@@ -1,0 +1,49 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --color-bevel: #863bff;
+  --color-bevel-deep: #7e14ff;
+  --color-bevel-soft: #ede6ff;
+}
+
+/* Tailwind Typography ships dark <pre> backgrounds by default; the app is
+   light-only, so retheme prose code blocks to slate. */
+.prose {
+  --tw-prose-pre-bg: var(--color-slate-100);
+  --tw-prose-pre-code: var(--color-slate-900);
+}
+.prose :where(pre):not(:where([class~="not-prose"] *)) {
+  border: 1px solid var(--color-slate-200);
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Persistent scrollbars in the VSCode webview. macOS overlay scrollbars fade
+   out by default, leaving long chat threads with no visible scroll affordance. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(64 64 64);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(82 82 82);
+  background-clip: content-box;
+}

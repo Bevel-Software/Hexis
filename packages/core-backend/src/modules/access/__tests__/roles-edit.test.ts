@@ -1,0 +1,138 @@
+import { describe, it, expect } from 'vitest';
+
+import {
+  parseRolesModel,
+  emitRolesModel,
+  createRole,
+  deleteRole,
+  addMember,
+  removeMember,
+  renameRoleDisplay,
+  assertSafeRoleDisplayName,
+  RolesEditError,
+} from '../roles-edit.js';
+import { parseYamlSubset } from '../access-control.service.js';
+
+const BASE = `roles:
+  Admin:
+    - razvan@bevel.software
+    - juan@bevel.software
+  Product Team:
+    - felix@example.com
+  Empty Role: []
+`;
+
+describe('roles-edit: parse + emit', () => {
+  it('parses roles in order with de-duplicated members', () => {
+    const model = parseRolesModel(`roles:\n  A:\n    - x@a.eu\n    - X@a.eu\n    - y@a.eu\n`);
+    expect(model).toEqual([{ displayName: 'A', members: ['x@a.eu', 'y@a.eu'] }]);
+  });
+
+  it('treats an empty file as no roles', () => {
+    expect(parseRolesModel('')).toEqual([]);
+    expect(parseRolesModel('   \n')).toEqual([]);
+  });
+
+  it('reads both `[]` and a bare key as an empty role', () => {
+    expect(parseRolesModel('roles:\n  A: []\n')).toEqual([{ displayName: 'A', members: [] }]);
+    expect(parseRolesModel('roles:\n  A:\n')).toEqual([{ displayName: 'A', members: [] }]);
+  });
+
+  it('rejects a malformed role value instead of coercing it (CodeRabbit)', () => {
+    // A scalar role value is malformed — must throw, not become an empty role.
+    expect(() => parseRolesModel('roles:\n  A: somebody@x.eu\n')).toThrow(RolesEditError);
+  });
+
+  it('emits an empty role as `Name: []` (the only round-trippable empty form)', () => {
+    const text = emitRolesModel([{ displayName: 'Empty', members: [] }]);
+    expect(text).toContain('Empty: []');
+    // The bare form would parse to null and fail the list check — assert we never emit it.
+    expect(text).not.toMatch(/Empty:\s*\n/);
+    expect(parseRolesModel(text)).toEqual([{ displayName: 'Empty', members: [] }]);
+  });
+
+  it('re-emit is idempotent (canonical model in → byte-identical out)', () => {
+    const once = emitRolesModel(parseRolesModel(BASE));
+    const twice = emitRolesModel(parseRolesModel(once));
+    expect(twice).toBe(once);
+  });
+
+  it('emits valid YAML the resolver subset parser reads back', () => {
+    const text = emitRolesModel(parseRolesModel(BASE));
+    const parsed = parseYamlSubset(text);
+    expect(parsed.ok).toBe(true);
+  });
+});
+
+describe('roles-edit: name guard', () => {
+  it('rejects structurally unsafe names', () => {
+    for (const bad of ['Sales: West', '#temp', 'a<b', 'a>b', '-leading', '']) {
+      expect(() => assertSafeRoleDisplayName(bad)).toThrow(RolesEditError);
+    }
+  });
+
+  it('allows ordinary multi-word names', () => {
+    expect(() => assertSafeRoleDisplayName('Product Team')).not.toThrow();
+    expect(() => assertSafeRoleDisplayName('GTM Team')).not.toThrow();
+  });
+});
+
+describe('roles-edit: mutations', () => {
+  it('addMember is idempotent (no-op when already a member)', () => {
+    const r = addMember(BASE, 'admin', 'JUAN@bevel.software');
+    expect(r.changed).toBe(false);
+  });
+
+  it('addMember appends a new canonicalised member', () => {
+    const r = addMember(BASE, 'product team', 'New@example.com');
+    expect(r.changed).toBe(true);
+    expect(parseRolesModel(r.text).find((x) => x.displayName === 'Product Team')!.members).toContain('new@example.com');
+  });
+
+  it('addMember rejects a malformed email before any write', () => {
+    expect(() => addMember(BASE, 'admin', 'not-an-email')).toThrow(RolesEditError);
+  });
+
+  it('removeMember removes only the target; no-op if absent', () => {
+    const r = removeMember(BASE, 'admin', 'juan@bevel.software');
+    expect(r.changed).toBe(true);
+    expect(parseRolesModel(r.text).find((x) => x.displayName === 'Admin')!.members).toEqual(['razvan@bevel.software']);
+    expect(removeMember(BASE, 'admin', 'ghost@x.eu').changed).toBe(false);
+  });
+
+  it('createRole appends `Name: []`, rejects reserved + duplicate', () => {
+    const r = createRole(BASE, 'Marketing');
+    expect(r.text).toContain('Marketing: []');
+    expect(() => createRole(BASE, 'everyone')).toThrow(RolesEditError);
+    expect(() => createRole(BASE, 'deny')).toThrow(RolesEditError);
+    expect(() => createRole(BASE, 'admin')).toThrow(RolesEditError); // duplicate canonical
+  });
+
+  it('deleteRole removes the role; 404 when absent', () => {
+    const r = deleteRole(BASE, 'product team');
+    expect(parseRolesModel(r.text).some((x) => x.displayName === 'Product Team')).toBe(false);
+    expect(() => deleteRole(BASE, 'ghost')).toThrow(/not found/);
+  });
+
+  it('renameRoleDisplay: casing-only keeps members, changes label', () => {
+    const r = renameRoleDisplay(BASE, 'product team', 'PRODUCT TEAM');
+    const role = parseRolesModel(r.text).find((x) => x.members.includes('felix@example.com'))!;
+    expect(role.displayName).toBe('PRODUCT TEAM');
+  });
+
+  it('renameRoleDisplay: rejects collision with another existing role', () => {
+    expect(() => renameRoleDisplay(BASE, 'product team', 'Admin')).toThrow(/already exists/);
+  });
+
+  it('only the changed role moves in the diff (other roles untouched)', () => {
+    const before = emitRolesModel(parseRolesModel(BASE));
+    const after = addMember(before, 'product team', 'z@example.com').text;
+    const beforeLines = before.split('\n');
+    const afterLines = after.split('\n');
+    // Admin block is identical; only Product Team grew by one line.
+    expect(afterLines.filter((l) => l.includes('razvan@bevel.software'))).toEqual(
+      beforeLines.filter((l) => l.includes('razvan@bevel.software')),
+    );
+    expect(afterLines.length).toBe(beforeLines.length + 1);
+  });
+});

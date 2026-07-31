@@ -1,0 +1,8 @@
+.git
+node_modules
+**/node_modules
+**/dist
+.env
+workspaces
+backups
+tool-chain-spills

@@ -1,0 +1,141 @@
+import type { FileTreeEntry } from '@bevel-software/shared';
+import type { PendingEntry } from '../state/workspace.context';
+
+function findEntryByPath(tree: FileTreeEntry | null, relativePath: string): FileTreeEntry | null {
+  if (!tree) return null;
+  if (tree.relativePath === relativePath) return tree;
+  if (tree.children) {
+    for (const child of tree.children) {
+      const found = findEntryByPath(child, relativePath);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+export function pathExistsInTree(tree: FileTreeEntry | null, relativePath: string): boolean {
+  return findEntryByPath(tree, relativePath) !== null;
+}
+
+function collectFilesByBasename(tree: FileTreeEntry | null, basename: string, acc: string[]): void {
+  if (!tree) return;
+  if (tree.type === 'file' && tree.name === basename) acc.push(tree.relativePath);
+  if (tree.children) {
+    for (const child of tree.children) collectFilesByBasename(child, basename, acc);
+  }
+}
+
+/**
+ * Resolve a candidate path to a concrete workspace-relative path.
+ * - Multi-segment candidates (contain `/`) must match an existing entry exactly.
+ * - Single-segment candidates (e.g. `positioning.md`) also match if exactly one
+ *   file in the tree has that basename — handles agent shorthand after a full
+ *   path was already mentioned in the same turn. Ambiguous basenames stay null.
+ */
+/**
+ * Merge optimistic pending-upload entries into a server-sourced file tree
+ * so the FileExplorer can render dropped/picked files within one frame of
+ * the user's action — well before their server commits have echoed back.
+ *
+ * Pending entries whose paths already exist on the server are skipped (the
+ * real entry wins). Missing parent directories along the way are
+ * synthesized as directory entries so a single dropped file inside a brand
+ * new folder renders the folder too.
+ *
+ * Returns a freshly-allocated tree; the input is not mutated. Children at
+ * each level are re-sorted so synthesized entries appear in the same order
+ * a server refresh would render them: directories first, then files,
+ * alphabetical within each group.
+ */
+export function mergePendingIntoTree(
+  tree: FileTreeEntry,
+  pending: Map<string, PendingEntry>,
+): FileTreeEntry {
+  if (pending.size === 0) return tree;
+
+  const cloneNode = (node: FileTreeEntry): FileTreeEntry => ({
+    name: node.name,
+    relativePath: node.relativePath,
+    type: node.type,
+    children: node.children ? node.children.map(cloneNode) : undefined,
+  });
+  const root = cloneNode(tree);
+
+  // Walk to (and create) the directory at `path`. Returns null if `path`
+  // collides with an existing file along the way.
+  const ensureDir = (path: string): FileTreeEntry | null => {
+    if (!path || path === '.') return root;
+    const parts = path.split('/');
+    let node = root;
+    for (let i = 0; i < parts.length; i++) {
+      const segPath = parts.slice(0, i + 1).join('/');
+      if (!node.children) node.children = [];
+      let child = node.children.find((c) => c.relativePath === segPath);
+      if (!child) {
+        child = {
+          name: parts[i],
+          relativePath: segPath,
+          type: 'directory',
+          children: [],
+        };
+        node.children.push(child);
+      } else if (child.type !== 'directory') {
+        return null;
+      } else if (!child.children) {
+        child.children = [];
+      }
+      node = child;
+    }
+    return node;
+  };
+
+  for (const [fullPath, entry] of pending) {
+    const parts = fullPath.split('/');
+    const name = parts[parts.length - 1];
+    const parentPath = parts.slice(0, -1).join('/');
+    const parent = ensureDir(parentPath);
+    if (!parent) continue;
+    if (!parent.children) parent.children = [];
+    if (parent.children.some((c) => c.relativePath === fullPath)) continue;
+    parent.children.push({
+      name,
+      relativePath: fullPath,
+      type: entry.type,
+      children: entry.type === 'directory' ? [] : undefined,
+    });
+  }
+
+  // Re-sort every level so synthesized entries appear in tree order.
+  const sort = (node: FileTreeEntry) => {
+    if (!node.children) return;
+    node.children.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    for (const c of node.children) sort(c);
+  };
+  sort(root);
+
+  return root;
+}
+
+export function resolveWorkspacePath(tree: FileTreeEntry | null, candidate: string): string | null {
+  if (!tree || !candidate) return null;
+  // The agent may emit either raw paths (`Knowledge/0. Current Truth/x.md`) or
+  // percent-encoded ones (`Knowledge/0.%20Current%20Truth/x.md`) — react-markdown
+  // hands us whatever was inside the link destination, so decode defensively.
+  let decoded = candidate;
+  try {
+    decoded = decodeURIComponent(candidate);
+  } catch {
+    // Malformed escape sequence — fall back to the raw candidate.
+  }
+  const normalized = decoded.trim().replace(/^\.\//, '').replace(/^\//, '');
+  if (!normalized) return null;
+  const entry = findEntryByPath(tree, normalized);
+  if (entry?.type === 'file') return normalized;
+  if (normalized.includes('/')) return null;
+  const matches: string[] = [];
+  collectFilesByBasename(tree, normalized, matches);
+  return matches.length === 1 ? matches[0] : null;
+}

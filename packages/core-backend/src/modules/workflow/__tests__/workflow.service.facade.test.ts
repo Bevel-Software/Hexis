@@ -1,0 +1,380 @@
+import { describe, it, expect, vi } from 'vitest';
+import type {
+  AuthUser,
+  ChangeInput,
+  PostChangeRequestCommentInput,
+} from '@bevel-software/shared';
+import type { GitService } from '../git/git.service.js';
+import type { PullRequestService } from '../git/pull-request.service.js';
+import type { IReviewWorkflowService } from '../review-workflow/review-workflow.interface.js';
+import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { IAccessControl } from '../../access/access-control.interface.js';
+import { FileLockService } from '../file-lock.service.js';
+import { PendingCommitsService } from '../pending-commits.service.js';
+import { WorkflowService } from '../workflow.service.js';
+import type { Database } from '../../database/connection.js';
+
+// The facade tests never exercise `openChangeRequest` (the only method that
+// touches the DB), so a bare stub is enough to satisfy the constructor.
+function makeDb(): Database {
+  return {} as unknown as Database;
+}
+
+function makeWorkspaceService(): WorkspaceService {
+  // Bare stub. `sweepOrphanedWorkspaces` is exercised as a fire-and-forget
+  // side effect of `listBranches` — stub it so the delegation tests aren't
+  // surprised by a missing method on the mock.
+  return {
+    getWorkspacePath: vi.fn().mockResolvedValue('/tmp/ws'),
+    sweepOrphanedWorkspaces: vi.fn().mockResolvedValue({ removed: [] }),
+    getOrCreateForBranch: vi.fn(async (branch: string) => ({ id: encodeURIComponent(branch) })),
+  } as unknown as WorkspaceService;
+}
+
+function makeFileLockService(): FileLockService {
+  // Stub returns "lock not held" defaults. Lock tests run against the real
+  // service with a stubbed DB; the facade-level tests verify delegation only.
+  return {
+    acquire: vi.fn().mockResolvedValue({
+      acquired: true,
+      lock: { branch: 'b', path: 'p', holderUserId: 'u', holderName: 'U', acquiredAt: '', lastHeartbeatAt: '', expiresAt: '' },
+    }),
+    heartbeat: vi.fn(),
+    release: vi.fn(),
+    get: vi.fn().mockResolvedValue(null),
+  } as unknown as FileLockService;
+}
+
+function makePendingCommits(): PendingCommitsService {
+  // Stub — the facade-level tests verify delegation only; queue-side
+  // behavior is covered by `pending-commits.service.test.ts`.
+  return {
+    enqueue: vi.fn().mockResolvedValue(undefined),
+    claimNext: vi.fn().mockResolvedValue(null),
+    markSucceeded: vi.fn().mockResolvedValue(undefined),
+    markTransientFailure: vi.fn().mockResolvedValue(undefined),
+    markRecoveryStarted: vi.fn().mockResolvedValue(undefined),
+    markNeedsAttention: vi.fn().mockResolvedValue(undefined),
+    listNeedsAttention: vi.fn().mockResolvedValue([]),
+    countPending: vi.fn().mockResolvedValue(0),
+    startupReconcile: vi.fn().mockResolvedValue(undefined),
+  } as unknown as PendingCommitsService;
+}
+
+function makeAccessControl(): IAccessControl {
+  // Stub returns an all-allow map for the rejection broaden path; the
+  // delegation-style tests don't exercise that branch.
+  return {
+    canWrite: vi.fn().mockResolvedValue(false),
+    canWriteBatch: vi.fn().mockResolvedValue(new Map()),
+    canRead: vi.fn().mockResolvedValue(true),
+    canReadBatch: vi.fn().mockResolvedValue(new Map()),
+    eligibleReaders: vi.fn().mockResolvedValue({ restricted: false, roles: [], users: [] }),
+    canReadAtRef: vi.fn().mockResolvedValue(null),
+    canDownload: vi.fn().mockResolvedValue(false),
+    canOwner: vi.fn().mockResolvedValue(false),
+    eligibleOwners: vi.fn().mockResolvedValue({ roles: [], users: [] }),
+    eligibleDownloaders: vi.fn().mockResolvedValue({ roles: [], users: [] }),
+    eligibleWriters: vi.fn().mockResolvedValue({ roles: [], users: [] }),
+    eligibleWriterEmails: vi.fn().mockResolvedValue(new Map()),
+    eligibleOwnerEmails: vi.fn().mockResolvedValue(new Map()),
+    grantSources: vi.fn().mockResolvedValue({}),
+    invalidate: vi.fn(),
+    findEmailByHash: vi.fn().mockResolvedValue(null),
+    kbPrincipals: vi.fn().mockResolvedValue({ groups: [], people: [] }),
+    validateRolesYaml: vi.fn().mockReturnValue({ ok: true }),
+    referencesToRole: vi.fn().mockResolvedValue([]),
+    canWriteAtRef: vi.fn().mockResolvedValue(null),
+    canWriteBatchAtRef: vi.fn().mockResolvedValue(null),
+    eligibleWritersAtRef: vi.fn().mockResolvedValue(null),
+    eligibleWritersForPathsAtRef: vi.fn().mockResolvedValue(null),
+  };
+}
+
+/**
+ * The facade exists only to delegate — these tests pin down that contract.
+ * For each backed method we verify (a) the right underlying call is made
+ * with the right arguments, (b) the underlying return propagates back. For
+ * each unimplemented method we verify it rejects with
+ * `NotImplementedWorkflowError` so consumers can switch on the error class.
+ *
+ * Cache invalidation (`PullRequestService.invalidateDetailCache`) is part
+ * of the facade contract for mutating change-request methods — without it
+ * the legacy 30s detail cache would mask just-applied changes. Each mutating
+ * test re-asserts the invalidation fires exactly once for the right PR.
+ */
+function makeUser(overrides: Partial<AuthUser> = {}): AuthUser {
+  return {
+    id: overrides.id ?? 'u1',
+    email: overrides.email ?? 'alice@example.com',
+    name: overrides.name ?? 'Alice',
+    avatarUrl: overrides.avatarUrl,
+  };
+}
+
+function makeGit(): GitService {
+  return {
+    status: vi.fn(),
+    listBranches: vi.fn(),
+    createBranch: vi.fn(),
+    switchBranch: vi.fn(),
+    deleteBranch: vi.fn(),
+    forkCurrentToDraft: vi.fn(),
+    discardChanges: vi.fn(),
+    commit: vi.fn(),
+    push: vi.fn(),
+    fetch: vi.fn(),
+    pull: vi.fn(),
+    diffStat: vi.fn(),
+    pendingChanges: vi.fn(),
+    resolveForkBase: vi.fn(),
+    revertCommit: vi.fn(),
+    logForFile: vi.fn(),
+    diffFileAtCommit: vi.fn(),
+    diffFileBetweenBranches: vi.fn(),
+    workingStatus: vi.fn(),
+    diffFileWorking: vi.fn(),
+    mergeFromOrigin: vi.fn(),
+    commitFile: vi.fn(),
+    // roles.yaml-preservation guard (preserveBaseRolesYaml): default to "no
+    // roles.yaml change" — same content at base and head → the guard no-ops.
+    resetToRemote: vi.fn().mockResolvedValue(undefined),
+    commitChanges: vi.fn().mockResolvedValue(null),
+    readFileAtRef: vi.fn().mockResolvedValue('roles:\n  Admin:\n    - admin@x.com\n'),
+  } as unknown as GitService;
+}
+
+function makePrs(): PullRequestService {
+  return {
+    listOpenPrs: vi.fn(),
+    listPrsAuthoredBy: vi.fn(),
+    listPrsForOwnerEmail: vi.fn(),
+    getPr: vi.fn(),
+    getPrDetail: vi.fn(),
+    invalidateDetailCache: vi.fn(),
+    setDetailEnricher: vi.fn(),
+  } as unknown as PullRequestService;
+}
+
+function makeReviewWorkflow(): IReviewWorkflowService {
+  return {
+    listComments: vi.fn(),
+    postComment: vi.fn(),
+    editComment: vi.fn(),
+    deleteComment: vi.fn(),
+    getApprovalStates: vi.fn(),
+    approveFile: vi.fn(),
+    unapproveFile: vi.fn(),
+    evaluateMergeGate: vi.fn(),
+    mergePr: vi.fn(),
+    cancelPr: vi.fn(),
+  } as unknown as IReviewWorkflowService;
+}
+
+describe('WorkflowService — branch delegation', () => {
+  it('listBranches delegates to git.listBranches', async () => {
+    const git = makeGit();
+    const branches = [{ name: 'main', isCurrent: true, isProtected: true, ahead: 0, behind: 0, hasRemote: true }];
+    (git.listBranches as ReturnType<typeof vi.fn>).mockResolvedValue(branches);
+
+    const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    await expect(svc.listBranches('w1')).resolves.toBe(branches);
+    // listBranches(workspaceId, opts?) forwards opts — undefined when omitted.
+    expect(git.listBranches).toHaveBeenCalledWith('w1', undefined);
+  });
+
+  it('createBranch forwards fromBase when provided', async () => {
+    const git = makeGit();
+    (git.createBranch as ReturnType<typeof vi.fn>).mockResolvedValue({ name: 'feat' });
+
+    const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    await svc.createBranch('w1', 'feat', 'current-company-state');
+    expect(git.createBranch).toHaveBeenCalledWith('w1', 'feat', 'current-company-state');
+  });
+
+  it('branchStatus delegates to git.status (rename only — same payload)', async () => {
+    const git = makeGit();
+    const status = { branch: 'main', isDirty: false, hasUpstream: true, unpushedCommits: 0, conflicted: [], unmergedFromUpstream: false };
+    (git.status as ReturnType<typeof vi.fn>).mockResolvedValue(status);
+
+    const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    await expect(svc.branchStatus('w1')).resolves.toBe(status);
+    expect(git.status).toHaveBeenCalledWith('w1');
+  });
+});
+
+describe('WorkflowService — change delegation', () => {
+  it('commitChange delegates to git.commit', async () => {
+    const git = makeGit();
+    const user = makeUser();
+    const input: ChangeInput = { summary: 'tweak owner' };
+    const commit = { sha: 'abc', authorName: 'Alice', authorEmail: 'alice@example.com', subject: 'tweak owner', committedAt: '2026-01-01T00:00:00Z' };
+    (git.commit as ReturnType<typeof vi.fn>).mockResolvedValue(commit);
+
+    const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    await expect(svc.commitChange('w1', user, input)).resolves.toBe(commit);
+    expect(git.commit).toHaveBeenCalledWith('w1', user, input);
+  });
+
+  it('listChangesForFile clamps via the underlying git.logForFile', async () => {
+    const git = makeGit();
+    (git.logForFile as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    await svc.listChangesForFile('w1', 'Knowledge/Foo.md', 5);
+    expect(git.logForFile).toHaveBeenCalledWith('w1', 'Knowledge/Foo.md', 5);
+  });
+
+  it('compareFile delegates to git.diffFileBetweenBranches', async () => {
+    const git = makeGit();
+    (git.diffFileBetweenBranches as ReturnType<typeof vi.fn>).mockResolvedValue('@@ diff');
+
+    const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    const diff = await svc.compareFile('w1', 'Foo.md', 'a', 'b');
+    expect(diff).toBe('@@ diff');
+    expect(git.diffFileBetweenBranches).toHaveBeenCalledWith('w1', 'Foo.md', 'a', 'b');
+  });
+});
+
+describe('WorkflowService — change request delegation + cache invalidation', () => {
+  it('listChangeRequests forwards opts to prs.listOpenPrs', async () => {
+    const prs = makePrs();
+    (prs.listOpenPrs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const svc = new WorkflowService(makeDb(), makeGit(), prs, makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    await svc.listChangeRequests({ fresh: true });
+    expect(prs.listOpenPrs).toHaveBeenCalledWith({ fresh: true });
+  });
+
+  it('postComment delegates AND invalidates the PR detail cache', async () => {
+    const prs = makePrs();
+    const reviewWorkflow = makeReviewWorkflow();
+    const comment = { id: 'c1' };
+    const input: PostChangeRequestCommentInput = { body: 'hi' };
+    (reviewWorkflow.postComment as ReturnType<typeof vi.fn>).mockResolvedValue(comment);
+
+    const svc = new WorkflowService(makeDb(), makeGit(), prs, reviewWorkflow, makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    const user = makeUser();
+    await expect(svc.postComment(42, user, input, 'sha1')).resolves.toBe(comment);
+    expect(reviewWorkflow.postComment).toHaveBeenCalledWith(42, user, input, 'sha1');
+    expect(prs.invalidateDetailCache).toHaveBeenCalledWith(42);
+    expect(prs.invalidateDetailCache).toHaveBeenCalledTimes(1);
+  });
+
+  it('approveFile invalidates the PR detail cache exactly once', async () => {
+    const prs = makePrs();
+    const reviewWorkflow = makeReviewWorkflow();
+    (reviewWorkflow.approveFile as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const svc = new WorkflowService(makeDb(), makeGit(), prs, reviewWorkflow, makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    await svc.approveFile(7, 'Foo.md', makeUser(), [], 'sha', 'main', null, 'w1');
+    expect(prs.invalidateDetailCache).toHaveBeenCalledWith(7);
+    expect(prs.invalidateDetailCache).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejectChangeRequest delegates to reviewWorkflow.cancelPr', async () => {
+    const prs = makePrs();
+    const reviewWorkflow = makeReviewWorkflow();
+    (reviewWorkflow.cancelPr as ReturnType<typeof vi.fn>).mockResolvedValue({ prNumber: 9, cancelledAt: 't' });
+
+    const svc = new WorkflowService(makeDb(), makeGit(), prs, reviewWorkflow, makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    const user = makeUser();
+    await svc.rejectChangeRequest(9, user, 'open', null, 'main', 'w1');
+    expect(reviewWorkflow.cancelPr).toHaveBeenCalledWith(9, user, 'open', null, 'main', 'w1');
+    expect(prs.invalidateDetailCache).toHaveBeenCalledWith(9);
+  });
+
+  it('mergeChangeRequest wraps the underlying merge result in a "merged" outcome', async () => {
+    const prs = makePrs();
+    const reviewWorkflow = makeReviewWorkflow();
+    const mergeResult = { prNumber: 4, sha: 'abc', mergedAt: 't' };
+    (reviewWorkflow.mergePr as ReturnType<typeof vi.fn>).mockResolvedValue(mergeResult);
+    // The roles.yaml-preservation guard resolves the CR's source branch via
+    // getPr. readFileAtRef (stubbed in makeGit) returns identical roles.yaml for
+    // base + head, so the guard no-ops and the merge proceeds.
+    (prs.getPr as ReturnType<typeof vi.fn>).mockResolvedValue({ branch: 'alice/feat', base: 'main' });
+
+    const git = makeGit();
+    const workspaceService = makeWorkspaceService();
+    const svc = new WorkflowService(makeDb(), git, prs, reviewWorkflow, workspaceService, makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    // Conflicts are surfaced by the local merge inside `reviewWorkflow.mergePr`
+    // (mocked here), so there's no provider "mergeable" pre-check to stub.
+    const outcome = await svc.mergeChangeRequest(
+      4,
+      makeUser(),
+      'sha',
+      [],
+      'open',
+      'PR title',
+      'main',
+      'w1',
+      { bypass: true },
+    );
+    expect(outcome).toEqual({ kind: 'merged', result: mergeResult });
+    // The target branch's workspace is pulled so it doesn't fall behind origin.
+    expect(workspaceService.getOrCreateForBranch).toHaveBeenCalledWith('main');
+    expect(git.pull).toHaveBeenCalledWith('main');
+    expect(reviewWorkflow.mergePr).toHaveBeenCalledWith(
+      4,
+      expect.objectContaining({ email: 'alice@example.com' }),
+      'sha',
+      [],
+      'open',
+      'PR title',
+      'main',
+      'w1',
+      { bypass: true },
+    );
+    expect(prs.invalidateDetailCache).toHaveBeenCalledWith(4);
+  });
+});
+
+describe('WorkflowService — file lock delegation', () => {
+  it('acquireLock delegates to FileLockService.acquire', async () => {
+    const fileLocks = makeFileLockService();
+    const svc = new WorkflowService(makeDb(), makeGit(), makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), fileLocks, makePendingCommits(), 'knowledge-base');
+    await svc.acquireLock('w1', 'b', 'p', makeUser());
+    expect(fileLocks.acquire).toHaveBeenCalledWith('w1', 'b', 'p', expect.objectContaining({ email: 'alice@example.com' }));
+  });
+
+  it('getLock delegates to FileLockService.get', async () => {
+    const fileLocks = makeFileLockService();
+    const svc = new WorkflowService(makeDb(), makeGit(), makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), fileLocks, makePendingCommits(), 'knowledge-base');
+    await expect(svc.getLock('w1', 'b', 'p')).resolves.toBeNull();
+    expect(fileLocks.get).toHaveBeenCalledWith('w1', 'b', 'p');
+  });
+
+  it('releaseLock enqueues a pending commit then drops the lock (no synchronous commit)', async () => {
+    const git = makeGit();
+    const fileLocks = makeFileLockService();
+    // releaseLock guards on ownership via fileLocks.get — stub it to
+    // return the caller's lock so the guard passes.
+    (fileLocks.get as ReturnType<typeof vi.fn>).mockResolvedValue({
+      branch: 'feat', path: 'Foo.md', holderUserId: 'u1', holderName: 'Alice',
+      acquiredAt: '', lastHeartbeatAt: '', expiresAt: '',
+    });
+    const pending = makePendingCommits();
+    const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), fileLocks, pending, 'knowledge-base');
+    await expect(svc.releaseLock('w1', 'feat', 'Foo.md', makeUser())).resolves.toBeUndefined();
+    // No inline git work — the worker handles that out of band.
+    expect(git.commitFile).not.toHaveBeenCalled();
+    expect(pending.enqueue).toHaveBeenCalledWith({
+      workspaceId: 'w1',
+      branch: 'feat',
+      path: 'Foo.md',
+      authorEmail: 'alice@example.com',
+      authorName: 'Alice',
+    });
+    expect(fileLocks.release).toHaveBeenCalledWith('w1', 'feat', 'Foo.md', expect.any(Object));
+  });
+
+  it('releaseLock refuses when the caller does not hold the lock', async () => {
+    const git = makeGit();
+    const fileLocks = makeFileLockService(); // default: get → null
+    const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), fileLocks, makePendingCommits(), 'knowledge-base');
+    await expect(svc.releaseLock('w1', 'feat', 'Foo.md', makeUser())).rejects.toThrow(/not held by you/);
+    // The commit must NOT run when the caller doesn't hold the lock —
+    // otherwise a non-holder could trigger a commit attributed as them.
+    expect(git.commitFile).not.toHaveBeenCalled();
+  });
+});

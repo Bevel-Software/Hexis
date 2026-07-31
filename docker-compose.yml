@@ -1,0 +1,103 @@
+# Bounded stdout logging for every service. Without this Docker's json-file
+# driver grows logs until the container is replaced — with it, retention has a
+# hard cap per service. Keep it applied to ALL services.
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:17-alpine
+    # Credentials follow the tenant slug, defaulting to `bevel`. NOTE: postgres
+    # only applies these on FIRST init of the data volume — changing TENANT_ID
+    # on a deploy with an existing pgdata volume does NOT rename the user/db.
+    environment:
+      POSTGRES_USER: ${TENANT_ID:-bevel}
+      POSTGRES_PASSWORD: ${TENANT_ID:-bevel}
+      POSTGRES_DB: ${TENANT_ID:-bevel}
+    expose:
+      - "5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    logging: *bounded-logging
+
+  app:
+    build:
+      context: .
+      args:
+        # Baked into the image and returned by GET /api/health so deploys can
+        # be confirmed by sha, e.g. `GIT_SHA=$(git rev-parse HEAD) docker
+        # compose build`. Unset → health reports 'unknown'.
+        GIT_SHA: ${GIT_SHA:-}
+        # Branch model — must be build args (not just runtime env below)
+        # because they're baked into the frontend bundle at `vite build` time.
+        # Keep these in sync with the runtime values below so the server-side
+        # checks match the bundled frontend.
+        DEFAULT_BRANCH: ${DEFAULT_BRANCH:-}
+        PROTECTED_BRANCHES: ${PROTECTED_BRANCHES:-}
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      # Git host credential. The KB can live on any git server (GitHub, GitLab,
+      # Bitbucket, Azure DevOps, self-hosted): GIT_TOKEN is the Basic-auth
+      # password and GIT_USERNAME the Basic username (host-specific — see
+      # .env.example).
+      - GIT_TOKEN=${GIT_TOKEN}
+      - GIT_USERNAME=${GIT_USERNAME:-}
+      - JWT_SECRET=${JWT_SECRET}
+      - TEST_PASSWORD=${TEST_PASSWORD}
+      # Tenant slug branded into every credential prefix. Default `bevel`
+      # keeps pre-existing keys/tokens valid — change it only for a fresh deploy.
+      - TENANT_ID=${TENANT_ID:-bevel}
+      - LOGIN_PASSWORD=${LOGIN_PASSWORD:-true}
+      - ALLOWED_EMAIL_DOMAINS=${ALLOWED_EMAIL_DOMAINS:-}
+      - KB_REPO_URL=${KB_REPO_URL}
+      - KB_DIR_NAME=${KB_DIR_NAME}
+      # Initial Admin(s) for a freshly-seeded KB — REQUIRED to seed an empty
+      # repo, ignored once it's populated.
+      - SEED_ADMIN_EMAILS=${SEED_ADMIN_EMAILS:-}
+      # Branch model (backend runtime). Must match the build args above.
+      - DEFAULT_BRANCH=${DEFAULT_BRANCH}
+      - PROTECTED_BRANCHES=${PROTECTED_BRANCHES}
+      # 32-byte key (base64 or hex) encrypting secrets-vault values + MCP
+      # OAuth client secrets/tokens.
+      - SECRETS_ENC_KEY=${SECRETS_ENC_KEY}
+      # Public URLs for OAuth redirects + post-login bounces. The backend
+      # serves the SPA itself, so both default to this container's origin.
+      - PUBLIC_BACKEND_URL=${PUBLIC_BACKEND_URL:-http://localhost:3001}
+      - PUBLIC_FRONTEND_URL=${PUBLIC_FRONTEND_URL:-http://localhost:3001}
+      - DATABASE_URL=postgresql://${TENANT_ID:-bevel}:${TENANT_ID:-bevel}@db:5432/${TENANT_ID:-bevel}
+    # node:22-slim ships neither curl nor wget; Node 22's global fetch probes.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      # Boot includes DB migrations + KB seeding on first run; give it room
+      # before failures start counting toward `retries`.
+      start_period: 90s
+    depends_on:
+      db:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      # Per-branch workspace clones + workspace-root scratch files. Without
+      # this, a redeploy wipes them (KB content re-clones from origin, but
+      # scratch files outside the KB dir are truly lost).
+      - workspaces:/app/apps/server/workspaces
+      # Diff-review backup ledger (sibling of `workspaces` by config default).
+      - backups:/app/apps/server/backups
+      # `call_tool_chain` spill files (sibling of `workspaces` by default).
+      - spills:/app/apps/server/tool-chain-spills
+    logging: *bounded-logging
+
+volumes:
+  pgdata:
+  workspaces:
+  backups:
+  spills:

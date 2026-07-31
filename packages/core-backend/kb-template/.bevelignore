@@ -1,0 +1,21 @@
+# Entries listed here are hidden from the Bevel file tree / agent view.
+# Syntax is the same as .gitignore — patterns are matched relative to this file.
+
+# Git internals — never surface these in the UI or to the agent.
+.git/
+
+# Tooling / CI configuration that isn't user-editable knowledge.
+.github/
+.claude/
+
+# Repo hygiene files that clutter the tree without being node content.
+.gitignore
+.gitattributes
+# README.md files are the base folders' own documentation — keep them visible.
+CLAUDE.md
+
+# Empty-folder placeholders used only for committing empty dirs.
+**/.gitkeep
+
+**/access.md
+roles.yaml

@@ -1,0 +1,10 @@
+/* The core stylesheet already does `@import "tailwindcss"` + the typography
+   plugin + the app's theme tokens/base styles — import it once here. */
+@import "@bevel-software/core-frontend/index.css";
+
+/* Tailwind v4 must SCAN the core-frontend sources (a raw-TS package under
+   node_modules, which the automatic source detection skips) so the utility
+   classes used by its components are emitted into this app's CSS. Path is
+   relative to this stylesheet; the workspace/package symlink resolves to the
+   package's src/. */
+@source "../node_modules/@bevel-software/core-frontend/src";

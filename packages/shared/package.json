@@ -1,0 +1,32 @@
+{
+  "name": "@bevel-software/shared",
+  "version": "0.1.0",
+  "description": "Shared types and pure domain utilities of the Bevel core platform (auth, workspace, git/workflow contracts, branch registry).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "ai": "^6.0.161"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}

@@ -1,0 +1,191 @@
+import {
+  Fragment,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from 'react';
+import {
+  Group,
+  Panel,
+  Separator,
+  useDefaultLayout,
+  type PanelImperativeHandle,
+  type PanelSize,
+} from 'react-resizable-panels';
+import { LayoutContext, type LayoutController } from '../state/layout.context';
+import type { PaneDef } from '../../../core/registry';
+
+const LAYOUT_ID = 'bevel-shell-v1';
+const SEPARATOR_CLASS =
+  'w-px bg-slate-100 hover:bg-bevel-deep/60 data-[dragging=true]:bg-bevel-deep transition-colors outline-none focus-visible:bg-bevel-deep cursor-col-resize';
+
+function getSafeLocalStorage(): Storage | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    const storage = window.localStorage;
+    const probeKey = `${LAYOUT_ID}:storage-probe`;
+    storage.setItem(probeKey, '1');
+    storage.removeItem(probeKey);
+    return storage;
+  } catch {
+    return undefined;
+  }
+}
+
+interface ResizableThreePaneLayoutProps {
+  header: ReactNode;
+  /**
+   * Registry-driven pane list (preferred). When provided, panel ids — and
+   * therefore the persisted layout shape — derive from this list.
+   */
+  panes?: PaneDef[];
+  // Legacy named slots, kept as a convenience/compat signature (converted to
+  // the same pane list internally with the historical sizing defaults).
+  explorer?: ReactNode;
+  viewer?: ReactNode;
+  chat?: ReactNode;
+}
+
+export function ResizableThreePaneLayout({
+  header,
+  panes,
+  explorer,
+  viewer,
+  chat,
+}: ResizableThreePaneLayoutProps) {
+  const paneList = useMemo<PaneDef[]>(() => {
+    if (panes && panes.length > 0) {
+      return [...panes].sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
+    }
+    const legacy: PaneDef[] = [];
+    if (explorer !== undefined) {
+      legacy.push({
+        id: 'explorer',
+        node: explorer,
+        defaultSize: '17%',
+        minSize: '10%',
+        maxSize: '35%',
+        collapsible: true,
+      });
+    }
+    if (viewer !== undefined) {
+      legacy.push({ id: 'viewer', node: viewer, minSize: '30%' });
+    }
+    if (chat !== undefined) {
+      legacy.push({
+        id: 'chat',
+        node: chat,
+        defaultSize: '26%',
+        minSize: '18%',
+        maxSize: '50%',
+        collapsible: true,
+      });
+    }
+    return legacy;
+  }, [panes, explorer, viewer, chat]);
+
+  // The pane *ids* must be referentially stable across renders even though
+  // the pane nodes (fresh JSX) are not — useDefaultLayout keys the persisted
+  // layout on them.
+  const idsKey = paneList.map((p) => p.id).join('|');
+  const panelIds = useMemo(() => idsKey.split('|'), [idsKey]);
+
+  // One stable imperative-handle ref per pane id (a plain `{ current }`
+  // object satisfies the `panelRef` contract). Created lazily so the map
+  // adapts to whatever panes are registered.
+  const panelRefs = useRef(
+    new Map<string, RefObject<PanelImperativeHandle | null>>(),
+  );
+  const getPanelRef = (id: string): RefObject<PanelImperativeHandle | null> => {
+    let ref = panelRefs.current.get(id);
+    if (!ref) {
+      ref = { current: null };
+      panelRefs.current.set(id, ref);
+    }
+    return ref;
+  };
+
+  const storage = useMemo(() => getSafeLocalStorage(), []);
+  const { defaultLayout, onLayoutChanged } = useDefaultLayout({
+    id: LAYOUT_ID,
+    panelIds,
+    storage,
+  });
+
+  const [collapsedById, setCollapsedById] = useState<Record<string, boolean>>(
+    {},
+  );
+
+  const togglePane = useCallback((id: string) => {
+    const panel = panelRefs.current.get(id)?.current;
+    if (!panel) return;
+    if (panel.isCollapsed()) panel.expand();
+    else panel.collapse();
+  }, []);
+
+  const handlePaneResize = useCallback((id: string, size: PanelSize) => {
+    const isCollapsed = size.asPercentage === 0;
+    setCollapsedById((prev) =>
+      prev[id] === isCollapsed ? prev : { ...prev, [id]: isCollapsed },
+    );
+  }, []);
+
+  const collapsibleIds = useMemo(
+    () => new Set(paneList.filter((p) => p.collapsible).map((p) => p.id)),
+    [paneList],
+  );
+
+  const controller = useMemo<LayoutController>(
+    () => ({
+      isExplorerCollapsed: !!collapsedById['explorer'],
+      isChatCollapsed: !!collapsedById['chat'],
+      canToggleExplorer: collapsibleIds.has('explorer'),
+      canToggleChat: collapsibleIds.has('chat'),
+      toggleExplorer: () => togglePane('explorer'),
+      toggleChat: () => togglePane('chat'),
+      isPaneCollapsed: (id: string) => !!collapsedById[id],
+      canTogglePane: (id: string) => collapsibleIds.has(id),
+      togglePane,
+    }),
+    [collapsedById, collapsibleIds, togglePane],
+  );
+
+  return (
+    <LayoutContext.Provider value={controller}>
+      <div className="flex flex-col h-full bg-white text-slate-900">
+        {header}
+        <Group
+          orientation="horizontal"
+          defaultLayout={defaultLayout}
+          onLayoutChanged={onLayoutChanged}
+          className="flex flex-1 min-h-0"
+        >
+          {paneList.map((pane, index) => (
+            <Fragment key={pane.id}>
+              {index > 0 && <Separator className={SEPARATOR_CLASS} />}
+              <Panel
+                id={pane.id}
+                panelRef={getPanelRef(pane.id)}
+                defaultSize={pane.defaultSize}
+                minSize={pane.minSize}
+                maxSize={pane.maxSize}
+                collapsible={pane.collapsible}
+                collapsedSize={pane.collapsible ? '0%' : undefined}
+                onResize={
+                  pane.collapsible
+                    ? (size: PanelSize) => handlePaneResize(pane.id, size)
+                    : undefined
+                }
+              >
+                {pane.node}
+              </Panel>
+            </Fragment>
+          ))}
+        </Group>
+      </div>
+    </LayoutContext.Provider>
+  );
+}

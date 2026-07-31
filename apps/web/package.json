@@ -1,0 +1,31 @@
+{
+  "name": "@bevel-software/web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone core SPA shell: CoreAppShell with a core-only registry.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@bevel-software/core-frontend": "workspace:*",
+    "@iconify-json/material-icon-theme": "^1.2.58",
+    "@iconify/react": "^6.0.2",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-router-dom": "^7.1.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/node": "^24.12.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "~5.9.3",
+    "vite": "^8.0.1"
+  }
+}

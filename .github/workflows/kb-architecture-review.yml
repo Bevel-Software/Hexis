@@ -1,0 +1,140 @@
+name: KB Architecture Review
+
+# The PR author triggers the review by commenting `/bevel-review` on the PR,
+# by convention after CodeRabbit has finished its code-level pass. The agent
+# loads the architecture-review skill + this repo's rules from the knowledge
+# base, reviews the diff, and routes the outcome per the project's Review
+# Policy — go-ahead / bounce to author / escalate — as PR comments.
+#
+# Setup (once per repo):
+#   - repo variable  KNOWLEDGE_BASE_API_URL  — e.g. https://<company>.bevel.software
+#   - repo secret    KNOWLEDGE_BASE_CONNECTION_KEY — from the KB settings page
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  review:
+    if: >-
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '/bevel-review')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      statuses: write
+
+    steps:
+      # Instant sign of life: react 👀 to the triggering comment so the author
+      # knows the command was seen while the agent (~3 min) spins up.
+      - name: Acknowledge the command
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X POST \
+            "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=eyes
+
+      - name: Resolve PR head branch
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "ref=$(gh pr view ${{ github.event.issue.number }} \
+            --repo ${{ github.repository }} \
+            --json headRefName -q .headRefName)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(gh pr view ${{ github.event.issue.number }} \
+            --repo ${{ github.repository }} \
+            --json headRefOid -q .headRefOid)" >> "$GITHUB_OUTPUT"
+
+      # issue_comment runs attach to the default branch, not the PR, so the run
+      # itself never shows in the PR's checks. Publish a commit STATUS on the PR
+      # head instead: pending now; the agent sets the final state to match its
+      # routing verdict. Make `bevel/architecture-review` a required check in
+      # branch protection to enforce the review policy mechanically.
+      - name: Mark review status pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X POST "repos/${{ github.repository }}/statuses/${{ steps.pr.outputs.sha }}" \
+            -f state=pending \
+            -f context=bevel/architecture-review \
+            -f description="Architecture review running" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.ref }}
+          # Full history so the agent can diff against the PR base branch.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run architecture review
+        run: npx --yes @bevel-software/pipeline-agent@latest
+        env:
+          KNOWLEDGE_BASE_API_URL: ${{ vars.KNOWLEDGE_BASE_API_URL }}
+          KNOWLEDGE_BASE_CONNECTION_KEY: ${{ secrets.KNOWLEDGE_BASE_CONNECTION_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          AGENT_PROMPT: |
+            You are the architecture review agent for pull request #${{ github.event.issue.number }} of ${{ github.repository }}.
+
+            Read the skill file `Skills/Engineering/review/architecture-review/SKILL.md` from the knowledge base and follow it exactly, in PR triage mode (and run the direction-fit-review skill alongside it when the change is structural). Resolve this repository to its Project node in the Engineering ontology and apply its Review Policy.
+
+            Practical notes:
+            - The knowledge base UI origin is exactly: ${{ vars.KNOWLEDGE_BASE_API_URL }} — every KB link you post (the one-pager, change requests) MUST start with that origin, e.g. ${{ vars.KNOWLEDGE_BASE_API_URL }}/workspace/main/knowledge-base/Data/Engineering/Knowledge/<Project>/PR-Overviews/PR-<n>.html (URL-encode `/` in branch names as %2F). NEVER invent, shorten, or restyle the host.
+            - KnowledgeBase tools: call `start_session` ONCE first, then pass the returned id as `sessionId` on EVERY subsequent KnowledgeBase tool call (list_files, grep, read_file, write_file, ...). A 403 mentioning "session id" means you forgot the sessionId parameter — it is NOT an access problem; retry the same call with the sessionId before concluding anything about permissions.
+            - KnowledgeBase tool paths are workspace-relative and MUST start with the repo folder (`list_files` the root once to learn its name, e.g. `knowledge-base/`). This applies to WRITES too: the one-pager goes to `knowledge-base/Data/Engineering/Knowledge/<Project>/PR-Overviews/PR-<n>.html` — a bare `Data/...` path writes OUTSIDE the git repo at the workspace root and the file is lost.
+            - The PR head branch is checked out with full history; diff against the base with `git diff origin/<base>...HEAD` (read the base branch name from the PR).
+            - Use the `gh` CLI (authenticated via GH_TOKEN) for ALL pull-request interactions: reading the PR description, checks, and comments; posting the review outcome (go-ahead / request changes / escalation) as PR comments.
+            - Use the knowledge-base tools to read the rule nodes and, on a terminal outcome, to write the PR one-pager and its Evolution Log index entry.
+            - This may be a RE-RUN after fixes or after the lead responded to an escalation: the skill's "Re-runs and follow-up" section applies — read the whole PR thread (your prior comments, replies, lead activity) BEFORE reviewing, reconcile your prior findings instead of re-posting them, and honor a lead override.
+            - Every run is a FULL review under the CURRENT rules in the knowledge base. Prior verdicts — including your own earlier comments on this PR — are NOT precedent: a re-trigger on an unchanged head usually means the rules changed and you must apply the updated rules to the same code. "Same head commit, nothing to re-evaluate" is never a valid conclusion; never skip the review or reuse a previous verdict.
+            - AFTER posting your outcome comment, publish it as a commit status on the PR head (${{ steps.pr.outputs.sha }}), context `bevel/architecture-review`, mapping: go-ahead → state=success; bounce → state=failure (description: "changes requested — see review comment"); escalated → state=pending (description: "awaiting tech lead decision"). Use: gh api -X POST repos/${{ github.repository }}/statuses/${{ steps.pr.outputs.sha }} -f state=<state> -f context=bevel/architecture-review -f description="<short>" -f target_url="<one-pager URL, or the review comment URL>". This status is the PR's check — never skip it.
+            - Never merge the PR; your go-ahead comment is your final action. Never commit or push anything to the repository — helper scripts a rule tells you to run are written to your own sandbox only.
+
+      # Never leave the PR check stuck on "pending — running". The agent can
+      # fail to publish its verdict without failing the step: it exits 0 having
+      # declined to act and printed the commands it would have run. `failure()`
+      # doesn't fire for that, so the check hangs forever. Read the status back
+      # on every outcome instead and error it only if it is still the untouched
+      # pending marker — an escalation also parks the status on `pending`, but
+      # with its own description, and that is a real verdict to leave alone.
+      - name: Backstop the review status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.pr.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PENDING_DESCRIPTION: Architecture review running
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SHA:-}" ]; then
+            echo "No PR head sha resolved — no status to back up."
+            exit 0
+          fi
+
+          info=$(gh api "repos/$REPO/commits/$SHA/statuses" \
+            --jq 'map(select(.context == "bevel/architecture-review"))
+                  | (first // {})
+                  | "\(.state // "")\t\(.description // "")"')
+          IFS=$'\t' read -r state description <<<"$info"
+
+          if [ "$state" != "pending" ] || [ "$description" != "$PENDING_DESCRIPTION" ]; then
+            echo "Review status is '$state' ($description) — leaving it alone."
+            exit 0
+          fi
+
+          echo "Agent finished without publishing a verdict — marking the check errored."
+          gh api -X POST "repos/$REPO/statuses/$SHA" \
+            -f state=error \
+            -f context=bevel/architecture-review \
+            -f description="Review agent posted no verdict — see run log, then re-trigger /bevel-review" \
+            -f target_url="$RUN_URL"

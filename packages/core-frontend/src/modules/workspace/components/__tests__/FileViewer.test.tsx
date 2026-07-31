@@ -1,0 +1,492 @@
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { render, screen, waitFor, act } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import type { BranchInfo, WorkingTreeStatus } from '@bevel-software/shared';
+
+// Mock the access API before importing the component tree — useFileAccess
+// fires a fetch in an effect on mount, and we don't want real network in tests.
+type Eligible = { roles: string[]; users: { name: string; email: string }[] };
+const EMPTY_ELIGIBLE: Eligible = { roles: [], users: [] };
+const accessMock = vi.hoisted(() => ({
+  result: {
+    canWrite: true,
+    canOwner: false,
+    eligible: { roles: ['Admin'], users: [] },
+    owners: { roles: [], users: [] },
+  } as {
+    canWrite: boolean;
+    canOwner: boolean;
+    eligible: { roles: string[]; users: { name: string; email: string }[] };
+    owners: { roles: string[]; users: { name: string; email: string }[] };
+  },
+  fetchFileAccess: vi.fn(),
+}));
+accessMock.fetchFileAccess.mockImplementation(async () => accessMock.result);
+vi.mock('../../../access/api', () => ({
+  fetchFileAccess: accessMock.fetchFileAccess,
+  fetchFileAccessBatch: vi.fn(async () => ({ results: {} })),
+}));
+
+// Mock the lock API too — useFileLock acquires/heartbeats/releases against
+// real endpoints. In these tests we just need the acquire to succeed so the
+// save flow can finish; lock contention paths are exercised in lock-specific
+// tests, not here.
+vi.mock('../../../workflow/services/lock.api', () => ({
+  acquireLock: vi.fn(async () => ({
+    acquired: true,
+    lock: {
+      branch: 'alice/draft',
+      path: 'Knowledge/Foo.md',
+      holderUserId: 'u1',
+      holderName: 'Test User',
+      acquiredAt: new Date().toISOString(),
+      lastHeartbeatAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    },
+  })),
+  heartbeatLock: vi.fn(async () => ({})),
+  checkpointLockedFile: vi.fn(async () => null),
+  releaseLock: vi.fn(async () => null),
+  getLock: vi.fn(async () => null),
+  LockApiError: class LockApiError extends Error {
+    readonly status: number;
+    readonly body: unknown;
+    constructor(status: number, message: string, body?: unknown) {
+      super(message);
+      this.status = status;
+      this.body = body;
+    }
+  },
+}));
+
+import { FileViewer } from '../FileViewer';
+// The lock API is mocked above; import the mocked fns so individual tests can
+// override the acquire outcome (e.g. a 403 on enter-edit).
+import { acquireLock as acquireLockMock, LockApiError } from '../../../workflow/services/lock.api';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../state/workspace.context';
+import { GitContext, type GitContextValue } from '../../../git/state/git.context';
+import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
+import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
+import { PrViewerContext, type PrViewerContextValue } from '../../../pr/state/pr-viewer.context';
+
+let injectPendingFromTest: ((value?: string) => void) | null = null;
+
+function makeStatus(branch = 'alice/draft'): WorkingTreeStatus {
+  return {
+    branch,
+    hasUpstream: true,
+    unmergedFromUpstream: false,
+  };
+}
+
+function makeGit(status: WorkingTreeStatus): GitContextValue {
+  const branches: BranchInfo[] = [];
+  return {
+    status,
+    branches,
+    availability: 'ready',
+    lastError: null,
+    refreshStatus: async () => null,
+    refreshBranches: async () => {},
+    createBranch: async () => {},
+    deleteBranch: async () => {},
+    pull: async () => {},
+    fetchForkBase: async () => null,
+    revert: async () => ({
+      sha: 'abc',
+      authorName: 'n',
+      authorEmail: 'e',
+      subject: 's',
+      committedAt: '2026-04-20T00:00:00.000Z',
+    }),
+    fetchFileHistory: async () => [],
+    fetchFileDiff: async () => '',
+    fetchFileComparison: async () => '',
+  };
+}
+
+function ViewerHarness({
+  initialContent = 'Base content',
+  pendingValue = 'Agent version',
+  branch = 'alice/draft',
+  filePath = 'knowledge-base/Knowledge/Foo.md',
+  kbDirName = 'knowledge-base',
+  addTab,
+}: {
+  initialContent?: string;
+  pendingValue?: string;
+  branch?: string;
+  filePath?: string;
+  kbDirName?: string | null;
+  addTab?: WorkspaceContextValue['addTab'];
+}) {
+  const [openFileContent, setOpenFileContent] = useState(initialContent);
+  const [pendingFileContent, setPendingFileContent] = useState<string | null>(null);
+
+  useEffect(() => {
+    injectPendingFromTest = (value?: string) => {
+      setPendingFileContent(value ?? pendingValue);
+    };
+    return () => {
+      injectPendingFromTest = null;
+    };
+  }, [pendingValue]);
+
+  const tab = {
+    path: filePath,
+    content: openFileContent,
+    savedContent: openFileContent,
+    isDirty: false,
+    pendingFileContent,
+  };
+  const workspace: WorkspaceContextValue = {
+    workspaceId: 'ws-1',
+    kbDirName,
+    fileTree: null,
+    openTabs: [tab],
+    activeTab: tab,
+    dirtyTabFilenames: [],
+    openFilePath: filePath,
+    openFileContent,
+    openFileSavedContent: openFileContent,
+    hasUnsavedFileChanges: false,
+    pendingFileContent,
+    setActiveTabContent: () => {},
+    uploadError: null,
+    isUploading: false,
+    uploadProgress: null,
+    pendingUploads: new Map(),
+    fsRevision: 0,
+    bumpFsRevision: () => {},
+    setPersistenceBranch: () => {},
+    refreshFileTree: async () => null,
+    addTab: addTab ?? (async () => true),
+    closeTab: async () => ({ closed: true, newActivePath: null }),
+    activateTab: () => {},
+    reorderTab: () => {},
+    closeAllTabs: () => {},
+    hydrateTabs: async () => ({ surviving: [], dropped: [], denied: [] }),
+    createFile: async () => {},
+    createDirectory: async () => {},
+    unzipHere: async () => ({ extracted: 0, skipped: [], destination: '' }),
+    uploadFiles: async () => {},
+    dispatchUpload: async () => {},
+    clearUploadError: () => {},
+    deleteEntry: async () => {},
+    moveEntry: async () => {},
+    saveFile: async (_relativePath: string, content: string) => {
+      setOpenFileContent(content);
+    },
+    reloadTabFromDisk: async () => {},
+    setPendingContent: (content: string) => {
+      setPendingFileContent(content);
+    },
+    acceptPendingContent: async () => {
+      setOpenFileContent((curr) => pendingFileContent ?? curr);
+      setPendingFileContent(null);
+    },
+    rejectPendingContent: async () => {
+      setPendingFileContent(null);
+    },
+  };
+  const review: ReviewContextValue = {
+    session: null,
+    selectedPath: null,
+    fileDiff: null,
+    isLoadingDiff: false,
+    lastError: null,
+    isLoading: false,
+    refresh: async () => {},
+    selectPath: async () => {},
+    acceptOne: async () => {},
+    rejectOne: async () => {},
+    acceptAll: async () => {},
+    rejectAll: async () => {},
+    clearError: () => {},
+  };
+  const auth: AuthContextValue = {
+    user: null,
+    token: null,
+    isLoading: false,
+    login: async () => {},
+    logout: () => {},
+  };
+  const prViewer: PrViewerContextValue = {
+    openPrNumber: null,
+    detail: null,
+    notFound: false,
+    selectedPath: null,
+    isLoading: false,
+    lastError: null,
+    openPr: () => {},
+    closeViewer: () => {},
+    selectPath: () => {},
+    refresh: async () => {},
+  };
+
+  return (
+    <MemoryRouter>
+      <AuthContext.Provider value={auth}>
+        <WorkspaceContext.Provider value={workspace}>
+          <GitContext.Provider value={makeGit(makeStatus(branch))}>
+            <ReviewContext.Provider value={review}>
+              <PrViewerContext.Provider value={prViewer}>
+                <button type="button" onClick={() => setPendingFileContent(pendingValue)}>
+                  Inject pending
+                </button>
+                <FileViewer />
+              </PrViewerContext.Provider>
+            </ReviewContext.Provider>
+          </GitContext.Provider>
+        </WorkspaceContext.Provider>
+      </AuthContext.Provider>
+    </MemoryRouter>
+  );
+}
+
+describe('FileViewer', () => {
+  // Restore the access mock to its default after each test so a test that
+  // flips it to `canWrite: false` doesn't bleed into later tests in this file.
+  afterEach(() => {
+    accessMock.result = {
+      canWrite: true,
+      canOwner: false,
+      eligible: { roles: ['Admin'], users: [] },
+      owners: EMPTY_ELIGIBLE,
+    };
+    accessMock.fetchFileAccess.mockClear();
+    // Restore the default "acquire succeeds" behaviour so a per-test 403
+    // override doesn't leak into the next test.
+    vi.mocked(acquireLockMock).mockImplementation(async () => ({
+      acquired: true,
+      lock: {
+        branch: 'alice/draft',
+        path: 'Knowledge/Foo.md',
+        holderUserId: 'u1',
+        holderName: 'Test User',
+        acquiredAt: new Date().toISOString(),
+        lastHeartbeatAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    }));
+  });
+
+  it('immediately enters review mode when pending arrives on a clean file', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="base clean" pendingValue="agent clean" />);
+
+    await user.click(screen.getByRole('button', { name: 'Inject pending' }));
+
+    expect(await screen.findByText(/Previewing agent's changes/i)).toBeInTheDocument();
+    expect(screen.getByText(/Reviewing agent update/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+    expect(screen.getByText('agent clean')).toBeInTheDocument();
+  });
+
+  it('defers pending review when unsaved manual edits exist', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="base" pendingValue="agent replacement" />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    await user.type(textarea, ' local edits');
+    expect(textarea.value).toBe('base local edits');
+
+    await act(async () => {
+      injectPendingFromTest?.();
+    });
+
+    expect(await screen.findByText(/Agent update is waiting/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Previewing agent's changes/i)).not.toBeInTheDocument();
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('base local edits');
+  });
+
+  it('allows reviewing deferred pending after local save', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="base" pendingValue="agent latest" />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    await user.type(textarea, ' local');
+    await act(async () => {
+      injectPendingFromTest?.();
+    });
+
+    await user.keyboard('{Control>}s{/Control}');
+
+    const reviewButton = await screen.findByRole('button', { name: /Review agent update/i });
+    await waitFor(() => expect(reviewButton).not.toBeDisabled());
+    await user.click(reviewButton);
+
+    expect(await screen.findByText(/Previewing agent's changes/i)).toBeInTheDocument();
+    expect(screen.getByText('agent latest')).toBeInTheDocument();
+  });
+
+  it('clears pending review state after accept/reject and returns to editable mode', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="base before" pendingValue="agent accepted" />);
+
+    await user.click(screen.getByRole('button', { name: 'Inject pending' }));
+    const accept = await screen.findByRole('button', { name: 'Accept' });
+    await user.click(accept);
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Previewing agent's changes/i)).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.getByText('agent accepted')).toBeInTheDocument();
+
+    await act(async () => {
+      injectPendingFromTest?.('agent rejected');
+    });
+    const reject = await screen.findByRole('button', { name: 'Reject' });
+    await user.click(reject);
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Previewing agent's changes/i)).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+  });
+
+  // (No no-access panel tests: a tab whose read 403s AUTO-CLOSES — denied tabs
+  // never exist, and the access-denied view lives at the route level. See
+  // FileRoute.test.tsx's file-denied cases.)
+
+  it('shows the canonical-state banner on a protected branch but keeps editing enabled', () => {
+    // Write access is now governed by roles.yaml + access.md and enforced by
+    // the backend at commit time — the editor itself is no longer disabled
+    // based on branch name. The banner stays as informational copy.
+    render(<ViewerHarness initialContent="official" branch="current-company-state" />);
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.getByText(/current company state/i)).toBeInTheDocument();
+  });
+
+  it('goes read-only and shows AccessRestrictedBanner when canWrite is false on a protected branch', async () => {
+    // The access gate only fires on protected branches — drafts are
+    // free-for-all and never reach the API, so reproducing the read-only
+    // state requires a protected branch.
+    accessMock.result = {
+      canWrite: false,
+      canOwner: false,
+      eligible: { roles: ['Admin', 'Product Manager'], users: [] },
+      owners: EMPTY_ELIGIBLE,
+    };
+    render(<ViewerHarness initialContent="official" branch="target-company-state" />);
+    await waitFor(() => {
+      expect(screen.getByText(/You don't have permission to edit/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Admin, Product Manager/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+  });
+
+  // Drafts are free-for-all: even if the backend would deny at PR-merge
+  // time, the editor must stay writable on a draft so the user can prepare
+  // a change request. Mirrors the backend's lock/commit/push gates, which
+  // all skip the access check on non-protected branches.
+  it('stays editable on a draft branch even when canWrite would be false', async () => {
+    accessMock.result = {
+      canWrite: false,
+      canOwner: false,
+      eligible: { roles: ['Admin'], users: [] },
+      owners: EMPTY_ELIGIBLE,
+    };
+    render(<ViewerHarness initialContent="draft content" branch="alice/draft" />);
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.queryByText(/You don't have permission to edit/i)).not.toBeInTheDocument();
+    expect(accessMock.fetchFileAccess).not.toHaveBeenCalled();
+  });
+
+  // Bug A regression: files outside the KB are the user's own workspace.
+  // Even when the backend would say "denied" for some path, a non-repo path
+  // must never reach the backend — it's editable unconditionally.
+  it('keeps non-repo files editable and never calls the access API', async () => {
+    accessMock.result = {
+      canWrite: false,
+      canOwner: false,
+      eligible: { roles: ['Admin'], users: [] },
+      owners: EMPTY_ELIGIBLE,
+    };
+    render(
+      <ViewerHarness
+        initialContent="my scratch notes"
+        branch="alice/draft"
+        filePath="notes/scratch.md"
+      />,
+    );
+
+    // The Edit affordance (provided by MarkdownRenderer when not readOnly) is
+    // present, no banner appears, and the access lookup never fires.
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.queryByText(/You don't have permission to edit/i)).not.toBeInTheDocument();
+    expect(accessMock.fetchFileAccess).not.toHaveBeenCalled();
+  });
+
+  // Bug B regression: the hook must strip the kbDirName prefix before
+  // querying the backend, otherwise deeper access.md grants silently miss
+  // and the editor falsely shows read-only. Exercised on a protected
+  // branch because drafts skip the API entirely (drafts-are-free).
+  it('strips kbDirName before calling the API for repo files', async () => {
+    accessMock.result = {
+      canWrite: true,
+      canOwner: false,
+      eligible: { roles: ['Product Manager'], users: [] },
+      owners: EMPTY_ELIGIBLE,
+    };
+    render(
+      <ViewerHarness
+        initialContent="sales doc"
+        branch="target-company-state"
+        filePath="knowledge-base/Knowledge/Sales/Foo.md"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(accessMock.fetchFileAccess).toHaveBeenCalledWith(
+        'ws-1',
+        'Knowledge/Sales/Foo.md',
+      );
+    });
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.queryByText(/You don't have permission to edit/i)).not.toBeInTheDocument();
+  });
+
+  // Hardening regression: when `useFileAccess` default-allows (its lookup
+  // failed transiently) the Edit button is shown even on a path the backend
+  // will refuse. Clicking Edit then hits a 403 on lock acquisition. Before the
+  // fix that 403 was swallowed (console.warn only) and the click just flickered
+  // "Loading…" then reverted to "Edit" with no explanation. Now the refusal is
+  // surfaced in the save-error banner so the user understands the file is
+  // read-only to them. (Distinct from lock contention, which the "Locked by X"
+  // banner already covers.)
+  it('surfaces an access-denied 403 on enter-edit instead of silently reverting', async () => {
+    // Force the access lookup to fail → useFileAccess default-allows →
+    // canWrite=true → the Edit button renders on a protected branch.
+    accessMock.fetchFileAccess.mockRejectedValueOnce(new Error('network down'));
+    // The authoritative backend gate refuses the lock with a 403.
+    vi.mocked(acquireLockMock).mockRejectedValueOnce(
+      new LockApiError(
+        403,
+        'You don\'t have permission to write to "Knowledge/Foo.md". Eligible: Admin.',
+        { access: { path: 'Knowledge/Foo.md', eligibleRoles: ['Admin'], eligibleUsers: [] } },
+      ),
+    );
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="official" branch="target-company-state" />);
+
+    // Editor stays writable (default-allow) — the Edit button is present.
+    const editButton = await screen.findByRole('button', { name: 'Edit' });
+    await user.click(editButton);
+
+    // The refusal is surfaced, not swallowed.
+    await waitFor(() => {
+      expect(
+        screen.getByText(/You don't have permission to write to/i),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Eligible: Admin/i)).toBeInTheDocument();
+    // And we did NOT flip into edit mode — no editable textbox appeared.
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+});

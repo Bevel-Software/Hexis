@@ -1,0 +1,61 @@
+{
+  "name": "@bevel-software/core-frontend",
+  "version": "0.1.0",
+  "description": "Open-source core UI of the Bevel platform (raw TS/TSX source): workspace explorer/viewer, branches & change requests, Library, secrets, tools, access control.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./index.css": "./src/index.css",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.1.1",
+    "tailwindcss": "^4.0.0"
+  },
+  "dependencies": {
+    "@bevel-software/shared": "workspace:*",
+    "@iconify/react": "^6.0.2",
+    "@tailwindcss/typography": "^0.5.19",
+    "@utcp/sdk": "^1.1.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.7.0",
+    "mammoth": "^1.12.0",
+    "mermaid": "^11.14.0",
+    "react-markdown": "^10.1.0",
+    "react-resizable-panels": "^4.10.0",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
+    "rehype-slug": "^6.0.0",
+    "remark-frontmatter": "^5.0.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.5.0",
+    "xlsx": "^0.18.5",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "happy-dom": "^20.8.9",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-router-dom": "^7.1.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "~5.9.3",
+    "vitest": "^2.1.9"
+  }
+}
