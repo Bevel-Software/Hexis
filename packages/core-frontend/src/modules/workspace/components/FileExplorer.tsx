@@ -30,13 +30,14 @@ import {
   PIPELINES_DIR,
 } from '@bevel-software/shared';
 import { useWorkspace } from '../state/workspace.context';
-import { mergePendingIntoTree } from '../utils/fileTree';
+import { mergePendingIntoTree, findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useFileNav } from '../routing/kb-routes';
 import { authFetch } from '../../../lib/api';
 import { getFileIcon } from '../../../lib/utils';
 import { PullRequestsForMe } from '../../git/components/PullRequestsForMe';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { useAppRegistry } from '../../../core/registry';
 
 // ── Pinned folders (client-side, localStorage) ──
 
@@ -836,29 +837,8 @@ function FileTreeNode({
  * include one of those well-known root directories, or null when there's no
  * such split (legacy clones).
  */
-const KB_ROOT_DIRS = new Set([
-  KNOWLEDGE_BASE_DIR,
-  DATA_DIR,
-  AGENTS_DIR,
-  PIPELINES_DIR,
-  SKILLS_DIR,
-  TOOLS_DIR,
-]);
-
-function findKbRoot(node: FileTreeEntry | null): FileTreeEntry | null {
-  if (!node?.children) return null;
-  const holdsSplit = node.children.some(
-    (c) => c.type === 'directory' && KB_ROOT_DIRS.has(c.name),
-  );
-  if (holdsSplit) return node;
-  for (const child of node.children) {
-    if (child.type === 'directory') {
-      const found = findKbRoot(child);
-      if (found) return found;
-    }
-  }
-  return null;
-}
+// (`findKbRoot` lives in `../utils/fileTree` — shared with registry-
+// contributed explorer items.)
 
 export function FileExplorer() {
   const { fileTree, dispatchUpload, uploadError, clearUploadError, pendingUploads } = useWorkspace();
@@ -906,8 +886,11 @@ export function FileExplorer() {
     [mergedTree, pinnedPaths],
   );
 
-  // (The pinned "Graph view" — the interactive ontology graph — is part of the
-  // enterprise knowledge system and is not included in the core frontend.)
+  // Registry-contributed rows for the Pinned section (rendered below the
+  // pinned folders). The enterprise knowledge system contributes its
+  // "Graph view" entry — the interactive ontology graph — this way; the core
+  // ships none of its own.
+  const { explorerItems } = useAppRegistry();
 
   // Right-click → Manage access opens this sheet for the chosen entry.
   const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);
@@ -1029,6 +1012,9 @@ export function FileExplorer() {
         </div>
         {pinnedEntries.map((e) => (
           <FileTreeNode key={`pin:${e.relativePath}`} entry={e} depth={0} collapseChildren />
+        ))}
+        {explorerItems.map(({ id, Component }) => (
+          <Component key={id} tree={mergedTree} />
         ))}
         <div className="mx-3 my-2 border-t border-slate-100" />
         {!mergedTree ? (

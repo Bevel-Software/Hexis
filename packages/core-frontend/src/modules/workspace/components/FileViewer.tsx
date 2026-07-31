@@ -55,7 +55,7 @@ export function FileViewer() {
   // Chat decoupling: the suggested-prompt seed is an optional registry port
   // (null when no chat surface is registered → the prompt buttons hide).
   const seedSuggestedPrompt = useSuggestedPromptSeed();
-  const { fileViewerPanels } = useAppRegistry();
+  const { fileViewerPanels, renderers } = useAppRegistry();
   const git = useGit();
   const review = useReview();
 
@@ -115,10 +115,15 @@ export function FileViewer() {
   const registeredPanels = fileViewerPanels.map(({ id, Component }) => (
     <Component key={id} />
   ));
-  const Renderer = useMemo(
-    () => (openFilePath ? getFileRenderer(openFilePath) : null),
-    [openFilePath],
-  );
+  // Registry renderer overrides win over the built-in extension map — the
+  // enterprise registry swaps in its own `.html` renderer (vendored d3/mermaid
+  // + KB graph client) this way.
+  const Renderer = useMemo(() => {
+    if (!openFilePath) return null;
+    const ext = openFilePath.slice(openFilePath.lastIndexOf('.')).toLowerCase();
+    const override = renderers.find((r) => r.extensions.includes(ext));
+    return override?.Component ?? getFileRenderer(openFilePath);
+  }, [openFilePath, renderers]);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeTab, setActiveTab] = useState<'content' | 'history' | 'compare'>('content');

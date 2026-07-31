@@ -1,5 +1,43 @@
-import type { FileTreeEntry } from '@bevel-software/shared';
+import {
+  AGENTS_DIR,
+  DATA_DIR,
+  KNOWLEDGE_BASE_DIR,
+  PIPELINES_DIR,
+  SKILLS_DIR,
+  TOOLS_DIR,
+  type FileTreeEntry,
+} from '@bevel-software/shared';
 import type { PendingEntry } from '../state/workspace.context';
+
+export const KB_ROOT_DIRS = new Set([
+  KNOWLEDGE_BASE_DIR,
+  DATA_DIR,
+  AGENTS_DIR,
+  PIPELINES_DIR,
+  SKILLS_DIR,
+  TOOLS_DIR,
+]);
+
+/**
+ * Descend past the workspace / KB-clone wrapper levels to the node that holds
+ * the well-known KB root dirs (`KnowledgeBase/`, `Data/`, `Agents/`, …), or
+ * null when the tree predates the split. Shared by the explorer's sectioning
+ * and registry-contributed explorer items (e.g. the enterprise Graph view).
+ */
+export function findKbRoot(node: FileTreeEntry | null): FileTreeEntry | null {
+  if (!node?.children) return null;
+  const holdsSplit = node.children.some(
+    (c) => c.type === 'directory' && KB_ROOT_DIRS.has(c.name),
+  );
+  if (holdsSplit) return node;
+  for (const child of node.children) {
+    if (child.type === 'directory') {
+      const found = findKbRoot(child);
+      if (found) return found;
+    }
+  }
+  return null;
+}
 
 function findEntryByPath(tree: FileTreeEntry | null, relativePath: string): FileTreeEntry | null {
   if (!tree) return null;

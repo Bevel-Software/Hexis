@@ -17,6 +17,8 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
+import type { FileTreeEntry } from '@bevel-software/shared';
+import type { FileRendererProps } from '../modules/workspace/components/renderers/types';
 
 /** A route contributed to one of the shell's `<Routes>` blocks. */
 export interface RouteDef {
@@ -90,6 +92,29 @@ export interface AdminMenuItem {
 export interface FileViewerPanelDef {
   id: string;
   Component: ComponentType;
+}
+
+/**
+ * A file renderer OVERRIDE consulted by the FileViewer before the built-in
+ * extension map (`modules/workspace/components/renderers`). The enterprise
+ * registry replaces the plain `.html` renderer with one that inlines its
+ * vendored d3/mermaid libraries and the KB graph client.
+ */
+export interface FileRendererDef {
+  /** Lowercase extensions including the dot, e.g. `['.html', '.htm']`. */
+  extensions: string[];
+  Component: ComponentType<FileRendererProps>;
+}
+
+/**
+ * A row appended to the file explorer's "Pinned" section (after the pinned
+ * folders). The component receives the explorer's merged file tree (null
+ * while loading) and renders its own row — plus any overlay that row opens.
+ * The enterprise knowledge system contributes its "Graph view" entry here.
+ */
+export interface ExplorerItemDef {
+  id: string;
+  Component: ComponentType<{ tree: FileTreeEntry | null }>;
 }
 
 /** Context passed when the user asks to open a change request from a draft. */
@@ -228,6 +253,10 @@ export interface AppRegistry {
   adminMenuItems: AdminMenuItem[];
   /** Auxiliary FileViewer surfaces (see {@link FileViewerPanelDef}). */
   fileViewerPanels: FileViewerPanelDef[];
+  /** File-renderer overrides by extension (see {@link FileRendererDef}). */
+  renderers: FileRendererDef[];
+  /** Extra rows in the explorer's Pinned section (see {@link ExplorerItemDef}). */
+  explorerItems: ExplorerItemDef[];
   /**
    * Static override of the change-request port. Overrides that need runtime
    * state (e.g. the chat dispatch) should instead shadow
@@ -250,6 +279,8 @@ export const EMPTY_REGISTRY: AppRegistry = {
   banners: [],
   adminMenuItems: [],
   fileViewerPanels: [],
+  renderers: [],
+  explorerItems: [],
   apps: [],
   toolbarItems: [],
 };

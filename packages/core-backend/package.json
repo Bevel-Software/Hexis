@@ -15,6 +15,7 @@
       "default": "./dist/modules/database/core-schema.js"
     },
     "./modules/*": "./dist/modules/*",
+    "./shared/*": "./dist/shared/*",
     "./package.json": "./package.json"
   },
   "files": [
