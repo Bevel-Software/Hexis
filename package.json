@@ -7,12 +7,14 @@
     "build": "pnpm -r run build",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "release": "pnpm build && pnpm changeset publish"
   },
   "engines": {
     "node": ">=22 <23"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.31.1",
     "@eslint/js": "^9.39.4",
     "eslint": "^9.39.4",
     "eslint-plugin-react-hooks": "^7.0.1",

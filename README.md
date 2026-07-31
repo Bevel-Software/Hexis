@@ -69,4 +69,4 @@ platform layers chat/agents, connectors, routines, the knowledge-graph system
 and more on top of the extension points exposed here (`CorePorts`,
 `ServerExtensions`, workflow lifecycle hooks, and the frontend `AppRegistry`).
 
-License: TBD
+License: [Apache-2.0](LICENSE)

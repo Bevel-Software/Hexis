@@ -28,5 +28,14 @@
   },
   "devDependencies": {
     "typescript": "^5.8.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bevel-Software/skill-and-tool-management.git",
+    "directory": "packages/shared"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

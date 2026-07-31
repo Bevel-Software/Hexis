@@ -57,5 +57,14 @@
     "tailwindcss": "^4.2.2",
     "typescript": "~5.9.3",
     "vitest": "^2.1.9"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bevel-Software/skill-and-tool-management.git",
+    "directory": "packages/core-frontend"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
