@@ -1,6 +1,12 @@
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { DEFAULT_BRANCH, PROTECTED_BRANCHES, SKILLS_DIR, TOOLS_DIR } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_BRANCH,
+  PROTECTED_BRANCHES,
+  GROUPS_DIR,
+  LEGACY_SKILLS_DIR,
+  LEGACY_TOOLS_DIR,
+} from '@bevel-software/platform-shared';
 import { CoreConfig } from '../core-config.js';
 import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
@@ -287,8 +293,12 @@ export async function createCoreServices(
   // caches are independent, so the split preserves behavior.)
   fileChangeNotifier.onFilesChanged(({ branch, paths }) => {
     if (branch !== DEFAULT_BRANCH) return;
-    if (paths.some((p) => p.startsWith(`${config.kbDirName}/${TOOLS_DIR}/`))) toolManualService.invalidate();
-    if (paths.some((p) => p.startsWith(`${config.kbDirName}/${SKILLS_DIR}/`))) skillService.invalidate();
+    // Both catalogs now live under `Groups/`, so a change there invalidates
+    // both; the legacy roots stay watched until the KB migration lands.
+    const touched = (dir: string) =>
+      paths.some((p) => p.startsWith(`${config.kbDirName}/${dir}/`));
+    if (touched(GROUPS_DIR) || touched(LEGACY_TOOLS_DIR)) toolManualService.invalidate();
+    if (touched(GROUPS_DIR) || touched(LEGACY_SKILLS_DIR)) skillService.invalidate();
   });
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the

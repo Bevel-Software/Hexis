@@ -8,8 +8,7 @@ import {
   DATA_DIR,
   KNOWLEDGE_BASE_DIR,
   PIPELINES_DIR,
-  SKILLS_DIR,
-  TOOLS_DIR,
+  GROUPS_DIR,
 } from '@bevel-software/platform-shared';
 import type { IKbSeedService } from './kb-seed.interface.js';
 
@@ -44,8 +43,7 @@ const REQUIRED_DIRS: readonly string[] = [
   DATA_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
-  SKILLS_DIR,
-  TOOLS_DIR,
+  GROUPS_DIR,
 ];
 
 /** Redact the token from any string that might surface in a log or error. */

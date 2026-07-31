@@ -9,7 +9,7 @@ import {
   DefaultVariableSubstitutor,
   type CallTemplate,
 } from '@utcp/sdk';
-import { DEFAULT_BRANCH, TOOLS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, GROUPS_DIR, LEGACY_TOOLS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -467,12 +467,18 @@ export class ToolManualService implements IToolManualService {
     } catch {
       return [];
     }
-    const root = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName, TOOLS_DIR);
+    const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
-    const files = (await walkFiles(root, (n) => n.toLowerCase().endsWith('.tool'))).map((rel) => ({
-      abs: path.join(root, rel),
-      rel: `${TOOLS_DIR}/${rel}`,
-    }));
+    // `Groups/` is the merged layout, where a `.tool` sits beside the skills
+    // that use it. `Tools/` is read too so the catalog is not empty against a
+    // KB that has not migrated yet — delete it once the migration lands.
+    const files: { abs: string; rel: string }[] = [];
+    for (const dir of [GROUPS_DIR, LEGACY_TOOLS_DIR]) {
+      const root = path.join(kbRoot, dir);
+      for (const rel of await walkFiles(root, (n) => n.toLowerCase().endsWith('.tool'))) {
+        files.push({ abs: path.join(root, rel), rel: `${dir}/${rel}` });
+      }
+    }
 
     const parsed: ToolManualDescriptor[] = [];
     for (const f of files) {

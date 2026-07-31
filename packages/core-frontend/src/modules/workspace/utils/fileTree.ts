@@ -3,8 +3,9 @@ import {
   DATA_DIR,
   KNOWLEDGE_BASE_DIR,
   PIPELINES_DIR,
-  SKILLS_DIR,
-  TOOLS_DIR,
+  GROUPS_DIR,
+  LEGACY_SKILLS_DIR,
+  LEGACY_TOOLS_DIR,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
 import type { PendingEntry } from '../state/workspace.context';
@@ -14,8 +15,11 @@ export const KB_ROOT_DIRS = new Set([
   DATA_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
-  SKILLS_DIR,
-  TOOLS_DIR,
+  GROUPS_DIR,
+  // Kept so an unmigrated clone still sections correctly instead of folding
+  // its skills and tools into Knowledge as "stray content folders".
+  LEGACY_SKILLS_DIR,
+  LEGACY_TOOLS_DIR,
 ]);
 
 /**

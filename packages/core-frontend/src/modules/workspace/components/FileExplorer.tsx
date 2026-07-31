@@ -23,8 +23,9 @@ import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
   validateFilename,
   KNOWLEDGE_BASE_DIR,
-  SKILLS_DIR,
-  TOOLS_DIR,
+  GROUPS_DIR,
+  LEGACY_SKILLS_DIR,
+  LEGACY_TOOLS_DIR,
   DATA_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
@@ -914,15 +915,19 @@ export function FileExplorer() {
     const data = findDir(DATA_DIR);
     const agents = findDir(AGENTS_DIR);
     const pipelines = findDir(PIPELINES_DIR);
-    const skills = findDir(SKILLS_DIR);
-    const tools = findDir(TOOLS_DIR);
-    if (!knowledgeBase && !data && !agents && !pipelines && !skills && !tools) return null;
+    const groups = findDir(GROUPS_DIR);
+    // Pre-merge clones still have the split pair; both are rendered so a KB
+    // that has not migrated does not lose its skills and tools from the tree.
+    const skills = findDir(LEGACY_SKILLS_DIR);
+    const tools = findDir(LEGACY_TOOLS_DIR);
+    if (!knowledgeBase && !data && !agents && !pipelines && !groups && !skills && !tools)
+      return null;
     // Any other top-level content folder (e.g. a stray `Legal/`) folds into Knowledge.
     const otherDirs = kids.filter(
       (c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name),
     );
-    // Present Knowledge, Data, Agents, Pipelines, Skills and Tools as named
-    // roots. Knowledge is synthetic so it can relabel `KnowledgeBase` and
+    // Present Knowledge, Data, Agents, Pipelines and Groups as named roots
+    // (plus the legacy Skills/Tools pair while it still exists). Knowledge is synthetic so it can relabel `KnowledgeBase` and
     // absorb the stray content folders; it reuses KnowledgeBase's own path so
     // file ops on the row still resolve.
     const knowledge: FileTreeEntry | null = knowledgeBase
@@ -939,13 +944,17 @@ export function FileExplorer() {
     const pipelinesRoot: FileTreeEntry | null = pipelines
       ? { ...pipelines, name: PIPELINES_DIR }
       : null;
-    const skillsRoot: FileTreeEntry | null = skills ? { ...skills, name: SKILLS_DIR } : null;
-    const toolsRoot: FileTreeEntry | null = tools ? { ...tools, name: TOOLS_DIR } : null;
+    const groupsRoot: FileTreeEntry | null = groups ? { ...groups, name: GROUPS_DIR } : null;
+    const skillsRoot: FileTreeEntry | null = skills
+      ? { ...skills, name: LEGACY_SKILLS_DIR }
+      : null;
+    const toolsRoot: FileTreeEntry | null = tools ? { ...tools, name: LEGACY_TOOLS_DIR } : null;
     return {
       knowledge,
       data: dataRoot,
       agents: agentsRoot,
       pipelines: pipelinesRoot,
+      groups: groupsRoot,
       skills: skillsRoot,
       tools: toolsRoot,
       looseFiles: kids.filter((c) => c.type === 'file'),
@@ -1032,6 +1041,9 @@ export function FileExplorer() {
             )}
             {sections.pipelines && (
               <FileTreeNode entry={sections.pipelines} depth={0} accent collapseChildren />
+            )}
+            {sections.groups && (
+              <FileTreeNode entry={sections.groups} depth={0} accent collapseChildren />
             )}
             {sections.skills && (
               <FileTreeNode entry={sections.skills} depth={0} accent collapseChildren />
