@@ -7,7 +7,9 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./ui": "./src/shared/components/index.ts",
     "./index.css": "./src/index.css",
+    "./theme.css": "./src/shared/theme/index.css",
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },

@@ -1,6 +1,20 @@
-@import "tailwindcss";
+/**
+ * The application stylesheet: Tailwind, the design tokens, and app chrome.
+ *
+ * Design tokens do NOT live here — they live in `./shared/theme/`, which is
+ * importable on its own as `.../platform-core-frontend/theme.css`. This file
+ * is what an app needs on top of them: the Tailwind build, the typography
+ * plugin's theming, and the base/reset rules that belong to the shell.
+ */
+
+@import 'tailwindcss';
+@import './shared/theme/index.css';
 @plugin "@tailwindcss/typography";
 
+/* Brand purple. Not part of the design system: the prototype has no purple,
+   and the fate of these 46 call sites is an open decision (T21). Kept here,
+   outside `shared/theme/`, so the token module stays free of undecided
+   values. */
 @theme {
   --color-bevel: #863bff;
   --color-bevel-deep: #7e14ff;
@@ -8,24 +22,35 @@
 }
 
 /* Tailwind Typography ships dark <pre> backgrounds by default; the app is
-   light-only, so retheme prose code blocks to slate. */
+   light-only, so retheme prose code blocks onto the design tokens.
+   These MUST resolve through tokens rather than a raw palette: consuming
+   `--color-slate-*` here is what would break if the palette is ever
+   disabled — the custom properties become invalid-at-computed-value-time,
+   the plugin's dark default takes over, and every code block turns black. */
 .prose {
-  --tw-prose-pre-bg: var(--color-slate-100);
-  --tw-prose-pre-code: var(--color-slate-900);
+  --tw-prose-pre-bg: var(--color-sunken);
+  --tw-prose-pre-code: var(--color-ink);
 }
-.prose :where(pre):not(:where([class~="not-prose"] *)) {
-  border: 1px solid var(--color-slate-200);
+.prose :where(pre):not(:where([class~='not-prose'] *)) {
+  border: 1px solid var(--color-line);
 }
 
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
   margin: 0;
   overflow: hidden;
 }
 
 body {
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
+  font-size: var(--text-strong);
+  line-height: 1.5;
+  color: var(--color-ink);
+  background: var(--color-canvas);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 /* Persistent scrollbars in the VSCode webview. macOS overlay scrollbars fade

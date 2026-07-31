@@ -1,4 +1,4 @@
-import { useMemo, useState, type Ref } from 'react';
+import { Suspense, lazy, useMemo, useState, type Ref } from 'react';
 import { Link2, Check } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -8,7 +8,14 @@ import rehypeSanitize from 'rehype-sanitize';
 import rehypeSlug from 'rehype-slug';
 import { parseFrontmatter, labelFor } from '../../utils/frontmatter';
 import { escapeSpacesInLinkDestinations } from '../../../../shared/markdown/Markdown';
-import { MermaidDiagram } from './MermaidDiagram';
+/**
+ * Mermaid's eager core is ~151 KB gzip and is only needed by documents that
+ * actually contain a ```mermaid fence — a small minority. Loading it lazily
+ * keeps it out of the initial payload for every other page.
+ */
+const MermaidDiagram = lazy(() =>
+  import('./MermaidDiagram').then((m) => ({ default: m.MermaidDiagram })),
+);
 
 // A frontmatter value that is a single markdown link, e.g.
 // `nodeType: [Process](../../NodeTypes/Process.md)` (parseFrontmatter strips
@@ -258,7 +265,11 @@ export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, 
           child.props.className.includes('language-mermaid')
         ) {
           const code = String(child.props.children).replace(/\n$/, '');
-          return <MermaidDiagram code={code} />;
+          return (
+            <Suspense fallback={<pre {...props}>{children}</pre>}>
+              <MermaidDiagram code={code} />
+            </Suspense>
+          );
         }
         return <pre {...props}>{children}</pre>;
       },

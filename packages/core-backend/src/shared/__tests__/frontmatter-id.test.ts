@@ -56,6 +56,59 @@ describe('dedupeById', () => {
     expect(out.map((x) => x.at)).toEqual([1, 2]); // first `a` kept, second dropped
     expect(onDup).toHaveBeenCalledWith('a', 3);
   });
+
+  /**
+   * REGRESSION GUARD for the "one folder = one space" model.
+   *
+   * Spaces are grouping folders under the catalog root, and a tool or skill
+   * shared by two spaces is expected to be duplicated as two files with
+   * DISTINCT ids. Nothing enforces that convention — `seen` is a single
+   * global Set keyed on the declared id, with no notion of the folder the
+   * item came from. So the moment two spaces hold a same-named item, one of
+   * them silently disappears from the catalog.
+   *
+   * These tests pin that behaviour so it is a documented, observable
+   * property rather than a surprise. If dedup ever becomes folder-scoped,
+   * they are the tests that should change.
+   */
+  test('same id in two different space folders: the second folder loses its copy', () => {
+    const onDup = vi.fn();
+    // Services sort by (name, path) before deduping, so path order is stable.
+    const items = [
+      { name: 'notion', path: 'Tools/Everyone/notion.tool' },
+      { name: 'notion', path: 'Tools/Finance/notion.tool' },
+    ];
+    const out = dedupeById(items, (x) => x.name, (x, id) => onDup(id, x.path));
+
+    expect(out).toHaveLength(1);
+    expect(out[0].path).toBe('Tools/Everyone/notion.tool');
+    // The Finance space loses its tool entirely — only a server-side warning
+    // marks it, which is why the convention needs distinct ids per space.
+    expect(onDup).toHaveBeenCalledWith('notion', 'Tools/Finance/notion.tool');
+  });
+
+  test('distinct ids per space folder keep BOTH copies — the supported pattern', () => {
+    const onDup = vi.fn();
+    const items = [
+      { name: 'everyone_notion', path: 'Tools/Everyone/notion.tool' },
+      { name: 'finance_notion', path: 'Tools/Finance/notion.tool' },
+    ];
+    const out = dedupeById(items, (x) => x.name, (x, id) => onDup(id, x.path));
+
+    expect(out).toHaveLength(2);
+    expect(onDup).not.toHaveBeenCalled();
+  });
+
+  test('the surviving copy is the alphabetically-first path, not scan order', () => {
+    // Deterministic winner matters: an unstable one means a space's tool
+    // appears or vanishes depending on filesystem iteration order.
+    const items = [
+      { name: 'x', path: 'Tools/Zulu/x.tool' },
+      { name: 'x', path: 'Tools/Alpha/x.tool' },
+    ].sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
+
+    expect(dedupeById(items, (i) => i.name)[0].path).toBe('Tools/Alpha/x.tool');
+  });
 });
 
 describe('setFrontmatterField (shared, line-based)', () => {

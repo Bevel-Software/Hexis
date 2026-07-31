@@ -1,10 +1,21 @@
 /**
- * Library module — game-feel visual layer (approved mock: mocks/mock-a2-game-library.html).
+ * Library module — game-feel visual layer.
+ *
  * Deliberately teal-accented (#0d9488), NOT brand purple: the user moved this
  * view off the brand color on purpose. Everything here is scoped under `lib-`
  * class names; layout is Tailwind in the components, this file holds only the
  * pieces Tailwind can't express well: keyframes, glossy status gems, particle
  * flight, gear chrome, 3D card tilt + glare, slot/dock animations, diff marks.
+ *
+ * ⚠ The originating mock (`mocks/mock-a2-game-library.html`) is NOT in this
+ * repo, so the rationale above is the only surviving record of the decision.
+ *
+ * ⚠ STATUS: this layer is a second design system. It predates
+ * `src/shared/theme/`, uses 106 raw hex values and its own radius/type scale,
+ * and the prototype the app is migrating to is flat and quiet with no tilt,
+ * glare, gems or gears. Replacing it therefore REVERSES the documented
+ * decision above, which is a product call that has not been made — do not
+ * delete this file as incidental cleanup during the repaint.
  */
 
 /* ── status gems ── */
