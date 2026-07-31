@@ -42,7 +42,10 @@ import {
 import { ensureRecoveryBotUser } from '../modules/workflow/recovery-bot.js';
 import { AdminAccessService } from '../modules/admin/admin-access.service.js';
 import { ExternalApiKeyService } from '../modules/tool-auth/external-api-key.service.js';
-import { InternalTokenService } from '../modules/tool-auth/internal-token.service.js';
+import {
+  InternalTokenService,
+  deriveInternalTokenSecret,
+} from '../modules/tool-auth/internal-token.service.js';
 import {
   createToolAuthMiddleware,
   createManualAuthMiddleware,
@@ -323,8 +326,18 @@ export async function createCoreServices(
 
   // Least-privilege internal tokens: minted per (workspace, user, scope) by the
   // agents' code-mode clients and by the MCP proxy, verified by the tool-auth
-  // middleware below — the same instance must back both sides.
-  const internalTokenService = new InternalTokenService({ prefix: config.internalTokenPrefix });
+  // middleware below. The signing key is STABLE across processes sharing the
+  // deployment env (INTERNAL_TOKEN_SECRET, else derived from JWT_SECRET) so a
+  // sibling process — the enterprise routine CLI, a second replica — mints
+  // tokens this server verifies. Only a deployment with NO jwtSecret at all
+  // falls back to the per-boot random key (single-process smoke setups).
+  const internalTokenSecret =
+    config.internalTokenSecret ||
+    (config.jwtSecret ? deriveInternalTokenSecret(config.jwtSecret) : undefined);
+  const internalTokenService = new InternalTokenService({
+    prefix: config.internalTokenPrefix,
+    secret: internalTokenSecret,
+  });
 
   // GDPR erasure path: admin-driven user deletion. The core service erases the
   // rows it owns; each module contributes its slice as a participant.

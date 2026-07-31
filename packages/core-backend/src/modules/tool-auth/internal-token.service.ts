@@ -36,6 +36,19 @@ interface SignedPayload extends InternalTokenClaim {
 
 const DEFAULT_PREFIX = 'bevel-int_';
 
+/**
+ * Derive the stable internal-token HMAC key from the deployment's JWT secret.
+ * Domain-separated (the constant label), so the two token systems never share
+ * key material and neither key reveals the other. A STABLE key — rather than
+ * the per-boot random default — is what lets a sibling process that shares the
+ * deployment env (the enterprise routine CLI, a second replica) mint tokens
+ * this server verifies; the composition root uses this whenever
+ * `INTERNAL_TOKEN_SECRET` is not set explicitly.
+ */
+export function deriveInternalTokenSecret(jwtSecret: string): string {
+  return createHmac('sha256', jwtSecret).update('bevel-internal-token').digest('hex');
+}
+
 function b64url(buf: Buffer): string {
   return buf.toString('base64url');
 }

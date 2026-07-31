@@ -107,6 +107,15 @@ export class CoreConfig {
    */
   readonly secretsEncKey: string;
   /**
+   * Optional dedicated HMAC key for internal (loopback) tokens. Unset
+   * (default) → the composition root derives a domain-separated key from
+   * `JWT_SECRET`, so every process sharing the deployment env (the server,
+   * a routine CLI, a second replica) mints tokens the server verifies. Set
+   * `INTERNAL_TOKEN_SECRET` to rotate the internal tool surface's credential
+   * independently of user sessions.
+   */
+  readonly internalTokenSecret: string;
+  /**
    * Public base URL of THIS backend, used to build OAuth redirect URIs.
    * Must match a redirect URI registered with the OAuth provider(s).
    */
@@ -175,6 +184,7 @@ export class CoreConfig {
       process.env.SHAREPOINT_TOKEN_ENC_KEY ||
       ''
     ).trim();
+    this.internalTokenSecret = (process.env.INTERNAL_TOKEN_SECRET || '').trim();
     this.publicBackendUrl = (process.env.PUBLIC_BACKEND_URL || `http://localhost:${this.port}`)
       .trim()
       .replace(/\/+$/, '');

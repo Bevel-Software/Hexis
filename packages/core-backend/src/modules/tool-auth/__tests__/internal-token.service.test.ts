@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { InternalTokenService } from '../internal-token.service.js';
+import {
+  InternalTokenService,
+  deriveInternalTokenSecret,
+} from '../internal-token.service.js';
 import { createTokenVerifier } from '../tool-auth.middleware.js';
 import type { IExternalApiKeyService } from '../external-api-key.interface.js';
 
@@ -38,6 +41,27 @@ describe('InternalTokenService', () => {
     const token = svc.mint(claim);
     now += 1500;
     expect(svc.verify(token)).toBeNull();
+  });
+
+  it('verifies a token minted by a SIBLING instance sharing the secret (CLI → server)', () => {
+    // The routine CLI and a second replica each build their own service graph;
+    // with the same configured secret their tokens must verify across
+    // instances — this is what makes the loopback tool surface reachable from
+    // a process other than the server itself.
+    const secret = deriveInternalTokenSecret('deployment-jwt-secret');
+    const cliSide = new InternalTokenService({ secret });
+    const serverSide = new InternalTokenService({ secret });
+    expect(serverSide.verify(cliSide.mint(claim))).toEqual(claim);
+  });
+
+  it('derives a stable, domain-separated internal secret from the JWT secret', () => {
+    const derived = deriveInternalTokenSecret('deployment-jwt-secret');
+    // Deterministic (same input → same key) …
+    expect(deriveInternalTokenSecret('deployment-jwt-secret')).toBe(derived);
+    // … but never the JWT secret itself, and different per input.
+    expect(derived).not.toBe('deployment-jwt-secret');
+    expect(deriveInternalTokenSecret('other-secret')).not.toBe(derived);
+    expect(derived).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('rejects a connection-key-shaped bearer', () => {
