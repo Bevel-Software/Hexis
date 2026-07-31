@@ -1,5 +1,13 @@
-import { useEffect, useMemo, useState, Fragment, type ReactNode } from 'react';
-import { BrowserRouter, Routes, Route, useNavigate } from 'react-router-dom';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  Fragment,
+  type ReactNode,
+} from 'react';
+import { BrowserRouter, Navigate, Routes, Route, useLocation } from 'react-router-dom';
 import { AuthContext } from '../modules/auth/state/auth.context';
 import { useAuthState } from '../modules/auth/hooks/useAuthState';
 import { LoginScreen } from '../modules/auth/components/LoginScreen';
@@ -20,20 +28,31 @@ import { FileViewer } from '../modules/workspace/components/FileViewer';
 import { FileRoute } from '../modules/workspace/components/FileRoute';
 import { KB_ROUTE_PREFIX } from '../modules/workspace/routing/kb-routes';
 import { AppLayout } from '../modules/layout/components/AppLayout';
+import {
+  LayoutContext,
+  NO_PANES_LAYOUT,
+  type LayoutController,
+} from '../modules/layout/state/layout.context';
 import { MaintenanceOverlay } from '../modules/layout/components/MaintenanceOverlay';
 import { AdminProvider } from '../modules/admin/state/admin.context';
 import { RolesCorruptedBanner } from '../modules/admin/components/RolesCorruptedBanner';
 import { ReviewProvider } from '../modules/review/state/ReviewProvider';
 import { ReviewPanelSurface } from '../modules/review/components/ReviewPanelSurface';
 import { ConnectToolsPage } from '../modules/secrets-vault/components/ConnectToolsPage';
-import { SecretsVaultPage } from '../modules/secrets-vault/components/SecretsVaultPage';
+import { SecretsPage } from '../modules/secrets-vault/components/SecretsPage';
+import { ExternalAgentAccessPage } from '../modules/toolbar/components/ExternalAgentAccessPage';
+import { AdminRolesPage } from '../modules/admin/components/AdminRolesPage';
+import { ToolsExplorerPage } from '../modules/tools/ToolsExplorerPage';
 import { LibraryPage } from '../modules/library/components/LibraryPage';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
 import {
+  activeAppId,
+  ActiveAppIdContext,
   AppRegistryContext,
   CrCreationPortContext,
   SuggestedPromptSeedContext,
   useAppRegistry,
+  type AppDef,
   type AppRegistry,
   type BannerDef,
   type CrCreationInput,
@@ -139,7 +158,8 @@ const CORE_BANNERS: BannerDef[] = [
 
 // Core panes; merged (by `order`) with registry-contributed panes (the
 // enterprise chat pane registers at order 30). Sizing mirrors the historical
-// hard-coded three-pane layout exactly.
+// hard-coded three-pane layout exactly. These are the KNOWLEDGE app's panes —
+// other apps render their own full surface (see CORE_APPS).
 const CORE_PANES: PaneDef[] = [
   {
     id: 'explorer',
@@ -153,15 +173,45 @@ const CORE_PANES: PaneDef[] = [
   { id: 'viewer', order: 20, node: <ViewerRoutes />, minSize: '30%' },
 ];
 
-function AppChrome() {
+/**
+ * The core apps behind the toolbar's app switcher. Each app is a full
+ * surface below the always-mounted toolbar. "Skills & Tools" renders the
+ * Library full-bleed for now and will move to the dedicated view when it
+ * lands. Knowledge's path IS `KB_ROUTE_PREFIX` ('/workspace') — the KB file
+ * links `kbFileUrl()` produces are absolute `/workspace/<branch>/<path>`
+ * URLs, so they land inside the Knowledge surface by construction.
+ */
+const CORE_APPS: AppDef[] = [
+  {
+    id: 'knowledge',
+    label: 'Knowledge',
+    path: KB_ROUTE_PREFIX,
+    description: 'Browse and edit your knowledge base',
+    order: 10,
+    element: <KnowledgeSurface />,
+  },
+  {
+    id: 'skills-tools',
+    label: 'Skills & Tools',
+    path: '/skills-and-tools',
+    description: 'What your assistant can do, and what it connects to',
+    order: 20,
+    element: <LibraryPage />,
+  },
+];
+
+/**
+ * Setter through which the Knowledge surface's pane layout reports its
+ * controller to AppChrome (whose LayoutContext provider wraps the toolbar).
+ */
+const PaneControllerContext = createContext<(c: LayoutController | null) => void>(
+  () => {},
+);
+
+/** The Knowledge app: the historical pane workspace (explorer / viewer / panes). */
+function KnowledgeSurface() {
   const registry = useAppRegistry();
-  const banners = useMemo(
-    () =>
-      [...CORE_BANNERS, ...registry.banners].sort(
-        (a, b) => (a.order ?? 100) - (b.order ?? 100),
-      ),
-    [registry],
-  );
+  const setController = useContext(PaneControllerContext);
   const panes = useMemo(
     () =>
       [...CORE_PANES, ...registry.panes].sort(
@@ -169,24 +219,102 @@ function AppChrome() {
       ),
     [registry],
   );
+  return <AppLayout panes={panes} onController={setController} />;
+}
+
+function AppChrome() {
+  const registry = useAppRegistry();
+  const location = useLocation();
+  const banners = useMemo(
+    () =>
+      [...CORE_BANNERS, ...registry.banners].sort(
+        (a, b) => (a.order ?? 100) - (b.order ?? 100),
+      ),
+    [registry],
+  );
+  // The full app list (core apps were merged into the registry by the shell).
+  const apps = useMemo(
+    () => [...registry.apps].sort((a, b) => (a.order ?? 100) - (b.order ?? 100)),
+    [registry],
+  );
+  const activeId = activeAppId(apps, location.pathname);
+
+  // Pane controller bridge: the toolbar sits OUTSIDE the active app's surface,
+  // so the Knowledge pane layout reports its controller up here and the shell
+  // provides it around toolbar + surface. While a pane-less app (Skills &
+  // Tools, registry apps) is active the controller is null → NO_PANES_LAYOUT,
+  // which hides the toolbar's pane-toggle buttons.
+  const [paneController, setPaneController] = useState<LayoutController | null>(null);
 
   return (
-    /* Flex-col wrapper so the (conditional) corrupted banner
-       takes its own height and the h-full layout flexes into
-       the rest. When the banner is null this is a no-op pass
-       through — AppLayout still fills the viewport. */
-    <div className="flex flex-col h-screen">
-      {banners.map((banner) => (
-        <Fragment key={banner.id}>{banner.node}</Fragment>
-      ))}
-      <div className="flex-1 min-h-0">
-        <AppLayout header={<Toolbar />} panes={panes} />
-      </div>
-    </div>
+    <ActiveAppIdContext.Provider value={activeId}>
+      <LayoutContext.Provider value={paneController ?? NO_PANES_LAYOUT}>
+        <PaneControllerContext.Provider value={setPaneController}>
+          {/* Flex-col wrapper so the (conditional) banner strip takes its own
+              height and the toolbar + active surface flex into the rest. */}
+          <div className="flex flex-col h-screen">
+            {banners.map((banner) => (
+              <Fragment key={banner.id}>{banner.node}</Fragment>
+            ))}
+            <Toolbar />
+            <div className="flex-1 min-h-0">
+              {/* Switching routes swaps EVERYTHING below the toolbar: an app
+                  surface, a standalone settings page, or a redirect. */}
+              <ShellRoutes apps={apps} />
+            </div>
+          </div>
+        </PaneControllerContext.Provider>
+      </LayoutContext.Provider>
+    </ActiveAppIdContext.Provider>
   );
 }
 
-/** The viewer pane: registry routes first, then the core routes. */
+/**
+ * The shell-level route table below the persistent toolbar:
+ *
+ *  - App surfaces at `<path>/*` (a legacy `/` app path maps to `*` for API
+ *    stability — apps come before the redirect catch-all, so a match-all app
+ *    still wins over it).
+ *  - The standalone settings pages — full pages under the toolbar, outside
+ *    any app surface (activeAppId is undefined there, so the switcher shows
+ *    no checkmark and the pane toggles hide via NO_PANES_LAYOUT). `/connect`
+ *    and `/secrets` are OAuth return targets: external redirects land on
+ *    these exact URLs, so they must stay routes with these exact paths.
+ *  - Redirects: `/` → `/workspace`, and a final catch-all for anything
+ *    unknown (including the retired `/library` path).
+ *
+ * Extracted from AppChrome so the routing behavior is testable without the
+ * full provider stack.
+ */
+export function ShellRoutes({ apps }: { apps: AppDef[] }) {
+  return (
+    <Routes>
+      {apps.map((app) => (
+        <Route
+          key={app.id}
+          path={app.path === '/' ? '*' : `${app.path}/*`}
+          element={app.element}
+        />
+      ))}
+      <Route path="/connect" element={<ConnectToolsPage />} />
+      <Route path="/secrets" element={<SecretsPage />} />
+      <Route path="/external-agent-access" element={<ExternalAgentAccessPage />} />
+      <Route path="/roles-and-members" element={<AdminRolesPage />} />
+      <Route path="/tools" element={<ToolsExplorerPage />} />
+      <Route path="/" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
+      <Route path="*" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
+    </Routes>
+  );
+}
+
+/**
+ * The viewer pane: registry routes first, then the core routes. This
+ * `<Routes>` block is nested inside the Knowledge surface's
+ * `${KB_ROUTE_PREFIX}/*` route, so every path here matches the REMAINDER
+ * after `/workspace` — `:branch/*` is `/workspace/<branch>/<path>` (the
+ * absolute URLs `kbFileUrl()` builds), and the default `*` is the
+ * knowledge-home fallback for `/workspace` itself.
+ */
 function ViewerRoutes() {
   const registry = useAppRegistry();
   return (
@@ -194,21 +322,7 @@ function ViewerRoutes() {
       {registry.viewerRoutes.map((r) => (
         <Route key={r.path} path={r.path} element={r.element} />
       ))}
-      {/* OAuth landing pages — external redirects
-          arrive here, so these stay routes (not
-          only gear-menu dialogs): /connect is both the
-          external-agent authorization step and the
-          tool sign-in return page; /secrets is where
-          the standalone-secret OAuth callback returns
-          (#authorized/#error), opening the Secrets
-          dialog like the registered /connectors route
-          does for Connectors. */}
-      <Route path="/connect" element={<ConnectToolsPage />} />
-      <Route path="/secrets" element={<SecretsRoute />} />
-      {/* The Library — core skills/integrations/loadout view (gear-menu row
-          "Library" navigates here). */}
-      <Route path="/library" element={<LibraryPage />} />
-      <Route path={`${KB_ROUTE_PREFIX}/:branch/*`} element={<FileRoute />} />
+      <Route path=":branch/*" element={<FileRoute />} />
       <Route path="*" element={<FileViewer />} />
     </Routes>
   );
@@ -278,18 +392,6 @@ export function AuthGate({ children }: { children: ReactNode }) {
   );
 }
 
-/**
- * Landing for the standalone-secret OAuth return (`/secrets#authorized=…`).
- * Same pattern as the enterprise ConnectorsRoute: the Secrets panel is a
- * gear-menu dialog, but the backend callback redirects the browser here, so
- * this route opens that dialog (which reads the hash); closing it returns to
- * the workspace.
- */
-function SecretsRoute() {
-  const navigate = useNavigate();
-  return <SecretsVaultPage open onClose={() => navigate('/', { replace: true })} />;
-}
-
 function AppShell() {
   return (
     <AuthGate>
@@ -299,12 +401,14 @@ function AppShell() {
 }
 
 export function CoreAppShell({ registry }: { registry: AppRegistry }) {
-  // Core file-viewer panels merge ahead of registry-contributed ones. The
-  // agent-review surface is core: it renders the pending-changes session
-  // served by the core diff backend (/api/workspace/:id/review*).
+  // Core contributions merge ahead of registry-contributed ones: the review
+  // file-viewer panel (core — it renders the pending-changes session served
+  // by the core diff backend at /api/workspace/:id/review*) and the core
+  // apps (Knowledge + Skills & Tools) that the switcher and AppChrome read.
   const mergedRegistry = useMemo<AppRegistry>(
     () => ({
       ...registry,
+      apps: [...CORE_APPS, ...registry.apps],
       fileViewerPanels: [
         { id: 'review', Component: ReviewPanelSurface },
         ...registry.fileViewerPanels.filter((p) => p.id !== 'review'),
@@ -316,9 +420,12 @@ export function CoreAppShell({ registry }: { registry: AppRegistry }) {
   // (e.g. a pasted /workspace/<branch>/<path> link) survives login —
   // FileRoute picks it up automatically once auth resolves.
   //
-  // Registry `topLevelRoutes` (the enterprise /embed*, /tools and /onboarding
+  // Registry `topLevelRoutes` (the enterprise /embed* and /onboarding
   // surfaces today) sit OUTSIDE `AppShell` and its auth gate — they own their
-  // auth story themselves (see the comments on each route definition).
+  // auth story themselves (see the comments on each route definition). They
+  // are matched BEFORE the AppShell catch-all, so a registry can also shadow
+  // a shell route (e.g. serve its own /tools) when it needs a different auth
+  // wrapper.
   return (
     <AppRegistryContext.Provider value={mergedRegistry}>
       <BrowserRouter>

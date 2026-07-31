@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Check, Copy, Wrench, ExternalLink } from 'lucide-react';
 import { Dialog } from '../../../shared/components/Dialog';
+import { PageShell } from '../../../shared/components/PageShell';
 import {
   type ExternalApiKeySummary,
   type MintedExternalApiKey,
@@ -13,10 +14,10 @@ import {
 
 /**
  * "Copied" affordance with a 1500ms auto-reset. Owns the timer + its teardown
- * (so a closing dialog can't fire a stale setState), shared by the reveal modal
- * and every CopyBlock. `copy(text)` writes to the clipboard and flags copied;
- * a rejected write (insecure context / denied permission) leaves the textarea
- * selectable for manual copy and shows no false "Copied".
+ * (so an unmounting page can't fire a stale setState), shared by the reveal
+ * modal and every CopyBlock. `copy(text)` writes to the clipboard and flags
+ * copied; a rejected write (insecure context / denied permission) leaves the
+ * textarea selectable for manual copy and shows no false "Copied".
  */
 function useCopyFeedback(): { copied: boolean; copy: (text: string) => void } {
   const [copied, setCopied] = useState(false);
@@ -32,11 +33,6 @@ function useCopyFeedback(): { copied: boolean; copy: (text: string) => void } {
       .catch(() => {});
   }, []);
   return { copied, copy };
-}
-
-interface Props {
-  open: boolean;
-  onClose(): void;
 }
 
 const MAX_LABEL_LEN = 200;
@@ -55,7 +51,8 @@ function formatRelative(ts: number | null): string {
 }
 
 /**
- * Settings dialog for external agent access, in two tabs:
+ * The External agent access page, routed standalone at
+ * `/external-agent-access` (below the persistent toolbar), in two tabs:
  *
  *  - "Your agent" (default) — connecting the user's own interactive agent
  *    (Claude Code, Claude Desktop, Cursor…). No key: the agent gets only the
@@ -70,7 +67,7 @@ function formatRelative(ts: number | null): string {
  * Glossary terms used in copy: "External API key", "Disconnect" (= revoke),
  * "External agent" (= MCP client). See docs/glossary.md.
  */
-export function ExternalApiKeysDialog({ open, onClose }: Props) {
+export function ExternalAgentAccessPage() {
   const labelInputId = useId();
 
   const [tab, setTab] = useState<'agent' | 'autonomous'>('agent');
@@ -83,8 +80,8 @@ export function ExternalApiKeysDialog({ open, onClose }: Props) {
   const [createError, setCreateError] = useState<string | null>(null);
 
   // The plaintext of a freshly minted key. Held in state for the lifetime
-  // of this modal-within-modal — never persisted, and cleared when the
-  // user closes the panel or dismisses the reveal step.
+  // of the reveal modal — never persisted, and cleared when the user
+  // dismisses the reveal step.
   const [reveal, setReveal] = useState<MintedExternalApiKey | null>(null);
   const { copied, copy } = useCopyFeedback();
 
@@ -107,15 +104,8 @@ export function ExternalApiKeysDialog({ open, onClose }: Props) {
   }, []);
 
   useEffect(() => {
-    if (!open) return;
-    setTab('agent');
-    setLabel('');
-    setCreateError(null);
-    setReveal(null);
-    setPendingDelete(null);
-    setDeleting(false);
     void refresh();
-  }, [open, refresh]);
+  }, [refresh]);
 
   async function handleCreate() {
     const trimmed = label.trim();
@@ -176,14 +166,7 @@ export function ExternalApiKeysDialog({ open, onClose }: Props) {
 
   return (
     <>
-      <Dialog
-        open={open}
-        onClose={onClose}
-        title="External agent access"
-        size="2xl"
-        busy={reveal !== null}
-        bare
-      >
+      <PageShell title="External agent access" padded={false}>
         <div className="flex border-b border-slate-200 px-4 shrink-0" role="tablist">
           {(
             [
@@ -208,7 +191,7 @@ export function ExternalApiKeysDialog({ open, onClose }: Props) {
         </div>
 
         {tab === 'agent' && (
-          <div className="px-4 py-3 space-y-4 overflow-y-auto">
+          <div className="px-4 py-3 space-y-4">
             <p className="text-xs text-slate-600 leading-snug">
               Connect your own agent — Claude Code, Claude Desktop, Cursor and similar. No key
               needed: the first time the agent connects, your browser opens so you can sign in and
@@ -275,7 +258,7 @@ export function ExternalApiKeysDialog({ open, onClose }: Props) {
         )}
 
         {tab === 'autonomous' && (
-          <div className="px-4 py-3 space-y-4 overflow-y-auto">
+          <div className="px-4 py-3 space-y-4">
             <p className="text-xs text-slate-600 leading-snug">
               For autonomous agents and pipelines (CI, scheduled jobs) that can't open a browser to
               sign in. Create an external API key and give it to the agent. Each key carries your
@@ -326,7 +309,7 @@ export function ExternalApiKeysDialog({ open, onClose }: Props) {
               ) : keys.length === 0 ? (
                 <div className="text-xs text-slate-600">No external API keys yet.</div>
               ) : (
-                <ul className="divide-y divide-slate-200 border border-slate-200 rounded max-h-72 overflow-y-auto">
+                <ul className="divide-y divide-slate-200 border border-slate-200 rounded">
                   {sortedKeys.map((k) => {
                     const revoked = k.revokedAt !== null;
                     const usage = !revoked ? k.llmUsage : undefined;
@@ -393,7 +376,7 @@ export function ExternalApiKeysDialog({ open, onClose }: Props) {
             </div>
           </div>
         )}
-      </Dialog>
+      </PageShell>
 
       <Dialog
         open={pendingDelete !== null}

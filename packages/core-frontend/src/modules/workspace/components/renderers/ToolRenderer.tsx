@@ -344,7 +344,7 @@ export function ToolRenderer({
             <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Secret variables</h3>
             {secretKeys.length === 0 ? (
               <p className="text-[11px] text-slate-400">
-                No secrets yet. Add them in the Secrets Vault, then reference them here.
+                No secrets yet. Add them on the Secrets page, then reference them here.
               </p>
             ) : (
               <div className="flex flex-wrap gap-1">

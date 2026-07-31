@@ -1,12 +1,15 @@
+import { Fragment, useMemo } from 'react';
 import { LogOut, PanelLeft, PanelRight } from 'lucide-react';
 import { useAuth } from '../../auth/state/auth.context';
 import { AdminMenu } from './AdminMenu';
-import { BranchSwitcher } from '../../git/components/BranchSwitcher';
+import { AppSwitcher } from './AppSwitcher';
 import { useLayout } from '../../layout/state/layout.context';
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
+import { useAppRegistry } from '../../../core/registry';
 
 export function Toolbar() {
   const { user, logout } = useAuth();
+  const registry = useAppRegistry();
   const {
     isExplorerCollapsed,
     isChatCollapsed,
@@ -15,20 +18,25 @@ export function Toolbar() {
     toggleExplorer,
     toggleChat,
   } = useLayout();
-  // Below the `md` breakpoint the git-action cluster (just the branch
-  // switcher now) does not fit alongside the toolbar essentials, so it
-  // drops onto a second row instead of overflowing offscreen.
+  // Below the `md` breakpoint the registry item cluster (the enterprise
+  // branch switcher, for one) does not fit alongside the toolbar essentials,
+  // so it drops onto a second row instead of overflowing offscreen.
   const isCompact = useMediaQuery('(max-width: 767px)');
 
-  // Share + Discard buttons retired with the workflow migration: lock
-  // release auto-commits + pushes the file (`releaseLock` in
-  // WorkflowService), and all users on the same branch share the same
-  // workspace so there is no separate "share" step. The save-state
-  // badge that used to live next to the branch switcher was also
-  // removed — the per-file Edit/Save toggle on the file viewer is the
-  // only state the user needs to act on; a toolbar-level "Saved"
-  // indicator added noise without informing any decision.
-  const gitActions = <BranchSwitcher />;
+  // Registry-contributed left-cluster items. The CORE toolbar has none of its
+  // own: the branch switcher is an enterprise contribution scoped (by the
+  // item itself, via useActiveAppId) to the Knowledge app — the git module
+  // still ships the component, the core shell just doesn't mount it.
+  // (Share/Discard buttons retired with the workflow migration: lock release
+  // auto-commits + pushes, so there is no separate "share" step.)
+  const toolbarItems = useMemo(
+    () =>
+      [...registry.toolbarItems].sort((a, b) => (a.order ?? 100) - (b.order ?? 100)),
+    [registry],
+  );
+  const itemCluster = toolbarItems.map((item) => (
+    <Fragment key={item.id}>{item.node}</Fragment>
+  ));
 
   return (
     <header className="border-b border-slate-200 shrink-0 bg-white">
@@ -47,10 +55,10 @@ export function Toolbar() {
           </button>
         )}
 
-        <span className="text-sm font-semibold tracking-wide">Bevel</span>
+        <AppSwitcher />
 
-        {!isCompact && (
-          <div className="flex items-center gap-2 ml-4">{gitActions}</div>
+        {!isCompact && itemCluster.length > 0 && (
+          <div className="flex items-center gap-2 ml-4">{itemCluster}</div>
         )}
 
         <div className="flex-1" />
@@ -95,7 +103,7 @@ export function Toolbar() {
         </button>
       </div>
 
-      {isCompact && (
+      {isCompact && itemCluster.length > 0 && (
         <div
           // Horizontal-only scroll. `overflow-y-hidden` keeps a tall child
           // (e.g. a button with a wrapping badge) from giving the row a
@@ -106,7 +114,7 @@ export function Toolbar() {
           className="h-10 flex items-center px-3 gap-2 border-t border-slate-200 overflow-x-auto overflow-y-hidden"
           style={{ touchAction: 'pan-x' }}
         >
-          {gitActions}
+          {itemCluster}
         </div>
       )}
 

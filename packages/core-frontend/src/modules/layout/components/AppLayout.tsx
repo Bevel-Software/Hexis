@@ -2,12 +2,20 @@ import type { ReactNode } from 'react';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { ResizableThreePaneLayout } from './ResizableThreePaneLayout';
 import { MobileChatLayout } from './MobileChatLayout';
+import type { LayoutController } from '../state/layout.context';
 import type { PaneDef } from '../../../core/registry';
 
 interface AppLayoutProps {
-  header: ReactNode;
+  /** Optional now that the Toolbar lives above the app surfaces in the shell. */
+  header?: ReactNode;
   /** Registry-driven pane list (preferred). */
   panes?: PaneDef[];
+  /**
+   * Reports the pane controller to an ancestor provider (the shell), so a
+   * toolbar OUTSIDE this layout can drive the pane toggles. Called with null
+   * on unmount (app switched away → no panes to toggle).
+   */
+  onController?: (controller: LayoutController | null) => void;
   // Legacy named slots, kept as a convenience/compat signature.
   explorer?: ReactNode;
   viewer?: ReactNode;

@@ -1,6 +1,7 @@
 import {
   Fragment,
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -36,12 +37,14 @@ function getSafeLocalStorage(): Storage | undefined {
 }
 
 interface ResizableThreePaneLayoutProps {
-  header: ReactNode;
+  header?: ReactNode;
   /**
    * Registry-driven pane list (preferred). When provided, panel ids — and
    * therefore the persisted layout shape — derive from this list.
    */
   panes?: PaneDef[];
+  /** Reports the pane controller upward (null on unmount) — see AppLayout. */
+  onController?: (controller: LayoutController | null) => void;
   // Legacy named slots, kept as a convenience/compat signature (converted to
   // the same pane list internally with the historical sizing defaults).
   explorer?: ReactNode;
@@ -52,6 +55,7 @@ interface ResizableThreePaneLayoutProps {
 export function ResizableThreePaneLayout({
   header,
   panes,
+  onController,
   explorer,
   viewer,
   chat,
@@ -152,6 +156,14 @@ export function ResizableThreePaneLayout({
     }),
     [collapsedById, collapsibleIds, togglePane],
   );
+
+  // Mirror the controller to the shell (whose provider wraps the toolbar).
+  // The inner provider below still serves this layout's own subtree — same
+  // object, so the two are always consistent.
+  useEffect(() => {
+    onController?.(controller);
+    return () => onController?.(null);
+  }, [controller, onController]);
 
   return (
     <LayoutContext.Provider value={controller}>

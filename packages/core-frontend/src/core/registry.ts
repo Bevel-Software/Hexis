@@ -61,11 +61,13 @@ export interface AdminMenuItemHelpers {
 }
 
 /**
- * One row of the toolbar gear menu. Core rows (Secrets, External agent
- * access, Browse available tools, Roles & Members) are built into AdminMenu;
- * enterprise rows are contributed here. A row either opens a dialog
- * (`dialog` — mounted persistently by AdminMenu, driven by an open flag, so
- * existing dialog components need no changes) or runs an action (`onSelect`).
+ * One row of the toolbar gear menu. Core rows (Skills & Tools, External
+ * agent access, Secrets, Browse available tools, Roles & Members) are built
+ * into AdminMenu and navigate to standalone routed pages; enterprise rows
+ * are contributed here. A row either opens a dialog (`dialog` — mounted
+ * persistently by AdminMenu, driven by an open flag, so existing dialog
+ * components need no changes) or runs an action (`onSelect`, e.g. a
+ * navigation).
  */
 export interface AdminMenuItem {
   id: string;
@@ -139,10 +141,78 @@ export interface CrCreationPort {
   resolveCrConflicts?(ctx: CrConflictInput): void;
 }
 
+/**
+ * An entry in the app switcher behind the toolbar brand (top-left). Each app
+ * is a top-level SURFACE: switching apps swaps everything below the (always
+ * mounted) toolbar for the app's `element`. Core ships "Knowledge" (the pane
+ * workspace) and "Skills & Tools"; the enterprise registry appends its own.
+ */
+export interface AppDef {
+  id: string;
+  label: string;
+  /** Route the switcher navigates to. Also drives the active highlight and
+   * the surface's route (`<path>/*`): the app whose path is the longest
+   * prefix of the current location is active. Core ships Knowledge at
+   * '/workspace' and Skills & Tools at '/skills-and-tools'; on locations no
+   * app claims (the standalone settings pages) no app is active. A '/' path
+   * is still honored as a match-everything fallback for API stability, but
+   * no core app uses it anymore. */
+  path: string;
+  /** The full-height surface rendered below the toolbar while active. */
+  element: ReactElement;
+  /** One-line subtitle under the label in the switcher list. */
+  description?: string;
+  /** Sort order in the list (core: Knowledge 10, Skills & Tools 20). */
+  order?: number;
+}
+
+/**
+ * Pick the active app for a location: the app whose `path` is the longest
+ * prefix of the pathname, or undefined when no app claims it (the standalone
+ * settings pages — no switcher checkmark, no pane toggles). A '/' app path
+ * matches everything and only wins when no more specific path does; core no
+ * longer registers one (Knowledge lives at '/workspace'), but the fallback
+ * semantics are kept for registries that do.
+ */
+export function activeAppId(apps: AppDef[], pathname: string): string | undefined {
+  let best: AppDef | undefined;
+  for (const app of apps) {
+    const matches =
+      app.path === '/'
+        ? true
+        : pathname === app.path || pathname.startsWith(`${app.path}/`);
+    if (matches && (!best || app.path.length > best.path.length)) best = app;
+  }
+  return best?.id;
+}
+
+/**
+ * A toolbar contribution rendered in the left cluster next to the app
+ * switcher (and on the compact second row on narrow screens). The node runs
+ * under the shell's providers, so it can read {@link useActiveAppId} and
+ * render only for specific apps — that is how the enterprise scopes its
+ * branch switcher to the Knowledge app.
+ */
+export interface ToolbarItemDef {
+  id: string;
+  node: ReactNode;
+  order?: number;
+}
+
 export interface AppRegistry {
+  /** Apps appended to the toolbar's app switcher (see {@link AppDef}). */
+  apps: AppDef[];
+  /** Toolbar left-cluster contributions (see {@link ToolbarItemDef}). */
+  toolbarItems: ToolbarItemDef[];
   /** Routes mounted OUTSIDE the app shell (own auth handling, no workspace chrome). */
   topLevelRoutes: RouteDef[];
-  /** Extra routes inside the viewer pane's `<Routes>` (e.g. OAuth landings). */
+  /**
+   * Extra routes inside the viewer pane's `<Routes>`. The viewer pane is
+   * nested under the Knowledge surface's `/workspace/*` route, so these
+   * paths are RELATIVE to `/workspace` (a route registered as 'connectors'
+   * renders at `/workspace/connectors`). Surfaces that need a top-level URL
+   * of their own belong in `topLevelRoutes` instead.
+   */
   viewerRoutes: RouteDef[];
   /**
    * Ordered wrappers applied INSIDE the core providers (workspace, git,
@@ -180,7 +250,20 @@ export const EMPTY_REGISTRY: AppRegistry = {
   banners: [],
   adminMenuItems: [],
   fileViewerPanels: [],
+  apps: [],
+  toolbarItems: [],
 };
+
+/**
+ * The active app's id (see {@link activeAppId}), provided by the shell above
+ * the toolbar and every app surface. `undefined` outside the shell (tests,
+ * standalone renders) — treat that as "no app context".
+ */
+export const ActiveAppIdContext = createContext<string | undefined>(undefined);
+
+export function useActiveAppId(): string | undefined {
+  return useContext(ActiveAppIdContext);
+}
 
 /** Convenience builder: fill in the empty defaults for unspecified fields. */
 export function makeRegistry(partial: Partial<AppRegistry>): AppRegistry {

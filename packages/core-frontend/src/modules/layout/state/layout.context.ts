@@ -20,6 +20,23 @@ export interface LayoutController {
   togglePane?: (id: string) => void;
 }
 
+/**
+ * Controller for a surface with no collapsible panes — what the shell provides
+ * while an app WITHOUT the pane layout (e.g. Skills & Tools) is active, so the
+ * always-mounted Toolbar renders no toggle buttons instead of crashing.
+ */
+export const NO_PANES_LAYOUT: LayoutController = {
+  isExplorerCollapsed: false,
+  isChatCollapsed: false,
+  canToggleExplorer: false,
+  canToggleChat: false,
+  toggleExplorer: () => {},
+  toggleChat: () => {},
+  isPaneCollapsed: () => false,
+  canTogglePane: () => false,
+  togglePane: () => {},
+};
+
 export const LayoutContext = createContext<LayoutController | null>(null);
 
 export function useLayout(): LayoutController {

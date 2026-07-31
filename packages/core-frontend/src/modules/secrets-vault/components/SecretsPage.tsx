@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { RefreshCw, Trash2, ShieldCheck, ExternalLink, Wrench } from 'lucide-react';
-import { Dialog } from '../../../shared/components/Dialog';
+import { PageShell } from '../../../shared/components/PageShell';
 import {
   listSecrets,
   createOAuthSecret,
@@ -12,20 +12,41 @@ import { listToolSecrets, type ToolSecrets } from '../services/tool-secrets.api'
 import { ToolSecretsPanel } from './ToolSecretsPanel';
 
 /**
- * The Secrets Vault, as a gear-menu dialog. Primary surface is PER-TOOL: each
- * `.tool` manual declares which `${VAR}`s are set by the tool owner (shared) vs
- * by each user, and the panels let the right people fill the right values.
- * OAuth credentials (per-user) live under "Advanced" — the callback/refresh
- * flow is keyed by secret id. Also mounted on the `/secrets` landing route,
- * which is where the OAuth callback returns the browser (`#authorized`/`#error`
- * in the fragment).
+ * The Secrets page, routed standalone at `/secrets` (below the persistent
+ * toolbar). Primary surface is PER-TOOL: each `.tool` manual declares which
+ * `${VAR}`s are set by the tool owner (shared) vs by each user, and the panels
+ * let the right people fill the right values. OAuth credentials (per-user)
+ * live under "Advanced" — the callback/refresh flow is keyed by secret id.
+ *
+ * `/secrets` is also the standalone-secret OAuth landing: the backend
+ * callback returns the browser here with the outcome in the URL fragment
+ * (`#authorized` / `#error`), which the page surfaces and then strips.
  */
-export function SecretsVaultPage({ open, onClose }: { open: boolean; onClose(): void }) {
+/**
+ * The OAuth-callback outcome carried in the URL fragment
+ * (`#authorized` / `#error=<message>`), or null when there is none.
+ * `URLSearchParams` already percent-decodes, so the value is used as-is (a
+ * second `decodeURIComponent` would corrupt messages containing `%`).
+ */
+function readHashOutcome(): { kind: 'authorized' | 'error'; text: string } | null {
+  const hash = window.location.hash.replace(/^#/, '');
+  if (!hash) return null;
+  const params = new URLSearchParams(hash);
+  if (params.has('authorized')) return { kind: 'authorized', text: 'Authorization complete.' };
+  if (params.has('error'))
+    return { kind: 'error', text: params.get('error') || 'Authorization failed.' };
+  return null;
+}
+
+export function SecretsPage() {
   const [tools, setTools] = useState<ToolSecrets[]>([]);
   const [secrets, setSecrets] = useState<SecretSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  // Read ONCE, synchronously, before the fragment is stripped below. Kept in
+  // its own slot (not the API `error` above) so the initial refresh() — whose
+  // success path clears the API error — can't race the outcome away.
+  const [oauthOutcome] = useState(readHashOutcome);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -42,24 +63,18 @@ export function SecretsVaultPage({ open, onClose }: { open: boolean; onClose(): 
   }, []);
 
   useEffect(() => {
-    if (!open) return;
     void refresh();
-  }, [open, refresh]);
+  }, [refresh]);
 
-  // Surface the OAuth-callback outcome carried in the URL fragment.
+  // Strip the consumed fragment so a refresh doesn't re-announce the outcome.
   useEffect(() => {
-    if (!open) return;
-    const hash = window.location.hash.replace(/^#/, '');
-    if (!hash) return;
-    const params = new URLSearchParams(hash);
-    if (params.has('authorized')) setNotice('Authorization complete.');
-    // `URLSearchParams` already percent-decodes, so use the value as-is (a second
-    // `decodeURIComponent` would corrupt messages containing `%`).
-    else if (params.has('error')) setError(params.get('error') || 'Authorization failed.');
-    if (params.has('authorized') || params.has('error')) {
-      window.history.replaceState(null, '', window.location.pathname);
-    }
-  }, [open]);
+    if (oauthOutcome) window.history.replaceState(null, '', window.location.pathname);
+  }, [oauthOutcome]);
+
+  // A live API error wins over the (historical) callback outcome; otherwise
+  // the callback error stays visible even after the list load succeeds.
+  const shownError = error ?? (oauthOutcome?.kind === 'error' ? oauthOutcome.text : null);
+  const notice = oauthOutcome?.kind === 'authorized' ? oauthOutcome.text : null;
 
   const oauthSecrets = secrets.filter((s) => s.kind === 'oauth');
 
@@ -82,24 +97,21 @@ export function SecretsVaultPage({ open, onClose }: { open: boolean; onClose(): 
   };
 
   return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      title="Secrets Vault"
-      size="2xl"
-      headerActions={
+    <PageShell
+      title="Secrets"
+      actions={
         <button
           onClick={() => void refresh()}
           disabled={loading}
-          className="rounded p-1.5 hover:bg-slate-100"
+          className="rounded p-1.5 hover:bg-slate-200/60 text-slate-600"
           aria-label="Refresh"
         >
           <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
         </button>
       }
     >
-      {error && (
-          <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>
+      {shownError && (
+          <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{shownError}</div>
         )}
         {notice && (
           <div className="mb-3 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
@@ -185,7 +197,7 @@ export function SecretsVaultPage({ open, onClose }: { open: boolean; onClose(): 
             </div>
           </div>
         </details>
-    </Dialog>
+    </PageShell>
   );
 }
 

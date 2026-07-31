@@ -18,8 +18,9 @@ import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { flyParticles } from './particles';
 
 /**
- * The Library — the core skills / integrations / loadout view (route
- * `/library`, registered in the core shell). Game-style visual direction from
+ * The Library — the core skills / integrations / loadout view (the Skills &
+ * Tools app surface at `/skills-and-tools`, registered in the core shell).
+ * Game-style visual direction from
  * the approved mock `mocks/mock-a2-game-library.html`: teal accent, status
  * gems, tilting cards, loadout sidebar with particle flight. All data is real
  * (skills catalog, secrets-vault connection status, workflow change

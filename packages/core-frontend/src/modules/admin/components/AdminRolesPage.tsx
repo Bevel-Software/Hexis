@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Check, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react';
-import { Dialog } from '../../../shared/components/Dialog';
+import { PageShell } from '../../../shared/components/PageShell';
 import { DEFAULT_BRANCH } from '@bevel-software/shared';
 import { useAdmin } from '../state/admin.context';
 import {
@@ -64,7 +64,13 @@ interface SelfRemoveTarget {
   email: string;
 }
 
-export function AdminRolesPage({ open, onClose }: { open: boolean; onClose(): void }) {
+/**
+ * Roles & Members, routed standalone at `/roles-and-members` (below the
+ * persistent toolbar). Admin-gated: non-admins get a clear "Admins only"
+ * state instead of the roster (the backend enforces the same gate on every
+ * roles endpoint — this is presentation, not the security boundary).
+ */
+export function AdminRolesPage() {
   const { isAdmin } = useAdmin();
   const [roster, setRoster] = useState<RoleRosterEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -86,15 +92,14 @@ export function AdminRolesPage({ open, onClose }: { open: boolean; onClose(): vo
   // current roster.
   const requestId = useRef(0);
 
-  // Load the roster whenever the dialog opens (and again if admin status
-  // resolves later). Gated on `open` because this component stays mounted under
-  // AdminMenu — without the guard it fetches only once on mount and shows a
-  // stale roster on reopen. All setState happens in the async callbacks — never
-  // synchronously in the effect body — so this stays clear of
-  // react-hooks/set-state-in-effect. `loading` starts true, so the spinner is
-  // already showing until the first response lands.
+  // Load the roster on mount (and again if admin status resolves later —
+  // AdminProvider fetches admin status asynchronously, so `isAdmin` can flip
+  // to true after the first render). All setState happens in the async
+  // callbacks — never synchronously in the effect body — so this stays clear
+  // of react-hooks/set-state-in-effect. `loading` starts true, so the spinner
+  // is already showing until the first response lands.
   useEffect(() => {
-    if (!open || !isAdmin) return;
+    if (!isAdmin) return;
     const myReq = ++requestId.current;
     let active = true;
     fetchRoles()
@@ -113,7 +118,7 @@ export function AdminRolesPage({ open, onClose }: { open: boolean; onClose(): vo
     return () => {
       active = false;
     };
-  }, [open, isAdmin]);
+  }, [isAdmin]);
 
   // Each mutation returns the fresh roster — set it directly (refetch-only) and
   // reconcile the optimistic sets in the same update, while the authoritative
@@ -211,47 +216,44 @@ export function AdminRolesPage({ open, onClose }: { open: boolean; onClose(): vo
 
   if (!isAdmin) {
     return (
-      <Dialog open={open} onClose={onClose} title="Roles & Members" size="4xl">
-        <div className="p-6 text-sm text-slate-600">Admin access required.</div>
-      </Dialog>
+      <PageShell title="Roles & Members" width="4xl">
+        <div className="text-sm text-slate-600">
+          Admins only. Ask an admin if you need a role or membership changed.
+        </div>
+      </PageShell>
     );
   }
 
   return (
-    <Dialog
-      open={open}
-      onClose={onClose}
+    <PageShell
       title="Roles & Members"
-      size="4xl"
-      bare
-      headerActions={<NewRoleControl onCreate={createOptimistic} />}
+      width="4xl"
+      actions={<NewRoleControl onCreate={createOptimistic} />}
     >
-      <div className="flex-1 overflow-y-auto min-h-0">
-        {loading && roster.length === 0 ? (
-          <div className="flex items-center gap-2 p-6 text-sm text-slate-600">
-            <Loader2 size={14} className="animate-spin" /> Loading…
-          </div>
-        ) : error ? (
-          <div className="m-4 p-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded">
-            {error}
-          </div>
-        ) : visibleRoster.length === 0 ? (
-          <div className="p-6 text-sm text-slate-600">No roles yet.</div>
-        ) : (
-          <div className="flex flex-col gap-3 p-4">
-            {visibleRoster.map((role) => (
-              <RoleCard
-                key={role.canonical}
-                role={role}
-                onApply={applyRoster}
-                onDelete={deleteOptimistic}
-                deleteError={deleteErrors[role.canonical] ?? null}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    </Dialog>
+      {loading && roster.length === 0 ? (
+        <div className="flex items-center gap-2 p-2 text-sm text-slate-600">
+          <Loader2 size={14} className="animate-spin" /> Loading…
+        </div>
+      ) : error ? (
+        <div className="p-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded">
+          {error}
+        </div>
+      ) : visibleRoster.length === 0 ? (
+        <div className="p-2 text-sm text-slate-600">No roles yet.</div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {visibleRoster.map((role) => (
+            <RoleCard
+              key={role.canonical}
+              role={role}
+              onApply={applyRoster}
+              onDelete={deleteOptimistic}
+              deleteError={deleteErrors[role.canonical] ?? null}
+            />
+          ))}
+        </div>
+      )}
+    </PageShell>
   );
 }
 

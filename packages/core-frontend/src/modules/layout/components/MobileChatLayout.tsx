@@ -7,7 +7,9 @@ import { SlideOverlay } from './SlideOverlay';
 import type { PaneDef } from '../../../core/registry';
 
 interface MobileChatLayoutProps {
-  header: ReactNode;
+  header?: ReactNode;
+  /** Reports the pane controller upward (null on unmount) — see AppLayout. */
+  onController?: (controller: LayoutController | null) => void;
   /**
    * Registry-driven pane list (preferred). This layout is chat-first, so it
    * picks the well-known 'explorer' / 'viewer' / 'chat' panes out of the
@@ -23,6 +25,7 @@ interface MobileChatLayoutProps {
 export function MobileChatLayout({
   header,
   panes,
+  onController,
   explorer: explorerSlot,
   viewer: viewerSlot,
   chat: chatSlot,
@@ -66,6 +69,13 @@ export function MobileChatLayout({
     }),
     [isExplorerOpen, toggleExplorer, noopToggleChat],
   );
+
+  // Mirror the controller to the shell (whose provider wraps the toolbar) —
+  // same object as the inner provider below, so the two stay consistent.
+  useEffect(() => {
+    onController?.(controller);
+    return () => onController?.(null);
+  }, [controller, onController]);
 
   // Viewer sheet visibility is URL-driven: open iff the URL is on the KB route
   // AND points at a file (the `*` segment is non-empty). Closing the sheet

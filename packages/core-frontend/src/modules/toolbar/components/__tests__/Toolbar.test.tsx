@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { Toolbar } from '../Toolbar';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import {
@@ -25,6 +25,7 @@ import {
   AppRegistryContext,
   makeRegistry,
   type AdminMenuItem,
+  type ToolbarItemDef,
 } from '../../../../core/registry';
 
 const stubAdminMenuItems: AdminMenuItem[] = [
@@ -50,19 +51,19 @@ const stubAdminMenuItems: AdminMenuItem[] = [
   },
 ];
 
-// The gear menu's dialog rows mount dialogs that fetch on open — stub their
-// data layers so clicking a row doesn't hit the network.
-vi.mock('../../services/external-api-keys.api', () => ({
-  listExternalApiKeys: vi.fn(async () => []),
-  createExternalApiKey: vi.fn(async () => ({ plaintext: 'k', summary: {} })),
-  disconnectExternalApiKey: vi.fn(async () => {}),
-}));
+/** Exposes the router's current pathname so menu navigation can be asserted. */
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="pathname">{location.pathname}</div>;
+}
+
 function renderToolbar(overrides?: {
   auth?: Partial<AuthContextValue>;
   autoUpdate?: AutoUpdateState;
   git?: Partial<GitContextValue>;
   layout?: Partial<LayoutController>;
   isAdmin?: boolean;
+  toolbarItems?: ToolbarItemDef[];
 }) {
   const toggleExplorer = vi.fn();
   const toggleChat = vi.fn();
@@ -170,9 +171,13 @@ function renderToolbar(overrides?: {
                       }}
                     >
                       <AppRegistryContext.Provider
-                        value={makeRegistry({ adminMenuItems: stubAdminMenuItems })}
+                        value={makeRegistry({
+                          adminMenuItems: stubAdminMenuItems,
+                          toolbarItems: overrides?.toolbarItems ?? [],
+                        })}
                       >
                         <Toolbar />
+                        <LocationProbe />
                       </AppRegistryContext.Provider>
                     </AdminContext.Provider>
                   </LayoutContext.Provider>
@@ -219,20 +224,29 @@ describe('Toolbar', () => {
     expect(toggleChat).toHaveBeenCalledTimes(1);
   });
 
-  it('renders the branch picker and logout — Share / Discard / status badge retired with auto-commit-on-release', () => {
+  it('renders logout but NO branch picker — the core toolbar carries only registry items', () => {
     renderToolbar();
-    expect(screen.getByTitle('Your active shared draft')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /sign out/i })).toBeInTheDocument();
-    // No Share/Discard buttons — lock release auto-commits + pushes.
+    // The branch switcher left the core toolbar: it is an enterprise
+    // toolbarItem contribution, scoped by the item itself to the Knowledge
+    // app. The git module still ships the component; the shell doesn't
+    // mount it. (Share/Discard/status badge stayed retired with
+    // auto-commit-on-release.)
+    expect(screen.queryByTitle('Your active shared draft')).toBeNull();
     expect(screen.queryByRole('button', { name: /share changes/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /discard/i })).toBeNull();
-    // No save-state badge next to the branch picker either — the
-    // per-file Edit/Save button is the only state the user acts on,
-    // and a toolbar-level indicator wasn't earning its pixels.
     expect(screen.queryByText('Saved')).toBeNull();
-    expect(screen.queryByText('Sharing…')).toBeNull();
-    expect(screen.queryByText('Missing updates')).toBeNull();
-    expect(screen.queryByText('Updating…')).toBeNull();
+  });
+
+  it('renders registry-contributed toolbar items in the left cluster', () => {
+    renderToolbar({
+      toolbarItems: [
+        { id: 'stub-branch-tools', node: <button>Stub branch tools</button> },
+      ],
+    });
+    expect(
+      screen.getByRole('button', { name: 'Stub branch tools' }),
+    ).toBeInTheDocument();
   });
 
   it('hides the explorer toggle when canToggleExplorer is false', () => {
@@ -283,7 +297,7 @@ describe('Toolbar', () => {
       await openMenu();
       // Registry-contributed row merged with the core rows.
       expect(screen.getByRole('menuitem', { name: 'Stub extension' })).toBeInTheDocument();
-      expect(screen.getByRole('menuitem', { name: 'Library' })).toBeInTheDocument();
+      expect(screen.getByRole('menuitem', { name: 'Skills & Tools' })).toBeInTheDocument();
       expect(screen.getByRole('menuitem', { name: 'External agent access' })).toBeInTheDocument();
       expect(screen.getByRole('menuitem', { name: 'Secrets' })).toBeInTheDocument();
       expect(screen.getByRole('menuitem', { name: 'Browse available tools' })).toBeInTheDocument();
@@ -303,13 +317,28 @@ describe('Toolbar', () => {
       expect(screen.getByRole('menuitem', { name: 'Stub extension' })).toBeInTheDocument();
     });
 
-    // Dialog-launching rows: the row must close the menu and mount its dialog
-    // (the data layers are module-mocked above, so opening never fetches).
-    it('opens the External agent access dialog from its row and closes the menu', async () => {
+    // Core rows all NAVIGATE — the settings surfaces are standalone routed
+    // pages below the persistent toolbar, not dialogs.
+    it('navigates to the standalone settings pages from the core rows and closes the menu', async () => {
       renderToolbar();
+      for (const [row, path] of [
+        ['External agent access', '/external-agent-access'],
+        ['Secrets', '/secrets'],
+        ['Browse available tools', '/tools'],
+        ['Skills & Tools', '/skills-and-tools'],
+      ] as const) {
+        await openMenu();
+        await userEvent.click(screen.getByRole('menuitem', { name: row }));
+        expect(screen.getByTestId('pathname')).toHaveTextContent(path);
+        expect(screen.queryByRole('menu')).toBeNull();
+      }
+    });
+
+    it('navigates to /roles-and-members from the admin row', async () => {
+      renderToolbar({ isAdmin: true });
       await openMenu();
-      await userEvent.click(screen.getByRole('menuitem', { name: 'External agent access' }));
-      expect(await screen.findByRole('dialog', { name: 'External agent access' })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('menuitem', { name: 'Roles & Members' }));
+      expect(screen.getByTestId('pathname')).toHaveTextContent('/roles-and-members');
       expect(screen.queryByRole('menu')).toBeNull();
     });
 

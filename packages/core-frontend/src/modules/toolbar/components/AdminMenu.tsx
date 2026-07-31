@@ -2,9 +2,6 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Boxes, KeyRound, LibraryBig, Lock, Settings, Users } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useAdmin } from '../../admin/state/admin.context';
-import { AdminRolesPage } from '../../admin/components/AdminRolesPage';
-import { SecretsVaultPage } from '../../secrets-vault/components/SecretsVaultPage';
-import { ExternalApiKeysDialog } from './ExternalApiKeysDialog';
 import { useAppRegistry, type AdminMenuItem } from '../../../core/registry';
 
 const MENU_ID = 'app-settings-menu';
@@ -35,15 +32,19 @@ function MenuItem({
  * Connected apps, feedback, LLM configuration, user accounts, …) is
  * registry-contributed — see `enterprise/admin-menu-items.tsx`. The `order`
  * values interleave the two lists to reproduce the historical row order.
+ *
+ * All core rows NAVIGATE — the settings surfaces are standalone routed pages
+ * below the persistent toolbar, not dialogs. The `dialog` contract on
+ * {@link AdminMenuItem} stays supported for registry-contributed rows.
  */
 const CORE_MENU_ITEMS: AdminMenuItem[] = [
   {
-    id: 'library',
+    id: 'skills-and-tools',
     order: 35,
     icon: <LibraryBig size={14} />,
-    label: 'Library',
+    label: 'Skills & Tools',
     onSelect: ({ navigate, closeMenu }) => {
-      navigate('/library');
+      navigate('/skills-and-tools');
       closeMenu();
     },
   },
@@ -52,18 +53,20 @@ const CORE_MENU_ITEMS: AdminMenuItem[] = [
     order: 40,
     icon: <KeyRound size={14} />,
     label: 'External agent access',
-    dialog: ({ open, onClose }) => (
-      <ExternalApiKeysDialog open={open} onClose={onClose} />
-    ),
+    onSelect: ({ navigate, closeMenu }) => {
+      navigate('/external-agent-access');
+      closeMenu();
+    },
   },
   {
     id: 'secrets',
     order: 50,
     icon: <Lock size={14} />,
     label: 'Secrets',
-    dialog: ({ open, onClose }) => (
-      <SecretsVaultPage open={open} onClose={onClose} />
-    ),
+    onSelect: ({ navigate, closeMenu }) => {
+      navigate('/secrets');
+      closeMenu();
+    },
   },
   {
     id: 'browse-tools',
@@ -81,9 +84,10 @@ const CORE_MENU_ITEMS: AdminMenuItem[] = [
     order: 10,
     icon: <Users size={14} />,
     label: 'Roles & Members',
-    dialog: ({ open, onClose }) => (
-      <AdminRolesPage open={open} onClose={onClose} />
-    ),
+    onSelect: ({ navigate, closeMenu }) => {
+      navigate('/roles-and-members');
+      closeMenu();
+    },
   },
 ];
 
@@ -98,10 +102,11 @@ const CORE_MENU_ITEMS: AdminMenuItem[] = [
  *   - "Admin only" section (admins): Roles & Members, User accounts,
  *     LLM Configuration, Feedback Inbox.
  *
- * Dialog rows don't navigate — selecting the row closes the menu and opens
- * the row's dialog. Dialogs are mounted here persistently (driven by an
- * open flag per row) so they survive the (transient) dropdown, exactly as
- * the pre-registry static dialogs did.
+ * Core rows all navigate (the settings surfaces are standalone routed
+ * pages). Registry rows may still be dialog rows: those don't navigate —
+ * selecting the row closes the menu and opens the row's dialog. Dialogs are
+ * mounted here persistently (driven by an open flag per row) so they survive
+ * the (transient) dropdown, exactly as the pre-registry static dialogs did.
  *
  * Open/close mechanics mirror PrHeaderOverflowMenu: click toggles, an outside
  * mousedown or Escape closes. Rendered for all users; the admin section is
