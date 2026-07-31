@@ -105,8 +105,6 @@ function renderDialog(owned: boolean) {
         allowedToolsBySkill={new Map([['newsletter', ['slack_post_message']]])}
         crs={[]}
         myCrNumbers={new Set()}
-        inLoadout={false}
-        onToggleLoadout={() => {}}
         onClose={() => {}}
         onDataChanged={() => {}}
       />,
@@ -183,8 +181,6 @@ describe('DetailDialog (integration)', () => {
           allowedToolsBySkill={new Map([['newsletter', ['slack_post_message']]])}
           crs={[]}
           myCrNumbers={new Set()}
-          inLoadout={false}
-          onToggleLoadout={() => {}}
           onClose={() => {}}
           onDataChanged={() => {}}
         />,

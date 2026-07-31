@@ -40,8 +40,6 @@ export interface DetailDialogProps {
   crs: PullRequestSummary[];
   /** Numbers of the caller's own change requests. */
   myCrNumbers: Set<number>;
-  inLoadout: boolean;
-  onToggleLoadout(): void;
   onClose(): void;
   /** Something durable changed (merge, send back, withdraw, new suggestion). */
   onDataChanged(): void;
@@ -68,24 +66,10 @@ const OWNER_TAG = (
  * rows and the skills that use it.
  */
 export function DetailDialog(props: DetailDialogProps) {
-  const { target, inLoadout, onToggleLoadout, onClose } = props;
+  const { target, onClose } = props;
   const name = target.kind === 'skill' ? target.skill.name : target.tool.name;
   const owned = target.kind === 'skill' ? target.owned : target.tool.canWrite;
   const [compareCr, setCompareCr] = useState<PullRequestSummary | null>(null);
-
-  const loadoutButton = (
-    <button
-      type="button"
-      className={
-        inLoadout
-          ? 'rounded-[10px] border border-[#f5c2c2] bg-[#fdecec] px-3.5 py-1.5 text-xs font-bold text-[#c53030]'
-          : 'rounded-[10px] bg-gradient-to-br from-[#0d9488] to-[#0f766e] px-3.5 py-1.5 text-xs font-bold text-white shadow-[0_4px_14px_rgba(13,148,136,0.22)]'
-      }
-      onClick={onToggleLoadout}
-    >
-      {inLoadout ? 'In loadout — remove' : '+ Add to loadout'}
-    </button>
-  );
 
   return (
     <>
@@ -103,7 +87,6 @@ export function DetailDialog(props: DetailDialogProps) {
               </span>
             </span>
           }
-          headerActions={loadoutButton}
           bodyClassName="min-h-[16rem]"
         >
           {target.kind === 'skill' ? (

@@ -1,44 +1,47 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import '../library.css';
-import { LoadoutProvider, useLoadout, type LoadoutKind } from '../state/loadout';
-import { LibraryToastProvider, useLibraryToast } from '../state/toast';
+import { groupOfPath } from '@bevel-software/platform-shared';
+import { LibraryToastProvider } from '../state/toast';
 import { useLibraryData } from '../hooks/useLibraryData';
 import {
   filterLibraryItems,
+  groupCounts,
   neededToolsFor,
   skillStatus,
   toolStatus,
   type AttentionStatus,
-  type LibraryCategory,
+  type LibraryFilter,
 } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
-import { cn } from '../../../lib/utils';
 import { LibraryCard } from './LibraryCard';
-import { LoadoutSidebar, type LoadoutRow } from './LoadoutSidebar';
+import { GroupsSidebar } from './GroupsSidebar';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 
 /**
- * The Library — the core skills / integrations / loadout view (the Skills &
- * Tools app surface at `/skills-and-tools`, registered in the core shell).
+ * The Library — the skills + integrations catalog (the Skills & Tools app
+ * surface at `/skills-and-tools`, registered in the core shell).
  *
- * Repainted onto the design system. This view previously ran its own visual
- * language from `mocks/mock-a2-game-library.html` — teal accent, glossy status
- * gems, 3D-tilting cards with pointer glare, spinning gear chrome and particle
- * flight into the loadout. That direction was replaced by the flat prototype
- * (`skill-prototype-juan.html`), so the game-feel layer is gone; the loadout
- * sidebar's slot animation is kept because it communicates the add, not decor.
+ * Rebuilt on the prototype. Two things it no longer has:
  *
- * All data is real (skills catalog, secrets-vault connection status, workflow
- * change requests); only the loadout itself is a documented client-side stub.
+ *  - the LOADOUT. It came from a retired mock; the prototype has no such
+ *    concept, and it was a documented client-side stub, so nothing persisted
+ *    was lost. Its rail is now the group nav.
+ *  - Skills / Integrations filter chips. Groups are the structure, and a group
+ *    owns its skills AND the tools they need, so splitting the catalog by kind
+ *    showed a group's integrations detached from the reason they exist.
+ *
+ * Groups are derived from each item's KB path, so they work against both the
+ * merged `Groups/` layout and the pre-merge one.
+ *
+ * All data is real: skills catalog, secrets-vault connection status, workflow
+ * change requests.
  */
 export function LibraryPage() {
   return (
-    <LoadoutProvider>
-      <LibraryToastProvider>
-        <LibraryPageInner />
-      </LibraryToastProvider>
-    </LoadoutProvider>
+    <LibraryToastProvider>
+      <LibraryPageInner />
+    </LibraryToastProvider>
   );
 }
 
@@ -49,14 +52,28 @@ interface GalleryItem {
   description: string;
   owned: boolean;
   status: AttentionStatus;
+  /** Folder group from the KB path, or null when the item is in none. */
+  group: string | null;
+}
+
+/** The h1 names what the sidebar has selected, so the two never disagree. */
+function headingFor(filter: LibraryFilter): string {
+  switch (filter.kind) {
+    case 'all':
+      return 'Library';
+    case 'owned':
+      return 'Owned by me';
+    case 'ungrouped':
+      return 'Yours alone';
+    case 'group':
+      return filter.group;
+  }
 }
 
 function LibraryPageInner() {
   const data = useLibraryData();
-  const loadout = useLoadout();
-  const toast = useLibraryToast();
   const navigate = useNavigate();
-  const [category, setCategory] = useState<LibraryCategory>('skills');
+  const [filter, setFilter] = useState<LibraryFilter>({ kind: 'all' });
   const [query, setQuery] = useState('');
   const [detail, setDetail] = useState<DetailTarget | null>(null);
 
@@ -67,6 +84,7 @@ function LibraryPageInner() {
       name: s.name,
       description: s.description,
       owned: data.ownedSkills.has(s.name),
+      group: groupOfPath(s.path),
       status: skillStatus(
         neededToolsFor({ allowedTools: data.allowedToolsBySkill.get(s.name) }, data.tools),
       ),
@@ -76,50 +94,27 @@ function LibraryPageInner() {
       id: t.slug,
       name: t.name,
       // The browser tool surface exposes no human description for a `.tool`
-      // manual yet (see report) — the card stays clean, detail lives in ⓘ.
+      // manual yet (see report) — the card stays clean; detail lives behind it.
       description: '',
       owned: t.canWrite,
+      group: groupOfPath(t.path),
       status: toolStatus(t),
     }));
     return [...skillItems, ...toolItems];
   }, [data.skills, data.tools, data.ownedSkills, data.allowedToolsBySkill]);
 
   const visible = useMemo(
-    () => filterLibraryItems(items, category, query),
-    [items, category, query],
+    () => filterLibraryItems(items, filter, query),
+    [items, filter, query],
   );
 
-  const counts = useMemo(
-    () => ({
-      skills: items.filter((i) => i.kind === 'skill').length,
-      integrations: items.filter((i) => i.kind === 'integration').length,
-      owned: items.filter((i) => i.owned).length,
-    }),
+  const groups = useMemo(() => groupCounts(items), [items]);
+  const ownedCount = useMemo(() => items.filter((i) => i.owned).length, [items]);
+  const ungroupedCount = useMemo(() => items.filter((i) => i.group === null).length, [items]);
+  const attentionCount = useMemo(
+    () => items.filter((i) => i.kind === 'integration' && i.status.state !== 'ok').length,
     [items],
   );
-
-  const rows: LoadoutRow[] = useMemo(() => {
-    const byKey = new Map(items.map((i) => [`${i.kind}:${i.id}`, i]));
-    const pick = (kind: LoadoutKind, ids: string[]) =>
-      ids
-        .map((id) => byKey.get(`${kind}:${id}`))
-        .filter((i): i is GalleryItem => i !== undefined)
-        .map((i) => ({ kind, id: i.id, name: i.name, status: i.status }));
-    return [...pick('skill', loadout.skills), ...pick('integration', loadout.integrations)];
-  }, [items, loadout.skills, loadout.integrations]);
-
-  const attentionCount = rows.filter((r) => r.status.state !== 'ok').length;
-
-  function toggleItem(item: GalleryItem) {
-    const added = loadout.toggle(item.kind, item.id);
-    if (added) {
-      toast(
-        item.status.state === 'ok'
-          ? `${item.name} added — ready to go`
-          : `${item.name} added — needs a quick sign-in`,
-      );
-    }
-  }
 
   function openDetail(item: GalleryItem) {
     if (item.kind === 'skill') {
@@ -131,38 +126,14 @@ function LibraryPageInner() {
     }
   }
 
-  const chip = (cat: LibraryCategory, label: string, count: number) => {
-    const on = category === cat;
-    return (
-      <button
-        key={cat}
-        type="button"
-        aria-pressed={on}
-        className={cn(
-          'flex items-center gap-2 rounded-full border px-4 py-1.5 text-detail font-medium transition-colors',
-          on
-            ? 'border-transparent bg-ink text-canvas'
-            : 'border-line text-ink-muted hover:bg-hover hover:text-ink',
-        )}
-        onClick={() => setCategory(cat)}
-      >
-        {label}
-        <span className={cn('rounded-full px-1.5 text-micro', on ? 'bg-canvas/20' : 'bg-hover')}>
-          {count}
-        </span>
-      </button>
-    );
-  };
-
   return (
     <div className="flex h-full min-h-0 bg-canvas text-ink">
-      <LoadoutSidebar
-        rows={rows}
-        onOpen={(row) => {
-          const item = items.find((i) => i.kind === row.kind && i.id === row.id);
-          if (item) openDetail(item);
-        }}
-        onRemove={(row) => loadout.remove(row.kind, row.id)}
+      <GroupsSidebar
+        filter={filter}
+        onSelect={setFilter}
+        groups={groups}
+        ownedCount={ownedCount}
+        ungroupedCount={ungroupedCount}
         attentionCount={attentionCount}
         onFinishSetup={() => navigate('/connect')}
       />
@@ -170,9 +141,10 @@ function LibraryPageInner() {
       <main className="min-w-0 flex-1 overflow-y-auto px-8 py-6">
         <div className="flex items-start gap-4">
           <div>
-            <h1 className="text-display font-semibold">Library</h1>
+            <h1 className="text-display font-semibold">{headingFor(filter)}</h1>
             <p className="mt-0.5 text-ui text-ink-muted">
-              Click a card to add it to your loadout · open a card's details for more.
+              {visible.length} {visible.length === 1 ? 'item' : 'items'} · open one for what it
+              does, who owns it, and what it needs.
             </p>
           </div>
           <TextField
@@ -184,11 +156,7 @@ function LibraryPageInner() {
           />
         </div>
 
-        <div className="mb-5 mt-4 flex gap-2">
-          {chip('skills', 'Skills', counts.skills)}
-          {chip('integrations', 'Integrations', counts.integrations)}
-          {chip('owned', 'Owned by me', counts.owned)}
-        </div>
+        <div className="mt-5" />
 
         {data.error ? (
           <Banner role="alert" tone="danger">
@@ -212,9 +180,7 @@ function LibraryPageInner() {
                 description={item.description}
                 owned={item.owned}
                 status={item.status}
-                picked={loadout.isIn(item.kind, item.id)}
-                onToggle={() => toggleItem(item)}
-                onInfo={() => openDetail(item)}
+                onOpen={() => openDetail(item)}
               />
             ))}
           </div>
@@ -229,19 +195,6 @@ function LibraryPageInner() {
           allowedToolsBySkill={data.allowedToolsBySkill}
           crs={data.crs}
           myCrNumbers={data.myCrNumbers}
-          inLoadout={
-            detail.kind === 'skill'
-              ? loadout.isIn('skill', detail.skill.name)
-              : loadout.isIn('integration', detail.tool.slug)
-          }
-          onToggleLoadout={() => {
-            const item = items.find(
-              (i) =>
-                i.kind === (detail.kind === 'skill' ? 'skill' : 'integration') &&
-                i.id === (detail.kind === 'skill' ? detail.skill.name : detail.tool.slug),
-            );
-            if (item) toggleItem(item);
-          }}
           onClose={() => setDetail(null)}
           onDataChanged={data.reload}
         />

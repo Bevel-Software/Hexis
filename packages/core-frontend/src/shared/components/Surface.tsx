@@ -39,7 +39,13 @@ const ELEVATION: Record<SurfaceElevation, string> = {
 };
 
 export interface SurfaceProps extends HTMLAttributes<HTMLElement> {
-  as?: 'div' | 'section' | 'aside' | 'article';
+  as?: 'div' | 'section' | 'aside' | 'article' | 'button';
+  /**
+   * Only meaningful with `as="button"`. Declared here because a `<button>`
+   * inside a form defaults to `type="submit"`, so a card that omits it would
+   * submit the form it happens to sit in.
+   */
+  type?: 'button' | 'submit' | 'reset';
   tone?: SurfaceTone;
   radius?: SurfaceRadius;
   elevation?: SurfaceElevation;

@@ -89,19 +89,34 @@ export function skillStatus(neededTools: ToolSecrets[]): AttentionStatus {
 
 /* ── gallery filtering ── */
 
-export type LibraryCategory = 'skills' | 'integrations' | 'owned';
+/**
+ * What the sidebar has selected.
+ *
+ * Note there is no 'skills' / 'integrations' member. The design does not split
+ * the catalog by kind: a group owns its skills AND the tools those skills need,
+ * so filtering to "just tools" would show a group's integrations detached from
+ * the reason any of them are there. Kind is a property of a card, not a view.
+ */
+export type LibraryFilter =
+  | { kind: 'all' }
+  | { kind: 'owned' }
+  | { kind: 'group'; group: string }
+  /** Owned by someone, in no group — the prototype calls these "yours alone". */
+  | { kind: 'ungrouped' };
 
 export interface LibraryFilterable {
   kind: 'skill' | 'integration';
   name: string;
   description: string;
   owned: boolean;
+  /** Folder group from the item's KB path, or null when it sits in none. */
+  group: string | null;
 }
 
-/** The chip + search filter from the mock: category narrows, query matches name/description. */
+/** Sidebar selection narrows; the query matches name/description within it. */
 export function filterLibraryItems<T extends LibraryFilterable>(
   items: T[],
-  category: LibraryCategory,
+  filter: LibraryFilter,
   query: string,
 ): T[] {
   const q = query.trim().toLowerCase();
@@ -109,8 +124,35 @@ export function filterLibraryItems<T extends LibraryFilterable>(
     if (q && !item.name.toLowerCase().includes(q) && !item.description.toLowerCase().includes(q)) {
       return false;
     }
-    if (category === 'skills') return item.kind === 'skill';
-    if (category === 'integrations') return item.kind === 'integration';
-    return item.owned;
+    switch (filter.kind) {
+      case 'all':
+        return true;
+      case 'owned':
+        return item.owned;
+      case 'group':
+        return item.group === filter.group;
+      case 'ungrouped':
+        return item.group === null;
+    }
   });
+}
+
+/**
+ * Group names present in the catalog, with how many items each holds.
+ *
+ * Sorted by name rather than by count so the sidebar does not reorder itself
+ * when a group gains an item — a nav that moves under the pointer is worse
+ * than one that buries the biggest group in the middle.
+ */
+export function groupCounts<T extends LibraryFilterable>(
+  items: T[],
+): { group: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    if (item.group === null) continue;
+    counts.set(item.group, (counts.get(item.group) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([group, count]) => ({ group, count }))
+    .sort((a, b) => a.group.localeCompare(b.group));
 }
