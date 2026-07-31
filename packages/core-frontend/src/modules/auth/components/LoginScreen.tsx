@@ -62,36 +62,36 @@ export function LoginScreen() {
     <div className="flex items-center justify-center h-full bg-white">
       <form
         onSubmit={handleSubmit}
-        className="bg-white p-8 rounded-xl border border-slate-200 w-full max-w-sm space-y-5"
+        className="bg-white p-8 rounded-xl border border-line w-full max-w-sm space-y-5"
       >
         <div className="text-center space-y-1">
-          <h1 className="text-2xl font-semibold text-slate-900">Bevel</h1>
-          <p className="text-sm text-slate-600">Sign in to continue</p>
+          <h1 className="text-2xl font-semibold text-ink">Bevel</h1>
+          <p className="text-sm text-ink-muted">Sign in to continue</p>
         </div>
 
         {passwordEnabled && (
           <>
             <div className="space-y-3">
               <label className="block space-y-1">
-                <span className="text-xs text-slate-600">Email</span>
+                <span className="text-xs text-ink-muted">Email</span>
                 <input
                   type="email"
                   required
                   autoComplete="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="w-full rounded-md bg-slate-100 border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-slate-400"
+                  className="w-full rounded-md bg-sunken border border-line-strong px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent"
                 />
               </label>
               <label className="block space-y-1">
-                <span className="text-xs text-slate-600">Password</span>
+                <span className="text-xs text-ink-muted">Password</span>
                 <input
                   type="password"
                   required
                   autoComplete="current-password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full rounded-md bg-slate-100 border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-slate-400"
+                  className="w-full rounded-md bg-sunken border border-line-strong px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent"
                 />
               </label>
             </div>
@@ -113,10 +113,10 @@ export function LoginScreen() {
         )}
 
         {passwordEnabled && microsoftEnabled && (
-          <div className="flex items-center gap-3 text-xs text-slate-400">
-            <span className="h-px flex-1 bg-slate-200" />
+          <div className="flex items-center gap-3 text-xs text-ink-faint">
+            <span className="h-px flex-1 bg-line" />
             or
-            <span className="h-px flex-1 bg-slate-200" />
+            <span className="h-px flex-1 bg-line" />
           </div>
         )}
 
@@ -124,7 +124,7 @@ export function LoginScreen() {
           <button
             type="button"
             onClick={startMicrosoftLogin}
-            className="w-full rounded-md border border-slate-300 bg-white text-slate-700 text-sm font-medium py-2 hover:bg-slate-50"
+            className="w-full rounded-md border border-line-strong bg-white text-ink text-sm font-medium py-2 hover:bg-hover"
           >
             Sign in with Microsoft
           </button>

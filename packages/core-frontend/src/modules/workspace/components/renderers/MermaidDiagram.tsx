@@ -198,7 +198,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({ code }: MermaidDiag
       <div className="rounded-lg border border-red-200/50 bg-red-50 p-4 my-4">
         <p className="text-xs text-red-600 font-medium mb-1">Mermaid diagram error</p>
         <pre className="text-xs text-red-700/70 whitespace-pre-wrap">{error}</pre>
-        <pre className="mt-2 text-xs text-slate-600 whitespace-pre-wrap">{code}</pre>
+        <pre className="mt-2 text-xs text-ink-muted whitespace-pre-wrap">{code}</pre>
       </div>
     );
   }
@@ -207,29 +207,29 @@ export const MermaidDiagram = memo(function MermaidDiagram({ code }: MermaidDiag
   const translate = translateRef.current;
 
   return (
-    <div className="relative my-4 rounded-lg border border-slate-300 bg-white overflow-hidden group">
+    <div className="relative my-4 rounded-lg border border-line-strong bg-white overflow-hidden group">
       {/* Zoom controls */}
       <div className="absolute top-2 right-2 z-10 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
         <button
           onClick={zoomOut}
-          className="p-1.5 rounded bg-slate-100/90 hover:bg-slate-200 text-slate-600 hover:text-slate-900 transition-colors"
+          className="p-1.5 rounded bg-sunken hover:bg-hover text-ink-muted hover:text-ink transition-colors"
           title="Zoom out"
         >
           <ZoomOut size={14} />
         </button>
-        <span className="text-xs text-slate-600 min-w-[3rem] text-center tabular-nums">
+        <span className="text-xs text-ink-muted min-w-[3rem] text-center tabular-nums">
           {Math.round(scale * 100)}%
         </span>
         <button
           onClick={zoomIn}
-          className="p-1.5 rounded bg-slate-100/90 hover:bg-slate-200 text-slate-600 hover:text-slate-900 transition-colors"
+          className="p-1.5 rounded bg-sunken hover:bg-hover text-ink-muted hover:text-ink transition-colors"
           title="Zoom in"
         >
           <ZoomIn size={14} />
         </button>
         <button
           onClick={resetView}
-          className="p-1.5 rounded bg-slate-100/90 hover:bg-slate-200 text-slate-600 hover:text-slate-900 transition-colors"
+          className="p-1.5 rounded bg-sunken hover:bg-hover text-ink-muted hover:text-ink transition-colors"
           title="Reset view"
         >
           <Maximize2 size={14} />

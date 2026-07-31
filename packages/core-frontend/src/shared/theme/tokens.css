@@ -160,4 +160,17 @@
     'Helvetica Neue', Arial, sans-serif;
   --font-mono:
     ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* ── retired palettes ─────────────────────────────────────────────────
+     Slate was the app's de-facto neutral ramp (1,006 call sites). It is a
+     COLD grey; the ink ramp above is warm, so the two cannot coexist on a
+     screen without the mix reading as dirty. `initial` deletes the whole
+     family from the generated stylesheet.
+
+     ⚠ This does NOT fail loudly. Tailwind emits no rule for a utility whose
+     token is `initial`, so a stray `text-slate-600` is a silent no-op that
+     renders at the inherited colour — it looks *almost* right, which is the
+     worst failure mode. `pnpm ds:check` is what actually catches it; keep
+     the raw-slate-palette baseline pinned at 0.                            */
+  --color-slate-*: initial;
 }

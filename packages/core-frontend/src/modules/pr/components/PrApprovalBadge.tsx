@@ -71,7 +71,7 @@ export function PrApprovalBadge({ state, size = 12 }: Props) {
     <span
       role="img"
       aria-label={label}
-      className="flex items-center gap-0.5 text-slate-600 shrink-0"
+      className="flex items-center gap-0.5 text-ink-muted shrink-0"
       title={label}
     >
       <Clock size={size} />

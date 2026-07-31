@@ -28,13 +28,13 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
       <div className="space-y-3">
         <SetupBanner setup={tool.setup} />
         {tool.setup?.kind !== 'oauth-manual' && (
-          <p className="text-[11px] text-slate-400">
+          <p className="text-[11px] text-ink-faint">
             {tool.setup?.kind === 'open' ? (
               <>No setup needed — this server is open and needs no credentials.</>
             ) : (
               <>
-                This tool declares no <code className="rounded bg-slate-100 px-1">variables</code>. Add a{' '}
-                <code className="rounded bg-slate-100 px-1">variables</code> block to the <code>.tool</code> file to make
+                This tool declares no <code className="rounded bg-sunken px-1">variables</code>. Add a{' '}
+                <code className="rounded bg-sunken px-1">variables</code> block to the <code>.tool</code> file to make
                 its <code>{'${VAR}'}</code> placeholders configurable here.
               </>
             )}
@@ -133,8 +133,8 @@ function VarGroup({
 }) {
   return (
     <div>
-      <h4 className="text-[11px] font-semibold text-slate-600">{title}</h4>
-      <p className="mb-1.5 text-[10px] text-slate-400">{hint}</p>
+      <h4 className="text-[11px] font-semibold text-ink-muted">{title}</h4>
+      <p className="mb-1.5 text-[10px] text-ink-faint">{hint}</p>
       <ul className="space-y-1.5">
         {vars.map((v) =>
           v.oauth ? (
@@ -190,9 +190,9 @@ function VarRow({
   };
 
   return (
-    <li className="rounded border border-slate-200 px-2 py-1.5">
+    <li className="rounded border border-line px-2 py-1.5">
       <div className="flex items-center gap-1.5">
-        <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[10px] text-slate-700">{`\${${v.name}}`}</code>
+        <code className="rounded bg-sunken px-1 py-0.5 font-mono text-[10px] text-ink">{`\${${v.name}}`}</code>
         {isSet ? (
           <span className="flex items-center gap-0.5 text-[10px] text-emerald-600">
             <Check size={11} /> set
@@ -200,19 +200,19 @@ function VarRow({
         ) : (
           <span className="text-[10px] text-amber-600">not set</span>
         )}
-        {!editable && <Lock size={11} className="text-slate-400" aria-label="You cannot edit this" />}
+        {!editable && <Lock size={11} className="text-ink-faint" aria-label="You cannot edit this" />}
         {editable && isSet && (
           <button
             onClick={() => void run(onDelete)}
             disabled={busy}
-            className="ml-auto rounded p-0.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-40"
+            className="ml-auto rounded p-0.5 text-ink-faint hover:bg-red-50 hover:text-red-600 disabled:opacity-40"
             aria-label="Remove secret"
           >
             <Trash2 size={12} />
           </button>
         )}
       </div>
-      {v.label && <p className="mt-0.5 text-[10px] text-slate-400">{v.label}</p>}
+      {v.label && <p className="mt-0.5 text-[10px] text-ink-faint">{v.label}</p>}
       {editable && (
         <div className="mt-1 flex gap-1">
           <input
@@ -220,12 +220,12 @@ function VarRow({
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder={isSet ? 'Replace value…' : 'Enter value…'}
-            className="min-w-0 flex-1 rounded border border-slate-300 px-1.5 py-1 text-[11px] focus:border-slate-500 focus:outline-none"
+            className="min-w-0 flex-1 rounded border border-line-strong px-1.5 py-1 text-[11px] focus:border-accent focus:outline-none"
           />
           <button
             onClick={() => void run(() => onSave(value))}
             disabled={busy || !value}
-            className="rounded bg-slate-800 px-2 py-1 text-[11px] text-white disabled:opacity-40"
+            className="rounded bg-ink px-2 py-1 text-[11px] text-white disabled:opacity-40"
           >
             Save
           </button>
@@ -291,9 +291,9 @@ function OAuthVarRow({
   };
 
   return (
-    <li className="rounded border border-slate-200 px-2 py-1.5">
+    <li className="rounded border border-line px-2 py-1.5">
       <div className="flex items-center gap-1.5">
-        <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[10px] text-slate-700">{`\${${v.name}}`}</code>
+        <code className="rounded bg-sunken px-1 py-0.5 font-mono text-[10px] text-ink">{`\${${v.name}}`}</code>
         {v.needsReauth ? (
           <span className="text-[10px] text-amber-600">new permissions needed</span>
         ) : v.authorized ? (
@@ -312,7 +312,7 @@ function OAuthVarRow({
           <ExternalLink size={11} /> {v.authorized ? 'Reconnect' : 'Authorize'}
         </button>
       </div>
-      {v.label && <p className="mt-0.5 text-[10px] text-slate-400">{v.label}</p>}
+      {v.label && <p className="mt-0.5 text-[10px] text-ink-faint">{v.label}</p>}
       {v.needsReauth && v.missingScopes && v.missingScopes.length > 0 && (
         <p className="mt-0.5 text-[10px] text-amber-600">
           Missing: {v.missingScopes.join(', ')}
@@ -324,9 +324,9 @@ function OAuthVarRow({
         </p>
       )}
       {ownerCanWrite && (
-        <div className="mt-1.5 border-t border-slate-100 pt-1.5">
+        <div className="mt-1.5 border-t border-line pt-1.5">
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-medium text-slate-500">Client secret</span>
+            <span className="text-[10px] font-medium text-ink-muted">Client secret</span>
             {ownerConfigured ? (
               <span className="flex items-center gap-0.5 text-[10px] text-emerald-600">
                 <Check size={11} /> set
@@ -335,7 +335,7 @@ function OAuthVarRow({
               <span className="text-[10px] text-amber-600">not set</span>
             )}
           </div>
-          <p className="mt-0.5 text-[10px] text-slate-400">
+          <p className="mt-0.5 text-[10px] text-ink-faint">
             From the OAuth app you registered with the provider — shared by everyone, users then sign in themselves.
           </p>
           <div className="mt-1 flex gap-1">
@@ -344,12 +344,12 @@ function OAuthVarRow({
               value={secret}
               onChange={(e) => setSecret(e.target.value)}
               placeholder={ownerConfigured ? 'Replace client secret…' : 'Paste client secret…'}
-              className="min-w-0 flex-1 rounded border border-slate-300 px-1.5 py-1 text-[11px] focus:border-slate-500 focus:outline-none"
+              className="min-w-0 flex-1 rounded border border-line-strong px-1.5 py-1 text-[11px] focus:border-accent focus:outline-none"
             />
             <button
               onClick={() => void saveSecret()}
               disabled={busy || !secret}
-              className="rounded bg-slate-800 px-2 py-1 text-[11px] text-white disabled:opacity-40"
+              className="rounded bg-ink px-2 py-1 text-[11px] text-white disabled:opacity-40"
             >
               Save
             </button>

@@ -134,14 +134,14 @@ function LibraryPageInner() {
       className={`flex items-center gap-1.5 rounded-full border px-4 py-1.5 text-[12.5px] font-semibold transition-all ${
         category === cat
           ? 'border-[#7fd0c4] bg-gradient-to-br from-[#e6f7f4] to-[#d5f1ec] text-[#0f766e] shadow-[0_2px_10px_rgba(13,148,136,0.22)]'
-          : 'border-slate-200 bg-white text-slate-500 hover:border-[#7fd0c4] hover:text-slate-800'
+          : 'border-line bg-white text-ink-muted hover:border-[#7fd0c4] hover:text-ink'
       }`}
       onClick={() => setCategory(cat)}
     >
       {label}
       <span
         className={`rounded-full px-1.5 text-[10.5px] font-bold ${
-          category === cat ? 'bg-[#0d948826]' : 'bg-slate-900/5'
+          category === cat ? 'bg-[#0d948826]' : 'bg-hover'
         }`}
       >
         {count}
@@ -150,7 +150,7 @@ function LibraryPageInner() {
   );
 
   return (
-    <div className="flex h-full min-h-0 bg-[#eef1f6] text-slate-800">
+    <div className="flex h-full min-h-0 bg-[#eef1f6] text-ink">
       <LoadoutSidebar
         rows={rows}
         onOpen={(row) => {
@@ -172,13 +172,13 @@ function LibraryPageInner() {
         <div className="mb-1 flex items-center gap-4">
           <div>
             <h1 className="text-[26px] font-bold tracking-tight">Library</h1>
-            <div className="text-[13px] text-slate-500">
+            <div className="text-[13px] text-ink-muted">
               Click a card to add it to your loadout · open a card's details for more.
             </div>
           </div>
-          <div className="ml-auto flex w-64 items-center gap-2 rounded-[11px] border border-slate-200 bg-white px-3.5 py-2 shadow-[0_1px_4px_rgba(22,35,58,0.05)]">
+          <div className="ml-auto flex w-64 items-center gap-2 rounded-[11px] border border-line bg-white px-3.5 py-2 shadow-[0_1px_4px_rgba(22,35,58,0.05)]">
             <input
-              className="w-full bg-transparent text-[13px] outline-none placeholder:text-slate-400"
+              className="w-full bg-transparent text-[13px] outline-none placeholder:text-ink-faint"
               placeholder="Search the library…"
               aria-label="Search the library"
               value={query}
@@ -201,9 +201,9 @@ function LibraryPageInner() {
             </button>
           </div>
         ) : data.loading ? (
-          <div className="py-16 text-center text-sm text-slate-400">Loading the library…</div>
+          <div className="py-16 text-center text-sm text-ink-faint">Loading the library…</div>
         ) : visible.length === 0 ? (
-          <div className="py-16 text-center text-sm text-slate-400">Nothing here matches yet.</div>
+          <div className="py-16 text-center text-sm text-ink-faint">Nothing here matches yet.</div>
         ) : (
           <div className="lib-grid grid grid-cols-[repeat(auto-fill,minmax(228px,1fr))] gap-5 pb-14">
             {visible.map((item) => (

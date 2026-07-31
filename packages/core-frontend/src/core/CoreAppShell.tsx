@@ -380,7 +380,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   return (
     <AuthContext.Provider value={auth}>
       {auth.isLoading ? (
-        <div className="flex items-center justify-center h-full bg-white text-slate-600 text-sm">
+        <div className="flex items-center justify-center h-full bg-white text-ink-muted text-sm">
           Loading…
         </div>
       ) : auth.user ? (

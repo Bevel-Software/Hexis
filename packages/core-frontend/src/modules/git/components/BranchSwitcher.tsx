@@ -294,7 +294,7 @@ export function BranchSwitcher() {
           }
           setError(null);
         }}
-        className="flex items-center gap-1.5 px-2 py-1 text-xs rounded hover:bg-slate-100 text-slate-700 disabled:opacity-60 disabled:cursor-not-allowed"
+        className="flex items-center gap-1.5 px-2 py-1 text-xs rounded hover:bg-hover text-ink disabled:opacity-60 disabled:cursor-not-allowed"
         title={branchLabel}
         // Stay clickable mid-switch so the user can re-pick a branch — the
         // switch is just URL navigation and re-navigating cancels cleanly.
@@ -303,7 +303,7 @@ export function BranchSwitcher() {
         disabled={git.availability === 'loading' && !git.status}
       >
         {switchingTo ? (
-          <Loader2 size={13} className="animate-spin text-slate-500" />
+          <Loader2 size={13} className="animate-spin text-ink-muted" />
         ) : (
           <GitBranch size={13} />
         )}
@@ -316,20 +316,20 @@ export function BranchSwitcher() {
       {open && panelPos && createPortal(
         <div
           ref={panelRef}
-          className="fixed z-50 w-[400px] bg-slate-100 border border-slate-300 rounded-lg shadow-xl overflow-hidden"
+          className="fixed z-50 w-[400px] bg-sunken border border-line-strong rounded-lg shadow-xl overflow-hidden"
           style={{ top: panelPos.top, left: panelPos.left }}
         >
           {!creating && !choosingTarget && (
             <>
               <button
-                className="flex items-center gap-2 w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-200/80"
+                className="flex items-center gap-2 w-full text-left px-3 py-2 text-sm text-ink hover:bg-hover"
                 onClick={() => setCreating(true)}
               >
                 <Plus size={14} />
                 Start a shared draft…
               </button>
               <button
-                className="flex items-center gap-2 w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-200/80 border-b border-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex items-center gap-2 w-full text-left px-3 py-2 text-sm text-ink hover:bg-hover border-b border-line-strong disabled:opacity-50 disabled:cursor-not-allowed"
                 onClick={() => setChoosingTarget(true)}
                 disabled={!canOpenPr}
                 title={
@@ -347,13 +347,13 @@ export function BranchSwitcher() {
           )}
 
           {choosingTarget && (
-            <div className="border-b border-slate-300">
+            <div className="border-b border-line-strong">
               <div className="flex items-center justify-between px-3 pt-2 pb-1">
-                <span className="text-[11px] text-slate-600 uppercase tracking-wide">
+                <span className="text-[11px] text-ink-muted uppercase tracking-wide">
                   Apply draft to…
                 </span>
                 <button
-                  className="text-[11px] text-slate-600 hover:text-slate-700"
+                  className="text-[11px] text-ink-muted hover:text-ink"
                   onClick={() => setChoosingTarget(false)}
                 >
                   Cancel
@@ -361,7 +361,7 @@ export function BranchSwitcher() {
               </div>
               <div className="max-h-48 overflow-y-auto">
                 {targetBranches.length === 0 && (
-                  <div className="px-3 py-2 text-xs text-slate-600">
+                  <div className="px-3 py-2 text-xs text-ink-muted">
                     No other branches to target.
                   </div>
                 )}
@@ -378,10 +378,10 @@ export function BranchSwitcher() {
                       className={`flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm ${
                         isDefaultTarget
                           ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
-                          : 'text-slate-700 hover:bg-slate-200/60'
+                          : 'text-ink hover:bg-hover'
                       }`}
                     >
-                      {b.isProtected && <Lock size={11} className="text-slate-600" />}
+                      {b.isProtected && <Lock size={11} className="text-ink-muted" />}
                       {displayName ? (
                         <span className="truncate flex-1" title={b.name}>
                           {displayName}
@@ -402,8 +402,8 @@ export function BranchSwitcher() {
           )}
 
           {creating && (
-            <div className="px-3 py-2 border-b border-slate-300 space-y-2">
-              <div className="text-[11px] text-slate-600">What are you changing?</div>
+            <div className="px-3 py-2 border-b border-line-strong space-y-2">
+              <div className="text-[11px] text-ink-muted">What are you changing?</div>
               <input
                 autoFocus
                 type="text"
@@ -417,7 +417,7 @@ export function BranchSwitcher() {
                     setNewBranchName('');
                   }
                 }}
-                className="w-full bg-white border border-slate-300 rounded px-2 py-1 text-xs focus:outline-none focus:border-slate-400"
+                className="w-full bg-white border border-line-strong rounded px-2 py-1 text-xs focus:outline-none focus:border-accent"
               />
               <div className="flex justify-end gap-1">
                 <button
@@ -425,7 +425,7 @@ export function BranchSwitcher() {
                     setCreating(false);
                     setNewBranchName('');
                   }}
-                  className="px-2 py-0.5 text-xs rounded hover:bg-slate-200 text-slate-700"
+                  className="px-2 py-0.5 text-xs rounded hover:bg-hover text-ink"
                 >
                   Cancel
                 </button>
@@ -442,7 +442,7 @@ export function BranchSwitcher() {
 
           <div className="max-h-64 overflow-y-auto">
             {git.branches.length === 0 && (
-              <div className="px-3 py-2 text-xs text-slate-600">No drafts yet.</div>
+              <div className="px-3 py-2 text-xs text-ink-muted">No drafts yet.</div>
             )}
             {git.branches.map((b) => {
               const current = isCurrentBranch(b);
@@ -476,8 +476,8 @@ export function BranchSwitcher() {
                   key={b.name}
                   className={`flex items-stretch w-full text-sm group ${
                     current
-                      ? 'bg-slate-200/70 text-slate-900'
-                      : 'text-slate-700 hover:bg-slate-200/60'
+                      ? 'bg-line-strong text-ink'
+                      : 'text-ink hover:bg-hover'
                   }`}
                 >
                   <button
@@ -489,7 +489,7 @@ export function BranchSwitcher() {
                     }`}
                   >
                     {current ? <Check size={12} /> : <span className="w-3" />}
-                    {b.isProtected && <Lock size={11} className="text-slate-600" />}
+                    {b.isProtected && <Lock size={11} className="text-ink-muted" />}
                     <span className="truncate flex-1" title={b.name}>{b.name}</span>
                   </button>
                   {canDelete && (
@@ -500,7 +500,7 @@ export function BranchSwitcher() {
                       }}
                       title={deleteTitle}
                       aria-label={deleteTitle}
-                      className="px-2 text-slate-600 hover:text-red-600 hover:bg-slate-100/80 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                      className="px-2 text-ink-muted hover:text-red-600 hover:bg-hover opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
                     >
                       <Trash2 size={12} />
                     </button>
@@ -513,7 +513,7 @@ export function BranchSwitcher() {
           {error && (
             <div
               role="alert"
-              className="px-3 py-2 text-xs text-red-600 border-t border-slate-300"
+              className="px-3 py-2 text-xs text-red-600 border-t border-line-strong"
             >
               {error.message}
             </div>

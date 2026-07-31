@@ -79,7 +79,7 @@ export function PrCancelButton({ detail, onCancelled }: Props) {
         aria-disabled={!allowed || undefined}
         title={tooltip}
         aria-label="Cancel change request"
-        className="flex items-center gap-1.5 px-2 py-1 text-xs rounded whitespace-nowrap shrink-0 text-red-700 hover:bg-red-50 disabled:text-slate-400 disabled:hover:bg-transparent disabled:cursor-not-allowed aria-disabled:text-slate-400 aria-disabled:hover:bg-transparent aria-disabled:cursor-not-allowed"
+        className="flex items-center gap-1.5 px-2 py-1 text-xs rounded whitespace-nowrap shrink-0 text-red-700 hover:bg-red-50 disabled:text-ink-faint disabled:hover:bg-transparent disabled:cursor-not-allowed aria-disabled:text-ink-faint aria-disabled:hover:bg-transparent aria-disabled:cursor-not-allowed"
       >
         <XCircle size={12} aria-hidden="true" />
         {busy ? 'Cancelling…' : 'Cancel change request'}

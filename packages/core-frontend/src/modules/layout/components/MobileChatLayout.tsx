@@ -96,7 +96,7 @@ export function MobileChatLayout({
 
   return (
     <LayoutContext.Provider value={controller}>
-      <div className="flex flex-col h-full bg-white text-slate-900">
+      <div className="flex flex-col h-full bg-white text-ink">
         {header}
         <div className="flex-1 min-h-0">
           {chat}
@@ -126,18 +126,18 @@ export function MobileChatLayout({
             check therefore only fires when the gesture starts on the grip
             zone — taps on the close button walk up past a header that does
             NOT carry the attribute and so don't initiate a drag. */}
-        <div className="h-9 flex items-center px-2 shrink-0 border-b border-slate-200">
+        <div className="h-9 flex items-center px-2 shrink-0 border-b border-line">
           <div
             data-swipe-handle="true"
             className="flex-1 self-stretch flex items-center justify-center cursor-grab touch-none"
             aria-label="Swipe down to close"
           >
-            <div className="w-10 h-1 rounded-full bg-slate-300" aria-hidden="true" />
+            <div className="w-10 h-1 rounded-full bg-line-strong" aria-hidden="true" />
           </div>
           <button
             type="button"
             onClick={closeViewer}
-            className="p-1.5 rounded hover:bg-slate-100 text-slate-600 hover:text-slate-900"
+            className="p-1.5 rounded hover:bg-hover text-ink-muted hover:text-ink"
             title="Close file"
             aria-label="Close file"
           >

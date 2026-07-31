@@ -39,13 +39,13 @@ export function Toolbar() {
   ));
 
   return (
-    <header className="border-b border-slate-200 shrink-0 bg-white">
+    <header className="border-b border-line shrink-0 bg-white">
       <div className="h-12 flex items-center px-4 gap-2">
         {canToggleExplorer && (
           <button
             onClick={toggleExplorer}
-            className={`p-1.5 rounded hover:bg-slate-100 transition-colors ${
-              isExplorerCollapsed ? 'text-slate-600' : 'text-slate-700'
+            className={`p-1.5 rounded hover:bg-hover transition-colors ${
+              isExplorerCollapsed ? 'text-ink-muted' : 'text-ink'
             }`}
             title={isExplorerCollapsed ? 'Show file explorer' : 'Hide file explorer'}
             aria-label={isExplorerCollapsed ? 'Show file explorer' : 'Hide file explorer'}
@@ -73,7 +73,7 @@ export function Toolbar() {
                 referrerPolicy="no-referrer"
               />
             )}
-            <span className="text-xs text-slate-600 hidden sm:inline">{user.name}</span>
+            <span className="text-xs text-ink-muted hidden sm:inline">{user.name}</span>
           </div>
         )}
 
@@ -82,8 +82,8 @@ export function Toolbar() {
         {canToggleChat && (
           <button
             onClick={toggleChat}
-            className={`p-1.5 rounded hover:bg-slate-100 transition-colors ${
-              isChatCollapsed ? 'text-slate-600' : 'text-slate-700'
+            className={`p-1.5 rounded hover:bg-hover transition-colors ${
+              isChatCollapsed ? 'text-ink-muted' : 'text-ink'
             }`}
             title={isChatCollapsed ? 'Show chat panel' : 'Hide chat panel'}
             aria-label={isChatCollapsed ? 'Show chat panel' : 'Hide chat panel'}
@@ -95,7 +95,7 @@ export function Toolbar() {
 
         <button
           onClick={logout}
-          className="p-1.5 rounded hover:bg-slate-100 text-slate-600 hover:text-slate-900"
+          className="p-1.5 rounded hover:bg-hover text-ink-muted hover:text-ink"
           title="Sign out"
           aria-label="Sign out"
         >
@@ -111,7 +111,7 @@ export function Toolbar() {
           // browsers not to claim a vertical pan gesture on this strip —
           // otherwise iOS / Android can hijack downward swipes that started
           // on the toolbar.
-          className="h-10 flex items-center px-3 gap-2 border-t border-slate-200 overflow-x-auto overflow-y-hidden"
+          className="h-10 flex items-center px-3 gap-2 border-t border-line overflow-x-auto overflow-y-hidden"
           style={{ touchAction: 'pan-x' }}
         >
           {itemCluster}

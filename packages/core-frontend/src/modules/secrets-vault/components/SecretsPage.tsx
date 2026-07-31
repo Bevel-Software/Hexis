@@ -103,7 +103,7 @@ export function SecretsPage() {
         <button
           onClick={() => void refresh()}
           disabled={loading}
-          className="rounded p-1.5 hover:bg-slate-200/60 text-slate-600"
+          className="rounded p-1.5 hover:bg-hover text-ink-muted"
           aria-label="Refresh"
         >
           <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
@@ -119,28 +119,28 @@ export function SecretsPage() {
           </div>
         )}
 
-        <p className="mb-4 max-w-2xl text-xs text-slate-500">
-          Secrets back the <code className="rounded bg-slate-100 px-1">{'${VARIABLE}'}</code> placeholders in your tool
+        <p className="mb-4 max-w-2xl text-xs text-ink-muted">
+          Secrets back the <code className="rounded bg-sunken px-1">{'${VARIABLE}'}</code> placeholders in your tool
           manuals. Each tool declares which variables its owner sets once (shared by everyone) and which each user sets
           for themselves. Values are never displayed after saving.
         </p>
 
         {loading ? (
-          <div className="text-xs text-slate-400">Loading…</div>
+          <div className="text-xs text-ink-faint">Loading…</div>
         ) : tools.length === 0 ? (
-          <div className="rounded border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
+          <div className="rounded border border-dashed border-line px-4 py-6 text-center text-xs text-ink-faint">
             No tools you can access declare secrets yet.
           </div>
         ) : (
           <ul className="mb-6 max-w-2xl space-y-3">
             {tools.map((tool) => (
-              <li key={tool.slug} className="rounded border border-slate-200 p-3">
+              <li key={tool.slug} className="rounded border border-line p-3">
                 <div className="mb-2 flex items-center gap-2">
-                  <Wrench size={13} className="text-slate-500" />
-                  <span className="text-xs font-semibold text-slate-700">{tool.name}</span>
-                  <span className="text-[10px] text-slate-400">{tool.path}</span>
+                  <Wrench size={13} className="text-ink-muted" />
+                  <span className="text-xs font-semibold text-ink">{tool.name}</span>
+                  <span className="text-[10px] text-ink-faint">{tool.path}</span>
                   {tool.canWrite && (
-                    <span className="ml-auto rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">
+                    <span className="ml-auto rounded bg-sunken px-1.5 py-0.5 text-[10px] text-ink-muted">
                       you can edit shared secrets
                     </span>
                   )}
@@ -152,18 +152,18 @@ export function SecretsPage() {
         )}
 
         <details className="max-w-2xl">
-          <summary className="cursor-pointer text-xs font-medium text-slate-600">Advanced — OAuth credentials</summary>
+          <summary className="cursor-pointer text-xs font-medium text-ink-muted">Advanced — OAuth credentials</summary>
           <div className="mt-3 space-y-4">
-            <p className="text-[11px] text-slate-400">
+            <p className="text-[11px] text-ink-faint">
               OAuth secrets are per-user. Name the variable key exactly as the tool references it —
-              <code className="rounded bg-slate-100 px-1">{'<Manual>_<VAR>'}</code> — then click Authorize to complete
+              <code className="rounded bg-sunken px-1">{'<Manual>_<VAR>'}</code> — then click Authorize to complete
               the flow.
             </p>
             {oauthSecrets.length > 0 && (
-              <ul className="divide-y divide-slate-100 rounded border border-slate-200">
+              <ul className="divide-y divide-line rounded border border-line">
                 {oauthSecrets.map((s) => (
                   <li key={s.id} className="flex items-center gap-3 px-3 py-2">
-                    <code className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-700">
+                    <code className="rounded bg-sunken px-1.5 py-0.5 text-xs font-medium text-ink">
                       {`\${${s.key}}`}
                     </code>
                     {s.authorized ? (
@@ -182,7 +182,7 @@ export function SecretsPage() {
                       </button>
                       <button
                         onClick={() => void onDelete(s.id)}
-                        className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                        className="rounded p-1 text-ink-faint hover:bg-red-50 hover:text-red-600"
                         aria-label="Delete secret"
                       >
                         <Trash2 size={14} />
@@ -192,7 +192,7 @@ export function SecretsPage() {
                 ))}
               </ul>
             )}
-            <div className="rounded border border-slate-200 p-4">
+            <div className="rounded border border-line p-4">
               <OAuthSecretForm onSaved={() => void refresh()} onError={setError} />
             </div>
           </div>
@@ -202,7 +202,7 @@ export function SecretsPage() {
 }
 
 const inputCls =
-  'w-full rounded border border-slate-300 px-2 py-1.5 text-xs focus:border-slate-500 focus:outline-none';
+  'w-full rounded border border-line-strong px-2 py-1.5 text-xs focus:border-accent focus:outline-none';
 
 function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (m: string) => void }) {
   const [key, setKey] = useState('');
@@ -254,11 +254,11 @@ function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (
       <Field label="Scopes (space or comma separated)">
         <input className={inputCls} value={scopes} onChange={(e) => setScopes(e.target.value)} />
       </Field>
-      <p className="text-[11px] text-slate-400">Save first, then click “Authorize” on the secret to complete the flow.</p>
+      <p className="text-[11px] text-ink-faint">Save first, then click “Authorize” on the secret to complete the flow.</p>
       <button
         onClick={() => void submit()}
         disabled={busy || !key.trim() || !authorizationUrl.trim() || !tokenUrl.trim() || !clientId.trim()}
-        className="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
+        className="rounded bg-ink px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
       >
         Save OAuth secret
       </button>
@@ -269,7 +269,7 @@ function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
-      <span className="mb-0.5 block text-[11px] font-medium text-slate-500">{label}</span>
+      <span className="mb-0.5 block text-[11px] font-medium text-ink-muted">{label}</span>
       {children}
     </label>
   );

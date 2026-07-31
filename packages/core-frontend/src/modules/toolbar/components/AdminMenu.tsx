@@ -7,7 +7,7 @@ import { useAppRegistry, type AdminMenuItem } from '../../../core/registry';
 const MENU_ID = 'app-settings-menu';
 
 const ITEM_CLASS =
-  'flex w-full items-center gap-2 px-3 py-1.5 text-sm text-left text-slate-700 hover:bg-slate-100';
+  'flex w-full items-center gap-2 px-3 py-1.5 text-sm text-left text-ink hover:bg-hover';
 
 /** One gear-menu row: shared `role="menuitem"` button shell around icon + label. */
 function MenuItem({
@@ -203,7 +203,7 @@ export function AdminMenu() {
         ref={buttonRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="relative p-1.5 rounded hover:bg-slate-100 text-slate-600 hover:text-slate-900"
+        className="relative p-1.5 rounded hover:bg-hover text-ink-muted hover:text-ink"
         title="Menu"
         aria-label={showBadge ? `Menu, ${unreadCount} new feedback` : 'Menu'}
         aria-haspopup="menu"
@@ -222,7 +222,7 @@ export function AdminMenu() {
         <div
           id={MENU_ID}
           role="menu"
-          className="absolute right-0 top-full mt-1 z-40 bg-white border border-slate-200 rounded shadow-md py-1 flex flex-col items-stretch min-w-[13rem]"
+          className="absolute right-0 top-full mt-1 z-40 bg-white border border-line rounded shadow-md py-1 flex flex-col items-stretch min-w-[13rem]"
         >
           {defaultItems.map(renderRow)}
 
@@ -231,7 +231,7 @@ export function AdminMenu() {
               <div
                 role="presentation"
                 id="admin-menu-admin-section-label"
-                className="mt-1 pt-1 border-t border-slate-200 px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400"
+                className="mt-1 pt-1 border-t border-line px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-faint"
               >
                 Admin only
               </div>

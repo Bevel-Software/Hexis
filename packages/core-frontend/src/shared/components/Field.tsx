@@ -5,10 +5,10 @@ import { cn } from '../../lib/utils';
  * Text inputs. Implements the prototype's `.msearch` and `.sbnote`.
  *
  * Covers 47 form fields (37 <input>, 16 <textarea> minus overlaps). The
- * important part is the focus treatment: the design replaces the app's
- * `focus:border-slate-400/500` pattern (15 sites) with an inset accent
- * outline and a transparent border, so the control does not shift by a pixel
- * when focused.
+ * important part is the focus treatment: the 15 hand-rolled fields recolour
+ * their border on focus, which is on-system but still repaints a 1px edge.
+ * This uses an inset outline plus a transparent border instead, so the
+ * control does not shift by a pixel when focused.
  *
  * Both components spread `...rest`, so `aria-label`, `aria-describedby`,
  * `required` and validation attributes stay entirely the caller's.

@@ -187,9 +187,9 @@ export function FileHistoryPanel({ filePath, onRevertCompleted }: Props) {
 
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-white">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-slate-200 shrink-0">
-        <History size={14} className="text-slate-600 shrink-0" />
-        <span className="text-xs text-slate-600 truncate">Timeline — {filePath}</span>
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-line shrink-0">
+        <History size={14} className="text-ink-muted shrink-0" />
+        <span className="text-xs text-ink-muted truncate">Timeline — {filePath}</span>
       </div>
 
       {error && (
@@ -206,15 +206,15 @@ export function FileHistoryPanel({ filePath, onRevertCompleted }: Props) {
 
       <div className="flex-1 flex min-h-0">
         {/* Left: commit list */}
-        <div className="w-72 shrink-0 overflow-y-auto border-r border-slate-200">
+        <div className="w-72 shrink-0 overflow-y-auto border-r border-line">
           {loading && (
-            <div className="flex items-center gap-2 px-3 py-3 text-xs text-slate-600">
+            <div className="flex items-center gap-2 px-3 py-3 text-xs text-ink-muted">
               <Loader2 size={13} className="animate-spin" />
               Loading timeline…
             </div>
           )}
           {!loading && commits && commits.length === 0 && (
-            <div className="px-3 py-3 text-xs text-slate-600">
+            <div className="px-3 py-3 text-xs text-ink-muted">
               Nothing has been saved to this file yet.
             </div>
           )}
@@ -228,10 +228,10 @@ export function FileHistoryPanel({ filePath, onRevertCompleted }: Props) {
                     <button
                       type="button"
                       onClick={() => selectCommit(c)}
-                      className={`w-full text-left px-3 py-2 border-b border-slate-200/60 text-xs transition-colors ${
+                      className={`w-full text-left px-3 py-2 border-b border-line text-xs transition-colors ${
                         isSelected
-                          ? 'bg-slate-100 text-slate-900'
-                          : 'text-slate-700 hover:bg-slate-100/80'
+                          ? 'bg-sunken text-ink'
+                          : 'text-ink hover:bg-hover'
                       }`}
                     >
                       {/* Subject leads; SHA moves to a muted pill so non-technical users aren't
@@ -239,14 +239,14 @@ export function FileHistoryPanel({ filePath, onRevertCompleted }: Props) {
                       <div className="flex items-start gap-2">
                         <span className="flex-1 truncate">{c.subject || '(no message)'}</span>
                         <span
-                          className="shrink-0 font-mono text-[9px] text-slate-500 bg-white border border-slate-200 rounded px-1 py-[1px]"
+                          className="shrink-0 font-mono text-[9px] text-ink-muted bg-white border border-line rounded px-1 py-[1px]"
                           title={`Save id: ${c.sha}`}
                         >
                           {shortSha(c.sha)}
                         </span>
                       </div>
                       <div
-                        className="mt-0.5 text-[10px] text-slate-600 truncate"
+                        className="mt-0.5 text-[10px] text-ink-muted truncate"
                         title={formatAbsoluteTime(c.committedAt)}
                       >
                         {who} · {formatRelativeTime(c.committedAt)}
@@ -262,18 +262,18 @@ export function FileHistoryPanel({ filePath, onRevertCompleted }: Props) {
         {/* Right: diff + revert */}
         <div className="flex-1 flex flex-col min-w-0">
           {!selected && (
-            <div className="flex-1 flex items-center justify-center px-6 text-xs text-slate-600">
+            <div className="flex-1 flex items-center justify-center px-6 text-xs text-ink-muted">
               Pick a save to see what changed.
             </div>
           )}
           {selected && (
             <>
-              <div className="flex items-center gap-2 px-3 py-2 border-b border-slate-200 shrink-0">
-                <span className="text-xs text-slate-700 truncate flex-1">
+              <div className="flex items-center gap-2 px-3 py-2 border-b border-line shrink-0">
+                <span className="text-xs text-ink truncate flex-1">
                   {selected.subject || '(no message)'}
                 </span>
                 <span
-                  className="font-mono text-[10px] text-slate-600 shrink-0"
+                  className="font-mono text-[10px] text-ink-muted shrink-0"
                   title={`Save id: ${selected.sha}`}
                 >
                   {shortSha(selected.sha)}
@@ -287,7 +287,7 @@ export function FileHistoryPanel({ filePath, onRevertCompleted }: Props) {
                       ? "You don't have permission to edit this file"
                       : 'Creates a new save that reverses this one'
                   }
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-900 border border-slate-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium bg-sunken hover:bg-hover text-ink border border-line-strong transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {reverting ? (
                     <Loader2 size={12} className="animate-spin" />
@@ -299,7 +299,7 @@ export function FileHistoryPanel({ filePath, onRevertCompleted }: Props) {
               </div>
               <div className="flex-1 overflow-auto">
                 {diffLoading && (
-                  <div className="flex items-center gap-2 px-3 py-3 text-xs text-slate-600">
+                  <div className="flex items-center gap-2 px-3 py-3 text-xs text-ink-muted">
                     <Loader2 size={13} className="animate-spin" />
                     Loading changes…
                   </div>

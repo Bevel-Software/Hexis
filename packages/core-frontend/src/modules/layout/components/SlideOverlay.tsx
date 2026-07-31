@@ -193,7 +193,7 @@ export function SlideOverlay({
       aria-label={ariaLabel}
     >
       <div
-        className="absolute inset-0 bg-slate-900/40"
+        className="absolute inset-0 bg-scrim"
         // Tying backdrop opacity to drag progress makes the close gesture feel
         // continuous — the sheet and the backdrop both fade together as the
         // user pulls down. Falls back to a fixed CSS transition when nothing

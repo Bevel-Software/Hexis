@@ -40,7 +40,7 @@ export function PrCommentThread({
   const [replying, setReplying] = useState(false);
 
   return (
-    <div className={`rounded border ${isStale ? 'border-slate-200 bg-white/40 opacity-70' : 'border-slate-200 bg-white/60'} px-3 py-2 space-y-2`}>
+    <div className={`rounded border ${isStale ? 'border-line bg-white/40 opacity-70' : 'border-line bg-white/60'} px-3 py-2 space-y-2`}>
       <PrCommentRow
         comment={root}
         currentUserEmail={currentUserEmail}
@@ -49,7 +49,7 @@ export function PrCommentThread({
         onDelete={onDelete}
       />
       {replies.map((r) => (
-        <div key={r.id} className="ml-4 pl-3 border-l border-slate-200">
+        <div key={r.id} className="ml-4 pl-3 border-l border-line">
           <PrCommentRow
             comment={r}
             currentUserEmail={currentUserEmail}
@@ -60,7 +60,7 @@ export function PrCommentThread({
         </div>
       ))}
       {replying ? (
-        <div className="ml-4 pl-3 border-l border-slate-200">
+        <div className="ml-4 pl-3 border-l border-line">
           <PrCommentComposer
             placeholder="Reply…"
             submitLabel="Reply"
@@ -76,7 +76,7 @@ export function PrCommentThread({
         <button
           type="button"
           onClick={() => setReplying(true)}
-          className="ml-4 flex items-center gap-1 text-[11px] text-slate-600 hover:text-slate-700"
+          className="ml-4 flex items-center gap-1 text-[11px] text-ink-muted hover:text-ink"
         >
           <MessageSquare size={10} />
           Reply
@@ -121,9 +121,9 @@ function PrCommentRow({
   return (
     <div>
       <div className="flex items-center gap-1.5 text-[11px]">
-        <span className="font-medium text-slate-900">{comment.author.name || comment.author.email}</span>
-        <span className="text-slate-500">·</span>
-        <span className="text-slate-600" title={new Date(comment.createdAt).toLocaleString()}>
+        <span className="font-medium text-ink">{comment.author.name || comment.author.email}</span>
+        <span className="text-ink-muted">·</span>
+        <span className="text-ink-muted" title={new Date(comment.createdAt).toLocaleString()}>
           {formatTime(comment.createdAt)}
           {comment.updatedAt && comment.updatedAt !== comment.createdAt && ' (edited)'}
         </span>
@@ -139,7 +139,7 @@ function PrCommentRow({
               onClick={() => setEditing(true)}
               title="Edit"
               aria-label="Edit comment"
-              className="p-0.5 rounded text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+              className="p-0.5 rounded text-ink-muted hover:text-ink hover:bg-hover"
             >
               <Pencil size={11} aria-hidden="true" />
             </button>
@@ -148,18 +148,18 @@ function PrCommentRow({
               onClick={() => onDelete(comment.id)}
               title="Delete"
               aria-label="Delete comment"
-              className="p-0.5 rounded text-slate-600 hover:text-red-700 hover:bg-red-100"
+              className="p-0.5 rounded text-ink-muted hover:text-red-700 hover:bg-red-100"
             >
               <Trash2 size={11} aria-hidden="true" />
             </button>
           </div>
         )}
       </div>
-      <div className="mt-1 text-xs text-slate-900 whitespace-pre-wrap break-words">
+      <div className="mt-1 text-xs text-ink whitespace-pre-wrap break-words">
         {comment.body}
       </div>
       {comment.path && (
-        <div className="mt-1 text-[10px] text-slate-600 font-mono truncate">
+        <div className="mt-1 text-[10px] text-ink-muted font-mono truncate">
           {comment.path}{comment.line !== undefined ? `:${comment.line}` : ''}
         </div>
       )}

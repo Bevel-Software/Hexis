@@ -2,9 +2,12 @@
 /**
  * Design-system ratchet.
  *
- * The UI is mid-migration onto semantic tokens. A hard "no slate allowed"
- * gate would fail on day one against ~1,000 existing call sites, so this
- * enforces the only rule that can hold today: the counts must never go UP.
+ * The UI is mid-migration onto semantic tokens, so this enforces the only rule
+ * that holds across a partial migration: the counts must never go UP.
+ *
+ * `raw-slate-palette` is already at 0 and the palette itself is deleted in
+ * tokens.css, so for that rule the ratchet is effectively a hard ban — any
+ * reintroduction is an increase. The other three still have real balances.
  *
  * Why a grep gate and not a build gate: disabling the palette with
  * `--color-slate-*: initial` fails SILENTLY. Tailwind simply emits no rule

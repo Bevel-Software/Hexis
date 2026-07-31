@@ -729,26 +729,26 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
         {initials(p.label)}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="text-sm text-slate-900 font-medium truncate">
+        <div className="text-sm text-ink font-medium truncate">
           {p.label}
-          {p.isYou && <span className="text-slate-400 font-normal"> (you)</span>}
+          {p.isYou && <span className="text-ink-faint font-normal"> (you)</span>}
           {p.isRole && (
-            <span className="ml-1.5 text-[10px] uppercase tracking-wide text-slate-400">role</span>
+            <span className="ml-1.5 text-[10px] uppercase tracking-wide text-ink-faint">role</span>
           )}
         </div>
-        {p.sub && <div className="text-xs text-slate-500 truncate">{p.sub}</div>}
+        {p.sub && <div className="text-xs text-ink-muted truncate">{p.sub}</div>}
       </div>
       {canManage && p.manage === 'inherited' ? (
         // Inherited from a parent folder — read-only here. Leaf folder name only
         // (full path on hover); Remove opens the "Remove from parent?" flow.
         <div className="flex items-center gap-2 shrink-0">
           <span
-            className="text-xs text-slate-400 italic max-w-[10rem] truncate"
+            className="text-xs text-ink-faint italic max-w-[10rem] truncate"
             title={p.ancestors.map(folderPath).join(', ')}
           >
             via {p.ancestors.map(folderLabel).join(', ')}
           </span>
-          <span className="text-sm text-slate-400">{summarizeVerbs(p.verbs)}</span>
+          <span className="text-sm text-ink-faint">{summarizeVerbs(p.verbs)}</span>
           <button
             type="button"
             disabled={busy}
@@ -762,7 +762,7 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
         // No file-backed grant to remove here — managed elsewhere (a group's
         // membership, the everyone policy, or admin rescue).
         <span
-          className="text-sm text-slate-400 shrink-0"
+          className="text-sm text-ink-faint shrink-0"
           title="Granted via a role or policy — manage it there"
         >
           {summarizeVerbs(p.verbs)}
@@ -773,13 +773,13 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
             type="button"
             disabled={busy}
             onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
-            className="px-2 py-1 rounded text-sm text-slate-600 flex items-center gap-1 hover:bg-slate-100 disabled:cursor-not-allowed"
+            className="px-2 py-1 rounded text-sm text-ink-muted flex items-center gap-1 hover:bg-hover disabled:cursor-not-allowed"
           >
             {summarizeVerbs(p.verbs)}
             <ChevronDown size={14} />
           </button>
           {openRowKey === p.key && (
-            <div className="absolute right-0 z-20 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg w-44 py-1">
+            <div className="absolute right-0 z-20 mt-1 bg-white border border-line rounded-lg shadow-lg w-44 py-1">
               {TIER_ROLES.map((role) => {
                 const k = ROLE_TO_KEY[role];
                 const checked = p.verbs[k];
@@ -793,16 +793,16 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
                     type="button"
                     disabled={disabled}
                     onClick={() => doToggleVerb(p.principal, role, checked)}
-                    className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <span className="w-4 h-4 border border-slate-300 rounded flex items-center justify-center shrink-0">
+                    <span className="w-4 h-4 border border-line-strong rounded flex items-center justify-center shrink-0">
                       {checked && <Check size={12} className="text-bevel" />}
                     </span>
                     <span className="flex-1 text-left">{role}</span>
                   </button>
                 );
               })}
-              <div className="border-t border-slate-100 my-1" />
+              <div className="border-t border-line my-1" />
               {(() => {
                 const checked = p.verbs.download;
                 const disabled = busy || p.verbs.owner;
@@ -811,16 +811,16 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
                     type="button"
                     disabled={disabled}
                     onClick={() => doToggleVerb(p.principal, 'Can download', checked)}
-                    className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <span className="w-4 h-4 border border-slate-300 rounded flex items-center justify-center shrink-0">
+                    <span className="w-4 h-4 border border-line-strong rounded flex items-center justify-center shrink-0">
                       {checked && <Check size={12} className="text-bevel" />}
                     </span>
                     <span className="flex-1 text-left">Can download</span>
                   </button>
                 );
               })()}
-              <div className="border-t border-slate-100 my-1" />
+              <div className="border-t border-line my-1" />
               <button
                 type="button"
                 disabled={busy}
@@ -836,14 +836,14 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
           )}
         </div>
       ) : (
-        <span className="text-sm text-slate-500 shrink-0">{summarizeVerbs(p.verbs)}</span>
+        <span className="text-sm text-ink-muted shrink-0">{summarizeVerbs(p.verbs)}</span>
       )}
     </div>
   );
 
   return (
     <div
-      className="fixed inset-0 z-[70] bg-slate-900/45 flex items-center justify-center p-4"
+      className="fixed inset-0 z-[70] bg-scrim flex items-center justify-center p-4"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -856,17 +856,17 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
       >
         <div className="flex items-start justify-between gap-3 px-6 pt-5 pb-2">
           <div className="min-w-0">
-            <h2 id="manage-access-title" className="text-lg font-bold text-slate-900">
+            <h2 id="manage-access-title" className="text-lg font-bold text-ink">
               Manage access
             </h2>
-            <div className="mt-0.5 text-sm text-slate-500 truncate" title={entry.relativePath}>
+            <div className="mt-0.5 text-sm text-ink-muted truncate" title={entry.relativePath}>
               {entry.name}
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded hover:bg-slate-100 text-slate-600 hover:text-slate-900 shrink-0"
+            className="p-1.5 rounded hover:bg-hover text-ink-muted hover:text-ink shrink-0"
             aria-label="Close"
           >
             <X size={16} />
@@ -878,19 +878,19 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
             <div className="my-3">
               <div className="flex gap-2 relative">
                 <div className="flex-1 relative">
-                  <div className="w-full border border-slate-200 rounded-lg px-2 py-1.5 flex flex-wrap items-center gap-1.5 focus-within:ring-2 focus-within:ring-bevel/40">
+                  <div className="w-full border border-line rounded-lg px-2 py-1.5 flex flex-wrap items-center gap-1.5 focus-within:ring-2 focus-within:ring-bevel/40">
                     {pickedChips.map((c) => {
                       const label = c.kind === 'role' ? c.role : c.displayName || c.email;
                       return (
                         <span
                           key={principalKey(c)}
-                          className="inline-flex items-center gap-1 bg-slate-100 text-slate-700 rounded px-2 py-1 text-xs"
+                          className="inline-flex items-center gap-1 bg-sunken text-ink rounded px-2 py-1 text-xs"
                         >
                           {label}
                           <button
                             type="button"
                             onClick={() => removeChip(c)}
-                            className="text-slate-400 hover:text-red-600"
+                            className="text-ink-faint hover:text-red-600"
                             aria-label={`Remove ${label}`}
                           >
                             <X size={12} />
@@ -912,19 +912,19 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
                     />
                   </div>
                   {query.trim() && suggest && (suggest.groups.length > 0 || suggest.people.length > 0) && (
-                    <div className="absolute z-10 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg max-h-56 overflow-auto">
+                    <div className="absolute z-10 left-0 right-0 mt-1 bg-white border border-line rounded-lg shadow-lg max-h-56 overflow-auto">
                       {suggest.groups.map((g) => (
                         <button
                           key={`g:${g}`}
                           type="button"
                           onClick={() => addChip({ kind: 'role', role: g })}
-                          className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-hover flex items-center gap-2"
                         >
-                          <span className="w-6 h-6 rounded-full bg-slate-500 text-white text-[10px] flex items-center justify-center">
+                          <span className="w-6 h-6 rounded-full bg-ink-muted text-white text-[10px] flex items-center justify-center">
                             {initials(g)}
                           </span>
                           <span className="flex-1">{g}</span>
-                          <span className="text-[10px] uppercase tracking-wide text-slate-400">
+                          <span className="text-[10px] uppercase tracking-wide text-ink-faint">
                             role
                           </span>
                         </button>
@@ -934,7 +934,7 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
                           key={`p:${p.email}`}
                           type="button"
                           onClick={() => addChip({ kind: 'user', email: p.email, displayName: p.name })}
-                          className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center gap-2"
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-hover flex items-center gap-2"
                         >
                           <span
                             className="w-6 h-6 rounded-full text-white text-[10px] flex items-center justify-center"
@@ -943,7 +943,7 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
                             {initials(p.name || p.email)}
                           </span>
                           <span className="flex-1 truncate">{p.name || p.email}</span>
-                          <span className="text-xs text-slate-400 truncate">{p.email}</span>
+                          <span className="text-xs text-ink-faint truncate">{p.email}</span>
                         </button>
                       ))}
                     </div>
@@ -954,13 +954,13 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
                   <button
                     type="button"
                     onClick={() => setVerbOpen((o) => !o)}
-                    className="h-full px-3 rounded-lg border border-slate-200 text-sm text-slate-700 flex items-center gap-1 hover:bg-slate-50 max-w-[12rem]"
+                    className="h-full px-3 rounded-lg border border-line text-sm text-ink flex items-center gap-1 hover:bg-hover max-w-[12rem]"
                   >
                     <span className="truncate">{summarizeVerbs(effectiveNewVerbs)}</span>
                     <ChevronDown size={14} className="shrink-0" />
                   </button>
                   {verbOpen && (
-                    <div className="absolute right-0 z-10 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg w-44 py-1">
+                    <div className="absolute right-0 z-10 mt-1 bg-white border border-line rounded-lg shadow-lg w-44 py-1">
                       {TIER_ROLES.map((role) => {
                         const k = ROLE_TO_KEY[role];
                         const checked = effectiveNewVerbs[k];
@@ -974,24 +974,24 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
                             disabled={disabled}
                             aria-pressed={checked}
                             onClick={() => setNewVerbs((v) => ({ ...v, [k]: !v[k] }))}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
                           >
-                            <span className="w-4 h-4 border border-slate-300 rounded flex items-center justify-center shrink-0">
+                            <span className="w-4 h-4 border border-line-strong rounded flex items-center justify-center shrink-0">
                               {checked && <Check size={12} className="text-bevel" />}
                             </span>
                             <span className="flex-1 text-left">{role}</span>
                           </button>
                         );
                       })}
-                      <div className="border-t border-slate-100 my-1" />
+                      <div className="border-t border-line my-1" />
                       <button
                         type="button"
                         disabled={effectiveNewVerbs.owner}
                         aria-pressed={effectiveNewVerbs.download}
                         onClick={() => setNewVerbs((v) => ({ ...v, download: !v.download }))}
-                        className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <span className="w-4 h-4 border border-slate-300 rounded flex items-center justify-center shrink-0">
+                        <span className="w-4 h-4 border border-line-strong rounded flex items-center justify-center shrink-0">
                           {effectiveNewVerbs.download && <Check size={12} className="text-bevel" />}
                         </span>
                         <span className="flex-1 text-left">Can download</span>
@@ -1011,12 +1011,12 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
                 </button>
               </div>
               {query.trim() && !addPending && !suggest?.peopleWithheld && (
-                <div className="mt-1.5 text-xs text-slate-500">
+                <div className="mt-1.5 text-xs text-ink-muted">
                   Type a full email to add someone, or pick a role from the list.
                 </div>
               )}
               {pickedChips.some(isEveryoneRole) && (
-                <div className="mt-1.5 text-xs text-slate-500">
+                <div className="mt-1.5 text-xs text-ink-muted">
                   “Everyone” makes this {targetKind} publicly readable — it can only be granted read access.
                 </div>
               )}
@@ -1029,11 +1029,11 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
           )}
 
           {!governed ? (
-            <div className="py-8 text-center text-sm text-slate-500">
+            <div className="py-8 text-center text-sm text-ink-muted">
               This item isn't part of the knowledge base, so it isn't governed by access control.
             </div>
           ) : loading ? (
-            <div className="flex items-center gap-2 py-8 justify-center text-sm text-slate-500">
+            <div className="flex items-center gap-2 py-8 justify-center text-sm text-ink-muted">
               <Loader2 size={16} className="animate-spin" /> Loading access…
             </div>
           ) : error ? (
@@ -1051,7 +1051,7 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
                 </div>
               )}
 
-              <div className="text-sm font-bold text-slate-700 my-2">People with access</div>
+              <div className="text-sm font-bold text-ink my-2">People with access</div>
 
               {data && !data.readers.restricted && (
                 <div className="flex items-center gap-3 py-1.5">
@@ -1059,15 +1059,15 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
                     <Globe size={16} />
                   </span>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm text-slate-800">Anyone can read</div>
-                    <div className="text-xs text-slate-500">Public — every signed-in user can read this {targetKind}</div>
+                    <div className="text-sm text-ink">Anyone can read</div>
+                    <div className="text-xs text-ink-muted">Public — every signed-in user can read this {targetKind}</div>
                   </div>
                   {canManage && (
                     <button
                       type="button"
                       disabled={busy}
                       onClick={removePublicRead}
-                      className="text-xs text-slate-500 hover:text-red-600 disabled:opacity-50 px-2 py-1"
+                      className="text-xs text-ink-muted hover:text-red-600 disabled:opacity-50 px-2 py-1"
                     >
                       Remove
                     </button>
@@ -1076,7 +1076,7 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
               )}
 
               {directRows.length === 0 ? (
-                <div className="text-sm text-slate-500 py-2">
+                <div className="text-sm text-ink-muted py-2">
                   {inheritedRows.length > 0
                     ? 'No one is granted directly here — everyone below inherits access from a parent folder.'
                     : 'No explicit grants at this path.'}
@@ -1086,18 +1086,18 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
               )}
 
               {inheritedRows.length > 0 && (
-                <div className="mt-3 border-t border-slate-100 pt-2">
+                <div className="mt-3 border-t border-line pt-2">
                   <button
                     type="button"
                     onClick={() => setShowInherited((v) => !v)}
-                    className="w-full flex items-center gap-1.5 py-1 text-sm font-medium text-slate-500 hover:text-slate-700"
+                    className="w-full flex items-center gap-1.5 py-1 text-sm font-medium text-ink-muted hover:text-ink"
                   >
                     <ChevronDown
                       size={14}
                       className={`transition-transform ${showInherited ? 'rotate-180' : ''}`}
                     />
                     Inherited access ({inheritedRows.length})
-                    <span className="font-normal text-slate-400">
+                    <span className="font-normal text-ink-faint">
                       — from parent folders &amp; roles
                     </span>
                   </button>
@@ -1105,13 +1105,13 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
                 </div>
               )}
 
-              <div className="flex items-center gap-3 border-t border-slate-100 mt-4 pt-4">
-                <div className="w-9 h-9 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center shrink-0">
+              <div className="flex items-center gap-3 border-t border-line mt-4 pt-4">
+                <div className="w-9 h-9 rounded-full bg-sunken text-ink-muted flex items-center justify-center shrink-0">
                   <Lock size={16} />
                 </div>
                 <div className="flex-1">
-                  <div className="text-sm font-semibold text-slate-800">Restricted</div>
-                  <div className="text-xs text-slate-500">
+                  <div className="text-sm font-semibold text-ink">Restricted</div>
+                  <div className="text-xs text-ink-muted">
                     Only people granted access can edit this item.
                   </div>
                 </div>
@@ -1133,7 +1133,7 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
 
       {confirmRemove && (
         <div
-          className="fixed inset-0 z-[80] bg-slate-900/40 flex items-center justify-center p-4"
+          className="fixed inset-0 z-[80] bg-scrim flex items-center justify-center p-4"
           onMouseDown={(e) => {
             if (e.target === e.currentTarget && !busy) setConfirmRemove(null);
           }}
@@ -1146,10 +1146,10 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
               const va = confirmRemove.verb ? `${VERB_NOUN[confirmRemove.verb]} access` : 'access';
               return (
                 <>
-                  <h3 className="text-lg font-semibold text-slate-900">
+                  <h3 className="text-lg font-semibold text-ink">
                     {confirmRemove.ancestors.length ? 'Remove from parent folder?' : 'Restrict access here?'}
                   </h3>
-                  <p className="mt-2 text-sm text-slate-600">
+                  <p className="mt-2 text-sm text-ink-muted">
                     {confirmRemove.ancestors.length ? (
                       <>
                         {confirmRemove.label}'s {va} here is inherited from{' '}
@@ -1191,7 +1191,7 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
               )}
               {confirmRemove.ancestors.length > 1 && (
                 <>
-                  <div className="text-xs text-slate-500">
+                  <div className="text-xs text-ink-muted">
                     Inherited from multiple folders — remove from one at a time:
                   </div>
                   {confirmRemove.ancestors.map((a) => (
@@ -1211,7 +1211,7 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
                 type="button"
                 disabled={busy}
                 onClick={() => doDenyHere(confirmRemove.principal, confirmRemove.verb)}
-                className="w-full px-4 py-2.5 rounded-lg text-sm font-medium border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed"
+                className="w-full px-4 py-2.5 rounded-lg text-sm font-medium border border-line-strong text-ink hover:bg-hover disabled:cursor-not-allowed"
               >
                 Restrict just this {targetKind}
               </button>
@@ -1219,7 +1219,7 @@ export function ManageAccessDialog({ entry, onClose }: Props) {
                 type="button"
                 disabled={busy}
                 onClick={() => setConfirmRemove(null)}
-                className="w-full px-4 py-2 rounded-lg text-sm text-slate-500 hover:bg-slate-50 disabled:cursor-not-allowed"
+                className="w-full px-4 py-2 rounded-lg text-sm text-ink-muted hover:bg-hover disabled:cursor-not-allowed"
               >
                 Cancel
               </button>

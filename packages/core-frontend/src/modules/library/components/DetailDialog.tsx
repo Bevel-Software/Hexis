@@ -98,7 +98,7 @@ export function DetailDialog(props: DetailDialogProps) {
             <span className="flex items-center gap-2 text-[15px]">
               {name}
               {owned && OWNER_TAG}
-              <span className="text-[10.5px] font-normal uppercase tracking-[.08em] text-slate-400">
+              <span className="text-[10.5px] font-normal uppercase tracking-[.08em] text-ink-faint">
                 {target.kind === 'skill' ? 'Skill' : 'Integration'}
               </span>
             </span>
@@ -246,7 +246,7 @@ function SkillDetailBody({
   }
 
   if (detail.loading) {
-    return <div className="py-8 text-center text-sm text-slate-400">Loading…</div>;
+    return <div className="py-8 text-center text-sm text-ink-faint">Loading…</div>;
   }
   if (detail.error || !detail.skill) {
     return <div className="py-8 text-center text-sm text-[#c53030]">{detail.error ?? "Couldn't load this skill."}</div>;
@@ -258,17 +258,17 @@ function SkillDetailBody({
 
   return (
     <div className="text-sm">
-      <p className="mb-4 text-[13.5px] text-slate-600">{detail.skill.description}</p>
+      <p className="mb-4 text-[13.5px] text-ink-muted">{detail.skill.description}</p>
 
       <section className="mb-4">
         <div className="mb-2 flex items-center justify-between">
-          <h4 className="text-[10.5px] font-bold uppercase tracking-[.09em] text-slate-400">
+          <h4 className="text-[10.5px] font-bold uppercase tracking-[.09em] text-ink-faint">
             Integrations this skill needs
           </h4>
           {owned && accessEntry && (
             <button
               type="button"
-              className="rounded-lg bg-[#eef2f7] px-3.5 py-1 text-[11.5px] font-bold text-slate-600 shadow-[inset_0_0_0_1px_#d3dbe6] transition-transform hover:-translate-y-px"
+              className="rounded-lg bg-[#eef2f7] px-3.5 py-1 text-[11.5px] font-bold text-ink-muted shadow-[inset_0_0_0_1px_#d3dbe6] transition-transform hover:-translate-y-px"
               onClick={() => setAccessOpen(true)}
             >
               Manage access
@@ -308,7 +308,7 @@ function SkillDetailBody({
       </section>
 
       <section className="mb-4">
-        <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-slate-400">
+        <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-ink-faint">
           Files in this skill — click one to view it
         </h4>
         <div className="flex flex-col gap-1.5">
@@ -319,12 +319,12 @@ function SkillDetailBody({
               className={`flex items-center gap-2 rounded-[9px] border px-2.5 py-1.5 text-left transition-colors ${
                 selected === rel
                   ? 'border-[#0d9488] bg-[#e6f7f4]'
-                  : 'border-slate-200 bg-[#fafbfd] hover:border-[#7fd0c4]'
+                  : 'border-line bg-[#fafbfd] hover:border-[#7fd0c4]'
               }`}
               onClick={() => setSelected(rel)}
             >
               <span
-                className={`font-mono text-[11.5px] font-semibold ${selected === rel ? 'text-[#0f766e]' : 'text-slate-600'}`}
+                className={`font-mono text-[11.5px] font-semibold ${selected === rel ? 'text-[#0f766e]' : 'text-ink-muted'}`}
               >
                 {rel}
               </span>
@@ -340,7 +340,7 @@ function SkillDetailBody({
 
       <section>
         <div className="mb-2 flex items-center justify-between">
-          <h4 className="font-mono text-[11px] text-slate-500">{selected}</h4>
+          <h4 className="font-mono text-[11px] text-ink-muted">{selected}</h4>
           {owned && kbDirName && (
             <button
               type="button"
@@ -367,9 +367,9 @@ function SkillDetailBody({
 
         <div ref={fileViewRef}>
           {raw === null ? (
-            <div className="py-4 text-center text-xs text-slate-400">Loading…</div>
+            <div className="py-4 text-center text-xs text-ink-faint">Loading…</div>
           ) : suggestionDiff ? (
-            <pre className="lib-sug whitespace-pre-wrap break-words rounded-[13px] border border-slate-200 bg-[#f7f9fb] p-3.5 font-mono text-[11.5px] leading-relaxed text-slate-600">
+            <pre className="lib-sug whitespace-pre-wrap break-words rounded-[13px] border border-line bg-[#f7f9fb] p-3.5 font-mono text-[11.5px] leading-relaxed text-ink-muted">
               {suggestionDiff.map((l, i) =>
                 l.kind === 'same' ? (
                   <div key={i}>{l.text || ' '}</div>
@@ -385,7 +385,7 @@ function SkillDetailBody({
               )}
             </pre>
           ) : selected.endsWith('.md') ? (
-            <div className="rounded-[13px] border border-slate-200 bg-[#f7f9fb] px-4 py-3">
+            <div className="rounded-[13px] border border-line bg-[#f7f9fb] px-4 py-3">
               <KbMarkdownView
                 source={raw}
                 onOpenFile={(href) => {
@@ -395,7 +395,7 @@ function SkillDetailBody({
               />
             </div>
           ) : (
-            <pre className="whitespace-pre-wrap break-words rounded-[13px] border border-slate-200 bg-[#f7f9fb] p-3.5 font-mono text-[11.5px] leading-relaxed text-slate-600">
+            <pre className="whitespace-pre-wrap break-words rounded-[13px] border border-line bg-[#f7f9fb] p-3.5 font-mono text-[11.5px] leading-relaxed text-ink-muted">
               {raw}
             </pre>
           )}
@@ -427,7 +427,7 @@ function SkillCompareHost({ skillSummary, cr, onExit, onDataChanged }: CompareHo
 
   if (detail.loading) {
     return (
-      <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/40 text-sm text-white">
+      <div className="fixed inset-0 z-[60] flex items-center justify-center bg-scrim text-sm text-white">
         Loading…
       </div>
     );
@@ -475,7 +475,7 @@ function ToolDetailBody({ tool, skills, allowedToolsBySkill }: ToolBodyProps) {
   return (
     <div className="text-sm">
       <section className="mb-4">
-        <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-slate-400">
+        <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-ink-faint">
           Connection status
         </h4>
         <div className="flex flex-col gap-1.5">
@@ -517,17 +517,17 @@ function ToolDetailBody({ tool, skills, allowedToolsBySkill }: ToolBodyProps) {
       </section>
 
       <section>
-        <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-slate-400">
+        <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-ink-faint">
           Used by these skills
         </h4>
         {usedBy.length === 0 ? (
-          <span className="text-[11.5px] italic text-slate-400">No skills use this yet</span>
+          <span className="text-[11.5px] italic text-ink-faint">No skills use this yet</span>
         ) : (
           <div className="flex flex-wrap gap-1.5">
             {usedBy.map((s) => (
               <span
                 key={s.name}
-                className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11.5px] font-semibold text-slate-500"
+                className="rounded-full border border-line bg-white px-2.5 py-1 text-[11.5px] font-semibold text-ink-muted"
               >
                 {s.name}
               </span>
@@ -543,10 +543,10 @@ function ToolDetailBody({ tool, skills, allowedToolsBySkill }: ToolBodyProps) {
 
 function IntItem({ title, sub, right }: { title: string; sub: string; right: React.ReactNode }) {
   return (
-    <div className="flex items-center gap-3 rounded-[11px] border border-slate-200 bg-[#fafbfd] px-3 py-2">
+    <div className="flex items-center gap-3 rounded-[11px] border border-line bg-[#fafbfd] px-3 py-2">
       <div className="min-w-0">
-        <b className="block text-[12.5px] text-slate-800">{title}</b>
-        <small className="block text-[11px] text-slate-400">{sub}</small>
+        <b className="block text-[12.5px] text-ink">{title}</b>
+        <small className="block text-[11px] text-ink-faint">{sub}</small>
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-2">{right}</div>
     </div>

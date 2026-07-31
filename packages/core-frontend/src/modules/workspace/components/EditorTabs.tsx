@@ -38,7 +38,7 @@ export function EditorTabs() {
   if (openTabs.length === 0) return null;
 
   return (
-    <div className="border-b border-slate-200 bg-slate-50/50 shrink-0">
+    <div className="border-b border-line bg-sunken shrink-0">
       <div
         role="tablist"
         aria-label="Open files"
@@ -240,12 +240,12 @@ function TabPill(props: TabPillProps) {
         }
       }}
       className={[
-        'group relative flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-r border-slate-200 cursor-pointer select-none whitespace-nowrap shrink-0 min-w-[8rem]',
+        'group relative flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-r border-line cursor-pointer select-none whitespace-nowrap shrink-0 min-w-[8rem]',
         isActive
-          ? 'bg-slate-100 text-slate-900'
-          : 'text-slate-600 hover:bg-slate-100/80',
+          ? 'bg-sunken text-ink'
+          : 'text-ink-muted hover:bg-hover',
         isDragging ? 'opacity-40' : '',
-        isDragTarget ? 'border-l-2 border-l-slate-400' : '',
+        isDragTarget ? 'border-l-2 border-l-accent' : '',
       ].join(' ')}
     >
       <span className="truncate max-w-[16rem]">{filename}</span>
@@ -271,7 +271,7 @@ function TabPill(props: TabPillProps) {
           e.stopPropagation();
           onClose();
         }}
-        className="ml-0.5 p-0.5 rounded hover:bg-slate-200 text-slate-400 hover:text-slate-700 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity shrink-0"
+        className="ml-0.5 p-0.5 rounded hover:bg-hover text-ink-faint hover:text-ink opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity shrink-0"
       >
         <X size={11} />
       </button>
@@ -365,7 +365,7 @@ function ContextMenu({ state, openTabs, onClose, onCloseTab, onCloseMany }: Cont
       role="menu"
       aria-label="Tab actions"
       style={{ left: pos.left, top: pos.top }}
-      className="fixed z-50 min-w-[12rem] rounded border border-slate-200 bg-white shadow-lg py-1 text-xs"
+      className="fixed z-50 min-w-[12rem] rounded border border-line bg-white shadow-lg py-1 text-xs"
     >
       {items.map((item) => (
         <button
@@ -374,7 +374,7 @@ function ContextMenu({ state, openTabs, onClose, onCloseTab, onCloseMany }: Cont
           role="menuitem"
           disabled={item.disabled}
           onClick={item.onClick}
-          className="w-full text-left px-3 py-1.5 text-slate-700 hover:bg-slate-100 disabled:text-slate-400 disabled:hover:bg-transparent disabled:cursor-default"
+          className="w-full text-left px-3 py-1.5 text-ink hover:bg-hover disabled:text-ink-faint disabled:hover:bg-transparent disabled:cursor-default"
         >
           {item.label}
         </button>

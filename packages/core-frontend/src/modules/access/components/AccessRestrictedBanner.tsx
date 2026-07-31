@@ -17,12 +17,12 @@ export function AccessRestrictedBanner({ path, eligible }: Props) {
   return (
     <div
       role="status"
-      className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border-b border-slate-200 text-xs text-slate-700 shrink-0"
+      className="flex items-center gap-2 px-3 py-1.5 bg-sunken border-b border-line text-xs text-ink shrink-0"
     >
-      <Lock size={13} className="shrink-0 text-slate-500" />
+      <Lock size={13} className="shrink-0 text-ink-muted" />
       <span className="flex-1">
         You don't have permission to edit{' '}
-        <span className="font-mono text-slate-900">{path}</span>. Editing is restricted to{' '}
+        <span className="font-mono text-ink">{path}</span>. Editing is restricted to{' '}
         <span className="font-medium">{summary}</span>. Ask one of them, or have the access
         rules for this folder broadened.
       </span>

@@ -21,7 +21,7 @@ import type { PaneDef } from '../../../core/registry';
 
 const LAYOUT_ID = 'bevel-shell-v1';
 const SEPARATOR_CLASS =
-  'w-px bg-slate-100 hover:bg-bevel-deep/60 data-[dragging=true]:bg-bevel-deep transition-colors outline-none focus-visible:bg-bevel-deep cursor-col-resize';
+  'w-px bg-sunken hover:bg-bevel-deep/60 data-[dragging=true]:bg-bevel-deep transition-colors outline-none focus-visible:bg-bevel-deep cursor-col-resize';
 
 function getSafeLocalStorage(): Storage | undefined {
   if (typeof window === 'undefined') return undefined;
@@ -167,7 +167,7 @@ export function ResizableThreePaneLayout({
 
   return (
     <LayoutContext.Provider value={controller}>
-      <div className="flex flex-col h-full bg-white text-slate-900">
+      <div className="flex flex-col h-full bg-white text-ink">
         {header}
         <Group
           orientation="horizontal"

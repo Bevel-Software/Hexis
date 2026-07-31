@@ -571,10 +571,10 @@ export function FileViewer() {
         <EditorTabs />
         <div className="flex-1 flex items-center justify-center px-6">
           <div className="max-w-md text-center">
-            <h2 className="text-slate-900 text-base font-medium tracking-tight mb-2">
+            <h2 className="text-ink text-base font-medium tracking-tight mb-2">
               Open a file, or ask the process assistant a question.
             </h2>
-            <p className="text-slate-600 text-sm mb-6">
+            <p className="text-ink-muted text-sm mb-6">
               Pick anything from the file tree, or start with a suggestion.
             </p>
             {/* Suggested prompts seed the chat composer — only rendered when a
@@ -586,7 +586,7 @@ export function FileViewer() {
                     key={prompt}
                     type="button"
                     onClick={() => seedSuggestedPrompt(prompt)}
-                    className="text-left text-sm text-slate-700 bg-slate-100/80 hover:bg-slate-100 border border-slate-200 hover:border-slate-300 rounded-lg px-3 py-2 transition-colors duration-150"
+                    className="text-left text-sm text-ink bg-sunken hover:bg-hover border border-line hover:border-line-strong rounded-lg px-3 py-2 transition-colors duration-150"
                   >
                     {prompt}
                   </button>
@@ -615,12 +615,12 @@ export function FileViewer() {
       {openFilePath && <NodeOwnersBanner owners={access.owners} />}
       <EditorTabs />
       {/* Active-file metadata + sub-tabs (Content / History / Compare) */}
-      <div className="h-10 border-b border-slate-200 flex items-center px-3 gap-2 shrink-0">
-        <span className="text-sm font-medium tracking-tight text-slate-900 truncate shrink-0">
+      <div className="h-10 border-b border-line flex items-center px-3 gap-2 shrink-0">
+        <span className="text-sm font-medium tracking-tight text-ink truncate shrink-0">
           {fileName}
         </span>
         {parentDir && (
-          <span className="text-xs text-slate-600 truncate min-w-0">
+          <span className="text-xs text-ink-muted truncate min-w-0">
             {parentDir}
           </span>
         )}
@@ -667,13 +667,13 @@ export function FileViewer() {
           )}
           <button
             onClick={handleCopyLink}
-            className="ml-1 p-1 rounded hover:bg-slate-100 text-slate-600 hover:text-slate-900 transition-colors duration-150 relative"
+            className="ml-1 p-1 rounded hover:bg-hover text-ink-muted hover:text-ink transition-colors duration-150 relative"
             title={linkCopied ? 'Link copied' : 'Copy link to this file'}
             aria-label="Copy link to this file"
           >
             <Link2 size={14} />
             {linkCopied && (
-              <span className="absolute top-full right-0 mt-1 px-1.5 py-0.5 rounded bg-slate-900 text-[10px] text-emerald-300 whitespace-nowrap pointer-events-none">
+              <span className="absolute top-full right-0 mt-1 px-1.5 py-0.5 rounded bg-ink text-[10px] text-emerald-300 whitespace-nowrap pointer-events-none">
                 Link copied
               </span>
             )}
@@ -749,14 +749,14 @@ export function FileViewer() {
               session exists, so the two review UIs never compete (regardless
               of whether the multi-file panel is currently open). */}
           {isReviewingPending && !hasPendingReview && (
-        <div role="status" aria-live="polite" aria-atomic="true" className="flex items-center gap-2 px-3 py-2 bg-slate-100 border-b border-slate-300 shrink-0">
-          <span className="text-xs text-slate-700 flex-1">
+        <div role="status" aria-live="polite" aria-atomic="true" className="flex items-center gap-2 px-3 py-2 bg-sunken border-b border-line-strong shrink-0">
+          <span className="text-xs text-ink flex-1">
             Previewing agent's changes — accept to keep, reject to undo
           </span>
           <button
             onClick={handleReject}
             disabled={isSubmitting}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium text-ink-muted hover:text-ink hover:bg-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <XCircle size={13} />
             Reject
@@ -895,8 +895,8 @@ function TabButton({ active, onClick, icon, label }: TabButtonProps) {
       onClick={onClick}
       className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
         active
-          ? 'bg-slate-100 text-slate-900'
-          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/80'
+          ? 'bg-sunken text-ink'
+          : 'text-ink-muted hover:text-ink hover:bg-hover'
       }`}
     >
       {icon}

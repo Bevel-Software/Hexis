@@ -74,7 +74,7 @@ function CopyAnchorButton({ url }: { url: string }) {
       }}
       // `align-middle` keeps it on the heading baseline; hidden until the
       // heading is hovered (or the button is focused for keyboard users).
-      className="ml-1.5 inline-flex align-middle p-0.5 rounded text-slate-400 no-underline opacity-0 transition-opacity hover:bg-slate-100 hover:text-slate-700 focus:opacity-100 group-hover/anchor:opacity-100"
+      className="ml-1.5 inline-flex align-middle p-0.5 rounded text-ink-faint no-underline opacity-0 transition-opacity hover:bg-hover hover:text-ink focus:opacity-100 group-hover/anchor:opacity-100"
       title={copied ? 'Link copied' : 'Copy link to this heading'}
       aria-label="Copy link to this heading"
     >
@@ -129,11 +129,11 @@ function FrontmatterPanel({
   if (entries.length === 0) return null;
 
   return (
-    <div className="mb-4 rounded-lg border border-slate-300 bg-slate-100/70 divide-y divide-slate-200/60">
+    <div className="mb-4 rounded-lg border border-line-strong bg-sunken divide-y divide-line">
       {entries.map(([key, value]) => (
         <div key={key} className="flex items-start gap-3 px-3 py-2 text-xs">
-          <span className="shrink-0 text-slate-600 w-28">{labelFor(key)}</span>
-          <span className="text-slate-900 break-words">
+          <span className="shrink-0 text-ink-muted w-28">{labelFor(key)}</span>
+          <span className="text-ink break-words">
             {Array.isArray(value) ? (
               value.join(', ')
             ) : (

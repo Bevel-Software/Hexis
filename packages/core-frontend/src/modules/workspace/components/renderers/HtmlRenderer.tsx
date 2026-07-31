@@ -149,14 +149,14 @@ export function HtmlRenderer({
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-1 pb-3 border-b border-slate-200 mb-3 shrink-0">
+      <div className="flex items-center gap-1 pb-3 border-b border-line mb-3 shrink-0">
         {!readOnly && (
           <button
             onClick={switchToEdit}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
               mode === 'edit'
-                ? 'bg-slate-200 text-slate-900'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                ? 'bg-line-strong text-ink'
+                : 'text-ink-muted hover:text-ink hover:bg-hover'
             }`}
           >
             <Pencil size={12} />
@@ -167,8 +167,8 @@ export function HtmlRenderer({
           onClick={switchToPreview}
           className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
             mode === 'preview'
-              ? 'bg-slate-200 text-slate-900'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              ? 'bg-line-strong text-ink'
+              : 'text-ink-muted hover:text-ink hover:bg-hover'
           }`}
         >
           <Eye size={12} />
@@ -177,7 +177,7 @@ export function HtmlRenderer({
         {mode === 'preview' && (
           <button
             onClick={() => setReloadKey((k) => k + 1)}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium text-ink-muted hover:text-ink hover:bg-hover transition-colors"
             title="Reload preview"
           >
             <RotateCw size={12} />
@@ -185,7 +185,7 @@ export function HtmlRenderer({
           </button>
         )}
         {saveState === 'saving' && (
-          <span className="ml-2 text-xs text-slate-600">Saving…</span>
+          <span className="ml-2 text-xs text-ink-muted">Saving…</span>
         )}
         {saveState === 'error' && saveError && (
           <span className="ml-2 text-xs text-red-600 truncate" title={saveError}>
@@ -196,7 +196,7 @@ export function HtmlRenderer({
 
       {mode === 'edit' && !readOnly ? (
         <textarea
-          className="flex-1 w-full bg-transparent text-sm text-slate-700 font-mono whitespace-pre-wrap break-words leading-relaxed resize-none outline-none"
+          className="flex-1 w-full bg-transparent text-sm text-ink font-mono whitespace-pre-wrap break-words leading-relaxed resize-none outline-none"
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
@@ -219,10 +219,10 @@ export function HtmlRenderer({
           // iframe cannot exfiltrate, navigate, popup, or fetch.
           sandbox="allow-scripts"
           referrerPolicy="no-referrer"
-          className="flex-1 w-full bg-white rounded border border-slate-200"
+          className="flex-1 w-full bg-white rounded border border-line"
         />
       ) : (
-        <div className="flex items-center justify-center h-full text-slate-600 text-sm">
+        <div className="flex items-center justify-center h-full text-ink-muted text-sm">
           Loading preview…
         </div>
       )}

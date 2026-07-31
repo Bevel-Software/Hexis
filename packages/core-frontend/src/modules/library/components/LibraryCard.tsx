@@ -90,7 +90,7 @@ export function LibraryCard({
         type="button"
         aria-label={`Details for ${name}`}
         title="Details"
-        className={`absolute right-2.5 top-2.5 z-[3] flex h-6 w-6 items-center justify-center rounded-full border bg-white/85 font-serif text-xs font-bold italic transition-all hover:scale-110 hover:border-[#0d9488] hover:bg-white hover:text-[#0f766e] ${picked ? 'border-[#9dd8cd] text-slate-500' : 'border-slate-200 text-slate-400'}`}
+        className={`absolute right-2.5 top-2.5 z-[3] flex h-6 w-6 items-center justify-center rounded-full border bg-white/85 font-serif text-xs font-bold italic transition-all hover:scale-110 hover:border-[#0d9488] hover:bg-white hover:text-[#0f766e] ${picked ? 'border-[#9dd8cd] text-ink-muted' : 'border-line text-ink-faint'}`}
         onClick={(e) => {
           e.stopPropagation();
           onInfo();
@@ -99,8 +99,8 @@ export function LibraryCard({
         i
       </button>
       <div className="pr-6">
-        <div className="text-[14.5px] font-bold tracking-[.01em] text-slate-800">{name}</div>
-        <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] uppercase tracking-[.08em] text-slate-400">
+        <div className="text-[14.5px] font-bold tracking-[.01em] text-ink">{name}</div>
+        <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] uppercase tracking-[.08em] text-ink-faint">
           {kind === 'skill' ? 'Skill' : 'Integration'}
           {owned && (
             <span className="rounded-full border border-[#f0dda6] bg-[#fdf3d8] px-1.5 text-[9.5px] font-bold tracking-[.05em] text-[#92600a]">
@@ -109,12 +109,12 @@ export function LibraryCard({
           )}
         </div>
       </div>
-      <div className="relative flex-1 text-xs text-slate-500">{description}</div>
+      <div className="relative flex-1 text-xs text-ink-muted">{description}</div>
       {needsAttention && (
         <div
-          className={`flex items-center border-t pt-2.5 ${picked ? 'border-[#bde4dc]' : 'border-slate-200'}`}
+          className={`flex items-center border-t pt-2.5 ${picked ? 'border-[#bde4dc]' : 'border-line'}`}
         >
-          <span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500">
+          <span className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted">
             <StatusGem state={status.state} />
             {status.text}
           </span>

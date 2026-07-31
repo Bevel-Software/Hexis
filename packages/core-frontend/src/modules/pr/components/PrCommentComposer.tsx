@@ -63,7 +63,7 @@ export function PrCommentComposer({
         disabled={disabled || busy}
         placeholder={placeholder}
         rows={3}
-        className="w-full bg-white border border-slate-200 rounded px-2 py-1.5 text-xs text-slate-900 placeholder-slate-500 resize-none focus:outline-none focus:border-slate-300 disabled:opacity-60"
+        className="w-full bg-white border border-line rounded px-2 py-1.5 text-xs text-ink placeholder-ink-faint resize-none focus:outline-none focus:border-accent disabled:opacity-60"
       />
       {error && <div className="text-[10px] text-red-600">{error}</div>}
       <div className="flex items-center gap-1.5 justify-end">
@@ -72,7 +72,7 @@ export function PrCommentComposer({
             type="button"
             onClick={onCancel}
             disabled={busy}
-            className="px-2 py-1 text-xs rounded text-slate-600 hover:text-slate-900 hover:bg-slate-100 disabled:opacity-50"
+            className="px-2 py-1 text-xs rounded text-ink-muted hover:text-ink hover:bg-hover disabled:opacity-50"
           >
             Cancel
           </button>
@@ -81,7 +81,7 @@ export function PrCommentComposer({
           type="button"
           onClick={handleSubmit}
           disabled={!body.trim() || busy || disabled}
-          className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:bg-slate-100 disabled:text-slate-600 disabled:cursor-not-allowed"
+          className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:bg-sunken disabled:text-ink-muted disabled:cursor-not-allowed"
         >
           <Send size={11} />
           {busy ? 'Posting…' : submitLabel}

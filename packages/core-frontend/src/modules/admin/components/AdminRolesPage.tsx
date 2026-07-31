@@ -217,7 +217,7 @@ export function AdminRolesPage() {
   if (!isAdmin) {
     return (
       <PageShell title="Roles & Members" width="4xl">
-        <div className="text-sm text-slate-600">
+        <div className="text-sm text-ink-muted">
           Admins only. Ask an admin if you need a role or membership changed.
         </div>
       </PageShell>
@@ -231,7 +231,7 @@ export function AdminRolesPage() {
       actions={<NewRoleControl onCreate={createOptimistic} />}
     >
       {loading && roster.length === 0 ? (
-        <div className="flex items-center gap-2 p-2 text-sm text-slate-600">
+        <div className="flex items-center gap-2 p-2 text-sm text-ink-muted">
           <Loader2 size={14} className="animate-spin" /> Loading…
         </div>
       ) : error ? (
@@ -239,7 +239,7 @@ export function AdminRolesPage() {
           {error}
         </div>
       ) : visibleRoster.length === 0 ? (
-        <div className="p-2 text-sm text-slate-600">No roles yet.</div>
+        <div className="p-2 text-sm text-ink-muted">No roles yet.</div>
       ) : (
         <div className="flex flex-col gap-3">
           {visibleRoster.map((role) => (
@@ -296,7 +296,7 @@ function NewRoleControl({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="px-3 py-1.5 text-xs rounded border border-slate-200 hover:bg-slate-50 flex items-center gap-1.5"
+        className="px-3 py-1.5 text-xs rounded border border-line hover:bg-hover flex items-center gap-1.5"
       >
         <Plus size={12} /> New role
       </button>
@@ -315,7 +315,7 @@ function NewRoleControl({
             if (e.key === 'Escape') reset();
           }}
           placeholder="Role name"
-          className="text-xs px-2 py-1 border border-slate-200 rounded focus:outline-none focus:border-slate-300 w-48"
+          className="text-xs px-2 py-1 border border-line rounded focus:outline-none focus:border-accent w-48"
           aria-label="New role name"
         />
         <button
@@ -328,7 +328,7 @@ function NewRoleControl({
         <button
           type="button"
           onClick={reset}
-          className="p-1 rounded hover:bg-slate-100 text-slate-500"
+          className="p-1 rounded hover:bg-hover text-ink-muted"
           aria-label="Cancel"
         >
           <X size={14} />
@@ -593,7 +593,7 @@ function RoleCard({
   };
 
   return (
-    <div className="border border-slate-200 rounded-lg p-4">
+    <div className="border border-line rounded-lg p-4">
       <div className="flex items-start gap-3">
         <div className="flex-1 min-w-0">
           {renaming ? (
@@ -610,14 +610,14 @@ function RoleCard({
                   }
                 }}
                 disabled={busy}
-                className="text-base font-semibold px-2 py-1 border border-slate-200 rounded focus:outline-none focus:border-slate-300"
+                className="text-base font-semibold px-2 py-1 border border-line rounded focus:outline-none focus:border-accent"
                 aria-label="Role name"
               />
               <button
                 type="button"
                 onClick={submitRename}
                 disabled={busy}
-                className="p-1 rounded hover:bg-slate-100 text-slate-600 disabled:opacity-50"
+                className="p-1 rounded hover:bg-hover text-ink-muted disabled:opacity-50"
                 aria-label="Save name"
               >
                 {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
@@ -629,7 +629,7 @@ function RoleCard({
                   setRenaming(false);
                 }}
                 disabled={busy}
-                className="p-1 rounded hover:bg-slate-100 text-slate-500"
+                className="p-1 rounded hover:bg-hover text-ink-muted"
                 aria-label="Cancel rename"
               >
                 <X size={14} />
@@ -637,11 +637,11 @@ function RoleCard({
             </div>
           ) : (
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-semibold text-slate-900 truncate">
+              <h2 className="text-base font-semibold text-ink truncate">
                 {displayName}
               </h2>
               {role.isAdmin && (
-                <span className="text-[10px] uppercase tracking-wide text-slate-500 border border-slate-200 rounded px-1.5 py-0.5">
+                <span className="text-[10px] uppercase tracking-wide text-ink-muted border border-line rounded px-1.5 py-0.5">
                   Required
                 </span>
               )}
@@ -658,7 +658,7 @@ function RoleCard({
                 setRenaming(true);
               }}
               disabled={busy || renamePending}
-              className="p-1.5 rounded hover:bg-slate-100 text-slate-600 disabled:opacity-50"
+              className="p-1.5 rounded hover:bg-hover text-ink-muted disabled:opacity-50"
               title="Rename"
               aria-label="Rename role"
             >
@@ -683,16 +683,16 @@ function RoleCard({
       {/* Member chips — optimistically hides members pending removal. */}
       <div className="mt-3 flex flex-wrap gap-2">
         {visibleMembers.length === 0 ? (
-          <span className="text-xs text-slate-400">No members.</span>
+          <span className="text-xs text-ink-faint">No members.</span>
         ) : (
           visibleMembers.map((email) => {
             const isLastAdminMember = role.isAdmin && visibleMembers.length === 1;
             return (
               <span
                 key={email}
-                className="inline-flex items-center gap-1.5 pl-1 pr-1.5 py-1 bg-slate-50 border border-slate-200 rounded-full text-xs text-slate-700"
+                className="inline-flex items-center gap-1.5 pl-1 pr-1.5 py-1 bg-sunken border border-line rounded-full text-xs text-ink"
               >
-                <span className="w-5 h-5 rounded-full bg-slate-500 text-white text-[9px] font-semibold flex items-center justify-center">
+                <span className="w-5 h-5 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center">
                   {initials(email)}
                 </span>
                 <span className="truncate max-w-[14rem]">{email}</span>
@@ -700,7 +700,7 @@ function RoleCard({
                   type="button"
                   onClick={() => handleRemoveMember(email)}
                   disabled={busy || renamePending || isLastAdminMember}
-                  className="rounded-full p-0.5 text-slate-400 hover:text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:hover:text-slate-400 disabled:hover:bg-transparent"
+                  className="rounded-full p-0.5 text-ink-faint hover:text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:hover:text-ink-faint disabled:hover:bg-transparent"
                   title={
                     isLastAdminMember
                       ? 'Admin must keep at least one member'
@@ -735,12 +735,12 @@ function RoleCard({
             }}
             placeholder="Add member by email"
             disabled={busy || renamePending}
-            className="text-xs px-2 py-1 border border-slate-200 rounded focus:outline-none focus:border-slate-300 w-64"
+            className="text-xs px-2 py-1 border border-line rounded focus:outline-none focus:border-accent w-64"
             aria-label="Member email"
             autoComplete="off"
           />
           {showSuggest && suggestions.length > 0 && (
-            <ul className="absolute z-10 mt-1 w-72 max-h-56 overflow-auto bg-white border border-slate-200 rounded shadow-lg py-1">
+            <ul className="absolute z-10 mt-1 w-72 max-h-56 overflow-auto bg-white border border-line rounded shadow-lg py-1">
               {suggestions.map((p) => (
                 <li key={p.email}>
                   <button
@@ -750,13 +750,13 @@ function RoleCard({
                       e.preventDefault();
                       submitAddMember(p.email);
                     }}
-                    className="w-full text-left px-2 py-1.5 hover:bg-slate-50 flex items-center gap-2"
+                    className="w-full text-left px-2 py-1.5 hover:bg-hover flex items-center gap-2"
                   >
-                    <span className="w-5 h-5 rounded-full bg-slate-500 text-white text-[9px] font-semibold flex items-center justify-center shrink-0">
+                    <span className="w-5 h-5 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center shrink-0">
                       {initials(p.email)}
                     </span>
-                    <span className="flex-1 truncate text-xs text-slate-700">{p.name || p.email}</span>
-                    <span className="text-[10px] text-slate-400 truncate">{p.email}</span>
+                    <span className="flex-1 truncate text-xs text-ink">{p.name || p.email}</span>
+                    <span className="text-[10px] text-ink-faint truncate">{p.email}</span>
                   </button>
                 </li>
               ))}
@@ -767,7 +767,7 @@ function RoleCard({
           type="button"
           onClick={() => submitAddMember()}
           disabled={busy || renamePending}
-          className="px-3 py-1 text-xs rounded border border-slate-200 hover:bg-slate-50 disabled:opacity-50 flex items-center gap-1"
+          className="px-3 py-1 text-xs rounded border border-line hover:bg-hover disabled:opacity-50 flex items-center gap-1"
         >
           {busy && <Loader2 size={12} className="animate-spin" />}
           Add
@@ -791,12 +791,12 @@ function RoleCard({
         >
           {deleteTarget.role.referencedBy.length > 0 ? (
             <>
-              <p className="text-sm text-slate-700">
+              <p className="text-sm text-ink">
                 {deleteTarget.role.referencedBy.length} access rule
                 {deleteTarget.role.referencedBy.length === 1 ? '' : 's'} will be
                 ignored after deletion:
               </p>
-              <ul className="mt-2 max-h-40 overflow-auto text-xs text-slate-500 space-y-0.5">
+              <ul className="mt-2 max-h-40 overflow-auto text-xs text-ink-muted space-y-0.5">
                 {deleteTarget.role.referencedBy.map((ref, i) => (
                   <li key={`${ref.path}:${ref.verb}:${i}`} className="truncate">
                     {ref.verb} · {ref.path}
@@ -805,7 +805,7 @@ function RoleCard({
               </ul>
             </>
           ) : (
-            <p className="text-sm text-slate-700">This role has no access rules.</p>
+            <p className="text-sm text-ink">This role has no access rules.</p>
           )}
         </ConfirmDialog>
       )}
@@ -819,7 +819,7 @@ function RoleCard({
           onCancel={() => setSelfRemove(null)}
           onConfirm={confirmSelfRemove}
         >
-          <p className="text-sm text-slate-700">
+          <p className="text-sm text-ink">
             You are removing your own last Admin membership. You may lose access
             to admin tools.
           </p>
@@ -914,14 +914,14 @@ function ConfirmDialog({
         tabIndex={-1}
         className="bg-white rounded-lg shadow-lg w-full max-w-md p-5 outline-none"
       >
-        <h3 id={titleId} className="text-sm font-semibold text-slate-900">{title}</h3>
+        <h3 id={titleId} className="text-sm font-semibold text-ink">{title}</h3>
         <div className="mt-3">{children}</div>
         <div className="mt-5 flex justify-end gap-2">
           <button
             type="button"
             onClick={onCancel}
             disabled={busy}
-            className="px-3 py-1.5 text-xs rounded border border-slate-200 hover:bg-slate-50 disabled:opacity-50"
+            className="px-3 py-1.5 text-xs rounded border border-line hover:bg-hover disabled:opacity-50"
           >
             Cancel
           </button>

@@ -243,7 +243,7 @@ export function PrMergeButton({ detail, onMerged, compact = false }: Props) {
         onClick={handleClick}
         disabled={busy || hardBlocked || cannotBypass}
         title={tooltip}
-        className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded whitespace-nowrap shrink-0 disabled:bg-slate-100 disabled:text-slate-600 disabled:cursor-not-allowed ${buttonClass}`}
+        className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded whitespace-nowrap shrink-0 disabled:bg-sunken disabled:text-ink-muted disabled:cursor-not-allowed ${buttonClass}`}
       >
         <GitMerge size={12} />
         {busy

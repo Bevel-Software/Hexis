@@ -32,7 +32,7 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
 
   if (!objectUrl) {
     return (
-      <div className="flex items-center justify-center h-full text-slate-600 text-sm">
+      <div className="flex items-center justify-center h-full text-ink-muted text-sm">
         Loading image...
       </div>
     );

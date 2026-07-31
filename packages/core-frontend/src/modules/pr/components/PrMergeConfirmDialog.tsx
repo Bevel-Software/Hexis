@@ -38,12 +38,12 @@ export function PrMergeConfirmDialog({ warnings, base, busy, onConfirm, onCancel
       aria-modal="true"
       aria-labelledby="pr-merge-confirm-title"
     >
-      <div className="w-[28rem] max-w-[90vw] bg-white border border-slate-200 rounded-md shadow-xl">
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-200">
+      <div className="w-[28rem] max-w-[90vw] bg-white border border-line rounded-md shadow-xl">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-line">
           <AlertTriangle size={14} className="text-amber-600 shrink-0" />
           <h2
             id="pr-merge-confirm-title"
-            className="text-sm font-medium text-slate-900 flex-1"
+            className="text-sm font-medium text-ink flex-1"
           >
             Apply draft to {baseDisplay} without all confirmations?
           </h2>
@@ -52,17 +52,17 @@ export function PrMergeConfirmDialog({ warnings, base, busy, onConfirm, onCancel
             onClick={onCancel}
             disabled={busy}
             aria-label="Cancel"
-            className="p-1 rounded text-slate-600 hover:text-slate-900 hover:bg-slate-100 disabled:opacity-40"
+            className="p-1 rounded text-ink-muted hover:text-ink hover:bg-hover disabled:opacity-40"
           >
             <X size={14} aria-hidden="true" />
           </button>
         </div>
 
         <div className="px-4 py-3 space-y-3">
-          <p className="text-xs text-slate-700">
+          <p className="text-xs text-ink">
             This draft has not been approved by:
           </p>
-          <ul className="text-xs text-slate-700 space-y-1 max-h-48 overflow-y-auto bg-white/50 border border-slate-200 rounded px-3 py-2">
+          <ul className="text-xs text-ink space-y-1 max-h-48 overflow-y-auto bg-white/50 border border-line rounded px-3 py-2">
             {warnings.map((w, i) => (
               <li key={i} className="flex gap-1.5">
                 <span className="text-amber-600 shrink-0">•</span>
@@ -70,7 +70,7 @@ export function PrMergeConfirmDialog({ warnings, base, busy, onConfirm, onCancel
               </li>
             ))}
           </ul>
-          <label className="flex items-start gap-2 text-xs text-slate-700 cursor-pointer select-none">
+          <label className="flex items-start gap-2 text-xs text-ink cursor-pointer select-none">
             <input
               type="checkbox"
               checked={bypassAck}
@@ -80,19 +80,19 @@ export function PrMergeConfirmDialog({ warnings, base, busy, onConfirm, onCancel
             />
             <span>
               Bypass approval requirements and apply anyway.{' '}
-              <span className="text-slate-600">
+              <span className="text-ink-muted">
                 The bypassed list is recorded in the merge commit body.
               </span>
             </span>
           </label>
         </div>
 
-        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-slate-200">
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-line">
           <button
             type="button"
             onClick={onCancel}
             disabled={busy}
-            className="px-3 py-1 text-xs rounded text-slate-700 hover:bg-slate-100 disabled:opacity-40"
+            className="px-3 py-1 text-xs rounded text-ink hover:bg-hover disabled:opacity-40"
           >
             Cancel
           </button>
@@ -100,7 +100,7 @@ export function PrMergeConfirmDialog({ warnings, base, busy, onConfirm, onCancel
             type="button"
             onClick={onConfirm}
             disabled={busy || !bypassAck}
-            className="flex items-center gap-1.5 px-3 py-1 text-xs rounded bg-amber-600 hover:bg-amber-500 text-white disabled:bg-slate-100 disabled:text-slate-600 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 px-3 py-1 text-xs rounded bg-amber-600 hover:bg-amber-500 text-white disabled:bg-sunken disabled:text-ink-muted disabled:cursor-not-allowed"
           >
             <GitMerge size={12} aria-hidden="true" />
             {busy ? 'Applying…' : `Apply to ${baseDisplay} with bypass`}

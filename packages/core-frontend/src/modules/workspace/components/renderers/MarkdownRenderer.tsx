@@ -205,13 +205,13 @@ export function MarkdownRenderer({
   return (
     <div className="flex flex-col h-full">
       {showStatusStrip && (
-        <div className="flex items-center gap-2 pb-2 mb-2 border-b border-slate-200 shrink-0">
+        <div className="flex items-center gap-2 pb-2 mb-2 border-b border-line shrink-0">
           {saveState === 'saving' && (
             <span
               role="status"
               aria-live="polite"
               aria-atomic="true"
-              className="text-xs text-slate-600"
+              className="text-xs text-ink-muted"
             >
               Saving…
             </span>
@@ -239,7 +239,7 @@ export function MarkdownRenderer({
         />
       ) : (
         <textarea
-          className="flex-1 w-full bg-transparent text-sm text-slate-700 font-mono whitespace-pre-wrap break-words leading-relaxed resize-none outline-none"
+          className="flex-1 w-full bg-transparent text-sm text-ink font-mono whitespace-pre-wrap break-words leading-relaxed resize-none outline-none"
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
