@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { AuthUser } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import type { ISystemNoticeSink } from '../pending-commits.worker.js';
 import {
   N_RECOVERY,

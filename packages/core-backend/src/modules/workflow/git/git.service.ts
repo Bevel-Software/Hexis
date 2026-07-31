@@ -11,7 +11,7 @@ import type {
   PullRequestFile,
   ShareChangesRequest,
   WorkingTreeStatus,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';

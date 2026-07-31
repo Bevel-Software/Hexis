@@ -1,5 +1,5 @@
 import type { Router, RequestHandler } from 'express';
-import { DEFAULT_BRANCH, PROTECTED_BRANCHES } from '@bevel-software/shared';
+import { DEFAULT_BRANCH, PROTECTED_BRANCHES } from '@bevel-software/platform-shared';
 import type { IToolRegistry, JsonSchema } from '../../tool-registry/tool.contract.js';
 import { ToolError, type ToolContext, type ToolHandler } from '../../tool-helpers/tool.contract.js';
 import { toolDef, withBranchInput } from '../../tool-helpers/tool-def.js';

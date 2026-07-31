@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
-import type { AuthUser } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import type { AuthContextValue } from '../state/auth.context';
 import { loginWithPassword, fetchCurrentUser } from '../services/auth.api';
 import { getToken, setToken, clearToken } from '../../../lib/api';

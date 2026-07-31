@@ -10,9 +10,9 @@ Monorepo layout:
 
 | Path | What it is |
 | --- | --- |
-| `packages/shared` | `@bevel-software/shared` — shared types + pure domain utilities |
-| `packages/core-backend` | `@bevel-software/core-backend` — the core backend (ships `migrations/` + `kb-template/`) |
-| `packages/core-frontend` | `@bevel-software/core-frontend` — the core UI, published as raw TS/TSX source |
+| `packages/shared` | `@bevel-software/platform-shared` — shared types + pure domain utilities |
+| `packages/core-backend` | `@bevel-software/platform-core-backend` — the core backend (ships `migrations/` + `kb-template/`) |
+| `packages/core-frontend` | `@bevel-software/platform-core-frontend` — the core UI, published as raw TS/TSX source |
 | `apps/server` | standalone core backend shell |
 | `apps/web` | standalone core SPA shell (Vite) |
 

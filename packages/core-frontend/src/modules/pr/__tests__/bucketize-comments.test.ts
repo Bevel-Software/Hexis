@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { PrReviewComment } from '@bevel-software/shared';
+import type { PrReviewComment } from '@bevel-software/platform-shared';
 import { bucketizeComments } from '../utils/bucketize-comments';
 
 function comment(overrides: Partial<PrReviewComment>): PrReviewComment {

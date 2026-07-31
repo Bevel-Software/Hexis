@@ -1,4 +1,4 @@
-import type { PullRequestSummary } from '@bevel-software/shared';
+import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 import { GitApiError } from './git.api';
 

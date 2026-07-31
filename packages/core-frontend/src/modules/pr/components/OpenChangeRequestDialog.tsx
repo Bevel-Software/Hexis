@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   DEFAULT_BRANCH,
   protectedBranchDisplayName,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import { Dialog } from '../../../shared/components/Dialog';
 import { useGit } from '../../git/state/git.context';
 import { openChangeRequest } from '../services/pr-open.api';

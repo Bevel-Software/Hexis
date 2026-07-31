@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   branchAuthorLocalpart,
   isBranchAuthoredBy,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 
 describe('branchAuthorLocalpart', () => {
   it('extracts and lowercases the localpart', () => {

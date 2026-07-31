@@ -1,5 +1,5 @@
 import { Check, X, FileEdit, FilePlus2, FileX2, ArrowRightLeft } from 'lucide-react';
-import type { PendingChange } from '@bevel-software/shared';
+import type { PendingChange } from '@bevel-software/platform-shared';
 
 interface Props {
   change: PendingChange;

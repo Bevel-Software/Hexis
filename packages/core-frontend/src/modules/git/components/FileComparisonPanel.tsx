@@ -8,7 +8,7 @@ import {
   AlertTriangle,
   RefreshCw,
 } from 'lucide-react';
-import { protectedBranchDisplayName, isProtectedBranch, DEFAULT_BRANCH, type BranchInfo } from '@bevel-software/shared';
+import { protectedBranchDisplayName, isProtectedBranch, DEFAULT_BRANCH, type BranchInfo } from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
 import { UnifiedDiffView } from './UnifiedDiffView';
 import { friendlyGitError } from '../services/error-messages';

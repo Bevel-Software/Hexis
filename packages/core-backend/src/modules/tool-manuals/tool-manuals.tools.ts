@@ -1,5 +1,5 @@
 import type { Router, RequestHandler } from 'express';
-import { DEFAULT_BRANCH } from '@bevel-software/shared';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import type { IToolRegistry, UtcpTool } from '../tool-registry/tool.contract.js';
 import type { ToolContext } from '../tool-helpers/tool.contract.js';
 import { toolDef } from '../tool-helpers/tool-def.js';

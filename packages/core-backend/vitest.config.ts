@@ -48,7 +48,7 @@ const liveTestsEnabled = LIVE_API_KEY_VARS.some((v) => !!process.env[v]);
 export default defineConfig({
   resolve: {
     alias: {
-      '@bevel-software/shared': path.resolve(__dirname, '../shared/src'),
+      '@bevel-software/platform-shared': path.resolve(__dirname, '../shared/src'),
     },
   },
   test: {

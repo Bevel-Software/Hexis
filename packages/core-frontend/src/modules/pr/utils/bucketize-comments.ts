@@ -1,4 +1,4 @@
-import type { PrReviewComment } from '@bevel-software/shared';
+import type { PrReviewComment } from '@bevel-software/platform-shared';
 
 export interface ThreadBucket {
   root: PrReviewComment;

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
-import type { AuthUser } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { externalApiKeys, users } from '../database/schema.js';
 import {

@@ -19,7 +19,7 @@ import {
   Users,
 } from 'lucide-react';
 import { Icon } from '@iconify/react';
-import type { FileTreeEntry } from '@bevel-software/shared';
+import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
   validateFilename,
   KNOWLEDGE_BASE_DIR,
@@ -28,7 +28,7 @@ import {
   DATA_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { mergePendingIntoTree, findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
 import { snapshotEntries } from '../utils/readDroppedEntries';

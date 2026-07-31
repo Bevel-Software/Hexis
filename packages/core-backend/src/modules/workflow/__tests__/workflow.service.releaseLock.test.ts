@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type MockInstance } from 'vitest';
-import type { AuthUser, Change } from '@bevel-software/shared';
+import type { AuthUser, Change } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IReviewWorkflowService } from '../review-workflow/review-workflow.interface.js';

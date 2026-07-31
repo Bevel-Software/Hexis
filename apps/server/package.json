@@ -13,7 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@bevel-software/core-backend": "workspace:*"
+    "@bevel-software/platform-core-backend": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

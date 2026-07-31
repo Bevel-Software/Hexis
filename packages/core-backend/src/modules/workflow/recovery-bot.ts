@@ -17,7 +17,7 @@
  */
 
 import { eq } from 'drizzle-orm';
-import type { AuthUser } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
 

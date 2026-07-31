@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import type { WorkflowEvent } from '@bevel-software/shared';
+import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import { useEventBus, type EventHandler } from '../state/event-bus.context';
 
 /**

@@ -1,6 +1,6 @@
 import express from 'express';
-import type { AuthUser } from '@bevel-software/shared';
-import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
+import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import type {
   IAccessControl,
   GrantPrincipal,

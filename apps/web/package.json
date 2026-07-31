@@ -11,7 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@bevel-software/core-frontend": "workspace:*",
+    "@bevel-software/platform-core-frontend": "workspace:*",
     "@iconify-json/material-icon-theme": "^1.2.58",
     "@iconify/react": "^6.0.2",
     "react": "^19.2.4",

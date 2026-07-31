@@ -5,7 +5,7 @@ import type {
   BranchInfo,
   CommitAttribution,
   WorkingTreeStatus,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 
 // BranchSwitcher fetches `roles.yaml` access on mount to determine whether the
 // current user is an admin (the backend treats "can write roles.yaml" as the

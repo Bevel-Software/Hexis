@@ -17,7 +17,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
-import type { FileTreeEntry } from '@bevel-software/shared';
+import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import type { FileRendererProps } from '../modules/workspace/components/renderers/types';
 
 /** A route contributed to one of the shell's `<Routes>` blocks. */

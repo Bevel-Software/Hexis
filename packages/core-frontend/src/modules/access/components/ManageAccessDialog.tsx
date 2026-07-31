@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X, Lock, Loader2, ChevronDown, Check, Globe } from 'lucide-react';
-import type { FileTreeEntry } from '@bevel-software/shared';
+import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useAuth } from '../../auth/state/auth.context';
 import {

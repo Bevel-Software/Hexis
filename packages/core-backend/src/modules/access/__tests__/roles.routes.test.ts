@@ -12,7 +12,7 @@ import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { Database } from '../../database/connection.js';
-import type { FileTreeEntry } from '@bevel-software/shared';
+import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { createAccessRoutes } from '../access.routes.js';
 
 /**

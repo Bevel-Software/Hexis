@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react';
-import type { FileTreeEntry } from '@bevel-software/shared';
+import type { FileTreeEntry } from '@bevel-software/platform-shared';
 
 export interface UploadError {
   filename: string;

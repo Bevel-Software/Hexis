@@ -3,7 +3,7 @@ import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { useEffect, useState } from 'react';
-import type { BranchInfo, WorkingTreeStatus } from '@bevel-software/shared';
+import type { BranchInfo, WorkingTreeStatus } from '@bevel-software/platform-shared';
 
 // Mock the access API before importing the component tree — useFileAccess
 // fires a fetch in an effect on mount, and we don't want real network in tests.

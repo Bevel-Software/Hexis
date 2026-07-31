@@ -18,7 +18,7 @@
  * isolation). Firing is fire-and-forget; a listener that needs to write files
  * (id-repair) does so on its own, after the locks have already been released.
  */
-import type { AuthUser } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 
 export interface FilesChange {
   workspaceId: string;

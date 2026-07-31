@@ -1,6 +1,6 @@
 import express from 'express';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { DEFAULT_BRANCH } from '@bevel-software/shared';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import {
   InvalidSecretError,
   SecretNotFoundError,

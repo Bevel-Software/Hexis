@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, GitPullRequest, Check, X, Clock } from 'lucide-react';
-import type { PullRequestSummary } from '@bevel-software/shared';
+import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { listPullRequestsForMe } from '../services/pr.api';
 import { friendlyGitError } from '../services/error-messages';
 import { useGit } from '../state/git.context';

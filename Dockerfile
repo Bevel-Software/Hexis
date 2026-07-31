@@ -39,8 +39,8 @@ ENV PROTECTED_BRANCHES=${PROTECTED_BRANCHES}
 
 # Build shared + core-backend (tsc → dist), then the SPA (Vite). `pnpm --filter`
 # routes through pnpm's workspace binary links.
-RUN pnpm --filter @bevel-software/shared run build
-RUN pnpm --filter @bevel-software/core-backend run build
+RUN pnpm --filter @bevel-software/platform-shared run build
+RUN pnpm --filter @bevel-software/platform-core-backend run build
 RUN pnpm --filter @bevel-software/web run build
 
 # Stage 2: Production image

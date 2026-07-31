@@ -6,7 +6,7 @@ import path from 'node:path'
 const envDir = path.resolve(__dirname, '../..')
 
 export default defineConfig(({ mode }) => {
-  // The shared branch registry (`@bevel-software/shared` → git/protected.ts) reads these
+  // The shared branch registry (`@bevel-software/platform-shared` → git/protected.ts) reads these
   // off `process.env` so the SAME module works on the backend (Node runtime) and
   // in the browser (statically replaced here at build time). Load with an empty
   // prefix so both `.env` file entries and real build-time env vars are visible,

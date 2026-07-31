@@ -40,8 +40,8 @@ import type {
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
-} from '@bevel-software/shared';
-import { isProtectedBranch } from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
+import { isProtectedBranch } from '@bevel-software/platform-shared';
 import { and, eq } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';

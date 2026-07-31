@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { parse as parseYaml } from 'yaml';
-import { extractFrontmatter } from '@bevel-software/shared';
+import { extractFrontmatter } from '@bevel-software/platform-shared';
 import type { FileRendererProps, RendererSaveState } from './types';
 import { authFetch } from '../../../../lib/api';
 import { Markdown } from '../../../../shared/markdown/Markdown';

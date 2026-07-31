@@ -4,7 +4,7 @@ import {
   CoreConfig,
   createCoreServices,
   createCoreServer,
-} from '@bevel-software/core-backend';
+} from '@bevel-software/platform-core-backend';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 

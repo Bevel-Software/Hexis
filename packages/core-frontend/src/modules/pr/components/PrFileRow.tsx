@@ -1,5 +1,5 @@
 import { Check, FileEdit, FilePlus2, FileX2, ArrowRightLeft, FileQuestion, X } from 'lucide-react';
-import type { FileApprovalState, PullRequestFile } from '@bevel-software/shared';
+import type { FileApprovalState, PullRequestFile } from '@bevel-software/platform-shared';
 import { PrApprovalBadge } from './PrApprovalBadge';
 
 interface Props {

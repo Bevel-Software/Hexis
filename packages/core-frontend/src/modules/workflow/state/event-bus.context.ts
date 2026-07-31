@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react';
-import type { WorkflowEvent } from '@bevel-software/shared';
+import type { WorkflowEvent } from '@bevel-software/platform-shared';
 
 /**
  * Handler signature for an event-bus subscription. The handler runs

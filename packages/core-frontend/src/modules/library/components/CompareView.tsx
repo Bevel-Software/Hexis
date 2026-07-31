@@ -5,7 +5,7 @@ import {
   protectedBranchDisplayName,
   type PullRequestDetail,
   type PullRequestSummary,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';

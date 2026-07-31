@@ -44,7 +44,7 @@ import { promises as fs } from 'node:fs';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
 import { LockingFilesystem } from '../workflow/locking-filesystem.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import type { AuthUser, FileTreeEntry, IWorkspaceService, IWorkflowService } from '@bevel-software/shared';
+import type { AuthUser, FileTreeEntry, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../workflow/workflow.errors.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {

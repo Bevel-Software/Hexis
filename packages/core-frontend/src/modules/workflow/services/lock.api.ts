@@ -2,7 +2,7 @@ import type {
   AcquireLockResult,
   Change,
   FileLock,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 
 /**

@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import type { AuthUser } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
 import { GitService } from '../git.service.js';

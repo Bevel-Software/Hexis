@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { WorkflowEvent } from '@bevel-software/shared';
+import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import { WorkflowEventBus } from '../event-bus.js';
 
 /**

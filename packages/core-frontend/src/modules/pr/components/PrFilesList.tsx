@@ -1,4 +1,4 @@
-import type { FileApprovalState, PullRequestFile } from '@bevel-software/shared';
+import type { FileApprovalState, PullRequestFile } from '@bevel-software/platform-shared';
 import { PrFileRow } from './PrFileRow';
 
 interface Props {

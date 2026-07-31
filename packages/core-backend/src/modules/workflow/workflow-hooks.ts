@@ -1,4 +1,4 @@
-import type { ValidationReport } from '@bevel-software/shared';
+import type { ValidationReport } from '@bevel-software/platform-shared';
 
 /**
  * Workflow lifecycle hooks — the generic seam that replaced the

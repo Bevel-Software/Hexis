@@ -1,4 +1,4 @@
-import type { FileDiffPayload, ReviewSession } from '@bevel-software/shared';
+import type { FileDiffPayload, ReviewSession } from '@bevel-software/platform-shared';
 
 /**
  * Shape of the diff service. Backups live in a sibling root that mirrors the

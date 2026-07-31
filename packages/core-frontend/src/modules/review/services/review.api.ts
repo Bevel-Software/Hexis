@@ -1,4 +1,4 @@
-import type { FileDiffPayload, ReviewSession } from '@bevel-software/shared';
+import type { FileDiffPayload, ReviewSession } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 
 export class ReviewApiError extends Error {

@@ -1,5 +1,5 @@
 import { AlertTriangle } from 'lucide-react';
-import { isProtectedBranch, protectedBranchDisplayName, DEFAULT_BRANCH } from '@bevel-software/shared';
+import { isProtectedBranch, protectedBranchDisplayName, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
 
 export function ProtectedBranchBanner() {
@@ -39,4 +39,4 @@ export function ProtectedBranchBanner() {
 }
 
 /** Re-exported for call sites that already imported from this component. */
-export { isProtectedBranch as isProtectedBranchName } from '@bevel-software/shared';
+export { isProtectedBranch as isProtectedBranchName } from '@bevel-software/platform-shared';

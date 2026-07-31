@@ -20,7 +20,7 @@
  * these helpers; this module keeps the rule itself testable in isolation.
  */
 
-import type { Ontology } from '@bevel-software/shared';
+import type { Ontology } from '@bevel-software/platform-shared';
 
 /** Outcome of a write check against the session's touched-ontology set. */
 export type WriteDecision =

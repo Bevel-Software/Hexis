@@ -1,5 +1,5 @@
 import { Check, Clock } from 'lucide-react';
-import type { FileApprovalState } from '@bevel-software/shared';
+import type { FileApprovalState } from '@bevel-software/platform-shared';
 
 interface Props {
   state: FileApprovalState | undefined;

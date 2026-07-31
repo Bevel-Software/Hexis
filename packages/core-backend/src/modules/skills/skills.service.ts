@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { parseDocument } from 'yaml';
-import { DEFAULT_BRANCH, SKILLS_DIR } from '@bevel-software/shared';
+import { DEFAULT_BRANCH, SKILLS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { GitMerge } from 'lucide-react';
-import { isProtectedBranch } from '@bevel-software/shared';
+import { isProtectedBranch } from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
 import { useAutoUpdate } from '../state/auto-update.context';
 import { useCrCreationPort } from '../../../core/registry';

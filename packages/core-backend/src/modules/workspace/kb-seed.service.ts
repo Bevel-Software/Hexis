@@ -10,7 +10,7 @@ import {
   PIPELINES_DIR,
   SKILLS_DIR,
   TOOLS_DIR,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import type { IKbSeedService } from './kb-seed.interface.js';
 
 const execFileAsync = promisify(execFile);

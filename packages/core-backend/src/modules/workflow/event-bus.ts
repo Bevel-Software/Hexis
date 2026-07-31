@@ -1,7 +1,7 @@
 /**
  * In-process event bus that fans workflow state-change events out to
  * subscribed SSE sessions. The shape and scope rules live in
- * `@bevel-software/shared/workflow/events.ts` — this module is the runtime that
+ * `@bevel-software/platform-shared/workflow/events.ts` — this module is the runtime that
  * makes them deliverable.
  *
  * **What this owns**
@@ -41,7 +41,7 @@ import {
   isWorkspaceScoped,
   type WorkflowEvent,
   type WorkflowEventPayload,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 
 /**
  * Capacity of the global event ring buffer. A new event evicts the oldest

@@ -1,4 +1,4 @@
-import type { FileApprovalState } from '@bevel-software/shared';
+import type { FileApprovalState } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
 

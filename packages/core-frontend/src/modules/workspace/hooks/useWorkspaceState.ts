@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import type { FileTreeEntry } from '@bevel-software/shared';
+import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { useEventBus, canonicalizeWorkspaceId } from '../../workflow/state/event-bus.context';
 import type {
   OpenTab,

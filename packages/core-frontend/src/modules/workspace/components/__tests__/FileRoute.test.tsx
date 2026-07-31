@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { ReactNode } from 'react';
-import type { WorkingTreeStatus } from '@bevel-software/shared';
+import type { WorkingTreeStatus } from '@bevel-software/platform-shared';
 import { FileRoute } from '../FileRoute';
 import { WorkspaceApiError } from '../../services/workspace.api';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';

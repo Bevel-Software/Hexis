@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import type { PullRequestDetail, WorkflowEvent } from '@bevel-software/shared';
+import type { PullRequestDetail, WorkflowEvent } from '@bevel-software/platform-shared';
 import { PrMergeButton } from '../components/PrMergeButton';
 // The button doesn't seed chat directly — on a conflicted apply it calls the
 // change-request port's `resolveCrConflicts`. In the enterprise build a

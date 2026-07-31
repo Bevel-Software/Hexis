@@ -20,7 +20,7 @@
 import { and, eq, gt, lte } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { fileLocks } from '../database/schema.js';
-import type { AcquireLockResult, AuthUser, FileLock } from '@bevel-software/shared';
+import type { AcquireLockResult, AuthUser, FileLock } from '@bevel-software/platform-shared';
 import { WorkflowValidationError } from './workflow.errors.js';
 
 /**

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { PullRequestSummary } from '@bevel-software/shared';
+import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { fetchFileAccessBatch } from '../../access/api';
 import { listToolSecrets, type ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import {

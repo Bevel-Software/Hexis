@@ -1,5 +1,5 @@
 {
-  "name": "@bevel-software/shared",
+  "name": "@bevel-software/platform-shared",
   "version": "0.1.0",
   "description": "Shared types and pure domain utilities of the Bevel core platform (auth, workspace, git/workflow contracts, branch registry).",
   "type": "module",

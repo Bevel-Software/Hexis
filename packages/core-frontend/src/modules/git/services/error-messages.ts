@@ -1,4 +1,4 @@
-import { protectedBranchDisplayName } from '@bevel-software/shared';
+import { protectedBranchDisplayName } from '@bevel-software/platform-shared';
 import { GitApiError } from './git.api';
 
 /**

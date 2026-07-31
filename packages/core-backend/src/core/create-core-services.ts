@@ -1,6 +1,6 @@
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
-import type { AuthUser } from '@bevel-software/shared';
-import { DEFAULT_BRANCH, PROTECTED_BRANCHES, SKILLS_DIR, TOOLS_DIR } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PROTECTED_BRANCHES, SKILLS_DIR, TOOLS_DIR } from '@bevel-software/platform-shared';
 import { CoreConfig } from '../core-config.js';
 import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';

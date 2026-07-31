@@ -9,7 +9,7 @@ import type {
   PrReviewComment,
   PullRequestFile,
   PullRequestState,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import { changeRequests, prComments, prFileApprovals, prMergeLog } from '../../database/schema.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';

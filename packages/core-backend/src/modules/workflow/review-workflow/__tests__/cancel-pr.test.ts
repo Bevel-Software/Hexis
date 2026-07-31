@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { AuthUser } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import { ReviewWorkflowService } from '../review-workflow.service.js';
 import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';

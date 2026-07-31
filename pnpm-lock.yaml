@@ -32,7 +32,7 @@ importers:
 
   apps/server:
     dependencies:
-      '@bevel-software/core-backend':
+      '@bevel-software/platform-core-backend':
         specifier: workspace:*
         version: link:../../packages/core-backend
     devDependencies:
@@ -48,7 +48,7 @@ importers:
 
   apps/web:
     dependencies:
-      '@bevel-software/core-frontend':
+      '@bevel-software/platform-core-frontend':
         specifier: workspace:*
         version: link:../../packages/core-frontend
       '@iconify-json/material-icon-theme':
@@ -94,7 +94,7 @@ importers:
 
   packages/core-backend:
     dependencies:
-      '@bevel-software/shared':
+      '@bevel-software/platform-shared':
         specifier: workspace:*
         version: link:../shared
       '@mastra/core':
@@ -188,7 +188,7 @@ importers:
 
   packages/core-frontend:
     dependencies:
-      '@bevel-software/shared':
+      '@bevel-software/platform-shared':
         specifier: workspace:*
         version: link:../shared
       '@iconify/react':

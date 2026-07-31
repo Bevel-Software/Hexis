@@ -1,4 +1,4 @@
-import type { AuthUser } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace

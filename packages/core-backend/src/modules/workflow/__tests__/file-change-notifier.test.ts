@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { AuthUser } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import { FileChangeNotifier, type FilesChange } from '../file-change-notifier.js';
 
 const USER: AuthUser = { id: 'u1', email: 'alice@example.com', name: 'Alice' };

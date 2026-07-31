@@ -1,4 +1,4 @@
-import type { WorkspaceInfo, FileTreeEntry } from '@bevel-software/shared';
+import type { WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 
 /**

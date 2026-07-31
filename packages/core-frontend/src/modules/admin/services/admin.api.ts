@@ -3,7 +3,7 @@ import { authFetch } from '../../../lib/api';
 /**
  * Single source of types for the admin inbox UI. Mirrors the backend shape in
  * `feedback.interface.ts`. Re-declared here (rather than imported from
- * `@bevel-software/shared`) because the admin feature is small and lives entirely on
+ * `@bevel-software/platform-shared`) because the admin feature is small and lives entirely on
  * the frontend + a couple of backend files — putting types in `shared` would
  * pull a build-graph dependency for two interfaces.
  */

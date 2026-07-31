@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react';
-import type { AuthUser } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 
 export interface AuthContextValue {
   user: AuthUser | null;

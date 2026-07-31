@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { MessageSquarePlus } from 'lucide-react';
-import type { PrReviewComment, PullRequestFile } from '@bevel-software/shared';
+import type { PrReviewComment, PullRequestFile } from '@bevel-software/platform-shared';
 import { parsePatch } from '../utils/parsePatch';
 import { bucketizeComments, type ThreadBucket } from '../utils/bucketize-comments';
 import { PrCommentThread } from './PrCommentThread';

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render } from '@testing-library/react';
-import type { FileApprovalState } from '@bevel-software/shared';
+import type { FileApprovalState } from '@bevel-software/platform-shared';
 import { PrApprovalBadge } from '../components/PrApprovalBadge';
 
 const ALICE = { name: 'Alice', email: 'alice@bevel.software' };

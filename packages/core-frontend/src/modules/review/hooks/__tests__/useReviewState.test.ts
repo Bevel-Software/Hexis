@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import type { PendingChange, ReviewSession } from '@bevel-software/shared';
+import type { PendingChange, ReviewSession } from '@bevel-software/platform-shared';
 import { useReviewState } from '../useReviewState';
 import { fetchReviewSession, rejectReviewChange } from '../../services/review.api';
 

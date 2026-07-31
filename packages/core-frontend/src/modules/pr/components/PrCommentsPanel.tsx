@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
-import type { PullRequestDetail } from '@bevel-software/shared';
+import type { PullRequestDetail } from '@bevel-software/platform-shared';
 import {
   deletePrComment,
   editPrComment,

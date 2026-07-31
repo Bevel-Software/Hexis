@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import type { BranchInfo } from '@bevel-software/shared';
+import type { BranchInfo } from '@bevel-software/platform-shared';
 import { useGitState } from '../useGitState';
 import {
   deleteBranch as apiDeleteBranch,

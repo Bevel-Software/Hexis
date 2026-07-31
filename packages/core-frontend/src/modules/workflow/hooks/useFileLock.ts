@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Change, FileLock } from '@bevel-software/shared';
+import type { Change, FileLock } from '@bevel-software/platform-shared';
 import {
   acquireLock as acquireLockApi,
   checkpointLockedFile,

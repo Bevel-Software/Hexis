@@ -1,7 +1,7 @@
 /**
  * Workflow vocabulary — the abstraction our app speaks instead of raw git/gh.
  *
- * Most types here alias existing engineering types in `@bevel-software/shared/git/*` so
+ * Most types here alias existing engineering types in `@bevel-software/platform-shared/git/*` so
  * the workflow layer is a single source of truth without duplicating the
  * payload shapes our backend already produces. The point of the aliases is the
  * *name*: callers depend on `Change` / `ChangeRequest` / `Branch`, never on

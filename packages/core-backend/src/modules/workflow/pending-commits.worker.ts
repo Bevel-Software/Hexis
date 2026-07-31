@@ -18,7 +18,7 @@
  * sequential and the simpler shape catches more potential bugs.
  */
 
-import type { AuthUser } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import type {
   PendingCommit,
   PendingCommitsService,

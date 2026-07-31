@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import type { BranchInfo, CommitAttribution, WorkingTreeStatus } from '@bevel-software/shared';
+import type { BranchInfo, CommitAttribution, WorkingTreeStatus } from '@bevel-software/platform-shared';
 
 // Mock the access API before importing the component tree — useFileAccess
 // fires a fetch in an effect on mount, and we don't want real network in tests.

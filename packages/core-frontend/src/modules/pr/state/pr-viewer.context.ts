@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react';
-import type { PullRequestDetail } from '@bevel-software/shared';
+import type { PullRequestDetail } from '@bevel-software/platform-shared';
 
 export interface PrViewerContextValue {
   /** Currently-open PR number, or null when the viewer is closed. */

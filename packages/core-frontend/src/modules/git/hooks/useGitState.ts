@@ -3,7 +3,7 @@ import type {
   BranchInfo,
   CommitAttribution,
   WorkingTreeStatus,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import type { GitContextValue } from '../state/git.context';
 import {
   createBranch as apiCreateBranch,

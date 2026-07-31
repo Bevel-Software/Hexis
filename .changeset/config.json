@@ -6,9 +6,9 @@
   "baseBranch": "main",
   "fixed": [
     [
-      "@bevel-software/shared",
-      "@bevel-software/core-backend",
-      "@bevel-software/core-frontend"
+      "@bevel-software/platform-shared",
+      "@bevel-software/platform-core-backend",
+      "@bevel-software/platform-core-frontend"
     ]
   ],
   "updateInternalDependencies": "patch",

@@ -1,13 +1,13 @@
 import { BranchNameError, WorkflowValidationError } from '../workflow.errors.js';
 
-// Single source of truth for the protected-branch list lives in `@bevel-software/shared` so
+// Single source of truth for the protected-branch list lives in `@bevel-software/platform-shared` so
 // the backend guard and the frontend banner/disabling logic can't drift apart.
-export { PROTECTED_BRANCHES, isProtectedBranch } from '@bevel-software/shared';
-// Authorship inference lives in `@bevel-software/shared` for the same reason — the
+export { PROTECTED_BRANCHES, isProtectedBranch } from '@bevel-software/platform-shared';
+// Authorship inference lives in `@bevel-software/platform-shared` for the same reason — the
 // picker's `canDelete` rule and the backend authorisation check on
 // `deleteBranch` must agree on every edge case (uppercase email, dotted
 // localpart, etc.).
-export { branchAuthorLocalpart, isBranchAuthoredBy } from '@bevel-software/shared';
+export { branchAuthorLocalpart, isBranchAuthoredBy } from '@bevel-software/platform-shared';
 
 const VALID_BRANCH_REGEX = /^[A-Za-z0-9][A-Za-z0-9/_\-.]*$/;
 

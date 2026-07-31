@@ -3,7 +3,7 @@ import type {
   BranchInfo,
   CommitAttribution,
   WorkingTreeStatus,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 
 export interface GitContextValue {
   status: WorkingTreeStatus | null;

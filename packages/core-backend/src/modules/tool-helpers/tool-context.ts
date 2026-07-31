@@ -1,5 +1,5 @@
 import { LocalFilesystem } from '@mastra/core/workspace';
-import type { IWorkflowService } from '@bevel-software/shared';
+import type { IWorkflowService } from '@bevel-software/platform-shared';
 import { LockingFilesystem } from '../workflow/locking-filesystem.js';
 import { ReadOnlyFilesystem } from '../workflow/read-only-filesystem.js';
 import { makeRolesYamlWriteValidator } from '../access/roles-yaml-guard.js';

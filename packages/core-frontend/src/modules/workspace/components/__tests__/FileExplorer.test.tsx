@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import type { FileTreeEntry } from '@bevel-software/shared';
+import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { FileExplorer } from '../FileExplorer';
 import { WorkspaceContext, type UploadError, type WorkspaceContextValue } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';

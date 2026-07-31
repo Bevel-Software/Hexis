@@ -1,5 +1,5 @@
 import { FileQuestion } from 'lucide-react';
-import type { FileDiffPayload } from '@bevel-software/shared';
+import type { FileDiffPayload } from '@bevel-software/platform-shared';
 
 export function BinaryChangePlaceholder({ payload }: { payload: FileDiffPayload }) {
   return (

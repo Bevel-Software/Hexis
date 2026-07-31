@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
-import type { BranchInfo, CommitAttribution, FileTreeEntry, WorkingTreeStatus } from '@bevel-software/shared';
+import type { BranchInfo, CommitAttribution, FileTreeEntry, WorkingTreeStatus } from '@bevel-software/platform-shared';
 import { useAutoPullUpdates } from '../hooks/useAutoPullUpdates';
 import type { GitContextValue } from '../state/git.context';
 import type { WorkspaceContextValue } from '../../workspace/state/workspace.context';

@@ -1,5 +1,5 @@
 /**
- * @bevel-software/core-backend — the open-source core of the Bevel platform:
+ * @bevel-software/platform-core-backend — the open-source core of the Bevel platform:
  * git-backed knowledge workspace, workflow (branches / change requests /
  * locks / SSE), skills, tool manuals + registry + auth, secrets vault, access
  * control, diff/backup ledger, code-mode and the remote MCP surface.

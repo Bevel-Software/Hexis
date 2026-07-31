@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { addCollection } from '@iconify/react'
 import materialIconTheme from '@iconify-json/material-icon-theme/icons.json'
 import './index.css'
-import { CoreAppShell, makeRegistry } from '@bevel-software/core-frontend'
+import { CoreAppShell, makeRegistry } from '@bevel-software/platform-core-frontend'
 
 addCollection(materialIconTheme)
 

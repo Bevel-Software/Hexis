@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { PullRequestDetail } from '@bevel-software/shared';
+import type { PullRequestDetail } from '@bevel-software/platform-shared';
 import type { PrViewerContextValue } from '../state/pr-viewer.context';
 import { fetchPrDetail } from '../services/pr-detail.api';
 import { GitApiError } from '../../git/services/git.api';

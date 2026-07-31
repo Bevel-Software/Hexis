@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import type { BranchInfo, FileTreeEntry, WorkingTreeStatus } from '@bevel-software/shared';
+import type { BranchInfo, FileTreeEntry, WorkingTreeStatus } from '@bevel-software/platform-shared';
 import { PullNeededBanner } from '../components/PullNeededBanner';
 import { GitContext, type GitContextValue } from '../state/git.context';
 import {

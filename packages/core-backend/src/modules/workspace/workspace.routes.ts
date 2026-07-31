@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import express from 'express';
-import type { AuthUser, IWorkflowService } from '@bevel-software/shared';
+import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import {
   AGENTS_DIR,
   DATA_DIR,
@@ -11,7 +11,7 @@ import {
   PIPELINES_DIR,
   SKILLS_DIR,
   TOOLS_DIR,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import { branchForWorkspaceId, FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import type { WorkspaceService } from './workspace.service.js';
 import type { AuthService } from '../auth/auth.service.js';

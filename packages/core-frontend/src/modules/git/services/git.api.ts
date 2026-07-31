@@ -2,7 +2,7 @@ import type {
   BranchInfo,
   CommitAttribution,
   WorkingTreeStatus,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 
 /**

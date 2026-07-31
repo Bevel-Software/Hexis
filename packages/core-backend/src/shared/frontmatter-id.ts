@@ -3,10 +3,10 @@
  * skills, and node id-links all resolve identity the SAME way: a frontmatter `id`,
  * then `name`, then a caller-supplied fallback (folder/filename). One grammar
  * (lowercase `snake_case`) and one dedup rule (refuse duplicates) across all three.
- * The `---` splitter itself lives in `@bevel-software/shared` (used by the
+ * The `---` splitter itself lives in `@bevel-software/platform-shared` (used by the
  * frontend too); re-exported here so backend callers keep one import site.
  */
-import { extractFrontmatter } from '@bevel-software/shared';
+import { extractFrontmatter } from '@bevel-software/platform-shared';
 
 export { extractFrontmatter };
 

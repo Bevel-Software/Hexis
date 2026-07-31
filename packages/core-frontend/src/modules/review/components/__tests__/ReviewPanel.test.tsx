@@ -3,7 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import type { ReactNode } from 'react';
-import type { ReviewSession } from '@bevel-software/shared';
+import type { ReviewSession } from '@bevel-software/platform-shared';
 import { ReviewPanel } from '../ReviewPanel';
 import { ReviewContext, type ReviewContextValue } from '../../state/review.context';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../workspace/state/workspace.context';

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { FileApprovalEntry, FileApprovalState, PullRequestState } from '@bevel-software/shared';
+import type { FileApprovalEntry, FileApprovalState, PullRequestState } from '@bevel-software/platform-shared';
 import { ReviewWorkflowService } from '../review-workflow.service.js';
 
 function makeService(): ReviewWorkflowService {

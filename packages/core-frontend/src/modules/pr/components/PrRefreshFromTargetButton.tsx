@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
-import { protectedBranchDisplayName, type PullRequestDetail } from '@bevel-software/shared';
+import { protectedBranchDisplayName, type PullRequestDetail } from '@bevel-software/platform-shared';
 import { refreshChangeRequestFromTarget } from '../services/pr-merge.api';
 import { GitApiError } from '../../git/services/git.api';
 import { useCrCreationPort } from '../../../core/registry';

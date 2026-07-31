@@ -32,7 +32,7 @@
 // `process` is supplied by Node at runtime on the backend and statically
 // replaced by Vite at build time on the frontend (vite.config.ts `define`).
 // Declared locally — narrowed to just `env` — so this shared module typechecks
-// without pulling @types/node into the @bevel-software/shared package. On the backend
+// without pulling @types/node into the @bevel-software/platform-shared package. On the backend
 // build (which has @types/node) this module-scoped declaration simply shadows
 // the global `process`, which is harmless here.
 declare const process: { env: Record<string, string | undefined> };

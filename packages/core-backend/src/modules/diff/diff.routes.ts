@@ -1,5 +1,5 @@
 import express from 'express';
-import type { AuthUser, IWorkflowService } from '@bevel-software/shared';
+import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import type { IDiffService } from './diff.interface.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';

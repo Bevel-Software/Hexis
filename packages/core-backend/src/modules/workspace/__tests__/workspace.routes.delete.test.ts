@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import type { IWorkflowService } from '@bevel-software/shared';
+import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';

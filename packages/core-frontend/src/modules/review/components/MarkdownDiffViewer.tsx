@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkFrontmatter from 'remark-frontmatter';
-import type { FileDiffPayload } from '@bevel-software/shared';
+import type { FileDiffPayload } from '@bevel-software/platform-shared';
 import { computeDiff, type DiffLine } from '../../workspace/utils/diff';
 import { parseFrontmatter, labelFor, type FrontmatterData } from '../../workspace/utils/frontmatter';
 

@@ -6,7 +6,7 @@ import {
   SKILLS_DIR,
   TOOLS_DIR,
   type FileTreeEntry,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import type { PendingEntry } from '../state/workspace.context';
 
 export const KB_ROOT_DIRS = new Set([

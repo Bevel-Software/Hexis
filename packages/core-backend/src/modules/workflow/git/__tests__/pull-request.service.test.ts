@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { PullRequestSummary } from '@bevel-software/shared';
+import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { PullRequestService } from '../pull-request.service.js';
 import type { GitService } from '../git.service.js';
 import type { Database } from '../../../database/connection.js';

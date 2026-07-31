@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { WorkflowEvent } from '@bevel-software/shared';
+import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import { EventBusContext, type EventBusContextValue, type EventHandler } from './event-bus.context';
 
 /** Storage key for the per-tab sessionId. SessionStorage so it survives a

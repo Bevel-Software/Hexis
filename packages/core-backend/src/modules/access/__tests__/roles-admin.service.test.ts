@@ -6,12 +6,12 @@ import os from 'node:os';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { FileTreeEntry, WorkflowEventPayload } from '@bevel-software/shared';
+import type { FileTreeEntry, WorkflowEventPayload } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../access-control.service.js';
 import { RolesAdminService, rewriteRoleTokensInText, findRoleRefsInText } from '../roles-admin.service.js';
-import type { AuthUser } from '@bevel-software/shared';
-import { DEFAULT_BRANCH } from '@bevel-software/shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 
 const KB = 'knowledge-base';
 const WS = workspaceIdForBranch(DEFAULT_BRANCH);

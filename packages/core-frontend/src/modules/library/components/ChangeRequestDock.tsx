@@ -1,4 +1,4 @@
-import type { PullRequestSummary } from '@bevel-software/shared';
+import type { PullRequestSummary } from '@bevel-software/platform-shared';
 
 interface ChangeRequestDockProps {
   crs: PullRequestSummary[];

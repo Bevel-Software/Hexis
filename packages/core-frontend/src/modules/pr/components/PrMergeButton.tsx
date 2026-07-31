@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { GitMerge } from 'lucide-react';
-import { protectedBranchDisplayName, type PullRequestDetail } from '@bevel-software/shared';
+import { protectedBranchDisplayName, type PullRequestDetail } from '@bevel-software/platform-shared';
 import { mergePullRequest } from '../services/pr-merge.api';
 import { fetchPrDetail } from '../services/pr-detail.api';
 import { PrMergeConfirmDialog } from './PrMergeConfirmDialog';

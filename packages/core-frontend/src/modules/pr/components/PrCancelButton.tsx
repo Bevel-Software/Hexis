@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { XCircle } from 'lucide-react';
-import type { PullRequestDetail } from '@bevel-software/shared';
+import type { PullRequestDetail } from '@bevel-software/platform-shared';
 import { cancelPullRequest } from '../services/pr-cancel.api';
 import { friendlyGitError } from '../../git/services/error-messages';
 import { PrCancelConfirmDialog } from './PrCancelConfirmDialog';

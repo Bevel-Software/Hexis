@@ -24,7 +24,7 @@ import type {
   IWorkflowService,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import type { AuthService } from '../auth/auth.service.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../workspace/workspace.service.js';

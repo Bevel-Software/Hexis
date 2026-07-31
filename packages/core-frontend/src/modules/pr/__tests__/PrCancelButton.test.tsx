@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import type { PullRequestDetail } from '@bevel-software/shared';
+import type { PullRequestDetail } from '@bevel-software/platform-shared';
 
 // API mock — replaces the network call. Each test resets and configures.
 vi.mock('../services/pr-cancel.api', () => ({

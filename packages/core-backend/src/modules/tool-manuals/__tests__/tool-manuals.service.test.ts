@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_BRANCH } from '@bevel-software/shared';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { ToolManualService } from '../tool-manuals.service.js';
 import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';

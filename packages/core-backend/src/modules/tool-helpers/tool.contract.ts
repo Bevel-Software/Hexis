@@ -1,4 +1,4 @@
-import type { AuthUser, IWorkflowService } from '@bevel-software/shared';
+import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import type { LocalFilesystem } from '@mastra/core/workspace';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';

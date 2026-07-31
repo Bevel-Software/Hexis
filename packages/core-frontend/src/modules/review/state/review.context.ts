@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react';
-import type { FileDiffPayload, ReviewSession } from '@bevel-software/shared';
+import type { FileDiffPayload, ReviewSession } from '@bevel-software/platform-shared';
 
 export interface ReviewContextValue {
   session: ReviewSession | null;

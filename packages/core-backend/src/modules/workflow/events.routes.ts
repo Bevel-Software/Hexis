@@ -34,7 +34,7 @@
 
 import type { Request, Response } from 'express';
 import express from 'express';
-import type { WorkflowEvent } from '@bevel-software/shared';
+import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import type { WorkflowEventBus } from './event-bus.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 

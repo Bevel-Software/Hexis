@@ -1,9 +1,9 @@
-import { KNOWLEDGE_BASE_DIR, ONTOLOGY_MARKERS, type Ontology } from '@bevel-software/shared';
+import { KNOWLEDGE_BASE_DIR, ONTOLOGY_MARKERS, type Ontology } from '@bevel-software/platform-shared';
 
 /**
  * Resolve which named ontology a KB path belongs to — the backend-side
  * implementation of the layout contract whose constants/types live in
- * `@bevel-software/shared` (`kb-layout.ts`). It is backend-only and consumed by
+ * `@bevel-software/platform-shared` (`kb-layout.ts`). It is backend-only and consumed by
  * more than one domain module (the `workspace` read gate and the `workflow`
  * session-ontology service), so it lives in `backend/src/shared` rather than in
  * any single module — importable by both modules without crossing a module's

@@ -1,5 +1,5 @@
 {
-  "name": "@bevel-software/core-frontend",
+  "name": "@bevel-software/platform-core-frontend",
   "version": "0.1.0",
   "description": "Open-source core UI of the Bevel platform (raw TS/TSX source): workspace explorer/viewer, branches & change requests, Library, secrets, tools, access control.",
   "type": "module",
@@ -25,7 +25,7 @@
     "tailwindcss": "^4.0.0"
   },
   "dependencies": {
-    "@bevel-software/shared": "workspace:*",
+    "@bevel-software/platform-shared": "workspace:*",
     "@iconify/react": "^6.0.2",
     "@tailwindcss/typography": "^0.5.19",
     "@utcp/sdk": "^1.1.1",

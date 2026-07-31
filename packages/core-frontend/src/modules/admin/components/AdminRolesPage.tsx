@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Check, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
-import { DEFAULT_BRANCH } from '@bevel-software/shared';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { useAdmin } from '../state/admin.context';
 import {
   addMember,

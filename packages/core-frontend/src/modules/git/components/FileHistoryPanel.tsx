@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { History, Undo2, AlertTriangle, Loader2 } from 'lucide-react';
-import type { CommitAttribution } from '@bevel-software/shared';
+import type { CommitAttribution } from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
 import { UnifiedDiffView } from './UnifiedDiffView';
 import { friendlyGitError } from '../services/error-messages';

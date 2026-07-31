@@ -3,7 +3,7 @@ import type {
   AuthUser,
   ChangeInput,
   PostChangeRequestCommentInput,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IReviewWorkflowService } from '../review-workflow/review-workflow.interface.js';

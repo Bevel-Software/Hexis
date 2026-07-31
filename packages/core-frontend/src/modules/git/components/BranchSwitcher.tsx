@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ChevronDown, GitBranch, Plus, Lock, Check, GitPullRequest, Trash2, Loader2 } from 'lucide-react';
-import { protectedBranchDisplayName, branchAuthorLocalpart, isBranchAuthoredBy, DEFAULT_BRANCH } from '@bevel-software/shared';
+import { protectedBranchDisplayName, branchAuthorLocalpart, isBranchAuthoredBy, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
 import { parseGitError, type GitErrorInfo } from '../services/error-messages';
 import { useAuth } from '../../auth/state/auth.context';

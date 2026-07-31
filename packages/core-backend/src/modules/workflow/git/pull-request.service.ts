@@ -7,7 +7,7 @@ import type {
   PullRequestFile,
   PullRequestState,
   PullRequestSummary,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import { changeRequests } from '../../database/schema.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';

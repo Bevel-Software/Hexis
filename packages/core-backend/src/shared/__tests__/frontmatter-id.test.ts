@@ -6,7 +6,7 @@ import {
   isValidId,
   dedupeById,
 } from '../frontmatter-id.js';
-import { setFrontmatterField } from '@bevel-software/shared';
+import { setFrontmatterField } from '@bevel-software/platform-shared';
 
 describe('extractFrontmatter', () => {
   test('splits a leading --- block from the body', () => {

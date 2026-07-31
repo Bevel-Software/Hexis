@@ -2,7 +2,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import type { IWorkflowService } from '@bevel-software/shared';
+import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access/creator-access.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';

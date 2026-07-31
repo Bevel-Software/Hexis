@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Plus, X } from 'lucide-react';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { extractFrontmatter } from '@bevel-software/shared';
+import { extractFrontmatter } from '@bevel-software/platform-shared';
 
 /**
  * A friendly form over a `.tool` manual. THE TOOL IS THE FRONTMATTER: everything

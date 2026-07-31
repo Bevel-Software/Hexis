@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { FileDiffPayload, ReviewSession } from '@bevel-software/shared';
+import type { FileDiffPayload, ReviewSession } from '@bevel-software/platform-shared';
 import type { ReviewContextValue } from '../state/review.context';
 import {
   acceptReviewChange,

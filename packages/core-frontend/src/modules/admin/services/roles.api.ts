@@ -3,7 +3,7 @@ import { authFetch } from '../../../lib/api';
 /**
  * Typed client for the admin Roles & Members surface. Mirrors the backend shape
  * in `roles-admin.service.ts`. Re-declared here (rather than imported from
- * `@bevel-software/shared`) to match the rest of the small admin feature, which
+ * `@bevel-software/platform-shared`) to match the rest of the small admin feature, which
  * keeps its types frontend-local.
  */
 export interface RoleRosterEntry {

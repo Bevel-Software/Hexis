@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Trash2, Eye, ChevronDown, X } from 'lucide-react';
-import type { PendingChange } from '@bevel-software/shared';
+import type { PendingChange } from '@bevel-software/platform-shared';
 import { useReview } from '../state/review.context';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useFileNav } from '../../workspace/routing/kb-routes';

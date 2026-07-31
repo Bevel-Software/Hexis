@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AlertTriangle, GitMerge, X } from 'lucide-react';
-import { protectedBranchDisplayName } from '@bevel-software/shared';
+import { protectedBranchDisplayName } from '@bevel-software/platform-shared';
 
 interface Props {
   /** Soft warnings from the gate — one line per pending approval. */

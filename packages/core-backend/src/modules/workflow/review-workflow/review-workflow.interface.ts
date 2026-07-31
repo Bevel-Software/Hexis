@@ -7,7 +7,7 @@ import type {
   PrReviewComment,
   PullRequestFile,
   PullRequestState,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 
 export interface MergeGateInput {
   prNumber: number;

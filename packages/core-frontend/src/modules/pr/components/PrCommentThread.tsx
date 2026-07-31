@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Pencil, Trash2, MessageSquare } from 'lucide-react';
-import type { PrReviewComment } from '@bevel-software/shared';
+import type { PrReviewComment } from '@bevel-software/platform-shared';
 import { PrCommentComposer } from './PrCommentComposer';
 
 interface Props {

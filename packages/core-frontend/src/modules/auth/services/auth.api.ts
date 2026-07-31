@@ -1,4 +1,4 @@
-import type { AuthUser, LoginResponse } from '@bevel-software/shared';
+import type { AuthUser, LoginResponse } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 
 export async function loginWithPassword(

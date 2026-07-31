@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { PullRequestFile } from '@bevel-software/shared';
+import type { PullRequestFile } from '@bevel-software/platform-shared';
 
 // mergePr merges locally through GitService now (no `gh`), so we stub the git
 // seam and spy on it. `mergeChangeRequestMock` stands in for the real

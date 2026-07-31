@@ -12,7 +12,7 @@
  * consumers actually need to discriminate on it.
  */
 
-import type { ValidationReport } from '@bevel-software/shared';
+import type { ValidationReport } from '@bevel-software/platform-shared';
 
 export class WorkflowDomainError extends Error {
   readonly status: number;
@@ -42,7 +42,7 @@ export class ProtectedBranchError extends WorkflowDomainError {
 /**
  * The caller tried to delete a branch they don't own. Authorship is inferred
  * from the `<email-localpart>/<slug>` naming convention used by
- * `slugifyDraftName` — see `isBranchAuthoredBy` in `@bevel-software/shared`.
+ * `slugifyDraftName` — see `isBranchAuthoredBy` in `@bevel-software/platform-shared`.
  *
  * Distinct from `AccessDeniedError` because that error is path-based
  * (file-level write permission via `roles.yaml`/`access.md`). Branch

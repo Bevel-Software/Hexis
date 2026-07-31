@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import type { FileDiffPayload } from '@bevel-software/shared';
+import type { FileDiffPayload } from '@bevel-software/platform-shared';
 import { computeDiff, type DiffLine } from '../../workspace/utils/diff';
 
 const MAX_RENDERED_LINES = 5000;

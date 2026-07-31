@@ -4,7 +4,7 @@ import {
   DEFAULT_BRANCH,
   type FileTreeEntry,
   type PullRequestSummary,
-} from '@bevel-software/shared';
+} from '@bevel-software/platform-shared';
 import { Dialog } from '../../../shared/components/Dialog';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useAuth } from '../../auth/state/auth.context';
