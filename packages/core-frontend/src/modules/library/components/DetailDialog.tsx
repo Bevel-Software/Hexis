@@ -22,7 +22,7 @@ import {
   toolVariableStatuses,
 } from '../utils/status';
 import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
-import { StatusGem } from './StatusGem';
+import { StatusDot } from './StatusDot';
 import { ChangeRequestDock } from './ChangeRequestDock';
 import { CompareView } from './CompareView';
 import { SuggestChange } from './SuggestChange';
@@ -280,7 +280,7 @@ function SkillDetailBody({
             <IntItem
               title="Knowledge base only"
               sub="No external connections needed"
-              right={<StatusGem state="ok" />}
+              right={<StatusDot state="ok" />}
             />
           ) : (
             needed.map((t) => {
@@ -292,7 +292,7 @@ function SkillDetailBody({
                   sub={status.state === 'ok' ? 'Connected — nothing to do' : status.text}
                   right={
                     status.state === 'ok' ? (
-                      <StatusGem state="ok" />
+                      <StatusDot state="ok" />
                     ) : (
                       <ConnectButton
                         label={status.state === 'err' ? 'Reconnect' : 'Connect'}
@@ -480,7 +480,7 @@ function ToolDetailBody({ tool, skills, allowedToolsBySkill }: ToolBodyProps) {
         </h4>
         <div className="flex flex-col gap-1.5">
           {rows.length === 0 ? (
-            <IntItem title="Nothing to set up" sub="This integration works for everyone as-is" right={<StatusGem state="ok" />} />
+            <IntItem title="Nothing to set up" sub="This integration works for everyone as-is" right={<StatusDot state="ok" />} />
           ) : (
             rows.map(({ v, status }) => (
               <IntItem
@@ -495,7 +495,7 @@ function ToolDetailBody({ tool, skills, allowedToolsBySkill }: ToolBodyProps) {
                 }
                 right={
                   status.state === 'ok' ? (
-                    <StatusGem state="ok" />
+                    <StatusDot state="ok" />
                   ) : v.scope === 'user' && v.adminConfigured !== false ? (
                     <ConnectButton
                       label={status.state === 'err' ? 'Reconnect' : 'Connect'}
@@ -507,7 +507,7 @@ function ToolDetailBody({ tool, skills, allowedToolsBySkill }: ToolBodyProps) {
                       onClick={() => navigate(kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${tool.path}`))}
                     />
                   ) : (
-                    <StatusGem state={status.state} />
+                    <StatusDot state={status.state} />
                   )
                 }
               />

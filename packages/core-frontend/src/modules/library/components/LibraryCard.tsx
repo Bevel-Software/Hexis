@@ -1,7 +1,7 @@
-import { useRef, type PointerEvent } from 'react';
-import { GearIcon } from './GearIcon';
-import { StatusGem } from './StatusGem';
-import type { AttentionStatus } from '../utils/status';
+import { Badge, Surface } from '../../../shared/components';
+import { cn } from '../../../lib/utils';
+import { StatusDot } from './StatusDot';
+import type { AttentionStatus, GemState } from '../utils/status';
 
 export interface LibraryCardProps {
   kind: 'skill' | 'integration';
@@ -12,16 +12,30 @@ export interface LibraryCardProps {
   /** Rendered in the footer ONLY when it needs attention (mock rule). */
   status: AttentionStatus;
   picked: boolean;
-  /** Card-body click: toggle loadout membership (rect feeds the particle flight). */
-  onToggle(fromRect: DOMRect): void;
+  /** Card-body click: toggle loadout membership. */
+  onToggle(): void;
   /** Top-right info button: open the detail dialog. */
   onInfo(): void;
 }
 
+const STATUS_INK: Record<GemState, string> = {
+  ok: 'text-ok',
+  warn: 'text-wait',
+  err: 'text-danger',
+  off: 'text-ink-faint',
+};
+
 /**
- * One gallery card. Deliberately icon/emoji-free (approved design). Skills get
- * the green top accent strip; integrations the gear chrome (4 corner gears +
- * 1 center, slow-spinning on hover). 3D tilt + glare follow the pointer.
+ * One gallery card — the prototype's `.card` (line 158).
+ *
+ * The card stays a `div[role=button]` rather than a `<button>` because it
+ * contains the ⓘ button, and a button inside a button is invalid HTML that
+ * browsers resolve by dropping the inner one.
+ *
+ * The two-line clamp on the description is load-bearing, not cosmetic. Skill
+ * descriptions run to full paragraphs, so without it a card grows to whatever
+ * its longest text needs and the grid stops being a grid. `min-h` sets the
+ * floor, the clamp sets the ceiling, and every card lands between them.
  */
 export function LibraryCard({
   kind,
@@ -34,63 +48,34 @@ export function LibraryCard({
   onToggle,
   onInfo,
 }: LibraryCardProps) {
-  const ref = useRef<HTMLDivElement>(null);
-
-  function onPointerMove(e: PointerEvent<HTMLDivElement>) {
-    const el = ref.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    const px = (e.clientX - r.left) / r.width;
-    const py = (e.clientY - r.top) / r.height;
-    el.style.transform = `translateY(-12px) scale(1.045) rotateX(${(0.5 - py) * 10}deg) rotateY(${(px - 0.5) * 10}deg)`;
-    el.style.setProperty('--lib-mx', `${px * 100}%`);
-    el.style.setProperty('--lib-my', `${py * 100}%`);
-  }
-
-  function onPointerLeave() {
-    if (ref.current) ref.current.style.transform = '';
-  }
-
   const needsAttention = kind === 'integration' && status.state !== 'ok';
 
   return (
-    <div
-      ref={ref}
+    <Surface
       data-testid={`library-card-${kind}-${id}`}
+      interactive
+      padded
       role="button"
       tabIndex={0}
       aria-pressed={picked}
       aria-label={`${name} — ${picked ? 'remove from loadout' : 'add to loadout'}`}
-      className={`lib-card ${kind === 'skill' ? 'lib-card-skill' : 'lib-card-tool'} ${picked ? 'lib-card-picked' : ''} flex min-h-[180px] flex-col gap-2.5 p-4`}
-      onPointerMove={onPointerMove}
-      onPointerLeave={onPointerLeave}
-      onClick={() => {
-        const el = ref.current;
-        if (el) onToggle(el.getBoundingClientRect());
-      }}
+      className={cn(
+        'relative flex min-h-28 flex-col gap-1.5 text-left',
+        picked && 'border-transparent bg-ok-soft hover:bg-ok-soft',
+      )}
+      onClick={onToggle}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          const el = ref.current;
-          if (el) onToggle(el.getBoundingClientRect());
+          onToggle();
         }
       }}
     >
-      {kind === 'integration' && (
-        <div className="lib-gears">
-          <GearIcon />
-          <GearIcon />
-          <GearIcon />
-          <GearIcon />
-          <GearIcon />
-        </div>
-      )}
-      <div className="lib-card-glare" />
       <button
         type="button"
         aria-label={`Details for ${name}`}
         title="Details"
-        className={`absolute right-2.5 top-2.5 z-[3] flex h-6 w-6 items-center justify-center rounded-full border bg-white/85 font-serif text-xs font-bold italic transition-all hover:scale-110 hover:border-[#0d9488] hover:bg-white hover:text-[#0f766e] ${picked ? 'border-[#9dd8cd] text-ink-muted' : 'border-line text-ink-faint'}`}
+        className="absolute right-3 top-3 flex size-5 items-center justify-center rounded-full border border-line bg-surface text-meta font-semibold text-ink-faint transition-colors hover:border-line-strong hover:text-ink"
         onClick={(e) => {
           e.stopPropagation();
           onInfo();
@@ -98,35 +83,27 @@ export function LibraryCard({
       >
         i
       </button>
-      <div className="pr-6">
-        <div className="text-[14.5px] font-bold tracking-[.01em] text-ink">{name}</div>
-        <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] uppercase tracking-[.08em] text-ink-faint">
-          {kind === 'skill' ? 'Skill' : 'Integration'}
-          {owned && (
-            <span className="rounded-full border border-[#f0dda6] bg-[#fdf3d8] px-1.5 text-[9.5px] font-bold tracking-[.05em] text-[#92600a]">
-              OWNER
-            </span>
-          )}
-        </div>
-      </div>
-      <div className="relative flex-1 text-xs text-ink-muted">{description}</div>
-      {needsAttention && (
-        <div
-          className={`flex items-center border-t pt-2.5 ${picked ? 'border-[#bde4dc]' : 'border-line'}`}
-        >
-          <span className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted">
-            <StatusGem state={status.state} />
-            {status.text}
-          </span>
-        </div>
-      )}
-      <div className="lib-hover-cta">
-        {picked ? (
-          <span className="lib-hc-remove">− Remove</span>
-        ) : (
-          <span className="lib-hc-add">+ Add to loadout</span>
+
+      <div className="flex items-center gap-2 pr-7">
+        <span className="truncate text-lede font-semibold text-ink">{name}</span>
+        {owned && (
+          <Badge tone="outline" size="xs" className="shrink-0 uppercase">
+            Owner
+          </Badge>
         )}
       </div>
-    </div>
+
+      {description && <p className="line-clamp-2 text-detail text-ink-muted">{description}</p>}
+
+      <div className="mt-auto flex items-center gap-1.5 pt-2 text-meta text-ink-faint">
+        <span className="text-label uppercase">{kind === 'skill' ? 'Skill' : 'Integration'}</span>
+        {needsAttention && (
+          <span className={cn('ml-auto flex items-center gap-1.5 font-semibold', STATUS_INK[status.state])}>
+            <StatusDot state={status.state} />
+            {status.text}
+          </span>
+        )}
+      </div>
+    </Surface>
   );
 }

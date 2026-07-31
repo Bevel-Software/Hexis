@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { StatusGem } from './StatusGem';
+import { StatusDot } from './StatusDot';
 import type { LoadoutKind } from '../state/loadout';
 import type { AttentionStatus } from '../utils/status';
 
@@ -82,7 +82,7 @@ export function LoadoutSidebar({
         <div className="text-[10.5px] text-ink-faint">{row.status.text}</div>
       </div>
       <span className="lib-slot-gem ml-auto shrink-0">
-        <StatusGem state={row.status.state} />
+        <StatusDot state={row.status.state} />
       </span>
       <button
         type="button"
