@@ -4,6 +4,10 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { LibraryData } from '../hooks/useLibraryData';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { GroupSummary } from '../services/groups.api';
+import {
+  WorkspaceContext,
+  type WorkspaceContextValue,
+} from '../../workspace/state/workspace.context';
 
 /**
  * The routing skeleton: what each URL renders, what the sidebar marks as
@@ -15,8 +19,17 @@ import type { GroupSummary } from '../services/groups.api';
 const dataMock = vi.hoisted(() => ({ useLibraryData: vi.fn() }));
 vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryData }));
 
-const groupsMock = vi.hoisted(() => ({ listGroups: vi.fn() }));
-vi.mock('../services/groups.api', () => ({ listGroups: groupsMock.listGroups }));
+const groupsMock = vi.hoisted(() => ({
+  listGroups: vi.fn(),
+  listGroupAccessRequests: vi.fn(),
+}));
+vi.mock('../services/groups.api', () => ({
+  listGroups: groupsMock.listGroups,
+  listGroupAccessRequests: groupsMock.listGroupAccessRequests,
+  dismissGroupAccessRequest: vi.fn(),
+  requestGroupAccess: vi.fn(),
+  AlreadyReadableError: class AlreadyReadableError extends Error {},
+}));
 
 import { LibraryRoutes } from '../routes/LibraryRoutes';
 
@@ -72,13 +85,21 @@ function LocationProbe() {
   return <div aria-label="pathname">{location.pathname}</div>;
 }
 
+/** The shell mounts `LibraryRoutes` inside the workspace context; so does this. */
+const workspace = {
+  workspaceId: 'target-company-state',
+  kbDirName: 'knowledge-base',
+} as unknown as WorkspaceContextValue;
+
 function renderAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <Routes>
-        <Route path="/skills-and-tools/*" element={<LibraryRoutes />} />
-      </Routes>
-      <LocationProbe />
+      <WorkspaceContext.Provider value={workspace}>
+        <Routes>
+          <Route path="/skills-and-tools/*" element={<LibraryRoutes />} />
+        </Routes>
+        <LocationProbe />
+      </WorkspaceContext.Provider>
     </MemoryRouter>,
   );
 }
@@ -89,6 +110,7 @@ describe('LibraryRoutes', () => {
   beforeEach(() => {
     dataMock.useLibraryData.mockReturnValue(CATALOG);
     groupsMock.listGroups.mockResolvedValue(GROUPS);
+    groupsMock.listGroupAccessRequests.mockResolvedValue([]);
   });
 
   it('renders the gallery at /skills-and-tools with heading Library', async () => {

@@ -1,5 +1,6 @@
 import { cn } from '../../../lib/utils';
 import type { LibraryFilter } from '../utils/status';
+import { LockGlyph } from './LockGlyph';
 
 export interface GroupsSidebarProps {
   /** What the URL has selected, or null on a page with no gallery filter. */
@@ -41,7 +42,7 @@ export function GroupsSidebar({
   filter,
   onSelect,
   groups,
-  // `lockedGroups` is deliberately not read yet — see the WP7 note in the nav.
+  lockedGroups,
   groupsIndexActive,
   onOpenGroupsIndex,
   ownedCount,
@@ -49,6 +50,12 @@ export function GroupsSidebar({
   attentionCount,
   onFinishSetup,
 }: GroupsSidebarProps) {
+  const rowClass = (selected: boolean) =>
+    cn(
+      'flex items-center justify-between gap-2 rounded-sm px-2.5 py-1.5 text-ui transition-colors',
+      selected ? 'bg-hover font-semibold text-ink' : 'text-ink-muted hover:bg-hover hover:text-ink',
+    );
+
   const row = (
     label: string,
     selected: boolean,
@@ -60,10 +67,7 @@ export function GroupsSidebar({
       key={label}
       type="button"
       aria-current={selected}
-      className={cn(
-        'flex items-center justify-between gap-2 rounded-sm px-2.5 py-1.5 text-ui transition-colors',
-        selected ? 'bg-hover font-semibold text-ink' : 'text-ink-muted hover:bg-hover hover:text-ink',
-      )}
+      className={rowClass(selected)}
       onClick={onClick}
     >
       <span className="truncate">{label}</span>
@@ -78,6 +82,33 @@ export function GroupsSidebar({
           {count}
         </span>
       )}
+    </button>
+  );
+
+  /**
+   * A group the caller cannot read. Same chrome as every other row, because it
+   * is the same kind of thing — a place in the workspace — and demoting it
+   * visually would undo the reason it is listed at all.
+   *
+   * The count box holds a lock instead of a number, and holds it in the SAME
+   * slot so the column of counts stays a column. Never a count (the caller
+   * cannot see inside to count anything) and never the amber attention badge
+   * (a non-member has nothing to fix). The accessible name carries the state in
+   * words, so the glyph itself can stay decorative.
+   */
+  const lockedRow = (name: string) => (
+    <button
+      key={`locked:${name}`}
+      type="button"
+      aria-label={`${name} (locked)`}
+      aria-current={filter?.kind === 'group' && filter.group === name}
+      className={rowClass(filter?.kind === 'group' && filter.group === name)}
+      onClick={() => onSelect({ kind: 'group', group: name })}
+    >
+      <span className="truncate">{name}</span>
+      <span className="flex h-4.5 shrink-0 basis-5.5 items-center justify-center text-ink-faint">
+        <LockGlyph className="size-3" />
+      </span>
     </button>
   );
 
@@ -115,12 +146,11 @@ export function GroupsSidebar({
         )}
         {ungroupedCount > 0 &&
           row('Yours alone', filter?.kind === 'ungrouped', () => onSelect({ kind: 'ungrouped' }), ungroupedCount)}
-        {/* WP7 (locked groups): the prototype's 14px `.navgap` and one row per
-            `lockedGroups` entry go here — same chrome, a lock glyph in the count
-            box instead of a number, `aria-label="{name} (locked)"`, click
-            navigating to the group route. The prop is already plumbed; the
-            layout passes `[]` until that work package lands. */}
-
+        {/* Locked groups, after the prototype's 14px `.navgap`. The gap is the
+            whole statement: these are in the same list because they are in the
+            same workspace, and below a break because you are not in them. */}
+        {lockedGroups.length > 0 && <div className="h-3.5" aria-hidden="true" />}
+        {lockedGroups.map(lockedRow)}
       </nav>
 
       {attentionCount > 0 && (

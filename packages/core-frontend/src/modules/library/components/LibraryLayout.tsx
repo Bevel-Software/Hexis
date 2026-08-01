@@ -20,7 +20,7 @@ import { GroupsSidebar } from './GroupsSidebar';
  * can take its filter as a plain prop and the sidebar can hold no state.
  */
 export function LibraryLayout() {
-  const { items } = useLibrary();
+  const { items, groupSummaries } = useLibrary();
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -31,6 +31,24 @@ export function LibraryLayout() {
     () => groupCounts(items).map((g) => ({ ...g, attention: attentionOf(items, g.group) })),
     [items],
   );
+  /**
+   * Groups the caller cannot get into, alphabetical.
+   *
+   * `canRead` is the folder verdict; the catalog is the other witness, and it
+   * wins when it disagrees. Access resolves closeness-first, so a per-file grant
+   * can hand somebody one skill inside a folder they cannot read — showing that
+   * group locked while its skill sits in the gallery above would be the Library
+   * contradicting itself. Same rule as `GroupPage`'s member-vs-locked decision,
+   * which is what keeps the row and the page it opens in agreement.
+   */
+  const lockedGroups = useMemo(() => {
+    const visible = new Set(items.map((i) => i.group).filter((g): g is string => g !== null));
+    return groupSummaries
+      .filter((g) => !g.canRead && !visible.has(g.name))
+      .map((g) => g.name)
+      .sort((a, b) => a.localeCompare(b));
+  }, [groupSummaries, items]);
+
   const ownedCount = useMemo(() => items.filter((i) => i.owned).length, [items]);
   const ungroupedCount = useMemo(() => items.filter((i) => i.group === null).length, [items]);
   const attentionCount = useMemo(
@@ -44,10 +62,7 @@ export function LibraryLayout() {
         filter={filter}
         onSelect={(next) => navigate(pathForLibraryFilter(next))}
         groups={groups}
-        // WP7 (locked groups): `groupSummaries.filter(g => !g.canRead && the
-        // catalog has no item in it).map(g => g.name)`. Empty until then, so no
-        // locked section renders.
-        lockedGroups={[]}
+        lockedGroups={lockedGroups}
         groupsIndexActive={groupsIndexActive}
         onOpenGroupsIndex={() => navigate(`${LIBRARY_ROOT}/groups`)}
         ownedCount={ownedCount}

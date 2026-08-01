@@ -9,10 +9,10 @@ export interface GroupIndexRowProps {
   /** Right-aligned counts, e.g. `4 skills · 2 tools`. */
   meta?: string;
   /**
-   * After the counts. WP7 (locked groups) owns what goes here for an
-   * "Ask to join" row — the lock glyph, and the `Requested — …` state that
-   * replaces it once a request is pending. Kept as a slot rather than a
-   * boolean so that swap needs no change to this file.
+   * After the counts: the amber attention count on a group you are in, or —
+   * on an "Ask to join" row — the `Locked` chip, which becomes `Requested`
+   * once the caller has a pending access request. A slot rather than a
+   * boolean, which is why those three states cost this file nothing.
    */
   trailing?: ReactNode;
   onOpen(): void;

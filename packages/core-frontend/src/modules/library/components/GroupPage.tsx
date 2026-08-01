@@ -9,10 +9,15 @@ import {
   pathForPropose,
 } from '../routes/library-paths';
 import { ownersTextOf, primaryFolderOf, readersTextOf } from '../utils/group-summary';
-import type { GroupSummary } from '../services/groups.api';
+import { useGroupAccessRequests } from '../hooks/useGroupAccessRequests';
+import { useWorkspace } from '../../workspace/state/workspace.context';
+import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { useLibraryToast } from '../state/toast';
 import { LibraryCard } from './LibraryCard';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
+import { AccessRequestsBanner } from './AccessRequestsBanner';
+import { LockedGroupView } from './LockedGroupView';
 
 /**
  * One group, as a place: `/skills-and-tools/groups/:group`.
@@ -36,8 +41,13 @@ export function GroupPage() {
   const group = decodeGroupSegment(params.group ?? '');
   const data = useLibrary();
   const navigate = useNavigate();
+  const toast = useLibraryToast();
+  const { kbDirName } = useWorkspace();
+  const requests = useGroupAccessRequests();
   const [detail, setDetail] = useState<DetailTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
+  const [manageFolder, setManageFolder] = useState<string | null>(null);
 
   const summary = useMemo(
     () => data.groupSummaries.find((g) => g.name === group) ?? null,
@@ -65,6 +75,44 @@ export function GroupPage() {
     }
   }
 
+  /**
+   * The access editor, hoisted out of both branches because both open it: the
+   * locked view's `Manage access` (a locked-out Admin unlocking themselves) and
+   * the member view's request banner (an owner letting somebody else in). Only
+   * one of those views is ever on screen, so one dialog is enough.
+   *
+   * `kbDirName` gates it because the resolver addresses files repo-relative and
+   * the dialog strips that prefix — without it the path we would hand over is
+   * not the path we mean. Same guard the skill dialog uses.
+   */
+  const manageDialog =
+    manageFolder && kbDirName ? (
+      <ManageAccessDialog
+        entry={{
+          name: manageFolder.split('/').pop() ?? manageFolder,
+          relativePath: `${kbDirName}/${manageFolder}`,
+          type: 'directory',
+        }}
+        onClose={() => {
+          setManageFolder(null);
+          // Granting IS approving: the request retires itself server-side once
+          // the requester can read, so closing the dialog is the moment to ask
+          // again rather than a moment to mark anything approved here.
+          data.reloadGroups();
+          requests.reload();
+        }}
+      />
+    ) : null;
+
+  async function dismiss(id: string) {
+    try {
+      await requests.dismiss(id);
+    } catch {
+      toast("Couldn't dismiss that — try again.");
+      requests.reload();
+    }
+  }
+
   // Nothing has spoken yet: the catalog is still loading, the group index is
   // still loading, and no item has proven the group exists. Deciding now would
   // flash "doesn't exist" (or a locked splash) at somebody who is simply early.
@@ -73,7 +121,20 @@ export function GroupPage() {
   }
 
   if (summary && !summary.canRead && groupItems.length === 0) {
-    return <LockedPlaceholder group={group} summary={summary} />;
+    return (
+      <>
+        <LockedGroupView
+          group={summary}
+          onRequested={data.reloadGroups}
+          onUnlocked={() => {
+            data.reload();
+            data.reloadGroups();
+          }}
+          onManage={setManageFolder}
+        />
+        {manageDialog}
+      </>
+    );
   }
 
   // No summary, no items, and the endpoint did NOT fail — the group really is
@@ -113,6 +174,18 @@ export function GroupPage() {
             : `Run by ${ownersText}`}
         </p>
       )}
+
+      {/* Somebody is waiting on the person reading this. It goes ABOVE the
+          setup banner because a request is about a human, and the folder's
+          owners are the only people who can answer it. */}
+      <AccessRequestsBanner
+        group={group}
+        folders={summary?.folders ?? []}
+        requests={requests.requests.filter((r) => r.group === group)}
+        onManage={setManageFolder}
+        onDismiss={(id) => void dismiss(id)}
+        className="mt-4"
+      />
 
       {attention > 0 && (
         <Banner role="status" tone="wait" className="mt-4">
@@ -188,6 +261,8 @@ export function GroupPage() {
           onDataChanged={data.reload}
         />
       )}
+
+      {manageDialog}
     </div>
   );
 }
@@ -204,32 +279,6 @@ function GroupBreadcrumb({ group }: { group: string }) {
         {group}
       </span>
     </nav>
-  );
-}
-
-/**
- * WP7 (locked groups) replaces this block wholesale with
- * `<LockedGroupView group={summary} onRequested={…} onUnlocked={…}
- * onManage={…} />` (master plan D3): the Locked badge, the run-by lede, the
- * `{n} skills · {n} tools — visible to members only.` counts line, the
- * ask-to-join CTA with its `Requested — …` state, and the `Manage access`
- * button a locked-out platform Admin gets from `canWrite` (admin-rescue grants
- * WRITE on `access.md`, never READ — an Admin can genuinely be locked out of
- * reading and still be the person who can fix it).
- *
- * Until then the page states the one fact it is allowed to state. A locked
- * group advertises its existence and who to ask; never a name of anything
- * inside it.
- */
-function LockedPlaceholder({ group, summary }: { group: string; summary: GroupSummary }) {
-  return (
-    <div className="pb-14">
-      <GroupBreadcrumb group={group} />
-      <h1 className="mt-1.5 text-display font-semibold">{group}</h1>
-      <Banner role="note" tone="neutral" className="mt-4">
-        {`Ask ${ownersTextOf(summary)} for access.`}
-      </Banner>
-    </div>
   );
 }
 

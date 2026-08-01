@@ -3,6 +3,11 @@ import '../library.css';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 import { filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
+import { useGroupAccessRequests } from '../hooks/useGroupAccessRequests';
+import { useWorkspace } from '../../workspace/state/workspace.context';
+import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { useLibraryToast } from '../state/toast';
+import { AccessRequestsBanner } from './AccessRequestsBanner';
 import { LibraryCard } from './LibraryCard';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 
@@ -42,13 +47,48 @@ function headingFor(filter: LibraryFilter): string {
 
 export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const data = useLibrary();
+  const toast = useLibraryToast();
+  const { kbDirName } = useWorkspace();
+  const requests = useGroupAccessRequests();
   const [query, setQuery] = useState('');
   const [detail, setDetail] = useState<DetailTarget | null>(null);
+  /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
+  const [manageFolder, setManageFolder] = useState<string | null>(null);
 
   const visible = useMemo(
     () => filterLibraryItems(data.items, filter, query),
     [data.items, filter, query],
   );
+
+  /**
+   * Pending requests, one banner per group, on the Everything view only.
+   *
+   * Everything is where an admin lands, so it is the one place a request is
+   * guaranteed to be SEEN — the group's own page also carries its banner, but
+   * nobody visits a group to find out that somebody wants into it. The other
+   * two gallery views ("Owned by me", "Yours alone") are about your own things,
+   * and a request is not one of them.
+   */
+  const pendingByGroup = useMemo(() => {
+    if (filter.kind !== 'all') return [];
+    const groups = [...new Set(requests.requests.map((r) => r.group))].sort((a, b) =>
+      a.localeCompare(b),
+    );
+    return groups.map((group) => ({
+      group,
+      folders: data.groupSummaries.find((g) => g.name === group)?.folders ?? [],
+      rows: requests.requests.filter((r) => r.group === group),
+    }));
+  }, [filter, requests.requests, data.groupSummaries]);
+
+  async function dismiss(id: string) {
+    try {
+      await requests.dismiss(id);
+    } catch {
+      toast("Couldn't dismiss that — try again.");
+      requests.reload();
+    }
+  }
 
   function openDetail(item: LibraryItem) {
     if (item.kind === 'skill') {
@@ -80,6 +120,17 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
       </div>
 
       <div className="mt-5" />
+
+      {pendingByGroup.map(({ group, folders, rows }) => (
+        <AccessRequestsBanner
+          key={group}
+          group={group}
+          folders={folders}
+          requests={rows}
+          onManage={setManageFolder}
+          onDismiss={(id) => void dismiss(id)}
+        />
+      ))}
 
       {data.error ? (
         <Banner role="alert" tone="danger">
@@ -119,6 +170,27 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
           myCrNumbers={data.myCrNumbers}
           onClose={() => setDetail(null)}
           onDataChanged={data.reload}
+        />
+      )}
+
+      {/* Granting read here IS approving the request: the row retires itself
+          server-side once the requester can read the folder, which is why
+          closing the dialog refetches instead of marking anything approved.
+          `kbDirName` gates it — the resolver addresses files repo-relative and
+          the dialog strips that prefix, so without it the path we hand over is
+          not the path we mean. */}
+      {manageFolder && kbDirName && (
+        <ManageAccessDialog
+          entry={{
+            name: manageFolder.split('/').pop() ?? manageFolder,
+            relativePath: `${kbDirName}/${manageFolder}`,
+            type: 'directory',
+          }}
+          onClose={() => {
+            setManageFolder(null);
+            data.reloadGroups();
+            requests.reload();
+          }}
         />
       )}
     </>
