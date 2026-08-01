@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X, Lock, Loader2, ChevronDown, Check, Globe } from 'lucide-react';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import {
+  Badge,
+  Banner,
+  Button,
+  Dialog,
+  MenuItem,
+  MenuPanel,
+} from '../../../shared/components';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useAuth } from '../../auth/state/auth.context';
 import {
@@ -134,7 +142,19 @@ function ancestorsFromSources(sources: GrantSources | undefined): string[] {
 /** The checklist order; download is independent and rendered separately. */
 const TIER_ROLES: Role[] = ['Owner', 'Can edit', 'Can read'];
 
-const AVATAR_COLORS = ['#863bff', '#0ea5e9', '#16a34a', '#f59e0b', '#ec4899', '#7e14ff'];
+/**
+ * Muted identity tones (bg/fg pairs) — the same family as the Library's
+ * monogram marks, so a person's avatar and a tool's logo read as one system
+ * instead of one calm grid with saturated Drive-style discs in the middle.
+ */
+const AVATAR_TONES = [
+  { bg: '#eaf1ea', fg: '#4f7a52' },
+  { bg: '#e9eefb', fg: '#4560a8' },
+  { bg: '#fbeeea', fg: '#a85a41' },
+  { bg: '#f2eafa', fg: '#6f4a9b' },
+  { bg: '#e7f2f4', fg: '#3d7783' },
+  { bg: '#faf0e2', fg: '#8a6a2f' },
+];
 
 function initials(label: string): string {
   const parts = label.replace(/[<>]/g, '').trim().split(/[\s@.]+/).filter(Boolean);
@@ -143,10 +163,10 @@ function initials(label: string): string {
   return (parts[0][0] + parts[1][0]).toUpperCase();
 }
 
-function avatarColor(seed: string): string {
+function avatarTone(seed: string): { bg: string; fg: string } {
   let h = 0;
   for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
-  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
+  return AVATAR_TONES[Math.abs(h) % AVATAR_TONES.length];
 }
 
 const EMAIL_RE = /^[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+$/;
@@ -284,13 +304,9 @@ export function ManageAccessDialog({ entry, onClose, workspaceId: workspaceIdPro
     };
   }, [workspaceId, repoRelative, targetKind]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  // Escape / backdrop / focus trapping all belong to the shared `Dialog` now —
+  // including the layering that lets the nested "Remove from parent?" modal
+  // take Escape without also closing this one.
 
   // Debounced autocomplete. People are withheld server-side until q ≥ 2 chars.
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -733,515 +749,487 @@ export function ManageAccessDialog({ entry, onClose, workspaceId: workspaceIdPro
 
   // One grantee row. Direct rows get the inline verb editor; inherited rows are
   // read-only with a Remove that opens the cascade flow; external rows are
-  // read-only with no action. `dense` trims the avatar/labels in the collapsed
-  // inherited section so a deep folder chain doesn't overflow.
-  const renderRow = (p: PrincipalRow) => (
-    <div key={p.key} className="flex items-center gap-3 py-2 group">
-      <div
-        className="w-9 h-9 rounded-full flex items-center justify-center text-[13px] font-bold text-white shrink-0"
-        style={{ background: p.isRole ? '#64748b' : avatarColor(p.label) }}
-      >
-        {initials(p.label)}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="text-sm text-ink font-medium truncate">
-          {p.label}
-          {p.isYou && <span className="text-ink-faint font-normal"> (you)</span>}
-          {p.isRole && (
-            <span className="ml-1.5 text-[10px] uppercase tracking-wide text-ink-faint">role</span>
-          )}
-        </div>
-        {p.sub && <div className="text-xs text-ink-muted truncate">{p.sub}</div>}
-      </div>
-      {canManage && p.manage === 'inherited' ? (
-        // Inherited from a parent folder — read-only here. Leaf folder name only
-        // (full path on hover); Remove opens the "Remove from parent?" flow.
-        <div className="flex items-center gap-2 shrink-0">
-          <span
-            className="text-xs text-ink-faint italic max-w-[10rem] truncate"
-            title={p.ancestors.map(folderPath).join(', ')}
-          >
-            via {p.ancestors.map(folderLabel).join(', ')}
+  // read-only with no action.
+  const renderRow = (p: PrincipalRow) => {
+    const tone = avatarTone(p.label);
+    return (
+      <div key={p.key} className="flex items-center gap-3 py-2">
+        {p.isRole ? (
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-sunken text-detail font-bold text-ink-muted">
+            {initials(p.label)}
           </span>
-          <span className="text-sm text-ink-faint">{summarizeVerbs(p.verbs)}</span>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => doRevoke(p)}
-            className="px-2 py-1 rounded text-sm text-red-600 hover:bg-red-50 disabled:cursor-not-allowed"
+        ) : (
+          <span
+            className="flex size-9 shrink-0 items-center justify-center rounded-full text-detail font-bold"
+            style={{ backgroundColor: tone.bg, color: tone.fg }}
           >
-            Remove
-          </button>
+            {initials(p.label)}
+          </span>
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span className="truncate text-ui font-medium text-ink">{p.label}</span>
+            {p.isYou && <span className="shrink-0 text-ui text-ink-faint">(you)</span>}
+            {p.isRole && (
+              <Badge tone="outline" size="xs" className="shrink-0 uppercase">
+                Role
+              </Badge>
+            )}
+          </div>
+          {p.sub && <div className="truncate text-detail text-ink-muted">{p.sub}</div>}
         </div>
-      ) : canManage && p.manage === 'external' ? (
-        // No file-backed grant to remove here — managed elsewhere (a group's
-        // membership, the everyone policy, or admin rescue).
-        <span
-          className="text-sm text-ink-faint shrink-0"
-          title="Granted via a role or policy — manage it there"
-        >
-          {summarizeVerbs(p.verbs)}
-        </span>
-      ) : canManage ? (
-        <div className="relative shrink-0">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
-            className="px-2 py-1 rounded text-sm text-ink-muted flex items-center gap-1 hover:bg-hover disabled:cursor-not-allowed"
+        {canManage && p.manage === 'inherited' ? (
+          // Inherited from a parent folder — read-only here. Leaf folder name only
+          // (full path on hover); Remove opens the "Remove from parent?" flow.
+          <div className="flex shrink-0 items-center gap-2">
+            <span
+              className="max-w-40 truncate text-detail italic text-ink-faint"
+              title={p.ancestors.map(folderPath).join(', ')}
+            >
+              via {p.ancestors.map(folderLabel).join(', ')}
+            </span>
+            <span className="text-detail text-ink-faint">{summarizeVerbs(p.verbs)}</span>
+            <Button variant="danger" size="tiny" disabled={busy} onClick={() => doRevoke(p)}>
+              Remove
+            </Button>
+          </div>
+        ) : canManage && p.manage === 'external' ? (
+          // No file-backed grant to remove here — managed elsewhere (a group's
+          // membership, the everyone policy, or admin rescue).
+          <span
+            className="shrink-0 text-detail text-ink-faint"
+            title="Granted via a role or policy — manage it there"
           >
             {summarizeVerbs(p.verbs)}
-            <ChevronDown size={14} />
-          </button>
-          {openRowKey === p.key && (
-            <div className="absolute right-0 z-20 mt-1 bg-white border border-line rounded-lg shadow-lg w-44 py-1">
-              {TIER_ROLES.map((role) => {
-                const k = ROLE_TO_KEY[role];
-                const checked = p.verbs[k];
-                const disabled =
-                  busy ||
-                  (role === 'Can edit' && p.verbs.owner) ||
-                  (role === 'Can read' && (p.verbs.owner || p.verbs.write));
-                return (
-                  <button
-                    key={role}
-                    type="button"
-                    disabled={disabled}
-                    onClick={() => doToggleVerb(p.principal, role, checked)}
-                    className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <span className="w-4 h-4 border border-line-strong rounded flex items-center justify-center shrink-0">
-                      {checked && <Check size={12} className="text-bevel" />}
-                    </span>
-                    <span className="flex-1 text-left">{role}</span>
-                  </button>
-                );
-              })}
-              <div className="border-t border-line my-1" />
-              {(() => {
-                const checked = p.verbs.download;
-                const disabled = busy || p.verbs.owner;
-                return (
-                  <button
-                    type="button"
-                    disabled={disabled}
-                    onClick={() => doToggleVerb(p.principal, 'Can download', checked)}
-                    className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <span className="w-4 h-4 border border-line-strong rounded flex items-center justify-center shrink-0">
-                      {checked && <Check size={12} className="text-bevel" />}
-                    </span>
-                    <span className="flex-1 text-left">Can download</span>
-                  </button>
-                );
-              })()}
-              <div className="border-t border-line my-1" />
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => {
-                  setOpenRowKey(null);
-                  doRevoke(p);
-                }}
-                className="w-full text-left px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 disabled:cursor-not-allowed"
-              >
-                Remove access
-              </button>
-            </div>
-          )}
-        </div>
-      ) : (
-        <span className="text-sm text-ink-muted shrink-0">{summarizeVerbs(p.verbs)}</span>
-      )}
-    </div>
-  );
+          </span>
+        ) : canManage ? (
+          <div className="relative shrink-0">
+            <Button
+              variant="quiet"
+              size="sm"
+              disabled={busy}
+              onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
+              trailingIcon={<ChevronDown size={14} />}
+            >
+              {summarizeVerbs(p.verbs)}
+            </Button>
+            {openRowKey === p.key && (
+              <MenuPanel className="absolute right-0 z-20 mt-1 w-48">
+                {TIER_ROLES.map((role) => {
+                  const k = ROLE_TO_KEY[role];
+                  const checked = p.verbs[k];
+                  const disabled =
+                    busy ||
+                    (role === 'Can edit' && p.verbs.owner) ||
+                    (role === 'Can read' && (p.verbs.owner || p.verbs.write));
+                  return (
+                    <MenuItem
+                      key={role}
+                      disabled={disabled}
+                      active={checked}
+                      onClick={() => doToggleVerb(p.principal, role, checked)}
+                      trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
+                    >
+                      {role}
+                    </MenuItem>
+                  );
+                })}
+                <div className="my-1 border-t border-line" />
+                {(() => {
+                  const checked = p.verbs.download;
+                  const disabled = busy || p.verbs.owner;
+                  return (
+                    <MenuItem
+                      disabled={disabled}
+                      active={checked}
+                      onClick={() => doToggleVerb(p.principal, 'Can download', checked)}
+                      trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
+                    >
+                      Can download
+                    </MenuItem>
+                  );
+                })()}
+                <div className="my-1 border-t border-line" />
+                <MenuItem
+                  tone="danger"
+                  disabled={busy}
+                  onClick={() => {
+                    setOpenRowKey(null);
+                    doRevoke(p);
+                  }}
+                >
+                  Remove access
+                </MenuItem>
+              </MenuPanel>
+            )}
+          </div>
+        ) : (
+          <span className="shrink-0 text-detail text-ink-muted">{summarizeVerbs(p.verbs)}</span>
+        )}
+      </div>
+    );
+  };
 
   return (
-    <div
-      className="fixed inset-0 z-[70] bg-scrim flex items-center justify-center p-4"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="manage-access-title"
-        className="w-full max-w-[540px] max-h-[86vh] overflow-auto bg-white rounded-2xl shadow-2xl"
+    <>
+      <Dialog
+        open
+        onClose={onClose}
+        title="Manage access"
+        size="lg"
+        footer={
+          <Button variant="primary" size="sm" onClick={onClose}>
+            Done
+          </Button>
+        }
       >
-        <div className="flex items-start justify-between gap-3 px-6 pt-5 pb-2">
-          <div className="min-w-0">
-            <h2 id="manage-access-title" className="text-lg font-bold text-ink">
-              Manage access
-            </h2>
-            <div className="mt-0.5 text-sm text-ink-muted truncate" title={entry.relativePath}>
-              {entry.name}
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded hover:bg-hover text-ink-muted hover:text-ink shrink-0"
-            aria-label="Close"
-          >
-            <X size={16} />
-          </button>
-        </div>
+        <p className="truncate text-detail text-ink-muted" title={entry.relativePath}>
+          {entry.name}
+        </p>
 
-        <div className="px-6 pb-2">
-          {governed && canManage && (
-            <div className="my-3">
-              <div className="flex gap-2 relative">
-                <div className="flex-1 relative">
-                  <div className="w-full border border-line rounded-lg px-2 py-1.5 flex flex-wrap items-center gap-1.5 focus-within:ring-2 focus-within:ring-bevel/40">
-                    {pickedChips.map((c) => {
-                      const label = c.kind === 'role' ? c.role : c.displayName || c.email;
-                      return (
-                        <span
-                          key={principalKey(c)}
-                          className="inline-flex items-center gap-1 bg-sunken text-ink rounded px-2 py-1 text-xs"
-                        >
-                          {label}
-                          <button
-                            type="button"
-                            onClick={() => removeChip(c)}
-                            className="text-ink-faint hover:text-red-600"
-                            aria-label={`Remove ${label}`}
-                          >
-                            <X size={12} />
-                          </button>
-                        </span>
-                      );
-                    })}
-                    <input
-                      value={query}
-                      onChange={(e) => setQuery(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && addPending) {
-                          e.preventDefault();
-                          addChip(addPending);
-                        }
-                      }}
-                      placeholder={pickedChips.length ? '' : 'Add people or roles…'}
-                      className="flex-1 min-w-[8rem] px-1 py-1 text-sm focus:outline-none"
-                    />
-                  </div>
-                  {query.trim() && suggest && (suggest.groups.length > 0 || suggest.people.length > 0) && (
-                    <div className="absolute z-10 left-0 right-0 mt-1 bg-white border border-line rounded-lg shadow-lg max-h-56 overflow-auto">
-                      {suggest.groups.map((g) => (
+        {governed && canManage && (
+          <div className="mt-3">
+            <div className="relative flex items-stretch gap-1.5">
+              <div className="relative min-w-0 flex-1">
+                {/* A TextField that grew chips: same border, radius and focus
+                    treatment as the primitive, wrapped so the chips can wrap. */}
+                <div className="flex h-full w-full flex-wrap items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2 py-1 focus-within:border-transparent focus-within:outline-2 focus-within:-outline-offset-1 focus-within:outline-accent">
+                  {pickedChips.map((c) => {
+                    const label = c.kind === 'role' ? c.role : c.displayName || c.email;
+                    return (
+                      <span
+                        key={principalKey(c)}
+                        className="inline-flex items-center gap-1 rounded-sm bg-sunken px-2 py-0.5 text-detail text-ink"
+                      >
+                        {label}
                         <button
-                          key={`g:${g}`}
                           type="button"
-                          onClick={() => addChip({ kind: 'role', role: g })}
-                          className="w-full text-left px-3 py-2 text-sm hover:bg-hover flex items-center gap-2"
+                          onClick={() => removeChip(c)}
+                          className="rounded-xs text-ink-faint hover:text-danger"
+                          aria-label={`Remove ${label}`}
                         >
-                          <span className="w-6 h-6 rounded-full bg-ink-muted text-white text-[10px] flex items-center justify-center">
-                            {initials(g)}
-                          </span>
-                          <span className="flex-1">{g}</span>
-                          <span className="text-[10px] uppercase tracking-wide text-ink-faint">
-                            role
-                          </span>
+                          <X size={12} />
                         </button>
-                      ))}
-                      {suggest.people.map((p) => (
-                        <button
+                      </span>
+                    );
+                  })}
+                  <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && addPending) {
+                        e.preventDefault();
+                        addChip(addPending);
+                      }
+                    }}
+                    placeholder={pickedChips.length ? '' : 'Add people or roles…'}
+                    className="min-w-32 flex-1 bg-transparent px-1 py-1 text-ui text-ink placeholder:text-ink-faint focus:outline-none"
+                  />
+                </div>
+                {query.trim() && suggest && (suggest.groups.length > 0 || suggest.people.length > 0) && (
+                  <MenuPanel className="absolute left-0 right-0 z-10 mt-1 max-h-56 overflow-auto">
+                    {suggest.groups.map((g) => (
+                      <MenuItem
+                        key={`g:${g}`}
+                        onClick={() => addChip({ kind: 'role', role: g })}
+                        trailing={
+                          <span className="text-label uppercase text-ink-faint">role</span>
+                        }
+                      >
+                        <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
+                          {initials(g)}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate">{g}</span>
+                      </MenuItem>
+                    ))}
+                    {suggest.people.map((p) => {
+                      const tone = avatarTone(p.name || p.email);
+                      return (
+                        <MenuItem
                           key={`p:${p.email}`}
-                          type="button"
                           onClick={() => addChip({ kind: 'user', email: p.email, displayName: p.name })}
-                          className="w-full text-left px-3 py-2 text-sm hover:bg-hover flex items-center gap-2"
+                          trailing={
+                            <span className="max-w-40 truncate text-meta text-ink-faint">
+                              {p.email}
+                            </span>
+                          }
                         >
                           <span
-                            className="w-6 h-6 rounded-full text-white text-[10px] flex items-center justify-center"
-                            style={{ background: avatarColor(p.name || p.email) }}
+                            className="flex size-6 shrink-0 items-center justify-center rounded-full text-label font-bold"
+                            style={{ backgroundColor: tone.bg, color: tone.fg }}
                           >
                             {initials(p.name || p.email)}
                           </span>
-                          <span className="flex-1 truncate">{p.name || p.email}</span>
-                          <span className="text-xs text-ink-faint truncate">{p.email}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                          <span className="min-w-0 flex-1 truncate">{p.name || p.email}</span>
+                        </MenuItem>
+                      );
+                    })}
+                  </MenuPanel>
+                )}
+              </div>
 
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => setVerbOpen((o) => !o)}
-                    className="h-full px-3 rounded-lg border border-line text-sm text-ink flex items-center gap-1 hover:bg-hover max-w-[12rem]"
-                  >
-                    <span className="truncate">{summarizeVerbs(effectiveNewVerbs)}</span>
-                    <ChevronDown size={14} className="shrink-0" />
-                  </button>
-                  {verbOpen && (
-                    <div className="absolute right-0 z-10 mt-1 bg-white border border-line rounded-lg shadow-lg w-44 py-1">
-                      {TIER_ROLES.map((role) => {
-                        const k = ROLE_TO_KEY[role];
-                        const checked = effectiveNewVerbs[k];
-                        const disabled =
-                          (role === 'Can edit' && effectiveNewVerbs.owner) ||
-                          (role === 'Can read' && (effectiveNewVerbs.owner || effectiveNewVerbs.write));
-                        return (
-                          <button
-                            key={role}
-                            type="button"
-                            disabled={disabled}
-                            aria-pressed={checked}
-                            onClick={() => setNewVerbs((v) => ({ ...v, [k]: !v[k] }))}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            <span className="w-4 h-4 border border-line-strong rounded flex items-center justify-center shrink-0">
-                              {checked && <Check size={12} className="text-bevel" />}
-                            </span>
-                            <span className="flex-1 text-left">{role}</span>
-                          </button>
-                        );
-                      })}
-                      <div className="border-t border-line my-1" />
-                      <button
-                        type="button"
-                        disabled={effectiveNewVerbs.owner}
-                        aria-pressed={effectiveNewVerbs.download}
-                        onClick={() => setNewVerbs((v) => ({ ...v, download: !v.download }))}
-                        className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        <span className="w-4 h-4 border border-line-strong rounded flex items-center justify-center shrink-0">
-                          {effectiveNewVerbs.download && <Check size={12} className="text-bevel" />}
-                        </span>
-                        <span className="flex-1 text-left">Can download</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                <button
-                  type="button"
-                  disabled={pickedChips.length === 0 || grantVerbs.length === 0 || busy}
-                  onClick={doGrant}
-                  className="px-4 rounded-lg text-sm font-medium bg-bevel hover:bg-bevel-deep text-white disabled:bg-bevel/40 disabled:cursor-not-allowed flex items-center gap-1.5"
+              <div className="relative shrink-0">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-full max-w-44"
+                  onClick={() => setVerbOpen((o) => !o)}
+                  trailingIcon={<ChevronDown size={14} className="shrink-0" />}
                 >
-                  {busy && <Loader2 size={14} className="animate-spin" />}
-                  Share
-                </button>
-              </div>
-              {query.trim() && !addPending && !suggest?.peopleWithheld && (
-                <div className="mt-1.5 text-xs text-ink-muted">
-                  Type a full email to add someone, or pick a role from the list.
-                </div>
-              )}
-              {pickedChips.some(isEveryoneRole) && (
-                <div className="mt-1.5 text-xs text-ink-muted">
-                  “Everyone” makes this {targetKind} publicly readable — it can only be granted read access.
-                </div>
-              )}
-              {mutateError && (
-                <div className="mt-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                  {mutateError}
-                </div>
-              )}
-            </div>
-          )}
-
-          {!governed ? (
-            <div className="py-8 text-center text-sm text-ink-muted">
-              This item isn't part of the knowledge base, so it isn't governed by access control.
-            </div>
-          ) : loading ? (
-            <div className="flex items-center gap-2 py-8 justify-center text-sm text-ink-muted">
-              <Loader2 size={16} className="animate-spin" /> Loading access…
-            </div>
-          ) : error ? (
-            <div className="py-6 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3">
-              Couldn't load access: {error}
-            </div>
-          ) : (
-            <>
-              {!canManage && (
-                <div className="flex items-center gap-3 bg-bevel-soft rounded-lg px-3 py-2.5 mb-3 text-sm text-bevel-deep">
-                  <span className="flex-1">
-                    Only people with edit access can share this {targetKind}.
-                    {ownerNames && <> Ask an owner: {ownerNames}.</>}
-                  </span>
-                </div>
-              )}
-
-              <div className="text-sm font-bold text-ink my-2">People with access</div>
-
-              {data && !data.readers.restricted && (
-                <div className="flex items-center gap-3 py-1.5">
-                  <span className="w-8 h-8 rounded-full bg-emerald-600 text-white flex items-center justify-center shrink-0">
-                    <Globe size={16} />
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm text-ink">Anyone can read</div>
-                    <div className="text-xs text-ink-muted">Public — every signed-in user can read this {targetKind}</div>
-                  </div>
-                  {canManage && (
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={removePublicRead}
-                      className="text-xs text-ink-muted hover:text-red-600 disabled:opacity-50 px-2 py-1"
+                  <span className="truncate">{summarizeVerbs(effectiveNewVerbs)}</span>
+                </Button>
+                {verbOpen && (
+                  <MenuPanel className="absolute right-0 z-10 mt-1 w-48">
+                    {TIER_ROLES.map((role) => {
+                      const k = ROLE_TO_KEY[role];
+                      const checked = effectiveNewVerbs[k];
+                      const disabled =
+                        (role === 'Can edit' && effectiveNewVerbs.owner) ||
+                        (role === 'Can read' && (effectiveNewVerbs.owner || effectiveNewVerbs.write));
+                      return (
+                        <MenuItem
+                          key={role}
+                          disabled={disabled}
+                          active={checked}
+                          aria-pressed={checked}
+                          onClick={() => setNewVerbs((v) => ({ ...v, [k]: !v[k] }))}
+                          trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
+                        >
+                          {role}
+                        </MenuItem>
+                      );
+                    })}
+                    <div className="my-1 border-t border-line" />
+                    <MenuItem
+                      disabled={effectiveNewVerbs.owner}
+                      active={effectiveNewVerbs.download}
+                      aria-pressed={effectiveNewVerbs.download}
+                      onClick={() => setNewVerbs((v) => ({ ...v, download: !v.download }))}
+                      trailing={
+                        effectiveNewVerbs.download ? (
+                          <Check size={14} className="text-accent" />
+                        ) : undefined
+                      }
                     >
-                      Remove
-                    </button>
-                  )}
-                </div>
-              )}
+                      Can download
+                    </MenuItem>
+                  </MenuPanel>
+                )}
+              </div>
 
-              {directRows.length === 0 ? (
-                <div className="text-sm text-ink-muted py-2">
-                  {inheritedRows.length > 0
-                    ? 'No one is granted directly here — everyone below inherits access from a parent folder.'
-                    : 'No explicit grants at this path.'}
-                </div>
-              ) : (
-                directRows.map(renderRow)
-              )}
+              <Button
+                variant="primary"
+                size="sm"
+                className="shrink-0"
+                disabled={pickedChips.length === 0 || grantVerbs.length === 0 || busy}
+                onClick={doGrant}
+                leadingIcon={busy ? <Loader2 size={14} className="animate-spin" /> : undefined}
+              >
+                Share
+              </Button>
+            </div>
+            {query.trim() && !addPending && !suggest?.peopleWithheld && (
+              <p className="mt-1.5 text-detail text-ink-muted">
+                Type a full email to add someone, or pick a role from the list.
+              </p>
+            )}
+            {pickedChips.some(isEveryoneRole) && (
+              <p className="mt-1.5 text-detail text-ink-muted">
+                “Everyone” makes this {targetKind} publicly readable — it can only be granted read access.
+              </p>
+            )}
+            {mutateError && (
+              <Banner tone="danger" role="alert" className="mt-2 whitespace-pre-line">
+                {mutateError}
+              </Banner>
+            )}
+          </div>
+        )}
 
-              {inheritedRows.length > 0 && (
-                <div className="mt-3 border-t border-line pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowInherited((v) => !v)}
-                    className="w-full flex items-center gap-1.5 py-1 text-sm font-medium text-ink-muted hover:text-ink"
-                  >
-                    <ChevronDown
-                      size={14}
-                      className={`transition-transform ${showInherited ? 'rotate-180' : ''}`}
-                    />
-                    Inherited access ({inheritedRows.length})
-                    <span className="font-normal text-ink-faint">
-                      — from parent folders &amp; roles
-                    </span>
-                  </button>
-                  {showInherited && <div className="mt-1">{inheritedRows.map(renderRow)}</div>}
-                </div>
-              )}
+        {!governed ? (
+          <p className="py-8 text-center text-ui text-ink-muted">
+            This item isn't part of the knowledge base, so it isn't governed by access control.
+          </p>
+        ) : loading ? (
+          <p className="flex items-center justify-center gap-2 py-8 text-ui text-ink-muted">
+            <Loader2 size={16} className="animate-spin" /> Loading access…
+          </p>
+        ) : error ? (
+          <Banner tone="danger" role="alert" className="my-3">
+            Couldn't load access: {error}
+          </Banner>
+        ) : (
+          <>
+            {!canManage && (
+              <Banner tone="neutral" role="note" className="mt-3">
+                Only people with edit access can share this {targetKind}.
+                {ownerNames && <> Ask an owner: {ownerNames}.</>}
+              </Banner>
+            )}
 
-              <div className="flex items-center gap-3 border-t border-line mt-4 pt-4">
-                <div className="w-9 h-9 rounded-full bg-sunken text-ink-muted flex items-center justify-center shrink-0">
-                  <Lock size={16} />
-                </div>
-                <div className="flex-1">
-                  <div className="text-sm font-semibold text-ink">Restricted</div>
-                  <div className="text-xs text-ink-muted">
-                    Only people granted access can edit this item.
+            <h3 className="mb-1 mt-4 text-label uppercase text-ink-faint">People with access</h3>
+
+            {data && !data.readers.restricted && (
+              <div className="flex items-center gap-3 py-1.5">
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-ok-soft text-ok">
+                  <Globe size={16} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="text-ui text-ink">Anyone can read</div>
+                  <div className="text-detail text-ink-muted">
+                    Public — every signed-in user can read this {targetKind}
                   </div>
                 </div>
-              </div>
-            </>
-          )}
-        </div>
-
-        <div className="flex items-center justify-end gap-3 px-6 py-4">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-5 py-2 rounded-lg text-sm font-medium bg-bevel hover:bg-bevel-deep text-white"
-          >
-            Done
-          </button>
-        </div>
-      </div>
-
-      {confirmRemove && (
-        <div
-          className="fixed inset-0 z-[80] bg-scrim flex items-center justify-center p-4"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget && !busy) setConfirmRemove(null);
-          }}
-        >
-          <div role="dialog" aria-modal="true" className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
-            {(() => {
-              // When the flow was triggered by unchecking ONE verb, the whole
-              // confirmation is scoped to it ("their EDIT access", "remove EDIT
-              // from the parent"); otherwise it's the whole principal.
-              const va = confirmRemove.verb ? `${VERB_NOUN[confirmRemove.verb]} access` : 'access';
-              return (
-                <>
-                  <h3 className="text-lg font-semibold text-ink">
-                    {confirmRemove.ancestors.length ? 'Remove from parent folder?' : 'Restrict access here?'}
-                  </h3>
-                  <p className="mt-2 text-sm text-ink-muted">
-                    {confirmRemove.ancestors.length ? (
-                      <>
-                        {confirmRemove.label}'s {va} here is inherited from{' '}
-                        <span className="font-medium" title={confirmRemove.ancestors.map(folderPath).join(', ')}>
-                          {confirmRemove.ancestors.map(folderLabel).join(', ')}
-                        </span>
-                        . Remove their {va} from the parent — which also removes it from other items in
-                        that folder — or restrict just this {targetKind} while leaving the parent grant
-                        intact.
-                      </>
-                    ) : (
-                      <>
-                        {confirmRemove.label}'s {va} here comes from a role or policy, not a grant on
-                        this {targetKind}. You can't remove it here — but you can restrict their {va} on
-                        just this {targetKind} by adding a block.
-                      </>
-                    )}
-                  </p>
-                </>
-              );
-            })()}
-
-            {mutateError && (
-              <div className="mt-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                {mutateError}
+                {canManage && (
+                  <Button variant="danger" size="tiny" disabled={busy} onClick={removePublicRead}>
+                    Remove
+                  </Button>
+                )}
               </div>
             )}
 
-            <div className="mt-5 flex flex-col gap-2">
-              {confirmRemove.ancestors.length === 1 && (
+            {directRows.length === 0 ? (
+              <p className="py-2 text-ui text-ink-muted">
+                {inheritedRows.length > 0
+                  ? 'No one is granted directly here — everyone below inherits access from a parent folder.'
+                  : 'No explicit grants at this path.'}
+              </p>
+            ) : (
+              directRows.map(renderRow)
+            )}
+
+            {inheritedRows.length > 0 && (
+              <div className="mt-3 border-t border-line pt-2">
                 <button
                   type="button"
-                  disabled={busy}
-                  onClick={() => doRemoveFromParent(confirmRemove.principal, confirmRemove.ancestors[0], confirmRemove.verb)}
-                  className="w-full px-4 py-2.5 rounded-lg text-sm font-medium bg-bevel hover:bg-bevel-deep text-white disabled:bg-bevel/40 disabled:cursor-not-allowed"
+                  onClick={() => setShowInherited((v) => !v)}
+                  className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail font-medium text-ink-muted hover:text-ink"
                 >
-                  Remove from {folderLabel(confirmRemove.ancestors[0])}
+                  <ChevronDown
+                    size={14}
+                    className={`transition-transform ${showInherited ? 'rotate-180' : ''}`}
+                  />
+                  Inherited access ({inheritedRows.length})
+                  <span className="font-normal text-ink-faint">
+                    — from parent folders &amp; roles
+                  </span>
                 </button>
-              )}
-              {confirmRemove.ancestors.length > 1 && (
-                <>
-                  <div className="text-xs text-ink-muted">
-                    Inherited from multiple folders — remove from one at a time:
-                  </div>
-                  {confirmRemove.ancestors.map((a) => (
-                    <button
-                      key={a}
-                      type="button"
-                      disabled={busy}
-                      onClick={() => doRemoveFromParent(confirmRemove.principal, a, confirmRemove.verb)}
-                      className="w-full px-4 py-2.5 rounded-lg text-sm font-medium bg-bevel hover:bg-bevel-deep text-white disabled:bg-bevel/40 disabled:cursor-not-allowed"
-                    >
-                      Remove from {folderLabel(a)}
-                    </button>
-                  ))}
-                </>
-              )}
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => doDenyHere(confirmRemove.principal, confirmRemove.verb)}
-                className="w-full px-4 py-2.5 rounded-lg text-sm font-medium border border-line-strong text-ink hover:bg-hover disabled:cursor-not-allowed"
-              >
-                Restrict just this {targetKind}
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => setConfirmRemove(null)}
-                className="w-full px-4 py-2 rounded-lg text-sm text-ink-muted hover:bg-hover disabled:cursor-not-allowed"
-              >
-                Cancel
-              </button>
+                {showInherited && <div className="mt-1">{inheritedRows.map(renderRow)}</div>}
+              </div>
+            )}
+
+            <div className="mt-4 flex items-center gap-3 border-t border-line pt-4">
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-sunken text-ink-muted">
+                <Lock size={16} />
+              </span>
+              <div className="flex-1">
+                <div className="text-ui font-semibold text-ink">Restricted</div>
+                <div className="text-detail text-ink-muted">
+                  Only people granted access can edit this item.
+                </div>
+              </div>
             </div>
+          </>
+        )}
+      </Dialog>
+
+      {confirmRemove && (
+        <Dialog
+          open
+          busy={busy}
+          onClose={() => setConfirmRemove(null)}
+          size="md"
+          title={
+            confirmRemove.ancestors.length ? 'Remove from parent folder?' : 'Restrict access here?'
+          }
+        >
+          {(() => {
+            // When the flow was triggered by unchecking ONE verb, the whole
+            // confirmation is scoped to it ("their EDIT access", "remove EDIT
+            // from the parent"); otherwise it's the whole principal.
+            const va = confirmRemove.verb ? `${VERB_NOUN[confirmRemove.verb]} access` : 'access';
+            return (
+              <p className="text-ui leading-relaxed text-ink-muted">
+                {confirmRemove.ancestors.length ? (
+                  <>
+                    {confirmRemove.label}'s {va} here is inherited from{' '}
+                    <span
+                      className="font-medium text-ink"
+                      title={confirmRemove.ancestors.map(folderPath).join(', ')}
+                    >
+                      {confirmRemove.ancestors.map(folderLabel).join(', ')}
+                    </span>
+                    . Remove their {va} from the parent — which also removes it from other items in
+                    that folder — or restrict just this {targetKind} while leaving the parent grant
+                    intact.
+                  </>
+                ) : (
+                  <>
+                    {confirmRemove.label}'s {va} here comes from a role or policy, not a grant on
+                    this {targetKind}. You can't remove it here — but you can restrict their {va} on
+                    just this {targetKind} by adding a block.
+                  </>
+                )}
+              </p>
+            );
+          })()}
+
+          {mutateError && (
+            <Banner tone="danger" role="alert" className="mt-3 whitespace-pre-line">
+              {mutateError}
+            </Banner>
+          )}
+
+          <div className="mt-4 flex flex-col gap-2">
+            {confirmRemove.ancestors.length === 1 && (
+              <Button
+                variant="primary"
+                className="w-full"
+                disabled={busy}
+                onClick={() =>
+                  doRemoveFromParent(confirmRemove.principal, confirmRemove.ancestors[0], confirmRemove.verb)
+                }
+              >
+                Remove from {folderLabel(confirmRemove.ancestors[0])}
+              </Button>
+            )}
+            {confirmRemove.ancestors.length > 1 && (
+              <>
+                <p className="text-detail text-ink-muted">
+                  Inherited from multiple folders — remove from one at a time:
+                </p>
+                {confirmRemove.ancestors.map((a) => (
+                  <Button
+                    key={a}
+                    variant="primary"
+                    className="w-full"
+                    disabled={busy}
+                    onClick={() => doRemoveFromParent(confirmRemove.principal, a, confirmRemove.verb)}
+                  >
+                    Remove from {folderLabel(a)}
+                  </Button>
+                ))}
+              </>
+            )}
+            <Button
+              variant="outline"
+              className="w-full"
+              disabled={busy}
+              onClick={() => doDenyHere(confirmRemove.principal, confirmRemove.verb)}
+            >
+              Restrict just this {targetKind}
+            </Button>
+            <Button
+              variant="quiet"
+              className="w-full"
+              disabled={busy}
+              onClick={() => setConfirmRemove(null)}
+            >
+              Cancel
+            </Button>
           </div>
-        </div>
+        </Dialog>
       )}
-    </div>
+    </>
   );
 }
