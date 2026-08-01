@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Badge, Button, ListRow, TextField } from '../../../../shared/components';
 import { startToolOAuth } from '../../../secrets-vault/services/connect.api';
 import {
@@ -42,6 +42,13 @@ export interface ToolVarRowProps {
   setupKind: 'open' | 'oauth-auto' | 'oauth-manual' | null;
   /** Where the OAuth round-trip should land — a bare path, no fragment. */
   returnTo: string;
+  /**
+   * Bumped by the section's banner to open this row's editor from a distance
+   * ("Add key" up top is the same act as "Add key" on the row). Monotonic
+   * counter rather than a boolean so pressing the banner twice re-opens a row
+   * the user has since cancelled.
+   */
+  editSignal?: number;
   onChanged(): void;
   onError(message: string): void;
 }
@@ -54,14 +61,25 @@ export function ToolVarRow({
   canWrite,
   setupKind,
   returnTo,
+  editSignal,
   onChanged,
   onError,
 }: ToolVarRowProps) {
   const [editor, setEditor] = useState<Editor>(null);
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const label = variable.label ?? variable.name;
+
+  // The banner's button targets exactly one row; scrolling brings the editor
+  // to where the click happened conceptually — "fix THIS".
+  useEffect(() => {
+    if (!editSignal) return;
+    setValue('');
+    setEditor('value');
+    rootRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [editSignal]);
 
   function open(next: Exclude<Editor, null>) {
     setValue('');
@@ -227,7 +245,7 @@ export function ToolVarRow({
   };
 
   return (
-    <div className="flex flex-col gap-1.5">
+    <div ref={rootRef} className="flex flex-col gap-1.5">
       <ListRow density="row" label={label} description={description} meta={meta} />
 
       {editor && (

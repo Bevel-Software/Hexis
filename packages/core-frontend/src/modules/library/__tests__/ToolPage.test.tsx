@@ -276,18 +276,14 @@ describe('ToolPage — connection', () => {
 });
 
 describe('ToolPage — manage access', () => {
-  it('shows the button to an admin and opens the Share tool panel', async () => {
+  it('offers none, to anyone, including an admin', async () => {
+    // Access is decided at the GROUP. A tool inherits its folder's rules, so an
+    // editor here would either duplicate the group's or quietly write a
+    // per-file override nobody looking at the group would ever see.
     renderPage({ isAdmin: true });
-    fireEvent.click(await screen.findByRole('button', { name: 'Manage access' }));
-
-    expect(screen.getByRole('dialog')).toHaveAccessibleName('Share tool');
-    expect(screen.getByTestId('tool-share-panel-body')).toBeInTheDocument();
-  });
-
-  it('hides the button from everyone else', async () => {
-    renderPage();
     await screen.findByRole('heading', { name: 'heyreach', level: 1 });
     expect(screen.queryByRole('button', { name: 'Manage access' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull();
   });
 });
 

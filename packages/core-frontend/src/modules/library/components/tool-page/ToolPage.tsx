@@ -2,14 +2,13 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { groupOfPath } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
-import { useAdmin } from '../../../admin/state/admin.context';
 import { useToolPage } from '../../hooks/useToolPage';
 import { LIBRARY_ROOT } from '../../routes/library-paths';
 import { readOAuthFragment } from '../../utils/oauth-fragment';
 import type { ToolCapability } from '../../services/tools.api';
 import type { LibrarySkillSummary } from '../../services/library.api';
 import { ToolConnectionSection } from './ToolConnectionSection';
-import { ToolSharePanel } from './ToolSharePanel';
+import { ToolLogo } from '../ToolLogo';
 
 /**
  * One tool, as a page.
@@ -26,13 +25,11 @@ import { ToolSharePanel } from './ToolSharePanel';
  *    same state as a typo'd slug (fail-closed: a distinct "you can't see this"
  *    would confirm the tool exists).
  *  - `tool.canWrite` — the owner-side affordances, from the per-file ACL.
- *  - `useAdmin().isAdmin` — the Manage access button, and nothing else.
  */
 export function ToolPage() {
   const { slug: rawSlug = '' } = useParams<{ slug: string }>();
   const slug = safeDecode(rawSlug);
   const navigate = useNavigate();
-  const { isAdmin } = useAdmin();
   const page = useToolPage(slug);
 
   // Read ONCE, synchronously, before the strip effect below runs — an effect
@@ -40,7 +37,6 @@ export function ToolPage() {
   // `actionError` so a successful reload can't clear a callback failure.
   const [oauthOutcome] = useState(readOAuthFragment);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [shareOpen, setShareOpen] = useState(false);
 
   useEffect(() => {
     if (oauthOutcome) window.history.replaceState(null, '', window.location.pathname);
@@ -103,6 +99,7 @@ export function ToolPage() {
       {backLink}
 
       <header className="mt-4 flex items-start gap-4">
+        <ToolLogo slug={tool.slug} name={tool.name} size="lg" className="mt-1" />
         <div className="min-w-0 flex-1">
           <p className="text-label font-semibold uppercase text-ink-faint">
             {group ? `Tool · ${group}` : 'Tool'}
@@ -114,11 +111,11 @@ export function ToolPage() {
             </p>
           )}
         </div>
-        {isAdmin && (
-          <Button variant="outline" size="sm" onClick={() => setShareOpen(true)}>
-            Manage access
-          </Button>
-        )}
+        {/* No `Manage access` here, deliberately. Access is decided at the
+            GROUP — a tool inherits its folder's `access.md`, so an editor on
+            this page would either duplicate the group's one or quietly write a
+            per-file override that nobody looking at the group would see. The
+            group's `Share` panel is the single place. */}
       </header>
 
       {actionError && (
@@ -146,11 +143,6 @@ export function ToolPage() {
         Managed by the Admins.
       </div>
 
-      <ToolSharePanel
-        open={shareOpen}
-        tool={{ slug: tool.slug, name: tool.name, path: tool.path }}
-        onClose={() => setShareOpen(false)}
-      />
     </Article>
   );
 }

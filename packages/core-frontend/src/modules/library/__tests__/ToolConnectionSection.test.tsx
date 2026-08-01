@@ -128,7 +128,7 @@ describe('ToolConnectionSection', () => {
     expect(screen.queryByRole('button', { name: 'Edit the tool file' })).toBeNull();
   });
 
-  it('drops the banner once the owner-side provider is configured', () => {
+  it('drops every banner once the owner-side provider is configured', () => {
     renderSection(
       tool({
         setup: OAUTH_MANUAL,
@@ -147,13 +147,111 @@ describe('ToolConnectionSection', () => {
         ],
       }),
     );
+    // The SETUP banner is gone because the provider is configured — and the
+    // connection banner does NOT take its place: configuration is done, and a
+    // pending sign-in is the row's business. The row below carries the state
+    // and the button, so a banner would be the same sentence twice.
     expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.queryByText(/Sign-in setup needed/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+  });
+
+  it('keeps the banner about configuration: a missing key is named, a pending sign-in is not', () => {
+    renderSection(
+      tool({
+        variables: [
+          {
+            name: 'API_KEY',
+            scope: 'user',
+            label: 'HeyReach API key',
+            key: 'heyreach_API_KEY',
+            adminConfigured: false,
+            userConfigured: false,
+          },
+          {
+            name: 'SIGNIN',
+            scope: 'user',
+            label: null,
+            key: 'heyreach_SIGNIN',
+            adminConfigured: true,
+            userConfigured: false,
+            oauth: true,
+            authorized: false,
+          },
+        ],
+      }),
+    );
+    const banner = screen.getByRole('status');
+    // One configuration gap → the singular headline, not "needs 2 things".
+    expect(banner).toHaveTextContent('This tool is not connected yet.');
+    expect(banner).toHaveTextContent('HeyReach API key — Needs a key from you');
+    expect(banner).not.toHaveTextContent('Needs your sign-in');
+  });
+
+  it('says what a tool is missing, in amber, above the rows', () => {
+    renderSection(
+      tool({
+        variables: [
+          {
+            name: 'API_KEY',
+            scope: 'user',
+            label: 'HeyReach API key',
+            key: 'heyreach_API_KEY',
+            adminConfigured: false,
+            userConfigured: false,
+          },
+        ],
+      }),
+    );
+    // Named by its label, not its env var — and it says whose move it is.
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'HeyReach API key — Needs a key from you',
+    );
+  });
+
+  it("the banner's Add key opens the missing variable's editor, from a distance", () => {
+    renderSection(
+      tool({
+        variables: [
+          {
+            name: 'API_KEY',
+            scope: 'user',
+            label: 'HeyReach API key',
+            key: 'heyreach_API_KEY',
+            adminConfigured: false,
+            userConfigured: false,
+          },
+        ],
+      }),
+    );
+    expect(screen.queryByRole('textbox')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Add key — HeyReach API key' }));
+    // The same editor the row's own button opens — one path, two doors.
+    expect(screen.getByLabelText('Value for API_KEY')).toBeInTheDocument();
+  });
+
+  it('says nothing when every variable is set', () => {
+    renderSection(
+      tool({
+        variables: [
+          {
+            name: 'API_KEY',
+            scope: 'user',
+            label: null,
+            key: 'heyreach_API_KEY',
+            adminConfigured: true,
+            userConfigured: true,
+          },
+        ],
+      }),
+    );
+    expect(screen.queryByRole('status')).toBeNull();
   });
 
   it.each<ToolSetup | null>([{ kind: 'open' }, { kind: 'oauth-auto' }, null])(
     'shows no setup banner for %s',
     (setup) => {
+      // No variables at all, so neither banner has anything to report.
       renderSection(tool({ setup, canWrite: true }));
       expect(screen.queryByRole('status')).toBeNull();
     },
