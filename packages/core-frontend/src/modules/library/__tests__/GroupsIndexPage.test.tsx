@@ -19,6 +19,7 @@ vi.mock('../services/groups.api', () => ({ listGroups: groupsMock.listGroups }))
 
 import { LibraryProvider } from '../state/library-data';
 import { GroupsIndexPage } from '../components/GroupsIndexPage';
+import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
 
 const tool = (over: Partial<ToolSecrets> = {}): ToolSecrets => ({
   slug: 'heyreach',
@@ -95,13 +96,15 @@ function LocationProbe() {
 function renderIndex() {
   return render(
     <MemoryRouter initialEntries={['/skills-and-tools/groups']}>
+      {withAuth(
       <LibraryProvider>
         <Routes>
           <Route path="/skills-and-tools/groups" element={<GroupsIndexPage />} />
           <Route path="*" element={<div />} />
         </Routes>
         <LocationProbe />
-      </LibraryProvider>
+      </LibraryProvider>,
+      )}
     </MemoryRouter>,
   );
 }
@@ -126,15 +129,18 @@ describe('GroupsIndexPage', () => {
     expect(screen.getByRole('heading', { name: 'Ask to join' })).toBeInTheDocument();
   });
 
-  it('offers the two personal views with their own copy', async () => {
+  it("offers the caller's own group under Yours, and opens it", async () => {
     renderIndex();
-    expect(await screen.findByText('The skills you answer for')).toBeInTheDocument();
-    expect(screen.getByText('Your sign-ins and the skills no group carries')).toBeInTheDocument();
-    fireEvent.click(row(/^Owned by me/));
-    await waitFor(() => expect(href()).toBe('/skills-and-tools/owned'));
+    expect(
+      await screen.findByText('Your sign-ins and the skills no group carries'),
+    ).toBeInTheDocument();
+    // The lens is gone from this page — it lives in the sidebar.
+    expect(screen.queryByText('The skills you answer for')).not.toBeInTheDocument();
+    fireEvent.click(row(new RegExp(`^${TEST_PERSONAL_GROUP}`)));
+    await waitFor(() => expect(href()).toBe('/skills-and-tools/yours'));
   });
 
-  it('hides Yours alone when nothing sits outside a group', async () => {
+  it("keeps the caller's own group listed even when nothing sits outside a group", async () => {
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,
       skills: [{ name: 'outreach', description: '', path: 'Groups/GTM/outreach' }],
@@ -142,7 +148,9 @@ describe('GroupsIndexPage', () => {
     });
     renderIndex();
     await screen.findByRole('heading', { name: 'All groups', level: 1 });
-    expect(screen.queryByRole('button', { name: /^Yours alone/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeInTheDocument();
+    // And never the lens: "Owned by me" is a view across groups, not a group.
+    expect(screen.queryByRole('button', { name: /^Owned by me/ })).not.toBeInTheDocument();
   });
 
   it("puts a readable group under Groups you're in, with its run-by line and totals", async () => {
@@ -240,7 +248,7 @@ describe('GroupsIndexPage', () => {
     renderIndex();
     const banner = await screen.findByRole('alert');
     expect(banner).toHaveTextContent("Couldn't load groups.");
-    expect(screen.getByRole('button', { name: /^Owned by me/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: "Groups you're in" })).not.toBeInTheDocument();
 
     groupsMock.listGroups.mockResolvedValue([summary()]);
@@ -252,6 +260,6 @@ describe('GroupsIndexPage', () => {
     groupsMock.listGroups.mockReturnValue(new Promise(() => {}));
     renderIndex();
     expect(screen.getByText('Loading groups…')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Owned by me/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeInTheDocument();
   });
 });

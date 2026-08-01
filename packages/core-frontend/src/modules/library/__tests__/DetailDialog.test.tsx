@@ -156,20 +156,21 @@ describe('DetailDialog (skill)', () => {
     expect(await screen.findByText(/topic: AI/)).toBeInTheDocument();
   });
 
-  it('shows owner-only Edit and Manage access when the caller owns the skill', async () => {
+  it('shows owner-only Edit when the caller owns the skill — but never access', async () => {
     renderDialog(true);
     await screen.findByText('Drafts the Friday newsletter for review.');
 
-    expect(screen.getByRole('button', { name: 'Manage access' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
     expect(screen.getByText('OWNER')).toBeInTheDocument();
+    // A skill inherits its group folder's rules; the group's Share panel is
+    // the one place they are decided, for owner and non-owner alike.
+    expect(screen.queryByRole('button', { name: 'Manage access' })).toBeNull();
   });
 
-  it('hides Edit and Manage access for non-owners', async () => {
+  it('hides Edit for non-owners', async () => {
     renderDialog(false);
     await screen.findByText('Drafts the Friday newsletter for review.');
 
-    expect(screen.queryByRole('button', { name: 'Manage access' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
     expect(screen.queryByText('OWNER')).toBeNull();
   });

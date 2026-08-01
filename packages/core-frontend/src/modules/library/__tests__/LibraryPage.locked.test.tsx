@@ -59,6 +59,7 @@ vi.mock('../../access/components/ManageAccessDialog', () => ({
 }));
 
 import { LibraryRoutes } from '../routes/LibraryRoutes';
+import { withAuth } from './auth-harness';
 
 const tool = (over: Partial<ToolSecrets> = {}): ToolSecrets => ({
   slug: 'heyreach',
@@ -128,11 +129,13 @@ const workspace = {
 function renderAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <WorkspaceContext.Provider value={workspace}>
-        <Routes>
-          <Route path="/skills-and-tools/*" element={<LibraryRoutes />} />
-        </Routes>
-      </WorkspaceContext.Provider>
+      {withAuth(
+        <WorkspaceContext.Provider value={workspace}>
+          <Routes>
+            <Route path="/skills-and-tools/*" element={<LibraryRoutes />} />
+          </Routes>
+        </WorkspaceContext.Provider>,
+      )}
     </MemoryRouter>,
   );
 }

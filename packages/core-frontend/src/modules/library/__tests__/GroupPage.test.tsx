@@ -38,24 +38,24 @@ vi.mock('../services/groups.api', () => ({
 // exercise the page's judgement rather than the network — and so the suite
 // doesn't wait on a connection refusal. `GroupAccessSection.test.tsx` is where
 // the section's own behaviour is covered.
-vi.mock('../../access/api', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../access/api')>();
-  return {
-    ...actual,
-    fetchFileAccess: vi.fn().mockResolvedValue({
-      canRead: true,
-      canWrite: false,
-      canDownload: false,
-      canOwner: false,
-      eligible: { roles: [], users: [] },
-      readers: { restricted: true, roles: [], users: [] },
-      owners: { roles: [], users: [] },
-      downloaders: { roles: [], users: [] },
-      sources: {},
-    }),
-    fetchAccessOverrides: vi.fn().mockResolvedValue({ overrides: [], truncated: false }),
-  };
-});
+// The ONE access surface. Mocked at the component: its own behaviour lives in
+// the access module's tests — what this file owes is that the page opens it on
+// the right DIRECTORY.
+vi.mock('../../access/components/ManageAccessDialog', () => ({
+  ManageAccessDialog: ({
+    entry,
+    onClose,
+  }: {
+    entry: { relativePath: string; type: string };
+    onClose(): void;
+  }) => (
+    <div role="dialog" aria-label={`Manage access ${entry.type} ${entry.relativePath}`}>
+      <button type="button" onClick={onClose}>
+        Close access
+      </button>
+    </div>
+  ),
+}));
 
 import { LibraryProvider } from '../state/library-data';
 import { LibraryToastProvider } from '../state/toast';
@@ -171,35 +171,13 @@ describe('GroupPage', () => {
     expect(screen.getByRole('heading', { name: 'Tools' })).toBeInTheDocument();
   });
 
-  it('renders the membership lede from the access principals', async () => {
+  it('leads with the group, not with who runs it', async () => {
     renderGroup('GTM');
-    expect(
-      await screen.findByText('Run by Olga Ivanova · shared with GTM Team, Ali Baba'),
-    ).toBeInTheDocument();
-  });
-
-  it('falls back through writers to the admins when nobody owns the folder', async () => {
-    groupsMock.listGroups.mockResolvedValue([
-      gtm({ owners: { roles: [], users: [] }, writers: { roles: [], users: [] } }),
-    ]);
-    renderGroup('GTM');
-    expect(await screen.findByText(/^Run by the workspace admins/)).toBeInTheDocument();
-  });
-
-  it('says "everyone here" when the group is not restricted', async () => {
-    groupsMock.listGroups.mockResolvedValue([
-      gtm({ readers: { restricted: false, roles: [], users: [] } }),
-    ]);
-    renderGroup('GTM');
-    expect(
-      await screen.findByText('Run by Olga Ivanova · shared with everyone here'),
-    ).toBeInTheDocument();
-  });
-
-  it('drops the shared-with clause when the reader list is withheld', async () => {
-    groupsMock.listGroups.mockResolvedValue([gtm({ readers: null })]);
-    renderGroup('GTM');
-    expect(await screen.findByText('Run by Olga Ivanova')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'GTM', level: 1 })).toBeInTheDocument();
+    // The run-by/shared-with lede is gone: it restated, above every group, what
+    // the Share panel says once and on demand.
+    expect(screen.queryByText(/^Run by /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/shared with/)).not.toBeInTheDocument();
   });
 
   it('offers a writer the Add dialog, with the group in its title', async () => {
@@ -256,13 +234,19 @@ describe('GroupPage', () => {
     expect(screen.getByText('No tools yet.')).toBeInTheDocument();
   });
 
-  it('carries the access section, derived from the folders its items live in', async () => {
+  it('Share IS the manage-access dialog, opened on this group\'s directory', async () => {
     renderGroup('GTM');
-    // The section is the page's only access escalation, so its absence would be
-    // a group nobody can share. Its own behaviour lives in
-    // `GroupAccessSection.test.tsx`; what matters here is that it is mounted
-    // with this group's item paths.
-    expect(await screen.findByRole('region', { name: 'Access for GTM' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Share' }));
+    // One dialog for every access path — no intermediate read-only panel.
+    // The entry is the group DIRECTORY under the KB dir, so the rules land on
+    // the folder, never on one file inside it.
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access directory knowledge-base/Groups/GTM',
+      }),
+    ).toBeInTheDocument();
   });
 
   it('locks a group the caller cannot read and shows nothing inside it', async () => {

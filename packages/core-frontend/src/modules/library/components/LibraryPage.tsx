@@ -10,7 +10,7 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useLibraryToast } from '../state/toast';
 import { AccessRequestsBanner } from './AccessRequestsBanner';
-import { LibraryCard } from './LibraryCard';
+import { GroupItemSections } from './group-page-parts';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 
 /**
@@ -114,8 +114,7 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
         <div>
           <h1 className="text-display font-semibold">{headingFor(filter)}</h1>
           <p className="mt-0.5 text-ui text-ink-muted">
-            {visible.length} {visible.length === 1 ? 'item' : 'items'} · open one for what it
-            does, who owns it, and what it needs.
+            {visible.length} {visible.length === 1 ? 'item' : 'items'}
           </p>
         </div>
         <TextField
@@ -152,19 +151,19 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
       ) : visible.length === 0 ? (
         <div className="py-16 text-center text-ui text-ink-faint">Nothing here matches yet.</div>
       ) : (
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(248px,1fr))] gap-2.5 pb-14">
-          {visible.map((item) => (
-            <LibraryCard
-              key={`${item.kind}:${item.id}`}
-              kind={item.kind}
-              id={item.id}
-              name={item.name}
-              description={item.description}
-              owned={item.owned}
-              status={item.status}
-              onOpen={() => openItem(item)}
-            />
-          ))}
+        // Skills and tools, split — the same two bands a group page has.
+        // One undifferentiated grid made you read every card's body to learn
+        // what kind of thing it was; the heading does that now, once, for a
+        // whole band. A band with nothing in it is dropped rather than shown
+        // empty: this is a search result, not an inventory of what could be.
+        <div className="pb-14">
+          <GroupItemSections
+            skillItems={visible.filter((i) => i.kind === 'skill')}
+            toolItems={visible.filter((i) => i.kind === 'integration')}
+            onOpen={openItem}
+            hideEmpty
+            emptySkills=""
+          />
         </div>
       )}
 

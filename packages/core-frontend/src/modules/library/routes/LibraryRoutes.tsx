@@ -5,6 +5,7 @@ import { LibraryLayout } from '../components/LibraryLayout';
 import { LibraryPage } from '../components/LibraryPage';
 import { GroupPage } from '../components/GroupPage';
 import { GroupsIndexPage } from '../components/GroupsIndexPage';
+import { PersonalGroupPage } from '../components/PersonalGroupPage';
 import { ProposeSkillPage } from '../components/ProposeSkillPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
 import { LIBRARY_ROOT } from './library-paths';
@@ -32,7 +33,12 @@ export function LibraryRoutes() {
           <Route element={<LibraryLayout />}>
             <Route index element={<LibraryPage filter={{ kind: 'all' }} />} />
             <Route path="owned" element={<LibraryPage filter={{ kind: 'owned' }} />} />
-            <Route path="yours" element={<LibraryPage filter={{ kind: 'ungrouped' }} />} />
+
+            {/* `yours` is a GROUP page, not a gallery filter — the items in no
+                folder, given the same page the folders get. The sidebar still
+                lights it through the `ungrouped` filter, so the URL and the
+                selection stay the pair they were. */}
+            <Route path="yours" element={<PersonalGroupPage />} />
 
             {/* A group is a PLACE: `groups/:group` is a real page with a real
                 URL, and `GroupPage` — not the router — decides whether the

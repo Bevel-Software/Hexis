@@ -38,10 +38,9 @@ vi.mock('../services/groups.api', () => ({
 const toolPageMock = vi.hoisted(() => ({ useToolPage: vi.fn() }));
 vi.mock('../hooks/useToolPage', () => ({ useToolPage: toolPageMock.useToolPage }));
 
-// The group page mounts an access section that fetches on render. Stub that
-// seam — this file tests the route table, not access (see
-// `GroupAccessSection.test.tsx`), and an unstubbed fetch makes the suite wait
-// on a refused connection.
+// ManageAccessDialog (reachable from the group page's Share) fetches through
+// this module. Nothing opens it in a routing test, but the stub keeps any
+// accidental mount from waiting on a refused connection.
 vi.mock('../../access/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../access/api')>();
   return {
@@ -62,6 +61,7 @@ vi.mock('../../access/api', async (importOriginal) => {
 });
 
 import { LibraryRoutes } from '../routes/LibraryRoutes';
+import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
 
 const tool = (over: Partial<ToolSecrets>): ToolSecrets => ({
   slug: 'heyreach',
@@ -150,7 +150,9 @@ function wrap(children: ReactNode) {
 
   return (
     <AdminContext.Provider value={adminValue}>
-      <WorkspaceContext.Provider value={workspaceValue}>{children}</WorkspaceContext.Provider>
+      <WorkspaceContext.Provider value={workspaceValue}>
+        {withAuth(children)}
+      </WorkspaceContext.Provider>
     </AdminContext.Provider>
   );
 }
@@ -181,7 +183,13 @@ describe('LibraryRoutes', () => {
   it('renders the gallery at /skills-and-tools with heading Library', async () => {
     renderAt('/skills-and-tools');
     expect(await screen.findByRole('heading', { name: 'Library' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Everything/ })).toHaveAttribute('aria-current', 'true');
+    // Everything has no sidebar row any more — the Library LANDS on
+    // everything, so arriving here lights nothing in the nav.
+    expect(screen.queryByRole('button', { name: /^Everything/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /^Owned by me/ })).toHaveAttribute(
+      'aria-current',
+      'false',
+    );
   });
 
   it('/skills-and-tools/owned selects Owned by me', async () => {
@@ -190,10 +198,19 @@ describe('LibraryRoutes', () => {
     expect(screen.getByRole('button', { name: /^Owned by me/ })).toHaveAttribute('aria-current', 'true');
   });
 
-  it('/skills-and-tools/yours selects Yours alone', async () => {
+  it("/skills-and-tools/yours is the caller's own group, as a group page", async () => {
     renderAt('/skills-and-tools/yours');
-    expect(await screen.findByRole('heading', { name: 'Yours alone' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Yours alone/ })).toHaveAttribute('aria-current', 'true');
+    expect(
+      await screen.findByRole('heading', { name: TEST_PERSONAL_GROUP, level: 1 }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toHaveAttribute(
+      'aria-current',
+      'true',
+    );
+    // The group-page furniture, not a filtered gallery: sections and a trail.
+    expect(screen.getByRole('heading', { name: 'Skills', level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Tools', level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole('navigation', { name: 'Breadcrumb' })).toBeInTheDocument();
   });
 
   it('a sidebar group click navigates to /skills-and-tools/groups/<name>', async () => {
@@ -228,17 +245,19 @@ describe('LibraryRoutes', () => {
     ).toBeInTheDocument();
   });
 
-  it('the All groups row navigates to the index and stays current there', async () => {
-    renderAt('/skills-and-tools');
-    fireEvent.click(await screen.findByRole('button', { name: /^All groups/ }));
+  it('reaches the index from a group page breadcrumb, which is the only route to it now', async () => {
+    renderAt('/skills-and-tools/groups/GTM');
+    fireEvent.click(await screen.findByRole('link', { name: 'All groups' }));
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools/groups'));
-    expect(screen.getByRole('button', { name: /^All groups/ })).toHaveAttribute('aria-current', 'true');
+    expect(
+      await screen.findByRole('heading', { name: 'All groups', level: 1 }),
+    ).toBeInTheDocument();
   });
 
-  it('keeps All groups current on the propose page', async () => {
+  it('carries no All groups row in the sidebar', async () => {
     renderAt('/skills-and-tools/propose?group=GTM');
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: /^All groups/ })).toHaveAttribute('aria-current', 'true'),
+      expect(screen.queryByRole('button', { name: /^All groups/ })).not.toBeInTheDocument(),
     );
     expect(pathname()).toBe('/skills-and-tools/propose');
   });
@@ -260,7 +279,7 @@ describe('LibraryRoutes', () => {
     expect(await screen.findByRole('heading', { name: 'heyreach', level: 1 })).toBeInTheDocument();
     expect(toolPageMock.useToolPage).toHaveBeenCalledWith('heyreach');
     // An item page is not a filtered view of the catalog — no gallery row is lit.
-    expect(screen.getByRole('button', { name: /^Everything/ })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: /^Owned by me/ })).toHaveAttribute(
       'aria-current',
       'false',
     );

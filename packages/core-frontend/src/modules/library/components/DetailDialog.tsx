@@ -1,16 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import {
-  DEFAULT_BRANCH,
-  type FileTreeEntry,
-  type PullRequestSummary,
-} from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, type PullRequestSummary } from '@bevel-software/platform-shared';
 import { Dialog } from '../../../shared/components/Dialog';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useAuth } from '../../auth/state/auth.context';
 import { kbFileUrl, resolveRelativePath } from '../../workspace/routing/kb-routes';
 import { KbMarkdownView } from '../../workspace/components/renderers/KbMarkdownView';
-import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import { readFileOnBranch, suggestChange, type LibrarySkillSummary } from '../services/library.api';
@@ -129,7 +124,6 @@ function SkillDetailBody({
   const { user } = useAuth();
   const detail = useSkillDetail(skillSummary.name);
   const [selected, setSelected] = useState('SKILL.md');
-  const [accessOpen, setAccessOpen] = useState(false);
   const fileViewRef = useRef<HTMLDivElement>(null);
 
   const prefix = `${skillSummary.path}/`;
@@ -233,9 +227,6 @@ function SkillDetailBody({
     return <div className="py-8 text-center text-sm text-[#c53030]">{detail.error ?? "Couldn't load this skill."}</div>;
   }
 
-  const accessEntry: FileTreeEntry | null = kbDirName
-    ? { name: 'SKILL.md', relativePath: `${kbDirName}/${skillSummary.path}/SKILL.md`, type: 'file' }
-    : null;
 
   return (
     <div className="text-sm">
@@ -246,15 +237,8 @@ function SkillDetailBody({
           <h4 className="text-[10.5px] font-bold uppercase tracking-[.09em] text-ink-faint">
             Integrations this skill needs
           </h4>
-          {owned && accessEntry && (
-            <button
-              type="button"
-              className="rounded-lg bg-[#eef2f7] px-3.5 py-1 text-[11.5px] font-bold text-ink-muted shadow-[inset_0_0_0_1px_#d3dbe6] transition-transform hover:-translate-y-px"
-              onClick={() => setAccessOpen(true)}
-            >
-              Manage access
-            </button>
-          )}
+          {/* No `Manage access`. A skill inherits its group folder's rules;
+              the group's `Share` panel is the one place they are decided. */}
         </div>
         <div className="flex flex-col gap-1.5">
           {needed.length === 0 ? (
@@ -386,10 +370,6 @@ function SkillDetailBody({
       <SuggestChange containerRef={fileViewRef} raw={raw} onSubmit={handleSuggest} />
 
       {owned && <ChangeRequestDock crs={skillCrs} onSelect={onCompare} />}
-
-      {accessOpen && accessEntry && (
-        <ManageAccessDialog entry={accessEntry} onClose={() => setAccessOpen(false)} />
-      )}
     </div>
   );
 }

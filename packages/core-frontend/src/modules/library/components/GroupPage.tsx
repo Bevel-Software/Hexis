@@ -1,7 +1,6 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
-import { cn } from '../../../lib/utils';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
 import {
   decodeGroupSegment,
@@ -9,15 +8,14 @@ import {
   pathForPropose,
   pathForTool,
 } from '../routes/library-paths';
-import { ownersTextOf, primaryFolderOf, readersTextOf } from '../utils/group-summary';
+import { primaryFolderOf } from '../utils/group-summary';
 import { useGroupAccessRequests } from '../hooks/useGroupAccessRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useLibraryToast } from '../state/toast';
-import { LibraryCard } from './LibraryCard';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
-import { GroupAccessSection } from './GroupAccessSection';
+import { GroupBreadcrumb, GroupItemSections, PageNote, ShareGlyph } from './group-page-parts';
 import { AccessRequestsBanner } from './AccessRequestsBanner';
 import { LockedGroupView } from './LockedGroupView';
 
@@ -59,9 +57,6 @@ export function GroupPage() {
     () => data.items.filter((i) => i.group === group),
     [data.items, group],
   );
-  // The access section derives the group's physical folders from these — one
-  // group can still span `Skills/<G>` and `Tools/<G>` on an unmigrated KB.
-  const itemPaths = useMemo(() => groupItems.map((i) => i.path), [groupItems]);
 
   const skillItems = groupItems.filter((i) => i.kind === 'skill');
   const toolItems = groupItems.filter((i) => i.kind === 'integration');
@@ -85,10 +80,12 @@ export function GroupPage() {
   }
 
   /**
-   * The access editor, hoisted out of both branches because both open it: the
-   * locked view's `Manage access` (a locked-out Admin unlocking themselves) and
-   * the member view's request banner (an owner letting somebody else in). Only
-   * one of those views is ever on screen, so one dialog is enough.
+   * THE access surface — one dialog, three openers: the title row's `Share`,
+   * the locked view's `Manage access` (a locked-out Admin unlocking
+   * themselves), and the request banner (an owner letting somebody else in).
+   * There is deliberately no read-only sibling: the dialog itself degrades to
+   * read-only when the resolved verdict says the caller cannot write, so a
+   * second "view access" panel would be the same information twice.
    *
    * `kbDirName` gates it because the resolver addresses files repo-relative and
    * the dialog strips that prefix — without it the path we would hand over is
@@ -163,26 +160,31 @@ export function GroupPage() {
     );
   }
 
-  const ownersText = summary ? ownersTextOf(summary) : null;
-  const readersText = summary ? readersTextOf(summary) : null;
   const primaryFolder = summary ? primaryFolderOf(summary) : null;
 
   return (
     <div className="pb-14">
-      <GroupBreadcrumb group={group} />
+      <GroupBreadcrumb name={group} />
 
-      <h1 className="mt-1.5 text-display font-semibold">{group}</h1>
-
-      {/* No lede at all when the summary is missing. The alternative — printing
-          "Run by the workspace admins" from a fallback we never resolved — is a
-          claim about access we have not verified. */}
-      {ownersText && (
-        <p className="mt-1 text-ui text-ink-muted">
-          {readersText
-            ? `Run by ${ownersText} · shared with ${readersText}`
-            : `Run by ${ownersText}`}
-        </p>
-      )}
+      {/* The title row carries the page's one persistent action. `Share` IS
+          the manage-access dialog — not a doorway to it. It stays un-gated:
+          for a non-writer the dialog renders read-only (its own `canWrite`
+          verdict decides), which is exactly what "who is this shared with?"
+          should answer. Hidden only when no folder is known to manage. */}
+      <div className="flex items-start justify-between gap-4">
+        <h1 className="mt-1.5 text-display font-semibold">{group}</h1>
+        {primaryFolder && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-1.5 shrink-0"
+            onClick={() => setManageFolder(primaryFolder)}
+          >
+            <ShareGlyph className="size-3.5" />
+            Share
+          </Button>
+        )}
+      </div>
 
       {/* Somebody is waiting on the person reading this. It goes ABOVE the
           setup banner because a request is about a human, and the folder's
@@ -224,29 +226,12 @@ export function GroupPage() {
         )}
       </div>
 
-      <GroupSection title="Skills" count={skillItems.length}>
-        {skillItems.length === 0 ? (
-          <p className="text-ui text-ink-faint">
-            {`No skills yet. Add one, or ask your agent to write one for ${group}.`}
-          </p>
-        ) : (
-          <CardGrid items={skillItems} onOpen={openItem} />
-        )}
-      </GroupSection>
-
-      <GroupSection title="Tools" count={toolItems.length}>
-        {toolItems.length === 0 ? (
-          <p className="text-ui text-ink-faint">No tools yet.</p>
-        ) : (
-          <CardGrid items={toolItems} onOpen={openItem} />
-        )}
-      </GroupSection>
-
-      {/* The page's access surface, and its ONLY access escalation — the
-          `Manage access` button inside opens the share dialog pinned to the
-          default branch (`workspaceId`), which is why there is no second Share
-          button above. */}
-      <GroupAccessSection group={group} itemPaths={itemPaths} />
+      <GroupItemSections
+        skillItems={skillItems}
+        toolItems={toolItems}
+        onOpen={openItem}
+        emptySkills={`No skills yet. Add one, or ask your agent to write one for ${group}.`}
+      />
 
       {addOpen && summary && primaryFolder && (
         <AddToGroupDialog
@@ -274,62 +259,6 @@ export function GroupPage() {
   );
 }
 
-/** `All groups › {group}` — the page's place in the Library, and the way back. */
-function GroupBreadcrumb({ group }: { group: string }) {
-  return (
-    <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-detail text-ink-faint">
-      <Link to={pathForGroupsIndex()} className="rounded-xs hover:text-ink">
-        All groups
-      </Link>
-      <span aria-hidden="true">›</span>
-      <span aria-current="page" className="truncate text-ink-muted">
-        {group}
-      </span>
-    </nav>
-  );
-}
 
-/** A titled band with the count beside — not inside — the heading, so the
- *  heading's accessible name stays exactly "Skills" / "Tools". */
-function GroupSection({
-  title,
-  count,
-  children,
-}: {
-  title: string;
-  count: number;
-  children: ReactNode;
-}) {
-  return (
-    <section className="mt-7">
-      <div className="mb-2.5 flex items-baseline gap-2">
-        <h2 className="text-label uppercase text-ink-faint">{title}</h2>
-        <span className="text-meta tabular-nums text-ink-faint">{count}</span>
-      </div>
-      {children}
-    </section>
-  );
-}
 
-function CardGrid({ items, onOpen }: { items: LibraryItem[]; onOpen(item: LibraryItem): void }) {
-  return (
-    <div className={cn('grid gap-2.5', 'grid-cols-[repeat(auto-fill,minmax(248px,1fr))]')}>
-      {items.map((item) => (
-        <LibraryCard
-          key={`${item.kind}:${item.id}`}
-          kind={item.kind}
-          id={item.id}
-          name={item.name}
-          description={item.description}
-          owned={item.owned}
-          status={item.status}
-          onOpen={() => onOpen(item)}
-        />
-      ))}
-    </div>
-  );
-}
 
-function PageNote({ children }: { children: ReactNode }) {
-  return <div className="py-16 text-center text-ui text-ink-faint">{children}</div>;
-}

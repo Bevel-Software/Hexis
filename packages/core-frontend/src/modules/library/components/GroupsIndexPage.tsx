@@ -1,7 +1,9 @@
 import { useMemo, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Badge, Banner } from '../../../shared/components';
+import { useAuth } from '../../auth/state/auth.context';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
+import { personalGroupName } from '../utils/personal-group';
 import { LIBRARY_ROOT, pathForGroup } from '../routes/library-paths';
 import { ownersTextOf } from '../utils/group-summary';
 import type { GroupSummary } from '../services/groups.api';
@@ -38,8 +40,9 @@ interface IndexEntry {
 export function GroupsIndexPage() {
   const { items, groupSummaries, groupsLoading, groupsError, reloadGroups } = useLibrary();
   const navigate = useNavigate();
+  const { user } = useAuth();
 
-  const ownedSkillCount = items.filter((i) => i.owned && i.kind === 'skill').length;
+  const personalName = personalGroupName(user?.name);
   const ungroupedSkills = countKind(items, null, 'skill');
   const ungroupedTools = countKind(items, null, 'integration');
 
@@ -78,22 +81,18 @@ export function GroupsIndexPage() {
         A group carries skills and tools for the people in it.
       </p>
 
+      {/* "Owned by me" used to head this list and does not any more: it is a
+          LENS on every group (the things you answer for, wherever they live),
+          not a place items belong to. It stays in the sidebar, where lenses
+          go. What remains here is the one group that really is yours. */}
       <SectionHead>Yours</SectionHead>
       <RowList>
         <GroupIndexRow
-          label="Owned by me"
-          description="The skills you answer for"
-          meta={`${ownedSkillCount} skills`}
-          onOpen={() => navigate(`${LIBRARY_ROOT}/owned`)}
+          label={personalName}
+          description="Your sign-ins and the skills no group carries"
+          meta={countsText(ungroupedSkills, ungroupedTools)}
+          onOpen={() => navigate(`${LIBRARY_ROOT}/yours`)}
         />
-        {ungroupedSkills + ungroupedTools > 0 && (
-          <GroupIndexRow
-            label="Yours alone"
-            description="Your sign-ins and the skills no group carries"
-            meta={countsText(ungroupedSkills, ungroupedTools)}
-            onOpen={() => navigate(`${LIBRARY_ROOT}/yours`)}
-          />
-        )}
       </RowList>
 
       {groupsError ? (
