@@ -485,6 +485,34 @@ describe('ToolManualService', () => {
     expect(m.type).toBe('mcp');
   });
 
+  test('parses `description` onto the descriptor, trimmed', async () => {
+    root = await mkdtemp(join(tmpdir(), 'toolsdesc-'));
+    const tools = join(root, wsId, KB_DIR, 'Tools');
+    await mkdir(tools, { recursive: true });
+    await writeFile(
+      join(tools, 'gh.tool'),
+      '---\nid: gh\ntype: mcp\nurl: https://mcp.example.com\ndescription: "  Read and write issues.  "\n---\n',
+    );
+    const [m] = await svc().listAccessible('user@x.eu');
+    expect(m.description).toBe('Read and write issues.');
+  });
+
+  test('a malformed `description` is IGNORED — it never takes a working `.tool` offline', async () => {
+    // Every other field throws on a bad value, which skips the whole file. This
+    // one must not: `description` buys a reader one sentence, and no sentence is
+    // worth removing a working integration from the catalog.
+    root = await mkdtemp(join(tmpdir(), 'toolsdescbad-'));
+    const tools = join(root, wsId, KB_DIR, 'Tools');
+    await mkdir(tools, { recursive: true });
+    await writeFile(join(tools, 'num.tool'), JSON.stringify({ name: 'num', type: 'http', url: 'https://x/m', description: 42 }));
+    await writeFile(join(tools, 'obj.tool'), JSON.stringify({ name: 'obj', type: 'http', url: 'https://x/m', description: { a: 1 } }));
+    await writeFile(join(tools, 'nul.tool'), JSON.stringify({ name: 'nul', type: 'http', url: 'https://x/m', description: null }));
+    await writeFile(join(tools, 'blank.tool'), JSON.stringify({ name: 'blank', type: 'http', url: 'https://x/m', description: '   ' }));
+    const byName = new Map((await svc().listAccessible('user@x.eu')).map((m) => [m.name, m]));
+    expect([...byName.keys()].sort()).toEqual(['blank', 'nul', 'num', 'obj']); // all four still in the catalog
+    for (const m of byName.values()) expect(m.description).toBeUndefined();
+  });
+
   test('preview validates an inline draft and reports its tools', async () => {
     const preview = await svc().preview(INLINE_TOOL);
     expect(preview.ok).toBe(true);

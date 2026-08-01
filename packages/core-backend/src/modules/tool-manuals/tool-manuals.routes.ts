@@ -84,6 +84,10 @@ export function createToolManualsAgentRoutes(
  * Browser-facing tool-manual routes (mounted under the JWT auth middleware):
  *   GET  /tools           — the caller's accessible `.tool` manuals (summaries).
  *   POST /tools/preview    — validate a draft `.tool` for the renderer.
+ *   GET  /tools/:slug      — one readable manual with description + capabilities
+ *                            (the tool page). Registered LAST so no future
+ *                            literal sibling is shadowed by the param segment;
+ *                            `preview` is POST-only, so it never collides.
  */
 export function createToolManualsBrowserRoutes(toolManualService: IToolManualService): express.Router {
   const router = express.Router();
@@ -104,6 +108,23 @@ export function createToolManualsBrowserRoutes(toolManualService: IToolManualSer
     if (!email) return void res.status(401).json({ error: 'Not authenticated' });
     const content = typeof req.body?.content === 'string' ? req.body.content : '';
     res.json(await toolManualService.preview(content));
+  });
+
+  router.get('/tools/:slug', async (req, res) => {
+    const email = req.userEmail;
+    if (!email) return void res.status(401).json({ error: 'Not authenticated' });
+    try {
+      // `getDetail` returns null for BOTH "no such slug" and "you can't read it",
+      // and this route keeps them indistinguishable: a distinct 403 would confirm
+      // the existence of a tool the caller isn't allowed to know about. Same
+      // fail-closed posture as the agent-facing `/tools/:slug/manual`.
+      const tool = await toolManualService.getDetail(email, String(req.params.slug));
+      if (!tool) return void res.status(404).json({ error: 'Not found' });
+      res.json({ tool });
+    } catch (err) {
+      console.error('[tool-manuals] detail failed:', err);
+      res.status(500).json({ error: 'Failed to load tool' });
+    }
   });
 
   return router;
