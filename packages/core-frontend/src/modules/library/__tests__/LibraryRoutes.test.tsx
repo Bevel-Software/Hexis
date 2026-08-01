@@ -4,6 +4,10 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { LibraryData } from '../hooks/useLibraryData';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { GroupSummary } from '../services/groups.api';
+import {
+  WorkspaceContext,
+  type WorkspaceContextValue,
+} from '../../workspace/state/workspace.context';
 
 /**
  * The routing skeleton: what each URL renders, what the sidebar marks as
@@ -17,6 +21,29 @@ vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryD
 
 const groupsMock = vi.hoisted(() => ({ listGroups: vi.fn() }));
 vi.mock('../services/groups.api', () => ({ listGroups: groupsMock.listGroups }));
+
+// The group page mounts an access section that fetches on render. Stub that
+// seam — this file tests the route table, not access (see
+// `GroupAccessSection.test.tsx`), and an unstubbed fetch makes the suite wait
+// on a refused connection.
+vi.mock('../../access/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../access/api')>();
+  return {
+    ...actual,
+    fetchFileAccess: vi.fn().mockResolvedValue({
+      canRead: true,
+      canWrite: false,
+      canDownload: false,
+      canOwner: false,
+      eligible: { roles: [], users: [] },
+      readers: { restricted: true, roles: [], users: [] },
+      owners: { roles: [], users: [] },
+      downloaders: { roles: [], users: [] },
+      sources: {},
+    }),
+    fetchAccessOverrides: vi.fn().mockResolvedValue({ overrides: [], truncated: false }),
+  };
+});
 
 import { LibraryRoutes } from '../routes/LibraryRoutes';
 
@@ -72,12 +99,25 @@ function LocationProbe() {
   return <div aria-label="pathname">{location.pathname}</div>;
 }
 
+/**
+ * The shell always mounts the Library inside `WorkspaceProvider` — the group
+ * page's access section reads `kbDirName` from it to build the share dialog's
+ * target path. Provide it here so the route table is tested against the same
+ * environment the app runs in.
+ */
+const workspace = {
+  workspaceId: 'target-company-state',
+  kbDirName: 'knowledge-base',
+} as unknown as WorkspaceContextValue;
+
 function renderAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <Routes>
-        <Route path="/skills-and-tools/*" element={<LibraryRoutes />} />
-      </Routes>
+      <WorkspaceContext.Provider value={workspace}>
+        <Routes>
+          <Route path="/skills-and-tools/*" element={<LibraryRoutes />} />
+        </Routes>
+      </WorkspaceContext.Provider>
       <LocationProbe />
     </MemoryRouter>,
   );

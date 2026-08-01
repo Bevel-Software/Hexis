@@ -128,3 +128,78 @@ describe('ManageAccessDialog — unchecking an inherited verb on a mixed row', (
     );
   });
 });
+
+/**
+ * Which BRANCH an access edit lands on.
+ *
+ * The file explorer edits the branch the user is looking at, so the ambient
+ * workspace is the right default and stays the default. The Library is the
+ * other case entirely: it describes the default branch no matter which branch
+ * happens to be open, so a group's access edit has to be pinned. Without the
+ * pin the same click would splice `access.md` on a draft — a rule that looks
+ * written and governs nothing.
+ */
+describe('ManageAccessDialog — which workspace the edit targets', () => {
+  const PINNED = 'target-company-state';
+
+  /** Alice, granted `write` directly here — one row, one editable checklist. */
+  const VIEW = {
+    canRead: true,
+    canWrite: true,
+    canDownload: false,
+    canOwner: false,
+    eligible: { roles: [], users: [A] },
+    readers: { restricted: true, roles: [], users: [A] },
+    owners: { roles: [], users: [] },
+    downloaders: { roles: [], users: [] },
+    sources: { 'u:alice@x.com': { read: [{ kind: 'direct' }], write: [{ kind: 'direct' }] } },
+  } as AccessResponse;
+
+  /** Check "Can download" on Alice's row — the shortest path to a grant call. */
+  async function grantDownloadToAlice(user: ReturnType<typeof userEvent.setup>) {
+    // The add-row's verb selector also reads "Can edit"; Alice's row trigger is
+    // the later one in the DOM.
+    const triggers = await screen.findAllByRole('button', { name: /^can edit$/i });
+    await user.click(triggers[triggers.length - 1]);
+    await user.click(await screen.findByRole('button', { name: /^can download$/i }));
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.suggestPrincipals.mockResolvedValue({ groups: [], people: [], peopleWithheld: false });
+    api.fetchFileAccess.mockResolvedValue(VIEW);
+    api.grantAccess.mockResolvedValue(VIEW);
+  });
+
+  it('reads and writes the workspace given by the prop, not the ambient one', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} workspaceId={PINNED} onClose={() => {}} />);
+
+    await waitFor(() =>
+      expect(api.fetchFileAccess).toHaveBeenCalledWith(PINNED, 'Sales/Deal.md', 'file'),
+    );
+    expect(api.fetchFileAccess).not.toHaveBeenCalledWith('ws-1', expect.anything(), expect.anything());
+
+    await grantDownloadToAlice(user);
+
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalledTimes(1));
+    expect(api.grantAccess).toHaveBeenCalledWith(
+      PINNED,
+      expect.objectContaining({ verb: 'download' }),
+    );
+  });
+
+  it('falls back to the ambient workspace when the prop is absent', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    await waitFor(() =>
+      expect(api.fetchFileAccess).toHaveBeenCalledWith('ws-1', 'Sales/Deal.md', 'file'),
+    );
+
+    await grantDownloadToAlice(user);
+
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalledTimes(1));
+    expect(api.grantAccess).toHaveBeenCalledWith('ws-1', expect.objectContaining({ verb: 'download' }));
+  });
+});

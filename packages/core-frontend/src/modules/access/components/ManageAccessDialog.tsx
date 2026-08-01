@@ -20,6 +20,18 @@ import {
 interface Props {
   entry: FileTreeEntry;
   onClose: () => void;
+  /**
+   * The workspace (branch) whose access is read and edited. Defaults to the
+   * ambient `WorkspaceContext` — which is what the file explorer wants, since
+   * it edits the branch the user is looking at.
+   *
+   * The Library is the other case: its surfaces describe the DEFAULT branch
+   * regardless of which branch happens to be open, so a group's access edit
+   * has to be pinned to it. Without this the same click would splice
+   * `access.md` on whatever branch the context last had open — a rule written
+   * into a draft nobody merges, silently doing nothing.
+   */
+  workspaceId?: string;
 }
 
 type Role = 'Owner' | 'Can edit' | 'Can read' | 'Can download';
@@ -189,8 +201,11 @@ function summarizeVerbs(v: VerbSet): string {
  * the user can't write the access config, the add affordance is disabled and
  * names the owners to ask.
  */
-export function ManageAccessDialog({ entry, onClose }: Props) {
-  const { workspaceId, kbDirName } = useWorkspace();
+export function ManageAccessDialog({ entry, onClose, workspaceId: workspaceIdProp }: Props) {
+  // `kbDirName` stays context-sourced: it names the clone directory, which is
+  // the same on every branch.
+  const { workspaceId: ctxWorkspaceId, kbDirName } = useWorkspace();
+  const workspaceId = workspaceIdProp ?? ctxWorkspaceId;
   const { user } = useAuth();
   const [data, setData] = useState<AccessResponse | null>(null);
   const [loading, setLoading] = useState(true);
