@@ -1,14 +1,13 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { useAuth } from '../../auth/state/auth.context';
 import { attentionOf, useLibrary } from '../state/library-data';
-import {
-  LIBRARY_ROOT,
-  isGroupsIndexPath,
-  libraryFilterForPath,
-  pathForLibraryFilter,
-} from '../routes/library-paths';
+import { personalGroupName } from '../utils/personal-group';
+import { libraryFilterForPath, pathForLibraryFilter } from '../routes/library-paths';
 import { groupCounts } from '../utils/status';
+import { useLibrarySidebar } from '../state/sidebar-collapse';
 import { GroupsSidebar } from './GroupsSidebar';
+import { NewGroupDialog } from './NewGroupDialog';
 
 /**
  * The shell every Library page renders inside: the group nav on the left, the
@@ -20,12 +19,20 @@ import { GroupsSidebar } from './GroupsSidebar';
  * can take its filter as a plain prop and the sidebar can hold no state.
  */
 export function LibraryLayout() {
-  const { items, groupSummaries } = useLibrary();
+  const { items, groupSummaries, reload, reloadGroups } = useLibrary();
   const location = useLocation();
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const [newGroupOpen, setNewGroupOpen] = useState(false);
+  /**
+   * Whether the nav is hidden. The state lives in a module store because the
+   * button that flips it sits in the top bar (left of the brand), outside
+   * this layout's tree — see `sidebar-collapse.ts` for why it is a store and
+   * why it is session-scoped.
+   */
+  const { collapsed } = useLibrarySidebar();
 
   const filter = libraryFilterForPath(location.pathname);
-  const groupsIndexActive = isGroupsIndexPath(location.pathname);
 
   const groups = useMemo(
     () => groupCounts(items).map((g) => ({ ...g, attention: attentionOf(items, g.group) })),
@@ -50,6 +57,15 @@ export function LibraryLayout() {
   }, [groupSummaries, items]);
 
   const ownedCount = useMemo(() => items.filter((i) => i.owned).length, [items]);
+  /**
+   * Owned items that are waiting on their owner. This — not `ownedCount` — is
+   * what earns the amber badge: 26 things you own is a fact about your library,
+   * one of them being broken is a fact about your afternoon.
+   */
+  const ownedAttention = useMemo(
+    () => items.filter((i) => i.owned && i.status.state !== 'ok').length,
+    [items],
+  );
   const ungroupedCount = useMemo(() => items.filter((i) => i.group === null).length, [items]);
   const attentionCount = useMemo(
     () => items.filter((i) => i.kind === 'integration' && i.status.state !== 'ok').length,
@@ -63,13 +79,29 @@ export function LibraryLayout() {
         onSelect={(next) => navigate(pathForLibraryFilter(next))}
         groups={groups}
         lockedGroups={lockedGroups}
-        groupsIndexActive={groupsIndexActive}
-        onOpenGroupsIndex={() => navigate(`${LIBRARY_ROOT}/groups`)}
         ownedCount={ownedCount}
+        ownedAttention={ownedAttention}
+        personalGroupLabel={personalGroupName(user?.name)}
         ungroupedCount={ungroupedCount}
         attentionCount={attentionCount}
         onFinishSetup={() => navigate('/connect')}
+        onCreateGroup={() => setNewGroupOpen(true)}
+        collapsed={collapsed}
       />
+
+      {newGroupOpen && (
+        <NewGroupDialog
+          // Every name the workspace already knows, readable or not: creating
+          // `Groups/GTM` when a locked `GTM` exists would not make a group, it
+          // would drop items into somebody else's.
+          existing={[...new Set([...groups.map((g) => g.group), ...groupSummaries.map((g) => g.name)])]}
+          onClose={() => setNewGroupOpen(false)}
+          onCreated={() => {
+            reload();
+            reloadGroups();
+          }}
+        />
+      )}
 
       <main className="min-w-0 flex-1 overflow-y-auto px-8 py-6">
         <Outlet />

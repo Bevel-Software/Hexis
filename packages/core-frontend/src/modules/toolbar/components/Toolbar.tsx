@@ -1,4 +1,5 @@
 import { Fragment, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import { LogOut, PanelLeft, PanelRight } from 'lucide-react';
 import { useAuth } from '../../auth/state/auth.context';
 import { AdminMenu } from './AdminMenu';
@@ -6,10 +7,20 @@ import { AppSwitcher } from './AppSwitcher';
 import { useLayout } from '../../layout/state/layout.context';
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
 import { useAppRegistry } from '../../../core/registry';
+import { SidebarToggle } from '../../library/components/SidebarToggle';
+import { useLibrarySidebar } from '../../library/state/sidebar-collapse';
+import { LIBRARY_ROOT } from '../../library/routes/library-paths';
 
 export function Toolbar() {
   const { user, logout } = useAuth();
   const registry = useAppRegistry();
+  const location = useLocation();
+  // The Library's nav toggle, in the top bar left of the brand. Path-gated
+  // rather than registry-gated: the button controls the Library's sidebar,
+  // so it appears exactly where that sidebar exists and nowhere else.
+  const onLibrary =
+    location.pathname === LIBRARY_ROOT || location.pathname.startsWith(`${LIBRARY_ROOT}/`);
+  const librarySidebar = useLibrarySidebar();
   const {
     isExplorerCollapsed,
     isChatCollapsed,
@@ -41,6 +52,13 @@ export function Toolbar() {
   return (
     <header className="border-b border-line shrink-0 bg-white">
       <div className="h-12 flex items-center px-4 gap-2">
+        {onLibrary && (
+          <SidebarToggle
+            collapsed={librarySidebar.collapsed}
+            onToggle={librarySidebar.toggle}
+          />
+        )}
+
         {canToggleExplorer && (
           <button
             onClick={toggleExplorer}

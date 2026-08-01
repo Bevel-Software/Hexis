@@ -23,12 +23,14 @@ function renderSidebar(over: Partial<GroupsSidebarProps> = {}) {
       { group: 'GTM', count: 3, attention: 2 },
     ],
     lockedGroups: ['Finance', 'Legal'],
-    groupsIndexActive: false,
-    onOpenGroupsIndex: vi.fn(),
     ownedCount: 2,
+    ownedAttention: 0,
+    personalGroupLabel: "Juan's Group",
     ungroupedCount: 1,
     attentionCount: 2,
     onFinishSetup: vi.fn(),
+    onCreateGroup: vi.fn(),
+    collapsed: false,
     ...over,
   };
   render(<GroupsSidebar {...props} />);
@@ -54,11 +56,11 @@ describe('GroupsSidebar — locked groups', () => {
       .map((b) => b.getAttribute('aria-label') ?? b.textContent);
     expect(labels).toEqual([
       'Owned by me2',
-      'Everything',
-      'All groups',
+      'New group',
+      // Your own space leads the groups; the ones you cannot enter trail them.
+      "Juan's Group1",
       'Engineering4',
       'GTM2',
-      'Yours alone1',
       'Finance (locked)',
       'Legal (locked)',
     ]);
