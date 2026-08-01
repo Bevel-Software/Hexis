@@ -163,8 +163,11 @@ export class ToolManualService implements IToolManualService {
   }
 
   async listAccessible(userEmail: string): Promise<ToolManualSummary[]> {
-    const manuals = await this.accessibleManuals(userEmail);
-    return manuals.map((m) => toSummary(m));
+    return (await this.accessibleManuals(userEmail)).map(toSummary);
+  }
+
+  async listAllSummaries(): Promise<ToolManualSummary[]> {
+    return (await this.scan()).map(toSummary);
   }
 
   async getDetail(userEmail: string, slug: string): Promise<ToolManualDetail | null> {
@@ -531,7 +534,10 @@ export class ToolManualService implements IToolManualService {
 
 // --- helpers ------------------------------------------------------------------
 
-/** The wire summary for one descriptor — the shape `listAccessible` has always returned. */
+/**
+ * The one descriptor → summary projection, shared by every list surface
+ * (`listAccessible`, `listAllSummaries`, and the summary half of `getDetail`).
+ */
 function toSummary(m: ToolManualDescriptor): ToolManualSummary {
   return {
     slug: m.slug,

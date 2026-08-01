@@ -418,6 +418,52 @@ export const oauthTokens = pgTable('oauth_tokens', {
   byExpiry: index('oauth_tokens_by_expiry').on(t.expiresAt),
 }));
 
+/**
+ * "Let me into this group" — a request from someone who cannot read a group
+ * folder to the people who can write its `access.md`.
+ *
+ * Postgres and not the event bus or a KB file: the `WorkflowEventBus` is
+ * in-memory/SSE only (a restart loses everything, and the prototype's
+ * "Requested resets on reload" bug is exactly what this table fixes), and a KB
+ * file write would either hit the protected default branch — dragging a
+ * non-content concern through the change-request machinery — or live on a
+ * branch nobody reads.
+ *
+ * Rows are never deleted (audit trail, mirroring the revoked-not-deleted
+ * pattern of `api_tokens`). Three lifecycle states:
+ *   • `pending`    — waiting on an admin.
+ *   • `fulfilled`  — the requester can now read the group. Set LAZILY, when the
+ *                    server next observes it: granting read IS approving, so
+ *                    there is no separate approve endpoint to keep in sync.
+ *   • `dismissed`  — an admin said no; `resolved_by_email` records who.
+ *
+ * The partial unique index is the idempotency: at most ONE pending request per
+ * (group, requester), so a double-click or a retry is a no-op rather than a
+ * duplicate row — while a re-request AFTER a grant-then-revoke is still allowed
+ * (the settled row no longer participates in the index).
+ */
+export const groupAccessRequests = pgTable('group_access_requests', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  groupName: text('group_name').notNull(),
+  requesterEmail: text('requester_email').notNull(), // lowercased at insert
+  requesterName: text('requester_name').notNull(),   // denormalized, like file_locks.holder_name
+  status: text('status').notNull().default('pending'), // 'pending' | 'fulfilled' | 'dismissed'
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  resolvedAt: timestamp('resolved_at'),
+  /** The dismisser's email; lazy fulfillment leaves it null (nobody clicked). */
+  resolvedByEmail: text('resolved_by_email'),
+}, (t) => ({
+  pendingUnq: uniqueIndex('group_access_requests_pending_unq')
+    .on(t.groupName, t.requesterEmail)
+    .where(sql`${t.status} = 'pending'`),
+  byGroup: index('group_access_requests_by_group').on(t.groupName, t.status),
+  byRequester: index('group_access_requests_by_requester').on(t.requesterEmail, t.status),
+  statusCheck: check(
+    'group_access_requests_status',
+    sql`${t.status} IN ('pending', 'fulfilled', 'dismissed')`,
+  ),
+}));
+
 export const sessionOntologyTouches = pgTable('session_ontology_touches', {
   sessionId: text('session_id').notNull(),
   ontology: text('ontology').notNull(),

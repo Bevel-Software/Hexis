@@ -21,6 +21,7 @@ import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
 import { registerSkillsTools, createSkillsRoutes } from '../modules/skills/index.js';
+import { createGroupsRoutes } from '../modules/groups/index.js';
 import type { SessionOntologyGate } from '../modules/workspace/session-ontology.gate.js';
 import {
   createSecretsVaultRoutes,
@@ -297,6 +298,17 @@ export async function createCoreServer(
     core.config.kbDirName,
   ));
   app.use('/api', core.authMiddleware, createSkillsRoutes(core.skillService));
+  // Group discovery + access requests. Browser-only (JWT): enumerating locked
+  // groups is a UI affordance, and the agent surfaces keep their fail-closed
+  // filtering with no knowledge of it. The display name is resolved from the
+  // users table, falling back to the email when the row is missing.
+  app.use('/api', core.authMiddleware, createGroupsRoutes(
+    core.groupIndexService,
+    core.groupAccessRequests,
+    core.accessControl,
+    async (req) => (req.userId ? (await core.authService.getUserById(req.userId))?.name : null)
+      ?? req.userEmail!,
+  ));
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));

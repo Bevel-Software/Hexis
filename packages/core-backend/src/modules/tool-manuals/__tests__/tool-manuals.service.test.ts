@@ -87,6 +87,16 @@ describe('ToolManualService', () => {
     expect(list.map((m) => m.name)).toEqual(['weather']);
   });
 
+  test('listAllSummaries returns every manual regardless of caller access', async () => {
+    // The group index counts a group's tools for people who cannot read them,
+    // so this surface must ignore the ACL that `listAccessible` applies.
+    const service = svc(denyBilling);
+    expect((await service.listAccessible('user@x.eu')).map((m) => m.name)).toEqual(['weather']);
+    const all = await service.listAllSummaries();
+    expect(all.map((m) => m.name).sort()).toEqual(['billing', 'weather']);
+    expect(all.map((m) => m.path).sort()).toEqual(['Tools/billing.tool', 'Tools/weather.tool']);
+  });
+
   test('builds an inline manual as an http sub-manual call-template', async () => {
     const templates = await svc().toManualCallTemplates('user@x.eu');
     const inline = templates.find((t) => t.name === 'weather')!;
