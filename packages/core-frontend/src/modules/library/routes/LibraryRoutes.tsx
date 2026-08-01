@@ -3,6 +3,7 @@ import { LibraryToastProvider } from '../state/toast';
 import { LibraryProvider } from '../state/library-data';
 import { LibraryLayout } from '../components/LibraryLayout';
 import { LibraryPage } from '../components/LibraryPage';
+import { ToolPage } from '../components/tool-page/ToolPage';
 import { LIBRARY_ROOT } from './library-paths';
 
 /**
@@ -39,10 +40,10 @@ export function LibraryRoutes() {
             <Route path="groups/:group" element={<PageComingInALaterWorkPackage />} />
             <Route path="propose" element={<PageComingInALaterWorkPackage />} />
 
-            {/* WP4 (tool page): `ToolPage` — the routed replacement for the
-                dialog's tool half, and the landing target of the OAuth
-                round-trip (`…/tools/:slug#authorized`). */}
-            <Route path="tools/:slug" element={<PageComingInALaterWorkPackage />} />
+            {/* The routed replacement for the dialog's tool half, and the
+                landing target of the OAuth round-trip
+                (`…/tools/:slug#authorized`). */}
+            <Route path="tools/:slug" element={<ToolPage />} />
 
             {/* CONTRACT (Ali): the skill page mounts at `skills/:name`
                 (`:name` = `encodeURIComponent(skill name)`), HERE, above the

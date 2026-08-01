@@ -52,6 +52,19 @@ export function pathForGroup(group: string): string {
 }
 
 /**
+ * The route for one tool. Four surfaces build this URL — the gallery card, the
+ * Secrets page, the Connect page, and the tool page's own OAuth `returnTo` —
+ * and the fourth is validated server-side, so a stray fragment or a missing
+ * encode is a 400 rather than a broken link. One function, no drift.
+ *
+ * Returns the BARE path: never append `#…` to it. The OAuth start route rejects
+ * a `returnTo` containing `#`, and the callback is what puts the fragment on.
+ */
+export function pathForTool(slug: string): string {
+  return `${LIBRARY_ROOT}/tools/${encodeURIComponent(slug)}`;
+}
+
+/**
  * Whether a path is the all-groups index or the propose page. Both light the
  * "All groups" row: you reached propose from the index, and the place you came
  * from should stay lit while you're there.

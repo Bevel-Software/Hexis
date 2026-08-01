@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import '../library.css';
 import { useLibrary, type LibraryItem } from '../state/library-data';
+import { pathForTool } from '../routes/library-paths';
 import { filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
 import { LibraryCard } from './LibraryCard';
@@ -42,6 +44,7 @@ function headingFor(filter: LibraryFilter): string {
 
 export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const data = useLibrary();
+  const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [detail, setDetail] = useState<DetailTarget | null>(null);
 
@@ -50,14 +53,19 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
     [data.items, filter, query],
   );
 
-  function openDetail(item: LibraryItem) {
-    if (item.kind === 'skill') {
-      const skill = data.skills.find((s) => s.name === item.id);
-      if (skill) setDetail({ kind: 'skill', skill, owned: item.owned });
-    } else {
-      const tool = data.tools.find((t) => t.slug === item.id);
-      if (tool) setDetail({ kind: 'integration', tool });
+  /**
+   * Integrations open a PAGE, skills still open the dialog. The asymmetry is
+   * temporary and deliberate: the tool page has landed, the skill page is
+   * Ali's and hasn't. A card that opens a URL is also the only way the OAuth
+   * round-trip has somewhere to come back to.
+   */
+  function openItem(item: LibraryItem) {
+    if (item.kind === 'integration') {
+      navigate(pathForTool(item.id));
+      return;
     }
+    const skill = data.skills.find((s) => s.name === item.id);
+    if (skill) setDetail({ kind: 'skill', skill, owned: item.owned });
   }
 
   return (
@@ -103,7 +111,7 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
               description={item.description}
               owned={item.owned}
               status={item.status}
-              onOpen={() => openDetail(item)}
+              onOpen={() => openItem(item)}
             />
           ))}
         </div>
