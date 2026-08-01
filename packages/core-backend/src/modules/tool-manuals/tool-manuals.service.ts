@@ -28,6 +28,8 @@ import {
   type IToolManualService,
   type ToolManualDescriptor,
   type ToolManualSummary,
+  type ToolManualDetail,
+  type ToolCapability,
   type UtcpManualDict,
   type ToolManualPreview,
   type ToolManualType,
@@ -37,6 +39,13 @@ import {
 } from './tool-manuals.contract.js';
 
 const CACHE_TTL_MS = 60_000;
+
+/**
+ * How many embedded tools a manual may advertise on the tool page. A `.tool` is
+ * author-written, so its `tools` array is unbounded input; the page renders one
+ * bullet per entry, and a thousand of them is a broken page, not a useful one.
+ */
+const MAX_CAPABILITIES = 100;
 
 /**
  * UTCP namespaces a user `.tool` may NOT claim: they belong to built-in manuals
@@ -155,15 +164,21 @@ export class ToolManualService implements IToolManualService {
 
   async listAccessible(userEmail: string): Promise<ToolManualSummary[]> {
     const manuals = await this.accessibleManuals(userEmail);
-    return manuals.map((m) => ({
-      slug: m.slug,
-      name: m.name,
-      path: m.path,
-      type: m.type,
-      variables: m.variables,
-      remote: m.remote,
-      setup: m.setup,
-    }));
+    return manuals.map((m) => toSummary(m));
+  }
+
+  async getDetail(userEmail: string, slug: string): Promise<ToolManualDetail | null> {
+    // Resolved through `accessibleManuals` rather than `scan()` + a canRead call
+    // so the cache, the dedupe, the mcp-oauth decoration and the fail-closed
+    // batch ACL all apply exactly as they do to the catalog listing — one read
+    // model, no second place for the access rules to drift.
+    const found = (await this.accessibleManuals(userEmail)).find((m) => m.slug === slug);
+    if (!found) return null;
+    return {
+      ...toSummary(found),
+      description: found.description ?? null,
+      capabilities: capabilitiesOf(found),
+    };
   }
 
   async listLocalOnly(userEmail: string): Promise<{ name: string; path: string }[]> {
@@ -516,6 +531,44 @@ export class ToolManualService implements IToolManualService {
 
 // --- helpers ------------------------------------------------------------------
 
+/** The wire summary for one descriptor — the shape `listAccessible` has always returned. */
+function toSummary(m: ToolManualDescriptor): ToolManualSummary {
+  return {
+    slug: m.slug,
+    name: m.name,
+    path: m.path,
+    type: m.type,
+    description: m.description,
+    variables: m.variables,
+    remote: m.remote,
+    setup: m.setup,
+  };
+}
+
+/**
+ * What an `inline` manual's embedded tools say the assistant can do. `tools` is
+ * typed `unknown[]` (it is only validated when actually served as a UTCP
+ * manual), so every entry is re-checked here: an entry without a string `name`
+ * has nothing to display and is dropped rather than rendering a blank bullet.
+ * Non-inline manuals discover their tools over the network at call time, so
+ * there is nothing to derive without a round-trip this endpoint won't make.
+ */
+function capabilitiesOf(m: ToolManualDescriptor): ToolCapability[] {
+  if (m.type !== 'inline' || !Array.isArray(m.tools)) return [];
+  const out: ToolCapability[] = [];
+  for (const entry of m.tools) {
+    if (out.length >= MAX_CAPABILITIES) break;
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const t = entry as Record<string, unknown>;
+    if (typeof t.name !== 'string' || !t.name.trim()) continue;
+    out.push({
+      name: t.name.trim(),
+      description: typeof t.description === 'string' && t.description.trim() ? t.description.trim() : null,
+    });
+  }
+  return out;
+}
+
 function baseName(rel: string): string {
   const base = rel.slice(rel.lastIndexOf('/') + 1);
   return base.replace(/\.tool$/i, '');
@@ -605,6 +658,14 @@ export function normalizeToolManual(
     path: repoPath,
     type,
   };
+
+  // Cosmetic prose for the browser tool page. Unlike every other field here, a
+  // malformed value is IGNORED rather than thrown on: `description` buys the
+  // reader a sentence, and no sentence is worth taking a working integration out
+  // of the catalog (a throw skips the whole file). So: a non-empty string wins,
+  // anything else — number, object, null, blank — silently leaves it absent.
+  const description = typeof obj.description === 'string' ? obj.description.trim() : '';
+  if (description) descriptor.description = description;
 
   const variables = normalizeVariables(obj.variables);
   if (variables.length) descriptor.variables = variables;
