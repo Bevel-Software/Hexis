@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Plug, RefreshCw, ShieldCheck, ExternalLink, Wrench, Check, ArrowRight } from 'lucide-react';
+import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
+import { cn } from '../../../lib/utils';
 import { pathForTool } from '../../library/routes/library-paths';
+import { ToolLogo } from '../../library/components/ToolLogo';
 import { startOAuth } from '../services/secrets.api';
 import { setUserVar, deleteUserVar } from '../services/tool-secrets.api';
 import {
@@ -36,6 +38,13 @@ const MCP_OAUTH_STATE_KEY = 'mcp-oauth-state';
  *    toggle — skipping wipes its saved per-user credentials so the tool won't
  *    be available to the agent — and a Finish button completes the flow and
  *    sends the browser back to the agent.
+ *
+ * DESIGN: this page speaks the Library's vocabulary, because it is the other
+ * half of the same job. Every state reads `Connected` or `Needs …` (never a
+ * third phrasing), nothing that needs a person is grey, and a tool is
+ * identified by its mark before its name — the same `ToolLogo` the gallery
+ * cards use. It went through the design system wholesale: no raw palette, no
+ * off-scale type, no ad-hoc bordered `div`s pretending to be Surfaces.
  */
 export function ConnectToolsPage() {
   const [tools, setTools] = useState<ConnectTool[]>([]);
@@ -206,189 +215,184 @@ export function ConnectToolsPage() {
     !loading && tools.length === 0 && oauth.length === 0 && toolOAuth.length === 0;
 
   return (
-    <div className="flex h-full flex-col bg-white">
-      <header className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-3">
-        <Plug size={16} className="text-ink-muted" />
-        <h1 className="text-sm font-semibold text-ink">Connect your tools</h1>
-        <button
-          onClick={() => void refresh()}
-          className="ml-auto flex items-center gap-1 rounded px-2 py-1 text-xs text-ink-muted hover:bg-hover"
-        >
-          <RefreshCw size={12} /> Refresh
-        </button>
+    <div className="flex h-full flex-col bg-canvas text-ink">
+      <header className="flex shrink-0 items-center gap-3 border-b border-line px-8 py-4">
+        <h1 className="text-strong font-semibold text-ink">Connect your tools</h1>
+        <Button variant="quiet" size="sm" className="ml-auto" onClick={() => void refresh()}>
+          Refresh
+        </Button>
       </header>
 
-      <div className="flex-1 overflow-y-auto p-4">
-        {agentMode && (
-          <div className="mb-4 flex max-w-2xl items-center gap-3 rounded border border-blue-200 bg-blue-50 px-3 py-2.5">
-            <div className="min-w-0 flex-1">
-              <div className="text-xs font-semibold text-blue-900">
-                {agentName ? `“${agentName}” wants to connect` : 'An external agent wants to connect'}
+      <div className="flex-1 overflow-y-auto px-8 py-6">
+        <div className="max-w-2xl">
+          {agentMode && (
+            <Surface tone="surface" radius="xl" elevation="card" padded className="mb-4">
+              <div className="flex items-start gap-4">
+                <div className="min-w-0 flex-1">
+                  <p className="text-strong font-semibold text-ink">
+                    {agentName
+                      ? `“${agentName}” wants to connect`
+                      : 'An external agent wants to connect'}
+                  </p>
+                  <p className="mt-1 text-detail text-ink-muted">
+                    Choose which tools it may use. Skipping a tool removes your saved keys and
+                    sign-ins for it. When you&apos;re done, finish to send it back to your agent.
+                  </p>
+                </div>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  className="shrink-0"
+                  disabled={finishing}
+                  onClick={() => void onFinish()}
+                >
+                  {finishing ? 'Finishing…' : 'Finish & return to your agent'}
+                </Button>
               </div>
-              <div className="mt-0.5 text-[11px] text-blue-800">
-                Choose which tools it may use. Skipping a tool removes your saved keys and sign-ins
-                for it. When you're done, finish to send it back to your agent.
-              </div>
-            </div>
-            <button
-              onClick={() => void onFinish()}
-              disabled={finishing}
-              className="flex shrink-0 items-center gap-1 rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-            >
-              {finishing ? 'Finishing…' : 'Finish & return to your agent'} <ArrowRight size={12} />
-            </button>
-          </div>
-        )}
+            </Surface>
+          )}
 
-        {error && (
-          <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>
-        )}
-        {notice && (
-          <div className="mb-3 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
-            {notice}
-          </div>
-        )}
+          {error && (
+            <Banner role="alert" tone="danger" className="mb-3">
+              {error}
+            </Banner>
+          )}
+          {notice && (
+            <Banner role="status" tone="ok" className="mb-3">
+              {notice}
+            </Banner>
+          )}
 
-        {!nothingToDo && (
-          <p className="mb-4 max-w-2xl text-xs text-ink-muted">
-            These tools need your own sign-in or keys before they will work in your agent. Authorize each connection and
-            enter any keys below, then head back to your agent and run the tool again. Your values are stored securely and
-            never shown again after saving.
-          </p>
-        )}
+          {!nothingToDo && (
+            <p className="mb-5 text-ui text-ink-muted">
+              These tools need your own sign-in or keys before they will work in your agent.
+              Authorize each connection and enter any keys below, then head back to your agent and
+              run the tool again. Your values are stored securely and never shown again after
+              saving.
+            </p>
+          )}
 
-        {loading ? (
-          <div className="text-xs text-ink-faint">Loading…</div>
-        ) : nothingToDo ? (
-          agentMode ? (
-            // In agent-connect mode an empty list is SUCCESS, not absence:
-            // every shared tool works without a personal credential, so the
-            // user's only job is to finish.
-            <div className="flex max-w-2xl items-center gap-2 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
-              <Check size={13} /> You're all set — none of your tools need a personal sign-in or
-              key. Click “Finish &amp; return to your agent” above to complete the connection.
-            </div>
+          {loading ? (
+            <p className="py-16 text-center text-ui text-ink-faint">Loading…</p>
+          ) : nothingToDo ? (
+            agentMode ? (
+              // In agent-connect mode an empty list is SUCCESS, not absence:
+              // every shared tool works without a personal credential, so the
+              // user's only job is to finish.
+              <Banner role="status" tone="ok">
+                You&apos;re all set — none of your tools need a personal sign-in or key. Click
+                “Finish &amp; return to your agent” above to complete the connection.
+              </Banner>
+            ) : (
+              <p className="py-16 text-center text-ui text-ink-faint">
+                You have no tools that need a personal sign-in or key.
+              </p>
+            )
           ) : (
-            <div className="rounded border border-dashed border-line px-4 py-6 text-center text-xs text-ink-faint">
-              You have no tools that need a personal sign-in or key.
-            </div>
-          )
-        ) : (
-          <>
-            {outstanding === 0 && (
-              <div className="mb-4 flex max-w-2xl items-center gap-2 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
-                <Check size={13} /> Everything is connected. You can use your tools in your agent.
-              </div>
-            )}
+            <>
+              {outstanding === 0 && (
+                <Banner role="status" tone="ok" className="mb-5">
+                  Everything is connected. You can use your tools in your agent.
+                </Banner>
+              )}
 
-            {(toolOAuth.length > 0 || oauth.length > 0) && (
-              <section className="mb-6 max-w-2xl">
-                <h2 className="mb-2 text-xs font-semibold text-ink">Sign-ins</h2>
-                <ul className="divide-y divide-line rounded border border-line">
+              {(toolOAuth.length > 0 || oauth.length > 0) && (
+                <Section title="Sign-ins">
                   {/* OAuth-backed tool variables — authorized via the tool-scoped flow. */}
                   {toolOAuth.map((o) => {
                     const id = signInId(o);
                     const on = isIncluded(id, o.authorized);
-                    const busy = wiping.has(id);
                     return (
-                      <li key={o.key} className="flex items-center gap-3 px-3 py-2">
-                        <IncludeToggle
-                          on={on}
-                          busy={busy}
-                          onChange={() => void onToggle(id, o.authorized, () => deleteUserVar(o.slug, o.varName))}
-                        />
-                        {/* The label names the SIGN-IN; the link goes to the
-                            tool that declared it, which is what the accessible
-                            name has to say. */}
-                        <Link
-                          to={pathForTool(o.slug)}
-                          aria-label={`Open ${o.toolName}`}
-                          className={`text-xs font-medium hover:underline ${on ? 'text-ink' : 'text-ink-faint'}`}
-                        >
-                          {o.label || o.toolName}
-                        </Link>
-                        {on ? (
-                          o.needsReauth ? (
-                            <span className="text-[11px] text-amber-600">new permissions needed</span>
-                          ) : o.authorized ? (
-                            <span className="flex items-center gap-1 text-[11px] text-emerald-600">
-                              <ShieldCheck size={12} /> connected
-                            </span>
-                          ) : (
-                            <span className="text-[11px] text-amber-600">not connected</span>
-                          )
-                        ) : (
-                          <span className="text-[11px] text-ink-faint">skipped</span>
-                        )}
-                        {on && (
-                          <button
-                            onClick={() => void onAuthorizeTool(o.slug, o.varName)}
-                            className="ml-auto flex items-center gap-1 rounded px-2 py-1 text-xs text-blue-600 hover:bg-blue-50"
-                          >
-                            <ExternalLink size={12} /> {o.authorized ? 'Reconnect' : 'Authorize'}
-                          </button>
-                        )}
-                      </li>
+                      <ConnectRow
+                        key={o.key}
+                        slug={o.slug}
+                        name={o.toolName}
+                        label={o.label || o.toolName}
+                        on={on}
+                        busy={wiping.has(id)}
+                        state={
+                          !on
+                            ? 'skipped'
+                            : o.needsReauth
+                              ? 'needs-reauth'
+                              : o.authorized
+                                ? 'connected'
+                                : 'needs-signin'
+                        }
+                        onToggle={() =>
+                          void onToggle(id, o.authorized, () => deleteUserVar(o.slug, o.varName))
+                        }
+                        action={
+                          on ? (
+                            <Button
+                              variant="outline"
+                              size="tiny"
+                              onClick={() => void onAuthorizeTool(o.slug, o.varName)}
+                            >
+                              {o.authorized ? 'Reconnect' : 'Authorize'}
+                            </Button>
+                          ) : null
+                        }
+                      />
                     );
                   })}
                   {/* Standalone OAuth secrets (registered directly, not via a tool). */}
                   {oauth.map((o) => (
-                    <li key={o.id} className="flex items-center gap-3 px-3 py-2">
-                      <span className="text-xs font-medium text-ink">{o.label || o.key}</span>
-                      {o.authorized ? (
-                        <span className="flex items-center gap-1 text-[11px] text-emerald-600">
-                          <ShieldCheck size={12} /> connected
-                        </span>
-                      ) : (
-                        <span className="text-[11px] text-amber-600">not connected</span>
-                      )}
-                      <button
-                        onClick={() => void onAuthorize(o.id)}
-                        className="ml-auto flex items-center gap-1 rounded px-2 py-1 text-xs text-blue-600 hover:bg-blue-50"
-                      >
-                        <ExternalLink size={12} /> {o.authorized ? 'Reconnect' : 'Authorize'}
-                      </button>
-                    </li>
+                    <ConnectRow
+                      key={o.id}
+                      slug={o.id}
+                      name={o.label || o.key}
+                      label={o.label || o.key}
+                      on
+                      busy={false}
+                      state={o.authorized ? 'connected' : 'needs-signin'}
+                      action={
+                        <Button
+                          variant="outline"
+                          size="tiny"
+                          onClick={() => void onAuthorize(o.id)}
+                        >
+                          {o.authorized ? 'Reconnect' : 'Authorize'}
+                        </Button>
+                      }
+                    />
                   ))}
-                </ul>
-              </section>
-            )}
+                </Section>
+              )}
 
-            {tools.length > 0 && (
-              <section className="max-w-2xl">
-                <h2 className="mb-2 text-xs font-semibold text-ink">Keys</h2>
-                <ul className="space-y-3">
+              {tools.length > 0 && (
+                <Section title="Keys">
                   {tools.map((tool) => {
                     const id = toolId(tool);
                     const configured = toolConfigured(tool);
                     const on = isIncluded(id, configured);
-                    const busy = wiping.has(id);
+                    const unset = tool.variables.filter((v) => !v.configured).length;
                     return (
-                      <li key={tool.slug} className="rounded border border-line p-3">
-                        <div className="mb-2 flex items-center gap-2">
-                          <IncludeToggle
-                            on={on}
-                            busy={busy}
-                            onChange={() =>
-                              void onToggle(id, configured, async () => {
-                                for (const v of tool.variables.filter((x) => x.configured)) {
-                                  await deleteUserVar(tool.slug, v.name);
-                                }
-                              })
-                            }
-                          />
-                          <Wrench size={13} className={on ? 'text-ink-muted' : 'text-ink-faint'} />
-                          <Link
-                            to={pathForTool(tool.slug)}
-                            aria-label={`Open ${tool.name}`}
-                            className={`text-xs font-semibold hover:underline ${on ? 'text-ink' : 'text-ink-faint'}`}
-                          >
-                            {tool.name}
-                          </Link>
-                          {!on && <span className="text-[11px] text-ink-faint">skipped</span>}
-                        </div>
+                      <Surface
+                        key={tool.slug}
+                        tone="surface"
+                        radius="xl"
+                        elevation="card"
+                        padded
+                        className={cn(!on && 'opacity-60')}
+                      >
+                        <ConnectRowHead
+                          slug={tool.slug}
+                          name={tool.name}
+                          label={tool.name}
+                          on={on}
+                          busy={wiping.has(id)}
+                          state={!on ? 'skipped' : unset > 0 ? 'needs-key' : 'connected'}
+                          onToggle={() =>
+                            void onToggle(id, configured, async () => {
+                              for (const v of tool.variables.filter((x) => x.configured)) {
+                                await deleteUserVar(tool.slug, v.name);
+                              }
+                            })
+                          }
+                        />
                         {on && (
-                          <ul className="space-y-2">
+                          <ul className="mt-3 flex flex-col gap-2">
                             {tool.variables.map((v) => (
                               <KeyRow
                                 key={v.key}
@@ -402,16 +406,88 @@ export function ConnectToolsPage() {
                             ))}
                           </ul>
                         )}
-                      </li>
+                      </Surface>
                     );
                   })}
-                </ul>
-              </section>
-            )}
-          </>
-        )}
+                </Section>
+              )}
+            </>
+          )}
+        </div>
       </div>
     </div>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="mb-7">
+      <h2 className="mb-2.5 text-label uppercase text-ink-faint">{title}</h2>
+      <div className="flex flex-col gap-1.5">{children}</div>
+    </section>
+  );
+}
+
+/**
+ * The five things a row can be — and the words for each.
+ *
+ * `Connected` or `Needs …`, exactly as the Library says it, because this is the
+ * page you land on to FIX what the Library told you was broken and the two must
+ * not disagree about what is wrong. "skipped" is the one non-status here: it is
+ * a choice you made, not a state of the tool, so it stays grey.
+ */
+const ROW_STATE: Record<
+  'connected' | 'needs-signin' | 'needs-reauth' | 'needs-key' | 'skipped',
+  { text: string; tone: 'ok' | 'wait' | 'outline' }
+> = {
+  connected: { text: 'Connected', tone: 'ok' },
+  'needs-signin': { text: 'Needs your sign-in', tone: 'wait' },
+  'needs-reauth': { text: 'Needs signing in again', tone: 'wait' },
+  'needs-key': { text: 'Needs a key from you', tone: 'wait' },
+  skipped: { text: 'Skipped', tone: 'outline' },
+};
+
+interface RowHeadProps {
+  slug: string;
+  name: string;
+  label: string;
+  on: boolean;
+  busy: boolean;
+  state: keyof typeof ROW_STATE;
+  onToggle?: () => void;
+  action?: React.ReactNode;
+}
+
+/** Mark, name, state, and (optionally) the control that fixes it. */
+function ConnectRowHead({ slug, name, label, on, busy, state, onToggle, action }: RowHeadProps) {
+  const s = ROW_STATE[state];
+  return (
+    <div className="flex items-center gap-2.5">
+      {onToggle && <IncludeToggle on={on} busy={busy} onChange={onToggle} />}
+      <ToolLogo slug={slug} name={name} className={cn(!on && 'grayscale')} />
+      <Link
+        to={pathForTool(slug)}
+        aria-label={`Open ${name}`}
+        className={cn(
+          'truncate rounded-xs text-ui font-semibold hover:underline',
+          on ? 'text-ink' : 'text-ink-faint',
+        )}
+      >
+        {label}
+      </Link>
+      <Badge tone={s.tone} size="xs" className="shrink-0">
+        {s.text}
+      </Badge>
+      {action && <span className="ml-auto shrink-0">{action}</span>}
+    </div>
+  );
+}
+
+function ConnectRow(props: RowHeadProps) {
+  return (
+    <Surface tone="surface" radius="lg" elevation="none" padded className="border border-line">
+      <ConnectRowHead {...props} />
+    </Surface>
   );
 }
 
@@ -425,15 +501,18 @@ function IncludeToggle({
   busy: boolean;
   onChange: () => void;
 }) {
+  const label = on
+    ? 'Skip this tool (removes your saved keys and sign-ins for it)'
+    : 'Include this tool';
   return (
     <input
       type="checkbox"
       checked={on}
       disabled={busy}
       onChange={onChange}
-      title={on ? 'Skip this tool (removes your saved keys and sign-ins for it)' : 'Include this tool'}
-      aria-label={on ? 'Skip this tool (removes your saved keys and sign-ins for it)' : 'Include this tool'}
-      className="h-3.5 w-3.5 shrink-0 accent-blue-600 disabled:opacity-40"
+      title={label}
+      aria-label={label}
+      className="size-3.5 shrink-0 accent-accent disabled:opacity-40"
     />
   );
 }
@@ -471,31 +550,32 @@ function KeyRow({
   };
 
   return (
-    <li className="flex items-center gap-2">
+    <li className="flex items-center gap-2.5">
       <div className="flex min-w-0 flex-1 items-center gap-2">
-        <span className="truncate text-xs text-ink-muted">{label || name}</span>
-        {configured ? (
-          <span className="flex items-center gap-1 text-[11px] text-emerald-600">
-            <Check size={11} /> set
-          </span>
-        ) : (
-          <span className="text-[11px] text-amber-600">not set</span>
-        )}
+        <span className="truncate text-detail text-ink-muted">{label || name}</span>
+        <Badge tone={configured ? 'ok' : 'wait'} size="xs" className="shrink-0">
+          {configured ? 'Set' : 'Needs a key'}
+        </Badge>
       </div>
-      <input
+      {/* Write-only. The stored value is never fetched, rendered or logged —
+          the field starts empty even for a configured key, and saving replaces
+          rather than reveals. */}
+      <TextField
         type="password"
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder={configured ? 'Replace…' : 'Enter value'}
-        className="w-40 rounded border border-line-strong px-2 py-1 text-xs focus:border-accent focus:outline-none"
+        aria-label={`${label || name} value`}
+        className="w-44"
       />
-      <button
-        onClick={() => void save()}
+      <Button
+        variant="primary"
+        size="sm"
         disabled={busy || !value.trim()}
-        className="rounded bg-ink px-2 py-1 text-xs font-medium text-white disabled:opacity-40"
+        onClick={() => void save()}
       >
         Save
-      </button>
+      </Button>
     </li>
   );
 }
