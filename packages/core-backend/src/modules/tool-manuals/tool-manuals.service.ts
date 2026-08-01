@@ -154,16 +154,11 @@ export class ToolManualService implements IToolManualService {
   }
 
   async listAccessible(userEmail: string): Promise<ToolManualSummary[]> {
-    const manuals = await this.accessibleManuals(userEmail);
-    return manuals.map((m) => ({
-      slug: m.slug,
-      name: m.name,
-      path: m.path,
-      type: m.type,
-      variables: m.variables,
-      remote: m.remote,
-      setup: m.setup,
-    }));
+    return (await this.accessibleManuals(userEmail)).map(toSummary);
+  }
+
+  async listAllSummaries(): Promise<ToolManualSummary[]> {
+    return (await this.scan()).map(toSummary);
   }
 
   async listLocalOnly(userEmail: string): Promise<{ name: string; path: string }[]> {
@@ -515,6 +510,19 @@ export class ToolManualService implements IToolManualService {
 }
 
 // --- helpers ------------------------------------------------------------------
+
+/** The one descriptor → summary projection, shared by both list surfaces. */
+function toSummary(m: ToolManualDescriptor): ToolManualSummary {
+  return {
+    slug: m.slug,
+    name: m.name,
+    path: m.path,
+    type: m.type,
+    variables: m.variables,
+    remote: m.remote,
+    setup: m.setup,
+  };
+}
 
 function baseName(rel: string): string {
   const base = rel.slice(rel.lastIndexOf('/') + 1);

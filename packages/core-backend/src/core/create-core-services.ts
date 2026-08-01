@@ -23,6 +23,7 @@ import { AccessControlService } from '../modules/access/access-control.service.j
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
+import { GroupIndexService, AccessRequestsService } from '../modules/groups/index.js';
 import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
@@ -90,6 +91,8 @@ export interface CoreServices {
   routineWritePolicy: RoutineWritePolicyService;
   skillService: SkillService;
   toolManualService: ToolManualService;
+  groupIndexService: GroupIndexService;
+  groupAccessRequests: AccessRequestsService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
@@ -187,6 +190,20 @@ export async function createCoreServices(
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
   const toolManualService = new ToolManualService(workspaceService, accessControl, config.kbDirName);
+  // Groups: the folders under `Groups/` (plus the legacy roots) that carry a
+  // team's skills AND the tools they need. Enumerated for EVERY authenticated
+  // caller — a group they cannot read still exists for them, as a locked one —
+  // with the counts read off the two catalogs above rather than a second scan.
+  const groupIndexService = new GroupIndexService(
+    workspaceService,
+    accessControl,
+    skillService,
+    toolManualService,
+    config.kbDirName,
+  );
+  // "Let me in" requests against those groups. Postgres-backed, so a request
+  // survives a reload and a restart; retired lazily when the requester can read.
+  const groupAccessRequests = new AccessRequestsService(db);
   // Auth service — resolves identities for login, PR author attribution, and
   // access lookups. (Change requests now store the author email directly, so
   // PullRequestService no longer depends on it for attribution.)
@@ -299,6 +316,12 @@ export async function createCoreServices(
       paths.some((p) => p.startsWith(`${config.kbDirName}/${dir}/`));
     if (touched(GROUPS_DIR) || touched(LEGACY_TOOLS_DIR)) toolManualService.invalidate();
     if (touched(GROUPS_DIR) || touched(LEGACY_SKILLS_DIR)) skillService.invalidate();
+    // The group index spans all three roots — and an access grant lands as a
+    // default-branch change to `<root>/<group>/access.md`, so this is also what
+    // makes a newly-granted group unlock within one round-trip instead of one TTL.
+    if (touched(GROUPS_DIR) || touched(LEGACY_SKILLS_DIR) || touched(LEGACY_TOOLS_DIR)) {
+      groupIndexService.invalidate();
+    }
   });
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the
@@ -490,6 +513,8 @@ export async function createCoreServices(
     routineWritePolicy,
     skillService,
     toolManualService,
+    groupIndexService,
+    groupAccessRequests,
     authService,
     authMiddleware,
     accountErasureService,

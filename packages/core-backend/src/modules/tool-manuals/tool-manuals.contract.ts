@@ -146,6 +146,14 @@ export interface IToolManualService {
   /** The `.tool` manuals the user can read, as summaries. */
   listAccessible(userEmail: string): Promise<ToolManualSummary[]>;
   /**
+   * Every manual in the catalog, UNFILTERED by access — the mirror of
+   * `skillService.listSkills(undefined)`. For caller-INDEPENDENT counting only
+   * (the group index's "N tools", which a non-member is allowed to see as a
+   * number). Never surface a name, path or description from this to someone
+   * who cannot read the file; `listAccessible` is the surface for that.
+   */
+  listAllSummaries(): Promise<ToolManualSummary[]>;
+  /**
    * Validated UTCP manual call-templates for the user's accessible `.tool`s —
    * one per file, ready for a UTCP client to `registerManual`. Each is validated
    * at build time (a `.tool` that fails to validate is skipped + logged). Does
