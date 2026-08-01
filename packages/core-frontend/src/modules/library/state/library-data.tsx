@@ -45,6 +45,12 @@ export interface LibraryItem {
   group: string | null;
   /** Repo-root-relative path — the skill's folder, or the `.tool` file. */
   path: string;
+  /**
+   * A skill's declared `version:` frontmatter. Undefined for integrations, and
+   * for the many skills that declare none — the field is optional all the way
+   * down from `SKILL.md`, so absence is the normal case, not a load failure.
+   */
+  version?: string;
 }
 
 export interface LibraryContextValue extends LibraryData {
@@ -96,6 +102,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       owned: data.ownedSkills.has(s.name),
       group: groupOfPath(s.path),
       path: s.path,
+      version: s.version,
       status: skillStatus(
         neededToolsFor({ allowedTools: data.allowedToolsBySkill.get(s.name) }, data.tools),
       ),

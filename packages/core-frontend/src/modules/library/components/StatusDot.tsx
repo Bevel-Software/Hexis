@@ -5,7 +5,6 @@ const TONE: Record<GemState, string> = {
   ok: 'bg-ok',
   warn: 'bg-wait-dot',
   err: 'bg-danger',
-  off: 'bg-ink-faint opacity-50',
 };
 
 /**

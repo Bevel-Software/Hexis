@@ -49,14 +49,16 @@ describe('toolStatus', () => {
     expect(toolStatus(expired).state).toBe('err');
   });
 
-  it('flags a missing shared value as off (not set up yet)', () => {
+  it('flags a missing shared value in AMBER, and says what it needs', () => {
     const t = tool({
       variables: [
         { name: 'API_KEY', scope: 'admin', label: null, key: 'k', adminConfigured: false, userConfigured: false },
       ],
     });
-    expect(toolStatus(t)).toEqual({ state: 'off', text: 'Not set up yet' });
-    expect(toolStatus(tool({ ...t, canWrite: true })).text).toContain('you maintain');
+    // Never grey. Grey read as "disabled" or "not your problem", when an
+    // unconfigured integration is the state that most needs somebody.
+    expect(toolStatus(t)).toEqual({ state: 'warn', text: 'Needs setup' });
+    expect(toolStatus(tool({ ...t, canWrite: true })).text).toBe('Needs setup — yours to set up');
   });
 });
 
@@ -78,8 +80,13 @@ describe('neededToolsFor / skillStatus', () => {
 
   it('skill is ready only when every needed integration is connected', () => {
     expect(skillStatus([slack]).state).toBe('ok');
-    expect(skillStatus([slack, notion])).toEqual({ state: 'warn', text: 'Needs setup' });
     expect(skillStatus([]).state).toBe('ok');
+  });
+
+  it('names the integration standing in the skill\'s way, not just that one is', () => {
+    // The first unhealthy one: fixing it either unblocks the skill or reveals
+    // the next name, and "Needs setup" told you neither.
+    expect(skillStatus([slack, notion])).toEqual({ state: 'warn', text: `Needs ${notion.name}` });
   });
 });
 

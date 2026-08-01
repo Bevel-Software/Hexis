@@ -10,7 +10,16 @@ import type { ToolSecrets, ToolVarStatus } from '../../secrets-vault/services/to
  * clean.
  */
 
-export type GemState = 'ok' | 'warn' | 'err' | 'off';
+/**
+ * Three states, and no fourth.
+ *
+ * There used to be an `off` — "not set up yet", drawn in grey. Grey reads as
+ * *disabled*, or as *not your problem*: an unconfigured integration looked like
+ * furniture next to the amber ones, when in fact it is the state that most
+ * needs somebody. Anything that needs a person is amber; anything that was
+ * working and stopped is red. Nothing that needs a person is grey.
+ */
+export type GemState = 'ok' | 'warn' | 'err';
 
 export interface AttentionStatus {
   state: GemState;
@@ -20,30 +29,36 @@ export interface AttentionStatus {
 
 const OK: AttentionStatus = { state: 'ok', text: 'Connected' };
 
-/** Severity order for aggregation: broken sign-in > not set up > user action pending. */
-const RANK: Record<GemState, number> = { ok: 0, warn: 1, off: 2, err: 3 };
+/** Severity order for aggregation: broken sign-in beats anything merely unset. */
+const RANK: Record<GemState, number> = { ok: 0, warn: 1, err: 2 };
 
+/**
+ * Two states, and the words for them: `Connected`, or `Needs <the thing>`.
+ *
+ * There is deliberately no middle. "Not set up yet", "Sign in again to keep
+ * this working" and "Needs your sign-in" were three ways of saying one thing —
+ * this does not work yet — in three different shapes, so a wall of cards read
+ * as several unrelated problems. Every unhealthy state now names what it wants
+ * in the same grammar, which is what makes the column scannable.
+ *
+ * A missing key is `warn`, not a quieter state of its own: it needs a person,
+ * and everything that needs a person looks the same colour.
+ */
 function varStatus(v: ToolVarStatus, canWrite: boolean): AttentionStatus {
+  const notSetUp: AttentionStatus = {
+    state: 'warn',
+    text: canWrite ? 'Needs setup — yours to set up' : 'Needs setup',
+  };
   if (v.oauth) {
-    if (!v.adminConfigured) {
-      return {
-        state: 'off',
-        text: canWrite ? 'Not set up yet — you maintain this integration' : 'Not set up yet',
-      };
-    }
-    if (v.authorized && v.needsReauth) return { state: 'err', text: 'Sign in again to keep this working' };
+    if (!v.adminConfigured) return notSetUp;
+    if (v.authorized && v.needsReauth) return { state: 'err', text: 'Needs signing in again' };
     if (!v.authorized) return { state: 'warn', text: 'Needs your sign-in' };
     return OK;
   }
   if (v.scope === 'user') {
     return v.userConfigured ? OK : { state: 'warn', text: 'Needs a key from you' };
   }
-  return v.adminConfigured
-    ? OK
-    : {
-        state: 'off',
-        text: canWrite ? 'Not set up yet — you maintain this integration' : 'Not set up yet',
-      };
+  return v.adminConfigured ? OK : notSetUp;
 }
 
 /** Aggregate connection state of one integration for the current user. */
@@ -81,10 +96,18 @@ export function neededToolsFor(
   });
 }
 
-/** A skill is ready when every integration it needs is fully connected. */
+/**
+ * A skill is ready when every integration it needs is fully connected.
+ *
+ * When it is not, the status NAMES the integration in the way — the prototype's
+ * `Needs {tool}` (line 1645). "Needs setup" told you a skill was blocked but
+ * not by what, which left the only next step as opening the skill to find out.
+ * The first unhealthy one is enough: fixing it either unblocks the skill or
+ * reveals the next name.
+ */
 export function skillStatus(neededTools: ToolSecrets[]): AttentionStatus {
-  const broken = neededTools.some((t) => toolStatus(t).state !== 'ok');
-  return broken ? { state: 'warn', text: 'Needs setup' } : { state: 'ok', text: 'Ready' };
+  const blocker = neededTools.find((t) => toolStatus(t).state !== 'ok');
+  return blocker ? { state: 'warn', text: `Needs ${blocker.name}` } : { state: 'ok', text: 'Ready' };
 }
 
 /* ── gallery filtering ── */
