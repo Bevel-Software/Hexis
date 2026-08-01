@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Plug, RefreshCw, ShieldCheck, ExternalLink, Wrench, Check, ArrowRight } from 'lucide-react';
+import { pathForTool } from '../../library/routes/library-paths';
 import { startOAuth } from '../services/secrets.api';
 import { setUserVar, deleteUserVar } from '../services/tool-secrets.api';
 import {
@@ -295,9 +297,16 @@ export function ConnectToolsPage() {
                           busy={busy}
                           onChange={() => void onToggle(id, o.authorized, () => deleteUserVar(o.slug, o.varName))}
                         />
-                        <span className={`text-xs font-medium ${on ? 'text-ink' : 'text-ink-faint'}`}>
+                        {/* The label names the SIGN-IN; the link goes to the
+                            tool that declared it, which is what the accessible
+                            name has to say. */}
+                        <Link
+                          to={pathForTool(o.slug)}
+                          aria-label={`Open ${o.toolName}`}
+                          className={`text-xs font-medium hover:underline ${on ? 'text-ink' : 'text-ink-faint'}`}
+                        >
                           {o.label || o.toolName}
-                        </span>
+                        </Link>
                         {on ? (
                           o.needsReauth ? (
                             <span className="text-[11px] text-amber-600">new permissions needed</span>
@@ -369,9 +378,13 @@ export function ConnectToolsPage() {
                             }
                           />
                           <Wrench size={13} className={on ? 'text-ink-muted' : 'text-ink-faint'} />
-                          <span className={`text-xs font-semibold ${on ? 'text-ink' : 'text-ink-faint'}`}>
+                          <Link
+                            to={pathForTool(tool.slug)}
+                            aria-label={`Open ${tool.name}`}
+                            className={`text-xs font-semibold hover:underline ${on ? 'text-ink' : 'text-ink-faint'}`}
+                          >
                             {tool.name}
-                          </span>
+                          </Link>
                           {!on && <span className="text-[11px] text-ink-faint">skipped</span>}
                         </div>
                         {on && (

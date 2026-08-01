@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { RefreshCw, Trash2, ShieldCheck, ExternalLink, Wrench } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
+import { pathForTool } from '../../library/routes/library-paths';
 import {
   listSecrets,
   createOAuthSecret,
@@ -137,7 +139,16 @@ export function SecretsPage() {
               <li key={tool.slug} className="rounded border border-line p-3">
                 <div className="mb-2 flex items-center gap-2">
                   <Wrench size={13} className="text-ink-muted" />
-                  <span className="text-xs font-semibold text-ink">{tool.name}</span>
+                  {/* The tool's own page is where its description, capabilities
+                      and owner-side setup live — this panel only shows the
+                      values. */}
+                  <Link
+                    to={pathForTool(tool.slug)}
+                    className="text-xs font-semibold text-ink hover:underline"
+                    aria-label={`Open ${tool.name}`}
+                  >
+                    {tool.name}
+                  </Link>
                   <span className="text-[10px] text-ink-faint">{tool.path}</span>
                   {tool.canWrite && (
                     <span className="ml-auto rounded bg-sunken px-1.5 py-0.5 text-[10px] text-ink-muted">

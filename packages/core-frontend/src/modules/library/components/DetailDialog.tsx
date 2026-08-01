@@ -16,20 +16,20 @@ import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api'
 import { readFileOnBranch, suggestChange, type LibrarySkillSummary } from '../services/library.api';
 import { useSkillDetail } from '../hooks/useSkillDetail';
 import { useLibraryToast } from '../state/toast';
-import {
-  neededToolsFor,
-  toolStatus,
-  toolVariableStatuses,
-} from '../utils/status';
+import { neededToolsFor, toolStatus } from '../utils/status';
 import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
 import { StatusDot } from './StatusDot';
 import { ChangeRequestDock } from './ChangeRequestDock';
 import { CompareView } from './CompareView';
 import { SuggestChange } from './SuggestChange';
 
-export type DetailTarget =
-  | { kind: 'skill'; skill: LibrarySkillSummary; owned: boolean }
-  | { kind: 'integration'; tool: ToolSecrets };
+/**
+ * Skills only. Integrations left this dialog for their own route
+ * (`/skills-and-tools/tools/:slug`) — a dialog has no URL, so it could never be
+ * the landing target of an OAuth round-trip. Kept as a one-member union
+ * because `kind` is what the skill half branches on.
+ */
+export type DetailTarget = { kind: 'skill'; skill: LibrarySkillSummary; owned: boolean };
 
 export interface DetailDialogProps {
   target: DetailTarget;
@@ -58,17 +58,14 @@ const OWNER_TAG = (
 
 /**
  * The ⓘ detail dialog from the approved mock, on the shared Dialog primitive
- * (Esc / backdrop close come with it). Skills: description, needed
- * integrations with per-connection state + Connect, clickable file browser
- * (SKILL.md tagged MAIN), owner-only Manage access + Edit, the change-request
- * layer (owner dock → side-by-side compare; own pending suggestions inline
- * with withdraw; select-text → suggest). Integrations: per-connection status
- * rows and the skills that use it.
+ * (Esc / backdrop close come with it): description, needed integrations with
+ * per-connection state + Connect, clickable file browser (SKILL.md tagged
+ * MAIN), owner-only Manage access + Edit, the change-request layer (owner dock
+ * → side-by-side compare; own pending suggestions inline with withdraw;
+ * select-text → suggest).
  */
 export function DetailDialog(props: DetailDialogProps) {
   const { target, onClose } = props;
-  const name = target.kind === 'skill' ? target.skill.name : target.tool.name;
-  const owned = target.kind === 'skill' ? target.owned : target.tool.canWrite;
   const [compareCr, setCompareCr] = useState<PullRequestSummary | null>(null);
 
   return (
@@ -80,23 +77,24 @@ export function DetailDialog(props: DetailDialogProps) {
           size="2xl"
           title={
             <span className="flex items-center gap-2 text-[15px]">
-              {name}
-              {owned && OWNER_TAG}
+              {target.skill.name}
+              {target.owned && OWNER_TAG}
               <span className="text-[10.5px] font-normal uppercase tracking-[.08em] text-ink-faint">
-                {target.kind === 'skill' ? 'Skill' : 'Integration'}
+                Skill
               </span>
             </span>
           }
           bodyClassName="min-h-[16rem]"
         >
-          {target.kind === 'skill' ? (
-            <SkillDetailBody {...props} skillSummary={target.skill} owned={target.owned} onCompare={setCompareCr} />
-          ) : (
-            <ToolDetailBody {...props} tool={target.tool} />
-          )}
+          <SkillDetailBody
+            {...props}
+            skillSummary={target.skill}
+            owned={target.owned}
+            onCompare={setCompareCr}
+          />
         </Dialog>
       </div>
-      {target.kind === 'skill' && compareCr && (
+      {compareCr && (
         <SkillCompareHost
           {...props}
           skillSummary={target.skill}
@@ -432,93 +430,6 @@ function SkillCompareHost({ skillSummary, cr, onExit, onDataChanged }: CompareHo
         onDataChanged();
       }}
     />
-  );
-}
-
-/* ── integration body ── */
-
-interface ToolBodyProps extends DetailDialogProps {
-  tool: ToolSecrets;
-}
-
-function ToolDetailBody({ tool, skills, allowedToolsBySkill }: ToolBodyProps) {
-  const navigate = useNavigate();
-  const { kbDirName } = useWorkspace();
-  const rows = toolVariableStatuses(tool);
-
-  const usedBy = useMemo(
-    () =>
-      skills.filter(
-        (s) =>
-          neededToolsFor({ allowedTools: allowedToolsBySkill.get(s.name) }, [tool]).length > 0,
-      ),
-    [skills, allowedToolsBySkill, tool],
-  );
-
-  return (
-    <div className="text-sm">
-      <section className="mb-4">
-        <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-ink-faint">
-          Connection status
-        </h4>
-        <div className="flex flex-col gap-1.5">
-          {rows.length === 0 ? (
-            <IntItem title="Nothing to set up" sub="This integration works for everyone as-is" right={<StatusDot state="ok" />} />
-          ) : (
-            rows.map(({ v, status }) => (
-              <IntItem
-                key={v.name}
-                title={v.label ?? v.name}
-                sub={
-                  status.state === 'ok'
-                    ? v.scope === 'admin'
-                      ? 'Set up for the whole team'
-                      : 'Connected'
-                    : status.text
-                }
-                right={
-                  status.state === 'ok' ? (
-                    <StatusDot state="ok" />
-                  ) : v.scope === 'user' && v.adminConfigured !== false ? (
-                    <ConnectButton
-                      label={status.state === 'err' ? 'Reconnect' : 'Connect'}
-                      onClick={() => navigate('/connect')}
-                    />
-                  ) : tool.canWrite && kbDirName ? (
-                    <ConnectButton
-                      label="Set up"
-                      onClick={() => navigate(kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${tool.path}`))}
-                    />
-                  ) : (
-                    <StatusDot state={status.state} />
-                  )
-                }
-              />
-            ))
-          )}
-        </div>
-      </section>
-
-      <section>
-        <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-ink-faint">
-          Used by these skills
-        </h4>
-        {usedBy.length === 0 ? (
-          <span className="text-[11.5px] italic text-ink-faint">No skills use this yet</span>
-        ) : (
-          <div className="flex flex-wrap gap-1.5">
-            {usedBy.map((s) => (
-              <span
-                key={s.name}
-                className="rounded-full border border-line bg-white px-2.5 py-1 text-[11.5px] font-semibold text-ink-muted"
-              >
-                {s.name}
-              </span>
-            ))}
-          </div>
-        )}
-      </section>
-    </div>
   );
 }
 

@@ -6,6 +6,7 @@ import { LibraryPage } from '../components/LibraryPage';
 import { GroupPage } from '../components/GroupPage';
 import { GroupsIndexPage } from '../components/GroupsIndexPage';
 import { ProposeSkillPage } from '../components/ProposeSkillPage';
+import { ToolPage } from '../components/tool-page/ToolPage';
 import { LIBRARY_ROOT } from './library-paths';
 
 /**
@@ -41,10 +42,10 @@ export function LibraryRoutes() {
             <Route path="groups/:group" element={<GroupPage />} />
             <Route path="propose" element={<ProposeSkillPage />} />
 
-            {/* WP4 (tool page): `ToolPage` — the routed replacement for the
-                dialog's tool half, and the landing target of the OAuth
-                round-trip (`…/tools/:slug#authorized`). */}
-            <Route path="tools/:slug" element={<PageComingInALaterWorkPackage />} />
+            {/* The routed replacement for the dialog's tool half, and the
+                landing target of the OAuth round-trip
+                (`…/tools/:slug#authorized`). */}
+            <Route path="tools/:slug" element={<ToolPage />} />
 
             {/* CONTRACT (Ali): the skill page mounts at `skills/:name`
                 (`:name` = `encodeURIComponent(skill name)`), HERE, above the
@@ -60,13 +61,4 @@ export function LibraryRoutes() {
       </LibraryProvider>
     </LibraryToastProvider>
   );
-}
-
-/**
- * Stands in for a page a later work package owns. Renders NOTHING on purpose:
- * the route resolving is the contract this package ships, and half a page is
- * worse than an empty one.
- */
-function PageComingInALaterWorkPackage() {
-  return null;
 }

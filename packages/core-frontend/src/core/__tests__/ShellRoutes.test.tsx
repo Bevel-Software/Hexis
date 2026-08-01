@@ -86,6 +86,17 @@ describe('ShellRoutes', () => {
     expect(screen.getByTestId('skills-surface')).toBeInTheDocument();
   });
 
+  it('keeps a tool deep link inside the Skills & Tools surface', () => {
+    // The app owns everything under `/skills-and-tools/*`, so its nested
+    // routes (the tool page, the group pages) must not fall into the shell's
+    // catch-all on a cold load or a refresh.
+    renderAt('/skills-and-tools/tools/heyreach');
+    expect(screen.getByTestId('pathname')).toHaveTextContent(
+      /^\/skills-and-tools\/tools\/heyreach$/,
+    );
+    expect(screen.getByTestId('skills-surface')).toBeInTheDocument();
+  });
+
   it('renders the standalone Secrets page at /secrets without redirecting', async () => {
     renderAt('/secrets');
     expect(screen.getByTestId('pathname')).toHaveTextContent(/^\/secrets$/);
