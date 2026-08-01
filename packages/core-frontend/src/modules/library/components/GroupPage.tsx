@@ -7,13 +7,19 @@ import {
   decodeGroupSegment,
   pathForGroupsIndex,
   pathForPropose,
+  pathForTool,
 } from '../routes/library-paths';
 import { ownersTextOf, primaryFolderOf, readersTextOf } from '../utils/group-summary';
-import type { GroupSummary } from '../services/groups.api';
+import { useGroupAccessRequests } from '../hooks/useGroupAccessRequests';
+import { useWorkspace } from '../../workspace/state/workspace.context';
+import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { useLibraryToast } from '../state/toast';
 import { LibraryCard } from './LibraryCard';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
 import { GroupAccessSection } from './GroupAccessSection';
+import { AccessRequestsBanner } from './AccessRequestsBanner';
+import { LockedGroupView } from './LockedGroupView';
 
 /**
  * One group, as a place: `/skills-and-tools/groups/:group`.
@@ -37,8 +43,13 @@ export function GroupPage() {
   const group = decodeGroupSegment(params.group ?? '');
   const data = useLibrary();
   const navigate = useNavigate();
+  const toast = useLibraryToast();
+  const { kbDirName } = useWorkspace();
+  const requests = useGroupAccessRequests();
   const [detail, setDetail] = useState<DetailTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
+  const [manageFolder, setManageFolder] = useState<string | null>(null);
 
   const summary = useMemo(
     () => data.groupSummaries.find((g) => g.name === group) ?? null,
@@ -56,16 +67,58 @@ export function GroupPage() {
   const toolItems = groupItems.filter((i) => i.kind === 'integration');
   const attention = attentionOf(data.items, group);
 
-  function openDetail(item: LibraryItem) {
-    // CONTRACT (Ali): when the item routes land (`skills/:name`, `tools/:slug`)
-    // this becomes `navigate(pathForSkill(item.id))` / `pathForTool(item.id)`
-    // and the dialog below goes away. One line per kind, nothing else moves.
-    if (item.kind === 'skill') {
-      const skill = data.skills.find((s) => s.name === item.id);
-      if (skill) setDetail({ kind: 'skill', skill, owned: item.owned });
-    } else {
-      const tool = data.tools.find((t) => t.slug === item.id);
-      if (tool) setDetail({ kind: 'integration', tool });
+  /**
+   * Same split as the gallery: a tool opens its PAGE, a skill still opens the
+   * dialog. Kept identical to `LibraryPage.openItem` on purpose — a card must
+   * do the same thing wherever you clicked it.
+   *
+   * CONTRACT (Ali): when `skills/:name` lands, the second half becomes
+   * `navigate(pathForSkill(item.id))` and the dialog below goes away.
+   */
+  function openItem(item: LibraryItem) {
+    if (item.kind === 'integration') {
+      navigate(pathForTool(item.id));
+      return;
+    }
+    const skill = data.skills.find((s) => s.name === item.id);
+    if (skill) setDetail({ kind: 'skill', skill, owned: item.owned });
+  }
+
+  /**
+   * The access editor, hoisted out of both branches because both open it: the
+   * locked view's `Manage access` (a locked-out Admin unlocking themselves) and
+   * the member view's request banner (an owner letting somebody else in). Only
+   * one of those views is ever on screen, so one dialog is enough.
+   *
+   * `kbDirName` gates it because the resolver addresses files repo-relative and
+   * the dialog strips that prefix — without it the path we would hand over is
+   * not the path we mean. Same guard the skill dialog uses.
+   */
+  const manageDialog =
+    manageFolder && kbDirName ? (
+      <ManageAccessDialog
+        entry={{
+          name: manageFolder.split('/').pop() ?? manageFolder,
+          relativePath: `${kbDirName}/${manageFolder}`,
+          type: 'directory',
+        }}
+        onClose={() => {
+          setManageFolder(null);
+          // Granting IS approving: the request retires itself server-side once
+          // the requester can read, so closing the dialog is the moment to ask
+          // again rather than a moment to mark anything approved here.
+          data.reloadGroups();
+          requests.reload();
+        }}
+      />
+    ) : null;
+
+  async function dismiss(id: string) {
+    try {
+      await requests.dismiss(id);
+    } catch {
+      toast("Couldn't dismiss that — try again.");
+      requests.reload();
     }
   }
 
@@ -77,7 +130,20 @@ export function GroupPage() {
   }
 
   if (summary && !summary.canRead && groupItems.length === 0) {
-    return <LockedPlaceholder group={group} summary={summary} />;
+    return (
+      <>
+        <LockedGroupView
+          group={summary}
+          onRequested={data.reloadGroups}
+          onUnlocked={() => {
+            data.reload();
+            data.reloadGroups();
+          }}
+          onManage={setManageFolder}
+        />
+        {manageDialog}
+      </>
+    );
   }
 
   // No summary, no items, and the endpoint did NOT fail — the group really is
@@ -118,6 +184,18 @@ export function GroupPage() {
         </p>
       )}
 
+      {/* Somebody is waiting on the person reading this. It goes ABOVE the
+          setup banner because a request is about a human, and the folder's
+          owners are the only people who can answer it. */}
+      <AccessRequestsBanner
+        group={group}
+        folders={summary?.folders ?? []}
+        requests={requests.requests.filter((r) => r.group === group)}
+        onManage={setManageFolder}
+        onDismiss={(id) => void dismiss(id)}
+        className="mt-4"
+      />
+
       {attention > 0 && (
         <Banner role="status" tone="wait" className="mt-4">
           <span>
@@ -152,7 +230,7 @@ export function GroupPage() {
             {`No skills yet. Add one, or ask your agent to write one for ${group}.`}
           </p>
         ) : (
-          <CardGrid items={skillItems} onOpen={openDetail} />
+          <CardGrid items={skillItems} onOpen={openItem} />
         )}
       </GroupSection>
 
@@ -160,7 +238,7 @@ export function GroupPage() {
         {toolItems.length === 0 ? (
           <p className="text-ui text-ink-faint">No tools yet.</p>
         ) : (
-          <CardGrid items={toolItems} onOpen={openDetail} />
+          <CardGrid items={toolItems} onOpen={openItem} />
         )}
       </GroupSection>
 
@@ -190,6 +268,8 @@ export function GroupPage() {
           onDataChanged={data.reload}
         />
       )}
+
+      {manageDialog}
     </div>
   );
 }
@@ -206,32 +286,6 @@ function GroupBreadcrumb({ group }: { group: string }) {
         {group}
       </span>
     </nav>
-  );
-}
-
-/**
- * WP7 (locked groups) replaces this block wholesale with
- * `<LockedGroupView group={summary} onRequested={…} onUnlocked={…}
- * onManage={…} />` (master plan D3): the Locked badge, the run-by lede, the
- * `{n} skills · {n} tools — visible to members only.` counts line, the
- * ask-to-join CTA with its `Requested — …` state, and the `Manage access`
- * button a locked-out platform Admin gets from `canWrite` (admin-rescue grants
- * WRITE on `access.md`, never READ — an Admin can genuinely be locked out of
- * reading and still be the person who can fix it).
- *
- * Until then the page states the one fact it is allowed to state. A locked
- * group advertises its existence and who to ask; never a name of anything
- * inside it.
- */
-function LockedPlaceholder({ group, summary }: { group: string; summary: GroupSummary }) {
-  return (
-    <div className="pb-14">
-      <GroupBreadcrumb group={group} />
-      <h1 className="mt-1.5 text-display font-semibold">{group}</h1>
-      <Banner role="note" tone="neutral" className="mt-4">
-        {`Ask ${ownersTextOf(summary)} for access.`}
-      </Banner>
-    </div>
   );
 }
 

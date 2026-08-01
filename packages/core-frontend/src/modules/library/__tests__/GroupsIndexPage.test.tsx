@@ -197,6 +197,18 @@ describe('GroupsIndexPage', () => {
     await waitFor(() => expect(href()).toBe('/skills-and-tools/groups/Finance'));
   });
 
+  it('says Requested instead of Locked once the caller has asked to join', async () => {
+    groupsMock.listGroups.mockResolvedValue([summary(), { ...LOCKED, hasRequested: true }]);
+    renderIndex();
+    // The one thing this row can tell you that you did not already know is
+    // whether you have already asked — so it says that instead of the obvious.
+    expect(await screen.findByTitle('Requested')).toBeInTheDocument();
+    expect(screen.queryByTitle('Locked')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Finance/ })).toHaveAccessibleName(
+      'Finance Run by Olga Ivanova 3 skills · 1 tools Requested',
+    );
+  });
+
   it('moves a locked group into Groups you’re in when an item grant reaches inside', async () => {
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,

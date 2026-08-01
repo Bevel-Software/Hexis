@@ -20,8 +20,19 @@ import type { GroupSummary } from '../services/groups.api';
 const dataMock = vi.hoisted(() => ({ useLibraryData: vi.fn() }));
 vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryData }));
 
-const groupsMock = vi.hoisted(() => ({ listGroups: vi.fn() }));
-vi.mock('../services/groups.api', () => ({ listGroups: groupsMock.listGroups }));
+const groupsMock = vi.hoisted(() => ({
+  listGroups: vi.fn(),
+  listGroupAccessRequests: vi.fn(),
+  dismissGroupAccessRequest: vi.fn(),
+  requestGroupAccess: vi.fn(),
+}));
+vi.mock('../services/groups.api', () => ({
+  listGroups: groupsMock.listGroups,
+  listGroupAccessRequests: groupsMock.listGroupAccessRequests,
+  dismissGroupAccessRequest: groupsMock.dismissGroupAccessRequest,
+  requestGroupAccess: groupsMock.requestGroupAccess,
+  AlreadyReadableError: class AlreadyReadableError extends Error {},
+}));
 
 // The page's access section fetches on mount. Stub that seam so these tests
 // exercise the page's judgement rather than the network — and so the suite
@@ -144,6 +155,9 @@ describe('GroupPage', () => {
   beforeEach(() => {
     dataMock.useLibraryData.mockReturnValue(CATALOG);
     groupsMock.listGroups.mockResolvedValue([gtm()]);
+    groupsMock.listGroupAccessRequests.mockResolvedValue([]);
+    groupsMock.requestGroupAccess.mockResolvedValue(undefined);
+    groupsMock.dismissGroupAccessRequest.mockResolvedValue(undefined);
   });
 
   it("shows only the group's own skills and tools", async () => {
@@ -257,7 +271,10 @@ describe('GroupPage', () => {
       gtm({ name: 'Finance', folders: ['Groups/Finance'], canRead: false, readers: null }),
     ]);
     renderGroup('Finance');
-    expect(await screen.findByText('Ask Olga Ivanova for access.')).toBeInTheDocument();
+    expect(
+      await screen.findByRole('button', { name: 'Subscribe to its skills and tools' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Run by Olga Ivanova.')).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Skills' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Propose a skill or tool' })).not.toBeInTheDocument();
   });
@@ -275,7 +292,9 @@ describe('GroupPage', () => {
     ]);
     renderGroup('Finance');
     expect(await screen.findByTestId('library-card-skill-budget')).toBeInTheDocument();
-    expect(screen.queryByText('Ask Olga Ivanova for access.')).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Subscribe to its skills and tools' }),
+    ).not.toBeInTheDocument();
   });
 
   it('says so when the group does not exist', async () => {

@@ -6,6 +6,7 @@ import { LIBRARY_ROOT, pathForGroup } from '../routes/library-paths';
 import { ownersTextOf } from '../utils/group-summary';
 import type { GroupSummary } from '../services/groups.api';
 import { GroupIndexRow } from './GroupIndexRow';
+import { LockGlyph } from './LockGlyph';
 
 /**
  * The all-groups index — `/skills-and-tools/groups`.
@@ -141,15 +142,23 @@ export function GroupsIndexPage() {
                     key={entry.name}
                     label={entry.name}
                     {...describe(entry)}
-                    /* WP7 (locked groups): this trailing slot becomes the
-                       `LockGlyph`, and `Requested — {when}` once the caller has
-                       a pending request (`summary.hasRequested`). A plain
-                       titled chip until then — the row must SAY it is locked
-                       even before the glyph exists. */
+                    /* The row has to SAY it is locked, not just look it — the
+                       glyph is decorative (`aria-hidden`) and the word beside
+                       it is what a screen reader and the tests both read.
+                       Once a request is pending the chip states that instead:
+                       the one thing this row can tell you that you did not
+                       already know is whether you have already asked. */
                     trailing={
-                      <Badge tone="outline" size="xs" title="Locked" className="uppercase">
-                        Locked
-                      </Badge>
+                      entry.summary?.hasRequested ? (
+                        <Badge tone="wait" size="xs" title="Requested" className="uppercase">
+                          Requested
+                        </Badge>
+                      ) : (
+                        <Badge tone="outline" size="xs" title="Locked" className="uppercase">
+                          <LockGlyph className="size-2.5 shrink-0" />
+                          Locked
+                        </Badge>
+                      )
                     }
                     onOpen={() => navigate(pathForGroup(entry.name))}
                   />

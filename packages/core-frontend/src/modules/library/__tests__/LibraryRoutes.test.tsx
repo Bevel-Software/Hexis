@@ -23,8 +23,17 @@ import type { ToolPageState } from '../hooks/useToolPage';
 const dataMock = vi.hoisted(() => ({ useLibraryData: vi.fn() }));
 vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryData }));
 
-const groupsMock = vi.hoisted(() => ({ listGroups: vi.fn() }));
-vi.mock('../services/groups.api', () => ({ listGroups: groupsMock.listGroups }));
+const groupsMock = vi.hoisted(() => ({
+  listGroups: vi.fn(),
+  listGroupAccessRequests: vi.fn(),
+}));
+vi.mock('../services/groups.api', () => ({
+  listGroups: groupsMock.listGroups,
+  listGroupAccessRequests: groupsMock.listGroupAccessRequests,
+  dismissGroupAccessRequest: vi.fn(),
+  requestGroupAccess: vi.fn(),
+  AlreadyReadableError: class AlreadyReadableError extends Error {},
+}));
 
 const toolPageMock = vi.hoisted(() => ({ useToolPage: vi.fn() }));
 vi.mock('../hooks/useToolPage', () => ({ useToolPage: toolPageMock.useToolPage }));
@@ -120,7 +129,8 @@ function LocationProbe() {
 /**
  * The shell's providers, which the Library sits inside for real
  * (`CoreAppShell` mounts both above every app surface). The tool page reads
- * `isAdmin` and `kbDirName` from them.
+ * `isAdmin` and `kbDirName` from them; the locked-group and request surfaces
+ * read `kbDirName` to address `access.md`.
  */
 function wrap(children: ReactNode) {
   const adminValue = {
@@ -165,6 +175,7 @@ describe('LibraryRoutes', () => {
     dataMock.useLibraryData.mockReturnValue(CATALOG);
     groupsMock.listGroups.mockResolvedValue(GROUPS);
     toolPageMock.useToolPage.mockReturnValue(TOOL_PAGE_STATE);
+    groupsMock.listGroupAccessRequests.mockResolvedValue([]);
   });
 
   it('renders the gallery at /skills-and-tools with heading Library', async () => {
