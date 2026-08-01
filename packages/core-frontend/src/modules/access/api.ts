@@ -203,3 +203,52 @@ export async function fetchFileAccessBatch(
   );
 }
 
+/** A principal named by a rule, as the overrides endpoint reports it. */
+export type AccessOverridePrincipal =
+  | { kind: 'role'; role: string }
+  | { kind: 'user'; email: string; name: string }
+  | { kind: 'everyone' };
+
+/** One `verb: principal` line of a rule; `deny` mirrors the literal prefix. */
+export interface AccessOverrideEntry {
+  verb: GrantVerb;
+  deny: boolean;
+  principal: AccessOverridePrincipal;
+}
+
+/**
+ * A file INSIDE a folder that declares its own access rules — a descendant
+ * `access.md` or a node's own frontmatter. `path` is the file that declares;
+ * `governs` is what the rules apply to (the containing directory for an
+ * `access.md`, the file itself for frontmatter). `parseError` is set, with
+ * `entries: []`, when an `access.md` could not be parsed.
+ */
+export interface AccessOverride {
+  path: string;
+  governs: string;
+  source: 'access-md' | 'frontmatter';
+  entries: AccessOverrideEntry[];
+  parseError?: string;
+}
+
+/**
+ * Every access rule declared inside `folder` (repo-relative). Display-only: a
+ * folder's share list is not the whole story, because resolution is
+ * closeness-first and a rule written on one item overrides the folder's rule
+ * for the principals it names.
+ *
+ * 403s for a caller who cannot read the folder, and drops rows governing
+ * anything they cannot read — so this can only ever describe rules on things
+ * the caller already sees.
+ */
+export async function fetchAccessOverrides(
+  workspaceId: string,
+  folder: string,
+): Promise<{ overrides: AccessOverride[]; truncated: boolean }> {
+  return handleApiResponse(
+    await authFetch(
+      `/api/workspace/${workspaceId}/access/overrides?path=${encodeURIComponent(folder)}`,
+    ),
+  );
+}
+

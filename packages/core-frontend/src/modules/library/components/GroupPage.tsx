@@ -13,6 +13,7 @@ import type { GroupSummary } from '../services/groups.api';
 import { LibraryCard } from './LibraryCard';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
+import { GroupAccessSection } from './GroupAccessSection';
 
 /**
  * One group, as a place: `/skills-and-tools/groups/:group`.
@@ -47,6 +48,9 @@ export function GroupPage() {
     () => data.items.filter((i) => i.group === group),
     [data.items, group],
   );
+  // The access section derives the group's physical folders from these — one
+  // group can still span `Skills/<G>` and `Tools/<G>` on an unmigrated KB.
+  const itemPaths = useMemo(() => groupItems.map((i) => i.path), [groupItems]);
 
   const skillItems = groupItems.filter((i) => i.kind === 'skill');
   const toolItems = groupItems.filter((i) => i.kind === 'integration');
@@ -160,13 +164,11 @@ export function GroupPage() {
         )}
       </GroupSection>
 
-      {/* WP6 (group access): `<GroupAccessSection group={group} itemPaths={…} />`
-          mounts HERE — the last child of the page body, after the Tools grid.
-          `itemPaths` is `groupItems.map(i => i.path)`; `LibraryItem.path` exists
-          for exactly that. Its `Manage access` button IS this page's access
-          escalation, which is why there is no second Share button above: the
-          dialog has to be opened with the `workspaceId` prop WP6 adds, or the
-          edit targets whatever branch the ambient workspace last had open. */}
+      {/* The page's access surface, and its ONLY access escalation — the
+          `Manage access` button inside opens the share dialog pinned to the
+          default branch (`workspaceId`), which is why there is no second Share
+          button above. */}
+      <GroupAccessSection group={group} itemPaths={itemPaths} />
 
       {addOpen && summary && primaryFolder && (
         <AddToGroupDialog

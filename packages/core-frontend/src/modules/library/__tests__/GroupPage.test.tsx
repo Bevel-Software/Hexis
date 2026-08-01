@@ -23,6 +23,29 @@ vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryD
 const groupsMock = vi.hoisted(() => ({ listGroups: vi.fn() }));
 vi.mock('../services/groups.api', () => ({ listGroups: groupsMock.listGroups }));
 
+// The page's access section fetches on mount. Stub that seam so these tests
+// exercise the page's judgement rather than the network — and so the suite
+// doesn't wait on a connection refusal. `GroupAccessSection.test.tsx` is where
+// the section's own behaviour is covered.
+vi.mock('../../access/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../access/api')>();
+  return {
+    ...actual,
+    fetchFileAccess: vi.fn().mockResolvedValue({
+      canRead: true,
+      canWrite: false,
+      canDownload: false,
+      canOwner: false,
+      eligible: { roles: [], users: [] },
+      readers: { restricted: true, roles: [], users: [] },
+      owners: { roles: [], users: [] },
+      downloaders: { roles: [], users: [] },
+      sources: {},
+    }),
+    fetchAccessOverrides: vi.fn().mockResolvedValue({ overrides: [], truncated: false }),
+  };
+});
+
 import { LibraryProvider } from '../state/library-data';
 import { LibraryToastProvider } from '../state/toast';
 import { GroupPage } from '../components/GroupPage';
@@ -217,6 +240,15 @@ describe('GroupPage', () => {
       await screen.findByText('No skills yet. Add one, or ask your agent to write one for GTM.'),
     ).toBeInTheDocument();
     expect(screen.getByText('No tools yet.')).toBeInTheDocument();
+  });
+
+  it('carries the access section, derived from the folders its items live in', async () => {
+    renderGroup('GTM');
+    // The section is the page's only access escalation, so its absence would be
+    // a group nobody can share. Its own behaviour lives in
+    // `GroupAccessSection.test.tsx`; what matters here is that it is mounted
+    // with this group's item paths.
+    expect(await screen.findByRole('region', { name: 'Access for GTM' })).toBeInTheDocument();
   });
 
   it('locks a group the caller cannot read and shows nothing inside it', async () => {

@@ -29,6 +29,29 @@ vi.mock('../services/groups.api', () => ({ listGroups: groupsMock.listGroups }))
 const toolPageMock = vi.hoisted(() => ({ useToolPage: vi.fn() }));
 vi.mock('../hooks/useToolPage', () => ({ useToolPage: toolPageMock.useToolPage }));
 
+// The group page mounts an access section that fetches on render. Stub that
+// seam — this file tests the route table, not access (see
+// `GroupAccessSection.test.tsx`), and an unstubbed fetch makes the suite wait
+// on a refused connection.
+vi.mock('../../access/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../access/api')>();
+  return {
+    ...actual,
+    fetchFileAccess: vi.fn().mockResolvedValue({
+      canRead: true,
+      canWrite: false,
+      canDownload: false,
+      canOwner: false,
+      eligible: { roles: [], users: [] },
+      readers: { restricted: true, roles: [], users: [] },
+      owners: { roles: [], users: [] },
+      downloaders: { roles: [], users: [] },
+      sources: {},
+    }),
+    fetchAccessOverrides: vi.fn().mockResolvedValue({ overrides: [], truncated: false }),
+  };
+});
+
 import { LibraryRoutes } from '../routes/LibraryRoutes';
 
 const tool = (over: Partial<ToolSecrets>): ToolSecrets => ({

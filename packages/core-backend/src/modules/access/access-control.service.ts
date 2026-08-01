@@ -157,7 +157,7 @@ export interface UserEntry {
 
 export type ParsedEntry = RoleEntry | UserEntry;
 
-interface AccessFile {
+export interface AccessFile {
   /** repo-relative POSIX path — e.g. `access.md`, `Knowledge/Sales/access.md`. */
   path: string;
   /** repo-relative POSIX directory — `''` for root. */
@@ -488,7 +488,16 @@ export function parseRolesYaml(
   return { ok: true, index };
 }
 
-function parseAccessFile(
+/**
+ * Parse one `access.md`'s frontmatter into its per-verb entry lists.
+ *
+ * Exported so read-only surfaces can report WHERE rules are declared without
+ * reimplementing the parse (see `access-declarations.ts`). Exporting changes
+ * nothing about resolution — this is the same function the resolver builds its
+ * model from, so a display of declarations can never drift from the rules that
+ * are actually enforced.
+ */
+export function parseAccessFile(
   text: string,
   relativePath: string,
 ): { ok: true; file: AccessFile; warnings: string[] } | { ok: false; errors: string[] } {
