@@ -3,6 +3,9 @@ import { LibraryToastProvider } from '../state/toast';
 import { LibraryProvider } from '../state/library-data';
 import { LibraryLayout } from '../components/LibraryLayout';
 import { LibraryPage } from '../components/LibraryPage';
+import { GroupPage } from '../components/GroupPage';
+import { GroupsIndexPage } from '../components/GroupsIndexPage';
+import { ProposeSkillPage } from '../components/ProposeSkillPage';
 import { LIBRARY_ROOT } from './library-paths';
 
 /**
@@ -30,14 +33,13 @@ export function LibraryRoutes() {
             <Route path="owned" element={<LibraryPage filter={{ kind: 'owned' }} />} />
             <Route path="yours" element={<LibraryPage filter={{ kind: 'ungrouped' }} />} />
 
-            {/* WP5 (group pages): `GroupsIndexPage`, `GroupPage` (member view;
-                WP7 adds the locked branch) and `ProposeSkillPage` — the last of
-                which is Ali's seam, its `?group=` query frozen by the plan.
-                The ROUTES land now so the sidebar, the item pages and every
-                deep link have somewhere real to point. */}
-            <Route path="groups" element={<PageComingInALaterWorkPackage />} />
-            <Route path="groups/:group" element={<PageComingInALaterWorkPackage />} />
-            <Route path="propose" element={<PageComingInALaterWorkPackage />} />
+            {/* A group is a PLACE: `groups/:group` is a real page with a real
+                URL, and `GroupPage` — not the router — decides whether the
+                caller gets the member view or the locked one. `propose` is
+                Ali's seam; its `?group=` query is frozen by the plan. */}
+            <Route path="groups" element={<GroupsIndexPage />} />
+            <Route path="groups/:group" element={<GroupPage />} />
+            <Route path="propose" element={<ProposeSkillPage />} />
 
             {/* WP4 (tool page): `ToolPage` — the routed replacement for the
                 dialog's tool half, and the landing target of the OAuth

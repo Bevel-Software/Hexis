@@ -119,6 +119,28 @@ describe('LibraryRoutes', () => {
     expect(screen.queryByRole('heading', { name: 'Library' })).not.toBeInTheDocument();
   });
 
+  it('/skills-and-tools/groups renders the all-groups index', async () => {
+    renderAt('/skills-and-tools/groups');
+    expect(
+      await screen.findByRole('heading', { name: 'All groups', level: 1 }),
+    ).toBeInTheDocument();
+  });
+
+  it("a group deep link renders that group's cards and no others", async () => {
+    renderAt('/skills-and-tools/groups/GTM');
+    expect(await screen.findByRole('heading', { name: 'GTM', level: 1 })).toBeInTheDocument();
+    expect(screen.getByTestId('library-card-skill-outreach')).toBeInTheDocument();
+    expect(screen.getByTestId('library-card-integration-heyreach')).toBeInTheDocument();
+    expect(screen.queryByTestId('library-card-skill-roadmap')).not.toBeInTheDocument();
+  });
+
+  it('the propose seam reads its group out of the query', async () => {
+    renderAt('/skills-and-tools/propose?group=GTM');
+    expect(
+      await screen.findByRole('heading', { name: 'Propose a skill or tool for GTM', level: 1 }),
+    ).toBeInTheDocument();
+  });
+
   it('the All groups row navigates to the index and stays current there', async () => {
     renderAt('/skills-and-tools');
     fireEvent.click(await screen.findByRole('button', { name: /^All groups/ }));

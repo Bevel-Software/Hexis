@@ -51,6 +51,33 @@ export function pathForGroup(group: string): string {
   return `${LIBRARY_ROOT}/groups/${encodeURIComponent(group)}`;
 }
 
+/** The all-groups index. */
+export function pathForGroupsIndex(): string {
+  return `${LIBRARY_ROOT}/groups`;
+}
+
+/**
+ * The propose seam. Both the path and the `group` query key are FROZEN by the
+ * master plan (§1): the change-request flow replaces the page's internals
+ * wholesale, and this is the one URL it has to keep answering. Built here so
+ * the contract has exactly one constructor rather than a template literal at
+ * every link site.
+ */
+export function pathForPropose(group?: string | null): string {
+  return group ? `${LIBRARY_ROOT}/propose?group=${encodeURIComponent(group)}` : `${LIBRARY_ROOT}/propose`;
+}
+
+/**
+ * Read a `:group` route param. React-router 7 hands params back RAW from both
+ * `matchPath` and `useParams`, so every reader owes this decode — and a
+ * malformed escape (`%zz`, from a hand-edited or truncated link) THROWS, which
+ * would blank the page. A bad link is a bad link, not a crash: fall back to the
+ * raw segment and let the group simply not be found.
+ */
+export function decodeGroupSegment(raw: string): string {
+  return decodeSegment(raw);
+}
+
 /**
  * Whether a path is the all-groups index or the propose page. Both light the
  * "All groups" row: you reached propose from the index, and the place you came
