@@ -56,16 +56,21 @@ export function pathForGroupsIndex(): string {
   return `${LIBRARY_ROOT}/groups`;
 }
 
-/**
- * The propose seam. Both the path and the `group` query key are FROZEN by the
- * master plan (§1): the change-request flow replaces the page's internals
- * wholesale, and this is the one URL it has to keep answering. Built here so
- * the contract has exactly one constructor rather than a template literal at
- * every link site.
+/*
+ * `pathForPropose` was here, with `/propose` and its `group` query key frozen
+ * by the master plan as the seam for the change-request flow.
+ *
+ * It is gone because the design it served is gone: the group page no longer
+ * forks into "Add" for owners and "Propose" for everyone else — there is one
+ * door, and where a skill lands is a property of the group, not of the button
+ * (proto:2996-3002). Nothing links here any more, so the constructor, the
+ * route and the page went together rather than leaving a URL nothing reaches.
+ *
+ * ALI: this crosses the seam the master plan reserved for you. If the
+ * change-request flow still wants a page of its own, it should have a URL that
+ * describes the change rather than the permission — and this is the commit
+ * that removed the old one.
  */
-export function pathForPropose(group?: string | null): string {
-  return group ? `${LIBRARY_ROOT}/propose?group=${encodeURIComponent(group)}` : `${LIBRARY_ROOT}/propose`;
-}
 
 /**
  * Read a `:group` route param. React-router 7 hands params back RAW from both

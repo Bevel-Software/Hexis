@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { cn } from '../../../lib/utils';
-import { DOCUMENT_COLUMN, DOCUMENT_GUTTERS } from '../../../shared/theme/measure';
+import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { useAuth } from '../../auth/state/auth.context';
 import { attentionOf, useLibrary } from '../state/library-data';
 import { personalGroupName } from '../utils/personal-group';
@@ -113,7 +113,7 @@ export function LibraryLayout() {
           NOT share: Skills opens on a heading (34px), Knowledge on a tab
           strip (12px). */}
       <main className="min-w-0 flex-1 overflow-y-auto">
-        <div className={cn(DOCUMENT_COLUMN, DOCUMENT_GUTTERS, 'pt-[34px]')}>
+        <div className={cn(DOCUMENT_COLUMN, documentGutters(collapsed), 'pt-[34px]')}>
           <Outlet />
         </div>
       </main>

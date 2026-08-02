@@ -2,12 +2,7 @@ import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
-import {
-  decodeGroupSegment,
-  pathForGroupsIndex,
-  pathForPropose,
-  pathForTool,
-} from '../routes/library-paths';
+import { decodeGroupSegment, pathForGroupsIndex, pathForTool } from '../routes/library-paths';
 import { primaryFolderOf } from '../utils/group-summary';
 import { useGroupAccessRequests } from '../hooks/useGroupAccessRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
@@ -15,7 +10,9 @@ import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useLibraryToast } from '../state/toast';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
-import { GroupBreadcrumb, GroupItemSections, PageNote, ShareGlyph } from './group-page-parts';
+import { BandControls, GroupBreadcrumb, GroupItemSections, PageNote } from './group-page-parts';
+import { PageActions } from './PageActions';
+import { copyToClipboard } from '../utils/clipboard';
 import { AccessRequestsBanner } from './AccessRequestsBanner';
 import { LockedGroupView } from './LockedGroupView';
 
@@ -46,6 +43,13 @@ export function GroupPage() {
   const requests = useGroupAccessRequests();
   const [detail, setDetail] = useState<DetailTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  // The Skills band's two controls. `filterOn` narrows the band to what is
+  // waiting on the reader; `refresh` re-reads the catalog and then says when it
+  // last did, because "nothing changed" and "nothing was checked" otherwise
+  // look identical. Both are page state — neither belongs in the URL, since
+  // neither is a place you would link someone to.
+  const [filterOn, setFilterOn] = useState(false);
+  const [refreshState, setRefreshState] = useState<'idle' | 'spin' | 'done'>('idle');
   /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
   const [manageFolder, setManageFolder] = useState<string | null>(null);
 
@@ -61,6 +65,9 @@ export function GroupPage() {
   const skillItems = groupItems.filter((i) => i.kind === 'skill');
   const toolItems = groupItems.filter((i) => i.kind === 'integration');
   const attention = attentionOf(data.items, group);
+  // What the Skills band actually renders. The filter is a VIEW over the band,
+  // not a different query — flipping it back must show exactly what was there.
+  const shownSkills = filterOn ? skillItems.filter((i) => i.status.state !== 'ok') : skillItems;
 
   /**
    * Same split as the gallery: a tool opens its PAGE, a skill still opens the
@@ -171,19 +178,19 @@ export function GroupPage() {
           for a non-writer the dialog renders read-only (its own `canWrite`
           verdict decides), which is exactly what "who is this shared with?"
           should answer. Hidden only when no folder is known to manage. */}
+      {/* Three actions, beside the title, for everyone (proto:3012-3025).
+          Share stays un-gated: for a non-writer the dialog renders read-only,
+          which is exactly what "who is this shared with?" should answer. */}
       <div className="flex items-start justify-between gap-4">
         <h1 className="mt-1.5 text-display font-semibold">{group}</h1>
-        {primaryFolder && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-1.5 shrink-0"
-            onClick={() => setManageFolder(primaryFolder)}
-          >
-            <ShareGlyph className="size-3.5" />
-            Share
-          </Button>
-        )}
+        <div className="mt-1.5">
+          <PageActions
+            onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
+            onAdd={() => setAddOpen(true)}
+            onCopyLink={() => copyToClipboard(window.location.href)}
+            addLabel={`Add a skill or tool to ${group}`}
+          />
+        </div>
       </div>
 
       {/* Somebody is waiting on the person reading this. It goes ABOVE the
@@ -211,32 +218,37 @@ export function GroupPage() {
         </Banner>
       )}
 
-      {/* Exactly one action, and it is the honest one. `canWrite` unknown (no
-          summary) falls to Propose: claiming write access we could not verify
-          would send somebody into a dialog whose button 403s. */}
-      <div className="mt-4">
-        {summary?.canWrite ? (
-          <Button variant="primary" size="sm" onClick={() => setAddOpen(true)}>
-            Add skills or tools
-          </Button>
-        ) : (
-          <Button variant="outline" size="sm" onClick={() => navigate(pathForPropose(group))}>
-            Propose a skill or tool
-          </Button>
-        )}
-      </div>
-
       <GroupItemSections
-        skillItems={skillItems}
+        skillItems={shownSkills}
         toolItems={toolItems}
         onOpen={openItem}
-        emptySkills={`No skills yet. Add one, or ask your agent to write one for ${group}.`}
+        emptySkills={
+          filterOn
+            ? 'Nothing in this band needs you right now.'
+            : `No skills yet. Add one, or ask your agent to write one for ${group}.`
+        }
+        skillControls={
+          <BandControls
+            attention={attention}
+            filterOn={filterOn}
+            onToggleFilter={() => setFilterOn((v) => !v)}
+            refreshState={refreshState}
+            onRefresh={() => {
+              setRefreshState('spin');
+              data.reload();
+              data.reloadGroups();
+              window.setTimeout(() => setRefreshState('done'), 550);
+              window.setTimeout(() => setRefreshState('idle'), 4000);
+            }}
+          />
+        }
       />
 
       {addOpen && summary && primaryFolder && (
         <AddToGroupDialog
           name={group}
           primaryPath={primaryFolder}
+          canWrite={summary.canWrite}
           onClose={() => setAddOpen(false)}
         />
       )}

@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { MenuPanel, MenuItem } from '../../../shared/components';
-import { useDismissableMenu } from '../hooks/useDismissableMenu';
+import { useDismissableMenu } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { useWorkspace } from '../state/workspace.context';
 import { useFileNav } from '../routing/kb-routes';

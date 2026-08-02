@@ -3,7 +3,7 @@ import { cn } from '../../../lib/utils';
 import {
   DOCUMENT_COLUMN,
   DOCUMENT_COLUMN_WIDE,
-  DOCUMENT_GUTTERS,
+  documentGutters,
 } from '../../../shared/theme/measure';
 
 /**
@@ -40,6 +40,13 @@ export interface KbDocumentShellProps {
    */
   variant?: 'prose' | 'full-bleed';
   /**
+   * The file tree beside this column is hidden, so the space it gave up should
+   * become margin on both sides rather than more line length (proto:709). The
+   * caller owns this because only it knows: the pane controller, not a global
+   * flag. Defaults to false — the nav is usually there.
+   */
+  roomy?: boolean;
+  /**
    * Lands on the element that ACTUALLY scrolls. `FileViewer` passes
    * `editorContainerRef` here: a capture-phase scroll listener is bound to it
    * and is the only thing resetting the file lock's idle-release timer for a
@@ -57,6 +64,7 @@ export interface KbDocumentShellProps {
 export function KbDocumentShell({
   rail,
   variant = 'prose',
+  roomy = false,
   scrollRef,
   children,
 }: KbDocumentShellProps) {
@@ -95,7 +103,7 @@ export function KbDocumentShell({
         <div
           className={cn(
             DOCUMENT_COLUMN_WIDE,
-            DOCUMENT_GUTTERS,
+            documentGutters(roomy),
             'grid grid-cols-1 items-start gap-11 pt-3',
             'max-[900px]:gap-[26px] min-[901px]:grid-cols-[minmax(0,620px)_296px]',
           )}
@@ -108,7 +116,7 @@ export function KbDocumentShell({
         // The top bar already separates the column from the window, so the
         // page's own padding only has to keep the tabs off the bar
         // (`.wrap.kb`, proto:695-699). Do not "fix" this to 34px.
-        <div className={cn(DOCUMENT_COLUMN, DOCUMENT_GUTTERS, 'pt-3')}>{children}</div>
+        <div className={cn(DOCUMENT_COLUMN, documentGutters(roomy), 'pt-3')}>{children}</div>
       )}
     </div>
   );

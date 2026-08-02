@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { Badge, Button, IconButton, MenuItem, MenuPanel } from '../../../shared/components';
-import { useDismissableMenu } from '../hooks/useDismissableMenu';
+import { useDismissableMenu } from '../../../shared/components';
 
 /**
  * The document's title, and the page's actions beside it.

@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
+import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Check, XCircle, Lock, AlertTriangle, ArrowLeft } from 'lucide-react';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
@@ -13,6 +13,7 @@ import { openRawFile } from '../utils/openRawFile';
 import { Banner, Button, Surface } from '../../../shared/components';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
+import { LayoutContext } from '../../layout/state/layout.context';
 import { useCanonicalFileUrl, useFileNav, resolveRelativePath } from '../routing/kb-routes';
 import { useReview } from '../../review/state/review.context';
 import { ProtectedBranchBanner } from '../../git/components/ProtectedBranchBanner';
@@ -67,6 +68,17 @@ export function FileViewer() {
   const { fileViewerPanels, renderers } = useAppRegistry();
   const git = useGit();
   const review = useReview();
+  // Hiding the tree buys margin, not line length (proto:709), and the pane
+  // controller is the only thing that knows whether it is hidden.
+  //
+  // Read straight off the context rather than through `useLayout`, which
+  // THROWS when there is no provider. A gutter is cosmetic; it must not be
+  // able to take the whole viewer down. There are two live cases with no
+  // controller — a registry app mounted outside the pane layout, and every
+  // unit test that renders FileViewer on its own — and in both the honest
+  // answer is "the tree is not hidden".
+  const layout = useContext(LayoutContext);
+  const explorerHidden = layout?.isExplorerCollapsed ?? false;
 
   // File-lock integration (PLAN §2). One useFileLock per (branch, file)
   // the user has open. Acquired on first dirty edit, released when the
@@ -704,6 +716,7 @@ export function FileViewer() {
           shell is now the element that scrolls — the capture-phase listener
           bound to it is the file lock's only activity signal for a reader. */}
       <KbDocumentShell
+              roomy={explorerHidden}
         variant={shellVariant}
         scrollRef={editorContainerRef}
         rail={

@@ -30,20 +30,35 @@ export const DOCUMENT_COLUMN = 'mx-auto w-full max-w-[880px]';
 export const DOCUMENT_COLUMN_WIDE = 'mx-auto w-full max-w-[980px]';
 
 /**
- * Side and bottom padding.
+ * Side and bottom padding — a TWO-STATE rule, not a ramp.
  *
- * The sides GROW WITH SPARE WIDTH rather than with a global "sidebar hidden"
- * flag: with a chat pane open the document column can be narrow while the
- * explorer is open, and wide while it is closed, so the flag would be wrong in
- * both directions. A percentage padding resolves against the containing
- * block's inline size — the pane, not the window — which is exactly the
- * measurement we want, so `clamp()` expresses the whole rule without a
- * container query. Floor 40px (the prototype's default gutter), ceiling 64px
- * (its collapsed gutter, proto:709); the ramp spans a 800px-wide pane to a
- * 1280px one.
+ * This was `px-[clamp(40px,5%,64px)]`, on the theory that gutters should grow
+ * with spare width rather than with a "sidebar hidden" flag. The theory was
+ * fine; the arithmetic was not. Because `max-width` includes the padding
+ * (border-box, above), a percentage gutter that resolves against the PANE eats
+ * the LINE. At a 1440px window with the nav open the pane is ~1228px, 5% is
+ * 61px, and the line came out at 880 − 122 = 758px — where the prototype gives
+ * 800px. The ramp was permanently spending 42px of the default reading measure
+ * to buy a smoother transition, and then collapsing the nav moved the line by
+ * only 6px instead of the intended 48px. The one state anyone actually reads in
+ * was the state it degraded.
+ *
+ * So it is the prototype's rule now, literally: 40px normally, 64px when the
+ * nav is away (proto:137, proto:709). The caller passes which state it is in,
+ * because only the caller knows — the Library reads its sidebar store, and
+ * Knowledge reads its pane controller. That also keeps the original objection
+ * satisfied: nothing here consults a global flag, so a narrow pane with the
+ * nav open and a wide one with it closed are both described correctly.
  *
  * Under 900px the prototype collapses to a single column with 18px sides and
- * drops the bottom rhythm from 110px to 90px (proto:623-632).
+ * drops the bottom rhythm from 110px to 90px (proto:623-632) — that part is a
+ * genuine viewport rule and stays a media query.
  */
-export const DOCUMENT_GUTTERS =
-  'px-[clamp(40px,5%,64px)] pb-[110px] max-[900px]:px-[18px] max-[900px]:pb-[90px]';
+const GUTTER_TAIL = 'pb-[110px] max-[900px]:px-[18px] max-[900px]:pb-[90px]';
+
+/**
+ * @param roomy the nav beside this column is hidden, so the space it gave up
+ *              becomes margin on both sides rather than more line length.
+ */
+export const documentGutters = (roomy: boolean): string =>
+  `${roomy ? 'px-[64px]' : 'px-[40px]'} ${GUTTER_TAIL}`;

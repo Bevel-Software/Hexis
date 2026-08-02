@@ -34,7 +34,7 @@ import { useFileNav } from '../routing/kb-routes';
 import { authFetch } from '../../../lib/api';
 import { cn } from '../../../lib/utils';
 import { MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
-import { useDismissableMenu } from '../hooks/useDismissableMenu';
+import { useDismissableMenu } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { PullRequestsForMe } from '../../git/components/PullRequestsForMe';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';

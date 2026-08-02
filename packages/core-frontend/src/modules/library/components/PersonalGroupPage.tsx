@@ -6,6 +6,9 @@ import { pathForTool } from '../routes/library-paths';
 import { personalGroupName } from '../utils/personal-group';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { GroupBreadcrumb, GroupItemSections, PageNote } from './group-page-parts';
+import { PageActions } from './PageActions';
+import { PersonalAddDialog } from './PersonalAddDialog';
+import { copyToClipboard } from '../utils/clipboard';
 
 /**
  * A person's own space, as a group: `/skills-and-tools/yours`.
@@ -16,19 +19,25 @@ import { GroupBreadcrumb, GroupItemSections, PageNote } from './group-page-parts
  * gets, because from where you stand it is the same kind of thing: a place
  * with your skills and your tools in it.
  *
- * What it does NOT have, and why:
- *  - no Share. There is no folder behind this page, so there is no `access.md`
- *    to show — its members are "you", by construction, and a Share button
- *    would promise an editor that has nothing to edit.
- *  - no Add. Adding here means creating a skill outside every group, which is
- *    what the agent already does when it writes one; there is no folder for a
- *    dialog to write into.
+ * It carries the same actions every group page carries, because it is the same
+ * kind of thing — with ONE exception, and it is a real one rather than a
+ * decision:
+ *
+ *  - no Share. Every other action here is a client-side affordance, but sharing
+ *    needs a folder to write an `access.md` into, and this page is defined as
+ *    the items in NO folder. There is nothing to point the dialog at. The
+ *    prototype can share its personal list because there it is a real space
+ *    record (`mine:<uid>`, proto:2265); the platform has no such object, and a
+ *    Share button that opens an editor over nothing is worse than no button.
+ *    Giving a person's own items a home folder is a backend change, and until
+ *    that exists this stays absent.
  */
 export function PersonalGroupPage() {
   const data = useLibrary();
   const navigate = useNavigate();
   const { user } = useAuth();
   const [detail, setDetail] = useState<DetailTarget | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
 
   const name = personalGroupName(user?.name);
   const items = useMemo(() => data.items.filter((i) => i.group === null), [data.items]);
@@ -53,10 +62,21 @@ export function PersonalGroupPage() {
     <div className="pb-14">
       <GroupBreadcrumb name={name} />
 
-      <h1 className="mt-1.5 text-display font-semibold">{name}</h1>
-      <p className="mt-1 text-ui text-ink-muted">
-        Your sign-ins, and the skills no group carries. Only you see this.
-      </p>
+      {/* The same title row every group page has. The description line that
+          used to sit under it is gone: "Only you see this" is what the page's
+          own name already says, and a subtitle explaining a heading is the
+          heading admitting it did not work (proto: the personal list carries
+          no lede). */}
+      <div className="flex items-start justify-between gap-4">
+        <h1 className="mt-1.5 text-display font-semibold">{name}</h1>
+        <div className="mt-1.5">
+          <PageActions
+            onAdd={() => setAddOpen(true)}
+            onCopyLink={() => copyToClipboard(window.location.href)}
+            addLabel="Add a skill or tool"
+          />
+        </div>
+      </div>
 
       <GroupItemSections
         skillItems={skillItems}
@@ -65,6 +85,8 @@ export function PersonalGroupPage() {
         emptySkills="No skills of your own yet. Anything your agent writes outside a group lands here."
         emptyTools="No sign-ins of your own yet."
       />
+
+      {addOpen && <PersonalAddDialog name={name} onClose={() => setAddOpen(false)} />}
 
       {detail && (
         <DetailDialog
