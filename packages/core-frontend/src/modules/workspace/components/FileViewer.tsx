@@ -24,8 +24,9 @@ import { PrViewer } from '../../pr/components/PrViewer';
 import { useFileLock } from '../../workflow/hooks/useFileLock';
 import { LockApiError } from '../../workflow/services/lock.api';
 import { useAuth } from '../../auth/state/auth.context';
-import { getFileRenderer } from './renderers';
+import { getFileRenderer, getRendererLayout } from './renderers';
 import type { RendererSaveState } from './renderers';
+import { KbDocumentShell } from './KbDocumentShell';
 
 const SUGGESTED_PROMPTS = [
   'Give me an overview of the process landscape.',
@@ -277,7 +278,8 @@ export function FileViewer() {
 
   // **Edit mode is explicit** (the lock spec, simplified). Viewing a file
   // never claims the lock — the user clicks "Edit" to enter edit mode,
-  // which acquires. Idle for 30s? `useFileLock` auto-releases and
+  // which acquires. Idle for `IDLE_RELEASE_MS` (two minutes)?
+  // `useFileLock` auto-releases and
   // `holdingLock` flips false; the effect below mirrors that into
   // `editMode` so the UI flips back to view. To resume editing, the
   // user clicks Edit again (which tries to acquire — may fail if
@@ -478,7 +480,7 @@ export function FileViewer() {
   //     guarantees it). Save = checkpoint commit, lock stays held so
   //     subsequent keystrokes don't have to re-acquire.
   //   - Final commit + release happens on exit-edit, unmount, file switch,
-  //     or 30s idle (the hook's idle timer).
+  //     or `IDLE_RELEASE_MS` of inactivity (the hook's idle timer).
   const handleSave = useCallback(async (content: string) => {
     if (!openFilePath) return;
     openFileContentRef.current = content;
@@ -605,6 +607,13 @@ export function FileViewer() {
   const fileName = lastSlash >= 0 ? openFilePath.slice(lastSlash + 1) : openFilePath;
   const parentDir = lastSlash >= 0 ? openFilePath.slice(0, lastSlash) : '';
 
+  // Which shape the document column takes. A history / comparison panel is a
+  // fixed-height viewport with its own scroller (both roots are
+  // `flex-1 flex flex-col min-h-0`), so it gets the full-bleed contract for
+  // the same reason a PDF does — an auto-height column would collapse it.
+  const shellVariant =
+    activeTab === 'content' ? getRendererLayout(openFilePath) : 'full-bleed';
+
   return (
     <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
       <ProtectedBranchBanner />
@@ -613,6 +622,12 @@ export function FileViewer() {
         <AccessRestrictedBanner path={openFilePath} eligible={access.eligible} />
       )}
       {openFilePath && <NodeOwnersBanner owners={access.owners} />}
+      {/* ONE column holds the tabs, the title and the text at the same width,
+          so they share an edge and the page reads as a single centred block
+          (proto:700-705). `editorContainerRef` goes to `scrollRef` because the
+          shell is now the element that scrolls — the capture-phase listener
+          bound to it is the file lock's only activity signal for a reader. */}
+      <KbDocumentShell variant={shellVariant} scrollRef={editorContainerRef}>
       <EditorTabs />
       {/* Active-file metadata + sub-tabs (Content / History / Compare) */}
       <div className="h-10 border-b border-line flex items-center px-3 gap-2 shrink-0">
@@ -842,9 +857,9 @@ export function FileViewer() {
               Lock semantics: the editor is read-only whenever we're not in
               explicit Edit mode. Edit mode is gated by the lock, so this
               also covers "someone else holds it" without a separate check.
-              `editorContainerRef` is the scroll-activity source for the
-              idle-release timer. */}
-          <div ref={editorContainerRef} className="flex-1 overflow-hidden p-4">
+              The scroll-activity source for the idle-release timer is the
+              shell above, not this wrapper — see `KbDocumentShell.scrollRef`. */}
+          <div className={shellVariant === 'full-bleed' ? 'flex min-h-0 flex-1 flex-col' : 'min-w-0'}>
             <Renderer
               // **Why we key on `openFileSavedContent` (read-only mode only).**
               // When a teammate's save lands, the workspace state updates the
@@ -875,6 +890,7 @@ export function FileViewer() {
           </div>
         </>
       )}
+      </KbDocumentShell>
       {registeredPanels}
       <PrViewer />
     </div>

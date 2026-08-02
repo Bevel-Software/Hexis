@@ -50,3 +50,40 @@ export function getFileRenderer(filePath: string): ComponentType<FileRendererPro
   const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
   return renderersByExtension[ext] ?? fallbackRenderer;
 }
+
+/**
+ * How a file's renderer wants to be laid out inside `KbDocumentShell`.
+ *
+ * Two kinds of renderer, and the difference is not cosmetic:
+ *
+ *   - **A document.** Markdown, plain text, Word. It has no natural height, so
+ *     the shell holds the 880px measure and does the scrolling. An 800px line
+ *     is a reading surface; a 2000px one is not.
+ *   - **A viewport.** A PDF, an image, a spreadsheet, a sandboxed HTML page, a
+ *     tool form. It is already a fixed-height thing with its own scroller, so
+ *     the shell yields and hands it a definite height. An `h-full` iframe in an
+ *     auto-height column collapses to 0px, and an 880px prose measure is the
+ *     wrong shape for a spreadsheet.
+ *
+ * `.html` is full-bleed even though its EDIT state is a source textarea: the
+ * read state is the sandbox iframe, and the extension has to pick one. A
+ * full-height source view is harmless; a zero-height preview is not.
+ *
+ * Deliberately keyed off the extension — the same key `getFileRenderer` uses —
+ * so a registry-contributed renderer override for an extension inherits the
+ * layout its built-in counterpart had.
+ */
+export type RendererLayout = 'prose' | 'full-bleed';
+
+const FULL_BLEED_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico',
+  '.pdf',
+  '.csv', '.xlsx',
+  '.html', '.htm',
+  '.tool',
+]);
+
+export function getRendererLayout(filePath: string): RendererLayout {
+  const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
+  return FULL_BLEED_EXTENSIONS.has(ext) ? 'full-bleed' : 'prose';
+}

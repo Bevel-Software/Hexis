@@ -168,8 +168,20 @@ interface KbMarkdownViewProps {
    * rehype-slug anchor id. Omit it (e.g. in the embed) to hide the buttons.
    */
   headingLink?: (slug: string) => string;
-  /** Optional scroll container ref (used by the file viewer for deep-link scroll). */
+  /** Optional container ref (used by the file viewer for deep-link scroll). */
   containerRef?: Ref<HTMLDivElement>;
+  /**
+   * Whether this view owns a scroller. `true` (the default) keeps the
+   * `flex-1 overflow-auto` box every caller relied on before the Knowledge
+   * document column existed — the Atlassian embed and the library's detail
+   * dialog still do.
+   *
+   * The file viewer passes `false`: inside `KbDocumentShell` the COLUMN
+   * scrolls, and a nested scroller there would break the measure (the
+   * document would scroll inside a fixed-height well) and hide the shell's
+   * scroll events from the file lock's activity listener.
+   */
+  scroll?: boolean;
   className?: string;
 }
 
@@ -180,7 +192,7 @@ interface KbMarkdownViewProps {
  * frontmatter panel, with navigation injected via `onOpenFile` so it carries no
  * dependency on workspace routing or context.
  */
-export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, containerRef, className }: KbMarkdownViewProps) {
+export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, containerRef, scroll = true, className }: KbMarkdownViewProps) {
   const { data: frontmatter, body } = useMemo(() => parseFrontmatter(source), [source]);
   // CommonMark rejects unescaped spaces in link destinations, so a KB link like
   // `[Foo](Some File.md)` would render as plain text. Wrap space-bearing
@@ -277,7 +289,10 @@ export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, 
   }, [onOpenFile, onOpenNodeId, headingLink]);
 
   return (
-    <div className={`flex-1 overflow-auto ${className ?? ''}`} ref={containerRef}>
+    <div
+      className={`${scroll ? 'flex-1 overflow-auto' : 'min-w-0'} ${className ?? ''}`}
+      ref={containerRef}
+    >
       <FrontmatterPanel data={frontmatter} onOpenFile={onOpenFile} />
       <div className="prose prose-sm max-w-none">
         <Markdown

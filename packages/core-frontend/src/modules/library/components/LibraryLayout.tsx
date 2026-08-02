@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { cn } from '../../../lib/utils';
+import { DOCUMENT_COLUMN, DOCUMENT_GUTTERS } from '../../../shared/theme/measure';
 import { useAuth } from '../../auth/state/auth.context';
 import { attentionOf, useLibrary } from '../state/library-data';
 import { personalGroupName } from '../utils/personal-group';
@@ -103,8 +105,17 @@ export function LibraryLayout() {
         />
       )}
 
-      <main className="min-w-0 flex-1 overflow-y-auto px-8 py-6">
-        <Outlet />
+      {/* The shared measure (`plans/05-knowledge-ui.md` D6). The pane stays the
+          scroller so the scrollbar keeps sitting at its edge; the column
+          inside it is the same 880px and the same side gutters Knowledge
+          uses, so the two surfaces cannot report different widths at the same
+          window width. Top padding is the one measure they deliberately do
+          NOT share: Skills opens on a heading (34px), Knowledge on a tab
+          strip (12px). */}
+      <main className="min-w-0 flex-1 overflow-y-auto">
+        <div className={cn(DOCUMENT_COLUMN, DOCUMENT_GUTTERS, 'pt-[34px]')}>
+          <Outlet />
+        </div>
       </main>
     </div>
   );

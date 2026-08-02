@@ -61,6 +61,31 @@ vi.mock('../../../workflow/services/lock.api', () => ({
   },
 }));
 
+// Wrap `useFileLock` rather than replacing it: every other case in this file
+// depends on the real acquire/release lifecycle. The wrapper only observes
+// `recordActivity`, which has no other visible effect (it resets a timer), so
+// there is no way to assert the scroll→lock wiring without a spy on it.
+const lockActivity = vi.hoisted(() => ({ recordActivity: vi.fn() }));
+vi.mock('../../../workflow/hooks/useFileLock', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../workflow/hooks/useFileLock')>();
+  const { useCallback } = await import('react');
+  return {
+    ...actual,
+    useFileLock: (args: Parameters<typeof actual.useFileLock>[0]) => {
+      const real = actual.useFileLock(args);
+      const realRecord = real.recordActivity;
+      // Stable identity: FileViewer's scroll effect lists `recordActivity` in
+      // its deps, and a fresh function each render would re-bind the listener
+      // on every render — changing exactly the behaviour under test.
+      const recordActivity = useCallback(() => {
+        lockActivity.recordActivity();
+        realRecord();
+      }, [realRecord]);
+      return { ...real, recordActivity };
+    },
+  };
+});
+
 import { FileViewer } from '../FileViewer';
 // The lock API is mocked above; import the mocked fns so individual tests can
 // override the acquire outcome (e.g. a 403 on enter-edit).
@@ -488,5 +513,39 @@ describe('FileViewer', () => {
     expect(screen.getByText(/Eligible: Admin/i)).toBeInTheDocument();
     // And we did NOT flip into edit mode — no editable textbox appeared.
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  // WP1 regression. The document column moved: the viewer pane used to be
+  // `overflow-hidden` with a per-renderer scroller, and `editorContainerRef`
+  // sat on that pane. It now sits on `KbDocumentShell`, which is what actually
+  // scrolls. Scroll events do NOT bubble, so if the ref ever lands on a
+  // wrapper nested inside the scroller the capture listener stops firing,
+  // nothing type-errors, and a reader's lock silently auto-releases after two
+  // minutes. This suite had zero scroll / recordActivity coverage before.
+  it('resets the lock idle timer when the document is scrolled in edit mode', async () => {
+    const user = userEvent.setup();
+    lockActivity.recordActivity.mockClear();
+    render(<ViewerHarness initialContent="a long document" />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    // Edit mode is what arms the scroll listener.
+    await screen.findByRole('textbox');
+    lockActivity.recordActivity.mockClear();
+
+    const shell = screen.getByTestId('kb-document-shell');
+    await act(async () => {
+      shell.dispatchEvent(new Event('scroll'));
+    });
+
+    expect(lockActivity.recordActivity).toHaveBeenCalled();
+  });
+
+  it('leads the page with the document column, not a full-bleed pane', () => {
+    render(<ViewerHarness initialContent="measured" />);
+    const shell = screen.getByTestId('kb-document-shell');
+    // A markdown file is a document, so it gets the prose measure.
+    expect(shell.getAttribute('data-variant')).toBe('prose');
+    // …and the tab strip lives inside it, so tabs and text share one edge.
+    expect(shell.querySelector('[role="tablist"]')).not.toBeNull();
   });
 });
