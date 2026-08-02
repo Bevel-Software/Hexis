@@ -86,27 +86,33 @@ interface RenderOptions {
   uploadError?: UploadError | null;
   fileTree?: FileTreeEntry | null;
   createFile?: ReturnType<typeof vi.fn>;
+  deleteEntry?: ReturnType<typeof vi.fn>;
+  openFilePath?: string | null;
 }
 
 function renderExplorer(opts: RenderOptions = {}) {
   const dispatchUpload = opts.dispatchUpload ?? vi.fn().mockResolvedValue(undefined);
   const clearUploadError = opts.clearUploadError ?? vi.fn();
   const createFile = opts.createFile ?? vi.fn().mockResolvedValue(undefined);
+  const deleteEntry = opts.deleteEntry ?? vi.fn().mockResolvedValue(undefined);
   // Distinguish "caller wants null tree" from "caller didn't pass anything".
   const fileTree = 'fileTree' in opts ? opts.fileTree ?? null : EMPTY_TREE;
   const workspace: WorkspaceContextValue = makeWorkspaceFixture({
     fileTree,
     uploadError: opts.uploadError ?? null,
     isUploading: opts.isUploading ?? false,
+    openFilePath: opts.openFilePath ?? null,
     refreshFileTree: async () => fileTree,
     dispatchUpload,
     clearUploadError,
     createFile,
+    deleteEntry,
   });
   return {
     dispatchUpload,
     clearUploadError,
     createFile,
+    deleteEntry,
     ...render(
       <MemoryRouter>
         <AuthContext.Provider value={makeAuth()}>
@@ -662,5 +668,116 @@ describe('FileExplorer create — no alert loop on a write-denied path', () => {
     } finally {
       alertSpy.mockRestore();
     }
+  });
+});
+
+// ── WP2: names and one caret, nothing else ──
+
+describe('FileExplorer rows — the prototype tree', () => {
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      { name: 'reports', relativePath: 'reports', type: 'directory', children: [] },
+      {
+        name: 'docs',
+        relativePath: 'docs',
+        type: 'directory',
+        children: [{ name: 'a.md', relativePath: 'docs/a.md', type: 'file' }],
+      },
+      { name: 'brief.md', relativePath: 'brief.md', type: 'file' },
+    ],
+  };
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+
+  // The folder icon repeated what the caret said and the file icon repeated
+  // what the extension said. Both are gone; the row is a name and a caret.
+  it('renders no folder or per-extension file icons', () => {
+    const { container } = renderExplorer({ fileTree: TREE });
+    // The iconify glyphs mounted as <svg> siblings of the name; lucide's
+    // Folder/FolderOpen did too. What survives in a row is at most the caret.
+    expect(container.querySelector('.iconify')).toBeNull();
+    const row = screen.getByText('brief.md').closest('button')!;
+    expect(row.querySelectorAll('svg')).toHaveLength(0);
+  });
+
+  it('gives a childless folder no caret and does not toggle it', async () => {
+    renderExplorer({ fileTree: TREE });
+    const empty = screen.getByText('reports').closest('button')!;
+    expect(empty.querySelectorAll('svg')).toHaveLength(0);
+    expect(empty).toHaveAttribute('aria-expanded');
+
+    const withKids = screen.getByText('docs').closest('button')!;
+    expect(withKids.querySelectorAll('svg')).toHaveLength(1);
+  });
+
+  it('marks directory rows with aria-expanded and the open file with aria-current', () => {
+    renderExplorer({ fileTree: TREE, openFilePath: 'docs/a.md' });
+    expect(screen.getByText('docs').closest('button')).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('a.md').closest('button')).toHaveAttribute('aria-current', 'true');
+    expect(screen.getByText('brief.md').closest('button')).toHaveAttribute('aria-current', 'false');
+  });
+
+  // The one prototype context-menu item the platform never had.
+  it('offers Copy path in the context menu and writes the entry path', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('brief.md'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
+    });
+    expect(writeText).toHaveBeenCalledWith('brief.md');
+  });
+
+  it('offers Copy path on a folder row too', () => {
+    renderExplorer({ fileTree: TREE });
+    fireEvent.contextMenu(screen.getByText('reports'));
+    expect(screen.getByRole('menuitem', { name: /Copy path/i })).toBeInTheDocument();
+  });
+
+  // MenuPanel is presentation only, so the dismissal is the caller's — and a
+  // menu you can only close by picking something is a keyboard trap.
+  it('closes the context menu on Escape and hands focus back to the row', async () => {
+    renderExplorer({ fileTree: TREE });
+    const row = screen.getByText('brief.md').closest('button')!;
+    fireEvent.contextMenu(screen.getByText('brief.md'));
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Escape' });
+    });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(row);
+  });
+
+  it('closes the context menu on an outside click', async () => {
+    renderExplorer({ fileTree: TREE });
+    fireEvent.contextMenu(screen.getByText('brief.md'));
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.mouseDown(document.body);
+    });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('still deletes from the context menu', async () => {
+    const deleteEntry = vi.fn(async () => {});
+    renderExplorer({ fileTree: TREE, deleteEntry });
+    fireEvent.contextMenu(screen.getByText('brief.md'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Delete/i }));
+    });
+    expect(deleteEntry).toHaveBeenCalledWith('brief.md');
   });
 });
