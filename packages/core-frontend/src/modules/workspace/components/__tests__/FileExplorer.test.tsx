@@ -148,6 +148,21 @@ describe('FileExplorer toolbar', () => {
     cleanup();
   });
 
+  /**
+   * A `//` comment placed among JSX CHILDREN is not a comment — it is text,
+   * and it renders. TypeScript accepts it, the ratchet ignores it, and every
+   * existing test here queries by role or test id, so a four-line source
+   * comment once shipped to the top of the file tree in full view. The check
+   * is cheap and the failure mode is invisible to everything else.
+   */
+  it('renders no source comments as page text', () => {
+    // The whole container, not the root div: the comment that prompted this
+    // was a SIBLING of the tree inside the top-level fragment, so anything
+    // scoped to the tree itself would have walked straight past it.
+    const { container } = renderExplorer();
+    expect(container.textContent ?? '').not.toMatch(/\/\//);
+  });
+
   it('renders the Add files button and the hidden file input', () => {
     renderExplorer();
     const button = screen.getByRole('button', { name: /Add files/i });

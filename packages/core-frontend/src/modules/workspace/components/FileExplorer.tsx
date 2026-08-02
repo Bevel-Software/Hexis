@@ -1029,10 +1029,10 @@ export function FileExplorer() {
 
   return (
     <>
-    // No background, no border, no width: this is the CONTENTS of the app's
-    // one sidebar, and `SidebarFrame` is the sidebar. It used to be `bg-white`
-    // against the Library's `bg-sidebar`, which is how two navs in one app
-    // ended up looking like two apps.
+    {/* No background, no border, no width: this is the CONTENTS of the app's
+        one sidebar, and `SidebarFrame` is the sidebar. It used to be
+        `bg-white` against the Library's `bg-sidebar`, which is how two navs in
+        one app ended up looking like two apps. */}
     <div
       // The drop target. It was findable as `role="complementary"` while this
       // was the `<aside>`; the aside is `SidebarFrame`'s now, and a second
