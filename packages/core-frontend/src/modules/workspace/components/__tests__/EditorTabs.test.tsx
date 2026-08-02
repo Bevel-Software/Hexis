@@ -10,6 +10,7 @@ import {
   type OpenTab,
 } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
+import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 
 function makeTab(path: string, overrides: Partial<OpenTab> = {}): OpenTab {
   const content = overrides.content ?? `content:${path}`;
@@ -63,11 +64,24 @@ vi.mock('../../routing/kb-routes', () => ({
   }),
 }));
 
-function Wrap({ workspace, children }: { workspace: WorkspaceContextValue; children: ReactNode }) {
+function Wrap({
+  workspace,
+  changeRequestPaths = [],
+  children,
+}: {
+  workspace: WorkspaceContextValue;
+  /** Workspace-relative paths with an open change request. */
+  changeRequestPaths?: string[];
+  children: ReactNode;
+}) {
   return (
     <MemoryRouter>
       <WorkspaceContext.Provider value={workspace}>
-        {children}
+        <OpenChangeRequestsContext.Provider
+          value={{ paths: new Set(changeRequestPaths), forPath: () => [] }}
+        >
+          {children}
+        </OpenChangeRequestsContext.Provider>
       </WorkspaceContext.Provider>
     </MemoryRouter>
   );
@@ -294,5 +308,18 @@ describe('EditorTabs', () => {
     const strip = screen.getByRole('tablist');
     expect(strip.className).toContain('kb-tabstrip');
     expect(strip.className).toContain('overflow-x-auto');
+  });
+
+  // WP6: the third place a file with an open request says so.
+  it('marks a tab whose file has an open change request', () => {
+    const tabs = [makeTab('a.md'), makeTab('b.md')];
+    render(
+      <Wrap workspace={makeWorkspace(tabs, 'a.md')} changeRequestPaths={['b.md']}>
+        <EditorTabs />
+      </Wrap>,
+    );
+    const [a, b] = screen.getAllByRole('tab');
+    expect(within(b).getByTitle('Open change request')).toBeInTheDocument();
+    expect(within(a).queryByTitle('Open change request')).toBeNull();
   });
 });

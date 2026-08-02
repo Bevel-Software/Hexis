@@ -6,6 +6,9 @@ import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
 import { KbFileRail } from './KbFileRail';
 import { useLinksOut } from '../hooks/useLinksOut';
+import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
+import { usePrViewer } from '../../pr/state/pr-viewer.context';
+import { Banner } from '../../../shared/components';
 import { useLastCommit } from '../hooks/useLastCommit';
 import { openRawFile } from '../utils/openRawFile';
 import { Button } from '../../../shared/components';
@@ -640,6 +643,11 @@ export function FileViewer() {
   // history request behind its "Edited" row.
   const [railOpen, setRailOpen] = useState(false);
   const linksOut = useLinksOut(openFilePath, openFileContent);
+  // ALL open requests, not just the ones scoped to you — a colleague's request
+  // on a file you can read but not write still belongs on this page.
+  const openChangeRequests = useOpenChangeRequests();
+  const requestsOnThisFile = openFilePath ? openChangeRequests.forPath(openFilePath) : [];
+  const { openPr } = usePrViewer();
   const lastCommit = useLastCommit(openFilePath, railOpen);
   // Compare owns the whole column; the rail steps aside for the duration and
   // comes back with the document.
@@ -783,6 +791,33 @@ export function FileViewer() {
         </>
       ) : (
         <>
+          {/* Somebody has proposed a change to this file. It says so here
+              whoever opened it — the signal comes from the broad endpoint, not
+              from the dock's you-scoped queue, so a colleague's request on a
+              file you can read but not write still shows. */}
+          {requestsOnThisFile.length > 0 && (
+            <Banner role="note" tone="wait" className="mb-4 flex-none">
+              <div className="font-semibold">
+                {requestsOnThisFile.length === 1
+                  ? 'Open change request'
+                  : `${requestsOnThisFile.length} open change requests`}
+              </div>
+              <div className="mt-0.5 text-detail text-ink-muted">
+                {requestsOnThisFile[0].appAuthor?.name ?? requestsOnThisFile[0].author.login}{' '}
+                proposed “{requestsOnThisFile[0].title}”. Nothing here changes until someone
+                with write access applies it.
+              </div>
+              <div className="mt-3">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => openPr(requestsOnThisFile[0].number)}
+                >
+                  Review the change
+                </Button>
+              </div>
+            </Banner>
+          )}
           {waitingOnAgentUpdate && (
             <div role="status" aria-live="polite" aria-atomic="true" className="flex items-center gap-2 px-3 py-2 bg-amber-50 border-b border-amber-200 shrink-0">
               <span className="text-xs text-amber-800 flex-1">

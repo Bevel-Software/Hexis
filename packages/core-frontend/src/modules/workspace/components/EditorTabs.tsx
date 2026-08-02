@@ -3,6 +3,7 @@ import { X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { MenuPanel, MenuItem } from '../../../shared/components';
 import { useDismissableMenu } from '../hooks/useDismissableMenu';
+import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { useWorkspace } from '../state/workspace.context';
 import { useFileNav } from '../routing/kb-routes';
 import type { OpenTab } from '../state/workspace.context';
@@ -218,6 +219,7 @@ function TabPill(props: TabPillProps) {
 
   const filename = basename(tab.path);
   const hasPending = tab.pendingFileContent !== null;
+  const hasChangeRequest = useOpenChangeRequests().paths.has(tab.path);
   const ref = useRef<HTMLDivElement>(null);
 
   // Suppressing the scrollbar removes the one cue that more strip exists, so
@@ -270,7 +272,14 @@ function TabPill(props: TabPillProps) {
         isDragTarget && 'border-l-2 border-l-accent',
       )}
     >
-      {/* Slot for the open-change-request dot (WP6). */}
+      {/* The accent dot marks the file you ARE looking at as having an open
+          request; the tree's amber one marks files you are not (proto:723). */}
+      {hasChangeRequest && (
+        <span
+          title="Open change request"
+          className="h-1.5 w-1.5 flex-none rounded-full bg-accent"
+        />
+      )}
       <span className="truncate max-w-[16rem]">{filename}</span>
       {tab.isDirty && (
         <span

@@ -9,6 +9,7 @@ import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { PrViewerContext, type PrViewerContextValue } from '../../../pr/state/pr-viewer.context';
+import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 
 // PullRequestsForMe pulls in router/git wiring we don't want to exercise here;
 // stub it so the toolbar can be tested in isolation.
@@ -88,6 +89,8 @@ interface RenderOptions {
   createFile?: ReturnType<typeof vi.fn>;
   deleteEntry?: ReturnType<typeof vi.fn>;
   openFilePath?: string | null;
+  /** Workspace-relative paths with an open change request. */
+  openChangeRequestPaths?: string[];
 }
 
 function renderExplorer(opts: RenderOptions = {}) {
@@ -119,7 +122,14 @@ function renderExplorer(opts: RenderOptions = {}) {
           <WorkspaceContext.Provider value={workspace}>
             <GitContext.Provider value={makeGit()}>
               <PrViewerContext.Provider value={makePrViewer()}>
-                <FileExplorer />
+                <OpenChangeRequestsContext.Provider
+                  value={{
+                    paths: new Set(opts.openChangeRequestPaths ?? []),
+                    forPath: () => [],
+                  }}
+                >
+                  <FileExplorer />
+                </OpenChangeRequestsContext.Provider>
               </PrViewerContext.Provider>
             </GitContext.Provider>
           </WorkspaceContext.Provider>
@@ -779,5 +789,19 @@ describe('FileExplorer rows — the prototype tree', () => {
       fireEvent.click(screen.getByRole('menuitem', { name: /Delete/i }));
     });
     expect(deleteEntry).toHaveBeenCalledWith('brief.md');
+  });
+
+  // WP6: the tree consumes the SHARED, workspace-relative set. The two path
+  // spaces are joined in the provider; here the row just has to light up for
+  // the path the tree actually holds.
+  it('marks a row whose file has an open change request', () => {
+    renderExplorer({
+      fileTree: TREE,
+      openChangeRequestPaths: ['brief.md'],
+    });
+    const marked = screen.getByText('brief.md').closest('button')!;
+    expect(marked.querySelector('[title="Open change request"]')).not.toBeNull();
+    const unmarked = screen.getByText('docs').closest('button')!;
+    expect(unmarked.querySelector('[title="Open change request"]')).toBeNull();
   });
 });

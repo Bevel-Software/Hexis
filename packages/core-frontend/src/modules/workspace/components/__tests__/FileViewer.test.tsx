@@ -105,8 +105,10 @@ import { GitContext, type GitContextValue } from '../../../git/state/git.context
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { PrViewerContext, type PrViewerContextValue } from '../../../pr/state/pr-viewer.context';
+import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 
 let injectPendingFromTest: ((value?: string) => void) | null = null;
+const openPrSpy = vi.fn();
 
 function makeStatus(branch = 'alice/draft'): WorkingTreeStatus {
   return {
@@ -159,6 +161,7 @@ function ViewerHarness({
   filePath = 'knowledge-base/Knowledge/Foo.md',
   kbDirName = 'knowledge-base',
   addTab,
+  changeRequests = [],
 }: {
   initialContent?: string;
   pendingValue?: string;
@@ -166,6 +169,8 @@ function ViewerHarness({
   filePath?: string;
   kbDirName?: string | null;
   addTab?: WorkspaceContextValue['addTab'];
+  /** Open change requests touching `filePath`. */
+  changeRequests?: { number: number; title: string; who: string }[];
 }) {
   const [openFileContent, setOpenFileContent] = useState(initialContent);
   const [pendingFileContent, setPendingFileContent] = useState<string | null>(null);
@@ -265,7 +270,7 @@ function ViewerHarness({
     selectedPath: null,
     isLoading: false,
     lastError: null,
-    openPr: () => {},
+    openPr: openPrSpy,
     closeViewer: () => {},
     selectPath: () => {},
     refresh: async () => {},
@@ -278,10 +283,26 @@ function ViewerHarness({
           <GitContext.Provider value={makeGit(makeStatus(branch))}>
             <ReviewContext.Provider value={review}>
               <PrViewerContext.Provider value={prViewer}>
-                <button type="button" onClick={() => setPendingFileContent(pendingValue)}>
-                  Inject pending
-                </button>
-                <FileViewer />
+                <OpenChangeRequestsContext.Provider
+                  value={{
+                    paths: new Set(changeRequests.length ? [filePath] : []),
+                    forPath: (p) =>
+                      p === filePath
+                        ? (changeRequests.map((c) => ({
+                            number: c.number,
+                            title: c.title,
+                            appAuthor: { name: c.who },
+                            author: { login: 'bevel-bot' },
+                            touchedNodePaths: ['Knowledge/Foo.md'],
+                          })) as never)
+                        : [],
+                  }}
+                >
+                  <button type="button" onClick={() => setPendingFileContent(pendingValue)}>
+                    Inject pending
+                  </button>
+                  <FileViewer />
+                </OpenChangeRequestsContext.Provider>
               </PrViewerContext.Provider>
             </ReviewContext.Provider>
           </GitContext.Provider>
@@ -636,6 +657,31 @@ describe('FileViewer', () => {
       1,
     ));
     expect(await screen.findByText(/by Ali/)).toBeInTheDocument();
+  });
+
+  // ── WP6: the third place ──
+
+  // The D3 asymmetry, made visible: this signal comes from the BROAD endpoint,
+  // so a request opened by somebody else on a file you can read but not write
+  // still says so here — while the dock, which is scoped to you, stays empty.
+  it('says so on the page when a file has an open change request', async () => {
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="contested"
+        changeRequests={[{ number: 32, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+
+    expect(await screen.findByText('Open change request')).toBeInTheDocument();
+    expect(screen.getByText(/Ali Raza proposed/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Review the change' }));
+    expect(openPrSpy).toHaveBeenCalledWith(32);
+  });
+
+  it('says nothing on a file nobody has proposed a change to', () => {
+    render(<ViewerHarness initialContent="quiet" />);
+    expect(screen.queryByText('Open change request')).not.toBeInTheDocument();
   });
 
   it('widens the column when the rail is open', async () => {

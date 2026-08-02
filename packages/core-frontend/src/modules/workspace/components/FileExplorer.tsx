@@ -35,6 +35,7 @@ import { authFetch } from '../../../lib/api';
 import { cn } from '../../../lib/utils';
 import { MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
 import { useDismissableMenu } from '../hooks/useDismissableMenu';
+import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { PullRequestsForMe } from '../../git/components/PullRequestsForMe';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useAppRegistry } from '../../../core/registry';
@@ -412,6 +413,8 @@ function FileTreeNode({
 }) {
   const { openFilePath, createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
   const { openFile } = useFileNav();
+  // One shared fetch behind this — see `OpenChangeRequestsProvider`.
+  const openChangeRequests = useOpenChangeRequests();
 
   const handleDownload = useCallback(async () => {
     if (!workspaceId) return;
@@ -847,6 +850,15 @@ function FileTreeNode({
           />
         ) : (
           <span className="truncate">{entry.name}</span>
+        )}
+        {/* News about a file you are not looking at (proto:692). Amber, not
+            the tab dot's accent: on a tab the dot marks the file you have
+            open; here it marks one you do not. */}
+        {openChangeRequests.paths.has(entry.relativePath) && (
+          <span
+            title="Open change request"
+            className="ml-auto h-1.5 w-1.5 flex-none rounded-full bg-wait-dot"
+          />
         )}
       </button>
       {contextMenu && (

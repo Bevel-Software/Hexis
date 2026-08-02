@@ -25,6 +25,7 @@ import { Toolbar } from '../modules/toolbar/components/Toolbar';
 import { DemoBanner } from '../modules/layout/components/DemoBanner';
 import { FileExplorer } from '../modules/workspace/components/FileExplorer';
 import { FileViewer } from '../modules/workspace/components/FileViewer';
+import { OpenChangeRequestsProvider } from '../modules/workspace/state/open-change-requests';
 import { FileRoute } from '../modules/workspace/components/FileRoute';
 import { KB_ROUTE_PREFIX } from '../modules/workspace/routing/kb-routes';
 import { AppLayout } from '../modules/layout/components/AppLayout';
@@ -219,7 +220,14 @@ function KnowledgeSurface() {
       ),
     [registry],
   );
-  return <AppLayout panes={panes} onController={setController} />;
+  // Mounted here, once, because three separate subtrees ask the same question:
+  // the tree (per row), the tab strip (per tab) and the viewer's banner. A
+  // plain hook per consumer would give every tree row its own request.
+  return (
+    <OpenChangeRequestsProvider>
+      <AppLayout panes={panes} onController={setController} />
+    </OpenChangeRequestsProvider>
+  );
 }
 
 function AppChrome() {
