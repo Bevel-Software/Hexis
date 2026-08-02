@@ -24,7 +24,6 @@ function renderHeader(overrides: Partial<KbPageHeaderProps> = {}) {
     onShare: vi.fn(),
     onCopyPage: vi.fn(async () => true),
     onCopyLink: vi.fn(async () => true),
-    onCopyPath: vi.fn(async () => true),
     onViewRaw: vi.fn(),
     ...overrides,
   };
@@ -47,19 +46,26 @@ describe('KbPageHeader', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('LICENSE');
   });
 
-  it('opens the file dialog from Share, and offers link + folder behind the chevron', async () => {
+  it('opens Manage access from Share, and offers the link behind the chevron', async () => {
     const user = userEvent.setup();
     const { props } = renderHeader();
 
     await user.click(screen.getByRole('button', { name: 'Share' }));
-    expect(props.onShare).toHaveBeenCalledWith('file');
+    expect(props.onShare).toHaveBeenCalled();
 
     await user.click(screen.getByRole('button', { name: 'More sharing options' }));
     expect(screen.getByRole('menuitem', { name: /Manage access/ })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: /Copy link to this page/ })).toBeInTheDocument();
+  });
 
-    await user.click(screen.getByRole('menuitem', { name: /Share the whole folder/ }));
-    expect(props.onShare).toHaveBeenCalledWith('folder');
+  // This page shares ONE thing. "Share the whole folder" was one click from
+  // handing over everything in the folder, with nothing on screen showing what
+  // "everything" was; it lives on the folder's own tree row now.
+  it('does not offer to share the whole folder', async () => {
+    const user = userEvent.setup();
+    renderHeader();
+    await user.click(screen.getByRole('button', { name: 'More sharing options' }));
+    expect(screen.queryByRole('menuitem', { name: /whole folder/i })).not.toBeInTheDocument();
   });
 
   // `canWrite` is `boolean | null`, and null means "not known yet". Treating it
@@ -113,10 +119,18 @@ describe('KbPageHeader', () => {
       /Version history/,
       /Compare versions/,
       /View raw file/,
-      /Copy path/,
     ]) {
       expect(screen.getByRole('menuitem', { name: label })).toBeInTheDocument();
     }
+  });
+
+  // Copying a reference to this page is one errand, and Share owns it. Two
+  // menus offering near-identical copies is how someone pastes the wrong one.
+  it('does not repeat Copy path in the overflow — Share owns copying a reference', async () => {
+    const user = userEvent.setup();
+    renderHeader();
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    expect(screen.queryByRole('menuitem', { name: /Copy path/i })).not.toBeInTheDocument();
   });
 
   it('hides both history entries when git is not ready', async () => {

@@ -624,14 +624,10 @@ describe('FileViewer', () => {
         name: 'Manage access: file knowledge-base/Knowledge/Foo.md',
       }),
     ).toBeInTheDocument();
-    // Close it, then take the other scope.
+    // And there is no second scope: sharing the whole folder starts at the
+    // folder's own row in the tree, beside the children it governs.
     await user.click(screen.getByRole('button', { name: 'More sharing options' }));
-    await user.click(screen.getByRole('menuitem', { name: /Share the whole folder/ }));
-    expect(
-      await screen.findByRole('dialog', {
-        name: 'Manage access: directory knowledge-base/Knowledge',
-      }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /whole folder/i })).not.toBeInTheDocument();
   });
 
   // ── WP5: the rail ──

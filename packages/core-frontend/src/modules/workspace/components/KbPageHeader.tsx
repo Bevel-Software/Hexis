@@ -1,16 +1,17 @@
 import { useCallback, useRef, useState } from 'react';
 import {
+  Check,
   ChevronDown,
   Clock4,
   Code2,
   Copy,
-  FolderOpen,
   GitCompare,
   History,
   Info,
   Link2,
   Pencil,
   Users,
+  X,
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { Badge, Button, IconButton, MenuItem, MenuPanel } from '../../../shared/components';
@@ -72,12 +73,17 @@ export interface KbPageHeaderProps {
   onToggleRail(): void;
   onOpenHistory(): void;
   onOpenCompare(): void;
-  onShare(target: 'file' | 'folder'): void;
+  /**
+   * Opens Manage access on THIS FILE. There is no folder target: sharing a
+   * whole folder from a file's page was one click away from handing over
+   * everything inside it, so it moved to the folder's own row in the tree.
+   */
+  onShare(): void;
   /** The page as Markdown. Absent for a file that has no markdown to copy. */
   onCopyPage?: () => Promise<boolean>;
-  /** The canonical URL, via `useCanonicalFileUrl`. */
+  /** The canonical URL, via `useCanonicalFileUrl`. The only copy-a-reference
+   *  action on this page — see the note where the `⋯` menu is built. */
   onCopyLink(): Promise<boolean>;
-  onCopyPath(): Promise<boolean>;
   onViewRaw(): void;
 }
 
@@ -116,7 +122,6 @@ export function KbPageHeader({
   onShare,
   onCopyPage,
   onCopyLink,
-  onCopyPath,
   onViewRaw,
 }: KbPageHeaderProps) {
   const [shareOpen, setShareOpen] = useState(false);
@@ -167,16 +172,17 @@ export function KbPageHeader({
       {isReviewingPending && <Badge tone="ok">Reviewing agent update</Badge>}
 
       <div className="ml-auto flex flex-none items-center gap-1.5">
-        {/* Share: bounded, and split. The chevron exists here and NOT on the
-            Library's group Share because a FILE has two share scopes — itself
-            and the folder it inherits from — and a group has one. */}
+        {/* Share: bounded, and split. Bounded because it is the one action on
+            this page with a consequence for other people. The chevron carries
+            the quieter sibling errand — copying a link to the page — so that
+            the button itself stays one thing: "let someone in". */}
         <div className="relative inline-flex items-stretch rounded-md border border-line-strong">
           <Button
             variant="quiet"
             size="sm"
             leadingIcon={<Users size={13} />}
             className="rounded-r-none rounded-l-md border-0"
-            onClick={() => onShare('file')}
+            onClick={onShare}
           >
             Share
           </Button>
@@ -198,7 +204,7 @@ export function KbPageHeader({
           {shareOpen && (
             <div ref={shareRef} className="absolute right-0 top-[calc(100%+5px)] z-40">
               <MenuPanel role="menu" aria-label="Sharing options" className="min-w-[212px]">
-                <MenuItem role="menuitem" onClick={() => { closeShare(); onShare('file'); }}>
+                <MenuItem role="menuitem" onClick={() => { closeShare(); onShare(); }}>
                   <span className="flex items-center gap-2.5"><Users size={14} />Manage access…</span>
                 </MenuItem>
                 <MenuItem
@@ -210,16 +216,24 @@ export function KbPageHeader({
                     {copyLabel('link', 'Copy link to this page')}
                   </span>
                 </MenuItem>
-                <MenuItem role="menuitem" onClick={() => { closeShare(); onShare('folder'); }}>
-                  <span className="flex items-center gap-2.5">
-                    <FolderOpen size={14} />Share the whole folder
-                  </span>
-                </MenuItem>
+                {/* "Share the whole folder" lived here and was cut. Sharing a
+                    folder from a file's page is a much bigger act than the row
+                    it sat in suggested — one click, and everything inside the
+                    folder changes hands. The folder's own row in the tree is
+                    where that belongs, behind its right-click → Manage access,
+                    which is also where you can see what you are about to
+                    affect. */}
               </MenuPanel>
             </div>
           )}
         </div>
 
+        {/* The icon CHANGES on success — it does not merely tint.
+            A background shift is the same signal this button already gives on
+            hover, so a copy that only tinted read as "nothing happened" and got
+            clicked again. A tick is unambiguous, and it is the one confirmation
+            people already expect from a copy button. `aria-live` carries the
+            same news to a screen reader, which a swapped icon would not. */}
         {onCopyPage && (
           <IconButton
             aria-label={copyLabel('page', 'Copy page as Markdown')}
@@ -228,9 +242,24 @@ export function KbPageHeader({
             tone={copied.page === 'fail' ? 'danger' : 'default'}
             onClick={() => void report('page', onCopyPage)}
           >
-            <Copy size={14} />
+            {copied.page === 'ok' ? (
+              <Check size={14} className="text-ok" />
+            ) : copied.page === 'fail' ? (
+              <X size={14} />
+            ) : (
+              <Copy size={14} />
+            )}
           </IconButton>
         )}
+        {/* Announced once, then cleared with the icon. Outside the button so
+            swapping the glyph does not re-announce the label as well. */}
+        <span className="sr-only" role="status" aria-live="polite">
+          {copied.page === 'ok'
+            ? 'Page copied as Markdown'
+            : copied.page === 'fail'
+              ? "Couldn't copy the page"
+              : ''}
+        </span>
 
         {showEdit &&
           (editMode ? (
@@ -296,15 +325,12 @@ export function KbPageHeader({
                 <MenuItem role="menuitem" onClick={() => { closeDots(); onViewRaw(); }}>
                   <span className="flex items-center gap-2.5"><Code2 size={14} />View raw file</span>
                 </MenuItem>
-                <MenuItem
-                  role="menuitem"
-                  onClick={() => { closeDots(); void report('path', onCopyPath); }}
-                >
-                  <span className="flex items-center gap-2.5">
-                    <Link2 size={14} />
-                    {copyLabel('path', 'Copy path')}
-                  </span>
-                </MenuItem>
+                {/* "Copy path" is NOT here. Copying a reference to this page is
+                    one errand, and Share already owns it ("Copy link to this
+                    page"); two menus offering near-identical copies is how a
+                    user ends up pasting the wrong one. The tree's right-click
+                    menu keeps its own Copy path, because there it reaches rows
+                    that are not open — a different job. */}
               </MenuPanel>
             </div>
           )}

@@ -575,17 +575,6 @@ export function FileViewer() {
     }
   }, [canonicalFileUrl]);
 
-  const handleCopyPath = useCallback(async () => {
-    if (!openFilePath) return false;
-    try {
-      await navigator.clipboard.writeText(openFilePath);
-      return true;
-    } catch (err) {
-      console.error('Failed to copy path:', err);
-      return false;
-    }
-  }, [openFilePath]);
-
   // "Copy page as Markdown" is the document's own source. It is offered only
   // when there IS markdown to copy — a PDF or an image has none, and copying
   // a blob's bytes as text is nonsense rather than a feature.
@@ -609,29 +598,21 @@ export function FileViewer() {
     openRawFile(workspaceId, openFilePath);
   }, [workspaceId, openFilePath]);
 
-  // Right-click → Manage access, reached from the page's Share button. The
-  // dialog takes a tree entry; a file and its parent folder are both entries,
-  // which is what makes "share the whole folder" the same dialog.
+  // Manage access on the open file, reached from the page's Share button.
+  //
+  // This page shares ONE thing: the file you are reading. It used to also
+  // offer "Share the whole folder", and that went — from a file's page it was
+  // a single click away from handing over everything in the folder, with
+  // nothing on screen showing what "everything" was. Sharing a folder now
+  // starts where the folder is: its row in the tree, right-click → Manage
+  // access, next to the children it governs.
   const [shareTarget, setShareTarget] = useState<FileTreeEntry | null>(null);
-  const handleShare = useCallback((target: 'file' | 'folder') => {
+  const handleShare = useCallback(() => {
     if (!openFilePath) return;
-    if (target === 'file') {
-      setShareTarget({
-        name: openFilePath.slice(openFilePath.lastIndexOf('/') + 1),
-        relativePath: openFilePath,
-        type: 'file',
-      });
-      return;
-    }
-    const slash = openFilePath.lastIndexOf('/');
-    // A file at the workspace root has no folder to share; fall back to the
-    // file itself rather than opening a dialog on the empty path.
-    if (slash < 0) return;
-    const dir = openFilePath.slice(0, slash);
     setShareTarget({
-      name: dir.slice(dir.lastIndexOf('/') + 1),
-      relativePath: dir,
-      type: 'directory',
+      name: openFilePath.slice(openFilePath.lastIndexOf('/') + 1),
+      relativePath: openFilePath,
+      type: 'file',
     });
   }, [openFilePath]);
 
@@ -767,7 +748,6 @@ export function FileViewer() {
         onShare={handleShare}
         onCopyPage={canCopyPage ? handleCopyPage : undefined}
         onCopyLink={handleCopyLink}
-        onCopyPath={handleCopyPath}
         onViewRaw={handleViewRaw}
       />
 

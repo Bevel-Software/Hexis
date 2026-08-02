@@ -59,11 +59,33 @@ describe('isProtectedBranchName', () => {
 });
 
 describe('ProtectedBranchBanner', () => {
-  it('shows the warning when on a protected branch', () => {
+  it('names the branch it is on, and where to propose changes instead', () => {
     renderWith(makeGit());
     expect(screen.getByText(/Current company state/)).toBeInTheDocument();
+    // Not the default branch, so the sentence redirects rather than instructs.
     expect(screen.getByText(/Target company state/)).toBeInTheDocument();
-    expect(screen.getByText('current-company-state')).toBeInTheDocument();
+    expect(screen.getByText(/propose your edits there instead/)).toBeInTheDocument();
+  });
+
+  // The branch SLUG used to be printed beside the display name — the same fact
+  // in the machine's spelling. It is the one piece of the sentence that made a
+  // note to a person look like a system message.
+  it('does not print the raw branch slug', () => {
+    renderWith(makeGit());
+    expect(screen.queryByText('current-company-state')).not.toBeInTheDocument();
+  });
+
+  // On the default branch a draft lands back here, so the sentence is an
+  // instruction about editing rather than a redirect somewhere else.
+  it('tells you how to edit when you are on the default branch', () => {
+    renderWith(
+      makeGit({
+        status: { branch: 'target-company-state', hasUpstream: true, unmergedFromUpstream: false },
+      }),
+    );
+    expect(screen.getByText(/the version everyone works from/)).toBeInTheDocument();
+    expect(screen.getByText(/start a draft/)).toBeInTheDocument();
+    expect(screen.queryByText(/instead/)).not.toBeInTheDocument();
   });
 
   it('renders nothing on a user branch', () => {

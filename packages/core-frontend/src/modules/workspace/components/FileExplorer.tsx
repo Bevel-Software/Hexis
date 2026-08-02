@@ -1065,7 +1065,11 @@ export function FileExplorer() {
       <PinnedContext.Provider value={pinnedController}>
       <ManageAccessContext.Provider value={setAccessTarget}>
       <div className="flex-1 overflow-y-auto py-1 min-h-0">
-        <div className="px-3 pt-2 pb-1 text-label uppercase text-ink-faint">Pinned</div>
+        {/* "Company Context", not "Pinned". The mechanism is pinning; the
+            SECTION is the handful of places this company actually works out
+            of. A label naming the mechanism tells you how the rows got there,
+            which nobody is wondering — the useful heading says what they are. */}
+        <div className="px-3 pt-2 pb-1 text-label uppercase text-ink-faint">Company Context</div>
         {pinnedEntries.map((e) => (
           <FileTreeNode key={`pin:${e.relativePath}`} entry={e} depth={0} collapseChildren />
         ))}
