@@ -195,9 +195,9 @@ export const MermaidDiagram = memo(function MermaidDiagram({ code }: MermaidDiag
 
   if (error) {
     return (
-      <div className="rounded-lg border border-red-200/50 bg-red-50 p-4 my-4">
-        <p className="text-xs text-red-600 font-medium mb-1">Mermaid diagram error</p>
-        <pre className="text-xs text-red-700/70 whitespace-pre-wrap">{error}</pre>
+      <div className="rounded-lg border border-danger/30/50 bg-danger-soft p-4 my-4">
+        <p className="text-xs text-danger font-medium mb-1">Mermaid diagram error</p>
+        <pre className="text-xs text-danger/70 whitespace-pre-wrap">{error}</pre>
         <pre className="mt-2 text-xs text-ink-muted whitespace-pre-wrap">{code}</pre>
       </div>
     );
@@ -212,7 +212,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({ code }: MermaidDiag
       <div className="absolute top-2 right-2 z-10 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
         <button
           onClick={zoomOut}
-          className="p-1.5 rounded bg-sunken hover:bg-hover text-ink-muted hover:text-ink transition-colors"
+          className="p-1.5 rounded-xs bg-sunken hover:bg-hover text-ink-muted hover:text-ink transition-colors"
           title="Zoom out"
         >
           <ZoomOut size={14} />
@@ -222,14 +222,14 @@ export const MermaidDiagram = memo(function MermaidDiagram({ code }: MermaidDiag
         </span>
         <button
           onClick={zoomIn}
-          className="p-1.5 rounded bg-sunken hover:bg-hover text-ink-muted hover:text-ink transition-colors"
+          className="p-1.5 rounded-xs bg-sunken hover:bg-hover text-ink-muted hover:text-ink transition-colors"
           title="Zoom in"
         >
           <ZoomIn size={14} />
         </button>
         <button
           onClick={resetView}
-          className="p-1.5 rounded bg-sunken hover:bg-hover text-ink-muted hover:text-ink transition-colors"
+          className="p-1.5 rounded-xs bg-sunken hover:bg-hover text-ink-muted hover:text-ink transition-colors"
           title="Reset view"
         >
           <Maximize2 size={14} />

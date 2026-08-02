@@ -1046,20 +1046,20 @@ export function FileExplorer() {
       {uploadError && (
         <div
           role="alert"
-          className="flex items-start gap-1 px-2 py-1 text-xs text-red-700 bg-red-50 border-b border-red-200 shrink-0"
+          className="flex items-start gap-1 px-2 py-1 text-xs text-danger bg-danger-soft border-b border-danger/30 shrink-0"
         >
           <span className="flex-1 truncate" title={uploadError.reason}>
             Couldn't add {uploadError.filename}: {uploadError.reason}
           </span>
-          <button
-            type="button"
-            onClick={clearUploadError}
-            className="p-0.5 rounded hover:bg-red-100 text-red-600 hover:text-red-800 shrink-0"
+          <IconButton
+            size={18}
+            tone="danger"
             title="Dismiss"
             aria-label="Dismiss upload error"
+            onClick={clearUploadError}
           >
             <X size={12} />
-          </button>
+          </IconButton>
         </div>
       )}
       <PinnedContext.Provider value={pinnedController}>

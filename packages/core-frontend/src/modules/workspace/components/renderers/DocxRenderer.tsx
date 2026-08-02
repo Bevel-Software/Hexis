@@ -62,7 +62,7 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
 
   if (error) {
     return (
-      <div className="flex items-center justify-center min-h-40 text-red-600 text-sm">
+      <div className="flex items-center justify-center min-h-40 text-danger text-sm">
         {error}
       </div>
     );

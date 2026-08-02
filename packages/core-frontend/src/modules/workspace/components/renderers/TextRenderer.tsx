@@ -84,7 +84,7 @@ export function TextRenderer({
       {!readOnly && (
         <div className="pt-2 text-xs min-h-5">
           {saveState === 'saving' && <span className="text-ink-muted">Saving…</span>}
-          {saveState === 'error' && saveError && <span className="text-red-600">{saveError}</span>}
+          {saveState === 'error' && saveError && <span className="text-danger">{saveError}</span>}
         </div>
       )}
     </div>

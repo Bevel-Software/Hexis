@@ -302,6 +302,19 @@ describe('Toolbar', () => {
       renderToolbar({ route: '/secrets' });
       expect(screen.queryByRole('button', { name: /(hide|show) sidebar/i })).toBeNull();
     });
+
+    // WP7: one glyph, one spot, both surfaces. Knowledge's explorer toggle and
+    // the Library's nav toggle are the same control doing the same thing, and
+    // two different marks for it would be the app saying "you are somewhere
+    // else" at the one place that must never move.
+    it('draws the explorer toggle with the same glyph as the Library nav toggle', () => {
+      renderToolbar({ route: '/skills-and-tools', layout: { canToggleExplorer: true } });
+      const explorer = screen.getByRole('button', { name: /(hide|show) file explorer/i });
+      const library = screen.getByRole('button', { name: /(hide|show) sidebar/i });
+      const shape = (btn: HTMLElement) => btn.querySelector('svg')?.innerHTML;
+      expect(shape(explorer)).toBeTruthy();
+      expect(shape(explorer)).toBe(shape(library));
+    });
   });
 
   // The "Reconciling with the team…" status pill is gone with the

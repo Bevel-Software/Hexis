@@ -74,7 +74,7 @@ function CopyAnchorButton({ url }: { url: string }) {
       }}
       // `align-middle` keeps it on the heading baseline; hidden until the
       // heading is hovered (or the button is focused for keyboard users).
-      className="ml-1.5 inline-flex align-middle p-0.5 rounded text-ink-faint no-underline opacity-0 transition-opacity hover:bg-hover hover:text-ink focus:opacity-100 group-hover/anchor:opacity-100"
+      className="ml-1.5 inline-flex align-middle p-0.5 rounded-xs text-ink-faint no-underline opacity-0 transition-opacity hover:bg-hover hover:text-ink focus:opacity-100 group-hover/anchor:opacity-100"
       title={copied ? 'Link copied' : 'Copy link to this heading'}
       aria-label="Copy link to this heading"
     >

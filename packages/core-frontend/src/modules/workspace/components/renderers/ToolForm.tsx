@@ -17,7 +17,7 @@ type ToolType = 'inline' | 'http' | 'mcp';
 
 const ACCESS_VERBS = ['read', 'write', 'owner', 'download'] as const;
 const inputCls =
-  'w-full rounded border border-line-strong px-2 py-1 text-xs focus:border-accent focus:outline-none disabled:bg-sunken disabled:text-ink-muted';
+  'w-full rounded-xs border border-line-strong px-2 py-1 text-xs focus:border-accent focus:outline-none disabled:bg-sunken disabled:text-ink-muted';
 
 /**
  * Parse the tool object — the `---` fence's contents, or the whole file when
@@ -76,7 +76,7 @@ export function ToolForm({
   const { model, notes } = parsed;
   if (!model) {
     return (
-      <p className="text-[11px] text-amber-600">
+      <p className="text-meta text-wait">
         This file isn’t valid JSON/YAML — switch to Code to {readOnly ? 'view' : 'fix'} it.
       </p>
     );
@@ -122,7 +122,7 @@ export function ToolForm({
         </select>
       </Field>
 
-      <label className="flex items-center gap-2 text-[11px] text-ink-muted">
+      <label className="flex items-center gap-2 text-meta text-ink-muted">
         <input type="checkbox" disabled={readOnly} checked={remote} onChange={(e) => setBody({ remote: e.target.checked })} />
         Available to remote agents
         <span className="text-ink-faint">(uncheck for local-only tools, e.g. a localhost MCP server)</span>
@@ -188,13 +188,13 @@ function AccessSection({ frontmatter, readOnly, onChange }: { frontmatter: Obj; 
   const [drafts, setDrafts] = useState<Partial<Record<string, string>>>({});
   return (
     <div>
-      <span className="mb-0.5 block text-[11px] font-medium text-ink-muted">
+      <span className="mb-0.5 block text-meta font-medium text-ink-muted">
         Access <span className="font-normal text-ink-faint">(one role or `Name &lt;email&gt;` per line; prefix `deny ` to remove)</span>
       </span>
       <div className="grid grid-cols-2 gap-2">
         {ACCESS_VERBS.map((verb) => (
           <label key={verb} className="block">
-            <span className="mb-0.5 block text-[10px] uppercase tracking-wide text-ink-faint">{verb}</span>
+            <span className="mb-0.5 block text-micro uppercase tracking-wide text-ink-faint">{verb}</span>
             <textarea
               disabled={readOnly}
               rows={2}
@@ -210,7 +210,7 @@ function AccessSection({ frontmatter, readOnly, onChange }: { frontmatter: Obj; 
                   return rest;
                 })
               }
-              className="w-full resize-y rounded border border-line-strong px-1.5 py-1 text-[11px] focus:border-accent focus:outline-none disabled:bg-sunken disabled:text-ink-muted"
+              className="w-full resize-y rounded-xs border border-line-strong px-1.5 py-1 text-meta focus:border-accent focus:outline-none disabled:bg-sunken disabled:text-ink-muted"
               placeholder={verb === 'read' ? 'everyone' : 'Role Name'}
             />
           </label>
@@ -223,7 +223,7 @@ function AccessSection({ frontmatter, readOnly, onChange }: { frontmatter: Obj; 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
-      <span className="mb-0.5 block text-[11px] font-medium text-ink-muted">{label}</span>
+      <span className="mb-0.5 block text-meta font-medium text-ink-muted">{label}</span>
       {children}
     </label>
   );
@@ -247,9 +247,9 @@ function KeyValueRows({
   const editAt = (i: number, next: [string, string]) => onChange(entries.map((e, j) => (j === i ? next : e)));
   return (
     <div>
-      <span className="mb-0.5 block text-[11px] font-medium text-ink-muted">{label}</span>
+      <span className="mb-0.5 block text-meta font-medium text-ink-muted">{label}</span>
       <div className="space-y-1">
-        {entries.length === 0 && readOnly && <p className="text-[11px] text-ink-faint">None.</p>}
+        {entries.length === 0 && readOnly && <p className="text-meta text-ink-faint">None.</p>}
         {entries.map(([k, v], i) => (
           <div key={i} className="flex gap-1">
             <input
@@ -287,11 +287,11 @@ function VariableRows({
   const editAt = (i: number, patch: Obj) => onChange(variables.map((v, j) => (j === i ? { ...v, ...patch } : v)));
   return (
     <div>
-      <span className="mb-0.5 block text-[11px] font-medium text-ink-muted">
+      <span className="mb-0.5 block text-meta font-medium text-ink-muted">
         Variables <span className="font-normal text-ink-faint">(who provisions each secret)</span>
       </span>
       <div className="space-y-1">
-        {variables.length === 0 && readOnly && <p className="text-[11px] text-ink-faint">None.</p>}
+        {variables.length === 0 && readOnly && <p className="text-meta text-ink-faint">None.</p>}
         {variables.map((v, i) => (
           <div key={i} className="flex gap-1">
             <input
@@ -364,16 +364,16 @@ function InlineToolsEditor({
 
   return (
     <div>
-      <span className="mb-0.5 block text-[11px] font-medium text-ink-muted">Inline tools (advanced, raw JSON)</span>
+      <span className="mb-0.5 block text-meta font-medium text-ink-muted">Inline tools (advanced, raw JSON)</span>
       <textarea
         value={readOnly ? external : text}
         readOnly={readOnly}
         onChange={(e) => onEdit(e.target.value)}
         spellCheck={false}
         rows={8}
-        className="w-full resize-y rounded border border-line-strong bg-sunken p-2 font-mono text-[11px] focus:border-accent focus:outline-none"
+        className="w-full resize-y rounded-xs border border-line-strong bg-sunken p-2 font-mono text-meta focus:border-accent focus:outline-none"
       />
-      {!readOnly && error && <p className="mt-0.5 text-[10px] text-red-600">Inline tools: {error}</p>}
+      {!readOnly && error && <p className="mt-0.5 text-micro text-danger">Inline tools: {error}</p>}
     </div>
   );
 }
@@ -383,7 +383,7 @@ function AddButton({ label, onClick }: { label: string; onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-muted hover:bg-hover"
+      className="flex items-center gap-1 rounded-xs px-1.5 py-0.5 text-meta text-ink-muted hover:bg-hover"
     >
       <Plus size={11} /> {label}
     </button>
@@ -395,7 +395,7 @@ function RemoveButton({ onClick }: { onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      className="rounded p-1 text-ink-faint hover:bg-red-50 hover:text-red-600"
+      className="rounded-xs p-1 text-ink-faint hover:bg-danger-soft hover:text-danger"
       aria-label="Remove"
     >
       <X size={12} />

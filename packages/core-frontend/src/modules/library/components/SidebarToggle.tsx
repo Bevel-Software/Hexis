@@ -48,6 +48,11 @@ export function SidebarToggle({
 /**
  * A panel with its left rail filled — the sidebar, drawn as itself.
  *
+ * Exported because BOTH surfaces show it now: the Library's nav toggle and
+ * Knowledge's explorer toggle are the same control in the same spot doing the
+ * same thing, and two glyphs for that would be the app saying "you are
+ * somewhere else" at the one place that must never move (proto:3696).
+ *
  * Inline for the same reason as `LockGlyph`: it inherits `currentColor` from
  * the button's hover state, and one shape is not worth an icon dependency.
  *
@@ -56,7 +61,7 @@ export function SidebarToggle({
  * side and butt square against the divider on the other. Both arcs carry the
  * outer `rx`, so the two shapes share one silhouette at any size.
  */
-function PanelGlyph({ className }: { className?: string }) {
+export function PanelGlyph({ className }: { className?: string }) {
   return (
     <svg className={className} aria-hidden="true" focusable="false" viewBox="0 0 16 16">
       <rect

@@ -1,13 +1,14 @@
 import { Fragment, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
-import { LogOut, PanelLeft, PanelRight } from 'lucide-react';
+import { LogOut, PanelRight } from 'lucide-react';
 import { useAuth } from '../../auth/state/auth.context';
 import { AdminMenu } from './AdminMenu';
 import { AppSwitcher } from './AppSwitcher';
 import { useLayout } from '../../layout/state/layout.context';
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
 import { useAppRegistry } from '../../../core/registry';
-import { SidebarToggle } from '../../library/components/SidebarToggle';
+import { cn } from '../../../lib/utils';
+import { SidebarToggle, PanelGlyph } from '../../library/components/SidebarToggle';
 import { useLibrarySidebar } from '../../library/state/sidebar-collapse';
 import { LIBRARY_ROOT } from '../../library/routes/library-paths';
 
@@ -61,15 +62,19 @@ export function Toolbar() {
 
         {canToggleExplorer && (
           <button
+            type="button"
             onClick={toggleExplorer}
-            className={`p-1.5 rounded hover:bg-hover transition-colors ${
-              isExplorerCollapsed ? 'text-ink-muted' : 'text-ink'
-            }`}
+            className={cn(
+              'flex size-7 items-center justify-center rounded-md transition-colors hover:bg-hover hover:text-ink',
+              isExplorerCollapsed ? 'text-ink-muted' : 'text-ink',
+            )}
             title={isExplorerCollapsed ? 'Show file explorer' : 'Hide file explorer'}
             aria-label={isExplorerCollapsed ? 'Show file explorer' : 'Hide file explorer'}
             aria-pressed={!isExplorerCollapsed}
           >
-            <PanelLeft size={16} />
+            {/* The same glyph the Library's nav toggle uses. One control, one
+                shape, one spot — on both surfaces. */}
+            <PanelGlyph className="size-4" />
           </button>
         )}
 

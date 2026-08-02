@@ -8,10 +8,9 @@ import { KbFileRail } from './KbFileRail';
 import { useLinksOut } from '../hooks/useLinksOut';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { usePrViewer } from '../../pr/state/pr-viewer.context';
-import { Banner } from '../../../shared/components';
 import { useLastCommit } from '../hooks/useLastCommit';
 import { openRawFile } from '../utils/openRawFile';
-import { Button } from '../../../shared/components';
+import { Banner, Button, Surface } from '../../../shared/components';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { useCanonicalFileUrl, useFileNav, resolveRelativePath } from '../routing/kb-routes';
@@ -20,7 +19,6 @@ import { ProtectedBranchBanner } from '../../git/components/ProtectedBranchBanne
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { useFileAccess } from '../../access/hooks/useFileAccess';
 import { AccessRestrictedBanner } from '../../access/components/AccessRestrictedBanner';
-import { NodeOwnersBanner } from '../../access/components/NodeOwnersBanner';
 import { FileHistoryPanel } from '../../git/components/FileHistoryPanel';
 import { FileComparisonPanel } from '../../git/components/FileComparisonPanel';
 import {
@@ -670,10 +668,10 @@ export function FileViewer() {
         <EditorTabs />
         <div className="flex-1 flex items-center justify-center px-6">
           <div className="max-w-md text-center">
-            <h2 className="text-ink text-base font-medium tracking-tight mb-2">
+            <h2 className="mb-2 text-head text-ink">
               Open a file, or ask the process assistant a question.
             </h2>
-            <p className="text-ink-muted text-sm mb-6">
+            <p className="mb-6 text-ui text-ink-muted">
               Pick anything from the file tree, or start with a suggestion.
             </p>
             {/* Suggested prompts seed the chat composer — only rendered when a
@@ -681,14 +679,19 @@ export function FileViewer() {
             {seedSuggestedPrompt && (
               <div className="flex flex-col gap-2">
                 {SUGGESTED_PROMPTS.map((prompt) => (
-                  <button
+                  <Surface
                     key={prompt}
+                    as="button"
+                    tone="sunken"
+                    radius="lg"
+                    elevation="none"
+                    interactive
                     type="button"
                     onClick={() => seedSuggestedPrompt(prompt)}
-                    className="text-left text-sm text-ink bg-sunken hover:bg-hover border border-line hover:border-line-strong rounded-lg px-3 py-2 transition-colors duration-150"
+                    className="px-3 py-2 text-left text-ui text-ink"
                   >
                     {prompt}
-                  </button>
+                  </Surface>
                 ))}
               </div>
             )}
@@ -714,7 +717,6 @@ export function FileViewer() {
       {accessRestricted && openFilePath && (
         <AccessRestrictedBanner path={openFilePath} eligible={access.eligible} />
       )}
-      {openFilePath && <NodeOwnersBanner owners={access.owners} />}
       {/* ONE column holds the tabs, the title and the text at the same width,
           so they share an edge and the page reads as a single centred block
           (proto:700-705). `editorContainerRef` goes to `scrollRef` because the
@@ -819,55 +821,78 @@ export function FileViewer() {
             </Banner>
           )}
           {waitingOnAgentUpdate && (
-            <div role="status" aria-live="polite" aria-atomic="true" className="flex items-center gap-2 px-3 py-2 bg-amber-50 border-b border-amber-200 shrink-0">
-              <span className="text-xs text-amber-800 flex-1">
-                Agent update is waiting. Save or undo your unsaved edits before reviewing it.
-              </span>
-              <button
-                onClick={handleReviewAgentUpdate}
-                disabled={isManualDirty}
-                className="px-2.5 py-1 rounded text-xs font-medium bg-amber-700 hover:bg-amber-600 text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                title={isManualDirty ? 'Finish local edits first' : 'Open the agent update preview'}
-              >
-                Review agent update
-              </button>
-            </div>
+            <Banner
+              role="status"
+              tone="wait"
+              aria-live="polite"
+              aria-atomic="true"
+              className="mb-4 flex-none items-center"
+            >
+              <div className="flex items-center gap-2">
+                <span className="flex-1">
+                  Agent update is waiting. Save or undo your unsaved edits before reviewing it.
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleReviewAgentUpdate}
+                  disabled={isManualDirty}
+                  title={isManualDirty ? 'Finish local edits first' : 'Open the agent update preview'}
+                >
+                  Review agent update
+                </Button>
+              </div>
+            </Banner>
           )}
           {/* Accept / Reject banner — hidden whenever a multi-file review
               session exists, so the two review UIs never compete (regardless
               of whether the multi-file panel is currently open). */}
           {isReviewingPending && !hasPendingReview && (
-        <div role="status" aria-live="polite" aria-atomic="true" className="flex items-center gap-2 px-3 py-2 bg-sunken border-b border-line-strong shrink-0">
-          <span className="text-xs text-ink flex-1">
-            Previewing agent's changes — accept to keep, reject to undo
-          </span>
-          <button
-            onClick={handleReject}
-            disabled={isSubmitting}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium text-ink-muted hover:text-ink hover:bg-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <XCircle size={13} />
-            Reject
-          </button>
-          <button
-            onClick={handleAccept}
-            disabled={isSubmitting}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium bg-emerald-700 hover:bg-emerald-600 text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <Check size={13} />
-            Accept
-          </button>
-        </div>
+            <Banner
+              role="status"
+              tone="neutral"
+              aria-live="polite"
+              aria-atomic="true"
+              className="mb-4 flex-none"
+            >
+              <div className="flex items-center gap-2">
+                <span className="flex-1">
+                  Previewing agent's changes — accept to keep, reject to undo
+                </span>
+                <Button
+                  variant="quiet"
+                  size="sm"
+                  leadingIcon={<XCircle size={13} />}
+                  onClick={handleReject}
+                  disabled={isSubmitting}
+                >
+                  Reject
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  leadingIcon={<Check size={13} />}
+                  onClick={handleAccept}
+                  disabled={isSubmitting}
+                >
+                  Accept
+                </Button>
+              </div>
+            </Banner>
           )}
 
           {/* Lock-by-someone-else banner — read-only state until the holder releases. */}
           {fileLock.externalLock && !fileLock.holdingLock && !isReviewingPending && !onProtectedBranch && (
-            <div role="status" aria-live="polite" aria-atomic="true" className="flex items-center gap-2 px-3 py-2 bg-amber-50 border-b border-amber-200 shrink-0">
-              <Lock size={14} className="text-amber-700 shrink-0" />
-              <span className="text-xs text-amber-800 flex-1">
-                Locked by <span className="font-medium">{fileLock.externalLock.holderName}</span>. The editor is read-only until they finish.
-              </span>
-            </div>
+            <Banner
+              role="status"
+              tone="wait"
+              icon={<Lock size={14} />}
+              aria-live="polite"
+              aria-atomic="true"
+              className="mb-4 flex-none"
+            >
+              Locked by <span className="font-medium">{fileLock.externalLock.holderName}</span>. The editor is read-only until they finish.
+            </Banner>
           )}
 
           {/* Save-failure banner. Validator failures carry a structured
@@ -876,21 +901,25 @@ export function FileViewer() {
               commits, even unrelated edits — without this UI the failure
               looks silent and the user keeps clicking Save). */}
           {saveError && (
-            <div role="alert" aria-live="assertive" className="flex flex-col gap-2 px-3 py-2 bg-red-50 border-b border-red-200 shrink-0">
+            <Banner
+              role="alert"
+              tone="danger"
+              icon={<AlertTriangle size={14} />}
+              aria-live="assertive"
+              className="mb-4 flex-none"
+            >
               <div className="flex items-center gap-2">
-                <AlertTriangle size={14} className="text-red-700 shrink-0" />
-                <span className="text-xs text-red-800 flex-1 font-medium">{saveError.message}</span>
-                <button
-                  type="button"
-                  onClick={() => setSaveError(null)}
-                  className="text-red-700 hover:text-red-900 text-xs underline"
-                  title="Dismiss"
-                >
+                <span className="flex-1 font-medium">{saveError.message}</span>
+                <Button variant="quiet" size="sm" title="Dismiss" onClick={() => setSaveError(null)}>
                   Dismiss
-                </button>
+                </Button>
               </div>
+              {/* The validator gates EVERY commit, even an unrelated edit, so
+                  the structured issue list is the only way the user learns
+                  which KB problem is blocking their save. The 20-item cap and
+                  its "…and N more" tail stay. */}
               {saveError.kind === 'validation' && saveError.mustFix.length > 0 && (
-                <ul className="text-xs text-red-800 ml-6 list-disc space-y-0.5 max-h-32 overflow-y-auto">
+                <ul className="mt-1.5 max-h-32 list-disc space-y-0.5 overflow-y-auto pl-4 text-detail">
                   {saveError.mustFix.slice(0, 20).map((issue, i) => (
                     <li key={i}>
                       {issue.path && <span className="font-mono">{issue.path}</span>}
@@ -903,7 +932,7 @@ export function FileViewer() {
                   )}
                 </ul>
               )}
-            </div>
+            </Banner>
           )}
 
           {/* Review-action failure banner. Rejecting an agent change is
@@ -912,18 +941,20 @@ export function FileViewer() {
               surfaces it (and survives the review panel optimistically
               unmounting on a failed "Reject all"). */}
           {review.lastError && (
-            <div role="alert" aria-live="assertive" className="flex items-center gap-2 px-3 py-2 bg-red-50 border-b border-red-200 shrink-0">
-              <AlertTriangle size={14} className="text-red-700 shrink-0" />
-              <span className="text-xs text-red-800 flex-1 font-medium">{review.lastError}</span>
-              <button
-                type="button"
-                onClick={() => review.clearError()}
-                className="text-red-700 hover:text-red-900 text-xs underline"
-                title="Dismiss"
-              >
-                Dismiss
-              </button>
-            </div>
+            <Banner
+              role="alert"
+              tone="danger"
+              icon={<AlertTriangle size={14} />}
+              aria-live="assertive"
+              className="mb-4 flex-none"
+            >
+              <div className="flex items-center gap-2">
+                <span className="flex-1 font-medium">{review.lastError}</span>
+                <Button variant="quiet" size="sm" title="Dismiss" onClick={() => review.clearError()}>
+                  Dismiss
+                </Button>
+              </div>
+            </Banner>
           )}
 
           {/* File content — show pending (new) content when reviewing, accepted content otherwise.

@@ -153,7 +153,7 @@ export function HtmlRenderer({
         {!readOnly && (
           <button
             onClick={switchToEdit}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xs text-xs font-medium transition-colors ${
               mode === 'edit'
                 ? 'bg-line-strong text-ink'
                 : 'text-ink-muted hover:text-ink hover:bg-hover'
@@ -165,7 +165,7 @@ export function HtmlRenderer({
         )}
         <button
           onClick={switchToPreview}
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xs text-xs font-medium transition-colors ${
             mode === 'preview'
               ? 'bg-line-strong text-ink'
               : 'text-ink-muted hover:text-ink hover:bg-hover'
@@ -177,7 +177,7 @@ export function HtmlRenderer({
         {mode === 'preview' && (
           <button
             onClick={() => setReloadKey((k) => k + 1)}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium text-ink-muted hover:text-ink hover:bg-hover transition-colors"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-xs text-xs font-medium text-ink-muted hover:text-ink hover:bg-hover transition-colors"
             title="Reload preview"
           >
             <RotateCw size={12} />
@@ -188,7 +188,7 @@ export function HtmlRenderer({
           <span className="ml-2 text-xs text-ink-muted">Saving…</span>
         )}
         {saveState === 'error' && saveError && (
-          <span className="ml-2 text-xs text-red-600 truncate" title={saveError}>
+          <span className="ml-2 text-xs text-danger truncate" title={saveError}>
             {saveError}
           </span>
         )}
@@ -204,7 +204,7 @@ export function HtmlRenderer({
           autoFocus
         />
       ) : previewError ? (
-        <div className="flex items-center justify-center h-full text-sm text-red-600 px-4 text-center">
+        <div className="flex items-center justify-center h-full text-sm text-danger px-4 text-center">
           {previewError}
         </div>
       ) : bundledSrcdoc ? (
@@ -219,7 +219,7 @@ export function HtmlRenderer({
           // iframe cannot exfiltrate, navigate, popup, or fetch.
           sandbox="allow-scripts"
           referrerPolicy="no-referrer"
-          className="flex-1 w-full bg-white rounded border border-line"
+          className="flex-1 w-full bg-white rounded-xs border border-line"
         />
       ) : (
         <div className="flex items-center justify-center h-full text-ink-muted text-sm">

@@ -227,7 +227,7 @@ export function MarkdownRenderer({
               role="alert"
               aria-live="assertive"
               aria-atomic="true"
-              className="text-xs text-red-600"
+              className="text-xs text-danger"
             >
               Couldn't save your changes. Try again in a moment.
             </span>
