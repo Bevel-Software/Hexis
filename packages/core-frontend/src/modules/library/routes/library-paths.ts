@@ -92,6 +92,18 @@ export function pathForTool(slug: string): string {
 }
 
 /**
+ * The route for one skill. `:name` is the skill's folder name — the same id the
+ * catalog, the card and `GET /api/skills/:name` all use — so the URL a card
+ * navigates to is the URL the page fetches from, with no lookup table in
+ * between. Encoded here rather than at each link site for the same reason
+ * `pathForTool` is: three surfaces build it (gallery card, group card, the tool
+ * page's "Powers these skills" chips).
+ */
+export function pathForSkill(name: string): string {
+  return `${LIBRARY_ROOT}/skills/${encodeURIComponent(name)}`;
+}
+
+/**
  * Whether a path is the all-groups index or the propose page. Both light the
  * "All groups" row: you reached propose from the index, and the place you came
  * from should stay lit while you're there.

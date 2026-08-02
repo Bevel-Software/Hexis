@@ -1,10 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../auth/state/auth.context';
 import { useLibrary, type LibraryItem } from '../state/library-data';
-import { pathForTool } from '../routes/library-paths';
+import { pathForSkill, pathForTool } from '../routes/library-paths';
 import { personalGroupName } from '../utils/personal-group';
-import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { GroupBreadcrumb, GroupItemSections, PageNote } from './group-page-parts';
 
 /**
@@ -28,7 +27,6 @@ export function PersonalGroupPage() {
   const data = useLibrary();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const [detail, setDetail] = useState<DetailTarget | null>(null);
 
   const name = personalGroupName(user?.name);
   const items = useMemo(() => data.items.filter((i) => i.group === null), [data.items]);
@@ -37,12 +35,7 @@ export function PersonalGroupPage() {
 
   /** Identical to the gallery's and the group page's — one behaviour per card. */
   function openItem(item: LibraryItem) {
-    if (item.kind === 'integration') {
-      navigate(pathForTool(item.id));
-      return;
-    }
-    const skill = data.skills.find((s) => s.name === item.id);
-    if (skill) setDetail({ kind: 'skill', skill, owned: item.owned });
+    navigate(item.kind === 'integration' ? pathForTool(item.id) : pathForSkill(item.id));
   }
 
   if (items.length === 0 && data.loading) {
@@ -65,19 +58,6 @@ export function PersonalGroupPage() {
         emptySkills="No skills of your own yet. Anything your agent writes outside a group lands here."
         emptyTools="No sign-ins of your own yet."
       />
-
-      {detail && (
-        <DetailDialog
-          target={detail}
-          tools={data.tools}
-          skills={data.skills}
-          allowedToolsBySkill={data.allowedToolsBySkill}
-          crs={data.crs}
-          myCrNumbers={data.myCrNumbers}
-          onClose={() => setDetail(null)}
-          onDataChanged={data.reload}
-        />
-      )}
     </div>
   );
 }

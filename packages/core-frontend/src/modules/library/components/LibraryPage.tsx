@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import '../library.css';
 import { useLibrary, type LibraryItem } from '../state/library-data';
-import { pathForTool } from '../routes/library-paths';
+import { pathForSkill, pathForTool } from '../routes/library-paths';
 import { filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
 import { useGroupAccessRequests } from '../hooks/useGroupAccessRequests';
@@ -11,7 +11,6 @@ import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useLibraryToast } from '../state/toast';
 import { AccessRequestsBanner } from './AccessRequestsBanner';
 import { GroupItemSections } from './group-page-parts';
-import { DetailDialog, type DetailTarget } from './DetailDialog';
 
 /**
  * The Library gallery — the card grid at `/skills-and-tools` and its three
@@ -54,7 +53,6 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const { kbDirName } = useWorkspace();
   const requests = useGroupAccessRequests();
   const [query, setQuery] = useState('');
-  const [detail, setDetail] = useState<DetailTarget | null>(null);
   /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
   const [manageFolder, setManageFolder] = useState<string | null>(null);
 
@@ -93,19 +91,9 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
     }
   }
 
-  /**
-   * Integrations open a PAGE, skills still open the dialog. The asymmetry is
-   * temporary and deliberate: the tool page has landed, the skill page is
-   * Ali's and hasn't. A card that opens a URL is also the only way the OAuth
-   * round-trip has somewhere to come back to.
-   */
+  /** Both kinds open a PAGE now — the skill page landed alongside the tool one. */
   function openItem(item: LibraryItem) {
-    if (item.kind === 'integration') {
-      navigate(pathForTool(item.id));
-      return;
-    }
-    const skill = data.skills.find((s) => s.name === item.id);
-    if (skill) setDetail({ kind: 'skill', skill, owned: item.owned });
+    navigate(item.kind === 'integration' ? pathForTool(item.id) : pathForSkill(item.id));
   }
 
   return (
@@ -165,19 +153,6 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
             emptySkills=""
           />
         </div>
-      )}
-
-      {detail && (
-        <DetailDialog
-          target={detail}
-          tools={data.tools}
-          skills={data.skills}
-          allowedToolsBySkill={data.allowedToolsBySkill}
-          crs={data.crs}
-          myCrNumbers={data.myCrNumbers}
-          onClose={() => setDetail(null)}
-          onDataChanged={data.reload}
-        />
       )}
 
       {/* Granting read here IS approving the request: the row retires itself

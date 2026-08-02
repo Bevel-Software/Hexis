@@ -6,6 +6,7 @@ import {
   decodeGroupSegment,
   pathForGroupsIndex,
   pathForPropose,
+  pathForSkill,
   pathForTool,
 } from '../routes/library-paths';
 import { primaryFolderOf } from '../utils/group-summary';
@@ -13,7 +14,6 @@ import { useGroupAccessRequests } from '../hooks/useGroupAccessRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useLibraryToast } from '../state/toast';
-import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
 import { GroupBreadcrumb, GroupItemSections, PageNote, ShareGlyph } from './group-page-parts';
 import { AccessRequestsBanner } from './AccessRequestsBanner';
@@ -44,7 +44,6 @@ export function GroupPage() {
   const toast = useLibraryToast();
   const { kbDirName } = useWorkspace();
   const requests = useGroupAccessRequests();
-  const [detail, setDetail] = useState<DetailTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
   const [manageFolder, setManageFolder] = useState<string | null>(null);
@@ -63,20 +62,11 @@ export function GroupPage() {
   const attention = attentionOf(data.items, group);
 
   /**
-   * Same split as the gallery: a tool opens its PAGE, a skill still opens the
-   * dialog. Kept identical to `LibraryPage.openItem` on purpose — a card must
-   * do the same thing wherever you clicked it.
-   *
-   * CONTRACT (Ali): when `skills/:name` lands, the second half becomes
-   * `navigate(pathForSkill(item.id))` and the dialog below goes away.
+   * Both kinds open a PAGE. Kept identical to `LibraryPage.openItem` on
+   * purpose — a card must do the same thing wherever you clicked it.
    */
   function openItem(item: LibraryItem) {
-    if (item.kind === 'integration') {
-      navigate(pathForTool(item.id));
-      return;
-    }
-    const skill = data.skills.find((s) => s.name === item.id);
-    if (skill) setDetail({ kind: 'skill', skill, owned: item.owned });
+    navigate(item.kind === 'integration' ? pathForTool(item.id) : pathForSkill(item.id));
   }
 
   /**
@@ -238,19 +228,6 @@ export function GroupPage() {
           name={group}
           primaryPath={primaryFolder}
           onClose={() => setAddOpen(false)}
-        />
-      )}
-
-      {detail && (
-        <DetailDialog
-          target={detail}
-          tools={data.tools}
-          skills={data.skills}
-          allowedToolsBySkill={data.allowedToolsBySkill}
-          crs={data.crs}
-          myCrNumbers={data.myCrNumbers}
-          onClose={() => setDetail(null)}
-          onDataChanged={data.reload}
         />
       )}
 
