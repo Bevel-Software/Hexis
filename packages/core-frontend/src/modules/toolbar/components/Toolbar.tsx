@@ -1,8 +1,7 @@
 import { Fragment, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
-import { LogOut, PanelRight } from 'lucide-react';
-import { useAuth } from '../../auth/state/auth.context';
-import { AdminMenu } from './AdminMenu';
+import { PanelRight } from 'lucide-react';
+import { ProfileMenu } from './ProfileMenu';
 import { AppSwitcher } from './AppSwitcher';
 import { useLayout } from '../../layout/state/layout.context';
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
@@ -13,7 +12,6 @@ import { useLibrarySidebar } from '../../library/state/sidebar-collapse';
 import { LIBRARY_ROOT } from '../../library/routes/library-paths';
 
 export function Toolbar() {
-  const { user, logout } = useAuth();
   const registry = useAppRegistry();
   const location = useLocation();
   // The Library's nav toggle, in the top bar left of the brand. Path-gated
@@ -86,22 +84,6 @@ export function Toolbar() {
 
         <div className="flex-1" />
 
-        {user && (
-          <div className="flex items-center gap-2">
-            {user.avatarUrl && (
-              <img
-                src={user.avatarUrl}
-                alt={user.name}
-                className="w-6 h-6 rounded-full"
-                referrerPolicy="no-referrer"
-              />
-            )}
-            <span className="text-xs text-ink-muted hidden sm:inline">{user.name}</span>
-          </div>
-        )}
-
-        <AdminMenu />
-
         {canToggleChat && (
           <button
             onClick={toggleChat}
@@ -116,14 +98,11 @@ export function Toolbar() {
           </button>
         )}
 
-        <button
-          onClick={logout}
-          className="p-1.5 rounded hover:bg-hover text-ink-muted hover:text-ink"
-          title="Sign out"
-          aria-label="Sign out"
-        >
-          <LogOut size={16} />
-        </button>
+        {/* One button for who you are and everything that follows you around.
+            It used to be three things in a row here — a name that was not a
+            control, a gear, and a sign-out arrow — all answering the same
+            question. See ProfileMenu's docblock. */}
+        <ProfileMenu />
       </div>
 
       {isCompact && itemCluster.length > 0 && (

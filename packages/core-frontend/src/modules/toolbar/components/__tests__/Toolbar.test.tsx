@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { setLibrarySidebarCollapsed } from '../../../library/state/sidebar-collapse';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { Toolbar } from '../Toolbar';
@@ -227,9 +227,9 @@ describe('Toolbar', () => {
     expect(toggleChat).toHaveBeenCalledTimes(1);
   });
 
-  it('renders logout but NO branch picker — the core toolbar carries only registry items', () => {
+  it('renders the profile trigger but NO branch picker — the core toolbar carries only registry items', () => {
     renderToolbar();
-    expect(screen.getByRole('button', { name: /sign out/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Test User' })).toBeInTheDocument();
     // The branch switcher left the core toolbar: it is an enterprise
     // toolbarItem contribution, scoped by the item itself to the Knowledge
     // app. The git module still ships the component; the shell doesn't
@@ -323,12 +323,51 @@ describe('Toolbar', () => {
   // to render. The Toolbar no longer mounts a `role="status"` element
   // and the resolution context was deleted entirely.
 
-  // The gear menu consolidates every former sidebar-footer entry. The
-  // all-user rows show for everyone; the "Admin only" section is gated.
-  describe('settings menu', () => {
+  // The profile menu consolidates every former sidebar-footer entry, plus the
+  // three top-bar controls it replaced. The all-user rows show for everyone;
+  // the "Admin only" section is gated.
+  describe('profile menu', () => {
     async function openMenu() {
-      await userEvent.click(screen.getByRole('button', { name: /^menu/i }));
+      await userEvent.click(screen.getByRole('button', { name: 'Test User' }));
     }
+
+    // One button, not three. The name used to be an inert span between the
+    // gear and the sign-out arrow — three controls for one question.
+    it('collapses the name, the gear and the sign-out arrow into a single trigger', () => {
+      renderToolbar();
+      expect(screen.queryByRole('button', { name: /^menu/i })).toBeNull();
+      expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Test User' })).toHaveAttribute(
+        'aria-haspopup',
+        'menu',
+      );
+    });
+
+    // Identity first: the menu says who you are before offering to change
+    // anything. The email is real, unlike the prototype's fabricated one.
+    it('states who you are at the top of the panel', async () => {
+      renderToolbar();
+      await openMenu();
+      const menu = screen.getByRole('menu');
+      expect(within(menu).getByText('Test User')).toBeInTheDocument();
+      expect(within(menu).getByText('user@example.com')).toBeInTheDocument();
+    });
+
+    it('signs you out from the last row and nowhere else', async () => {
+      const { logout } = renderToolbar();
+      await openMenu();
+      const rows = screen.getAllByRole('menuitem');
+      expect(rows[rows.length - 1]).toHaveTextContent('Sign out');
+      await userEvent.click(screen.getByRole('menuitem', { name: 'Sign out' }));
+      expect(logout).toHaveBeenCalledTimes(1);
+    });
+
+    // Nothing in the menu means anything without a person, and the trigger is
+    // that person — so signed out there is no button at all.
+    it('renders nothing when there is no signed-in user', () => {
+      renderToolbar({ auth: { user: null } });
+      expect(screen.queryByRole('button', { name: /sign out|test user/i })).toBeNull();
+    });
 
     it('shows the all-user rows (core + registry) to a non-admin and hides the Admin only section', async () => {
       renderToolbar({ isAdmin: false });
