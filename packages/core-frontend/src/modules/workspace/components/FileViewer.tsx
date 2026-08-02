@@ -996,6 +996,9 @@ export function FileViewer() {
         <ManageAccessDialog
           key={shareTarget.relativePath}
           entry={shareTarget}
+          // Keyed on the path, so retargeting at a parent remounts the sheet
+          // against that folder — the whole thing is this one setter.
+          onManageAncestor={setShareTarget}
           onClose={() => setShareTarget(null)}
         />
       )}

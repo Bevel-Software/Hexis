@@ -1123,6 +1123,9 @@ export function FileExplorer() {
       <ManageAccessDialog
         key={accessTarget.relativePath}
         entry={accessTarget}
+        // The dialog is keyed on the path, so pointing it at a parent remounts
+        // it against that folder — the whole retarget is this one setter.
+        onManageAncestor={setAccessTarget}
         onClose={() => setAccessTarget(null)}
       />
     )}
