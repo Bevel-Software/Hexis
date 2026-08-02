@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useMemo, useRef, useState } from 'react';
-import { Boxes, KeyRound, LibraryBig, Lock, LogOut, Users } from 'lucide-react';
+import { Boxes, ChevronDown, KeyRound, LibraryBig, Lock, LogOut, Users } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { useAuth } from '../../auth/state/auth.context';
@@ -244,9 +244,19 @@ export function ProfileMenu() {
           'text-detail text-ink-muted transition-colors hover:bg-hover hover:text-ink',
           open && 'bg-hover text-ink',
         )}
+        title="You and your settings"
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? MENU_ID : undefined}
+        /* The full name, where the pill shows only the first — an accessible
+           name that CONTAINS the visible one, which is what WCAG's
+           label-in-name asks for and what keeps voice control working. It has
+           to be an attribute rather than the button's text because the pill
+           drops to just the avatar on a narrow window, and a button whose
+           name disappears with the viewport has no name at all. */
+        aria-label={
+          showBadge ? `${user.name}, ${unreadCount} new feedback` : user.name
+        }
       >
         <span className="relative flex-none">
           <Avatar user={user} className="size-[22px] text-micro" />
@@ -257,12 +267,19 @@ export function ProfileMenu() {
             />
           )}
         </span>
-        {/* The visible name IS the accessible name — no aria-label, which
-            would silently override it. Below `sm` the name is screen-reader
-            only, so the button keeps a name at every width even though it
-            narrows to the avatar. */}
-        <span className="sr-only truncate sm:not-sr-only">{user.name}</span>
-        {showBadge && <span className="sr-only">, {unreadCount} new feedback</span>}
+        {/* First name only (proto:3726). The full one is on the button and in
+            the panel's identity block; a top bar does not need your surname. */}
+        <span aria-hidden className="hidden truncate sm:inline">
+          {user.name.trim().split(/\s+/)[0]}
+        </span>
+        <ChevronDown
+          aria-hidden
+          size={12}
+          className={cn(
+            'hidden flex-none text-ink-faint transition-transform sm:block',
+            open && 'rotate-180',
+          )}
+        />
       </button>
 
       {/* The ref goes on a positioning wrapper rather than on MenuPanel:

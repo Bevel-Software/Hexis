@@ -343,6 +343,19 @@ describe('Toolbar', () => {
       );
     });
 
+    // The pill says the first name; the full one is the accessible name and
+    // sits in the panel's identity block. Asserting the text exists catches a
+    // name missing from the DOM — it cannot catch one hidden by CSS, since
+    // happy-dom applies no stylesheet. That failure mode has bitten once
+    // already (`sm:not-sr-only` compiles to nothing under Tailwind v4), so
+    // the trigger deliberately carries no class Tailwind can silently drop.
+    it('shows the first name beside the avatar', () => {
+      renderToolbar();
+      const trigger = screen.getByRole('button', { name: 'Test User' });
+      expect(trigger).toHaveTextContent('Test');
+      expect(trigger).not.toHaveTextContent('Test User');
+    });
+
     // Identity first: the menu says who you are before offering to change
     // anything. The email is real, unlike the prototype's fabricated one.
     it('states who you are at the top of the panel', async () => {
