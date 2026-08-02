@@ -1,17 +1,20 @@
 import { cn } from '../../../lib/utils';
+import { SIDEBAR_DOM_ID } from './SidebarFrame';
 
 /**
- * Hide / show the group nav — the prototype's `#side-open` (lines 89-91).
+ * Hide / show the nav — the prototype's `#side-open` (lines 89-91).
  *
  * It lives in the TOP BAR, first in the row and left of the brand — the spot
  * every app puts the control that owns the panel below it. The `Toolbar`
- * mounts it (only while a Library route is up) and wires it to the module
- * store in `sidebar-collapse.ts`; the sidebar it controls renders in a
- * different subtree entirely, which `aria-controls` bridges by id.
+ * mounts it wherever a sidebar exists and wires it to the shared store in
+ * `layout/state/sidebar.ts`; the sidebar it controls renders in a different
+ * subtree entirely, which `aria-controls` bridges by id.
  *
- * ONE button, at ONE place. The prototype's own note — "the toggle never
- * moves — same spot, open or closed" — is the whole design: the toolbar
- * holds still while the nav slides, so collapsing does not move the thing
+ * ONE button, at ONE place, for ONE sidebar. It sat in the `library` module
+ * while Knowledge's explorer had a separate toggle of its own — same glyph,
+ * same spot, different state — and moved here when those became the same
+ * control. The prototype's own note is the whole design: "the toggle never
+ * moves — same spot, open or closed", so collapsing does not move the thing
  * you just clicked out from under the pointer.
  */
 export function SidebarToggle({
@@ -31,7 +34,7 @@ export function SidebarToggle({
       title={label}
       aria-label={label}
       aria-expanded={!collapsed}
-      aria-controls="library-sidebar"
+      aria-controls={SIDEBAR_DOM_ID}
       className={cn(
         // `ink-muted`, not `ink-faint`: at 16px with a 1.3 stroke this is a
         // thin shape on a tinted panel, and the faint step rendered it close

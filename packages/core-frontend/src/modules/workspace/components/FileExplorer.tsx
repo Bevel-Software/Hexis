@@ -1029,8 +1029,17 @@ export function FileExplorer() {
 
   return (
     <>
-    <aside
-      className={`h-full w-full min-w-0 flex flex-col bg-white overflow-hidden ${
+    // No background, no border, no width: this is the CONTENTS of the app's
+    // one sidebar, and `SidebarFrame` is the sidebar. It used to be `bg-white`
+    // against the Library's `bg-sidebar`, which is how two navs in one app
+    // ended up looking like two apps.
+    <div
+      // The drop target. It was findable as `role="complementary"` while this
+      // was the `<aside>`; the aside is `SidebarFrame`'s now, and a second
+      // complementary nested inside the first would be a lie about the page's
+      // landmarks.
+      data-testid="file-explorer-root"
+      className={`h-full w-full min-w-0 flex flex-col overflow-hidden ${
         dragOver ? 'ring-2 ring-inset ring-accent/40' : ''
       }`}
       onDrop={handleDrop}
@@ -1064,12 +1073,15 @@ export function FileExplorer() {
       )}
       <PinnedContext.Provider value={pinnedController}>
       <ManageAccessContext.Provider value={setAccessTarget}>
-      <div className="flex-1 overflow-y-auto py-1 min-h-0">
+      <div className="flex-1 overflow-y-auto min-h-0">
         {/* "Company Context", not "Pinned". The mechanism is pinning; the
             SECTION is the handful of places this company actually works out
             of. A label naming the mechanism tells you how the rows got there,
-            which nobody is wondering — the useful heading says what they are. */}
-        <div className="px-3 pt-2 pb-1 text-label uppercase text-ink-faint">Company Context</div>
+            which nobody is wondering — the useful heading says what they are.
+
+            Same padding as the Library's `SectionLabel`, because it is the
+            same thing: a heading over a list of places. */}
+        <div className="px-2.5 pb-1.5 text-label uppercase text-ink-faint">Company Context</div>
         {pinnedEntries.map((e) => (
           <FileTreeNode key={`pin:${e.relativePath}`} entry={e} depth={0} collapseChildren />
         ))}
@@ -1118,7 +1130,7 @@ export function FileExplorer() {
       </ManageAccessContext.Provider>
       </PinnedContext.Provider>
       <PullRequestsForMe />
-    </aside>
+    </div>
     {accessTarget && (
       <ManageAccessDialog
         key={accessTarget.relativePath}

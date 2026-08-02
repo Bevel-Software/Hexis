@@ -6,28 +6,31 @@ import { AppSwitcher } from './AppSwitcher';
 import { useLayout } from '../../layout/state/layout.context';
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
 import { useAppRegistry } from '../../../core/registry';
-import { cn } from '../../../lib/utils';
-import { SidebarToggle, PanelGlyph } from '../../library/components/SidebarToggle';
-import { useLibrarySidebar } from '../../library/state/sidebar-collapse';
+import { SidebarToggle } from '../../layout/components/SidebarToggle';
+import { toggleSidebar, useSidebar } from '../../layout/state/sidebar';
 import { LIBRARY_ROOT } from '../../library/routes/library-paths';
 
 export function Toolbar() {
   const registry = useAppRegistry();
   const location = useLocation();
-  // The Library's nav toggle, in the top bar left of the brand. Path-gated
-  // rather than registry-gated: the button controls the Library's sidebar,
-  // so it appears exactly where that sidebar exists and nowhere else.
+  /**
+   * ONE nav toggle, for the app's ONE sidebar.
+   *
+   * There used to be two buttons here — a path-gated `SidebarToggle` for the
+   * Library and a registry-gated one for Knowledge's explorer — with the same
+   * glyph, in the same spot, driving two different pieces of state. They read
+   * as one control to anyone using the app, so now they are one.
+   *
+   * Which surfaces HAVE a sidebar is still asked two ways, because the two
+   * apps answer it differently: Knowledge declares a `sidebar` pane (so the
+   * layout controller can say `canToggleExplorer`), while Skills & Tools has
+   * no pane group at all and is identified by its path.
+   */
   const onLibrary =
     location.pathname === LIBRARY_ROOT || location.pathname.startsWith(`${LIBRARY_ROOT}/`);
-  const librarySidebar = useLibrarySidebar();
-  const {
-    isExplorerCollapsed,
-    isChatCollapsed,
-    canToggleExplorer,
-    canToggleChat,
-    toggleExplorer,
-    toggleChat,
-  } = useLayout();
+  const { collapsed: sidebarCollapsed } = useSidebar();
+  const { isChatCollapsed, canToggleExplorer, canToggleChat, toggleChat } = useLayout();
+  const hasSidebar = onLibrary || canToggleExplorer;
   // Below the `md` breakpoint the registry item cluster (the enterprise
   // branch switcher, for one) does not fit alongside the toolbar essentials,
   // so it drops onto a second row instead of overflowing offscreen.
@@ -51,29 +54,8 @@ export function Toolbar() {
   return (
     <header className="border-b border-line shrink-0 bg-white">
       <div className="h-12 flex items-center px-4 gap-2">
-        {onLibrary && (
-          <SidebarToggle
-            collapsed={librarySidebar.collapsed}
-            onToggle={librarySidebar.toggle}
-          />
-        )}
-
-        {canToggleExplorer && (
-          <button
-            type="button"
-            onClick={toggleExplorer}
-            className={cn(
-              'flex size-7 items-center justify-center rounded-md transition-colors hover:bg-hover hover:text-ink',
-              isExplorerCollapsed ? 'text-ink-muted' : 'text-ink',
-            )}
-            title={isExplorerCollapsed ? 'Show file explorer' : 'Hide file explorer'}
-            aria-label={isExplorerCollapsed ? 'Show file explorer' : 'Hide file explorer'}
-            aria-pressed={!isExplorerCollapsed}
-          >
-            {/* The same glyph the Library's nav toggle uses. One control, one
-                shape, one spot — on both surfaces. */}
-            <PanelGlyph className="size-4" />
-          </button>
+        {hasSidebar && (
+          <SidebarToggle collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
         )}
 
         <AppSwitcher />

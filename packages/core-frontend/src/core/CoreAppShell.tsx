@@ -162,15 +162,11 @@ const CORE_BANNERS: BannerDef[] = [
 // hard-coded three-pane layout exactly. These are the KNOWLEDGE app's panes —
 // other apps render their own full surface (see CORE_APPS).
 const CORE_PANES: PaneDef[] = [
-  {
-    id: 'explorer',
-    order: 10,
-    node: <FileExplorer />,
-    defaultSize: '17%',
-    minSize: '10%',
-    maxSize: '35%',
-    collapsible: true,
-  },
+  // The file tree is the SIDEBAR, not a panel — the same frame, at the same
+  // width, that Skills & Tools puts its group list in. It left the resizable
+  // group when the two navs were unified; `SidebarFrame` owns its width and
+  // the shared store owns whether it is showing.
+  { id: 'explorer', order: 10, node: <FileExplorer />, sidebar: true, collapsible: true },
   { id: 'viewer', order: 20, node: <ViewerRoutes />, minSize: '30%' },
 ];
 

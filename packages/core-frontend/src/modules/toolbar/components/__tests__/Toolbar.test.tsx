@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { setLibrarySidebarCollapsed } from '../../../library/state/sidebar-collapse';
+import { setSidebarCollapsed } from '../../../layout/state/sidebar';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
@@ -197,28 +197,30 @@ function renderToolbar(overrides?: {
 }
 
 describe('Toolbar', () => {
-  it('renders explorer and chat toggle buttons with correct aria-pressed when panels are open', () => {
+  it('renders sidebar and chat toggles open when their panels are open', () => {
+    setSidebarCollapsed(false);
     renderToolbar();
-    const explorerBtn = screen.getByRole('button', { name: /hide file explorer/i });
-    const chatBtn = screen.getByRole('button', { name: /hide chat panel/i });
-    expect(explorerBtn).toHaveAttribute('aria-pressed', 'true');
-    expect(chatBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Hide sidebar' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+    expect(screen.getByRole('button', { name: /hide chat panel/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
   });
 
-  it('reflects collapsed state in aria-pressed and labels', () => {
-    renderToolbar({
-      layout: { isExplorerCollapsed: true, isChatCollapsed: true },
-    });
-    const explorerBtn = screen.getByRole('button', { name: /show file explorer/i });
-    const chatBtn = screen.getByRole('button', { name: /show chat panel/i });
-    expect(explorerBtn).toHaveAttribute('aria-pressed', 'false');
-    expect(chatBtn).toHaveAttribute('aria-pressed', 'false');
-  });
-
-  it('calls toggleExplorer when the explorer button is clicked', async () => {
-    const { toggleExplorer } = renderToolbar();
-    await userEvent.click(screen.getByRole('button', { name: /hide file explorer/i }));
-    expect(toggleExplorer).toHaveBeenCalledTimes(1);
+  it('reflects collapsed state in the labels', () => {
+    setSidebarCollapsed(true);
+    renderToolbar({ layout: { isChatCollapsed: true } });
+    expect(screen.getByRole('button', { name: 'Show sidebar' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    expect(screen.getByRole('button', { name: /show chat panel/i })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
   });
 
   it('calls toggleChat when the chat button is clicked', async () => {
@@ -259,12 +261,11 @@ describe('Toolbar', () => {
     ).toBeNull();
   });
 
-  it('shows the explorer toggle and fires toggleExplorer when canToggleExplorer is true', async () => {
-    const { toggleExplorer } = renderToolbar({ layout: { canToggleExplorer: true } });
-    const btn = screen.getByRole('button', { name: /hide file explorer/i });
-    expect(btn).toBeInTheDocument();
-    await userEvent.click(btn);
-    expect(toggleExplorer).toHaveBeenCalledTimes(1);
+  it('shows the sidebar toggle and flips the shared state when canToggleExplorer is true', async () => {
+    setSidebarCollapsed(false);
+    renderToolbar({ layout: { canToggleExplorer: true } });
+    await userEvent.click(screen.getByRole('button', { name: 'Hide sidebar' }));
+    expect(screen.getByRole('button', { name: 'Show sidebar' })).toBeInTheDocument();
   });
 
   it('hides the chat toggle when canToggleChat is false', () => {
@@ -282,14 +283,15 @@ describe('Toolbar', () => {
     expect(toggleChat).toHaveBeenCalledTimes(1);
   });
 
-  // The Library's nav toggle sits first in the row, left of the brand. It is
-  // path-gated: it controls the Library's sidebar, so it exists exactly where
-  // that sidebar exists.
-  describe('library sidebar toggle', () => {
-    beforeEach(() => setLibrarySidebarCollapsed(false));
+  // ONE nav toggle, first in the row and left of the brand, for the app's ONE
+  // sidebar. There were two buttons here — same glyph, same spot, different
+  // state — until Knowledge's file tree and the Library's group list became
+  // the same sidebar.
+  describe('sidebar toggle', () => {
+    beforeEach(() => setSidebarCollapsed(false));
 
-    it('shows on Library routes and flips the shared collapse state', async () => {
-      renderToolbar({ route: '/skills-and-tools' });
+    it('flips the shared collapse state on the Library', async () => {
+      renderToolbar({ route: '/skills-and-tools', layout: { canToggleExplorer: false } });
       const btn = screen.getByRole('button', { name: 'Hide sidebar' });
       expect(btn).toHaveAttribute('aria-expanded', 'true');
       await userEvent.click(btn);
@@ -298,22 +300,23 @@ describe('Toolbar', () => {
       ).toHaveAttribute('aria-expanded', 'false');
     });
 
-    it('does not render off the Library — there is no sidebar to control', () => {
-      renderToolbar({ route: '/secrets' });
-      expect(screen.queryByRole('button', { name: /(hide|show) sidebar/i })).toBeNull();
+    // Two surfaces answer "do I have a sidebar?" two ways — Knowledge declares
+    // a `sidebar` pane, the Library is known by its path — but there is only
+    // ever ONE button, never one per surface.
+    it.each([
+      ['the Library, by path', '/skills-and-tools', false],
+      ['Knowledge, by its sidebar pane', '/workspace/main', true],
+      ['both at once, without doubling up', '/skills-and-tools', true],
+    ])('renders exactly one toggle on %s', (_name, route, canToggleExplorer) => {
+      renderToolbar({ route, layout: { canToggleExplorer } });
+      expect(screen.getAllByRole('button', { name: /(hide|show) sidebar/i })).toHaveLength(1);
+      // The separate "file explorer" button is gone — it was this same button.
+      expect(screen.queryByRole('button', { name: /file explorer/i })).toBeNull();
     });
 
-    // WP7: one glyph, one spot, both surfaces. Knowledge's explorer toggle and
-    // the Library's nav toggle are the same control doing the same thing, and
-    // two different marks for it would be the app saying "you are somewhere
-    // else" at the one place that must never move.
-    it('draws the explorer toggle with the same glyph as the Library nav toggle', () => {
-      renderToolbar({ route: '/skills-and-tools', layout: { canToggleExplorer: true } });
-      const explorer = screen.getByRole('button', { name: /(hide|show) file explorer/i });
-      const library = screen.getByRole('button', { name: /(hide|show) sidebar/i });
-      const shape = (btn: HTMLElement) => btn.querySelector('svg')?.innerHTML;
-      expect(shape(explorer)).toBeTruthy();
-      expect(shape(explorer)).toBe(shape(library));
+    it('does not render where there is no sidebar to control', () => {
+      renderToolbar({ route: '/secrets', layout: { canToggleExplorer: false } });
+      expect(screen.queryByRole('button', { name: /(hide|show) sidebar/i })).toBeNull();
     });
   });
 

@@ -259,7 +259,7 @@ describe('FileExplorer toolbar', () => {
   it('routes root-level drag-and-drop through dispatchUpload (parity with the button)', async () => {
     const dispatchUpload = vi.fn().mockResolvedValue(undefined);
     renderExplorer({ dispatchUpload });
-    const aside = screen.getByRole('complementary');
+    const aside = screen.getByTestId('file-explorer-root');
     const file = new File(['drop'], 'dropped.md');
     await act(async () => {
       fireEvent.drop(aside, {

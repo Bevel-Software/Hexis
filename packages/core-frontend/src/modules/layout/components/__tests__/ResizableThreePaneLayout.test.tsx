@@ -42,7 +42,11 @@ describe('ResizableThreePaneLayout', () => {
     expect(screen.getByTestId('probe-chat').textContent).toBe('false');
   });
 
-  it('renders two resize handles between the three panels', () => {
+  // The explorer left the group: it is the app's SIDEBAR now, sized by
+  // `SidebarFrame` against a shared, persisted width rather than by a panel in
+  // this layout's own persisted arrangement. So the group holds viewer + chat
+  // and needs one panel separator, while the sidebar brings its own handle.
+  it('separates the panels it still owns, and lets the sidebar bring its own handle', () => {
     const { container } = render(
       <ResizableThreePaneLayout
         header={<div />}
@@ -51,7 +55,19 @@ describe('ResizableThreePaneLayout', () => {
         chat={<div />}
       />,
     );
-    const handles = container.querySelectorAll('[data-separator]');
-    expect(handles).toHaveLength(2);
+    expect(container.querySelectorAll('[data-separator]')).toHaveLength(1);
+    expect(screen.getByRole('separator', { name: /resize/i })).toBeInTheDocument();
+  });
+
+  it('renders the explorer inside the sidebar frame, not as a panel', () => {
+    render(
+      <ResizableThreePaneLayout
+        header={<div />}
+        explorer={<div>tree</div>}
+        viewer={<div />}
+      />,
+    );
+    const aside = screen.getByRole('complementary', { name: /file explorer/i });
+    expect(aside).toHaveTextContent('tree');
   });
 });
