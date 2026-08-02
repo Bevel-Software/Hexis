@@ -44,9 +44,12 @@ export function useDismissableMenu<T extends HTMLElement>({
 
     function onKey(e: KeyboardEvent) {
       if (e.key !== 'Escape') return;
-      // Stop the key here: an open menu is the innermost dismissable thing on
-      // screen, and letting Escape through would also close the dialog or the
-      // panel behind it.
+      // Stops window-level Escape handlers from also acting on this key. It
+      // does NOT protect against a `<Dialog>` hosting the menu — Dialog binds
+      // on `document` too, and same-node listeners are unaffected by
+      // stopPropagation. Nothing here mounts a menu inside a dialog; if
+      // something ever does, the fix is `useModalLayer`, not a third
+      // listener.
       e.stopPropagation();
       onClose();
       returnFocusTo?.current?.focus();

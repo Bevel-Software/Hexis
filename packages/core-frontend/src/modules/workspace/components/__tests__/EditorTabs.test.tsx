@@ -160,7 +160,11 @@ describe('EditorTabs', () => {
     render(<Wrap workspace={ws}><EditorTabs /></Wrap>);
     fireEvent.contextMenu(screen.getAllByRole('tab')[0]);
     expect(screen.getByRole('menu')).toBeInTheDocument();
-    fireEvent.keyDown(window, { key: 'Escape' });
+    // Dispatched on `document` rather than `window`: the strip's dismissal now
+    // comes from the shared `useDismissableMenu`, which binds where `Dialog`
+    // binds. A real Escape keypress reaches both — only the synthetic target
+    // moved.
+    fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 
@@ -237,5 +241,58 @@ describe('EditorTabs', () => {
     fireEvent.drop(tabC, { dataTransfer });
 
     expect(reorderTab).toHaveBeenCalledWith(tabs[0], 2);
+  });
+
+  // ── WP3: the strip becomes the prototype's `.kbtabs` ──
+
+  it('marks the active tab with aria-current', () => {
+    const tabs = [makeTab('a.md'), makeTab('b.md')];
+    render(<Wrap workspace={makeWorkspace(tabs, 'b.md')}><EditorTabs /></Wrap>);
+    const [a, b] = screen.getAllByRole('tab');
+    expect(a).toHaveAttribute('aria-current', 'false');
+    expect(b).toHaveAttribute('aria-current', 'true');
+  });
+
+  it('underlines the active tab instead of filling it', () => {
+    const tabs = [makeTab('a.md'), makeTab('b.md')];
+    render(<Wrap workspace={makeWorkspace(tabs, 'b.md')}><EditorTabs /></Wrap>);
+    const [a, b] = screen.getAllByRole('tab');
+    expect(b.className).toContain('shadow-[inset_0_-2px_0_var(--color-ink)]');
+    expect(b.className).not.toContain('bg-sunken');
+    expect(a.className).not.toContain('shadow-[inset');
+  });
+
+  // Suppressing the scrollbar removes the only cue that more strip exists, so
+  // activation has to bring an off-screen tab to the user. Shipping the
+  // suppression without this makes a 20-tab strip worse than it was.
+  it('brings the active tab into view when it changes', () => {
+    const scrollIntoView = vi.fn();
+    // happy-dom does not implement scrollIntoView.
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      value: scrollIntoView,
+      configurable: true,
+      writable: true,
+    });
+    const tabs = [makeTab('a.md'), makeTab('b.md'), makeTab('c.md')];
+    render(<Wrap workspace={makeWorkspace(tabs, 'c.md')}><EditorTabs /></Wrap>);
+    expect(scrollIntoView).toHaveBeenCalledWith({ inline: 'nearest', block: 'nearest' });
+  });
+
+  it('reveals the close control to the keyboard, not to the mouse click', () => {
+    const tabs = [makeTab('a.md')];
+    render(<Wrap workspace={makeWorkspace(tabs, 'a.md')}><EditorTabs /></Wrap>);
+    const close = screen.getByRole('button', { name: 'Close a.md' });
+    // Reachable by name (the frozen a11y handle) whatever its opacity is.
+    expect(close.className).toContain('group-hover:opacity-100');
+    expect(close.className).toContain('focus-visible:opacity-100');
+    expect(close.className).not.toContain(' focus:opacity-100');
+  });
+
+  it('draws no scrollbar over the labels but keeps the strip scrollable', () => {
+    const tabs = [makeTab('a.md')];
+    render(<Wrap workspace={makeWorkspace(tabs, 'a.md')}><EditorTabs /></Wrap>);
+    const strip = screen.getByRole('tablist');
+    expect(strip.className).toContain('kb-tabstrip');
+    expect(strip.className).toContain('overflow-x-auto');
   });
 });
