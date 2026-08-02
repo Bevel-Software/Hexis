@@ -52,21 +52,56 @@
   :focus-visible{outline:2px solid var(--ink2);outline-offset:2px;border-radius:6px}
   @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 
+  /* ————— the top bar — the app's chrome, above both surfaces —————
+     It carries what belongs to the APP rather than to a page: the nav
+     toggle, which app you are in, which branch you stand on, and you.
+     The sidebar's old brand block is gone with it — one identity, one
+     place, not a wordmark in two corners. */
+  .topbar{position:sticky;top:0;z-index:60;height:48px;flex:0 0 auto;display:flex;align-items:center;
+    gap:8px;padding:0 12px;background:var(--bg);border-bottom:1px solid var(--line)}
+  .tbicon{width:28px;height:28px;border-radius:7px;color:var(--ink3);flex:0 0 auto;
+    display:inline-flex;align-items:center;justify-content:center;transition:background .14s ease,color .14s ease}
+  .tbicon:hover{background:var(--hover);color:var(--ink)}
+  .tbicon.on{color:var(--ink)}
+  .tbbrand{display:inline-flex;align-items:center;gap:6px;padding:5px 8px;border-radius:8px;
+    transition:background .14s ease}
+  .tbbrand:hover,.tbbrand[aria-expanded="true"]{background:var(--hover)}
+  .tbbrand .bw{font-size:13.5px;font-weight:600;letter-spacing:-.01em;color:var(--ink)}
+  .tbbrand .bchev{color:var(--ink3);display:inline-flex;transition:transform .16s ease}
+  .tbbrand[aria-expanded="true"] .bchev{transform:rotate(180deg)}
+  .tbsep{width:1px;height:18px;background:var(--line);flex:0 0 auto;margin:0 2px}
+  .tbspacer{flex:1}
+  /* the branch you stand on — chrome, so it lives in the chrome */
+  .tbbranch{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border-radius:8px;
+    font-size:12px;color:var(--ink2);transition:background .14s ease}
+  .tbbranch:hover{background:var(--hover);color:var(--ink)}
+  .tbbranch .bname{font-family:var(--mono);font-size:11.5px;color:var(--ink);letter-spacing:-.01em}
+  .tbbranch .bdirty{font-size:10px;color:var(--wait);background:var(--wait-soft);border-radius:9px;
+    padding:1px 6px;font-weight:700}
+
   /* ————— app frame — the sidebar is the app's spine ————— */
-  .app{display:flex;min-height:100dvh}
-  .side{width:212px;flex:0 0 auto;position:sticky;top:0;height:100dvh;overflow:hidden;
+  .shell{display:flex;flex-direction:column;min-height:100dvh}
+  .app{display:flex;flex:1;min-height:0}
+  .side{width:212px;flex:0 0 auto;position:sticky;top:48px;height:calc(100dvh - 48px);overflow:hidden;
     border-right:1px solid var(--line);background:var(--side);
     transition:width .24s cubic-bezier(.2,.8,.2,1)}
+  /* while dragging, width follows the cursor — an easing curve would lag it */
+  .app.sizing .side{transition:none}
+  .app.sizing{cursor:col-resize;user-select:none}
+  /* the drag handle straddles the border without occupying layout: its own
+     width is cancelled by the negative margins, so nothing shifts when the
+     sidebar is collapsed and the handle goes away */
+  .resizer{width:7px;margin:0 -3.5px;flex:0 0 auto;position:relative;z-index:30;cursor:col-resize;
+    background:transparent;transition:background .16s ease}
+  .resizer::after{content:'';position:absolute;left:3px;top:0;bottom:0;width:1px;background:transparent;
+    transition:background .16s ease}
+  .resizer:hover::after,.resizer.on::after{background:var(--accent)}
+  .app.collapsed .resizer{display:none}
   .app.collapsed .side{width:0;border-right-color:transparent}
-  .side-collapse{margin-left:auto;width:24px;height:24px;border-radius:6px;color:var(--ink3);
-    display:flex;align-items:center;justify-content:center;flex:0 0 auto}
-  .side-collapse:hover{background:var(--hover);color:var(--ink)}
-  #side-open{position:fixed;top:14px;left:14px;z-index:50;width:28px;height:28px;border-radius:7px;
-    color:var(--ink3);background:var(--bg);border:1px solid var(--line);display:none;
-    align-items:center;justify-content:center}
-  #side-open:hover{background:var(--hover);color:var(--ink)}
-  .app.collapsed #side-open{display:flex}
-  .side-inner{width:212px;height:100%;display:flex;flex-direction:column;padding:22px 14px 18px}
+  /* the floating re-open button retired with the top bar: the toggle up there
+     never moves, so there is nothing to reopen from a second place */
+  #side-open{display:none!important}
+  .side-inner{width:212px;height:100%;display:flex;flex-direction:column;padding:16px 14px 18px}
   .brand{display:flex;align-items:center;gap:9px;padding:0 10px 22px}
   .brand .tile{width:22px;height:22px;border-radius:6px;background:var(--ink);color:var(--bg);
     display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
@@ -93,13 +128,14 @@
     border-radius:99px;padding:0 6px;margin-left:5px;vertical-align:1px}
   .side .cap{font-size:11px;color:var(--ink3);padding:14px 10px 0;line-height:1.5}
   .side .spacer{flex:1}
-  .me{display:flex;align-items:center;gap:9px;padding:8px 10px;border-top:1px solid var(--line);width:100%;
-    border-radius:9px;transition:background .14s ease}
-  .me:hover{background:var(--hover)}
-  .me .nm{font-size:12.5px;font-weight:500}
-  .me .rl{font-size:10.5px;color:var(--ink3)}
   .main{flex:1;min-width:0}
-  .wrap{max-width:980px;margin:0 auto;padding:34px 40px 110px}
+  /* ONE measure for the whole app. Knowledge and Skills are two views of the
+     same product, so a page should not visibly change width when you switch
+     between them — with the sidebar away the difference showed up as a fatter
+     gutter on one surface than the other. `wide` is the opt-out, for the
+     handful of pages that put a second column beside the article. */
+  .wrap{max-width:880px;margin:0 auto;padding:34px 40px 110px}
+  .wrap.wide{max-width:980px}
 
   h1{font-size:26px;font-weight:600;letter-spacing:-.018em;line-height:1.15;text-wrap:balance}
   .lede{font-size:14.5px;color:var(--ink2);line-height:1.55;max-width:62ch;margin-top:9px}
@@ -107,10 +143,18 @@
     margin:34px 0 10px;display:flex;align-items:center;gap:9px}
   .h4 .n{font-variant-numeric:tabular-nums;letter-spacing:0}
   .h4 .cap{font-weight:400;letter-spacing:0;text-transform:none;font-size:11.5px;color:var(--ink3)}
+  /* On a band of cards the count and the controls are detail, not headline —
+     you can see how many there are, and you only reach for the filter when you
+     want it. They fade in on hover, held in the layout by opacity rather than
+     display so nothing shifts under the cursor as the row lights up.
+     Two exceptions stay lit: a filter you have switched ON (a filter you
+     cannot see is a page lying about what it is showing), and "Last updated
+     just now", which is the answer to the button you just pressed. */
+  .h4.quiet .cap,.h4.quiet .filt{opacity:0;transition:opacity .14s ease}
+  .h4.quiet:hover .cap,.h4.quiet:hover .filt,
+  .h4.quiet:focus-within .cap,.h4.quiet:focus-within .filt,
+  .h4.quiet .filt.on,.h4.quiet .filt.spin{opacity:1}
   /* show only what needs you — appears only when something does */
-  .gearbtn{width:28px;height:28px;border-radius:7px;color:var(--ink3);flex:0 0 auto;
-    display:inline-flex;align-items:center;justify-content:center;transition:background .15s ease,color .15s ease}
-  .gearbtn:hover,.gearbtn[aria-expanded="true"]{background:var(--hover);color:var(--ink)}
   .ctxmenu{position:fixed;z-index:75;min-width:200px;background:var(--card);border:1px solid var(--line);
     border-radius:11px;box-shadow:var(--shadow);padding:5px;
     animation:cmenu-in .14s cubic-bezier(.2,.9,.3,1);transform-origin:top left}
@@ -119,15 +163,13 @@
   .ctxmenu button:hover{background:var(--hover);color:var(--ink)}
   .ctxmenu button.del{color:var(--del)}
   .ctxmenu button.del:hover{background:var(--del-soft)}
-  .sharebtn{margin-left:auto;display:inline-flex;align-items:center;gap:7px;padding:5px 11px 5px 9px;
-    border-radius:99px;font-size:13px;color:var(--ink2);flex:0 0 auto;
-    transition:background .15s ease,color .15s ease}
-  .sharebtn:hover{background:var(--hover);color:var(--ink)}
-  .toprow .sharebtn+.gearbtn{margin-left:2px}
+  /* the second head leans away on hover — the icon says "another person" before
+     the word does. Lives on `.actbtn` now: Share is the same bounded control on
+     a group page and a Knowledge page, so it is the same button. */
   .pico .p2{transform-box:fill-box;transform-origin:center;
     transition:transform .26s cubic-bezier(.34,1.5,.5,1),opacity .2s ease}
-  .sharebtn:hover .pico .p2{transform:translate(1.6px,-1.4px) scale(1.08)}
-  .sharebtn:hover .pico{transform:translateX(-.5px)}
+  .actbtn:hover .pico .p2{transform:translate(1.6px,-1.4px) scale(1.08)}
+  .actbtn:hover .pico{transform:translateX(-.5px)}
   .pico{transition:transform .26s ease}
   /* the share sheet */
   .sharerow{display:flex;gap:8px;margin-top:14px}
@@ -154,7 +196,11 @@
   .subnav .n.wait{background:var(--wait-soft);color:var(--wait);font-weight:700;border-radius:9px;padding:1px 7px}
 
   /* tiles */
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(248px,1fr));gap:10px}
+  /* 236, not 248: collapsing the sidebar swaps 40px of page padding for 64px,
+     and against the app's shared measure that was just enough to drop the grid
+     from three cards to two — you hide the sidebar to see MORE, so a row that
+     gets shorter for it is the wrong answer. Three across in both states. */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(236px,1fr));gap:10px}
   .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px 12px;
     display:flex;flex-direction:column;gap:6px;min-height:114px;box-shadow:var(--card-shadow);cursor:pointer;
     position:relative;text-align:left;width:100%;
@@ -456,8 +502,15 @@
   .dots:hover,.dots[aria-expanded="true"]{background:var(--hover);color:var(--ink)}
   .dotmenu{position:absolute;top:34px;right:0;width:216px;background:var(--card);border:1px solid var(--line);
     border-radius:11px;box-shadow:var(--shadow);padding:5px;z-index:45}
-  .dotmenu button{display:block;width:100%;padding:8px 10px;border-radius:7px;font-size:13px;color:var(--ink2)}
+  .dotmenu button{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border-radius:7px;
+    font-size:13px;color:var(--ink2)}
   .dotmenu button:hover{background:var(--hover);color:var(--ink)}
+  /* the glyph rides the row's colour, so hovering lights the whole line at once */
+  .dotmenu button .mi{color:var(--ink3);flex:0 0 15px;display:inline-flex;align-items:center;justify-content:center}
+  .dotmenu button:hover .mi{color:var(--ink2)}
+  /* the one item you cannot undo reads as itself, icon included */
+  .dotmenu button.del,.dotmenu button.del .mi{color:var(--del)}
+  .dotmenu button.del:hover{background:var(--del-soft)}
 
   /* version history — one panel over the app: the version on the left, the list on the right */
   .vov{position:fixed;inset:0;z-index:80;display:none;align-items:center;justify-content:center;
@@ -512,17 +565,39 @@
   .mlist{max-height:280px;overflow-y:auto}
 
   /* menus + modal */
-  .pmenu{position:fixed;left:14px;bottom:64px;width:262px;background:var(--card);border:1px solid var(--line);
-    border-radius:12px;box-shadow:var(--shadow);padding:6px;display:none;z-index:60}
+  /* ONE profile menu, hung off the top bar's right edge — it is who you are,
+     so it is where you are, and everything that used to be a separate gear
+     lives inside it. */
+  .pmenu{position:fixed;right:12px;top:46px;width:274px;max-height:calc(100dvh - 62px);overflow-y:auto;
+    background:var(--card);border:1px solid var(--line);
+    border-radius:12px;box-shadow:var(--shadow);padding:6px;display:none;z-index:90}
   .pmenu.on{display:block}
-  .pmenu button{display:flex;align-items:center;gap:9px;width:100%;padding:8px 10px;border-radius:8px}
-  .pmenu button:hover{background:var(--hover)}
+  .pmenu button{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border-radius:8px;
+    font-size:13px;color:var(--ink2)}
+  .pmenu button:hover{background:var(--hover);color:var(--ink)}
+  .pmenu button .mi{color:var(--ink3);flex:0 0 16px;display:inline-flex;align-items:center;justify-content:center}
+  .pmenu button:hover .mi{color:var(--ink2)}
   .pmenu .mt{font-size:13px;font-weight:500;display:block}
   .pmenu .ms{font-size:11px;color:var(--ink3);line-height:1.4;display:block}
   .pmenu .ui{min-width:0;flex:1}
   .pmenu .check{color:var(--accent);font-size:13px;margin-left:auto}
+  .pmenu .del{color:var(--del)}
+  .pmenu .del .mi{color:var(--del);opacity:.8}
+  .pmenu .del:hover{background:var(--del-soft);color:var(--del)}
+  /* who you are, stated once at the top so the menu never has to repeat it */
+  .pmid{display:flex;align-items:center;gap:10px;padding:9px 10px 11px;margin-bottom:4px;
+    border-bottom:1px solid var(--line)}
+  .pmid .nm{font-size:13px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pmid .em{font-size:11.5px;color:var(--ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .menu-label{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);font-weight:600;
     padding:11px 10px 5px;border-top:1px solid var(--line);margin-top:5px}
+  /* the trigger in the top bar */
+  .tbme{display:inline-flex;align-items:center;gap:7px;padding:3px 9px 3px 3px;border-radius:99px;
+    transition:background .14s ease}
+  .tbme:hover,.tbme[aria-expanded="true"]{background:var(--hover)}
+  .tbme .av{width:22px;height:22px;font-size:9px}
+  .tbme .nm{font-size:12.5px;color:var(--ink2);white-space:nowrap}
+  .tbme:hover .nm{color:var(--ink)}
 
   .mwrap{position:fixed;inset:0;z-index:70;display:none;align-items:center;justify-content:center;
     background:rgba(55,53,47,.25);padding:16px}
@@ -553,10 +628,233 @@
     .nav{flex-direction:row;flex-wrap:wrap}
     .nav .lbl,.side .cap{display:none}
     .side .spacer{display:none}
-    .me{border-top:none;margin-left:auto;width:auto}
-    .pmenu{left:auto;right:14px;top:64px;bottom:auto}
+    .pmenu{right:14px;left:14px;width:auto;top:56px}
     .wrap{padding:18px 18px 90px}
     .item-grid{grid-template-columns:1fr;gap:26px}
+  }
+
+  /* =========================================================
+     KNOWLEDGE — the knowledge base as a place you browse.
+     Same tokens, same rows, same document type as Skills &
+     tools. The only new idea is the TREE: a KB is nested, and
+     a flat list would lose the one thing the nesting tells you.
+     ========================================================= */
+  /* the app switcher — the brand block becomes the way between apps */
+  .brandrow{display:flex;align-items:center;gap:2px;margin:0 -8px 16px}
+  .brand.switch{flex:1;min-width:0;border-radius:9px;padding:6px 8px;margin:0;
+    transition:background .14s ease}
+  .brand.switch:hover,.brand.switch[aria-expanded="true"]{background:var(--hover)}
+  .brand.switch .bn,.brand.switch .bs{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .brand .bchev{margin-left:auto;color:var(--ink3);flex:0 0 auto;transition:transform .16s ease}
+  .brand.switch[aria-expanded="true"] .bchev{transform:rotate(180deg)}
+  /* drops from the brand in the top bar */
+  .appmenu{position:fixed;z-index:80;left:44px;top:46px;width:246px;background:var(--card);
+    border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:5px;
+    animation:cmenu-in .14s cubic-bezier(.2,.9,.3,1)}
+
+  /* the branch switcher, dropping from the chip it belongs to */
+  .branchmenu{position:fixed;z-index:80;left:196px;top:46px;width:308px;background:var(--card);
+    border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:5px;
+    animation:cmenu-in .14s cubic-bezier(.2,.9,.3,1)}
+  .branchmenu .bml{padding:7px 9px 5px;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--ink3);font-weight:600}
+  .brow{display:flex;align-items:flex-start;gap:9px;width:100%;padding:8px 9px;border-radius:8px}
+  .brow:hover{background:var(--hover)}
+  .brow .bck{width:14px;flex:0 0 14px;color:var(--accent);padding-top:2px}
+  .brow .bn2{font-family:var(--mono);font-size:12px;color:var(--ink);letter-spacing:-.01em;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .brow .bd2{font-size:11.5px;color:var(--ink3);margin-top:2px;line-height:1.4}
+  .brow .bstat{margin-left:auto;flex:0 0 auto;font-size:10px;font-weight:700;border-radius:9px;padding:1px 7px;
+    color:var(--wait);background:var(--wait-soft);white-space:nowrap}
+  .branchmenu .bsep{height:1px;background:var(--line);margin:5px 4px}
+  .branchmenu .bnew{display:flex;align-items:center;gap:9px;width:100%;padding:8px 9px;border-radius:8px;
+    font-size:12.5px;color:var(--ink2)}
+  .branchmenu .bnew:hover{background:var(--hover);color:var(--ink)}
+  .branchmenu .bnew .bi2{color:var(--ink3);display:inline-flex}
+  .appmenu button{display:flex;gap:10px;width:100%;padding:9px 10px;border-radius:8px;align-items:flex-start}
+  .appmenu button:hover{background:var(--hover)}
+  .appmenu .ck{width:14px;flex:0 0 14px;color:var(--accent);padding-top:2px}
+  .appmenu .an{font-size:13px;font-weight:600;color:var(--ink)}
+  .appmenu .ad{font-size:11.5px;color:var(--ink3);line-height:1.4;margin-top:1px}
+
+  /* the tree — a nav row that happens to nest, so it is typeset as one: same
+     size, padding, radius and weight as `.nav button` in the Skills sidebar.
+     Two sidebars in one app should not read as two different products. */
+  .tree{display:flex;flex-direction:column;gap:1px;overflow-y:auto;flex:1;margin:0 -4px;padding:0 4px}
+  .trow{display:flex;align-items:center;gap:6px;width:100%;padding:6px 10px;border-radius:7px;
+    font-size:13px;color:var(--ink2);transition:background .12s ease;text-align:left}
+  .trow:hover{background:var(--hover);color:var(--ink)}
+  .trow[aria-current="true"]{background:var(--hover);color:var(--ink);font-weight:600}
+  .trow .tw{flex:0 0 13px;width:13px;height:13px;display:inline-flex;align-items:center;justify-content:center;
+    color:var(--ink3);transition:transform .16s cubic-bezier(.2,.9,.3,1)}
+  .trow.open .tw{transform:rotate(90deg)}
+  .trow .tn{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .trow .tdot{margin-left:auto;width:6px;height:6px;border-radius:50%;background:var(--waitb);flex:0 0 6px}
+  .tkids{display:flex;flex-direction:column;gap:1px}
+
+  /* The Knowledge column starts high: the top bar already separates it from
+     the window, so the page's own padding only has to keep the tabs from
+     touching the bar. The Skills pages keep the roomier default — they open
+     on a heading, not on a tab strip. */
+  .wrap.kb{padding-top:12px}
+  /* With no rail, ONE column holds tabs, title and text at the same width, so
+     they share an edge and the whole page reads as a single centred block.
+     Constraining the article instead would centre the prose inside a wider
+     wrap and leave the tabs hanging off to one side. (The width itself is now
+     the app-wide default, up in `.wrap` — this is where it came from.) */
+  .wrap.kb .item-grid.solo > article{max-width:none}
+  /* Collapsed, the column is centred in the whole window — so the space the
+     sidebar gave up becomes margin on BOTH sides rather than more line length
+     on one. Wider gutters are the point, not a side effect. */
+  .app.collapsed .wrap{padding-left:64px;padding-right:64px}
+
+  /* open documents — tabs, because a KB visit is never one file */
+  .kbtabs{display:flex;align-items:center;gap:2px;margin:0 0 18px;border-bottom:1px solid var(--line);
+    overflow-x:auto;scrollbar-width:none}
+  .kbtabs::-webkit-scrollbar{display:none}
+  .kbtab{display:inline-flex;align-items:center;gap:7px;padding:7px 10px 10px;font-size:12.5px;
+    color:var(--ink3);border-radius:8px 8px 0 0;white-space:nowrap;transition:background .14s ease,color .14s ease}
+  .kbtab:hover{background:var(--hover);color:var(--ink2)}
+  .kbtab[aria-current="true"]{color:var(--ink);font-weight:600;box-shadow:inset 0 -2px 0 var(--ink)}
+  .kbtab .x{width:15px;height:15px;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;
+    color:var(--ink3);opacity:0;transition:opacity .12s ease,background .12s ease}
+  .kbtab:hover .x,.kbtab[aria-current="true"] .x{opacity:1}
+  .kbtab .x:hover{background:var(--line);color:var(--ink)}
+  .kbtab .tdirty{width:6px;height:6px;border-radius:50%;background:var(--accent);flex:0 0 6px}
+
+  /* ————— change requests, docked where the work arrives —————
+     The bottom of the tree is where the real app keeps them, and it is the
+     right place: the tree is what you are reading, this is what people want
+     you to change about it. It is a QUEUE, so it shows who and how much, and
+     it collapses — the point is to notice it, not to live in it. */
+  .crdock{flex:0 0 auto;border-top:1px solid var(--line);margin:8px -14px 0;padding:0 8px}
+  .crdock-h{display:flex;align-items:center;gap:7px;width:100%;padding:10px 6px 8px;
+    font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);font-weight:600}
+  .crdock-h:hover{color:var(--ink)}
+  .crdock-h .cw{width:11px;flex:0 0 11px;display:inline-flex;color:var(--ink3);
+    transition:transform .16s cubic-bezier(.2,.9,.3,1)}
+  .crdock-h.open .cw{transform:rotate(90deg)}
+  .crdock-h .cn{margin-left:auto;font-size:10px;font-weight:700;border-radius:9px;padding:1px 7px;
+    color:var(--wait);background:var(--wait-soft);letter-spacing:0}
+  .crdock-list{display:flex;flex-direction:column;gap:1px;padding-bottom:6px;max-height:184px;overflow-y:auto}
+  .crrow{display:block;width:100%;padding:6px 7px;border-radius:7px;transition:background .12s ease}
+  .crrow:hover{background:var(--hover)}
+  /* 13/11.5 — the same two sizes the tree above and the Skills nav use, so the
+     whole sidebar is one typographic system rather than three */
+  .crrow .ct{font-size:13px;color:var(--ink2);display:flex;gap:6px;min-width:0}
+  /* the ellipsis has to live on the TEXT, not on the flex row — a flex
+     container clips its children without ever drawing one */
+  .crrow .ct .cx{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crrow:hover .ct{color:var(--ink)}
+  .crrow .cnum{color:var(--ink3);font-variant-numeric:tabular-nums;flex:0 0 auto}
+  .crrow .cm{font-size:11.5px;color:var(--ink3);margin-top:1px}
+
+  /* ————— the page's own actions, on the page —————
+     Copy belongs beside the title, not inside a ⋯ menu two clicks away: it is
+     the single most common thing anyone does with a document they are about to
+     paste into a chat. The split button follows the docs-site convention —
+     press the left half to copy, the chevron for the other formats. */
+  /* With the rail hidden the column would run the whole window wide, and a
+     75-character line is where reading stops being comfortable — so the
+     measure is held by the article, not by whether the rail happens to be up. */
+  /* NOT centred: the breadcrumb and the ⋯ row above sit at the column's left
+     edge, and an article floating in the middle of them leaves the title
+     indented from its own trail. Knowledge centres the WHOLE column instead
+     (`.wrap.kb.solo`), which keeps every edge in one line. */
+  .item-grid.solo > article{max-width:820px}
+  .pageacts{display:flex;align-items:center;gap:6px;margin-left:auto;flex:0 0 auto}
+  /* the one bounded action on a page — see the note where it is rendered.
+     No `overflow:hidden`: this is the dropdown's positioning parent, and
+     clipping it would clip the menu out of existence. Halves round themselves. */
+  .actwrap{display:inline-flex;align-items:stretch;border:1px solid var(--line2);border-radius:9px;
+    background:var(--card);position:relative;transition:border-color .14s ease}
+  .actwrap:hover{border-color:var(--ink3)}
+  .actbtn{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;font-size:12.5px;color:var(--ink2);
+    border-radius:8px 0 0 8px;transition:background .14s ease,color .14s ease}
+  /* no second half to make room for — a group has exactly one thing to share */
+  .actwrap.only .actbtn{border-radius:8px}
+  .actbtn:hover{background:var(--hover);color:var(--ink)}
+  .actchev{width:24px;display:inline-flex;align-items:center;justify-content:center;color:var(--ink3);
+    border-left:1px solid var(--line);border-radius:0 8px 8px 0;transition:background .14s ease,color .14s ease}
+  .actchev:hover,.actchev[aria-expanded="true"]{background:var(--hover);color:var(--ink)}
+  .actmenu{position:absolute;right:0;top:calc(100% + 5px);z-index:70;min-width:212px;background:var(--card);
+    border:1px solid var(--line);border-radius:11px;box-shadow:var(--shadow);padding:5px;
+    animation:cmenu-in .14s cubic-bezier(.2,.9,.3,1)}
+  .actmenu button{display:flex;align-items:center;gap:10px;width:100%;padding:8px 9px;border-radius:7px;
+    font-size:12.5px;color:var(--ink2);white-space:nowrap}
+  .actmenu button:hover{background:var(--hover);color:var(--ink)}
+  .actmenu .mi{color:var(--ink3);flex:0 0 15px;display:inline-flex;align-items:center;justify-content:center}
+
+  /* ————— the access sheet —————
+     Ordered by what people came to do. Nine times in ten that is "give this to
+     someone", so the field for it is first, focused, and above the fold; the
+     roster is the answer to a different, rarer question and sits under it. */
+  .acc-add{display:flex;gap:8px;margin-top:16px}
+  .acc-add .msearch{flex:1;min-width:0;margin:0}
+  .acc-sec{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);font-weight:600;
+    margin:22px 0 2px;display:flex;align-items:baseline;gap:8px}
+  .acc-sec .n{letter-spacing:0;font-weight:400;font-size:11.5px}
+  .acc-row{display:flex;align-items:center;gap:9px;padding:8px 0;font-size:13px}
+  .acc-row+.acc-row{border-top:1px solid var(--line)}
+  .acc-row .pk{min-width:0;flex:1}
+  .acc-row .pk .sub{font-size:11.5px;color:var(--ink3);display:block;margin-top:1px}
+  .acc-role{font-size:12px;color:var(--ink3);white-space:nowrap}
+  .acc-x{width:22px;height:22px;border-radius:6px;color:var(--ink3);display:inline-flex;
+    align-items:center;justify-content:center;flex:0 0 auto}
+  .acc-x:hover{background:var(--del-soft);color:var(--del)}
+  /* one folder's worth of inherited people, folded away until asked for */
+  .acc-grp{border-top:1px solid var(--line);margin-top:0}
+  .acc-grp:first-of-type{margin-top:18px}
+  .acc-grph{display:flex;align-items:center;gap:8px;width:100%;padding:11px 0;font-size:13px;color:var(--ink2)}
+  .acc-grph:hover{color:var(--ink)}
+  .acc-grph .cw{width:11px;flex:0 0 11px;display:inline-flex;color:var(--ink3);
+    transition:transform .16s cubic-bezier(.2,.9,.3,1)}
+  .acc-grph.open .cw{transform:rotate(90deg)}
+  .acc-grph .gt b{font-weight:600;color:var(--ink)}
+  .acc-grph .gn{margin-left:auto;font-size:11.5px;color:var(--ink3);font-variant-numeric:tabular-nums}
+  .acc-grpb{padding:0 0 12px 19px}
+  .acc-grpb .acc-row:first-child{border-top:none}
+  .acc-open{margin-top:8px;font-size:12px;color:var(--accent);border-radius:6px}
+  .acc-open:hover{text-decoration:underline}
+
+  /* the document's own facts, in the right rail */
+  .kbmeta{display:flex;flex-direction:column;gap:0}
+  .kbmeta .mrow{display:flex;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);font-size:12.5px}
+  .kbmeta .mrow:last-child{border-bottom:none}
+  .kbmeta .mk{flex:0 0 84px;color:var(--ink3);font-size:11.5px;padding-top:1px}
+  .kbmeta .mv{min-width:0;color:var(--ink2);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .kbmeta .mv.mono{font-family:var(--mono);font-size:11px;color:var(--ink3);word-break:break-all;line-height:1.5}
+  .backlink{display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;border-radius:8px;
+    font-size:12.5px;color:var(--ink2);transition:background .14s ease;margin-left:-8px}
+  .backlink:hover{background:var(--hover);color:var(--ink)}
+  .backlink .bi{color:var(--ink3);flex:0 0 auto}
+
+  /* a data file is a table — same borders as the doc's own tables */
+  .kbtable{border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-top:14px;background:var(--card)}
+  .kbtable table{width:100%;border-collapse:collapse;font-size:12.5px}
+  .kbtable th{text-align:left;font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3);
+    font-weight:600;padding:9px 13px;border-bottom:1px solid var(--line);background:var(--card2);white-space:nowrap}
+  .kbtable td{padding:9px 13px;border-bottom:1px solid var(--line);color:var(--ink2)}
+  .kbtable tr:last-child td{border-bottom:none}
+  .kbtable td.num{font-variant-numeric:tabular-nums;text-align:right}
+  .kbfoot{font-size:11.5px;color:var(--ink3);margin-top:9px}
+
+  /* an image renders as itself, on the inset the viewer uses everywhere */
+  .kbimg{border:1px solid var(--line);border-radius:12px;background:var(--inset);margin-top:14px;
+    display:flex;align-items:center;justify-content:center;padding:44px 20px;flex-direction:column;gap:10px;
+    color:var(--ink3);font-size:12.5px}
+  .kbimg .ph{width:56px;height:44px;border-radius:8px;border:1.5px dashed var(--line2);display:flex;
+    align-items:center;justify-content:center;color:var(--ink3)}
+
+  @media (max-width:900px){
+    /* the sidebar's width is an inline style on desktop (it is draggable), so
+       the stacked layout has to out-rank it rather than merely follow it */
+    .side,.side-inner{width:100%!important}
+    .resizer{display:none}
+    .tree{max-height:220px}
+    .appmenu,.branchmenu{left:14px;right:14px;width:auto}
+    .crdock{margin:8px 0 0;width:100%}
+    .item-title .pageacts{margin-left:0}
   }
 </style>
 <script type="text/plain" id="md-heyreach-campaign">
@@ -1225,10 +1523,14 @@ T = {
     "orphan_min_frac": 0.25,  # last line of a block vs the measure
 }
 </script>
+<div class="shell">
+<header class="topbar" id="topbar"></header>
 <div class="app" id="app">
 <button id="side-open" data-collapse title="Show sidebar" aria-label="Show sidebar"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 5l7 7-7 7"/></svg></button>
 <aside class="side" id="side"></aside>
+<div class="resizer" id="resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0"></div>
 <div class="main"><main class="wrap" id="main"></main></div>
+</div>
 </div>
 <div class="pmenu" id="pmenu"></div>
 <div class="mwrap" id="mwrap"></div>
@@ -1495,6 +1797,148 @@ buyer what they were quoted.**
 - What you could not settle. Never empty.
 </script>
 
+<script type="text/plain" id="kb-invariant">
+---
+nodeType: "[[NodeType]]"
+---
+
+# Name
+
+The invariant's short name — e.g. **"No App-Level Branch Ownership"**.
+
+# Description
+
+What this invariant protects, in one sentence. An Invariant is a project-specific
+rule that must always hold for exactly one project. It is filed as a child node
+under its project's folder.
+
+A rule that applies to every project belongs in an [[ArchitecturePrinciple]] node
+instead.
+
+# Statement
+
+The rule itself, phrased normatively and precisely enough that a reviewer can
+decide whether a change violates it. Include the concrete exceptions if any exist
+— an invariant with unstated exceptions produces false-positive findings.
+
+# Rationale
+
+Why the invariant exists: the failure mode it prevents, or the decision it locks
+in. Reviewers use this to judge borderline cases in the spirit of the rule.
+
+# Enforcement
+
+How the rule is checked:
+
+- `deterministic` — name the CI tool. Reviewers skip what it already guarantees.
+- `review` — a human must actively check it.
+
+# How To Verify
+
+What a reviewer concretely looks at: which imports to inspect, which routes or
+flows to trace, what to grep for. This is what turns the rule into a repeatable
+check instead of a vibe.
+
+> An invariant nobody can verify in under a minute will be skipped, and a rule
+> that is skipped is not a rule.
+</script>
+
+<script type="text/plain" id="kb-bevel-platform">
+---
+nodeType: "[[Project]]"
+owner: "Juan Viera"
+---
+
+# Bevel Platform
+
+The knowledge base, the agent runtime, and the surfaces people actually touch —
+one product, one repository, one deploy.
+
+## Direction
+
+Everything an agent needs to do its job lives in the knowledge base as files, and
+every file is governed by the same access rules a person is. There is no second
+registry, no shadow config, and no place where "what the agent can see" is
+decided anywhere but the tree itself.
+
+## Invariants
+
+| Invariant | Enforcement |
+| --- | --- |
+| No App-Level Branch Ownership | deterministic |
+| One Ontology Write Boundary | review |
+| Access Resolves Closeness-First | deterministic |
+
+## Current focus
+
+The UI migration onto the shared design system. Skills & Tools landed first; the
+Knowledge surface is next, and it is the larger half — the file explorer, the
+document viewer, the change-request flow.
+
+See [[Avi-Checkin]] for the weekly state.
+</script>
+
+<script type="text/plain" id="kb-egym">
+---
+nodeType: "[[Company]]"
+stage: "Qualified"
+---
+
+# EGYM
+
+Fitness technology company, Munich. ~900 employees, gym-equipment hardware plus a
+connected software platform.
+
+## Why they came up
+
+Their ops team runs onboarding for every new gym partner out of a shared drive
+and a spreadsheet. That is the exact shape the knowledge base replaces: the
+process is real, the documents are real, and nobody can tell you which version is
+current.
+
+## Signals
+
+- Three separate people asked about **audit trails** in the first call.
+- They already run an internal wiki — so the objection is migration cost, not
+  the concept.
+- Procurement cycle is long. Expect a pilot before anything else.
+
+## Open questions
+
+1. Who owns the knowledge base internally once it ships?
+2. Does the gym-partner content need per-partner access, or is one shared space enough?
+
+Linked meeting: [[Marc-Roessler-Zvoove-Call-2026-03-19]]
+</script>
+
+<script type="text/plain" id="kb-readme">
+# Knowledge base
+
+This is the whole thing: every document your agents read, and every rule about
+who may read it.
+
+## How it is laid out
+
+- **KnowledgeBase/** — what the company knows. Ontology node types live beside
+  the knowledge that instantiates them.
+- **Groups/** — the skills and tools each team gets automatically.
+- **Data/** — generated tables and exports. Nothing here is hand-edited.
+- **Dashboards/** — rendered views, regenerated by pipelines.
+- **Agents/** and **Pipelines/** — what runs, and when.
+
+## The one rule
+
+A folder's `access.md` says who may read it. Access resolves **closeness-first**:
+the nearest rule to a file wins, so a `deny` deep in the tree beats a grant at
+the root. That is what makes a locked folder actually locked, even for admins.
+
+## Editing
+
+Every change is a change request against `main`. Nothing is edited in place —
+you propose, someone with write access applies, and the version history keeps
+both sides.
+</script>
+
 <div class="vov" id="vov"></div>
 <div id="ctx"></div>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
@@ -1678,7 +2122,7 @@ const exNote = f => '<p class="note" style="margin-top:14px">Excerpt — the ful
 
 /* small markdown renderer for real KB files: headings, lists, checklists,
    fenced + indented code, tables, blockquotes, rules */
-function mdRender(raw){
+function mdRender(raw, keepH1){
   const HTML_COMMENT = new RegExp('<'+'!--[\\s\\S]*?--'+'>','g');   /* built dynamically — a literal one breaks HTML script parsing */
   let md = raw.replace(/^\s*---[\s\S]*?---\s*/,'').replace(HTML_COMMENT,'').trim();
   const lines = md.split('\n');
@@ -1725,7 +2169,13 @@ function mdRender(raw){
       continue;
     }
     flushQuote();
-    if(t.startsWith('# ')){ flushPara(); closeList(); continue; }        /* h1 = page title, skip */
+    /* h1 is normally the page title, which the page already shows — skip it.
+       KB ontology nodes are the exception: there every FIELD is an h1
+       (`# Statement`, `# Rationale`), so dropping them would leave a document
+       of unlabelled paragraphs. `keepH1` says which kind of file this is. */
+    if(t.startsWith('# ')){ flushPara(); closeList();
+      if(keepH1) out.push('<h2>'+inline(t.slice(2))+'</h2>');
+      continue; }
     if(t.startsWith('## ')){ flushPara(); closeList(); out.push('<h2>'+inline(t.slice(3))+'</h2>'); continue; }
     if(t.startsWith('### ')){ flushPara(); closeList(); out.push('<h3>'+inline(t.slice(4))+'</h3>'); continue; }
     if(t.startsWith('- [ ]')){
@@ -1802,7 +2252,23 @@ const SPACES = [
     skills:['closing-checklist','vendor-review','budget-vs-actuals'],
     tools:['notion','gmail'] },
 ];
-const spaceById = id => SPACES.find(sp=>sp.id===id);
+/* Your own list IS a place. The sidebar files it under Subscriptions, "All
+   subscriptions" lists it under Yours, and it holds skills and tools like any
+   other — so it gets a record like any other, one per person, made the first
+   time anyone looks. Every sheet that takes a space (share, copy link, the ⋯)
+   then works on it with no special case.
+
+   It stays OUT of `SPACES` on purpose: so it never appears twice in a list of
+   subscriptions, and so `personalSkills()` keeps meaning what it says — the
+   skills no subscription carries. Its skills and tools are computed at render
+   time, so the record deliberately holds neither. */
+const MINE_SPACES = {};
+const mineSpace = (uid = state.user) => MINE_SPACES[uid] ||
+  (MINE_SPACES[uid] = { id:'mine:'+uid, personal:true, size:1,
+    name:personById(uid).name.split(' ')[0]+'’s List',
+    admins:[uid], members:[uid], groups:[] });
+const spaceById = id => SPACES.find(sp=>sp.id===id) ||
+  (String(id).startsWith('mine:') ? mineSpace(id.slice(5)) : undefined);
 const mySpaces = () => SPACES.filter(sp=>sp.members.includes(state.user));
 const isSpaceAdmin = sp => sp.admins.includes(state.user);
 const skillSpaces = sid => SPACES.filter(sp=>sp.skills.includes(sid));
@@ -1829,7 +2295,18 @@ const spacePending = spid => PENDING.filter(p=>p.space===spid && p.status==='ope
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = { user:'ali', view:'home', space:null, skill:null, tool:null, cr:null, pend:null, crFile:null, tabFile:'main', menu:false, dots:'', vhist:false, vsel:0, vfile:null, filter:false, crumb:null, ctx:null, refresh:'', collapsed:false };
+const state = { user:'ali', view:'home', space:null, skill:null, tool:null, cr:null, pend:null, crFile:null, tabFile:'main', menu:false, dots:'', vhist:false, vsel:0, vfile:null, filter:false, crumb:null, ctx:null, refresh:'', collapsed:false,
+  /* Knowledge: which app is up, which document, which folders are open, what's
+     in the tab strip. `kbOpen` is a plain array so the whole state stays
+     JSON-shaped and a demo can be restored from a hash. */
+  app:'skills', appmenu:false, branchmenu:false, branch:'main', sharemenu:false, sharesp:null,
+  accPath:null, accOpen:null,
+  /* the rail is OFF by default — a document should open as a document, and the
+     facts about it are one icon away for the moment you want them */
+  kbRail:false, sideW:212, crdock:true,
+  kbFile:'KnowledgeBase/Engineering/NodeTypes/Invariant.md',
+  kbOpen:['KnowledgeBase','KnowledgeBase/Engineering','KnowledgeBase/Engineering/NodeTypes'],
+  kbTabs:['KnowledgeBase/Engineering/NodeTypes/Invariant.md','KnowledgeBase/Engineering/Knowledge/Bevel-Platform.md','Data/Engineering/velocity.csv'] };
 
 const personById = id => PEOPLE.find(p=>p.id===id);
 const personByName = n => PEOPLE.find(p=>p.name===n || p.name.split(' ')[0]===n);
@@ -2116,7 +2593,7 @@ function renderHome(){
   const show = state.filter ? need : owned;
   let h = '<div class="toprow">'+crumbs([ROOT, { t:'Owned by me', menu:placesMenu('home') }])+'</div>';
   h += stripHtml(myQueue());
-  h += '<div class="h4" style="margin-top:28px">Skills you’re responsible for'+
+  h += '<div class="h4 quiet" style="margin-top:28px">Skills you’re responsible for'+
     (owned.length?'<span class="cap">'+owned.length+'</span>':'')+
     (need.length?filterBtn():'')+refreshBtn()+'</div>';
   h += skillTiles(show);
@@ -2163,20 +2640,27 @@ function renderSpaces(){
   return h;
 }
 
-/* just you — the sign-ins only you can set, and the skills no space carries */
+/* just you — the sign-ins only you can set, and the skills no space carries.
+
+   Built exactly like a subscription page, because it is one: the same trail,
+   the same title row with the same three actions, the same two bands under the
+   same two words. It used to be its own dialect — a bare "Add skills or tools"
+   button under the heading, a count that explained itself ("3 — only you have
+   these"), and "Integrations" where every other page says "Tools". Three ways
+   of saying the same thing is three things to learn. */
 function renderPersonal(){
+  const sp = mineSpace();
   const mine = personalSkills();
-  let h = '<div class="toprow">'+crumbs([ROOT, { t:MINE(), menu:placesMenu('personal') }])+'</div>'+
-    '<div class="item-title"><h1>'+esc(MINE())+'</h1></div>'+
-    '<p class="lede">Just you</p>'+
-    '<div style="margin-top:14px"><button class="btn small" data-addmine>Add skills or tools</button></div>';
   const need = mine.filter(needsCR);
-  h += '<div class="h4" style="margin-top:30px">Skills'+
-    (mine.length?'<span class="cap">'+mine.length+' — only you have these</span>':'')+
+  /* no lede: the page is called "Ali's List" and sits under your own name —
+     "Just you" was the title again, in smaller type */
+  let h = '<div class="toprow">'+crumbs([ROOT, { t:MINE(), menu:placesMenu('personal') }])+'</div>'+
+    '<div class="item-title"><h1>'+esc(MINE())+'</h1>'+spaceActs(sp, true)+'</div>';
+  h += '<div class="h4 quiet" style="margin-top:30px">Skills<span class="cap">'+mine.length+'</span>'+
     (need.length?filterBtn():'')+refreshBtn()+'</div>';
   h += mine.length ? skillTiles(state.filter ? need : mine)
     : '<div class="empty">Nothing yet. A skill you build stays here until a subscription takes it in.</div>';
-  h += '<div class="h4" style="margin-top:34px">Integrations<span class="cap">'+TOOLS.length+'</span></div>'+toolTiles();
+  h += '<div class="h4 quiet" style="margin-top:34px">Tools<span class="cap">'+TOOLS.length+'</span></div>'+toolTiles();
   return h;
 }
 
@@ -2319,6 +2803,9 @@ function filesPanel(s, files, af, opt){
 const dotsHtml = items => '<span class="dotwrap">'+
   '<button class="dots" data-dots aria-expanded="'+(!!state.dots)+'" aria-haspopup="true" title="More">⋯</button>'+
   (state.dots==='menu' ? '<div class="dotmenu">'+items+'</div>' : '')+'</span>';
+/* One row in a ⋯ or share menu. Every item carries an icon — a menu where some
+   rows have one and some don't reads as two lists that happen to touch. */
+const mi = (act, icon, label) => '<button '+act+'><span class="mi">'+icon+'</span>'+label+'</button>';
 function copyNow(v, msg){
   (navigator.clipboard ? navigator.clipboard.writeText(v) : Promise.reject())
     .then(()=>toast(msg)).catch(()=>toast('Couldn’t copy — select the text instead.'));
@@ -2429,7 +2916,8 @@ function renderSkill(s){
     '<div class="doc">'+fileDoc(s,af)+'</div>'+
     '<div class="pathline">'+esc((GROUP_PATH[s.group]||'Skills')+'/'+s.id+'/'+af.file)+'</div>';
   return '<div class="toprow">'+crumbs(skillTrail(s))+
-      dotsHtml('<button data-vhist>Version history</button><button data-copypage>Copy page contents</button>')+'</div>'+
+      dotsHtml(mi('data-vhist', I_CLOCK, 'Version history')+
+              mi('data-copypage', I_COPY, 'Copy page contents'))+'</div>'+
     '<div class="item-grid"><article>'+
       '<div class="item-title"><h1>'+esc(s.name)+'</h1></div>'+
       '<p class="lede">'+esc(s.desc)+'</p>'+
@@ -2451,7 +2939,6 @@ function fsize(f){
 /* =========================================================
    The sidebar — spaces are the structure
    ========================================================= */
-const GEAR_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.1"/><path d="M19.1 14.8a1.6 1.6 0 0 0 .3 1.8l.1.1a1.9 1.9 0 1 1-2.7 2.7l-.1-.1a1.6 1.6 0 0 0-2.7 1.1v.3a1.9 1.9 0 1 1-3.8 0v-.2a1.6 1.6 0 0 0-2.8-1.1l-.1.1a1.9 1.9 0 1 1-2.7-2.7l.1-.1a1.6 1.6 0 0 0-1.1-2.7h-.3a1.9 1.9 0 1 1 0-3.8h.2a1.6 1.6 0 0 0 1.1-2.8l-.1-.1a1.9 1.9 0 1 1 2.7-2.7l.1.1a1.6 1.6 0 0 0 2.8-1.1v-.3a1.9 1.9 0 1 1 3.8 0v.2a1.6 1.6 0 0 0 2.7 1.1l.1-.1a1.9 1.9 0 1 1 2.7 2.7l-.1.1a1.6 1.6 0 0 0 1.1 2.8h.3a1.9 1.9 0 1 1 0 3.8h-.2a1.6 1.6 0 0 0-1.5 1z"/></svg>';
 /* two people, and a third who steps in when you point at the button */
 const PEOPLE_SVG = '<svg class="pico" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+
   '<circle cx="9" cy="8" r="3.2"/><path d="M3.6 19.2c0-3.1 2.4-5 5.4-5s5.4 1.9 5.4 5"/>'+
@@ -2471,19 +2958,17 @@ const spaceAttention = sp =>
 function sideHtml(){
   const cur = (state.view==='space' || state.view==='doc' || state.view==='pending') ? state.space : null;
   const p = me();
-  const runs = SPACES.filter(sp=>isSpaceAdmin(sp)).map(sp=>sp.name);
-  const home = SPACES.find(sp=>sp.id!=='everyone'&&sp.members.includes(p.id));
-  const role = runs.length ? 'Runs '+runs.join(', ') : (home ? home.name : 'Everyone');
-  let h = '<div class="side-inner">';
-  h += '<div class="brand"><span class="tile">B</span><span><div class="bn">Bevel</div><div class="bs">Skills &amp; tools</div></span>'+
-    '<button class="side-collapse" data-collapse title="Hide sidebar" aria-label="Hide sidebar"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 5l-7 7 7 7"/></svg></button></div>';
+  let h = '<div class="side-inner" style="width:'+state.sideW+'px">';
   const needy = TOOLS.filter(needsMe).length;
   h += '<nav class="nav">';
   const mine = myQueue().length;
   h += '<button data-home aria-current="'+(!cur && state.view!=='personal')+'"><span>Owned by me</span>'+
     (mine?'<span class="pending">'+mine+'</span>':cnt(ownedSkills().length))+'</button>';
   h += '<div class="lbl">Subscriptions<button class="lbladd" data-newspace title="New space" aria-label="New space">+</button></div>';
-  h += '<button data-personal aria-current="'+(state.view==='personal')+'"><span>'+esc(MINE())+'</span>'+
+  /* the Owner tag too: you run your own list, and the row that says so on
+     every other subscription should not go quiet on the one you certainly own */
+  h += '<button data-personal aria-current="'+(state.view==='personal')+'">'+
+    '<span>'+esc(MINE())+'<span class="otag">Owner</span></span>'+
     (needy?'<span class="pending">'+needy+'</span>':cnt(personalSkills().length))+'</button>';
   /* yours first, then a gap, then the ones you'd have to ask for */
   const srow = sp => {
@@ -2500,10 +2985,41 @@ function sideHtml(){
   h += inSp.map(srow).join('');
   if(locked.length) h += '<div class="navgap"></div>'+locked.map(srow).join('');
   h += '</nav>';
-  h += '<div class="spacer"></div>';
-  h += '<button class="me" id="me" aria-haspopup="true">'+avHtml(p)+
-    '<span><div class="nm">'+esc(p.name)+'</div><div class="rl">'+esc(role)+'</div></span></button>';
+  /* No profile block down here any more: you live in the top bar, in one
+     button, on both surfaces. */
   return h+'</div>';
+}
+
+/* A place's own actions, beside its name — the same three on every one of
+   them, the way a Knowledge page carries its own.
+
+   Everyone sees all three, and they do the same thing for everyone. There is
+   ONE way to put a skill somewhere: you add it. There used to be two — owners
+   "added", everyone else "proposed" — which meant the same button in the same
+   spot opened a different flow with different words depending on who pressed
+   it, and the person who taught you the app could not tell you what you would
+   see. Who reviews what is a property of the subscription, not of the door.
+
+   Weight follows stakes. Share is bounded because it is the only action here
+   with a consequence for other people; + is an icon because it is frequent and
+   reversible; the rest live behind ⋯. No chevron on Share, unlike a Knowledge
+   page: a file can be shared at two scopes (itself, or its folder), a place
+   has exactly one thing to share.
+
+   The ⋯ is the one part that varies, because its items are about YOUR
+   relationship to the place: an owner can delete it, a member can leave it,
+   and neither is true of your own list — you cannot resign from yourself. */
+function spaceActs(sp, admin){
+  return '<span class="pageacts">'+
+    '<span class="actwrap only">'+
+      '<button class="actbtn" data-sharesheet="'+sp.id+'">'+PEOPLE_SVG+'Share</button></span>'+
+    '<button class="tbicon" data-add="'+sp.id+'" title="Add a skill or tool" aria-label="Add a skill or tool">'+I_PLUS+'</button>'+
+    dotsHtml(
+      mi('data-splink="'+sp.id+'"', I_LINK, 'Copy link')+
+      (sp.personal ? ''
+        : admin ? mi('class="del" data-delspace="'+sp.id+'"', I_TRASH, 'Delete subscription')
+                : mi('data-leavespace="'+sp.id+'"', I_OUT, 'Leave this subscription')))+
+    '</span>';
 }
 
 /* =========================================================
@@ -2526,20 +3042,15 @@ function renderSpace(sp){
   }
 
   const pend = spacePending(sp.id);
-  let h = '<div class="toprow">'+crumbs([ROOT, { t:sp.name, menu:placesMenu(sp.id) }])+
-      (admin?'<button class="sharebtn" data-sharesheet="'+sp.id+'">'+PEOPLE_SVG+'Share</button>'+
-             '<button class="gearbtn" data-spmenu="'+sp.id+'" title="Subscription settings" aria-label="Subscription settings">'+GEAR_SVG+'</button>':'')+'</div>'+
-    '<div class="item-title"><h1>'+esc(sp.name)+'</h1></div>';
-  if(admin) h += '<div style="margin-top:14px">'+
-    '<button class="btn small" data-add="'+sp.id+'">Add skills or tools</button></div>';
-  else h += '<div style="margin-top:14px"><button class="btn small" data-propose="'+sp.id+'">Propose a skill or tool</button></div>';
+  let h = '<div class="toprow">'+crumbs([ROOT, { t:sp.name, menu:placesMenu(sp.id) }])+'</div>'+
+    '<div class="item-title"><h1>'+esc(sp.name)+'</h1>'+spaceActs(sp, admin)+'</div>';
 
   /* in a space, "needs you" is setup: a skill whose tool you haven't connected,
      plus anything waiting for your review */
   const blocked = sp.skills.filter(sid=>{ const s = skillById(sid); return s && blockedBy(s).length; });
   const needN = blocked.length + (admin?pend.length:0);
   const shown = state.filter ? blocked : sp.skills;
-  h += '<div class="h4" style="margin-top:30px">Skills<span class="cap">'+
+  h += '<div class="h4 quiet" style="margin-top:30px">Skills<span class="cap">'+
     (sp.skills.length+(admin?pend.length:0))+'</span>'+(needN?filterBtn():'')+refreshBtn()+'</div>';
   h += '<div class="grid">'+
     (admin ? pend.map(p=>
@@ -2564,7 +3075,7 @@ function renderSpace(sp){
   if(!sp.skills.length && !(admin&&pend.length))
     h += '<div class="empty">No skills yet. Add one, or ask your agent to write one for '+esc(sp.name)+'.</div>';
 
-  h += '<div class="h4" style="margin-top:34px">Tools<span class="cap">'+sp.tools.length+'</span></div>';
+  h += '<div class="h4 quiet" style="margin-top:34px">Tools<span class="cap">'+sp.tools.length+'</span></div>';
   h += '<div class="grid">'+sp.tools.map(tid=>{
     const t = toolById(tid); if(!t) return '';
     const foot = stateFoot(t);
@@ -2588,7 +3099,8 @@ function renderDoc(s){
   if(!files.find(f=>f.id===state.tabFile)) state.tabFile = 'main';
   const af = files.find(f=>f.id===state.tabFile);
   let h = '<div class="toprow">'+crumbs(skillTrail(s))+
-      dotsHtml('<button data-vhist>Version history</button><button data-copypage>Copy page contents</button>')+'</div>'+
+      dotsHtml(mi('data-vhist', I_CLOCK, 'Version history')+
+              mi('data-copypage', I_COPY, 'Copy page contents'))+'</div>'+
     '<div class="item-grid solo"><article>'+
     '<div class="item-title"><h1>'+esc(s.name)+'</h1></div>'+
     '<p class="lede">'+esc(s.desc)+'</p>'+
@@ -2777,8 +3289,23 @@ function newSpaceModal(){
 /* the same small menu whether you right-clicked the sidebar or used the gear */
 function ctxHtml(){
   if(!state.ctx) return '';
+  const at = 'style="left:'+state.ctx.x+'px;top:'+state.ctx.y+'px"';
+
+  /* A KB path — the same menu for a file and a folder, minus what does not
+     apply. Right-click is where a file tree keeps the things you do TO a
+     thing rather than WITH it: who can see it, and getting a copy out. */
+  if(state.ctx.kb){
+    const p = state.ctx.kb, isDir = !kbf(p);
+    return '<div class="ctxmenu" '+at+'>'+
+      '<button data-kbshare="'+esc(p)+'">Manage access…</button>'+
+      '<button data-kbdownload="'+esc(p)+'">Download '+(isDir?'folder as .zip':'file')+'</button>'+
+      '<button data-copypath="'+esc(p)+'">Copy path</button>'+
+      (isDir ? '<button data-kbnewfile="'+esc(p)+'">New file here</button>' : '')+
+      '</div>';
+  }
+
   const sp = spaceById(state.ctx.sp); if(!sp) return '';
-  return '<div class="ctxmenu" style="left:'+state.ctx.x+'px;top:'+state.ctx.y+'px">'+
+  return '<div class="ctxmenu" '+at+'>'+
     '<button data-sharesheet="'+sp.id+'">Share '+esc(sp.name)+'</button>'+
     '<button class="del" data-delspace="'+sp.id+'">Delete subscription</button></div>';
 }
@@ -2786,6 +3313,10 @@ function ctxHtml(){
 /* share = who this reaches: a person by email, or a group (another subscription) */
 function shareModal(spid){
   const sp = spaceById(spid);
+  /* the sheet remembers what it is ON. Its buttons used to read `state.space`,
+     which is only set while you are standing on a group page — so the same
+     sheet opened from your own list had nothing to write to. */
+  state.sharesp = sp.id;
   const groups = (sp.groups||[]).map(spaceById).filter(Boolean);
   const free = SPACES.filter(x=>x.id!==sp.id && !(sp.groups||[]).includes(x.id));
   const reach = sp.members.length + groups.reduce((n,g)=>n+g.members.length, 0);
@@ -2817,19 +3348,6 @@ function ownerModal(sid){
     '<div class="mfoot"><button class="btn quiet" data-close>Close</button></div>');
 }
 
-/* anyone in a space can propose — the agent builds it, the space's owner reviews it */
-const proposePrompt = sp => 'Help me build a new skill or tool and propose it for the '+sp.name+' subscription at Bevel. Ask me what it should do, draft it, then send it to the space for review.';
-function proposeModal(spid){
-  const sp = spaceById(spid);
-  const adm = sp.admins.map(x=>personById(x).name).join(', ');
-  modal('<h3>Propose a skill or tool for '+esc(sp.name)+'</h3>'+
-    '<p style="margin-top:8px">You build with your agent, not here. Tell it what you need — it drafts the skill or tool and sends it to this subscription.</p>'+
-    '<div class="endpoint" style="white-space:normal">'+esc(proposePrompt(sp))+'</div>'+
-    '<p style="margin-top:12px;font-size:12.5px;color:var(--ink3)">'+esc(adm)+' reviews it before it joins '+esc(sp.name)+'.</p>'+
-    '<div class="mfoot"><button class="btn quiet" data-close>Close</button>'+
-    '<button class="btn primary" data-copy="'+esc(proposePrompt(sp))+'">Copy prompt</button></div>');
-}
-
 /* your own shelf: there is no catalogue to browse, because nothing is here until
    you make it. A folder you already have, or an agent that writes one. */
 const minePrompt = 'Help me build a skill or tool for myself at Bevel. Ask me what it should do, draft it, and add it to my own list — it stays mine until I propose it to a subscription.';
@@ -2854,6 +3372,9 @@ const personalAddModal = () => addFlow({
 const addPrompt = sp => 'Help me build a new skill or tool and add it to the '+sp.name+' subscription at Bevel. I run it, so it goes in directly — no review step.';
 function addModal(spid){
   const sp = spaceById(spid);
+  /* same button, same words, one branch — where it LANDS is the only thing
+     that differs, and the sheet says so in its own first line */
+  if(sp.personal){ personalAddModal(); return; }
   addFlow({ title:'Add a skill or tool to '+sp.name, zip:sp.id, prompt:addPrompt(sp),
     lede:'Two ways in. Either way it joins '+sp.name+' — everyone subscribed gets it the next time their agent connects.',
     agent:'Tell your agent what you need — it drafts the skill and adds it to '+sp.name+'.' });
@@ -2872,19 +3393,68 @@ function agentModal(){
 /* =========================================================
    Profile menu
    ========================================================= */
+/* =========================================================
+   The profile menu — one button, everything about you.
+
+   It replaces three separate controls (a name, a gear, a sign-out arrow) and
+   the sidebar's own profile block. Those were four places to look for things
+   that all answer the same question: "me, and the settings that follow me".
+   Identity sits at the top so the menu states who you are before it offers to
+   change anything, then workspace settings, then the admin-only set, then the
+   way out — destructive last, and the only red thing in it.
+   ========================================================= */
+const I_PLUG  = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5M7 8h10v3a5 5 0 0 1-10 0zM12 16v5"/></svg>';
+const I_EYE   = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.6"/></svg>';
+const I_LOOP  = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 0 0-13.7-5L4 8M4 4v4h4M4 13a8 8 0 0 0 13.7 5L20 16M20 20v-4h-4"/></svg>';
+const I_KEY   = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="12" r="3.6"/><path d="M11.6 12H21l-1.8 2.2M17 12v3"/></svg>';
+const I_LOCK2 = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="4.5" y="10.5" width="15" height="9.5" rx="2.2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></svg>';
+const I_APPS  = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M10.5 13.5a3.4 3.4 0 0 0 5 .3l2.4-2.4a3.4 3.4 0 0 0-4.8-4.8l-1.4 1.3"/><path d="M13.5 10.5a3.4 3.4 0 0 0-5-.3L6.1 12.6a3.4 3.4 0 0 0 4.8 4.8l1.3-1.3"/></svg>';
+const I_GRID  = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="6" r="2.4"/><circle cx="6.5" cy="16" r="2.4"/><circle cx="17.5" cy="16" r="2.4"/><path d="M12 8.4v3.2M10 13.6l-1.6 1M14 13.6l1.6 1"/></svg>';
+const I_CHAT  = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M4 5.5h16v10H9.5L5 19v-3.5H4z"/></svg>';
+const I_USERS = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.6 19.2c0-3.1 2.4-5 5.4-5s5.4 1.9 5.4 5"/><circle cx="17.6" cy="8.8" r="2.5"/><path d="M15.8 14.8c2.6-.5 4.9 1 4.9 4.4"/></svg>';
+const I_UACC  = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="8" r="3.4"/><path d="M4 19.5c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><path d="M17.5 7l4 4M21.5 7l-4 4"/></svg>';
+const I_CPU   = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10 3.5v3M14 3.5v3M10 17.5v3M14 17.5v3M3.5 10h3M3.5 14h3M17.5 10h3M17.5 14h3"/></svg>';
+const I_INBOX = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M3.5 13.5L6 5.5h12l2.5 8v5h-17z"/><path d="M3.5 13.5H9l1 2.2h4l1-2.2h5.5"/></svg>';
+
+/* One row per settings surface. `admin` gates it to the Admin only band. */
+const PROFILE_ITEMS = [
+  { icon:I_PLUG,  label:'Connectors' },
+  { icon:I_EYE,   label:'Watchlist' },
+  { icon:I_LOOP,  label:'Routines' },
+  { icon:I_KEY,   label:'External agent access', act:'data-agent' },
+  { icon:I_LOCK2, label:'Secrets' },
+  { icon:I_APPS,  label:'Connected apps' },
+  { icon:I_GRID,  label:'Browse available tools' },
+  { icon:I_CHAT,  label:'Give us feedback' },
+  { icon:I_USERS, label:'Roles & Members', admin:true },
+  { icon:I_UACC,  label:'User accounts',   admin:true },
+  { icon:I_CPU,   label:'LLM Configuration', admin:true },
+  { icon:I_INBOX, label:'Feedback Inbox',  admin:true },
+];
+
 function renderMenu(){
   const m = $('#pmenu');
   if(!state.menu){ m.classList.remove('on'); return; }
-  m.innerHTML = '<button data-agent><span class="ui"><span class="mt">External agent access</span>'+
-      '<span class="ms">Connect Claude Code, Codex or another agent</span></span></button>'+
-    '<div class="menu-label">Switch person</div>'+
-    PEOPLE.map(p=>{
-      const owns = SKILLS.filter(s=>acc(s.id).owners.includes(p.id)).length;
-      return '<button data-switch="'+p.id+'">'+avHtml(p)+'<span class="ui"><span class="mt">'+esc(p.name)+'</span>'+
-        '<span class="ms">'+(owns?owns+' skill'+(owns>1?'s':''):'No skills')+' · '+
-        esc((SPACES.find(sp=>sp.id!=='everyone'&&sp.members.includes(p.id))||{name:'Everyone'}).name)+'</span></span>'+
-        (p.id===state.user?'<span class="check">✓</span>':'')+'</button>';
-    }).join('');
+  const p = me();
+  const row = it => '<button '+(it.act||'data-settings="'+esc(it.label)+'"')+'>'+
+    '<span class="mi">'+it.icon+'</span>'+esc(it.label)+'</button>';
+
+  m.innerHTML =
+    '<div class="pmid">'+avHtml(p)+
+      '<span style="min-width:0"><div class="nm">'+esc(p.name)+'</div>'+
+      '<div class="em">'+esc(p.name.split(' ')[0].toLowerCase())+'@bevel.software</div></span></div>'+
+    PROFILE_ITEMS.filter(i=>!i.admin).map(row).join('')+
+    '<div class="menu-label">Admin only</div>'+
+    PROFILE_ITEMS.filter(i=>i.admin).map(row).join('')+
+    /* switching person is a demo affordance, not a product one — it sits with
+       the other identity things rather than in a menu of its own */
+    '<div class="menu-label">Viewing as</div>'+
+    PEOPLE.map(x=>
+      '<button data-switch="'+x.id+'">'+avHtml(x)+
+      '<span class="ui"><span class="mt">'+esc(x.name)+'</span></span>'+
+      (x.id===state.user?'<span class="check">✓</span>':'')+'</button>').join('')+
+    '<div class="menu-label" style="border-top:1px solid var(--line);padding-bottom:0;margin-top:5px"></div>'+
+    '<button class="del" data-signout><span class="mi">'+I_OUT+'</span>Sign out</button>';
   m.classList.add('on');
 }
 
@@ -2893,7 +3463,502 @@ function renderMenu(){
    One delegated listener instead of per-node handlers — clicks
    keep working no matter how or when the DOM was rebuilt.
    ========================================================= */
+/* =========================================================
+   KNOWLEDGE — the knowledge base as a place you browse.
+
+   Same app, same tokens, same document type as Skills & tools.
+   Three things are genuinely new and everything else is reuse:
+
+     1. the TREE. A KB is nested, and a flat list would throw
+        away the one thing the nesting tells you — what is
+        filed under what.
+     2. TABS. A KB visit is never one file: you open the node
+        type to read what a field means, then go back to the
+        node. Losing the first one to open the second is the
+        single most annoying thing a file browser can do.
+     3. RENDERERS. A `.tool` is a form, a `.csv` is a table, a
+        `.gif` is a picture. Showing any of them as text is the
+        viewer refusing to say what the file MEANS.
+
+   Locks come along unchanged from the group model: a folder you
+   cannot read still appears, because it is still a place in the
+   workspace — you just cannot open it.
+   ========================================================= */
+const I_FOLDER = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2.4h7A1.5 1.5 0 0 1 19 8.9v8.6a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17.5z"/></svg>';
+const I_IMG    = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l4.6-4.3 3 2.6 3-2.4L20 17"/></svg>';
+const I_CARET  = '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>';
+const I_BRANCH = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="7" cy="5.5" r="2.1"/><circle cx="7" cy="18.5" r="2.1"/><circle cx="17" cy="9.5" r="2.1"/><path d="M7 7.6v8.8M9.1 9.5H13a2 2 0 0 1 2 2v.4"/></svg>';
+const I_LINK   = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M10.5 13.5a3.4 3.4 0 0 0 5 .3l2.4-2.4a3.4 3.4 0 0 0-4.8-4.8l-1.4 1.3"/><path d="M13.5 10.5a3.4 3.4 0 0 0-5-.3L6.1 12.6a3.4 3.4 0 0 0 4.8 4.8l1.3-1.3"/></svg>';
+const I_X      = '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+
+
+/* The tree, modelled on the real workspace — and deliberately only the part of
+   it that IS knowledge: `KnowledgeBase/` (what the company knows) and `Data/`
+   (what its pipelines generate). `Groups/` holds skills and tool manuals, and
+   those have their own app with their own pages; listing them here would put
+   the same thing in two places and make the file browser the answer to a
+   question Skills & Tools already answers better.
+
+   `cr` marks a file with an open change request — the same amber dot the
+   skill file list uses. */
+const KBF = [
+  { p:'KnowledgeBase/README.md', kind:'md', mdId:'kb-readme', size:'1.9 KB', edited:'3 weeks ago', by:'juan' },
+  { p:'KnowledgeBase/Engineering/NodeTypes/NodeType.md', kind:'md', mdId:'kb-invariant', h1fields:true, size:'2.2 KB', edited:'2 months ago', by:'juan' },
+  { p:'KnowledgeBase/Engineering/NodeTypes/Project.md', kind:'md', mdId:'kb-invariant', h1fields:true, size:'2.8 KB', edited:'6 weeks ago', by:'juan' },
+  { p:'KnowledgeBase/Engineering/NodeTypes/Invariant.md', kind:'md', mdId:'kb-invariant', h1fields:true, size:'3.4 KB', edited:'4 days ago', by:'ali', cr:true },
+  { p:'KnowledgeBase/Engineering/NodeTypes/ArchitecturePrinciple.md', kind:'md', mdId:'kb-invariant', h1fields:true, size:'3.1 KB', edited:'5 weeks ago', by:'juan' },
+  { p:'KnowledgeBase/Engineering/Knowledge/Bevel-Platform.md', kind:'md', mdId:'kb-bevel-platform', size:'5.6 KB', edited:'yesterday', by:'juan' },
+  { p:'KnowledgeBase/Engineering/Knowledge/Avi-Checkin.md', kind:'md', mdId:'kb-bevel-platform', size:'2.4 KB', edited:'2 days ago', by:'avi' },
+  { p:'KnowledgeBase/GTM/NodeTypes/Company.md', kind:'md', mdId:'kb-egym', size:'1.7 KB', edited:'3 months ago', by:'ali' },
+  { p:'KnowledgeBase/GTM/NodeTypes/Lead.md', kind:'md', mdId:'kb-egym', size:'1.4 KB', edited:'3 months ago', by:'ali' },
+  { p:'KnowledgeBase/GTM/Knowledge/Egym.md', kind:'md', mdId:'kb-egym', size:'4.2 KB', edited:'6 hours ago', by:'ali' },
+  { p:'KnowledgeBase/GTM/Knowledge/Zvoove-Call-2026-03-19.md', kind:'md', mdId:'kb-egym', size:'3.3 KB', edited:'last week', by:'ali' },
+  { p:'KnowledgeBase/Organization/Onboarding.md', kind:'md', mdId:'kb-readme', size:'2.6 KB', edited:'a month ago', by:'juan' },
+  { p:'KnowledgeBase/Product/01-knowledge-page.gif', kind:'img', size:'1.4 MB', edited:'2 weeks ago', by:'juan' },
+  { p:'KnowledgeBase/Product/Bevel Platform Assessment.md', kind:'md', mdId:'kb-readme', size:'8.1 KB', edited:'last week', by:'juan' },
+  { p:'Data/Engineering/velocity.csv', kind:'csv', size:'12 KB', edited:'today', by:'pipeline' },
+  { p:'Data/GTM/pipeline-weekly.csv', kind:'csv', size:'31 KB', edited:'today', by:'pipeline' },
+  { p:'Data/README.md', kind:'md', mdId:'kb-readme', size:'640 B', edited:'2 months ago', by:'juan' },
+];
+/* A folder you cannot read is simply not in this tree.
+   The Skills sidebar lists locked GROUPS on purpose — a group is a place you
+   might ask to join, so naming it is the invitation. A file tree is not that:
+   it is the map of what you can open, and rows that refuse to open are noise
+   in the one list that should be entirely actionable. */
+
+const kbf = p => KBF.find(f=>f.p===p);
+const kbName = p => p.split('/').pop();
+const kbOpenDir = d => state.kbOpen.includes(d);
+
+/* Build the nested shape from flat paths — the same thing the file API returns. */
+function kbTree(){
+  const root = { dirs:new Map(), files:[] };
+  const dirAt = path => {
+    let node = root, sofar = '';
+    for(const seg of path.split('/')){
+      sofar = sofar ? sofar+'/'+seg : seg;
+      if(!node.dirs.has(seg)) node.dirs.set(seg, { name:seg, path:sofar, dirs:new Map(), files:[] });
+      node = node.dirs.get(seg);
+    }
+    return node;
+  };
+  KBF.forEach(f=>{
+    const i = f.p.lastIndexOf('/');
+    (i<0 ? root : dirAt(f.p.slice(0,i))).files.push(f);
+  });
+  return root;
+}
+
+/* Names and one caret, nothing else.
+
+   The folder icon was saying "this is a folder" next to a caret that already
+   said it, and the file icons were saying "this is a table" next to a name
+   ending in `.csv`. Both were decoration standing in the place where the name
+   should start. The caret earns its slot because it is the only thing here you
+   can act on — and a folder with nothing in it doesn't get one, because there
+   is nothing to open. */
+function kbRowsHtml(node, depth){
+  const pad = () => 'style="padding-left:'+(10 + depth*13)+'px"';
+  let h = '';
+  [...node.dirs.values()].forEach(d=>{
+    const open = kbOpenDir(d.path);
+    const kids = d.dirs.size + d.files.length;
+    h += '<button class="trow'+(open?' open':'')+'" '+pad()+' data-kbdir="'+esc(d.path)+'" aria-expanded="'+open+'">'+
+      '<span class="tw">'+(kids?I_CARET:'')+'</span>'+
+      '<span class="tn">'+esc(d.name)+'</span></button>';
+    if(open) h += '<div class="tkids">'+kbRowsHtml(d, depth+1)+'</div>';
+  });
+  /* the empty caret slot is what keeps a file's name in line with its
+     siblings' — the indent is the tree, so it has to survive the icon */
+  node.files.forEach(f=>{
+    h += '<button class="trow" '+pad()+' data-kbfile="'+esc(f.p)+'" aria-current="'+(state.kbFile===f.p)+'">'+
+      '<span class="tw"></span>'+
+      '<span class="tn">'+esc(kbName(f.p))+'</span>'+
+      (f.cr?'<span class="tdot" title="Open change request"></span>':'')+'</button>';
+  });
+  return h;
+}
+
+/* The Knowledge sidebar: which branch you stand on, then the tree. */
+function kbSideHtml(){
+  let h = '<div class="side-inner" style="width:'+state.sideW+'px">';
+  h += '<div class="tree">'+kbRowsHtml(kbTree(), 0)+'</div>';
+  h += crDockHtml();
+  return h+'</div>';
+}
+
+/* =========================================================
+   Who can read this — the same sheet for a file and a folder.
+
+   Access in the KB is a property of a PATH, and it inherits: what you grant
+   on a folder is what everything inside it gets. That is the whole reason
+   this sheet says which rule it is editing and where a grant came from — an
+   access dialog that hides inheritance teaches people to grant twice.
+   ========================================================= */
+function kbAccessModal(path){
+  state.accPath = path;               /* so a group toggle can re-render the sheet */
+  const isDir = !kbf(path);
+  const name = kbName(path);
+  const thing = isDir ? 'folder' : 'file';
+  /* The folders above this path that grant something, nearest last. Real
+     inheritance walks the whole ancestry; the shape is what matters here. */
+  const segs = path.split('/');
+  const root = segs[0];
+  const gran = segs.length>2 ? segs.slice(0, segs.length-1).join('/') : null;
+  const inherited = [
+    { folder:root, people:[['Everyone','Every signed-in person'],['Juan Viera','juan@bevel.software']] },
+  ];
+  if(gran) inherited.push({ folder:gran, people:[['Engineering','8 people']] });
+
+  const person = (label, sub, right) =>
+    '<div class="acc-row"><span class="logo"><span class="mg">'+esc(label[0])+'</span></span>'+
+    '<span class="pk">'+esc(label)+'<span class="sub">'+esc(sub)+'</span></span>'+right+'</div>';
+
+  modal('<h3>Share '+esc(name)+'</h3>'+
+    '<p style="margin-top:6px">Add someone by email, or name a group.</p>'+
+
+    '<div class="acc-add">'+
+      '<input class="msearch" id="accadd" placeholder="name@company.com, or a group…">'+
+      '<button class="btn primary" data-kbgrant="They">Share</button>'+
+    '</div>'+
+
+    '<div class="acc-sec">On this '+thing+'<span class="n">1</span></div>'+
+    person('Ali Raza','ali@bevel.software',
+      '<span class="acc-role">Can edit</span>'+
+      '<button class="acc-x" data-kbrevoke="Ali Raza" title="Remove Ali Raza" aria-label="Remove Ali Raza">'+
+      '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>')+
+
+    /* Inheritance, said as a sentence instead of labelled as a concept.
+       "People invited to KnowledgeBase" needs no explaining — it names the
+       folder, and the folder is both what it means and where it changes. One
+       collapsed row per granting folder, because two folders granting
+       different people is the normal case and merging them would hide which
+       one to open. */
+    inherited.map(g=>
+      '<div class="acc-grp">'+
+        '<button class="acc-grph'+(state.accOpen===g.folder?' open':'')+'" data-accgrp="'+esc(g.folder)+'" '+
+          'aria-expanded="'+(state.accOpen===g.folder)+'">'+
+          '<span class="cw">'+I_CARET+'</span>'+
+          '<span class="gt">People invited to <b>'+esc(kbName(g.folder))+'</b></span>'+
+          '<span class="gn">'+g.people.length+'</span>'+
+        '</button>'+
+        (state.accOpen===g.folder
+          ? '<div class="acc-grpb">'+g.people.map(p=>person(p[0],p[1],'')).join('')+
+            '<button class="acc-open" data-kbshare="'+esc(g.folder)+'">Manage '+esc(kbName(g.folder))+' →</button></div>'
+          : '')+
+      '</div>').join('')+
+
+    '<div class="mfoot"><button class="btn quiet" data-close>Done</button></div>');
+  /* the field is the point of the sheet — put the cursor in it */
+  const i = document.getElementById('accadd'); if(i) i.focus();
+}
+
+/* =========================================================
+   Change requests, docked under the tree.
+
+   Who you are belongs in the top bar and is already there; this
+   corner is better spent on the thing that actually needs you.
+   The tree is what you are reading — this is what other people
+   are asking you to change about it, so the two belong in one
+   column, with the queue pinned under the thing it acts on.
+   ========================================================= */
+const KBCRS = [
+  { n:32, title:'Tighten the enforcement wording on Invariant', by:'Ali Raza', files:1,
+    open:'KnowledgeBase/Engineering/NodeTypes/Invariant.md' },
+  { n:30, title:'Add the EGYM qualification notes', by:'John Newcomer', files:2,
+    open:'KnowledgeBase/GTM/Knowledge/Egym.md' },
+  { n:27, title:'Weekly velocity — restate the green column', by:'a pipeline', files:1,
+    open:'Data/Engineering/velocity.csv' },
+];
+function crDockHtml(){
+  const open = state.crdock;
+  let h = '<div class="crdock"><button class="crdock-h'+(open?' open':'')+'" data-crdock aria-expanded="'+open+'" '+
+    'aria-label="Change requests for you">'+
+    '<span class="cw">'+I_CARET+'</span>Change requests'+
+    '<span class="cn">'+KBCRS.length+'</span></button>';
+  if(open) h += '<div class="crdock-list">'+KBCRS.map(c=>
+    '<button class="crrow" data-kbcropen="'+c.n+'" title="'+esc(c.title)+'">'+
+      '<span class="ct"><span class="cnum">#'+c.n+'</span><span class="cx">'+esc(c.title)+'</span></span>'+
+      '<span class="cm">'+esc(c.by)+' · '+c.files+' file'+(c.files===1?'':'s')+'</span>'+
+    '</button>').join('')+'</div>';
+  return h+'</div>';
+}
+
+/* =========================================================
+   The top bar — what belongs to the APP, not to a page.
+
+   The nav toggle, which app you are in, which branch you stand
+   on, and you. It is the same bar on both surfaces, which is
+   the point: the thing that never changes should never move.
+   The sidebar's brand block went with it — one wordmark, one
+   corner, rather than the app naming itself twice.
+   ========================================================= */
+const I_PANEL = '<svg viewBox="0 0 16 16" width="15" height="15" fill="none"><rect x="1.5" y="2.5" width="13" height="11" rx="3.2" stroke="currentColor" stroke-width="1.3"/><path d="M4.7 2.5H6.1V13.5H4.7A3.2 3.2 0 0 1 1.5 10.3V5.7A3.2 3.2 0 0 1 4.7 2.5Z" fill="currentColor"/></svg>';
+const I_GEAR = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 10 4.1a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 11a2 2 0 1 1 0 4z"/></svg>';
+const I_OUT = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 17l5-5-5-5M20 12H9M11 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h5"/></svg>';
+const I_COPY = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5"/></svg>';
+const I_EDIT = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="M14.5 6.5l3 3"/></svg>';
+const I_INFO = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.8v.4"/></svg>';
+const I_CLOCK = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.4V12l3 1.8"/></svg>';
+const I_CODE = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 8l-4 4 4 4M15 8l4 4-4 4"/></svg>';
+const I_PLUS = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5.5v13M5.5 12h13"/></svg>';
+const I_TRASH = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 7h15M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7"/><path d="M6.5 7l.8 12.1A1.5 1.5 0 0 0 8.8 20.5h6.4a1.5 1.5 0 0 0 1.5-1.4L17.5 7"/></svg>';
+/* the folder a path sits in, or null at the root */
+const parentOf = p => p.indexOf('/')>-1 ? p.slice(0, p.lastIndexOf('/')) : null;
+
+function topbarHtml(){
+  const p = me();
+  let h = '<button class="tbicon'+(state.collapsed?'':' on')+'" data-collapse aria-pressed="'+(!state.collapsed)+'" '+
+    'title="'+(state.collapsed?'Show sidebar':'Hide sidebar')+'" aria-label="'+(state.collapsed?'Show sidebar':'Hide sidebar')+'">'+I_PANEL+'</button>';
+  h += '<button class="tbbrand" data-appmenu aria-expanded="'+(!!state.appmenu)+'" aria-haspopup="menu" title="Switch app">'+
+    '<span class="bw">Bevel</span>'+
+    '<span class="bchev"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span></button>';
+  /* the branch is a fact about the workspace you are editing — it belongs to
+     Knowledge, where files are edited, not to the skills catalog */
+  const b = BRANCHES.find(x=>x.id===state.branch) || BRANCHES[0];
+  if(state.app==='kb') h += '<span class="tbsep"></span>'+
+    '<button class="tbbranch" data-branchmenu aria-expanded="'+(!!state.branchmenu)+'" aria-haspopup="menu" title="Switch branch">'+I_BRANCH+
+    '<span class="bname">'+esc(b.id)+'</span>'+(b.dirty?'<span class="bdirty">'+b.dirty+'</span>':'')+
+    '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>';
+  h += '<span class="tbspacer"></span>';
+  /* one control for everything about you — see renderMenu */
+  h += '<button class="tbme" id="me" aria-haspopup="menu" aria-expanded="'+(!!state.menu)+'" title="You and your settings">'+
+    avHtml(p)+'<span class="nm">'+esc(p.name.split(' ')[0])+'</span>'+
+    '<svg class="bchev" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>';
+  return h + (state.appmenu ? appMenuHtml() : '') + (state.branchmenu ? branchMenuHtml() : '');
+}
+
+/* The branches you could be standing on. `main` is what everyone reads; the
+   rest are drafts — yours, and the ones people shared with you. A draft is
+   just a branch, which is why switching to one is a nav action and not a mode. */
+const BRANCHES = [
+  { id:'main', dirty:2, note:'What everyone reads. Changes land here by change request.' },
+  { id:'juan/knowledge-ui', by:'You', note:'Your draft — 4 files changed', mine:true },
+  { id:'ali/gtm-nodes', by:'Ali Raza', note:'Shared with you — 7 files changed', shared:true },
+];
+function branchMenuHtml(){
+  const row = b => {
+    const on = state.branch===b.id;
+    return '<button class="brow" data-pickbranch="'+esc(b.id)+'" role="menuitem">'+
+      '<span class="bck">'+(on?'<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5 11-11"/></svg>':'')+'</span>'+
+      '<span style="min-width:0"><div class="bn2">'+esc(b.id)+'</div><div class="bd2">'+esc(b.note)+'</div></span>'+
+      (b.dirty?'<span class="bstat">'+b.dirty+' unsaved</span>':'')+
+    '</button>';
+  };
+  return '<div class="branchmenu" role="menu">'+
+    '<div class="bml">Shared</div>'+ row(BRANCHES[0])+
+    '<div class="bml">Drafts</div>'+ BRANCHES.slice(1).map(row).join('')+
+    '<div class="bsep"></div>'+
+    '<button class="bnew" data-newbranch><span class="bi2"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span>Start a new draft</button>'+
+  '</div>';
+}
+function appMenuHtml(){
+  const row = (id, name, desc) =>
+    '<button data-app="'+id+'" role="menuitem">'+
+      '<span class="ck">'+(state.app===id?'<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5 11-11"/></svg>':'')+'</span>'+
+      '<span><div class="an">'+esc(name)+'</div><div class="ad">'+esc(desc)+'</div></span></button>';
+  return '<div class="appmenu" role="menu">'+
+    /* raw text — `row` escapes it, so an entity here would render literally */
+    row('kb','Knowledge','Browse and edit your knowledge base')+
+    row('skills','Skills & Tools','What your assistant can do, and what it connects to')+
+    '</div>';
+}
+
+/* =========================================================
+   A document — what it says, and the facts about it
+   ========================================================= */
+function renderKb(){
+  const f = kbf(state.kbFile) || KBF[0];
+
+  /* No breadcrumb row. The tree on the left already shows where this file
+     sits, with the folders open around it — a trail above the title would be
+     the same fact a second time, on the line where the title should be. */
+  let h = kbTabsHtml();
+
+  h += '<div class="item-grid'+(state.kbRail?'':' solo')+'"><article>';
+  /* The actions live ON the page, beside its name: copy it, edit it, and the
+     rest behind the ⋯ where things you use monthly belong. */
+  /* Share is the bounded button because it is the one action with a
+     consequence for other people; copy and edit are icons — frequent, private,
+     and instantly reversible. Weight follows stakes, not frequency. */
+  h += '<div class="item-title"><h1>'+esc(kbName(f.p).replace(/\.(md|csv|gif)$/,''))+'</h1>'+
+    '<span class="pageacts">'+
+      '<span class="actwrap">'+
+        '<button class="actbtn" data-kbshare="'+esc(f.p)+'">'+PEOPLE_SVG+'Share</button>'+
+        '<button class="actchev" data-sharemenu aria-expanded="'+(!!state.sharemenu)+'" aria-haspopup="menu" aria-label="More sharing options">'+
+          '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>'+
+        (state.sharemenu ? '<div class="actmenu" role="menu">'+
+          mi('data-kbshare="'+esc(f.p)+'"', PEOPLE_SVG, 'Manage access…')+
+          mi('data-kblink="'+esc(f.p)+'"', I_LINK, 'Copy link to this page')+
+          mi('data-kbshare="'+esc(parentOf(f.p) || f.p)+'"', I_FOLDER, 'Share the whole folder')+
+        '</div>' : '')+
+      '</span>'+
+      '<button class="tbicon" data-copypage title="Copy page as Markdown" aria-label="Copy page as Markdown">'+I_COPY+'</button>'+
+      '<button class="tbicon" data-kbedit title="Edit this file" aria-label="Edit this file">'+I_EDIT+'</button>'+
+      dotsHtml(
+        mi('data-rail', I_INFO, state.kbRail?'Hide file details':'File details')+
+        mi('data-vhist', I_CLOCK, 'Version history')+
+        mi('data-kbraw', I_CODE, 'View raw file')+
+        mi('data-copypath="'+esc(f.p)+'"', I_LINK, 'Copy path'))+
+    '</span></div>';
+
+  if(f.cr) h += '<div class="panel" style="margin-top:14px;background:var(--wait-soft);border-color:transparent">'+
+    '<div class="ph">Open change request</div>'+
+    '<div style="font-size:13px;color:var(--ink2);margin-top:2px">Ali proposed tightening the enforcement wording. '+
+    'Nothing here changes until someone with write access applies it.</div>'+
+    '<div style="display:flex;gap:8px;margin-top:11px"><button class="btn primary" data-kbcr>Review the change</button></div></div>';
+
+  h += kbBody(f);
+  h += '</article>'+(state.kbRail ? kbRailHtml(f) : '')+'</div>';
+  return h;
+}
+
+function kbTabsHtml(){
+  if(!state.kbTabs.length) return '';
+  return '<div class="kbtabs" role="tablist">'+state.kbTabs.map(p=>{
+    const f = kbf(p); if(!f) return '';
+    return '<button class="kbtab" data-kbfile="'+esc(p)+'" aria-current="'+(state.kbFile===p)+'" role="tab">'+
+      (f.cr?'<span class="tdirty"></span>':'')+
+      '<span>'+esc(kbName(p))+'</span>'+
+      '<span class="x" data-kbclose="'+esc(p)+'" role="button" aria-label="Close '+esc(kbName(p))+'">'+I_X+'</span></button>';
+  }).join('')+'</div>';
+}
+
+/* One renderer per kind — the viewer's whole job is saying what a file MEANS. */
+function kbBody(f){
+  if(f.kind==='csv')  return kbTableHtml(f);
+  if(f.kind==='img')  return '<div class="kbimg"><span class="ph">'+I_IMG+'</span>'+
+    '<span>'+esc(kbName(f.p))+' — 1240 × 720</span></div>'+
+    '<div class="kbfoot">Images render as themselves. The viewer never shows you base64 and calls it a file.</div>';
+  return '<div class="doc">'+mdRender(docText(f.mdId||'kb-readme'), !!f.h1fields)+'</div>';
+}
+
+function kbTableHtml(f){
+  const gtm = f && f.p.indexOf('GTM')>-1;
+  const head = gtm ? ['Week','Stage','Opened','Won','Value']
+                   : ['Week','Team','Merged','Reverted','Green'];
+  const rows = gtm ? [
+    ['2026-07-27','Qualified','18','4','€212k'],
+    ['2026-07-20','Qualified','14','3','€168k'],
+    ['2026-07-13','Qualified','21','6','€260k'],
+    ['2026-07-06','Qualified','11','2','€96k'],
+  ] : [
+    ['2026-07-27','Engineering','14','3','92%'],
+    ['2026-07-20','Engineering','11','5','84%'],
+    ['2026-07-13','Engineering','16','2','95%'],
+    ['2026-07-06','Engineering','9','6','78%'],
+  ];
+  return '<div class="kbtable"><table>'+
+    '<thead><tr>'+head.map((x,i)=>'<th'+(i>1?' style="text-align:right"':'')+'>'+esc(x)+'</th>').join('')+'</tr></thead><tbody>'+
+    rows.map(r=>'<tr><td>'+r[0]+'</td><td>'+r[1]+'</td><td class="num">'+r[2]+'</td><td class="num">'+r[3]+'</td><td class="num">'+r[4]+'</td></tr>').join('')+
+    '</tbody></table></div>'+
+    '<div class="kbfoot">Generated by a pipeline — '+(gtm?'312':'148')+' rows, 4 shown. Nothing in <b>Data/</b> is hand-edited.</div>';
+}
+
+/* The rail is the file's own facts: where it is, who touched it, what points here. */
+function kbRailHtml(f){
+  const p = personByName({juan:'Juan Viera',ali:'Ali Rahimi',avi:'Avi Cohen'}[f.by]||'Juan Viera') || me();
+  const links = f.p.indexOf('Invariant')>-1
+    ? [['NodeType.md','KnowledgeBase/Engineering/NodeTypes/NodeType.md'],
+       ['Bevel-Platform.md','KnowledgeBase/Engineering/Knowledge/Bevel-Platform.md']]
+    : [['README.md','KnowledgeBase/README.md']];
+  return '<aside><div class="h4" style="margin-top:0">About this file</div><div class="kbmeta">'+
+    '<div class="mrow"><span class="mk">Path</span><span class="mv mono">'+esc(f.p)+'</span></div>'+
+    '<div class="mrow"><span class="mk">Size</span><span class="mv">'+esc(f.size)+'</span></div>'+
+    '<div class="mrow"><span class="mk">Edited</span><span class="mv">'+esc(f.edited)+
+      (f.by==='pipeline'?' by a pipeline':' by '+esc(p.name.split(' ')[0]))+'</span></div>'+
+    '<div class="mrow"><span class="mk">Access</span><span class="mv"><span class="pill">Everyone can read</span></span></div>'+
+    '</div>'+
+    '<div class="h4">Links out</div>'+
+    links.map(l=>'<button class="backlink" data-kbfile="'+esc(l[1])+'"><span class="bi">'+I_LINK+'</span>'+esc(l[0])+'</button>').join('')+
+    '</aside>';
+}
+
 const CLICKS = {
+  'data-app': b=>{
+    const id = b.getAttribute('data-app');
+    state.app = id; state.appmenu = false;
+    if(id==='kb'){ state.view = 'kb'; }
+    else { state.view = 'home'; state.skill=null; state.cr=null; state.space=null; }
+    render(); window.scrollTo({top:0});
+  },
+  'data-appmenu': ()=>{ state.appmenu = !state.appmenu; render(); },
+  'data-kbdir': b=>{
+    const d = b.getAttribute('data-kbdir');
+    const i = state.kbOpen.indexOf(d);
+    if(i<0) state.kbOpen.push(d); else state.kbOpen.splice(i,1);
+    render();
+  },
+  'data-kbfile': b=>{
+    const p = b.getAttribute('data-kbfile');
+    state.kbFile = p;
+    if(!state.kbTabs.includes(p)) state.kbTabs.push(p);
+    /* Opening a file always opens the folders above it — otherwise a link out
+       lands you on a document the tree cannot show you. */
+    const segs = p.split('/'); let sofar='';
+    for(let i=0;i<segs.length-1;i++){ sofar = sofar?sofar+'/'+segs[i]:segs[i]; if(!state.kbOpen.includes(sofar)) state.kbOpen.push(sofar); }
+    render(); window.scrollTo({top:0});
+  },
+  'data-kbclose': b=>{
+    const p = b.getAttribute('data-kbclose');
+    const i = state.kbTabs.indexOf(p);
+    if(i>-1) state.kbTabs.splice(i,1);
+    if(state.kbFile===p) state.kbFile = state.kbTabs[Math.max(0,i-1)] || KBF[0].p;
+    render();
+  },
+  'data-rail': ()=>{ state.kbRail = !state.kbRail; state.dots=''; render(); },
+  'data-kbedit': ()=>toast('Opens the editor on this file. Your edits become a change request.'),
+  'data-kbshare': b=>{
+    state.ctx=null; state.sharemenu=false; state.accOpen=null;
+    kbAccessModal(b.getAttribute('data-kbshare'));
+  },
+  'data-kbdownload': b=>{
+    const p = b.getAttribute('data-kbdownload'); state.ctx=null; render();
+    toast('Downloading '+kbName(p)+'.');
+  },
+  'data-kbnewfile': b=>{ const d = b.getAttribute('data-kbnewfile'); state.ctx=null; render(); toast('New file in '+kbName(d)+'.'); },
+  'data-kbgrant': b=>{
+    const typed = (document.getElementById('accadd')||{value:''}).value.trim();
+    if(!typed){ const i=document.getElementById('accadd'); if(i) i.focus(); return; }
+    closeModal();
+    toast(typed+' can now read this — and anything inside it.');
+  },
+  'data-kbrevoke': b=>{ closeModal(); toast(b.getAttribute('data-kbrevoke')+' no longer has access here.'); },
+  /* the sheet re-renders itself: it is a modal, not part of the page tree */
+  'data-accgrp': b=>{
+    const g = b.getAttribute('data-accgrp');
+    state.accOpen = state.accOpen===g ? null : g;
+    kbAccessModal(state.accPath);
+  },
+  'data-sharemenu': ()=>{ state.sharemenu = !state.sharemenu; render(); },
+  'data-kblink': b=>{ state.sharemenu=false; render(); copyNow('https://bevel.software/kb/'+b.getAttribute('data-kblink'), 'Link copied.'); },
+  'data-crdock': ()=>{ state.crdock = !state.crdock; render(); },
+  'data-kbcropen': b=>{
+    const c = KBCRS.find(x=>String(x.n)===b.getAttribute('data-kbcropen'));
+    if(!c) return;
+    /* Opening a request opens the file it touches — a review you cannot see
+       the subject of is a diff floating in space. */
+    state.kbFile = c.open;
+    if(!state.kbTabs.includes(c.open)) state.kbTabs.push(c.open);
+    const segs = c.open.split('/'); let sofar='';
+    for(let i=0;i<segs.length-1;i++){ sofar = sofar?sofar+'/'+segs[i]:segs[i]; if(!state.kbOpen.includes(sofar)) state.kbOpen.push(sofar); }
+    render(); window.scrollTo({top:0});
+    toast('#'+c.n+' — '+c.title+', from '+c.by+'.');
+  },
+  'data-copypath': b=>{ state.ctx=null; state.dots=''; render(); copyNow(b.getAttribute('data-copypath'), 'Path copied.'); },
+  'data-kbraw': ()=>{ state.dots=''; render(); toast('This opens the file exactly as stored — frontmatter and all.'); },
+  'data-settings': b=>{ state.menu=false; renderMenu(); toast(b.getAttribute('data-settings')+' — a settings page of its own.'); },
+  'data-signout': ()=>{ state.menu=false; render(); renderMenu(); toast('Signed out.'); },
+  'data-branchmenu': ()=>{ state.branchmenu = !state.branchmenu; render(); },
+  'data-pickbranch': b=>{
+    const id = b.getAttribute('data-pickbranch');
+    state.branch = id; state.branchmenu = false;
+    render();
+    toast(id==='main' ? 'You are on main — what everyone reads.'
+                      : 'Switched to '+id+'. Edits here are a draft until you propose them.');
+  },
+  'data-newbranch': ()=>{ state.branchmenu=false; render(); toast('A new draft branches off main — nothing you do in it is visible until you propose it.'); },
+  'data-kbcr': ()=>toast('This opens the change request — the same review screen as a skill.'),
   'data-connect': b=>{
     closeModal();
     const t = toolById(b.getAttribute('data-connect'));
@@ -2970,16 +4035,34 @@ const CLICKS = {
     render();
     toast('Sent back to '+personById(p.by).name.split(' ')[0]+' — they can revise it and ask again.');
   },
-  'data-sharesheet': b=>{ const id=b.getAttribute('data-sharesheet'); state.ctx=null; render(); shareModal(id); },
-  'data-spmenu': b=>{
-    const id = b.getAttribute('data-spmenu'), r = b.getBoundingClientRect();
-    state.ctx = (state.ctx && state.ctx.sp===id) ? null
-      : { sp:id, x:Math.max(8, r.right-208), y:r.bottom+6 };
+  'data-sharesheet': b=>{ const id=b.getAttribute('data-sharesheet'); state.ctx=null; state.dots=''; render(); shareModal(id); },
+  'data-splink': b=>{
+    const sp = spaceById(b.getAttribute('data-splink'));
+    state.dots=''; render();
+    copyNow(location.origin+location.pathname+'#subscription='+sp.id, 'Link to '+sp.name+' copied.');
+  },
+  /* Leaving is the member's own door out, so it is theirs alone: an admin's ⋯
+     offers Delete instead, which is a different act with different fallout. */
+  'data-leavespace': b=>{
+    const sp = spaceById(b.getAttribute('data-leavespace'));
+    state.dots='';
+    modal('<h3>Leave '+esc(sp.name)+'?</h3>'+
+      '<p style="margin-top:8px">You lose its '+sp.skills.length+' skills and '+sp.tools.length+
+        ' tools on your next connection. Nothing is deleted — you can ask to join again.</p>'+
+      '<div class="mfoot"><button class="btn quiet" data-close>Cancel</button>'+
+      '<button class="btn danger" data-leavespace2="'+sp.id+'">Leave '+esc(sp.name)+'</button></div>');
+  },
+  'data-leavespace2': b=>{
+    const sp = spaceById(b.getAttribute('data-leavespace2'));
+    sp.members = sp.members.filter(m=>m!==state.user);
+    closeModal();
+    state.view='spaces'; state.space=null;
     render();
+    toast('You left '+sp.name+'.');
   },
   'data-delspace': b=>{
     const sp = spaceById(b.getAttribute('data-delspace'));
-    state.ctx = null;
+    state.ctx = null; state.dots = '';
     modal('<h3>Delete '+esc(sp.name)+'?</h3>'+
       '<p style="margin-top:8px">Its '+sp.members.length+' '+(sp.members.length===1?'person loses':'people lose')+
         ' these skills and tools on their next connection. The skills themselves stay in the knowledge base.</p>'+
@@ -3013,10 +4096,14 @@ const CLICKS = {
       setTimeout(()=>{ state.refresh=''; render(); }, 3500); }, 700);
   },
   'data-add': b=>addModal(b.getAttribute('data-add')),
-  'data-propose': b=>proposeModal(b.getAttribute('data-propose')),
   'data-collapse': ()=>{
     state.collapsed = !state.collapsed;
     document.getElementById('app').classList.toggle('collapsed', state.collapsed);
+    /* render() as well as the class: the sidebar's width is an INLINE style
+       now (it is draggable), and an inline width beats the `.collapsed` rule.
+       Without this the class flipped and nothing moved until some other click
+       happened to re-render — which is exactly what it looked like. */
+    render();
   },
   'data-reqaccess': b=>{
     const sp = spaceById(b.getAttribute('data-reqaccess'));
@@ -3048,19 +4135,19 @@ const CLICKS = {
     toast(p.name+' added — '+sp.name+' loads for them on their first sign-in.');
   },
   'data-addgroup': b=>{
-    const sp = spaceById(state.space), g = spaceById(b.getAttribute('data-addgroup'));
+    const sp = spaceById(state.sharesp), g = spaceById(b.getAttribute('data-addgroup'));
     (sp.groups || (sp.groups=[])).push(g.id);
     shareModal(sp.id); render();
     toast(g.name+' shared — its '+g.members.length+' people get '+sp.name+' on their next connection.');
   },
   'data-ungroup': b=>{
-    const sp = spaceById(state.space), g = spaceById(b.getAttribute('data-ungroup'));
+    const sp = spaceById(state.sharesp), g = spaceById(b.getAttribute('data-ungroup'));
     sp.groups = (sp.groups||[]).filter(x=>x!==g.id);
     shareModal(sp.id); render();
     toast('Stopped sharing '+sp.name+' with '+g.name+'.');
   },
   'data-unmember': b=>{
-    const sp = spaceById(state.space), p = personById(b.getAttribute('data-unmember'));
+    const sp = spaceById(state.sharesp), p = personById(b.getAttribute('data-unmember'));
     sp.members = sp.members.filter(x=>x!==p.id);
     shareModal(sp.id); render();
     toast(p.name+' removed from '+sp.name+'. Their agent loses its skills on the next connection.');
@@ -3071,6 +4158,17 @@ const CLICKS = {
     if(state.tool) toolModal(toolById(state.tool)); else render();
   },
   'data-copypage': ()=>{
+    /* In Knowledge the page IS a file, so copy the file. Same button, same
+       words, whichever surface you pressed it on. */
+    if(state.app==='kb'){
+      const f = kbf(state.kbFile) || KBF[0];
+      const raw = f.mdId ? docText(f.mdId)
+        : f.kind==='tool' ? 'name: heyreach\nvariables:\n  BASE_URL: { scope: admin }\n  API_KEY:  { scope: user }'
+        : kbName(f.p);
+      state.dots=''; render();
+      copyNow(raw.trim(), 'Copied '+kbName(f.p)+'.');
+      return;
+    }
     const s = skillById(state.skill); if(!s) return;
     const files = skillFiles(s);
     const f = files.find(x=>x.id===state.tabFile) || files[0];
@@ -3152,13 +4250,19 @@ const CLICKS = {
 document.addEventListener('click', e=>{
   let n = e.target instanceof Element ? e.target : null;
   const onCrumb = !!(n && n.closest('[data-crumb]'));
-  if(state.ctx && !(n && n.closest('.ctxmenu')) && !(n && n.closest('[data-spmenu]'))){ state.ctx=null; render(); }
+  if(state.ctx && !(n && n.closest('.ctxmenu'))){ state.ctx=null; render(); }
+  /* clicking anywhere but the switcher (or its own menu) puts it away */
+  if(state.appmenu && !(n && n.closest('.appmenu')) && !(n && n.closest('[data-appmenu]'))){ state.appmenu=false; render(); }
+  if(state.branchmenu && !(n && n.closest('.branchmenu')) && !(n && n.closest('[data-branchmenu]'))){ state.branchmenu=false; render(); }
+  if(state.sharemenu && !(n && n.closest('.actwrap'))){ state.sharemenu=false; render(); }
   if(state.crumb!==null && !onCrumb) state.crumb = null;   /* picking one, or clicking away, closes it */
   while(n && n !== document.documentElement){
     for(const a in CLICKS){
       if(n.hasAttribute(a)){ CLICKS[a](n); return; }
     }
-    if(n.id==='me'){ state.menu = !state.menu; renderMenu(); return; }
+    /* render() as well as renderMenu(): the trigger lives in the top bar now,
+       so its aria-expanded is part of the bar's markup */
+    if(n.id==='me'){ state.menu = !state.menu; render(); renderMenu(); return; }
     n = n.parentElement;
   }
   if(state.crumb===null && !onCrumb && document.querySelector('.cmenu')) render();
@@ -3171,9 +4275,15 @@ document.addEventListener('click', e=>{
   if(state.vhist && e.target instanceof Element && e.target.id==='vov'){ state.vhist=false; render(); }
 });
 function render(){
-  $('#side').innerHTML = sideHtml();
+  $('#topbar').innerHTML = topbarHtml();
+  const side = $('#side');
+  side.innerHTML = state.app==='kb' ? kbSideHtml() : sideHtml();
+  /* the frame's width is state; the inner column keeps its own so the rows
+     slide out intact when collapsed instead of reflowing on the way */
+  side.style.width = state.collapsed ? '0px' : state.sideW+'px';
   const main = $('#main');
-  main.innerHTML = state.view==='cr'      ? renderCR(crById(state.cr))
+  main.innerHTML = state.app==='kb'       ? renderKb()
+                 : state.view==='cr'      ? renderCR(crById(state.cr))
                  : state.view==='skill'   ? renderSkill(skillById(state.skill))
                  : state.view==='doc'     ? renderDoc(skillById(state.skill))
                  : state.view==='space'   ? renderSpace(spaceById(state.space))
@@ -3183,6 +4293,14 @@ function render(){
                  : renderHome();
   /* the two pages you decide on hold their actions on screen */
   main.classList.toggle('fit', state.view==='cr' || state.view==='pending');
+  main.classList.toggle('kb', state.app==='kb');
+  main.classList.toggle('solo', state.app==='kb' && !state.kbRail);
+  /* Wider only where there is a second column to hold: a rail, or the two
+     panes of a change request. Everything else — Knowledge, groups, the
+     gallery — shares one measure, so the gutters match across the app. */
+  main.classList.toggle('wide', state.app==='kb'
+    ? state.kbRail
+    : (state.view==='cr' || state.view==='pending' || state.view==='skill'));
   $('#ctx').innerHTML = ctxHtml();
   const vw = $('#vov');
   vw.innerHTML = state.vhist ? vovHtml() : '';
@@ -3197,13 +4315,84 @@ function render(){
     if(b && m) b.scrollTop = Math.max(0, m.offsetTop - 130);
   }
 }
+/* =========================================================
+   Dragging the sidebar wider.
+
+   Width is written straight to the element during the drag rather than through
+   render(): rebuilding the whole tree on every mousemove is both slow and
+   destructive — it would blow away the row you are hovering. State catches up
+   once on mouseup, which is also the only moment the new width matters.
+
+   Keyboard gets the same control: a separator you can only drag is a control
+   half the people cannot use.
+   ========================================================= */
+const SIDE_MIN = 180, SIDE_MAX = 460;
+const clampW = w => Math.max(SIDE_MIN, Math.min(SIDE_MAX, Math.round(w)));
+(function sidebarResize(){
+  const grip = $('#resizer'), app = $('#app'), side = $('#side');
+  if(!grip) return;
+  let dragging = false;
+
+  const move = e => {
+    if(!dragging) return;
+    e.preventDefault();
+    const w = clampW(e.clientX - side.getBoundingClientRect().left);
+    state.sideW = w;
+    side.style.width = w+'px';
+    const inner = side.querySelector('.side-inner');
+    if(inner) inner.style.width = w+'px';
+  };
+  const stop = ()=>{
+    if(!dragging) return;
+    dragging = false;
+    app.classList.remove('sizing');
+    grip.classList.remove('on');
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', stop);
+    render();                       /* one rebuild, at the end */
+  };
+  grip.addEventListener('mousedown', e=>{
+    if(state.collapsed) return;
+    e.preventDefault();
+    dragging = true;
+    app.classList.add('sizing');
+    grip.classList.add('on');
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', stop);
+  });
+  /* double-click resets to the default, the way a split pane should */
+  grip.addEventListener('dblclick', ()=>{ state.sideW = 212; render(); });
+  grip.addEventListener('keydown', e=>{
+    const step = e.shiftKey ? 32 : 8;
+    if(e.key==='ArrowLeft'){ e.preventDefault(); state.sideW = clampW(state.sideW - step); render(); }
+    if(e.key==='ArrowRight'){ e.preventDefault(); state.sideW = clampW(state.sideW + step); render(); }
+    if(e.key==='Home'){ e.preventDefault(); state.sideW = 212; render(); }
+  });
+})();
+
 /* right-click a subscription you run — share it, or delete it */
 document.addEventListener('contextmenu', e=>{
-  const b = e.target instanceof Element ? e.target.closest('#side [data-space]') : null;
+  const el = e.target instanceof Element ? e.target : null;
+  if(!el) return;
+  const place = () => ({ x:Math.min(e.clientX, window.innerWidth-232), y:Math.min(e.clientY, window.innerHeight-160) });
+
+  /* Knowledge: every row in the tree has a menu, folder or file. Right-click
+     is where a file tree keeps access and downloads — the platform already
+     works this way, and a tree that ignores the right button is a tree people
+     will right-click anyway. */
+  const row = el.closest('#side [data-kbdir], #side [data-kbfile]');
+  if(row){
+    e.preventDefault();
+    state.ctx = { kb: row.getAttribute('data-kbdir') || row.getAttribute('data-kbfile'), ...place() };
+    render();
+    return;
+  }
+
+  const b = el.closest('#side [data-space]');
   const sp = b && spaceById(b.getAttribute('data-space'));
   if(!sp || !isSpaceAdmin(sp)) return;          /* nothing to offer on one you don't run */
   e.preventDefault();
-  state.ctx = { sp:sp.id, x:Math.min(e.clientX, window.innerWidth-216), y:Math.min(e.clientY, window.innerHeight-90) };
+  state.ctx = { sp:sp.id, ...place() };
   render();
 });
 document.addEventListener('keydown', e=>{
@@ -3212,6 +4401,9 @@ document.addEventListener('keydown', e=>{
   }
   if(e.key!=='Escape') return;
   if($('#mwrap').classList.contains('on')) closeModal();
+  else if(state.sharemenu){ state.sharemenu=false; render(); }
+  else if(state.branchmenu){ state.branchmenu=false; render(); }
+  else if(state.appmenu){ state.appmenu=false; render(); }
   else if(state.ctx){ state.ctx=null; render(); }
   else if(state.crumb!==null){ state.crumb=null; render(); }
   else if(state.vhist){ state.vhist=false; render(); }
@@ -3229,6 +4421,17 @@ try{
   const hp = new URLSearchParams(location.hash.slice(1));
   if(hp.get('user')) state.user = hp.get('user');
   if(hp.get('theme')) document.documentElement.dataset.theme = hp.get('theme');
+  /* #app=kb opens the Knowledge surface; #kb=<path> opens one document in it */
+  if(hp.get('app')==='kb' || hp.get('kb')){ state.app='kb'; state.view='kb'; }
+  if(hp.get('kb')){
+    const p = hp.get('kb');
+    if(kbf(p)){
+      state.kbFile = p;
+      if(!state.kbTabs.includes(p)) state.kbTabs.push(p);
+      const segs = p.split('/'); let sofar='';
+      for(let i=0;i<segs.length-1;i++){ sofar = sofar?sofar+'/'+segs[i]:segs[i]; if(!state.kbOpen.includes(sofar)) state.kbOpen.push(sofar); }
+    }
+  }
   if(hp.get('s')){ state.view='skill'; state.skill=hp.get('s'); }
   if(hp.get('personal')) state.view = 'personal';
   if(hp.get('spaces')) state.view = 'spaces';
