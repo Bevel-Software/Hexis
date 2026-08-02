@@ -4,11 +4,14 @@ import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
+import { KbFileRail } from './KbFileRail';
+import { useLinksOut } from '../hooks/useLinksOut';
+import { useLastCommit } from '../hooks/useLastCommit';
 import { openRawFile } from '../utils/openRawFile';
 import { Button } from '../../../shared/components';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
-import { useCanonicalFileUrl } from '../routing/kb-routes';
+import { useCanonicalFileUrl, useFileNav, resolveRelativePath } from '../routing/kb-routes';
 import { useReview } from '../../review/state/review.context';
 import { ProtectedBranchBanner } from '../../git/components/ProtectedBranchBanner';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
@@ -632,8 +635,23 @@ export function FileViewer() {
   }, [openFilePath]);
 
   // Session state, defaulting closed. Open ⇒ the shell switches to the wide
-  // measure and opens the rail's track.
+  // measure and opens the rail's track. Closed costs nothing: `useLastCommit`
+  // is gated on it, so a reader who never opens the rail never pays for the
+  // history request behind its "Edited" row.
   const [railOpen, setRailOpen] = useState(false);
+  const linksOut = useLinksOut(openFilePath, openFileContent);
+  const lastCommit = useLastCommit(openFilePath, railOpen);
+  // Compare owns the whole column; the rail steps aside for the duration and
+  // comes back with the document.
+  const railVisible = railOpen && activeTab === 'content';
+  const { openFile: navigateToFile } = useFileNav();
+  const handleOpenLink = useCallback(
+    (href: string) => {
+      if (!openFilePath) return;
+      navigateToFile(resolveRelativePath(openFilePath, href));
+    },
+    [openFilePath, navigateToFile],
+  );
 
 
   if (!openFilePath || openFileContent === null || !Renderer) {
@@ -694,7 +712,23 @@ export function FileViewer() {
           (proto:700-705). `editorContainerRef` goes to `scrollRef` because the
           shell is now the element that scrolls — the capture-phase listener
           bound to it is the file lock's only activity signal for a reader. */}
-      <KbDocumentShell variant={shellVariant} scrollRef={editorContainerRef}>
+      <KbDocumentShell
+        variant={shellVariant}
+        scrollRef={editorContainerRef}
+        rail={
+          railVisible ? (
+            <KbFileRail
+              path={openFilePath}
+              // Null for a binary file, whose bytes we never hold as text.
+              charCount={openFileContent?.length ?? null}
+              lastCommit={lastCommit}
+              owners={access.owners}
+              linksOut={linksOut}
+              onOpen={handleOpenLink}
+            />
+          ) : undefined
+        }
+      >
       <EditorTabs />
       {/* The document names itself, and its actions sit beside its name.
           Everything the deleted 40px strip carried is here — the three chips

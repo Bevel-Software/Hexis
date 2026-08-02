@@ -74,7 +74,18 @@ export function KbDocumentShell({
         // A definite height, not a scroll. `h-full` resolves against this
         // component's own (flex-sized, definite) height, so an `h-full` iframe
         // inside gets real pixels instead of collapsing to zero.
-        <div className="flex h-full min-h-0 w-full flex-col">{children}</div>
+        //
+        // The rail still opens here — the facts it carries (where the file is,
+        // who last touched it, who can read it) are as true of a PDF as of a
+        // paragraph. It takes a fixed column beside the viewport rather than
+        // widening a measure there is none of, and scrolls on its own so a
+        // long link list cannot stretch the iframe.
+        <div className="flex h-full min-h-0 w-full">
+          <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">{children}</div>
+          {rail && (
+            <aside className="w-[296px] flex-none overflow-y-auto py-4 pr-4">{rail}</aside>
+          )}
+        </div>
       ) : rail ? (
         // The wide measure: `minmax(0,620px)` + a 296px rail with a 44px gap
         // (proto:344). The article track is minmax-from-zero so the rail never
