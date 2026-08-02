@@ -87,3 +87,24 @@ export function getRendererLayout(filePath: string): RendererLayout {
   const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
   return FULL_BLEED_EXTENSIONS.has(ext) ? 'full-bleed' : 'prose';
 }
+
+/**
+ * Files whose renderer fetches its own bytes and never reads the text buffer.
+ *
+ * The workspace loads every open file's content as a STRING, so
+ * `openFileContent.length` is a number for a PDF too — it is just not a number
+ * that means anything, because those bytes were never text. The rail asks this
+ * before offering a character count: a figure nobody can interpret is worse
+ * than an absent row.
+ *
+ * Note this is NOT the same set as `FULL_BLEED_EXTENSIONS`. A CSV is laid out
+ * full-bleed and is still text you can count.
+ */
+const BINARY_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico',
+  '.pdf', '.docx', '.xlsx', '.zip',
+]);
+
+export function isBinaryFile(filePath: string): boolean {
+  return BINARY_EXTENSIONS.has(filePath.slice(filePath.lastIndexOf('.')).toLowerCase());
+}

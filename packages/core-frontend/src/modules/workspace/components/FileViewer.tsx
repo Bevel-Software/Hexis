@@ -33,7 +33,7 @@ import { PrViewer } from '../../pr/components/PrViewer';
 import { useFileLock } from '../../workflow/hooks/useFileLock';
 import { LockApiError } from '../../workflow/services/lock.api';
 import { useAuth } from '../../auth/state/auth.context';
-import { getFileRenderer, getRendererLayout } from './renderers';
+import { getFileRenderer, getRendererLayout, isBinaryFile } from './renderers';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 
@@ -729,8 +729,10 @@ export function FileViewer() {
           railVisible ? (
             <KbFileRail
               path={openFilePath}
-              // Null for a binary file, whose bytes we never hold as text.
-              charCount={openFileContent?.length ?? null}
+              // Null for a binary file. The workspace loads every open file's
+              // content as a string, so `.length` is a number for a PDF too —
+              // it just is not a number that means anything.
+              charCount={isBinaryFile(openFilePath) ? null : openFileContent?.length ?? null}
               lastCommit={lastCommit}
               owners={access.owners}
               linksOut={linksOut}

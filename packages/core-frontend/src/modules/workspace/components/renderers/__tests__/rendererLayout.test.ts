@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getRendererLayout } from '../index';
+import { getRendererLayout, isBinaryFile } from '../index';
 
 /**
  * The layout choice is the one thing in WP1 that cannot fail loudly: pick
@@ -28,4 +28,26 @@ describe('getRendererLayout', () => {
   ])('lays out %s as a viewport of its own', (path) => {
     expect(getRendererLayout(path)).toBe('full-bleed');
   });
+});
+
+/**
+ * Deliberately NOT the same set as the layout map — a CSV is laid out
+ * full-bleed and is still text you can count. Conflating the two would make
+ * the rail print a character count for a PDF, which is a number nobody can
+ * interpret.
+ */
+describe('isBinaryFile', () => {
+  it.each(['Inbox/brief.pdf', 'Inbox/diagram.png', 'Inbox/report.docx', 'Data/book.xlsx'])(
+    'knows %s holds no countable text',
+    (path) => {
+      expect(isBinaryFile(path)).toBe(true);
+    },
+  );
+
+  it.each(['Knowledge/Foo.md', 'Data/velocity.csv', 'Knowledge/page.html', 'Knowledge/notes.txt'])(
+    'knows %s is text',
+    (path) => {
+      expect(isBinaryFile(path)).toBe(false);
+    },
+  );
 });
