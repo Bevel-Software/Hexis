@@ -61,6 +61,16 @@ vi.mock('../../../workflow/services/lock.api', () => ({
   },
 }));
 
+// The access sheet is a 1200-line dialog with its own suite and its own
+// endpoints. Here it only has to prove WHICH entry the page handed it — a file
+// and its parent folder are the two share scopes, and picking the wrong one is
+// the only mistake this wiring can make.
+vi.mock('../../../access/components/ManageAccessDialog', () => ({
+  ManageAccessDialog: ({ entry }: { entry: { relativePath: string; type: string } }) => (
+    <div role="dialog" aria-label={`Manage access: ${entry.type} ${entry.relativePath}`} />
+  ),
+}));
+
 // Wrap `useFileLock` rather than replacing it: every other case in this file
 // depends on the real acquire/release lifecycle. The wrapper only observes
 // `recordActivity`, which has no other visible effect (it resets a timer), so
@@ -547,5 +557,49 @@ describe('FileViewer', () => {
     expect(shell.getAttribute('data-variant')).toBe('prose');
     // …and the tab strip lives inside it, so tabs and text share one edge.
     expect(shell.querySelector('[role="tablist"]')).not.toBeNull();
+  });
+
+  // ── WP4: the document names itself ──
+
+  it('names the file in an h1 and keeps no 40px chrome strip', () => {
+    render(<ViewerHarness initialContent="titled" />);
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Foo');
+    // The trio of sub-tabs went behind ⋯; Content is the page now.
+    expect(screen.queryByRole('button', { name: 'Content' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'History' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Compare' })).not.toBeInTheDocument();
+  });
+
+  it('opens Version history from ⋯ and offers a way back to the document', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="historic" />);
+
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: /Version history/ }));
+
+    const back = await screen.findByRole('button', { name: /Back to the document/ });
+    await user.click(back);
+    // The document is back, and so is its Edit affordance.
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+  });
+
+  it('shares the file itself from Share, and the parent folder from the chevron', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="shared" />);
+
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access: file knowledge-base/Knowledge/Foo.md',
+      }),
+    ).toBeInTheDocument();
+    // Close it, then take the other scope.
+    await user.click(screen.getByRole('button', { name: 'More sharing options' }));
+    await user.click(screen.getByRole('menuitem', { name: /Share the whole folder/ }));
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access: directory knowledge-base/Knowledge',
+      }),
+    ).toBeInTheDocument();
   });
 });

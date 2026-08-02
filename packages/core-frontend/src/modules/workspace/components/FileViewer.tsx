@@ -1,7 +1,12 @@
-import { useMemo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Check, XCircle, FileText, History, Clock4, GitCompare, Link2, Lock, Pencil, AlertTriangle } from 'lucide-react';
+import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
+import { Check, XCircle, Lock, AlertTriangle, ArrowLeft } from 'lucide-react';
+import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { EditorTabs } from './EditorTabs';
+import { KbPageHeader } from './KbPageHeader';
+import { openRawFile } from '../utils/openRawFile';
+import { Button } from '../../../shared/components';
+import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { useCanonicalFileUrl } from '../routing/kb-routes';
 import { useReview } from '../../review/state/review.context';
@@ -52,7 +57,6 @@ export function FileViewer() {
     bumpFsRevision,
     reloadTabFromDisk,
   } = useWorkspace();
-  const [linkCopied, setLinkCopied] = useState(false);
   // Chat decoupling: the suggested-prompt seed is an optional registry port
   // (null when no chat surface is registered → the prompt buttons hide).
   const seedSuggestedPrompt = useSuggestedPromptSeed();
@@ -553,16 +557,83 @@ export function FileViewer() {
   // Canonical link for the open file: the node's id URL when it's a node, else
   // its path URL (resolved in the background, falls back to the path meanwhile).
   const canonicalFileUrl = useCanonicalFileUrl(openFilePath);
+  // Each copy resolves to whether it actually landed. `navigator.clipboard`
+  // rejects outright on a non-secure origin, and the header says so on the
+  // control that was clicked rather than swallowing it.
   const handleCopyLink = useCallback(async () => {
     try {
       const base = canonicalFileUrl ?? `${window.location.origin}${window.location.pathname}`;
       await navigator.clipboard.writeText(base + window.location.hash);
-      setLinkCopied(true);
-      window.setTimeout(() => setLinkCopied(false), 1500);
+      return true;
     } catch (err) {
       console.error('Failed to copy link:', err);
+      return false;
     }
   }, [canonicalFileUrl]);
+
+  const handleCopyPath = useCallback(async () => {
+    if (!openFilePath) return false;
+    try {
+      await navigator.clipboard.writeText(openFilePath);
+      return true;
+    } catch (err) {
+      console.error('Failed to copy path:', err);
+      return false;
+    }
+  }, [openFilePath]);
+
+  // "Copy page as Markdown" is the document's own source. It is offered only
+  // when there IS markdown to copy — a PDF or an image has none, and copying
+  // a blob's bytes as text is nonsense rather than a feature.
+  const canCopyPage = !!openFilePath && /\.(md|markdown)$/i.test(openFilePath);
+  const handleCopyPage = useCallback(async () => {
+    if (openFileContent === null) return false;
+    try {
+      await navigator.clipboard.writeText(openFileContent);
+      return true;
+    } catch (err) {
+      console.error('Failed to copy page:', err);
+      return false;
+    }
+  }, [openFileContent]);
+
+  // `⋯ → View raw file`. Wrapped in a helper rather than assigning
+  // `window.location.href` inline so a test can spy on the intent without the
+  // navigation (§2.3 forbids assigning location.href in a test).
+  const handleViewRaw = useCallback(() => {
+    if (!workspaceId || !openFilePath) return;
+    openRawFile(workspaceId, openFilePath);
+  }, [workspaceId, openFilePath]);
+
+  // Right-click → Manage access, reached from the page's Share button. The
+  // dialog takes a tree entry; a file and its parent folder are both entries,
+  // which is what makes "share the whole folder" the same dialog.
+  const [shareTarget, setShareTarget] = useState<FileTreeEntry | null>(null);
+  const handleShare = useCallback((target: 'file' | 'folder') => {
+    if (!openFilePath) return;
+    if (target === 'file') {
+      setShareTarget({
+        name: openFilePath.slice(openFilePath.lastIndexOf('/') + 1),
+        relativePath: openFilePath,
+        type: 'file',
+      });
+      return;
+    }
+    const slash = openFilePath.lastIndexOf('/');
+    // A file at the workspace root has no folder to share; fall back to the
+    // file itself rather than opening a dialog on the empty path.
+    if (slash < 0) return;
+    const dir = openFilePath.slice(0, slash);
+    setShareTarget({
+      name: dir.slice(dir.lastIndexOf('/') + 1),
+      relativePath: dir,
+      type: 'directory',
+    });
+  }, [openFilePath]);
+
+  // Session state, defaulting closed. Open ⇒ the shell switches to the wide
+  // measure and opens the rail's track.
+  const [railOpen, setRailOpen] = useState(false);
 
 
   if (!openFilePath || openFileContent === null || !Renderer) {
@@ -603,10 +674,6 @@ export function FileViewer() {
     );
   }
 
-  const lastSlash = openFilePath.lastIndexOf('/');
-  const fileName = lastSlash >= 0 ? openFilePath.slice(lastSlash + 1) : openFilePath;
-  const parentDir = lastSlash >= 0 ? openFilePath.slice(0, lastSlash) : '';
-
   // Which shape the document column takes. A history / comparison panel is a
   // fixed-height viewport with its own scroller (both roots are
   // `flex-1 flex flex-col min-h-0`), so it gets the full-bleed contract for
@@ -629,120 +696,57 @@ export function FileViewer() {
           bound to it is the file lock's only activity signal for a reader. */}
       <KbDocumentShell variant={shellVariant} scrollRef={editorContainerRef}>
       <EditorTabs />
-      {/* Active-file metadata + sub-tabs (Content / History / Compare) */}
-      <div className="h-10 border-b border-line flex items-center px-3 gap-2 shrink-0">
-        <span className="text-sm font-medium tracking-tight text-ink truncate shrink-0">
-          {fileName}
-        </span>
-        {parentDir && (
-          <span className="text-xs text-ink-muted truncate min-w-0">
-            {parentDir}
-          </span>
-        )}
-        {isManualDirty && (
-          <span className="ml-1 inline-flex items-center gap-1 text-xs text-amber-700 font-medium">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-            Unsaved
-          </span>
-        )}
-        {waitingOnAgentUpdate && (
-          <span className="ml-1 inline-flex items-center gap-1 text-xs text-amber-700 font-medium">
-            <Clock4 size={12} />
-            Agent update waiting
-          </span>
-        )}
-        {isReviewingPending && (
-          <span className="ml-1 inline-flex items-center gap-1 text-xs text-emerald-600 font-medium">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            Reviewing agent update
-          </span>
-        )}
-        <div className="ml-auto flex items-center gap-1">
-          <TabButton
-            active={activeTab === 'content'}
-            onClick={() => setActiveTab('content')}
-            icon={<FileText size={12} />}
-            label="Content"
-          />
-          {historyAvailable && (
-            <TabButton
-              active={activeTab === 'history'}
-              onClick={() => setActiveTab('history')}
-              icon={<History size={12} />}
-              label="History"
-            />
-          )}
-          {historyAvailable && (
-            <TabButton
-              active={activeTab === 'compare'}
-              onClick={() => setActiveTab('compare')}
-              icon={<GitCompare size={12} />}
-              label="Compare"
-            />
-          )}
-          <button
-            onClick={handleCopyLink}
-            className="ml-1 p-1 rounded hover:bg-hover text-ink-muted hover:text-ink transition-colors duration-150 relative"
-            title={linkCopied ? 'Link copied' : 'Copy link to this file'}
-            aria-label="Copy link to this file"
-          >
-            <Link2 size={14} />
-            {linkCopied && (
-              <span className="absolute top-full right-0 mt-1 px-1.5 py-0.5 rounded bg-ink text-[10px] text-emerald-300 whitespace-nowrap pointer-events-none">
-                Link copied
-              </span>
-            )}
-          </button>
-          {/* Edit / Save toggle. Hidden on protected branches (read-only)
-              and while reviewing a pending agent update (the Accept/Reject
-              banner owns the workflow there). Disabled when someone else
-              holds the lock — the existing lock banner explains who. Both
-              states use the same emerald palette so the toolbar reads as
-              "one action button changing its label" rather than two
-              competing controls. */}
-          {!onProtectedBranch && !isReviewingPending && activeTab === 'content' && (
-            editMode ? (
-              <button
-                onClick={handleExitEditMode}
-                className="ml-1 flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-emerald-700 text-white hover:bg-emerald-600 transition-colors"
-                title="Save changes and return to view mode"
-              >
-                <Check size={12} />
-                Save
-              </button>
-            ) : (
-              <button
-                onClick={handleEnterEditMode}
-                disabled={!!fileLock.externalLock || isEnteringEdit}
-                className="ml-1 flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-emerald-700 text-white hover:bg-emerald-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                title={
-                  fileLock.externalLock
-                    ? `Locked by ${fileLock.externalLock.holderName}`
-                    : isEnteringEdit
-                      ? 'Acquiring lock and fetching latest content…'
-                      : 'Click to edit this file'
-                }
-              >
-                <Pencil size={12} />
-                {isEnteringEdit ? 'Loading…' : 'Edit'}
-              </button>
-            )
-          )}
-        </div>
-      </div>
+      {/* The document names itself, and its actions sit beside its name.
+          Everything the deleted 40px strip carried is here — the three chips
+          as Badges, Edit with the same handlers and the same lock semantics,
+          the copy-link that used to be an icon in the corner — plus Share and
+          the overflow the prototype puts on the page. */}
+      <KbPageHeader
+        path={openFilePath}
+        canWrite={access.canWrite}
+        editMode={editMode}
+        entering={isEnteringEdit}
+        lockedBy={fileLock.externalLock?.holderName ?? null}
+        railOpen={railOpen}
+        historyAvailable={historyAvailable}
+        isDirty={isManualDirty}
+        waitingOnAgentUpdate={waitingOnAgentUpdate}
+        isReviewingPending={isReviewingPending}
+        activeTab={activeTab}
+        onEdit={handleEnterEditMode}
+        onDone={handleExitEditMode}
+        onToggleRail={() => setRailOpen((v) => !v)}
+        onOpenHistory={() => setActiveTab('history')}
+        onOpenCompare={() => setActiveTab('compare')}
+        onShare={handleShare}
+        onCopyPage={canCopyPage ? handleCopyPage : undefined}
+        onCopyLink={handleCopyLink}
+        onCopyPath={handleCopyPath}
+        onViewRaw={handleViewRaw}
+      />
 
+      {/* Content stopped being a tab: the document IS the page, and history
+          and comparison are two things you can go and look at. Each renders in
+          place of the body with an explicit way back — without it the only
+          route home would be reopening the file. */}
       {activeTab === 'history' && historyAvailable ? (
-        <FileHistoryPanel
-          filePath={openFilePath}
-          onRevertCompleted={handleRevertCompleted}
-        />
+        <>
+          <BackToDocument onBack={() => setActiveTab('content')} label="Version history" />
+          <FileHistoryPanel
+            filePath={openFilePath}
+            onRevertCompleted={handleRevertCompleted}
+          />
+        </>
       ) : activeTab === 'compare' && historyAvailable ? (
-        <FileComparisonPanel
-          filePath={openFilePath}
-          initialFrom={comparisonOverride?.fromBranch ?? null}
-          initialTo={comparisonOverride?.toBranch ?? null}
-          refreshKey={fsRevision}
-        />
+        <>
+          <BackToDocument onBack={() => setActiveTab('content')} label="Compare versions" />
+          <FileComparisonPanel
+            filePath={openFilePath}
+            initialFrom={comparisonOverride?.fromBranch ?? null}
+            initialTo={comparisonOverride?.toBranch ?? null}
+            refreshKey={fsRevision}
+          />
+        </>
       ) : (
         <>
           {waitingOnAgentUpdate && (
@@ -893,30 +897,30 @@ export function FileViewer() {
       </KbDocumentShell>
       {registeredPanels}
       <PrViewer />
+      {shareTarget && (
+        <ManageAccessDialog
+          key={shareTarget.relativePath}
+          entry={shareTarget}
+          onClose={() => setShareTarget(null)}
+        />
+      )}
     </div>
   );
 }
 
-interface TabButtonProps {
-  active: boolean;
-  onClick(): void;
-  icon: ReactNode;
-  label: string;
-}
-
-function TabButton({ active, onClick, icon, label }: TabButtonProps) {
+/**
+ * The way back from a panel that took the document's place.
+ *
+ * `Content` is no longer a tab, so there is no tab to click to return. Without
+ * this row the only route home from Version history is reopening the file.
+ */
+function BackToDocument({ onBack, label }: { onBack(): void; label: string }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
-        active
-          ? 'bg-sunken text-ink'
-          : 'text-ink-muted hover:text-ink hover:bg-hover'
-      }`}
-    >
-      {icon}
-      {label}
-    </button>
+    <div className="mb-3 flex shrink-0 items-center gap-2">
+      <Button variant="quiet" size="sm" leadingIcon={<ArrowLeft size={13} />} onClick={onBack}>
+        Back to the document
+      </Button>
+      <span className="text-detail text-ink-faint">{label}</span>
+    </div>
   );
 }
