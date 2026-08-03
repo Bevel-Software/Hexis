@@ -149,6 +149,38 @@ export function WelcomePage() {
   // to their face on the one page addressed to them.
   const firstName = displayFirstName(user?.name) || 'there';
 
+  const radios = useRef<(HTMLButtonElement | null)[]>([]);
+
+  /**
+   * Arrow keys move the choice, because `role="radiogroup"` promised they
+   * would. The role is not decoration — it tells a screen reader "these are
+   * exclusive, one is always on", and the same standard that defines it also
+   * defines how it is driven: arrows select, Tab leaves. Claiming the role
+   * while only answering clicks describes a control the keyboard cannot work.
+   *
+   * Selection FOLLOWS focus, which is the pattern's default for a group this
+   * cheap to change — picking a client re-renders one snippet, nothing is
+   * submitted, so there is no cost to arriving on an option and no reason to
+   * make people confirm. Wraps at both ends: three options in a row have no
+   * meaningful edge to stop at.
+   *
+   * Paired with the roving `tabIndex` below — one stop for the whole group,
+   * not one per option, so Tab moves past the picker rather than through it.
+   */
+  function onRadioKeyDown(event: React.KeyboardEvent, index: number) {
+    const step =
+      event.key === 'ArrowRight' || event.key === 'ArrowDown'
+        ? 1
+        : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+          ? -1
+          : 0;
+    if (step === 0) return;
+    event.preventDefault();
+    const next = (index + step + AGENT_CLIENTS.length) % AGENT_CLIENTS.length;
+    setClientId(AGENT_CLIENTS[next]!.id);
+    radios.current[next]?.focus();
+  }
+
   // One timer, cleared before it is replaced: a second copy inside the 1.5s
   // window would otherwise inherit the FIRST copy's expiry and blank the
   // checkmark almost immediately.
@@ -234,12 +266,19 @@ export function WelcomePage() {
           aria-label="Your agent"
           className="mt-2.5 flex gap-0.5 rounded-lg bg-sunken p-0.5"
         >
-          {AGENT_CLIENTS.map((c) => (
+          {AGENT_CLIENTS.map((c, i) => (
             <button
               key={c.id}
               type="button"
               role="radio"
               aria-checked={c.id === client.id}
+              // Roving: only the chosen option is a tab stop, so the group
+              // costs ONE Tab rather than one per client.
+              tabIndex={c.id === client.id ? 0 : -1}
+              ref={(el) => {
+                radios.current[i] = el;
+              }}
+              onKeyDown={(e) => onRadioKeyDown(e, i)}
               onClick={() => setClientId(c.id)}
               className={cn(
                 'flex-1 whitespace-nowrap rounded-md px-2 py-1.5 text-detail transition-colors',

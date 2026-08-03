@@ -22,7 +22,19 @@ const path = require('node:path');
 
 const email = process.argv[2] || 'juan@bevel.software';
 const envPath = path.resolve(__dirname, '../../../.env');
-const match = fs.readFileSync(envPath, 'utf8').match(/^DATABASE_URL=(.*)$/m);
+// Read defensively: an absent (or unreadable) .env is the ORDINARY case for a
+// fresh clone, and `readFileSync` throwing would answer it with an ENOENT
+// stack trace — the one shape of output that says nothing about what to do
+// next. Both endings are the same sentence: here is the path, put a
+// DATABASE_URL in it.
+let env = '';
+try {
+  env = fs.readFileSync(envPath, 'utf8');
+} catch {
+  console.error(`No readable .env at ${envPath}`);
+  process.exit(1);
+}
+const match = env.match(/^DATABASE_URL=(.*)$/m);
 if (!match) {
   console.error(`No DATABASE_URL in ${envPath}`);
   process.exit(1);

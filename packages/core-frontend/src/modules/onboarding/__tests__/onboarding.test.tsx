@@ -361,6 +361,40 @@ describe('WelcomePage', () => {
     ]);
   });
 
+  /**
+   * `role="radiogroup"` is a promise about the keyboard, not just a label for
+   * a screen reader: arrows select, and selection follows focus. The group
+   * wraps, because three options in a row have no edge worth stopping at.
+   */
+  it('drives the picker with the arrow keys, wrapping at both ends', async () => {
+    mountPage();
+    const checked = () =>
+      screen.getAllByRole('radio').find((o) => o.getAttribute('aria-checked') === 'true');
+
+    screen.getByRole('radio', { name: 'Claude' }).focus();
+    await userEvent.keyboard('{ArrowRight}');
+    expect(checked()).toHaveAccessibleName('ChatGPT');
+    expect(checked()).toHaveFocus();
+
+    // Off the end and round to the first.
+    await userEvent.keyboard('{ArrowRight}{ArrowRight}');
+    expect(checked()).toHaveAccessibleName('Claude');
+
+    // And backwards past the start, to the last.
+    await userEvent.keyboard('{ArrowLeft}');
+    expect(checked()).toHaveAccessibleName('Cursor & Others');
+  });
+
+  // Roving tabindex: the picker is ONE tab stop, not one per client.
+  it('offers a single tab stop for the whole picker', () => {
+    mountPage();
+    expect(screen.getAllByRole('radio').map((o) => o.getAttribute('tabindex'))).toEqual([
+      '0',
+      '-1',
+      '-1',
+    ]);
+  });
+
   // Into the person's OWN group, not the whole catalog — the same place the
   // sidebar's personal row goes.
   it('the skip link leaves for your own group, without concluding', async () => {

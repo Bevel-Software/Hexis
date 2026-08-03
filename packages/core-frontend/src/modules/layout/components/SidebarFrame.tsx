@@ -11,6 +11,13 @@ import {
 } from '../state/sidebar';
 
 /**
+ * The `aria-controls` target for the top bar's toggle, which renders in a
+ * different subtree. One id because there is only ever one sidebar mounted —
+ * the two surfaces never appear at once.
+ */
+export const SIDEBAR_DOM_ID = 'app-sidebar';
+
+/**
  * The app's nav spine — the prototype's `.side` + `.resizer` + `.side-inner`
  * (proto:85-104, proto:4328-4370).
  *
@@ -32,13 +39,6 @@ import {
  * would tab into a nav nobody can see. Clipping is a picture; `inert` is the
  * fact.
  */
-/**
- * The `aria-controls` target for the top bar's toggle, which renders in a
- * different subtree. One id because there is only ever one sidebar mounted —
- * the two surfaces never appear at once.
- */
-export const SIDEBAR_DOM_ID = 'app-sidebar';
-
 export function SidebarFrame({
   children,
   label,
