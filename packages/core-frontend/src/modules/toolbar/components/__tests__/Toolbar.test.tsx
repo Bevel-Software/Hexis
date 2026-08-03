@@ -351,10 +351,12 @@ describe('Toolbar', () => {
       renderToolbar();
       expect(screen.queryByRole('button', { name: /^menu/i })).toBeNull();
       expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
-      expect(screen.getByRole('button', { name: 'Test User' })).toHaveAttribute(
-        'aria-haspopup',
-        'true',
-      );
+      // A disclosure, not a menu button. `aria-haspopup="true"` is a synonym
+      // for `"menu"`, and the panel is a `group` of ordinary buttons with no
+      // roving arrow-key model — so the trigger must NOT claim one.
+      const trigger = screen.getByRole('button', { name: 'Test User' });
+      expect(trigger).not.toHaveAttribute('aria-haspopup');
+      expect(trigger).toHaveAttribute('aria-expanded', 'false');
     });
 
     // The pill says the first name; the full one is the accessible name and

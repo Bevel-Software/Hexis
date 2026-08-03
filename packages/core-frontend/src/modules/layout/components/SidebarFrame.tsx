@@ -74,11 +74,7 @@ export function SidebarFrame({
     [dragging],
   );
 
-  const endDrag = useCallback(() => {
-    if (!dragging) return;
-    setDragging(false);
-    commitSidebarWidth();
-  }, [dragging]);
+  const endDrag = useCallback(() => setDragging(false), []);
 
   /**
    * Keyboard gets the same control (proto:4366-4369). A separator you can only
@@ -103,9 +99,32 @@ export function SidebarFrame({
     [width],
   );
 
+  /**
+   * Collapsing UNMOUNTS the separator, so a drag in flight never gets its
+   * `pointerup`. Left alone the drag stays "live" for good: `dragging` never
+   * returns to false, the effect below never runs its cleanup, and the whole
+   * document keeps the resize cursor and the selection lock.
+   *
+   * Adjusted DURING RENDER rather than from an effect, which is what React
+   * prescribes for resetting state that an incoming value has invalidated.
+   * React re-runs the component before committing, so the lock is released in
+   * the same paint the sidebar collapses in; from an effect the state would
+   * change AFTER the commit — a second render pass with the cursor still stuck
+   * for its duration, which is the cascade `set-state-in-effect` names.
+   */
+  const [wasCollapsed, setWasCollapsed] = useState(collapsed);
+  if (wasCollapsed !== collapsed) {
+    setWasCollapsed(collapsed);
+    if (collapsed) setDragging(false);
+  }
+
   // While dragging, the whole page shows the resize cursor and stops selecting
   // text — otherwise sweeping across the document highlights it, and the
   // cursor flickers to a text caret every time it crosses a label.
+  //
+  // The cleanup is "this drag ended" by EVERY route there is — pointerup, a
+  // collapse, an unmount mid-drag — so the width commit belongs in it rather
+  // than in `endDrag`, which only ever covered the first of the three.
   useEffect(() => {
     if (!dragging) return;
     const { style } = document.body;
@@ -116,16 +135,9 @@ export function SidebarFrame({
     return () => {
       style.cursor = prevCursor;
       style.userSelect = prevSelect;
+      commitSidebarWidth();
     };
   }, [dragging]);
-
-  // Collapsing UNMOUNTS the separator, so a drag in flight never gets its
-  // `pointerup`. Without this the drag stays "live" for good: `dragging` never
-  // returns to false, the effect above never runs its cleanup, and the whole
-  // document keeps the resize cursor and the selection lock.
-  useEffect(() => {
-    if (collapsed) endDrag();
-  }, [collapsed, endDrag]);
 
   return (
     <>

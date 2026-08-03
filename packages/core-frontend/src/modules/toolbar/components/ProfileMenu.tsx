@@ -244,7 +244,11 @@ export function ProfileMenu() {
           open && 'bg-hover text-ink',
         )}
         title="You and your settings"
-        aria-haspopup="true"
+        /* A DISCLOSURE, not a menu button. `aria-haspopup="true"` is defined
+           as a synonym for `"menu"`, so it would still promise the roving
+           arrow-key model that `role="menu"` implies — and the panel below is
+           a `group` of ordinary buttons that Tab walks. `aria-expanded` plus
+           `aria-controls` is the whole contract this trigger can keep. */
         aria-expanded={open}
         aria-controls={open ? MENU_ID : undefined}
         /* The full name, where the pill shows only the first — an accessible
