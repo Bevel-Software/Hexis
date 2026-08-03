@@ -164,7 +164,7 @@ describe('SidebarFrame — drag cleanup', () => {
   });
 
   function startDrag() {
-    render(
+    const { unmount } = render(
       <SidebarFrame label="Library groups">
         <span>x</span>
       </SidebarFrame>,
@@ -174,14 +174,14 @@ describe('SidebarFrame — drag cleanup', () => {
     // column; happy-dom has no implementation to capture with.
     separator.setPointerCapture = () => {};
     fireEvent.pointerDown(separator, { button: 0, pointerId: 1 });
-    return separator;
+    return { separator, unmount };
   }
 
   const locked = () =>
     document.body.style.cursor === 'col-resize' && document.body.style.userSelect === 'none';
 
   it('locks the document while the drag is live, and lets go on pointerup', () => {
-    const separator = startDrag();
+    const { separator } = startDrag();
     expect(locked()).toBe(true);
     fireEvent.pointerUp(separator, { pointerId: 1 });
     expect(locked()).toBe(false);
@@ -202,5 +202,16 @@ describe('SidebarFrame — drag cleanup', () => {
     act(() => setSidebarCollapsed(true));
     act(() => setSidebarCollapsed(false));
     expect(locked()).toBe(false);
+  });
+
+  // The third way out, and the one with nothing else to fall back on: a route
+  // change takes the whole frame away mid-drag. No pointerup, no collapse, and
+  // `document.body` is not React's to tidy — only the cleanup gets it back.
+  it('lets go when the frame unmounts mid-drag', () => {
+    const { unmount } = startDrag();
+    expect(locked()).toBe(true);
+    unmount();
+    expect(locked()).toBe(false);
+    expect(document.body.style.cursor).toBe('');
   });
 });
