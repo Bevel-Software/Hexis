@@ -45,6 +45,7 @@ import { ExternalAgentAccessPage } from '../modules/toolbar/components/ExternalA
 import { AdminRolesPage } from '../modules/admin/components/AdminRolesPage';
 import { ToolsExplorerPage } from '../modules/tools/ToolsExplorerPage';
 import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
+import { RootLanding } from '../modules/onboarding/components/RootLanding';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
 import {
   activeAppId,
@@ -305,7 +306,11 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
       <Route path="/external-agent-access" element={<ExternalAgentAccessPage />} />
       <Route path="/roles-and-members" element={<AdminRolesPage />} />
       <Route path="/tools" element={<ToolsExplorerPage />} />
-      <Route path="/" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
+      {/* `/` alone consults the onboarding: a brand-new account's FIRST visit
+          lands on the welcome page, everyone else (and every later visit)
+          goes to Knowledge as always. The `*` catch-all stays a plain
+          redirect — a mistyped URL is not a reason to be onboarded. */}
+      <Route path="/" element={<RootLanding />} />
       <Route path="*" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
     </Routes>
   );

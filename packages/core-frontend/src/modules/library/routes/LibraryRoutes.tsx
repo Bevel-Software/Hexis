@@ -7,6 +7,7 @@ import { GroupPage } from '../components/GroupPage';
 import { GroupsIndexPage } from '../components/GroupsIndexPage';
 import { PersonalGroupPage } from '../components/PersonalGroupPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
+import { WelcomePage } from '../../onboarding/components/WelcomePage';
 import { LIBRARY_ROOT } from './library-paths';
 
 /**
@@ -31,6 +32,13 @@ export function LibraryRoutes() {
         <Routes>
           <Route element={<LibraryLayout />}>
             <Route index element={<LibraryPage filter={{ kind: 'all' }} />} />
+
+            {/* The connect-your-agent welcome — inside the layout, so the
+                sidebar (and the pill's selected state) is on screen with it.
+                Auto-reached once, on first sign-in (see `RootLanding`);
+                reachable forever through the pill and by URL. */}
+            <Route path="welcome" element={<WelcomePage />} />
+
             <Route path="owned" element={<LibraryPage filter={{ kind: 'owned' }} />} />
 
             {/* `yours` is a GROUP page, not a gallery filter — the items in no

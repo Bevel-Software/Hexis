@@ -21,6 +21,44 @@
   --color-bevel-soft: #ede6ff;
 }
 
+/* Onboarding motion. Two movements, used only through `motion-safe:`
+   arbitrary-animation utilities, so `prefers-reduced-motion` silences them
+   at the call sites:
+   - `onboarding-pulse`: a soft accent ring that swells and fades — the CTA
+     breathing. Box-shadow, not scale: the text must hold still while the
+     control calls.
+   - `onboarding-fade`: the welcome page's one-time arrival. */
+@keyframes onboarding-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-accent) 30%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+@keyframes onboarding-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@keyframes onboarding-fade {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 /* Tailwind Typography ships dark <pre> backgrounds by default; the app is
    light-only, so retheme prose code blocks onto the design tokens.
    These MUST resolve through tokens rather than a raw palette: consuming

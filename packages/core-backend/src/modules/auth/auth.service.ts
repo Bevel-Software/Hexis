@@ -14,12 +14,14 @@ function toAuthUser(user: {
   email: string;
   name: string;
   avatarUrl: string | null;
+  onboardingDone: boolean;
 }): AuthUser {
   return {
     id: user.id,
     email: user.email,
     name: user.name,
     avatarUrl: user.avatarUrl ?? undefined,
+    onboardingDone: user.onboardingDone,
   };
 }
 
@@ -144,12 +146,21 @@ export class AuthService {
 
     if (!user) return null;
 
-    return {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      avatarUrl: user.avatarUrl ?? undefined,
-    };
+    return toAuthUser(user);
+  }
+
+  /**
+   * Conclude the connect-your-agent onboarding for `userId`. Idempotent by
+   * construction (an UPDATE to the value it already has), so the welcome
+   * page's Done and the reminder pill's dismiss can both call it without
+   * coordinating. There is deliberately no way back to false over the API:
+   * "not onboarded again" is not a state a user can be put in.
+   */
+  async markOnboardingDone(userId: string): Promise<void> {
+    await this.db
+      .update(users)
+      .set({ onboardingDone: true, updatedAt: new Date() })
+      .where(eq(users.id, userId));
   }
 
   /**

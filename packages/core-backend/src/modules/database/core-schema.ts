@@ -18,6 +18,14 @@ export const users = pgTable('users', {
   email: text('email').notNull().unique(),
   name: text('name').notNull(),
   avatarUrl: text('avatar_url'),
+  /**
+   * The one onboarding fact the server keeps: has this person concluded the
+   * connect-your-agent setup (the welcome page's Done, or the reminder
+   * pill's dismiss — one field, both doors). False drives the pill in every
+   * browser the account signs into; true ends it everywhere at once, which
+   * is exactly what localStorage could not promise.
+   */
+  onboardingDone: boolean('onboarding_done').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });

@@ -78,6 +78,19 @@ export function createAuthRoutes(
 
   for (const provider of providers) provider.mountRoutes(router, authService);
 
+  // POST /api/auth/onboarding-done — conclude the connect-your-agent
+  // onboarding for the caller (protected). One-way and idempotent; the
+  // welcome page's Done and the reminder pill's × are its two callers.
+  router.post('/auth/onboarding-done', authMiddleware, async (req, res) => {
+    try {
+      await authService.markOnboardingDone(req.userId!);
+      res.json({ ok: true });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: msg });
+    }
+  });
+
   // GET /api/auth/me — validate stored JWT, return user info (protected)
   router.get('/auth/me', authMiddleware, async (req, res) => {
     try {
