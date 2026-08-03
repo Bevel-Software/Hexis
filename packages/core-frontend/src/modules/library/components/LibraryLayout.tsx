@@ -9,6 +9,7 @@ import { libraryFilterForPath, pathForLibraryFilter } from '../routes/library-pa
 import { groupCounts } from '../utils/status';
 import { useSidebar } from '../../layout/state/sidebar';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
+import { ConnectAgentPill } from '../../onboarding/components/ConnectAgentPill';
 import { GroupsSidebar } from './GroupsSidebar';
 import { NewGroupDialog } from './NewGroupDialog';
 
@@ -77,7 +78,16 @@ export function LibraryLayout() {
 
   return (
     <div className="flex h-full min-h-0 bg-canvas text-ink">
-      <SidebarFrame label="Library groups">
+      {/* The connect-your-agent CTA sits above the group list — the one row
+          that has to be true before the rows under it mean anything. Passed
+          IN rather than mounted by the frame: which reminder belongs at the
+          top of this nav is the surface's call, and `SidebarFrame` is the
+          app's generic consistency layer. Knowledge passes the same pill from
+          `ResizableThreePaneLayout`, which is what keeps it one pill in one
+          place — a person who skipped the welcome page and stayed in
+          Knowledge still sees it. It renders nothing once onboarding is
+          done. */}
+      <SidebarFrame label="Library groups" header={<ConnectAgentPill />}>
         <GroupsSidebar
           filter={filter}
           onSelect={(next) => navigate(pathForLibraryFilter(next))}

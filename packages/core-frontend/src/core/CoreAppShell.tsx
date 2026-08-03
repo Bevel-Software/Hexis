@@ -46,6 +46,7 @@ import { AdminRolesPage } from '../modules/admin/components/AdminRolesPage';
 import { ToolsExplorerPage } from '../modules/tools/ToolsExplorerPage';
 import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
 import { RootLanding } from '../modules/onboarding/components/RootLanding';
+import { ConnectAgentPill } from '../modules/onboarding/components/ConnectAgentPill';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
 import {
   activeAppId,
@@ -222,7 +223,17 @@ function KnowledgeSurface() {
   // plain hook per consumer would give every tree row its own request.
   return (
     <OpenChangeRequestsProvider>
-      <AppLayout panes={panes} onController={setController} />
+      {/* The connect-your-agent reminder rides Knowledge's sidebar too, and
+          the shell is where that is decided: `layout` is the app's generic
+          consistency layer and must not name a domain component, so the pill
+          is passed IN from the composition root. The Library passes the same
+          one from `LibraryLayout` — one pill, both surfaces, so a person who
+          skipped the welcome page and stayed in Knowledge still sees it. */}
+      <AppLayout
+        panes={panes}
+        onController={setController}
+        sidebarHeader={<ConnectAgentPill />}
+      />
     </OpenChangeRequestsProvider>
   );
 }

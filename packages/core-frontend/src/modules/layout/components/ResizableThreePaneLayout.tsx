@@ -47,6 +47,12 @@ interface ResizableThreePaneLayoutProps {
   panes?: PaneDef[];
   /** Reports the pane controller upward (null on unmount) — see AppLayout. */
   onController?: (controller: LayoutController | null) => void;
+  /**
+   * Pinned above the sidebar pane's own content. Passed through from the
+   * shell rather than named here, so this module stays domain-agnostic —
+   * see `SidebarFrame`'s `header`.
+   */
+  sidebarHeader?: ReactNode;
   // Legacy named slots, kept as a convenience/compat signature (converted to
   // the same pane list internally with the historical sizing defaults).
   explorer?: ReactNode;
@@ -58,6 +64,7 @@ export function ResizableThreePaneLayout({
   header,
   panes,
   onController,
+  sidebarHeader,
   explorer,
   viewer,
   chat,
@@ -192,7 +199,9 @@ export function ResizableThreePaneLayout({
         {header}
         <div className="flex flex-1 min-h-0">
         {sidebarPane && (
-          <SidebarFrame label="File explorer">{sidebarPane.node}</SidebarFrame>
+          <SidebarFrame label="File explorer" header={sidebarHeader}>
+            {sidebarPane.node}
+          </SidebarFrame>
         )}
         <Group
           orientation="horizontal"

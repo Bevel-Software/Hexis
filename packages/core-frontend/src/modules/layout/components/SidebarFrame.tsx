@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { cn } from '../../../lib/utils';
-import { ConnectAgentPill } from '../../onboarding/components/ConnectAgentPill';
 import {
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
@@ -42,10 +41,22 @@ export const SIDEBAR_DOM_ID = 'app-sidebar';
 export function SidebarFrame({
   children,
   label,
+  header,
 }: {
   children: ReactNode;
   /** Names the region and its resize handle, e.g. `Library groups`. */
   label: string;
+  /**
+   * Pinned above `children`, outside whatever list the surface is holding.
+   *
+   * A SLOT rather than a component this frame names, because the frame is the
+   * app's consistency layer and must stay domain-agnostic: what belongs at the
+   * top of the nav is the composing surface's decision, not the sidebar's.
+   * Both surfaces pass the connect-your-agent reminder — which is what makes
+   * it one pill in one place across Knowledge and Skills — but the frame does
+   * not know that, and the next thing to go there costs no edit here.
+   */
+  header?: ReactNode;
 }) {
   const { collapsed, width, instant } = useSidebar();
   const [dragging, setDragging] = useState(false);
@@ -163,16 +174,7 @@ export function SidebarFrame({
         {/* proto:104 — `padding:16px 14px 18px`, and an explicit width so the
             column does not reflow while the frame animates to zero. */}
         <div className="flex h-full flex-col px-3.5 pt-4 pb-[18px]" style={{ width }}>
-          {/* The connect-your-agent CTA sits above whatever list this sidebar
-              is holding — the one row that has to be true before the rows
-              under it mean anything.
-
-              HERE, not in either surface's own sidebar, because there is one
-              sidebar: mounting it in the Library's meant a person who skipped
-              the welcome page and stayed in Knowledge — where the app lands by
-              default — never saw the reminder at all. One frame, one pill,
-              both surfaces. It renders nothing once onboarding is done. */}
-          <ConnectAgentPill />
+          {header}
           {children}
         </div>
       </aside>
