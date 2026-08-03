@@ -28,13 +28,16 @@ import { WELCOME_PATH } from '../paths';
  * about what just happened.
  */
 export function ConnectAgentPill() {
-  // `SidebarFrame` mounts this, and SidebarFrame is a layout primitive that
-  // must stay renderable on its own — its unit tests mount it bare, and so
-  // could any future consumer. `useNavigate`/`useLocation` THROW outside a
-  // Router, so the check happens here, in a component whose only job is to
-  // decide, and the hooks live one level down where they are guaranteed a
-  // Router. No router, no reminder: the pill's whole purpose is to take you
-  // somewhere.
+  // This is passed into `SidebarFrame`'s `header` slot — by `LibraryLayout`
+  // for Skills & Tools, by `CoreAppShell` for Knowledge — so the frame itself
+  // stays domain-agnostic and never names the onboarding.
+  //
+  // The guard stays anyway, defensively: `useNavigate`/`useLocation` THROW
+  // outside a Router, and a slot can be filled from anywhere, including a
+  // future consumer or a test that renders bare. It lives here, in a
+  // component whose only job is to decide, with the hooks one level down
+  // where a Router is guaranteed. No router, no reminder: the pill's whole
+  // purpose is to take you somewhere.
   if (!useInRouterContext()) return null;
   return <RoutedConnectAgentPill />;
 }
