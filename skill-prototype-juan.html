@@ -71,6 +71,83 @@
   .tbbrand[aria-expanded="true"] .bchev{transform:rotate(180deg)}
   .tbsep{width:1px;height:18px;background:var(--line);flex:0 0 auto;margin:0 2px}
   .tbspacer{flex:1}
+  /* ————— the one thing a new account still has to do —————
+     A skills catalogue does nothing until an agent is connected to it, so on
+     a fresh account this is not a suggestion, it is the next step. It sits in
+     the top bar rather than on a page because it is true on every page, and
+     it goes away the moment it stops being true.
+
+     Quiet, not loud: a tinted pill with a dot, no siren. It is the only
+     accent-coloured thing in the chrome, which is enough when nothing else
+     competes for the colour. */
+  /* A CTA wearing a nav row's geometry. The tint is deliberate: this is the
+     one thing a new account must DO, so it gets the sidebar's only filled
+     accent — but at exactly a row's height, padding and radius, so it reads
+     as the first item with a highlight rather than a banner parked on the
+     list. The moment an agent connects, the sidebar has no blue in it at all.
+
+     Every property the row needs is declared here, because these buttons sit
+     inside `.nav` and inherit `.nav button`'s space-between/padding/colour
+     otherwise. (`.lbl` is likewise taken — it is the SUBSCRIPTIONS heading
+     style — which is how "Connect your agent" once rendered as an uppercase
+     section label clipped to "CONNECT YOUR AGI".) */
+  .navnudge{display:flex;align-items:center;margin-bottom:6px;border-radius:99px;
+    background:rgba(35,131,226,.08);transition:background .14s ease;
+    animation:ctapulse 2.6s ease-out infinite}
+  .navnudge:hover{background:rgba(35,131,226,.14)}
+  /* selected = you are on the welcome page: held at the hover depth, ring and
+     dot still — a CTA stops calling once you have answered it. The CONTAINER
+     is the whole selected state; no weight change (600 pushed the label into
+     ellipsis at the default sidebar width). */
+  .navnudge.on{background:rgba(35,131,226,.14);animation:none}
+  .navnudge.on .dot{animation:none}
+  .navnudge .go{display:flex;align-items:center;justify-content:flex-start;gap:8px;flex:1;min-width:0;
+    padding:6px 12px;border-radius:99px;font-size:13px;font-weight:500;color:var(--accent);text-align:left}
+  /* `.nav button:hover` AND `.nav button[aria-current="true"]` both paint the
+     app's warm grey + ink onto this button — over the blue tint that reads as
+     mud, twice over. The container owns every state; the inner button paints
+     nothing and stays accent in all of them. */
+  .navnudge .go:hover{background:transparent}
+  .navnudge .go[aria-current="true"]{background:transparent;color:var(--accent);font-weight:500}
+  .navnudge .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .navnudge .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex:0 0 auto;
+    animation:nudgepulse 2.4s ease-in-out infinite}
+  @keyframes nudgepulse{0%,100%{opacity:1}50%{opacity:.35}}
+  /* The CTA breathes: a soft accent ring that swells and fades. Box-shadow,
+     not scale — the text must hold still while the pill calls. */
+  @keyframes ctapulse{0%{box-shadow:0 0 0 0 rgba(35,131,226,.30)}
+    70%{box-shadow:0 0 0 7px rgba(35,131,226,0)}100%{box-shadow:0 0 0 0 rgba(35,131,226,0)}}
+  /* Dismiss is its OWN button, never the row — clicking "connect" must not be
+     able to mean "never show me this again". Grey at rest (only the
+     invitation gets the accent), and its hover tint is blue like the pill's:
+     the app's warm grey over this blue reads as mud. */
+  .navnudge .x{flex:0 0 18px;width:18px;height:18px;padding:0;margin:0 5px 0 2px;border-radius:50%;
+    display:inline-flex;align-items:center;justify-content:center;color:var(--ink3);opacity:0;
+    transition:opacity .14s ease,background .14s ease,color .14s ease}
+  .navnudge:hover .x,.navnudge .x:focus-visible{opacity:1}
+  .navnudge .x:hover{background:rgba(35,131,226,.18);color:var(--ink)}
+  .navnudge .go:focus-visible,.navnudge .x:focus-visible{outline:2px solid var(--accent);outline-offset:1px;opacity:1}
+
+  /* ————— the welcome page — the first thing a new account sees —————
+     One column, three beats: who you are, what this is, the one thing to do.
+     It fades up once; the CTA carries the same breathing ring as the sidebar
+     pill, so the page and the reminder are recognisably one campaign. */
+  .welcome{max-width:440px;margin:11vh auto 0}
+  .welcome.enter{animation:wfade .7s cubic-bezier(.2,.8,.2,1) both}
+  .welcome h1{font-size:27px;font-weight:700;letter-spacing:-.022em}
+  .welcome .wlede{margin:12px 0 0;font-size:14px;color:var(--ink2);line-height:1.65}
+  .welcome .wlabel{margin:36px 0 0;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--ink3);font-weight:600}
+  .welcome .seg{margin-top:10px}
+  .wfoot{display:flex;align-items:center;gap:16px;margin-top:20px}
+  .wcta{animation:ctapulse 2.4s ease-out infinite}
+  .wskip{font-size:12.5px;color:var(--ink3);transition:color .14s ease}
+  .wskip:hover{color:var(--ink)}
+  @keyframes wfade{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){
+    .navnudge,.navnudge .dot,.wcta{animation:none}
+    .welcome.enter{animation:none}
+  }
   /* the branch you stand on — chrome, so it lives in the chrome */
   .tbbranch{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border-radius:8px;
     font-size:12px;color:var(--ink2);transition:background .14s ease}
@@ -608,6 +685,30 @@
   .mcard p{font-size:13px;color:var(--ink2);line-height:1.55}
   .endpoint{font-family:var(--mono);font-size:11.5px;background:var(--inset);border:1px solid var(--line);
     border-radius:8px;padding:9px 11px;margin:14px 0 0;color:var(--ink);overflow-x:auto;white-space:nowrap}
+
+  /* the JSON snippet keeps its line breaks; everything else stays one line */
+  .endpoint.pre{white-space:pre}
+
+  /* ————— which client you already use —————
+     One snippet, chosen, instead of three printed at once. Picking your
+     client is a choice you made before opening this sheet, so it is a
+     control rather than something to scroll past. */
+  .seg{display:flex;gap:2px;padding:2px;background:var(--inset);border-radius:9px;margin:14px 0 0}
+  .seg button{flex:1;padding:5px 8px;border-radius:7px;font-size:12px;color:var(--ink2);
+    white-space:nowrap;transition:background .14s ease,color .14s ease}
+  .seg button:hover{color:var(--ink)}
+  .seg button[aria-current="true"]{background:var(--card);color:var(--ink);font-weight:600;
+    box-shadow:var(--card-shadow)}
+  .seghint{font-size:11.5px;color:var(--ink3);margin:10px 0 0;line-height:1.5}
+  /* the copy rides the block it copies */
+  .snip{position:relative;margin-top:14px}
+  .snip .endpoint{margin:0;padding-right:40px}
+  .snip .cp{position:absolute;top:7px;right:7px;width:24px;height:24px;border-radius:6px;
+    display:inline-flex;align-items:center;justify-content:center;color:var(--ink3);
+    transition:color .14s ease,background .14s ease}
+  .snip .cp:hover{color:var(--ink);background:var(--hover)}
+  .snip .cp.ok{color:var(--ok)}
+  .mnote{margin-top:18px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;color:var(--ink3);line-height:1.55}
   .mcard .mfoot{display:flex;justify-content:flex-end;gap:8px;margin-top:20px;align-items:center}
   .pick{display:flex;align-items:center;gap:11px;width:100%;padding:9px 11px;border:1px solid var(--line);
     border-radius:11px;background:var(--card);margin-bottom:7px;transition:border-color .15s ease,background .15s ease}
@@ -2295,7 +2396,11 @@ const spacePending = spid => PENDING.filter(p=>p.space===spid && p.status==='ope
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = { user:'ali', view:'home', space:null, skill:null, tool:null, cr:null, pend:null, crFile:null, tabFile:'main', menu:false, dots:'', vhist:false, vsel:0, vfile:null, filter:false, crumb:null, ctx:null, refresh:'', collapsed:false,
+/* `view` starts on 'welcome' because `mcpDone` starts false: the demo opens
+   as the brand-new account the welcome page exists for. Skipping or copying
+   lands on 'home' and the page never comes back uninvited — only the sidebar
+   pill leads to it. */
+const state = { user:'ali', view:'welcome', space:null, skill:null, tool:null, cr:null, pend:null, crFile:null, tabFile:'main', menu:false, dots:'', vhist:false, vsel:0, vfile:null, filter:false, crumb:null, ctx:null, refresh:'', collapsed:false,
   /* Knowledge: which app is up, which document, which folders are open, what's
      in the tab strip. `kbOpen` is a plain array so the whole state stays
      JSON-shaped and a demo can be restored from a hash. */
@@ -2304,6 +2409,19 @@ const state = { user:'ali', view:'home', space:null, skill:null, tool:null, cr:n
   /* the rail is OFF by default — a document should open as a document, and the
      facts about it are one icon away for the moment you want them */
   kbRail:false, sideW:212, crdock:true,
+  /* Has an agent ever connected to this account? In the product this is a
+     fact the server knows — no MCP session has ever been opened for this
+     user — and it is FALSE for exactly as long as someone has signed up and
+     not finished. It starts false here because a brand-new account is the
+     state this nudge exists for. `mcpNudge` is the separate question of
+     whether they want to be reminded: dismissing hides the reminder without
+     pretending the setup happened, and the profile menu still holds the door
+     (`External agent access`). */
+  mcpDone:false, mcpNudge:true,
+  /* Which client the agent sheet is showing. The sheet re-renders itself
+     from this — it is a modal, not part of the page tree — so it lives here
+     rather than in a closure. */
+  agentClient:'claude',
   kbFile:'KnowledgeBase/Engineering/NodeTypes/Invariant.md',
   kbOpen:['KnowledgeBase','KnowledgeBase/Engineering','KnowledgeBase/Engineering/NodeTypes'],
   kbTabs:['KnowledgeBase/Engineering/NodeTypes/Invariant.md','KnowledgeBase/Engineering/Knowledge/Bevel-Platform.md','Data/Engineering/velocity.csv'] };
@@ -2961,8 +3079,30 @@ function sideHtml(){
   let h = '<div class="side-inner" style="width:'+state.sideW+'px">';
   const needy = TOOLS.filter(needsMe).length;
   h += '<nav class="nav">';
+  /* ————— the one thing a new account still has to do —————
+     Above "Owned by me", because on a fresh account it is the row that has to
+     be true before any row under it means anything: the catalogue is a list of
+     things your agent cannot reach yet.
+
+     It sits IN the nav rather than in the top bar because it is a place you
+     go, like every other row here, and it leaves the same way — the moment an
+     agent connects the row is gone and the nav is back to its normal first
+     item. Nothing permanent is spent on it.
+
+     It says the outcome, not the protocol: "connect your agent" is what you
+     get, "set up MCP" is the plumbing. */
+  /* On the welcome page the pill stays, wearing the selected state: the page
+     is a place in the nav like any other, and the nav should say where you
+     are. Selected also means QUIET — the ring stops breathing while you are
+     standing where it points. */
+  if(!state.mcpDone && state.mcpNudge)
+    h += '<div class="navnudge'+(state.view==='welcome'?' on':'')+'">'+
+      '<button class="go" data-welcome aria-current="'+(state.view==='welcome')+'" title="Connect Claude, ChatGPT, Cursor or another agent">'+
+      '<span class="dot"></span><span class="t">Connect your agent</span></button>'+
+      '<button class="x" data-mcpdismiss title="Not now" aria-label="Dismiss — connect an agent later from your profile menu">'+
+      '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>';
   const mine = myQueue().length;
-  h += '<button data-home aria-current="'+(!cur && state.view!=='personal')+'"><span>Owned by me</span>'+
+  h += '<button data-home aria-current="'+(!cur && state.view!=='personal' && state.view!=='welcome')+'"><span>Owned by me</span>'+
     (mine?'<span class="pending">'+mine+'</span>':cnt(ownedSkills().length))+'</button>';
   h += '<div class="lbl">Subscriptions<button class="lbladd" data-newspace title="New space" aria-label="New space">+</button></div>';
   /* the Owner tag too: you run your own list, and the row that says so on
@@ -3379,15 +3519,88 @@ function addModal(spid){
     lede:'Two ways in. Either way it joins '+sp.name+' — everyone subscribed gets it the next time their agent connects.',
     agent:'Tell your agent what you need — it drafts the skill and adds it to '+sp.name+'.' });
 }
-const agentPrompt = () => 'Connect to the Bevel knowledge base. Add the external agent endpoint https://kb.bevel.software/mcp and sign in as '+me().email+' when the browser opens. Then list my skills to confirm the connection.';
+/* =========================================================
+   External agent access — one endpoint, said once.
+
+   One view, one job: get YOUR client connected. Pick the client, get the
+   line, copy it — the whole sheet is those three moves. The picker names
+   PRODUCTS, not surfaces: Claude covers claude.ai, Desktop and Code (the
+   hint routes each), because someone knows which assistant they use before
+   they know which build of it they are in. JSON is the catch-all, last.
+
+   No lede, no tabs, no tools link: everything the sheet used to explain is
+   either said by the picker itself or belongs to the settings page.
+   ========================================================= */
+const MCP_URL = 'https://knowledge.bevel.software/api/mcp';
+
+const AGENT_CLIENTS = [
+  { id:'claude', label:'Claude',
+    hint:'claude.ai or Claude Desktop: Settings → Connectors → Add custom connector, then paste this. In Claude Code, `claude mcp add` takes the same URL.',
+    snip:MCP_URL },
+  { id:'chatgpt', label:'ChatGPT',
+    hint:'Settings → Connectors → Create, then paste this.',
+    snip:MCP_URL },
+  { id:'other', label:'Cursor & Others',
+    hint:'For clients that read their servers from a JSON config — Cursor, Windsurf, Cline.',
+    snip:'{\n  "mcpServers": {\n    "knowledge-base": {\n      "type": "http",\n      "url": "'+MCP_URL+'"\n    }\n  }\n}' },
+];
+
+/* The copy sits ON the block it copies — a small icon, not a labelled button,
+   because "Done" owns the footer now and a footer with two primaries is a
+   question. `data-mcp` makes a successful copy count as setup progress: it is
+   the last act this app can observe before the agent takes over. */
+const I_COPY2 = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.2"/><path d="M6 15H5.2A1.2 1.2 0 0 1 4 13.8V5.2A1.2 1.2 0 0 1 5.2 4h8.6A1.2 1.2 0 0 1 15 5.2V6"/></svg>';
+const snipHtml = t =>
+  '<div class="snip"><div class="endpoint'+(t.indexOf('\n')>-1?' pre':'')+'">'+esc(t)+'</div>'+
+  '<button class="cp" data-mcp data-copy="'+esc(t)+'" title="Copy" aria-label="Copy">'+I_COPY2+'</button></div>';
+
 function agentModal(){
+  const c = AGENT_CLIENTS.filter(function(x){ return x.id===state.agentClient; })[0] || AGENT_CLIENTS[0];
   const on = TOOLS.filter(t=>!personalVar(t) || connected(t.id)).length;
   modal('<h3>External agent access</h3>'+
-    '<p>Claude Code, Codex or any other agent signs in with a key and acts with exactly your access — never more.</p>'+
-    '<div class="endpoint">kb.bevel.software/mcp</div>'+
-    '<p style="margin-top:12px;font-size:12.5px;color:var(--ink3)">It gets '+ORG.shared+' skills and '+on+' of '+TOOLS.length+' integrations — the ones you’ve connected.</p>'+
+    '<div class="seg" role="tablist">'+AGENT_CLIENTS.map(function(x){
+      return '<button role="tab" data-agentclient="'+x.id+'" aria-current="'+(x.id===c.id)+'">'+esc(x.label)+'</button>';
+    }).join('')+'</div>'+
+    '<p class="seghint">'+esc(c.hint)+'</p>'+
+    snipHtml(c.snip)+
+    '<div class="mnote">It gets '+ORG.shared+' skills and '+on+' of '+TOOLS.length+' integrations — the ones you have connected.</div>'+
+    /* "Done" concludes; it does not copy. A button whose word and act
+       disagree teaches people not to read buttons. */
     '<div class="mfoot"><button class="btn quiet" data-close>Close</button>'+
-    '<button class="btn primary" data-copy="'+esc(agentPrompt())+'">Copy prompt</button></div>');
+    '<button class="btn primary" data-mcpdone>Done</button></div>');
+}
+
+/* =========================================================
+   The welcome page — the first thing a new account sees.
+
+   Three beats and nothing else: your name (so the page is addressed, not
+   broadcast), one sentence of what this place is, and the single action the
+   account still needs. The same picker + snippet as the modal, because it IS
+   the same task — the modal remains for anyone arriving later through the
+   profile menu, this page is the front door.
+
+   "Go to your library →" is a skip, not a gate: nothing here is mandatory,
+   and the sidebar pill keeps the door open for whoever leaves.
+   ========================================================= */
+function renderWelcome(){
+  const c = AGENT_CLIENTS.filter(function(x){ return x.id===state.agentClient; })[0] || AGENT_CLIENTS[0];
+  /* The fade plays on ARRIVAL, not on every re-render — switching client
+     re-renders this page, and a page that fades on every click reads as
+     blinking. `wseen` is re-armed by `data-welcome` for deliberate returns. */
+  const enter = !state.wseen; state.wseen = true;
+  return '<div class="welcome'+(enter?' enter':'')+'">'+
+    '<h1>Welcome, '+esc(me().name.split(' ')[0])+'</h1>'+
+    '<p class="wlede">This is your company’s shared library — the skills, tools and knowledge your AI agents work from. Connect your agent once and access the skills and tools you need in one place.</p>'+
+    '<div class="wlabel">Connect your agent</div>'+
+    '<div class="seg" role="tablist">'+AGENT_CLIENTS.map(function(x){
+      return '<button role="tab" data-agentclient="'+x.id+'" aria-current="'+(x.id===c.id)+'">'+esc(x.label)+'</button>';
+    }).join('')+'</div>'+
+    '<p class="seghint">'+esc(c.hint)+'</p>'+
+    snipHtml(c.snip)+
+    '<div class="wfoot">'+
+    '<button class="btn primary wcta" data-mcpdone>Done</button>'+
+    '<button class="wskip" data-welcomeskip>Go to your library →</button>'+
+    '</div></div>';
 }
 
 /* =========================================================
@@ -3969,10 +4182,63 @@ const CLICKS = {
   'data-copy': b=>{
     const v = b.getAttribute('data-copy');
     (navigator.clipboard ? navigator.clipboard.writeText(v) : Promise.reject()).then(()=>{
-      if(!b.dataset.orig) b.dataset.orig = b.textContent;
-      b.textContent = '✓ Copied';
-      clearTimeout(b._t); b._t = setTimeout(()=>{ b.textContent = b.dataset.orig; }, 1500);
+      /* An icon button has no words to swap — `textContent` would delete the
+         glyph. It goes green for the same 1.5s instead. */
+      if(b.classList.contains('cp')){
+        b.classList.add('ok');
+        clearTimeout(b._t); b._t = setTimeout(()=>b.classList.remove('ok'), 1500);
+      } else {
+        if(!b.dataset.orig) b.dataset.orig = b.textContent;
+        b.textContent = '✓ Copied';
+        clearTimeout(b._t); b._t = setTimeout(()=>{ b.textContent = b.dataset.orig; }, 1500);
+      }
+      /* Taking the connection prompt is the last thing this app can watch you
+         do — the rest happens in your agent. In the product the nudge would
+         clear on the first MCP session instead, which is the real proof;
+         `data-mcp` is the demo standing in for it. Marked only on a
+         SUCCESSFUL copy: the clipboard can be refused outright, and clearing
+         the one reminder for a copy that never happened would strand someone
+         mid-setup. */
+      /* Sidebar only, NOT render(): the button that was just pressed is part
+         of the page tree on the welcome page, and a full re-render would
+         destroy it mid-flash — "✓ Copied" would blink out the instant it
+         appeared. The only thing `mcpDone` changes elsewhere is the pill. */
+      if(b.hasAttribute('data-mcp')){
+        state.mcpDone = true;
+        $('#side').innerHTML = state.app==='kb' ? kbSideHtml() : sideHtml();
+      }
     }).catch(()=>toast(v));
+  },
+  /* One picker, two homes. Inside the modal it re-renders the modal (same
+     pattern as `data-accgrp`); on the welcome page it re-renders the page.
+     "Is the modal up" is the discriminator, not the view — the modal can be
+     opened over any view. */
+  'data-agentclient': b=>{
+    state.agentClient = b.getAttribute('data-agentclient');
+    /* The page always re-renders (the welcome view holds this picker in its
+       own tree; `wseen` keeps the fade from replaying); the modal re-renders
+       on top only if it is up. */
+    render();
+    if($('#mwrap').classList.contains('on')) agentModal();
+  },
+  /* The sidebar pill and the profile menu lead here; re-arming `wseen` lets
+     the page fade in again on a deliberate return. */
+  'data-welcome': ()=>{ state.app='skills'; state.view='welcome'; state.wseen=false; render(); window.scrollTo({top:0}); },
+  'data-welcomeskip': ()=>{ state.view='home'; render(); window.scrollTo({top:0}); },
+  /* "Done" is the person's own word for it — the app takes it and concludes:
+     pill gone, welcome page over, modal closed. The door stays in the profile
+     menu, and the toast says so. */
+  'data-mcpdone': ()=>{
+    state.mcpDone = true; closeModal();
+    if(state.view==='welcome') state.view='home';
+    render(); window.scrollTo({top:0});
+    toast('Done — reopen the setup any time from your profile menu → External agent access.');
+  },
+  /* Not `mcpDone` — nothing was set up. It only says "stop asking", and the
+     profile menu keeps the door open. */
+  'data-mcpdismiss': ()=>{
+    state.mcpNudge = false; render();
+    toast('Hidden. Connect an agent any time from your profile menu → External agent access.');
   },
   'data-close': ()=>closeModal(),
   'data-crfile': b=>{ state.crFile = b.getAttribute('data-crfile'); render(); },
@@ -4290,6 +4556,7 @@ function render(){
                  : state.view==='pending' ? renderPending(pendById(state.pend))
                  : state.view==='personal'? renderPersonal()
                  : state.view==='spaces'  ? renderSpaces()
+                 : state.view==='welcome' ? renderWelcome()
                  : renderHome();
   /* the two pages you decide on hold their actions on screen */
   main.classList.toggle('fit', state.view==='cr' || state.view==='pending');
