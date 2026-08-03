@@ -223,23 +223,34 @@ describe('SkillPage', () => {
     expect(tab).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('shows owner-only Edit and the Owner badge — but never access', async () => {
+  it('shows the Owner badge to an owner — but never access', async () => {
     renderPage(true);
     await screen.findByRole('heading', { name: 'newsletter' });
 
-    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
     expect(screen.getByText('Owner')).toBeInTheDocument();
     // A skill inherits its group folder's rules; the group's Share panel is the
     // one place they are decided, for owner and non-owner alike.
     expect(screen.queryByRole('button', { name: 'Manage access' })).toBeNull();
   });
 
-  it('hides Edit and the badge for non-owners', async () => {
+  it('hides the Owner badge from non-owners', async () => {
     renderPage(false);
     await screen.findByRole('heading', { name: 'newsletter' });
 
-    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
     expect(screen.queryByText('Owner')).toBeNull();
+  });
+
+  /**
+   * One way to change a skill, for everyone. A direct-to-`main` `Edit` used to
+   * sit beside Propose; it bypassed review and, on a protected branch, usually
+   * ended in an AccessDenied after the user had already navigated away.
+   */
+  it('offers exactly one way to change the file — no direct-edit escape hatch', async () => {
+    renderPage(true);
+    // Propose appears once the file's raw text is in hand, so wait for it —
+    // asserting Edit's absence before the bar has rendered proves nothing.
+    expect(await screen.findByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
   });
 
   it('says so plainly when the skill cannot be loaded', async () => {

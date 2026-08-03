@@ -325,26 +325,28 @@ export function SkillPage() {
             if (!kbDirName) return;
             openInEditor(resolveRelativePath(`${kbDirName}/${skill.path}/${active}`, href));
           }}
+          /*
+           * ONE action, deliberately. There used to be an `Edit` beside this
+           * that jumped to the Knowledge app's editor on the default branch —
+           * a direct commit, no review. Two adjacent buttons that both mean
+           * "change this file" but differ on whether anyone gets to say no is
+           * a trap, and it usually sprang: `main` is protected, so for everyone
+           * without a write grant on the path that route ends in an
+           * AccessDenied AFTER they have navigated away and typed the change.
+           * Editing straight into the KB still exists in the Knowledge app; it
+           * just stops being offered here as if it were the same thing.
+           *
+           * One open proposal per person per file, too — a second would fork
+           * your own pending change into two decisions the owner must
+           * reconcile.
+           */
           actions={
-            <>
-              {/* One open proposal per person per file. A second "Propose
-                  changes" would fork your own pending change into two
-                  decisions the owner has to reconcile. */}
-              {rawOnMain !== null && !iAlreadyProposedHere && (
-                <Button variant="outline" size="tiny" onClick={() => setEditing(true)}>
-                  Propose changes
-                </Button>
-              )}
-              {owned && kbDirName && (
-                <Button
-                  variant="quiet"
-                  size="tiny"
-                  onClick={() => openInEditor(`${kbDirName}/${skill.path}/${active}`)}
-                >
-                  Edit
-                </Button>
-              )}
-            </>
+            rawOnMain !== null &&
+            !iAlreadyProposedHere && (
+              <Button variant="outline" size="tiny" onClick={() => setEditing(true)}>
+                Propose changes
+              </Button>
+            )
           }
         />
       )}
