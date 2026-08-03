@@ -25,20 +25,27 @@ export function useDefaultBranchFile(
   const asked = useRef<Set<string>>(new Set());
   const key = `${repoRelativePath ?? ''}::${revision}`;
 
+  /**
+   * No `cancelled` flag, deliberately — pairing one with the `asked` guard
+   * DEADLOCKS under StrictMode's double-invoked effects: the first run starts
+   * the fetch and marks the key asked, its cleanup sets `cancelled`, and the
+   * second run sees the key already asked and never refetches. The result
+   * arrives and is thrown away, so the caller waits forever. (That is exactly
+   * how this shipped: the change-request view sat on "Loading…" while both
+   * reads returned 200.)
+   *
+   * Discarding a stale response is the KEY's job instead: a late answer for a
+   * path we have since navigated away from simply stops matching on read.
+   */
   useEffect(() => {
     if (!repoRelativePath || asked.current.has(key)) return;
     asked.current.add(key);
-    let cancelled = false;
     readFileOnBranch(DEFAULT_BRANCH, repoRelativePath)
-      .then((content) => {
-        if (!cancelled) setFile({ key, content });
-      })
+      .then((content) => setFile({ key, content }))
       .catch(() => {
-        /* unreadable — callers fall back to the rendered view */
+        // Leave it unset rather than storing '': an empty string would diff as
+        // "the whole file was deleted".
       });
-    return () => {
-      cancelled = true;
-    };
   }, [repoRelativePath, key]);
 
   return file?.key === key ? file.content : null;

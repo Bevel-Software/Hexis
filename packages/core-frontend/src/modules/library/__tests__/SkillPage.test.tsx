@@ -364,6 +364,35 @@ describe('SkillPage — deciding on a change', () => {
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
   });
 
+  /**
+   * The empty string is not a stand-in for "hasn't loaded". Diffing `''`
+   * against the branch copy marks every line as a change and paints the whole
+   * file as rewritten — right beside an Approve button.
+   */
+  it('never renders a whole-file change while a side is still loading', async () => {
+    let releaseMain: (v: string) => void = () => {};
+    apiMock.readFileOnBranch.mockImplementation((branch: string) =>
+      branch.startsWith('suggestions/')
+        ? Promise.resolve(RAW_BRANCH)
+        : new Promise<string>((res) => {
+            releaseMain = res;
+          }),
+    );
+
+    renderPage(true, [foreignCr]);
+    await screen.findByText(/proposed a change/);
+
+    // Branch side in, main side still pending: no diff may be asserted yet.
+    expect(screen.getByText('Loading the change…')).toBeInTheDocument();
+    expect(document.querySelectorAll('ins')).toHaveLength(0);
+    expect(document.querySelectorAll('del')).toHaveLength(0);
+
+    releaseMain(RAW_MAIN);
+    // Both sides in: exactly the one line that actually differs.
+    await waitFor(() => expect(document.querySelectorAll('ins')).toHaveLength(1));
+    expect(document.querySelectorAll('del')).toHaveLength(1);
+  });
+
   it('offers the author Withdraw instead of a verdict, and only once per file', async () => {
     renderPage(false, [foreignCr], [7]);
 

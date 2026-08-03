@@ -45,6 +45,8 @@ export function CompareView({
   const [detail, setDetail] = useState<PullRequestDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [branchContents, setBranchContents] = useState<Record<string, string | null>>({});
+  /** Files whose branch copy could not be read — shown as such, never guessed at. */
+  const [unreadable, setUnreadable] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [sendBackOpen, setSendBackOpen] = useState(false);
   const [sendBackNote, setSendBackNote] = useState('');
@@ -138,19 +140,33 @@ export function CompareView({
       asked.current.add(selected);
       readFileOnBranch(cr.branch, `${skill.path}/${selected}`)
         .then((content) => setBranchContents((c) => ({ ...c, [selected]: content })))
-        .catch(() => setBranchContents((c) => ({ ...c, [selected]: '' })));
+        // NOT `''`. An unreadable branch copy stored as empty would diff as
+        // "every line deleted" — a change request that erases the file.
+        .catch(() => setUnreadable((s) => new Set(s).add(selected)));
     }
   }, [selected, cr.branch, skill.path]);
 
   const isAdded = addedFiles.includes(selected);
-  // Raw-vs-raw. `mainContent` hands back SKILL.md's PARSED body (frontmatter
-  // already stripped by the skills API), and diffing that against a raw branch
-  // read renders the frontmatter as a deletion and the whole file as changed.
-  const mainOnBranch = useDefaultBranchFile(isAdded ? null : `${skill.path}/${selected}`);
-  const mainRaw = isAdded ? null : mainOnBranch;
+  // Raw-vs-raw: the skills API hands back SKILL.md's PARSED body (frontmatter
+  // stripped), and diffing that against a raw branch read renders the
+  // frontmatter as a deletion and the whole file as changed.
+  const mainRaw = useDefaultBranchFile(isAdded ? null : `${skill.path}/${selected}`);
   const branchRaw = branchContents[selected] ?? null;
-  const diff: DiffLine[] | null =
-    branchRaw === null ? null : diffLines(isAdded ? '' : (mainRaw ?? ''), branchRaw);
+
+  /**
+   * BOTH sides or nothing.
+   *
+   * The empty string is not a stand-in for "hasn't loaded". Diffing `''`
+   * against the branch copy marks every line added and paints the whole file
+   * green — a confident claim that this change request rewrites the file,
+   * shown right above the Apply button, while the scale line beside it
+   * correctly reads `+1 −1`. A file genuinely new on the branch is the ONE
+   * case where an empty other side is real, and `isAdded` is how we know.
+   */
+  const bothSidesIn = branchRaw !== null && (isAdded || mainRaw !== null);
+  const diff: DiffLine[] | null = bothSidesIn
+    ? diffLines(isAdded ? '' : (mainRaw as string), branchRaw as string)
+    : null;
   const touchesSelected = changedFiles.has(selected);
 
   async function applyChanges() {
@@ -339,6 +355,7 @@ export function CompareView({
               <MarkedFile
                 diff={diff}
                 raw={detail !== null && !touchesSelected ? (mainRaw ?? branchRaw) : null}
+                unreadable={unreadable.has(selected)}
               />
             </div>
           </div>
@@ -413,7 +430,23 @@ function authorsReason(body: string | undefined): string | null {
  * passages stay in place struck through, added ones sit where they will land,
  * so what you read is the file as it would become.
  */
-function MarkedFile({ diff, raw }: { diff: DiffLine[] | null; raw: string | null }) {
+function MarkedFile({
+  diff,
+  raw,
+  unreadable,
+}: {
+  diff: DiffLine[] | null;
+  raw: string | null;
+  unreadable?: boolean;
+}) {
+  if (unreadable) {
+    return (
+      <p className="py-6 text-center text-detail text-ink-faint">
+        This file's copy on the change request couldn't be read, so there is no honest before and
+        after to show.
+      </p>
+    );
+  }
   if (raw !== null) {
     return (
       <pre className="whitespace-pre-wrap break-words font-mono text-detail leading-relaxed text-ink-muted">

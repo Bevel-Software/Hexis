@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { readFileOnBranch } from '../services/library.api';
 import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
@@ -21,6 +21,8 @@ export function useCrFileDiffs(
   revision = 0,
 ): Map<number, DiffLine[] | null> {
   const [contents, setContents] = useState<Map<string, string>>(new Map());
+  /** Requests already made, so a failed read is not retried on every render. */
+  const asked = useRef<Set<string>>(new Set());
 
   // Only the change requests that actually touch this file have anything to show.
   const relevant = useMemo(
@@ -30,25 +32,26 @@ export function useCrFileDiffs(
   const key = (n: number) => `${n}::${repoRelativePath}::${revision}`;
   const wanted = relevant.map((c) => `${c.number}|${c.branch}`).join(',');
 
+  /**
+   * No `cancelled` flag — see `useDefaultBranchFile` for why one would deadlock
+   * against the `asked` guard under StrictMode. Stale answers are discarded by
+   * the KEY (cr + path + revision), not by cleanup.
+   */
   useEffect(() => {
-    let cancelled = false;
     for (const cr of relevant) {
       const k = key(cr.number);
-      if (contents.has(k)) continue;
+      if (asked.current.has(k)) continue;
+      asked.current.add(k);
       readFileOnBranch(cr.branch, repoRelativePath)
-        .then((content) => {
-          if (!cancelled) setContents((m) => new Map(m).set(k, content));
-        })
+        .then((content) => setContents((m) => new Map(m).set(k, content)))
         .catch(() => {
-          // Unreadable branch: record the miss so it is not retried in a loop.
-          if (!cancelled) setContents((m) => new Map(m).set(k, ''));
+          // Deliberately NOT `''`. Storing empty for an unreadable branch copy
+          // would diff as "every line deleted" and present a proposal to erase
+          // the file. No content means no claim: the box keeps waiting.
         });
     }
-    return () => {
-      cancelled = true;
-    };
     // `contents` is intentionally out: it changes on every arrival, and the
-    // `has` guard above already makes each (cr, file, revision) fetch once.
+    // `asked` guard already makes each (cr, file, revision) fetch once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wanted, repoRelativePath, revision]);
 
