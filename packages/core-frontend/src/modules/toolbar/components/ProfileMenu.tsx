@@ -1,5 +1,14 @@
 import { Fragment, useCallback, useMemo, useRef, useState } from 'react';
-import { Boxes, ChevronDown, KeyRound, LibraryBig, Lock, LogOut, Users } from 'lucide-react';
+import {
+  Boxes,
+  ChevronDown,
+  CircleUserRound,
+  KeyRound,
+  LibraryBig,
+  Lock,
+  LogOut,
+  Users,
+} from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { useAuth } from '../../auth/state/auth.context';
@@ -21,7 +30,7 @@ const MENU_ID = 'app-profile-menu';
  * registry-contributed — see the enterprise shell's `adminMenuItems`. The
  * `order` values interleave the two lists to reproduce the historical row
  * order. In THIS repo the registry is empty (`makeRegistry({})`), so the menu
- * is these five rows and no more; the enterprise app gets all twelve.
+ * is these six rows and no more; the enterprise app gets all thirteen.
  *
  * All core rows NAVIGATE — the settings surfaces are standalone routed pages
  * below the persistent toolbar, not dialogs. The `dialog` contract on
@@ -65,6 +74,16 @@ const CORE_MENU_ITEMS: AdminMenuItem[] = [
     label: 'Browse available tools',
     onSelect: ({ navigate, closeMenu }) => {
       navigate('/tools');
+      closeMenu();
+    },
+  },
+  {
+    id: 'account',
+    order: 90,
+    icon: <CircleUserRound size={15} />,
+    label: 'Account',
+    onSelect: ({ navigate, closeMenu }) => {
+      navigate('/account');
       closeMenu();
     },
   },

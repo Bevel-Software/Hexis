@@ -1,6 +1,6 @@
 {
-  "id": "aa79f727-b8b7-4c83-9318-74d4762a8d56",
-  "prevId": "e7181272-9dc5-431e-a6ba-c999391e8869",
+  "id": "e7181272-9dc5-431e-a6ba-c999391e8869",
+  "prevId": "b7c1d5e2-3a48-4f16-9c02-8d5e4a1f7b93",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1568,12 +1568,11 @@
           "primaryKey": false,
           "notNull": false
         },
-        "onboarding_done": {
-          "name": "onboarding_done",
-          "type": "boolean",
+        "password_hash": {
+          "name": "password_hash",
+          "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "default": false
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",

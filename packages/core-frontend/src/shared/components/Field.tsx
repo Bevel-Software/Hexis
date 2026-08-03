@@ -21,7 +21,7 @@ const BASE = cn(
   'disabled:cursor-not-allowed disabled:opacity-50',
 );
 
-export interface TextFieldProps extends InputHTMLAttributes<HTMLInputElement> {}
+export type TextFieldProps = InputHTMLAttributes<HTMLInputElement>;
 
 export function TextField({ className, type = 'text', ...rest }: TextFieldProps) {
   return (
@@ -33,7 +33,7 @@ export function TextField({ className, type = 'text', ...rest }: TextFieldProps)
   );
 }
 
-export interface TextAreaFieldProps extends TextareaHTMLAttributes<HTMLTextAreaElement> {}
+export type TextAreaFieldProps = TextareaHTMLAttributes<HTMLTextAreaElement>;
 
 export function TextAreaField({ className, ...rest }: TextAreaFieldProps) {
   return (

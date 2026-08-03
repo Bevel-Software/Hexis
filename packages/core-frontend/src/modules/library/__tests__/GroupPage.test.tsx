@@ -34,13 +34,12 @@ vi.mock('../services/groups.api', () => ({
   AlreadyReadableError: class AlreadyReadableError extends Error {},
 }));
 
-// The page's access section fetches on mount. Stub that seam so these tests
-// exercise the page's judgement rather than the network — and so the suite
-// doesn't wait on a connection refusal. `GroupAccessSection.test.tsx` is where
-// the section's own behaviour is covered.
-// The ONE access surface. Mocked at the component: its own behaviour lives in
-// the access module's tests — what this file owes is that the page opens it on
-// the right DIRECTORY.
+// The ONE access surface — the separate summary section this page was designed
+// with never shipped, so there is no `GroupAccessSection.test.tsx` to defer to.
+// Mocked at the component: the dialog fetches on mount, and stubbing that seam
+// keeps these tests on the page's judgement rather than the network. Its own
+// behaviour lives in the access module's tests; what this file owes is that the
+// page opens it on the right DIRECTORY.
 vi.mock('../../access/components/ManageAccessDialog', () => ({
   ManageAccessDialog: ({
     entry,
@@ -246,6 +245,23 @@ describe('GroupPage', () => {
       await screen.findByText('No skills yet. Add one, or ask your agent to write one for GTM.'),
     ).toBeInTheDocument();
     expect(screen.getByText('No tools yet.')).toBeInTheDocument();
+  });
+
+  it('keeps Share on an EMPTY group — the folder is what carries access, not the items', async () => {
+    // Groups used to be derived from their items, which meant a group with
+    // nothing in it had no folder to manage and silently lost its access
+    // surface. `folders` now comes from the backend's readdir, so an empty
+    // group is still a place whose sharing can be changed.
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+    groupsMock.listGroups.mockResolvedValue([gtm({ skillCount: 0, toolCount: 0 })]);
+    renderGroup('GTM');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Share' }));
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access directory knowledge-base/Groups/GTM',
+      }),
+    ).toBeInTheDocument();
   });
 
   it('Share IS the manage-access dialog, opened on this group\'s directory', async () => {

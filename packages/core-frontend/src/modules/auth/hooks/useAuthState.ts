@@ -3,17 +3,17 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import type { AuthContextValue } from '../state/auth.context';
 import { loginWithPassword, fetchCurrentUser } from '../services/auth.api';
 import { getToken, setToken, clearToken } from '../../../lib/api';
-import { consumeMicrosoftCallback, OAUTH_ERROR_KEY } from '../services/microsoft-oauth';
+import { consumeSsoCallback, OAUTH_ERROR_KEY } from '../services/sso';
 
 export function useAuthState(): AuthContextValue {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [token, setTokenState] = useState<string | null>(getToken());
   const [isLoading, setIsLoading] = useState(true);
 
-  // On mount: first absorb a Microsoft OAuth callback (if we landed on it),
+  // On mount: first absorb an SSO OAuth callback (if we landed on one),
   // then validate whatever token we have (from the callback or localStorage).
   useEffect(() => {
-    const cb = consumeMicrosoftCallback();
+    const cb = consumeSsoCallback();
     if (cb.error) {
       sessionStorage.setItem(OAUTH_ERROR_KEY, cb.error);
     }

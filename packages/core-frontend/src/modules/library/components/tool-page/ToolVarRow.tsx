@@ -72,12 +72,28 @@ export function ToolVarRow({
 
   const label = variable.label ?? variable.name;
 
-  // The banner's button targets exactly one row; scrolling brings the editor
-  // to where the click happened conceptually — "fix THIS".
+  // Opening from a distance is a PROP CHANGE, not an event, so the editor state
+  // is adjusted during render against the previous signal — React's documented
+  // pattern for deriving state from a changed prop. It used to be an effect,
+  // which set state after paint: one frame of the row rendered closed, and the
+  // synchronous setState in an effect body is what `set-state-in-effect` flags.
+  // `seenSignal` starts undefined rather than at `editSignal` so a row that
+  // MOUNTS with a signal already on it still opens, as the effect version did.
+  const [seenSignal, setSeenSignal] = useState<number | undefined>(undefined);
+  if (editSignal !== seenSignal) {
+    setSeenSignal(editSignal);
+    if (editSignal) {
+      setValue('');
+      setEditor('value');
+    }
+  }
+
+  // The scroll stays an effect: it is a real DOM side effect and has to happen
+  // after the editor it scrolls to has been committed. The banner's button
+  // targets exactly one row; scrolling brings the editor to where the click
+  // happened conceptually — "fix THIS".
   useEffect(() => {
     if (!editSignal) return;
-    setValue('');
-    setEditor('value');
     rootRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }, [editSignal]);
 

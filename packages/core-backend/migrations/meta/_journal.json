@@ -12,15 +12,22 @@
     {
       "idx": 1,
       "version": "7",
-      "when": 1785577135101,
-      "tag": "0001_group_access_requests",
+      "when": 1785534603355,
+      "tag": "0001_user_password_hash",
       "breakpoints": true
     },
     {
       "idx": 2,
       "version": "7",
-      "when": 1785774461825,
-      "tag": "0002_user_onboarding_done",
+      "when": 1785577135101,
+      "tag": "0002_group_access_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1785784686463,
+      "tag": "0003_user_onboarding_done",
       "breakpoints": true
     }
   ]

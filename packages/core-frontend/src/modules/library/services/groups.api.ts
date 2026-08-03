@@ -76,7 +76,14 @@ export async function requestGroupAccess(name: string): Promise<void> {
     method: 'POST',
   });
   if (res.status === 409) {
-    const body = (await res.json().catch(() => ({}))) as { kind?: string };
+    // Read from a CLONE: this is a probe for one specific conflict, and any
+    // other 409 has to fall through to `handleApiResponse` with its body
+    // intact. Reading `res` itself would leave the real error path throwing
+    // "Body is unusable" instead of the server's message.
+    const body = (await res
+      .clone()
+      .json()
+      .catch(() => ({}))) as { kind?: string };
     if (body.kind === 'already-readable') throw new AlreadyReadableError();
   }
   await handleApiResponse<{ ok: true }>(res);

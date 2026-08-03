@@ -17,7 +17,7 @@ type ToolType = 'inline' | 'http' | 'mcp';
 
 const ACCESS_VERBS = ['read', 'write', 'owner', 'download'] as const;
 const inputCls =
-  'w-full rounded-xs border border-line-strong px-2 py-1 text-xs focus:border-accent focus:outline-none disabled:bg-sunken disabled:text-ink-muted';
+  'w-full rounded-md border border-line-strong px-2 py-1 text-xs focus:border-accent focus:outline-none disabled:bg-sunken disabled:text-ink-muted';
 
 /**
  * Parse the tool object — the `---` fence's contents, or the whole file when
@@ -194,7 +194,7 @@ function AccessSection({ frontmatter, readOnly, onChange }: { frontmatter: Obj; 
       <div className="grid grid-cols-2 gap-2">
         {ACCESS_VERBS.map((verb) => (
           <label key={verb} className="block">
-            <span className="mb-0.5 block text-micro uppercase tracking-wide text-ink-faint">{verb}</span>
+            <span className="mb-0.5 block text-label uppercase text-ink-faint">{verb}</span>
             <textarea
               disabled={readOnly}
               rows={2}
@@ -210,7 +210,7 @@ function AccessSection({ frontmatter, readOnly, onChange }: { frontmatter: Obj; 
                   return rest;
                 })
               }
-              className="w-full resize-y rounded-xs border border-line-strong px-1.5 py-1 text-meta focus:border-accent focus:outline-none disabled:bg-sunken disabled:text-ink-muted"
+              className="w-full resize-y rounded-md border border-line-strong px-1.5 py-1 text-meta focus:border-accent focus:outline-none disabled:bg-sunken disabled:text-ink-muted"
               placeholder={verb === 'read' ? 'everyone' : 'Role Name'}
             />
           </label>
@@ -371,7 +371,7 @@ function InlineToolsEditor({
         onChange={(e) => onEdit(e.target.value)}
         spellCheck={false}
         rows={8}
-        className="w-full resize-y rounded-xs border border-line-strong bg-sunken p-2 font-mono text-meta focus:border-accent focus:outline-none"
+        className="w-full resize-y rounded-md border border-line-strong bg-sunken p-2 font-mono text-meta focus:border-accent focus:outline-none"
       />
       {!readOnly && error && <p className="mt-0.5 text-micro text-danger">Inline tools: {error}</p>}
     </div>
@@ -383,7 +383,7 @@ function AddButton({ label, onClick }: { label: string; onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      className="flex items-center gap-1 rounded-xs px-1.5 py-0.5 text-meta text-ink-muted hover:bg-hover"
+      className="flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-meta text-ink-muted hover:bg-hover"
     >
       <Plus size={11} /> {label}
     </button>
@@ -395,7 +395,7 @@ function RemoveButton({ onClick }: { onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      className="rounded-xs p-1 text-ink-faint hover:bg-danger-soft hover:text-danger"
+      className="rounded-sm p-1 text-ink-faint hover:bg-danger-soft hover:text-danger"
       aria-label="Remove"
     >
       <X size={12} />

@@ -199,10 +199,15 @@ export function SecretsPage() {
                     <Button variant="outline" size="tiny" onClick={() => void onAuthorize(s.id)}>
                       {s.authorized ? 'Reconnect' : 'Sign in'}
                     </Button>
+                    {/* The accessible name has to START with the visible word
+                        (WCAG 2.5.3): "Delete secret" meant voice control could
+                        not act on a button that reads "Remove". The key is what
+                        makes it unambiguous in a list of otherwise identical
+                        rows, so it comes after. */}
                     <Button
                       variant="quiet"
                       size="tiny"
-                      aria-label="Delete secret"
+                      aria-label={`Remove ${s.key}`}
                       onClick={() => void onDelete(s.id)}
                     >
                       Remove

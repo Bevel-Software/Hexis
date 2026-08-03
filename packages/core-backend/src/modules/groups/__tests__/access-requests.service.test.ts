@@ -104,11 +104,18 @@ function makeFakeDb() {
         from() {
           const where = (pred: Pred) => {
             const hits = rows.filter((r) => matches(r, pred));
+            const sorted = () =>
+              [...hits]
+                .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+                .map((r) => project(r, cols));
             const result = {
-              orderBy: async () =>
-                [...hits]
-                  .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
-                  .map((r) => project(r, cols)),
+              // Thenable rather than async, so `.orderBy(...)` can be awaited
+              // directly OR chained into `.limit(n)` — the real builder allows
+              // both and `pendingAll` uses the chained form.
+              orderBy: () => ({
+                limit: async (n: number) => sorted().slice(0, n),
+                then: (resolve: (v: unknown[]) => void) => resolve(sorted()),
+              }),
               limit: async (n: number) => hits.slice(0, n).map((r) => project(r, cols)),
               then: (resolve: (v: unknown[]) => void) => resolve(hits.map((r) => project(r, cols))),
             };
@@ -179,6 +186,16 @@ describe('AccessRequestsService', () => {
     const all = await svc.pendingAll();
     expect(all.map((r) => r.groupName)).toEqual(['Finance', 'GTM']);
     expect(all[0]).toMatchObject({ requesterName: 'Ali Baba', requesterEmail: 'ali@bevel.software' });
+  });
+
+  it('pendingAll caps the scan, keeping the OLDEST rows', async () => {
+    await svc.create('Finance', 'ali@bevel.software', 'Ali Baba');
+    await svc.create('GTM', 'juan@bevel.software', 'Juan Viera');
+    await svc.create('Engineering', 'olga@bevel.software', 'Olga Ivanova');
+
+    // Oldest-first is what makes the cap safe to drop rows at: the ones it
+    // sheds are the newest, which the next load still finds.
+    expect((await svc.pendingAll(2)).map((r) => r.groupName)).toEqual(['Finance', 'GTM']);
   });
 
   it('markFulfilled retires rows and pendingAll excludes them', async () => {

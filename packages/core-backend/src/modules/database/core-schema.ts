@@ -19,6 +19,12 @@ export const users = pgTable('users', {
   name: text('name').notNull(),
   avatarUrl: text('avatar_url'),
   /**
+   * scrypt hash for password login (see auth/password-hash.ts). NULL for
+   * accounts that only ever signed in via SSO — password login refuses them
+   * until an admin (or the user, from their Account page) sets one.
+   */
+  passwordHash: text('password_hash'),
+  /**
    * The one onboarding fact the server keeps: has this person concluded the
    * connect-your-agent setup (the welcome page's Done, or the reminder
    * pill's dismiss — one field, both doors). False drives the pill in every

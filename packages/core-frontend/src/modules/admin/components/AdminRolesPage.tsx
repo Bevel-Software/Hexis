@@ -14,6 +14,7 @@ import {
   type RoleRosterEntry,
 } from '../services/roles.api';
 import { suggestPrincipals } from '../../access/api';
+import { AccountsSection } from './AccountsSection';
 
 /** The default-branch workspace id — roles are managed there (admin status derives from it). */
 const ROLES_WORKSPACE_ID = encodeURIComponent(DEFAULT_BRANCH);
@@ -253,6 +254,7 @@ export function AdminRolesPage() {
           ))}
         </div>
       )}
+      <AccountsSection />
     </PageShell>
   );
 }

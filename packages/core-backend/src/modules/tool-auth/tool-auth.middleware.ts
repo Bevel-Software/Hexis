@@ -22,6 +22,14 @@ export interface ToolAuth {
   tokenId?: string;
   /** The agent run id carried by a per-run internal token (in-process agent). The external path supplies `sessionId` on the tool body instead. */
   sessionId?: string;
+  /**
+   * The branch the in-process agent's workspace is focused on, carried by its
+   * internal token. Lets an internal-only workspace tool fall back to the
+   * caller's own workspace when the model omits `branch`. Only ever set for
+   * `source: 'internal'`; an external caller (connection key or externalProxy)
+   * never carries it and must name the branch explicitly.
+   */
+  focusedBranch?: string;
   /** Always `'write'` now (the middleware sets it for both internal + external — neither credential carries scope). The read path is dormant until consumer agents are removed. */
   scope: 'read' | 'write';
 }
@@ -113,7 +121,7 @@ export function createTokenVerifier(
       if (!claim) return { ok: false, status: 401, message: 'Invalid or expired internal token' };
       return claim.externalProxy
         ? { ok: true, auth: { source: 'external', userId: claim.userId, scope: 'write' } }
-        : { ok: true, auth: { source: 'internal', userId: claim.userId, sessionId: claim.sessionId, scope: 'write' } };
+        : { ok: true, auth: { source: 'internal', userId: claim.userId, sessionId: claim.sessionId, focusedBranch: claim.focusedBranch, scope: 'write' } };
     }
 
     // External API key → external caller. (verifyAndLoadToken may throw → propagates → caller maps to 500.)

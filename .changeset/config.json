@@ -1,6 +1,6 @@
 {
   "$schema": "https://unpkg.com/@changesets/config@3.1.1/schema.json",
-  "changelog": "@changesets/cli/changelog",
+  "changelog": false,
   "commit": false,
   "access": "public",
   "baseBranch": "main",
@@ -12,5 +12,8 @@
     ]
   ],
   "updateInternalDependencies": "patch",
-  "ignore": ["@bevel-software/server", "@bevel-software/web"]
+  "ignore": [
+    "@bevel-software/server",
+    "@bevel-software/web"
+  ]
 }
