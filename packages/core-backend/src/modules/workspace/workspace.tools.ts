@@ -771,6 +771,16 @@ export function registerWorkspaceTools(
         timeout_ms: { type: 'integer', minimum: 1000, maximum: 120000, description: 'Timeout in ms (default 30000).' },
         sessionId: SESSION_ID_INPUT,
       },
+      // `branch` stays REQUIRED here on purpose, and must not be relaxed to make
+      // the handler's focused-branch fallback "reachable". This list is the
+      // contract the model is TAUGHT — declaring it required is what makes the
+      // caller always name its branch, which is the fix for the workspace this
+      // tool used to resolve as "undefined". It is not a runtime gate: nothing in
+      // the tool route validates inputs against this schema, so a branch-less call
+      // still reaches the handler and still hits the `ctx.focusedBranch` fallback
+      // (covered by "falls back to the session focused branch when branch is
+      // omitted"). The fallback is a safety net for a model that disobeys the
+      // contract — not a sanctioned calling convention to advertise.
       required: ['branch', 'command'],
       additionalProperties: false,
     },
@@ -785,28 +795,50 @@ export function registerWorkspaceTools(
     },
     write: true,
     handler: async (a, ctx: ToolContext) => {
-      // Refuse a missing branch FIRST — before the policy gates below — so a
-      // malformed call always gets the 400 that names what is missing, rather
-      // than a 403 from a restricted session masking it. Unlike the file tools
-      // (which route through `getOrCreateForUser` and fall back to the default
-      // branch), execute_command turns `branch` straight into a workspace — so
-      // an absent value would `encodeURIComponent(undefined)` to the string
-      // "undefined", then try to CLONE a branch literally named "undefined",
-      // 500ing and leaving an `<workspaces>/undefined/` shell behind. Fail with
-      // a clear 4xx naming the missing context instead.
-      const branch = a.branch;
-      if (typeof branch !== 'string' || branch.trim().length === 0) {
+      // Resolve the branch FIRST — before the policy gates below — so a malformed
+      // call always gets the 400 that names what is missing, rather than a 403
+      // from a restricted session masking it. Unlike the file tools (which route
+      // through `getOrCreateForUser` and fall back to the default branch),
+      // execute_command turns `branch` straight into a workspace — so a bad value
+      // would `encodeURIComponent(undefined)` to the string "undefined", then try
+      // to CLONE a branch literally named "undefined", 500ing and leaving an
+      // `<workspaces>/undefined/` shell behind.
+      //
+      // Two distinct cases:
+      //  - branch OMITTED (`undefined`): the in-app chat agent may leave it off a
+      //    call. For an internal session we fall back to the caller's own focused
+      //    branch (`ctx.focusedBranch`, from its signed token), so the command runs
+      //    against the workspace the session is on (e.g. `main`) end to end. An
+      //    external caller carries no focused branch, so it stays absent → 400.
+      //  - branch PRESENT but invalid (the literal "undefined"/"null", empty, or
+      //    malformed): a broken value, never a real branch — fail closed, never
+      //    silently reinterpret it as the focused branch.
+      const raw = a.branch;
+      const branch = raw === undefined ? ctx.focusedBranch : raw;
+      if (typeof branch !== 'string' || branch.length === 0) {
         throw new ToolError(
           'execute_command requires a `branch`: pass the branch (draft) whose workspace to run the command in — the one you are currently working on.',
           400,
         );
       }
-      // Then the SHAPE of the value, via the one canonical validator every other
-      // branch path uses — no hand-maintained list of suspicious literals here,
-      // which would both miss malformed refs (`..`, `-x`, `foo/.lock`) and
-      // reserve names git considers perfectly valid. Note this runs on the RAW
-      // string: a whitespace-padded `" main "` is refused rather than silently
-      // trimmed into a different branch than the caller passed.
+      // A stringified absent value. Both are syntactically valid git branch names,
+      // so `assertValidBranchName` below happily accepts them — and accepting one
+      // is the whole bug this tool is guarded for: `getOrCreateForBranch("undefined")`
+      // clones a branch literally named "undefined" into `<workspaces>/undefined/`
+      // and 500s. Reject them by name, ahead of the shape check.
+      if (branch === 'undefined' || branch === 'null') {
+        throw new ToolError(
+          `execute_command got the literal string "${branch}" as \`branch\` — that is a stringified absent value, not a branch. ` +
+            'Pass the real branch (draft) whose workspace to run the command in.',
+          400,
+        );
+      }
+      // Then the SHAPE, via the one canonical validator every other branch path
+      // uses — no hand-maintained list of suspicious literals, which would both
+      // miss malformed refs (`..`, `-x`, `foo/.lock`) and reserve names git
+      // considers perfectly valid. Runs on the RAW string, so a whitespace-padded
+      // `" main "` is refused rather than silently trimmed into a different
+      // branch than the caller passed.
       try {
         assertValidBranchName(branch);
       } catch (err) {

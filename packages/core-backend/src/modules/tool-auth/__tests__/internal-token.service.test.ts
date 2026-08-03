@@ -22,6 +22,12 @@ describe('InternalTokenService', () => {
     expect(svc.verify(token)).toEqual({ userId: 'user-A', externalProxy: true });
   });
 
+  it('round-trips the focusedBranch claim (the in-process agent workspace branch)', () => {
+    const svc = new InternalTokenService({ secret: 'test-secret' });
+    const token = svc.mint({ userId: 'user-A', sessionId: 'run-1', focusedBranch: 'main' });
+    expect(svc.verify(token)).toEqual({ userId: 'user-A', sessionId: 'run-1', focusedBranch: 'main' });
+  });
+
   it('rejects a tampered token', () => {
     const svc = new InternalTokenService({ secret: 'test-secret' });
     const token = svc.mint(claim);
@@ -84,6 +90,16 @@ describe('createTokenVerifier — internal-token source resolution', () => {
     expect(result).toEqual({
       ok: true,
       auth: { source: 'internal', userId: 'user-A', sessionId: 'run-1', scope: 'write' },
+    });
+  });
+
+  it('carries the focusedBranch through to the internal auth (branch-less fallback source)', async () => {
+    const svc = new InternalTokenService({ secret: 's' });
+    const verify = createTokenVerifier(noExternalKeys, svc);
+    const result = await verify(svc.mint({ userId: 'user-A', sessionId: 'run-1', focusedBranch: 'alice/draft' }));
+    expect(result).toEqual({
+      ok: true,
+      auth: { source: 'internal', userId: 'user-A', sessionId: 'run-1', focusedBranch: 'alice/draft', scope: 'write' },
     });
   });
 

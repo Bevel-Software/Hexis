@@ -38,6 +38,15 @@ export interface ToolContext {
    * boundary to one run. Absent for non-agent or unthreaded calls.
    */
   sessionId?: string;
+  /**
+   * The branch the in-process agent's workspace is focused on, from its internal
+   * token. An internal-only workspace tool (e.g. `execute_command`) falls back to
+   * it when the model omits `branch`, so the in-app chat agent acts on its own
+   * workspace even on a branch-less call. Only set for `source: 'internal'`;
+   * external callers must name the branch explicitly (a present-but-invalid value
+   * still fails closed regardless of this).
+   */
+  focusedBranch?: string;
   abortSignal: AbortSignal;
   workspaceService: WorkspaceService;
   workflowService: IWorkflowService;
