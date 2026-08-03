@@ -65,6 +65,8 @@ The **group page** at `/skills-and-tools/groups/:group` (see §3 for the contrac
 
 Section wrapper: `<section aria-label={`Access for ${group}`}>` with heading `Access` (styled `text-label uppercase tracking-wider text-ink-faint`, matching the page's other section heads).
 
+> **SUPERSEDED — the card below never shipped.** What renders is `Share` → `ManageAccessDialog`. §2.2 is kept for the copy decisions and the reasoning behind them.
+
 **Per-folder card** (`Surface` tone `surface`, radius `xl`, elevation `card`, `padded`). One card per physical folder returned by `groupFoldersFor()` (§4.3). When there is more than one card, each card gets a sub-heading naming its folder — exactly `Skills folder — Skills/{G}`, `Tools folder — Tools/{G}`, `Groups folder — Groups/{G}` (`text-meta text-ink-muted`) — and the whole section is preceded by this Banner (tone `neutral`, `role="note"`):
 
 > **This group still lives in the legacy Skills/ and Tools/ folders, so its skills and its tools have separate access rules. Manage each folder below; they become one when the group is migrated to Groups/.**
@@ -132,6 +134,11 @@ The repo's existing semantics for access edits, which this feature follows verba
 - Backend: one NEW endpoint `GET /api/workspace/:id/access/overrides` (§4.4). All existing access endpoints used as-is.
 
 **Mount point decision** (must be unambiguous for autonomous agents):
+
+> **SUPERSEDED — not built. See the AS BUILT note at the top and §5 item 8.**
+
+As built there is nothing to mount: the access surface is the `Share` button in `GroupPage`'s title row, which opens `ManageAccessDialog` on `primaryFolderOf(summary)`. There is no LibraryPage fallback and `GalleryItem` gained no `path` field.
+
 - **Primary**: if `packages/core-frontend/src/modules/library/components/GroupPage.tsx` exists at implementation time (created by the group-page feature of this plan), render `<GroupAccessSection group={group} itemPaths={itemPaths} />` as the last child of its page body, after the Tools section.
 - **Fallback (interim, independently shippable)**: if GroupPage does not exist yet, mount in `LibraryPage.tsx` (`LibraryPageInner`): immediately after the card-grid container, add
   ```tsx
@@ -175,6 +182,9 @@ interface Props {
 Implementation: `const { workspaceId: ctxWorkspaceId, kbDirName } = useWorkspace(); const workspaceId = workspaceIdProp ?? ctxWorkspaceId;` — every existing call site is unaffected (prop optional). `kbDirName` stays context-sourced (same across branches). This is the complete answer to "what, if anything, ManageAccessDialog needs": nothing for directory targeting, one optional prop for branch pinning.
 
 ### 4.3 Group → physical folders (frontend util, no network)
+
+> **SUPERSEDED — not built. See the AS BUILT note at the top and §5 item 8.**
+
 
 ```ts
 // packages/core-frontend/src/modules/library/utils/group-folders.ts
@@ -234,6 +244,9 @@ export async function listAccessDeclarationsUnder(
 
 ### 4.5 Frontend client + hook
 
+> **PARTLY SUPERSEDED.** `fetchAccessOverrides` in `modules/access/api.ts` shipped; `useGroupAccess.ts` did not — see the AS BUILT note.
+
+
 ```ts
 // MODIFY packages/core-frontend/src/modules/access/api.ts — append:
 export type AccessOverridePrincipal =
@@ -280,8 +293,8 @@ No new storage. All truth stays in git: `Groups/<G>/access.md` (and legacy `Skil
 
 4. **MODIFY** `src/modules/access/api.ts` — append types + `fetchAccessOverrides` (§4.5).
 5. **MODIFY** `src/modules/access/components/ManageAccessDialog.tsx` — optional `workspaceId` prop (§4.2), `props.workspaceId ?? ctx.workspaceId` at L193.
-6. **CREATE** `src/modules/library/utils/group-folders.ts` — `GroupFolder`, `groupFoldersFor` (§4.3).
-7. **CREATE** `src/modules/library/hooks/useGroupAccess.ts` — `useGroupFolderAccess` (§4.5).
+6. ~~**CREATE** `src/modules/library/utils/group-folders.ts`~~ — **SUPERSEDED, not built.** Folders come from `GroupSummary.folders`; the page picks one with `primaryFolderOf` (`utils/group-summary.ts`).
+7. ~~**CREATE** `src/modules/library/hooks/useGroupAccess.ts`~~ — **SUPERSEDED, not built.** `ManageAccessDialog` fetches its own access state, so there is no summary for a hook to feed.
 8. ~~**CREATE** `src/modules/library/components/GroupAccessSection.tsx`~~ — **SUPERSEDED during implementation. No such component exists; do not build one from this section.**
 
    The read-only summary card was designed before `ManageAccessDialog` was the one access surface. Building both would have meant two renderings of the same rules that could disagree, so the section collapsed into a single `Share` button in the group page's title row, which opens the dialog directly on the group's folder. The dialog already renders read-only for a non-writer — its own `canWrite` verdict decides — so "who is this shared with?" and "change who it is shared with" are one control instead of a summary plus an escalation.
@@ -319,7 +332,7 @@ No DELETEs. No changes to `modules/pr/`, `modules/review/`, `DetailDialog.tsx`, 
 
 **M3 — Read-only group access section.** Items 4, 6, 7, 8 (summary + overrides display + legacy multi-card + banner, Manage button rendered but this milestone may ship with it hidden behind `canWrite` as designed — it opens the dialog only after M2, which precedes it) + item 9 mount + frontend tests. Verify: `pnpm --filter core-frontend test`, `pnpm ds:check` (ratchet must not rise), manual: select GTM in the Library → Access section shows readers/writers/owners and item-specific rules.
 
-**M4 — Manage escalation wired end-to-end.** The dialog wiring inside `GroupAccessCard` (open → grant a role → close → summary reflects it after `reload()`), plus the GroupPage mount swap if GroupPage has landed by then. Verify: grant `GTM Team` read on `Groups/GTM` from the group page; confirm a direct commit lands on the default branch touching only `Groups/GTM/access.md`; revoke path and inherited-409 confirm flow work from the folder target.
+**M4 — Manage escalation wired end-to-end.** *(As built: the dialog is wired to `Share` in `GroupPage`, not to a `GroupAccessCard`.)* The dialog wiring (open → grant a role → close → summary reflects it after `reload()`), plus the GroupPage mount swap if GroupPage has landed by then. Verify: grant `GTM Team` read on `Groups/GTM` from the group page; confirm a direct commit lands on the default branch touching only `Groups/GTM/access.md`; revoke path and inherited-409 confirm flow work from the folder target.
 
 ---
 
@@ -346,17 +359,17 @@ No DELETEs. No changes to `modules/pr/`, `modules/review/`, `DetailDialog.tsx`, 
 
 **Frontend**
 
-`packages/core-frontend/src/modules/library/__tests__/group-folders.test.ts`
+~~`packages/core-frontend/src/modules/library/__tests__/group-folders.test.ts`~~ — not built (no `group-folders.ts`)
 - `Groups/GTM/x/SKILL.md` → `[{folder:'Groups/GTM', root:'Groups'}]`
 - legacy `Skills/GTM/...` + `Tools/GTM/...` → two folders, Groups-first ordering preserved when mixed with `Groups/GTM/...` (three folders)
 - `Tools/slack.tool` (2 segments) contributes nothing; other groups' paths filtered; `[]` → `[]`; dedupes
 
-`packages/core-frontend/src/modules/library/__tests__/useGroupAccess.test.tsx` (mock `modules/access/api`)
+~~`packages/core-frontend/src/modules/library/__tests__/useGroupAccess.test.tsx`~~ — not built (no `useGroupAccess.ts`)
 - exposes summary + overrides after parallel load; `loading` toggles on summary only
 - summary rejection → `error` set; overrides rejection → `overrides: []`, no error
 - `reload()` refetches both
 
-`packages/core-frontend/src/modules/library/__tests__/GroupAccessSection.test.tsx` (mock `modules/access/api`, mock `ManageAccessDialog` to a stub asserting its props, provide WorkspaceContext with `kbDirName: 'knowledge-base'`)
+~~`packages/core-frontend/src/modules/library/__tests__/GroupAccessSection.test.tsx`~~ — not built. The equivalent coverage is in `GroupPage.test.tsx`: `Share` opens the dialog on the group DIRECTORY, and it survives on a group with no items.
 - shows `Checking access…` while loading, then the readers/writers/owners content
 - `readers.restricted === false` → renders "Everyone at the company can use this group."
 - `canWrite: true` → button with accessible name `Manage access` present; click → dialog stub received `entry={name:'GTM', relativePath:'knowledge-base/Groups/GTM', type:'directory'}` and `workspaceId=DEFAULT_WORKSPACE_ID`; stub close → both fetches re-fired
@@ -412,11 +425,11 @@ No DELETEs. No changes to `modules/pr/`, `modules/review/`, `DetailDialog.tsx`, 
 
 ## 10. Open risks & fallbacks
 
-1. **Group-page feature timing.** If `GroupPage.tsx` hasn't landed, the interim LibraryPage mount (§3) ships the full feature standalone; the later move is a one-line JSX relocation. If the group-page feature chooses a different route param name, only the mount call site changes — `GroupAccessSection`'s props are route-agnostic (`group` + `itemPaths`).
+1. ~~**Group-page feature timing.**~~ **Moot.** `GroupPage.tsx` landed in the same stack, so the interim LibraryPage mount was never needed and the access surface was built into the page directly.
 2. **`parseAccessFile` export conflicts** (e.g. Ali or another feature touching `access-control.service.ts`). Fallback: `access-declarations.ts` re-implements access.md parsing via the already-exported `extractFrontmatter` + `parseYamlSubset` + `parseAccessEntry` — identical output, no shared-file edit.
 3. **`resolvedView` fan-out cost on wide orgs** (one `grantSources` call per principal). We reuse the existing GET unchanged; if group pages make it hot, a follow-up `?lite=1` variant skipping `sources` is the fix — out of scope here, flagged for the backend owner.
 4. **Disclosure posture**: the summary shows eligible lists to any authenticated caller because `GET /access` already does. If product later tightens that, tighten it in `resolvedView` for both surfaces — do not fork behavior here.
 5. **Ambient workspace assumption**: if some future embedding renders the Library outside `WorkspaceProvider`, `useWorkspace()` throws. Current shell always provides it (ToolDetailBody relies on it today). If that assumption fails, wrap the mount in the provider rather than making the dialog context-optional.
 6. **`GalleryItem.path` addition** (fallback mount only) collides trivially with any concurrent LibraryPage refactor — it's a private field; whoever lands second rebases in seconds.
-7. **KB PR #8 slips or group folders get renamed**: everything here derives folders from item paths at runtime (`groupFoldersFor`), so no constant depends on the migration state; only the migration Banner copy assumes the destination is `Groups/` — safe.
+7. **KB PR #8 slips or group folders get renamed**: still safe, by a different route than planned — folders are discovered at runtime by the backend's `readdir` over all three roots rather than derived from item paths, so no constant depends on the migration state.
 
