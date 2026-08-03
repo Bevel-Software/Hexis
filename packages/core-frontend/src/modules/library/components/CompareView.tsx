@@ -11,6 +11,7 @@ import { mergePullRequest } from '../../pr/services/pr-merge.api';
 import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
 import { postPrComment } from '../../pr/services/pr-comments.api';
 import { readFileOnBranch, type LibrarySkill } from '../services/library.api';
+import { changeAuthorName } from '../utils/cr-author';
 import { useDefaultBranchFile } from '../hooks/useDefaultBranchFile';
 import { diffLines, type DiffLine } from '../utils/diff';
 
@@ -202,7 +203,7 @@ export function CompareView({
     }
   }
 
-  const author = cr.appAuthor?.name ?? cr.author.name ?? cr.author.login;
+  const author = changeAuthorName(cr);
   const firstName = author.split(' ')[0];
   const why = authorsReason(detail?.body);
 

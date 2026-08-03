@@ -95,4 +95,40 @@ describe('collapseUnchanged', () => {
     const rows = collapseUnchanged(diffLines('a\nb', 'a\nB'));
     expect(rows.some((r) => r.kind === 'gap')).toBe(false);
   });
+
+  /**
+   * Two changes `sameCount` unchanged lines apart. With the default context of
+   * 2, four of those are kept either side, so the hidden run is `sameCount - 4`.
+   */
+  function betweenTwoChanges(sameCount: number) {
+    const middle = Array.from({ length: sameCount }, (_, i) => `m${i}`);
+    return collapseUnchanged(
+      diffLines(['a', ...middle, 'z'].join('\n'), ['A', ...middle, 'Z'].join('\n')),
+    );
+  }
+
+  it('emits a short hidden run verbatim rather than as a gap', () => {
+    // A "1 unchanged line" button costs the row it hides and shows less.
+    const rows = betweenTwoChanges(5);
+    expect(rows.some((r) => r.kind === 'gap')).toBe(false);
+    // `&&` narrows the union where `.filter().map()` would not.
+    expect(rows.some((r) => r.kind === 'same' && r.text === 'm2')).toBe(true);
+  });
+
+  it('folds only runs longer than context * 2', () => {
+    // Exactly at the threshold (4 hidden) — kept.
+    const atThreshold = betweenTwoChanges(8);
+    expect(atThreshold.some((r) => r.kind === 'gap')).toBe(false);
+    expect(atThreshold.filter((r) => r.kind === 'same')).toHaveLength(8);
+
+    // One past it (5 hidden) — folded, and the count is what was hidden.
+    const past = betweenTwoChanges(9);
+    expect(past.filter((r) => r.kind === 'gap')).toEqual([{ kind: 'gap', count: 5 }]);
+  });
+
+  it('honours a caller-supplied context when deciding what to fold', () => {
+    // context 0 ⇒ nothing is kept for company and every run over 0 folds.
+    const rows = collapseUnchanged(diffLines('a\nb\nc\nz', 'A\nb\nc\nZ'), 0);
+    expect(rows.filter((r) => r.kind === 'gap')).toEqual([{ kind: 'gap', count: 2 }]);
+  });
 });

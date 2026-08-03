@@ -45,7 +45,19 @@ export function SkillFileEditor({
   const crlf = base.includes('\r\n');
   const toFileEndings = (s: string) => (crlf ? s.replace(/\r?\n/g, '\r\n') : s);
   const lf = (s: string) => s.replace(/\r\n?/g, '\n');
-  const unchanged = lf(text).trim() === lf(base).trim();
+
+  /**
+   * Exact comparison — NOT trimmed. Adding a trailing newline, stripping
+   * trailing spaces, or fixing the indent on the first line are real edits, and
+   * a trimmed guard answered every one of them with "Nothing changed yet".
+   *
+   * The LF normalisation is not the same kind of leniency and has to stay: the
+   * textarea can only ever produce LF, so against a CRLF `base` a raw `===`
+   * would report "changed" on a file nobody touched — and since `toFileEndings`
+   * converts back on the way out, that would open a change request git sees no
+   * diff in at all.
+   */
+  const unchanged = lf(text) === lf(base);
 
   async function submit() {
     if (unchanged) {

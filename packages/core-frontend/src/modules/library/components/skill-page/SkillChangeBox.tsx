@@ -17,6 +17,12 @@ export interface SkillChangeBoxProps {
   /** The proposal diffed against the file as it stands NOW; null while loading. */
   diff: DiffLine[] | null;
   /**
+   * This file already reads the way the proposal wants it to — someone landed
+   * the same edit first, or the author reverted it. There is nothing here to
+   * decide, though the change request may still touch other files.
+   */
+  upToDate?: boolean;
+  /**
    * The change cannot land as it stands — the file moved under it. Discovered
    * when a merge is attempted, which is the only moment git can answer the
    * question honestly.
@@ -41,10 +47,18 @@ export interface SkillChangeBoxProps {
  * not against what the author started from: what matters to the person deciding
  * is what would change if they said yes.
  *
- * `diff === null` is the blocked case, and it is deliberately NOT approvable.
- * Merging a change written against text that has since moved silently discards
- * whoever landed first, so the box states the situation and names the fix
- * instead of offering a button that would do the wrong thing.
+ * Two independent states, easily confused:
+ *
+ *  - `diff === null` means the comparison has not ARRIVED yet — one of the two
+ *    file reads is still in flight — and the box says "Loading the change…".
+ *    It is never a claim about the change itself; an absent diff is never
+ *    rendered as an empty or whole-file one.
+ *  - `blocked` means the change cannot LAND: the file moved under it, which git
+ *    only reveals when a merge is attempted. It withholds Approve (Decline and
+ *    Withdraw stay, since both are still valid answers) because merging a
+ *    change written against text that has since moved silently discards
+ *    whoever landed first. The box names the fix instead of offering a button
+ *    that would do the wrong thing.
  */
 export function SkillChangeBox({
   file,
@@ -53,6 +67,7 @@ export function SkillChangeBox({
   mine,
   canDecide,
   diff,
+  upToDate = false,
   blocked = false,
   owner,
   busy,
@@ -78,7 +93,9 @@ export function SkillChangeBox({
         <span className="ml-auto truncate font-mono text-meta text-ink-faint">{file}</span>
       </div>
 
-      {diff === null ? (
+      {/* No diff area when there is no difference — an empty pane under a
+          "what changed?" heading reads as a rendering failure. */}
+      {upToDate ? null : diff === null ? (
         <p className="px-3.5 py-4 text-center text-detail text-ink-faint">Loading the change…</p>
       ) : (
         <CollapsedDiffView lines={diff} />
@@ -90,7 +107,15 @@ export function SkillChangeBox({
           blocked ? 'bg-wait-soft' : 'border-t border-line',
         )}
       >
-        {blocked ? (
+        {upToDate ? (
+          <>
+            <span className="text-detail font-semibold text-ok">Already up to date</span>
+            <span className="w-full text-meta text-ink-muted">
+              This file already reads the way this change proposes. The change request may still
+              touch other files.
+            </span>
+          </>
+        ) : blocked ? (
           <>
             <span className="text-detail font-semibold text-wait">
               Blocked — these lines changed after this was written
@@ -124,12 +149,17 @@ export function SkillChangeBox({
               Withdraw
             </Button>
           )}
-          {canDecide && onDecline && (
+          {/* Both verdicts act on the WHOLE change request, so neither is
+              offered against a file with nothing to show: approving would
+              merge, and declining would kill, a request whose other files this
+              panel is not displaying. "Read the whole change" is the honest
+              route to that decision. */}
+          {canDecide && !upToDate && onDecline && (
             <Button variant="quiet" size="tiny" onClick={onDecline} disabled={busy}>
               Decline
             </Button>
           )}
-          {canDecide && !blocked && onApprove && (
+          {canDecide && !upToDate && !blocked && onApprove && (
             <Button variant="primary" size="tiny" onClick={onApprove} disabled={busy}>
               {busy ? 'Working…' : 'Approve'}
             </Button>

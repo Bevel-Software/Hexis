@@ -137,10 +137,14 @@ export function collapseUnchanged(lines: DiffLine[], context = 2): CollapsedDiff
   });
 
   const out: CollapsedDiff[] = [];
-  let hidden = 0;
+  // The lines themselves, not a running count: a short run is emitted as-is,
+  // so we have to still be holding it when the run ends.
+  let hidden: DiffLine[] = [];
   const flush = () => {
-    if (hidden > 0) out.push({ kind: 'gap', count: hidden });
-    hidden = 0;
+    if (hidden.length === 0) return;
+    if (hidden.length > context * 2) out.push({ kind: 'gap', count: hidden.length });
+    else out.push(...hidden);
+    hidden = [];
   };
 
   lines.forEach((l, i) => {
@@ -148,7 +152,7 @@ export function collapseUnchanged(lines: DiffLine[], context = 2): CollapsedDiff
       flush();
       out.push(l);
     } else {
-      hidden++;
+      hidden.push(l);
     }
   });
   flush();

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   DEFAULT_BRANCH,
@@ -12,19 +12,21 @@ import { useWorkspace } from '../../../workspace/state/workspace.context';
 import { kbFileUrl, resolveRelativePath } from '../../../workspace/routing/kb-routes';
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { mergePullRequest } from '../../../pr/services/pr-merge.api';
-import { proposeChange } from '../../services/library.api';
+import { proposeChange, suggestionBranchFor } from '../../services/library.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
 import { useCrFileDiffs } from '../../hooks/useCrFileDiffs';
 import { useDefaultBranchFile } from '../../hooks/useDefaultBranchFile';
 import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast';
 import { LIBRARY_ROOT } from '../../routes/library-paths';
+import { changeAuthorName } from '../../utils/cr-author';
 import { ownersTextOf } from '../../utils/group-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
 import { StatusDot } from '../StatusDot';
 import { ChangeRequestDock } from '../ChangeRequestDock';
 import { CompareView } from '../CompareView';
 import { SkillFileTabs } from './SkillFileTabs';
+import { skillPanelId, skillTabId } from './tab-ids';
 import { SkillFilePane } from './SkillFilePane';
 import { SkillFileEditor } from './SkillFileEditor';
 import { SkillChangeBox } from './SkillChangeBox';
@@ -56,6 +58,8 @@ export function SkillPage() {
 
   const [selected, setSelected] = useState('SKILL.md');
   const [compareCr, setCompareCr] = useState<PullRequestSummary | null>(null);
+  /** Ties the tabs to the panel they control; unique per mounted page. */
+  const tabsId = useId();
 
   // Ownership is a property of the CATALOG entry, not of the skill document —
   // it comes from the per-file ACL the provider already resolved, so the page
@@ -113,9 +117,29 @@ export function SkillPage() {
     () => (skillPath ? data.crs.filter((c) => touchesSkill(c, skillPath)) : []),
     [data.crs, skillPath],
   );
+  /**
+   * The caller's own open change request for this skill, resolved by BRANCH.
+   *
+   * Not by touched paths: `touchedNodePaths` is documented "Empty if not yet
+   * computed", and while it is empty every path-derived check collapses at
+   * once — the request stops looking like it touches this skill, so `ownCr`
+   * goes null, the editor offers itself again, and `proposeChange` takes its
+   * no-existing-request path and opens a SECOND change request against the
+   * branch that already has one.
+   *
+   * The branch is deterministic (`suggestionBranchFor`) and exists from the
+   * moment the request does, so it answers "is this mine?" in the window where
+   * paths cannot. The path-based lookup stays as a fallback — it can only add
+   * matches, never remove them — so a request opened on some other branch (by
+   * an agent, say) is still recognised as the caller's.
+   */
+  const myBranch = user ? suggestionBranchFor(user.email, name) : null;
   const ownCr = useMemo(
-    () => skillCrs.find((c) => data.myCrNumbers.has(c.number)) ?? null,
-    [skillCrs, data.myCrNumbers],
+    () =>
+      data.crs.find((c) => data.myCrNumbers.has(c.number) && c.branch === myBranch) ??
+      skillCrs.find((c) => data.myCrNumbers.has(c.number)) ??
+      null,
+    [data.crs, data.myCrNumbers, myBranch, skillCrs],
   );
 
   /** Which tabs get a dot: the files an open change request actually touches. */
@@ -159,7 +183,18 @@ export function SkillPage() {
     [skillCrs, fileRepoPath],
   );
 
-  const iAlreadyProposedHere = boxes.some((c) => data.myCrNumbers.has(c.number));
+  /**
+   * Whether to offer the editor. Keyed off `ownCr` — which knows the caller's
+   * request by branch — rather than off `boxes`, which cannot see a request
+   * whose touched paths have not been computed yet and would hand out a second
+   * editor over the top of one.
+   *
+   * Consequence worth knowing: one open proposal per person per SKILL, not per
+   * file. Adding a second file to a request you already have open now means
+   * withdrawing it (or asking your agent), which is the cost of never being
+   * able to fork your own pending change in two.
+   */
+  const iAlreadyProposedHere = ownCr !== null;
 
   const openInEditor = useCallback(
     (wsRelative: string) => navigate(kbFileUrl(DEFAULT_BRANCH, wsRelative)),
@@ -237,8 +272,16 @@ export function SkillPage() {
     </Button>
   );
 
+  // Same frame as the other two branches: the way out is on screen while the
+  // skill loads, not only once it has, and the column does not jump when the
+  // content arrives under it.
   if (detail.loading) {
-    return <div className="py-16 text-center text-ui text-ink-muted">Loading…</div>;
+    return (
+      <Article>
+        {backLink}
+        <p className="py-16 text-center text-ui text-ink-muted">Loading…</p>
+      </Article>
+    );
   }
 
   if (detail.error || !skill) {
@@ -302,12 +345,21 @@ export function SkillPage() {
         files={files}
         selected={active}
         pending={pendingFiles}
+        baseId={tabsId}
         onSelect={(f) => {
           setSelected(f);
           setEditing(false);
         }}
       />
 
+      {/* The panel the tabs control. It wraps BOTH the reading pane and the
+          editor that replaces it, so `aria-controls` resolves in either state
+          rather than pointing at an element that exists only half the time. */}
+      <div
+        role="tabpanel"
+        id={skillPanelId(tabsId)}
+        aria-labelledby={skillTabId(tabsId, active)}
+      >
       {editing && rawOnMain !== null ? (
         <SkillFileEditor
           file={active}
@@ -356,15 +408,20 @@ export function SkillPage() {
       {!editing &&
         boxes.map((cr) => {
           const mine = data.myCrNumbers.has(cr.number);
+          // `[]` is the hook's "overtaken" answer — the proposal and the file
+          // now say the same thing — and is distinct from `null`, which only
+          // means a side has not arrived yet.
+          const fileDiff = crDiffs.get(cr.number) ?? null;
           return (
             <SkillChangeBox
               key={cr.number}
               file={active}
-              author={cr.appAuthor?.name ?? cr.author.name ?? cr.author.login}
+              author={changeAuthorName(cr)}
               when={formatWhen(cr.createdAt)}
               mine={mine}
               canDecide={owned && !mine}
-              diff={crDiffs.get(cr.number) ?? null}
+              diff={fileDiff}
+              upToDate={fileDiff !== null && fileDiff.length === 0}
               blocked={blockedCrs.has(cr.number)}
               owner={ownerName}
               busy={busyCr === cr.number}
@@ -375,10 +432,12 @@ export function SkillPage() {
             />
           );
         })}
+      </div>
 
-      {/* The dock lists change requests touching ANY file of the skill — the
-          boxes above only cover the one on screen, so without it a proposal to
-          a file you are not looking at has no way to reach you. */}
+      {/* Outside the panel: the dock lists change requests touching ANY file of
+          the skill, so it is not about the selected tab. The boxes above only
+          cover the file on screen, and without this a proposal to a file you
+          are not looking at has no way to reach you. */}
       {owned && <ChangeRequestDock crs={skillCrs} onSelect={setCompareCr} />}
     </Article>
   );

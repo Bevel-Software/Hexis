@@ -1,4 +1,6 @@
+import { useRef } from 'react';
 import { cn } from '../../../../lib/utils';
+import { skillPanelId, skillTabId } from './tab-ids';
 
 interface SkillFileTabsProps {
   /** File names relative to the skill folder; `SKILL.md` is always first. */
@@ -6,6 +8,11 @@ interface SkillFileTabsProps {
   selected: string;
   /** Files carrying an open change request — the tab shows a dot. */
   pending?: ReadonlySet<string>;
+  /**
+   * Shared prefix for the tab ids and the panel id, so the two halves can point
+   * at each other. The owner of both mints it (`useId`).
+   */
+  baseId: string;
   onSelect(file: string): void;
 }
 
@@ -18,17 +25,45 @@ interface SkillFileTabsProps {
  * dot marks a file with a change request open on it, so the one file that needs
  * a decision is visible before you have clicked anything.
  *
- * `role="tablist"` is deliberate and load-bearing for the keyboard: with it,
- * left/right arrows are what a screen-reader user is told to press, which is
- * the behavior `onKeyDown` below implements.
+ * `role="tablist"` is deliberate and load-bearing: it is what tells a screen
+ * reader user to press arrows, so the keyboard handling below has to actually
+ * honour that promise — arrows and Home/End, with FOCUS following selection.
  */
-export function SkillFileTabs({ files, selected, pending, onSelect }: SkillFileTabsProps) {
+export function SkillFileTabs({
+  files,
+  selected,
+  pending,
+  baseId,
+  onSelect,
+}: SkillFileTabsProps) {
+  const buttons = useRef(new Map<string, HTMLButtonElement>());
+
+  /**
+   * Select AND focus. The tabs use a roving tabindex, so selecting alone moves
+   * the tab stop to a button the user is not standing on: the focus ring stays
+   * behind on a tab that is no longer selected, and a screen reader keeps
+   * announcing it while a different file is on screen.
+   */
+  function go(file: string) {
+    onSelect(file);
+    buttons.current.get(file)?.focus();
+  }
+
   function onKeyDown(e: React.KeyboardEvent) {
-    const delta = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
-    if (!delta) return;
-    e.preventDefault();
     const i = files.indexOf(selected);
-    onSelect(files[(i + delta + files.length) % files.length]);
+    const next =
+      e.key === 'ArrowRight'
+        ? files[(i + 1) % files.length]
+        : e.key === 'ArrowLeft'
+          ? files[(i - 1 + files.length) % files.length]
+          : e.key === 'Home'
+            ? files[0]
+            : e.key === 'End'
+              ? files[files.length - 1]
+              : undefined;
+    if (next === undefined) return;
+    e.preventDefault();
+    go(next);
   }
 
   return (
@@ -45,9 +80,15 @@ export function SkillFileTabs({ files, selected, pending, onSelect }: SkillFileT
             key={file}
             type="button"
             role="tab"
+            id={skillTabId(baseId, file)}
             aria-selected={on}
+            aria-controls={skillPanelId(baseId)}
             tabIndex={on ? 0 : -1}
             title={file}
+            ref={(el) => {
+              if (el) buttons.current.set(file, el);
+              else buttons.current.delete(file);
+            }}
             className={cn(
               'flex items-center gap-1.5 rounded-t-sm px-3 pb-2 pt-1.5 font-mono text-meta transition-colors',
               on
