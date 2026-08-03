@@ -157,6 +157,7 @@ Three seams need care because Knowledge work runs adjacent to them:
   `role="tablist"` at `EditorTabs.tsx:43` — plus a `role="alert"` at `FileExplorer.tsx:999`.
   `aria-current` and `aria-expanded` appear **zero times** in the whole module. So the
   prototype's handles have to be added as the WPs go:
+
   | Handle | Where | Added by |
   |---|---|---|
   | `aria-current` on the open file's row | tree | WP2 |
@@ -164,6 +165,7 @@ Three seams need care because Knowledge work runs adjacent to them:
   | `aria-current` on the active tab | tab strip | WP3 |
   | `aria-expanded` on the CR dock header | dock | WP6 |
   | `aria-label` on every icon-only control | title block, tree, dock | WP2/4/6 |
+
   Once added they ARE frozen — later WPs select on them.
 - **The three new menus need behavior `MenuPanel` does not provide.** Its own docstring
   (`shared/components/Menu.tsx:17-19`) says it "is presentation only — it does not portal,
@@ -185,7 +187,7 @@ Three seams need care because Knowledge work runs adjacent to them:
 
 ### 2.4 Verification loop — run for every work package, before declaring it done
 
-```
+```sh
 pnpm -s typecheck        # tsc --noEmit across the workspace
 pnpm -s test             # vitest run; may only ADD to the baseline
 pnpm -s build
@@ -250,9 +252,11 @@ Drop: `Folder`/`FolderOpen` icons, the `@iconify` per-extension file glyphs, the
 inline create, rename, drag-to-move, drag-and-drop upload, the pending-upload spinner, the
 context menu, auto-expand-to-open-file, and the user-intent-vs-auto-expand resolution at
 `FileExplorer.tsx:427, 490-497`. `getFileIcon` (`lib/utils.ts:202`) has exactly one caller
-and goes dead with the icons. **`@iconify/react` does NOT** — it has a second importer,
-`apps/web/src/main.tsx:3-4`, which registers the `material-icon-theme` collection at boot.
-Both packages stay in `package.json`; see WP2.
+and goes dead with the icons. **`@iconify/react` does NOT** — WP2 removes the FileExplorer
+reference and nothing else. The package keeps a live runtime importer at
+`apps/web/src/main.tsx:3-4`, which calls `addCollection()` with
+`@iconify-json/material-icon-theme/icons.json` at boot. Both packages therefore stay in
+`package.json` and stay REFERENCED; see WP2.
 
 *Rationale, from the prototype (proto:3552-3559):* the folder icon repeated what the caret
 said and the file icon repeated what the extension said; both stood where the name should
@@ -374,11 +378,30 @@ export interface KbDocumentShellProps {
    */
   variant?: 'prose' | 'full-bleed';
   /**
-   * Lands on the element that ACTUALLY scrolls. `FileViewer` passes
-   * `editorContainerRef` here: a capture-phase scroll listener is bound to it
-   * and is the only thing resetting the file lock's idle-release timer for a
+   * Lands on this component's OUTERMOST box, in both variants — which is why
+   * that box carries `overflow-auto` in both. `FileViewer` passes
+   * `editorContainerRef` here, and a capture-phase `scroll` listener bound to
+   * it is the only thing resetting the file lock's idle-release timer for a
    * user who is reading rather than typing. Scroll events do not bubble, so a
-   * ref on a wrapper nested inside the scroller never fires. See WP1.
+   * ref on anything nested INSIDE the scroller never fires. See WP1.
+   *
+   * The two variants differ in who does the scrolling, not in where the ref
+   * goes:
+   *  - `prose`      — this box is the scroller. The listener fires directly.
+   *  - `full-bleed` — this box gives its child a definite height and nothing
+   *                   overflows it, so no scrollbar appears here and the
+   *                   renderer scrolls its own viewport. The listener still
+   *                   sees those scrolls during the CAPTURE phase, which is
+   *                   why the ref is still wanted for this variant.
+   *
+   * GAP, stated rather than papered over: an iframe's internal scrolling
+   * produces no event in this document at all — capture phase or otherwise.
+   * The PDF viewer and the HTML sandbox are iframes, so a reader who never
+   * touches anything else releases the lock at `IDLE_RELEASE_MS`. Neither is
+   * editable in place, so what is lost is a lock nobody was using; do not
+   * "fix" it with a `Ref<HTMLDivElement>` the iframe cannot accept. If it ever
+   * needs fixing, the honest signal is a pointer/keyboard heartbeat on the
+   * shell, not a scroll listener.
    */
   scrollRef?: Ref<HTMLDivElement>;
   children: ReactNode;
@@ -445,8 +468,19 @@ export interface KbFileRailProps {
 
 ```ts
 // KbChangeRequestDock.tsx — the queue under the tree (WP6)
-// Renders PullRequestsForMe's data in the prototype's chrome. Same props-free
-// shape as the component it replaces in the explorer's footer slot.
+//
+// CHROME ONLY. `PullRequestsForMe` stays the single owner of the fetch, the
+// 60s poll, the `visibilitychange` handler, the `PR_STALE_EVENT` listener and
+// the vanished-branch prune — this file wraps it in the prototype's disclosure
+// header and rows and owns nothing else. Two components fetching the same
+// queue is two polls, two prunes and two answers to one question.
+//
+// It exists as a file only to keep §2.1 seam 2 (the `modules/git/` boundary)
+// intact. If that boundary turns out not to need it, delete it and restyle
+// `PullRequestsForMe` directly — what must never happen is BOTH being mounted,
+// or this one growing a fetch of its own.
+//
+// Same props-free shape as the component it replaces in the explorer's footer.
 ```
 
 ```ts
@@ -546,6 +580,17 @@ activity signal or a PDF its height.
    (proto:344-345). Sides `40px`, bottom `110px` (proto:137). **Top padding is `12px`, not
    34px** — Knowledge overrides the app default (`.wrap.kb`, proto:699); see the note under
    §1's table.
+
+   **These five numbers do not sum, and are not meant to.** `620 + 44 + 296` is 960, and
+   `max-width` includes the gutters (`box-sizing: border-box`, Tailwind preflight), so the
+   980px measure holds a **900px** content box. `minmax(0, 620px)` is a CAP, not a track
+   width: the rail takes its fixed 296, the gap takes 44, and the article takes what is
+   left — **560px** at the measure, never the 620 ceiling. All five values are the
+   prototype's own (proto:137, proto:344), so do not "reconcile" them by widening the
+   article to 640 or shrinking the measure to 960; both change the layout away from the
+   prototype to fix arithmetic that was never being done. What the `minmax` floor of `0`
+   buys is the thing worth protecting: the rail can never push the article into a
+   horizontal scroll.
 2. **Where the shell starts is a decision, and the prototype has already made it.** In the
    prototype the tab strip is INSIDE the measure: `#main.wrap` (proto:1532) has
    `kbTabsHtml()` as its first child (proto:3776), and proto:700-705 states the rule —
@@ -773,18 +818,26 @@ shows both.
 in all three places it should.
 
 **Build.**
-1. `components/KbChangeRequestDock.tsx` (NEW) — the prototype's chrome (proto:730-750):
-   a disclosure header `CHANGE REQUESTS` with a caret and an amber count `Badge`, then rows
-   `#{number}` + title (ellipsis on the text, never on the flex row — proto:745-747) +
-   `{author} · {n} file(s)`. Pinned to the explorer's footer with a `border-t`.
-2. **The dock renders `PullRequestsForMe`'s own data — nothing more.** Its fetch/poll/prune
-   is entangled with component-local state (`prs`/`loading`/`error` plus `timerRef`,
-   `mountedRef`, `prevBranchesRef`, and a single effect at `:37-140` owning the 60s timer,
-   the `visibilitychange` handler, the `PR_STALE_EVENT` listener and the vanished-branch
-   prune). "Behavior-identical extraction" of that into a plain hook is optimistic — a hook
-   called from two places would run the prune twice. **Default: restyle the component's
-   markup in place and extract nothing.** If the dock must be a separate file for §2.1
-   seam 2 reasons, wrap rather than extract.
+1. `components/KbChangeRequestDock.tsx` (NEW, chrome only) — the prototype's chrome
+   (proto:730-750): a disclosure header `CHANGE REQUESTS` with a caret and an amber count
+   `Badge`, then rows `#{number}` + title (ellipsis on the text, never on the flex row —
+   proto:745-747) + `{author} · {n} file(s)`. Pinned to the explorer's footer with a
+   `border-t`. **It renders `PullRequestsForMe` and fetches nothing.**
+2. **`PullRequestsForMe` remains the ONLY owner of the queue's data and lifecycle.** Its
+   fetch/poll/prune is entangled with component-local state (`prs`/`loading`/`error` plus
+   `timerRef`, `mountedRef`, `prevBranchesRef`, and a single effect at `:37-140` owning the
+   60s timer, the `visibilitychange` handler, the `PR_STALE_EVENT` listener and the
+   vanished-branch prune). "Behavior-identical extraction" of that into a plain hook is
+   optimistic — a hook called from two places would run the prune twice, and so would two
+   mounted components. So there are exactly two shapes allowed, and the choice is made once
+   (§9, item 3) before WP6 starts:
+   - **Wrap** — `KbChangeRequestDock` is a presentational shell around
+     `PullRequestsForMe`, which keeps every effect it has; or
+   - **Restyle in place** — `PullRequestsForMe`'s own markup changes and
+     `KbChangeRequestDock` is never created.
+
+   What is forbidden either way: both components mounted, or the dock growing a fetch,
+   timer or listener of its own.
 3. `hooks/useOpenChangeRequests.ts` (NEW) — §4.2 contract. **Three things this must get
    right, none of which fail loudly:**
    - **Different endpoint from the dock.** Fetch `listOpenChangeRequests()`
@@ -856,14 +909,15 @@ remains under `modules/workspace/`.
 | `components/KbDocumentShell.tsx` | 1 | the measure; §4.2 contract |
 | `components/KbPageHeader.tsx` | 4 | title + actions; §4.2 contract |
 | `components/KbFileRail.tsx` | 5 | About this file + Links out; §4.2 contract |
-| `components/KbChangeRequestDock.tsx` | 6 | the dock; prototype chrome over real PR data |
+| `components/KbChangeRequestDock.tsx` | 6 | the dock's chrome ONLY, wrapping `PullRequestsForMe`; owns no fetch, timer or listener — and is not created at all if WP6 takes the restyle-in-place branch (§4.2) |
 | `hooks/useLinksOut.ts` | 5 | outbound internal links, predicate from `KbMarkdownView.tsx:239` |
 | `hooks/useOpenChangeRequests.ts` | 6 | workspace-relative path → open requests; owns the `kbDirName` conversion (D3a) |
 | `state/open-change-requests.tsx` | 6 | the provider backing that hook — one fetch shared by tree, tabs and viewer |
 | `workspace.css` | 1/3 | **only** scrollbar suppression + any container-query rule; each with a comment saying why it is not a utility |
 
-`hooks/useMyPullRequests.ts` was in an earlier draft and is **cut** — WP6 step 2 restyles
-`PullRequestsForMe` in place rather than extracting a hook that would run its prune twice.
+`hooks/useMyPullRequests.ts` was in an earlier draft and is **cut** — WP6 step 2 leaves
+`PullRequestsForMe` owning its own data rather than extracting a hook that, called from two
+places, would run its prune twice.
 
 ### MODIFY
 
@@ -874,7 +928,7 @@ remains under `modules/workspace/`.
 | `components/FileViewer.tsx` | 1, 4, 5, 6, 7 | mount `KbDocumentShell` (forwarding `editorContainerRef`); delete the `h-10` strip + `TabButton`; mount `KbPageHeader`, rail, CR banner; banners → `Banner`; empty state retypeset; fix the stale 30s comment at `:281` |
 | `components/renderers/KbMarkdownView.tsx`, `TextRenderer.tsx`, `DocxRenderer.tsx`, `HtmlRenderer.tsx` | 1 | **surrender their scroll container** to the shell (WP1 step 4). Missing from an earlier draft — "the scroll container moves" is a renderer change, not a viewer change |
 | `components/FileRoute.tsx` | 7 | four error states onto `Banner` + tokens |
-| `../git/components/PullRequestsForMe.tsx` | 6 | restyle markup in place; **no extraction** (see §2.1 seam 2) |
+| `../git/components/PullRequestsForMe.tsx` | 6 | stays the sole owner of the queue's fetch/poll/prune; restyled in place, or wrapped by the dock — **no extraction**, and never both mounted (see §2.1 seam 2, §4.2) |
 | `../access/components/NodeOwnersBanner.tsx` | 7 | removed from the viewer once the rail carries owners |
 | `../toolbar/components/Toolbar.tsx` | 7 | one glyph swap |
 | `../library/components/LibraryLayout.tsx` | 1 | the shared measure on `<main>` (D6) |
@@ -893,8 +947,11 @@ touches neither — which is why it is the recommendation.
 | `getFileIcon` in `lib/utils.ts:202` | 2 | verified single caller (`FileExplorer.tsx:762`), which goes with it |
 | `components/NodeOwnersBanner.tsx` | 7 | verified single consumer (`FileViewer.tsx:615`); the rail takes over. Grep the enterprise repo first — if it mounts it, unmount here and keep the file |
 
-Not deleted: `@iconify/react` from `package.json`. It becomes unreferenced after WP2 and
-removing it is a genuine bundle win, but it is a dependency call — raise it, don't take it.
+Not deleted: `@iconify/react` from `package.json`. WP2 removes only the FileExplorer
+reference — the package is still imported at runtime by `apps/web/src/main.tsx:3-4`
+(`addCollection()` for `material-icon-theme`), so it does **not** become unreferenced and
+cannot simply be dropped. Whether that boot-time collection is still earning its bundle cost
+is a separate question, and a dependency call — raise it at the WP2 review, don't take it.
 
 ---
 
@@ -1082,9 +1139,13 @@ renderer changes in `components/renderers/__tests__/`.
    1280px window leaves the viewer at ~830px, below the 880px measure. Correct behavior is
    the column shrinking to fit with the floor padding — verify at that exact width, because
    it is the one place the two layout models genuinely disagree.
-3. **The dock/`PullRequestsForMe` boundary** (§2.1 seam 2). WP6 now restyles in place and
-   extracts nothing, which keeps the diff inside one component. If Ali objects to us
-   touching it at all, wrap instead. Decide *before* WP6 starts, not during.
+3. **The dock/`PullRequestsForMe` boundary** (§2.1 seam 2). Two shapes are allowed and one
+   of them must be picked *before* WP6 starts, not during: restyle `PullRequestsForMe` in
+   place and never create `KbChangeRequestDock`, or create the dock as a presentational
+   wrapper around it. Either way `PullRequestsForMe` keeps sole ownership of the fetch, the
+   60s poll, the prune and the `PR_STALE_EVENT` listener, and only one of the two is ever
+   mounted. If Ali objects to us touching the component at all, that settles it as the
+   wrapper.
 3b. **WP6 introduces the Knowledge surface's first use of a `modules/library/` service**
    (`listOpenChangeRequests`). That is the right call — it is what makes a dot mean the same
    thing on both surfaces (D3) — but it is a new cross-module edge. If that direction of

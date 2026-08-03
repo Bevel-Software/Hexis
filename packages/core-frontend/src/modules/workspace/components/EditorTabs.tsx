@@ -37,6 +37,10 @@ export function EditorTabs() {
   const [draggingPath, setDraggingPath] = useState<string | null>(null);
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
+  // The tab the menu was opened from. A ref rather than part of `MenuState`
+  // because `useDismissableMenu` wants a ref box, and because the tabs are a
+  // list — there is no single element a `useRef` on the tab could name.
+  const menuTriggerRef = useRef<HTMLElement | null>(null);
 
   // Hide the tabs strip entirely when there are no tabs — keeps the empty
   // state from looking like a chrome-only viewer.
@@ -77,6 +81,7 @@ export function EditorTabs() {
             }}
             onContextMenu={(e) => {
               e.preventDefault();
+              menuTriggerRef.current = e.currentTarget;
               setMenu({ tab, x: e.clientX, y: e.clientY });
             }}
             onDragStart={(e) => {
@@ -127,6 +132,7 @@ export function EditorTabs() {
         <ContextMenu
           state={menu}
           openTabs={openTabs}
+          returnFocusTo={menuTriggerRef}
           onClose={() => setMenu(null)}
           onCloseTab={async (tab) => {
             const wasActive = tab.path === activeTab?.path;
@@ -191,7 +197,7 @@ interface TabPillProps {
   isDragTarget: boolean;
   onActivate: () => void;
   onClose: () => void;
-  onContextMenu: (e: React.MouseEvent) => void;
+  onContextMenu: (e: React.MouseEvent<HTMLDivElement>) => void;
   onDragStart: (e: React.DragEvent) => void;
   onDragOver: (e: React.DragEvent) => void;
   onDragEnter: (e: React.DragEvent) => void;
@@ -320,10 +326,19 @@ interface ContextMenuProps {
   onClose: () => void;
   onCloseTab: (tab: OpenTab) => void | Promise<void>;
   onCloseMany: (tabs: OpenTab[]) => void | Promise<void>;
+  /** The tab this menu was opened from — Escape hands focus back to it. */
+  returnFocusTo?: React.RefObject<HTMLElement | null>;
 }
 
-function ContextMenu({ state, openTabs, onClose, onCloseTab, onCloseMany }: ContextMenuProps) {
-  const ref = useDismissableMenu<HTMLDivElement>({ open: true, onClose });
+function ContextMenu({
+  state,
+  openTabs,
+  onClose,
+  onCloseTab,
+  onCloseMany,
+  returnFocusTo,
+}: ContextMenuProps) {
+  const ref = useDismissableMenu<HTMLDivElement>({ open: true, onClose, returnFocusTo });
   const [pos, setPos] = useState<{ left: number; top: number }>({ left: state.x, top: state.y });
 
   // After the menu mounts, measure it and clamp into the viewport so a click

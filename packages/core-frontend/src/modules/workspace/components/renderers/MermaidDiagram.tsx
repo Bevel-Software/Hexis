@@ -195,7 +195,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({ code }: MermaidDiag
 
   if (error) {
     return (
-      <div className="rounded-lg border border-danger/30/50 bg-danger-soft p-4 my-4">
+      <div className="rounded-lg border border-danger/30 bg-danger-soft p-4 my-4">
         <p className="text-xs text-danger font-medium mb-1">Mermaid diagram error</p>
         <pre className="text-xs text-danger/70 whitespace-pre-wrap">{error}</pre>
         <pre className="mt-2 text-xs text-ink-muted whitespace-pre-wrap">{code}</pre>

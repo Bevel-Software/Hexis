@@ -204,7 +204,6 @@ export function ProfileMenu() {
   const renderRow = (item: AdminMenuItem) => (
     <MenuItem
       key={item.id}
-      role="menuitem"
       className="group"
       onClick={() => handleSelect(item)}
     >
@@ -245,7 +244,7 @@ export function ProfileMenu() {
           open && 'bg-hover text-ink',
         )}
         title="You and your settings"
-        aria-haspopup="menu"
+        aria-haspopup="true"
         aria-expanded={open}
         aria-controls={open ? MENU_ID : undefined}
         /* The full name, where the pill shows only the first — an accessible
@@ -287,9 +286,17 @@ export function ProfileMenu() {
           reason PageActions wraps it. */}
       {open && (
         <div ref={panelRef} className="absolute right-0 top-[calc(100%+5px)] z-40">
+        {/* A GROUP of buttons, not a `role="menu"`.
+            `menu`/`menuitem` is a promise about the keyboard: arrow keys move
+            between items, one roving tab stop, Home/End jump the ends — and
+            screen readers switch to application mode to deliver it. This panel
+            implements none of that; every row is a plain focusable button and
+            Tab is how you reach them. Claiming the role would put a keyboard
+            user in a mode where the keys they are told to press do nothing. */}
         <MenuPanel
           id={MENU_ID}
-          role="menu"
+          role="group"
+          aria-label="You and your settings"
           className="w-[274px] max-h-[calc(100dvh-62px)] overflow-y-auto"
         >
           {/* Who you are, stated once at the top so no row below has to
@@ -309,15 +316,13 @@ export function ProfileMenu() {
 
           {isAdmin && adminItems.length > 0 && (
             <div role="group" aria-labelledby="profile-menu-admin-section-label">
-              <MenuLabel role="presentation" id="profile-menu-admin-section-label">
-                Admin only
-              </MenuLabel>
+              <MenuLabel id="profile-menu-admin-section-label">Admin only</MenuLabel>
               {adminItems.map(renderRow)}
             </div>
           )}
 
           <div className="mt-1.5 border-t border-line pt-1.5">
-            <MenuItem role="menuitem" tone="danger" onClick={logout}>
+            <MenuItem tone="danger" onClick={logout}>
               <span className="flex items-center gap-2.5">
                 <LogOut size={15} className="flex-none opacity-80" />
                 Sign out

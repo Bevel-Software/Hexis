@@ -43,20 +43,29 @@ export function GroupBreadcrumb({ name }: { name: string }) {
  * rather than `display` so nothing shifts under the cursor as the row lights
  * up. `focus-within` is what keeps that honest for anyone who never hovers.
  *
- * Whatever the caller puts in `controls` decides its OWN exceptions: a filter
- * that is switched on has to stay lit, because a filter you cannot see is a
- * page lying about what it is showing.
+ * The exceptions are the CALLER's to declare, and they have to be declared
+ * here: `opacity` composites, so an `opacity-100` on a control nested inside an
+ * `opacity-0` wrapper multiplies to zero and changes nothing. A filter that is
+ * switched on has to stay lit — a filter you cannot see is a page lying about
+ * what it is showing — so `controlsActive` lifts the whole wrapper instead.
  */
 export function GroupSection({
   title,
   count,
   controls,
+  controlsActive = false,
   children,
 }: {
   title: string;
   count: number;
   /** Filter / refresh, right of the count. Fades with it. */
   controls?: ReactNode;
+  /**
+   * Keep `controls` visible without hover or focus — for when one of them is
+   * doing something the reader has to be able to see (a filter that is on, a
+   * refresh in flight).
+   */
+  controlsActive?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -74,8 +83,10 @@ export function GroupSection({
         {controls && (
           <span
             className={cn(
-              'flex items-center gap-0.5 opacity-0 transition-opacity',
-              'group-hover/band:opacity-100 group-focus-within/band:opacity-100',
+              'flex items-center gap-0.5 transition-opacity',
+              controlsActive
+                ? 'opacity-100'
+                : 'opacity-0 group-hover/band:opacity-100 group-focus-within/band:opacity-100',
             )}
           >
             {controls}
@@ -128,6 +139,7 @@ export function GroupItemSections({
   emptyTools = 'No tools yet.',
   hideEmpty = false,
   skillControls,
+  skillControlsActive = false,
 }: {
   skillItems: LibraryItem[];
   toolItems: LibraryItem[];
@@ -141,6 +153,8 @@ export function GroupItemSections({
    * already show.
    */
   skillControls?: ReactNode;
+  /** One of `skillControls` is mid-act — keep the row visible. See `GroupSection`. */
+  skillControlsActive?: boolean;
   /**
    * Drop a band with nothing in it instead of showing its empty state.
    *
@@ -153,7 +167,12 @@ export function GroupItemSections({
   return (
     <>
       {!(hideEmpty && skillItems.length === 0) && (
-        <GroupSection title="Skills" count={skillItems.length} controls={skillControls}>
+        <GroupSection
+          title="Skills"
+          count={skillItems.length}
+          controls={skillControls}
+          controlsActive={skillControlsActive}
+        >
           {skillItems.length === 0 ? (
             <p className="text-ui text-ink-faint">{emptySkills}</p>
           ) : (
@@ -207,9 +226,10 @@ export function ShareGlyph({ className }: { className?: string }) {
  * The two controls that ride the Skills heading (proto:2584-2589).
  *
  * `filter` narrows the band to the items waiting on you, and it STAYS LIT when
- * on — `GroupSection` fades its controls on hover, and a filter you cannot see
- * is a page lying about what it is showing, so this one opts out of the fade
- * while it is active.
+ * on — a filter you cannot see is a page lying about what it is showing. The
+ * opting-out is `GroupSection`'s `controlsActive`, because that is the element
+ * carrying the fade; an `opacity-100` on the button inside it would multiply
+ * against the wrapper's zero and do nothing.
  *
  * `refresh` re-reads the library and then says when it last did, because
  * "nothing changed" and "nothing was checked" look identical otherwise. It

@@ -44,6 +44,17 @@ describe('isBinaryFile', () => {
     },
   );
 
+  // The one file whose bytes ARE text and still must not be counted: it goes
+  // to `ImageRenderer` as a picture, so the character count would describe a
+  // buffer nobody was shown.
+  it.each(['Diagrams/flow.svg', 'Diagrams/LOGO.SVG'])(
+    'treats %s as an image payload, not countable text',
+    (path) => {
+      expect(isBinaryFile(path)).toBe(true);
+      expect(getRendererLayout(path)).toBe('full-bleed');
+    },
+  );
+
   it.each(['Knowledge/Foo.md', 'Data/velocity.csv', 'Knowledge/page.html', 'Knowledge/notes.txt'])(
     'knows %s is text',
     (path) => {

@@ -4,7 +4,6 @@ import {
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
-  clampSidebarWidth,
   commitSidebarWidth,
   setSidebarWidth,
   useSidebar,
@@ -120,6 +119,14 @@ export function SidebarFrame({
     };
   }, [dragging]);
 
+  // Collapsing UNMOUNTS the separator, so a drag in flight never gets its
+  // `pointerup`. Without this the drag stays "live" for good: `dragging` never
+  // returns to false, the effect above never runs its cleanup, and the whole
+  // document keeps the resize cursor and the selection lock.
+  useEffect(() => {
+    if (collapsed) endDrag();
+  }, [collapsed, endDrag]);
+
   return (
     <>
       <aside
@@ -178,5 +185,3 @@ export function SidebarFrame({
     </>
   );
 }
-
-export { clampSidebarWidth };

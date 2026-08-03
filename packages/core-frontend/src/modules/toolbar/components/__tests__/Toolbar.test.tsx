@@ -334,6 +334,17 @@ describe('Toolbar', () => {
       await userEvent.click(screen.getByRole('button', { name: 'Test User' }));
     }
 
+    // The panel is a labelled GROUP of buttons, not a `role="menu"`: it has no
+    // arrow-key navigation, so claiming the menu role would promise a keyboard
+    // model it does not implement. Every assertion below is the one it always
+    // was; only the selector moved.
+    const panel = () => screen.getByRole('group', { name: 'You and your settings' });
+    const rows = () => within(panel()).getAllByRole('button');
+    const row = (name: string | RegExp) => within(panel()).getByRole('button', { name });
+    const noRow = (name: string | RegExp) => within(panel()).queryByRole('button', { name });
+    const panelGone = () =>
+      screen.queryByRole('group', { name: 'You and your settings' });
+
     // One button, not three. The name used to be an inert span between the
     // gear and the sign-out arrow — three controls for one question.
     it('collapses the name, the gear and the sign-out arrow into a single trigger', () => {
@@ -342,7 +353,7 @@ describe('Toolbar', () => {
       expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
       expect(screen.getByRole('button', { name: 'Test User' })).toHaveAttribute(
         'aria-haspopup',
-        'menu',
+        'true',
       );
     });
 
@@ -364,7 +375,7 @@ describe('Toolbar', () => {
     it('states who you are at the top of the panel', async () => {
       renderToolbar();
       await openMenu();
-      const menu = screen.getByRole('menu');
+      const menu = panel();
       expect(within(menu).getByText('Test User')).toBeInTheDocument();
       expect(within(menu).getByText('user@example.com')).toBeInTheDocument();
     });
@@ -372,9 +383,9 @@ describe('Toolbar', () => {
     it('signs you out from the last row and nowhere else', async () => {
       const { logout } = renderToolbar();
       await openMenu();
-      const rows = screen.getAllByRole('menuitem');
-      expect(rows[rows.length - 1]).toHaveTextContent('Sign out');
-      await userEvent.click(screen.getByRole('menuitem', { name: 'Sign out' }));
+      const openRows = rows();
+      expect(openRows[openRows.length - 1]).toHaveTextContent('Sign out');
+      await userEvent.click(row('Sign out'));
       expect(logout).toHaveBeenCalledTimes(1);
     });
 
@@ -389,58 +400,58 @@ describe('Toolbar', () => {
       renderToolbar({ isAdmin: false });
       await openMenu();
       // Registry-contributed row merged with the core rows.
-      expect(screen.getByRole('menuitem', { name: 'Stub extension' })).toBeInTheDocument();
-      expect(screen.getByRole('menuitem', { name: 'Skills & Tools' })).toBeInTheDocument();
-      expect(screen.getByRole('menuitem', { name: 'External agent access' })).toBeInTheDocument();
-      expect(screen.getByRole('menuitem', { name: 'Secrets' })).toBeInTheDocument();
-      expect(screen.getByRole('menuitem', { name: 'Browse available tools' })).toBeInTheDocument();
+      expect(row('Stub extension')).toBeInTheDocument();
+      expect(row('Skills & Tools')).toBeInTheDocument();
+      expect(row('External agent access')).toBeInTheDocument();
+      expect(row('Secrets')).toBeInTheDocument();
+      expect(row('Browse available tools')).toBeInTheDocument();
       // Admin only section + its rows are hidden for non-admins.
       expect(screen.queryByText('Admin only')).toBeNull();
-      expect(screen.queryByRole('menuitem', { name: /Roles/ })).toBeNull();
-      expect(screen.queryByRole('menuitem', { name: 'Stub admin row' })).toBeNull();
+      expect(noRow(/Roles/)).toBeNull();
+      expect(noRow('Stub admin row')).toBeNull();
     });
 
     it('shows the Admin only section with its rows to an admin', async () => {
       renderToolbar({ isAdmin: true });
       await openMenu();
       expect(screen.getByText('Admin only')).toBeInTheDocument();
-      expect(screen.getByRole('menuitem', { name: /Roles/ })).toBeInTheDocument();
-      expect(screen.getByRole('menuitem', { name: 'Stub admin row' })).toBeInTheDocument();
+      expect(row(/Roles/)).toBeInTheDocument();
+      expect(row('Stub admin row')).toBeInTheDocument();
       // All-user rows are still present alongside the admin ones.
-      expect(screen.getByRole('menuitem', { name: 'Stub extension' })).toBeInTheDocument();
+      expect(row('Stub extension')).toBeInTheDocument();
     });
 
     // Core rows all NAVIGATE — the settings surfaces are standalone routed
     // pages below the persistent toolbar, not dialogs.
     it('navigates to the standalone settings pages from the core rows and closes the menu', async () => {
       renderToolbar();
-      for (const [row, path] of [
+      for (const [label, path] of [
         ['External agent access', '/external-agent-access'],
         ['Secrets', '/secrets'],
         ['Browse available tools', '/tools'],
         ['Skills & Tools', '/skills-and-tools'],
       ] as const) {
         await openMenu();
-        await userEvent.click(screen.getByRole('menuitem', { name: row }));
+        await userEvent.click(row(label));
         expect(screen.getByTestId('pathname')).toHaveTextContent(path);
-        expect(screen.queryByRole('menu')).toBeNull();
+        expect(panelGone()).toBeNull();
       }
     });
 
     it('navigates to /roles-and-members from the admin row', async () => {
       renderToolbar({ isAdmin: true });
       await openMenu();
-      await userEvent.click(screen.getByRole('menuitem', { name: 'Roles & Members' }));
+      await userEvent.click(row('Roles & Members'));
       expect(screen.getByTestId('pathname')).toHaveTextContent('/roles-and-members');
-      expect(screen.queryByRole('menu')).toBeNull();
+      expect(panelGone()).toBeNull();
     });
 
     it('opens a registry-contributed dialog from its row and closes the menu', async () => {
       renderToolbar();
       await openMenu();
-      await userEvent.click(screen.getByRole('menuitem', { name: 'Stub extension' }));
+      await userEvent.click(row('Stub extension'));
       expect(await screen.findByRole('dialog', { name: 'Stub extension' })).toBeInTheDocument();
-      expect(screen.queryByRole('menu')).toBeNull();
+      expect(panelGone()).toBeNull();
     });
   });
 });

@@ -329,7 +329,10 @@ export function FileRoute() {
     const denyName = error.path.slice(error.path.lastIndexOf('/') + 1);
     return (
       <ErrorScreen title={"You don't have access to this file"} role="alert">
-        <Banner role="alert" tone="danger" className="text-left">
+        {/* `note`, not `alert` — `ErrorScreen` already carries the alert on
+            the box this sits inside, and two nested live regions announce the
+            same sentence twice. This one is here for its `danger` tone. */}
+        <Banner role="note" tone="danger" className="text-left">
           <span className="font-mono">{denyName}</span> is restricted. Ask an owner to grant
           you read access.
         </Banner>

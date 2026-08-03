@@ -99,9 +99,14 @@ export function getRendererLayout(filePath: string): RendererLayout {
  *
  * Note this is NOT the same set as `FULL_BLEED_EXTENSIONS`. A CSV is laid out
  * full-bleed and is still text you can count.
+ *
+ * `.svg` IS here, even though its bytes happen to be text: it renders through
+ * `ImageRenderer`, which fetches the raw endpoint and hands the browser a
+ * picture. Nobody reading a diagram wants to be told it is 4,812 characters of
+ * XML, and the buffer the count would come from was never displayed.
  */
 const BINARY_EXTENSIONS = new Set([
-  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico',
   '.pdf', '.docx', '.xlsx', '.zip',
 ]);
 

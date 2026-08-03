@@ -17,17 +17,21 @@ import { useEffect, useRef, type RefObject } from 'react';
  *
  * Returns the ref to put on the panel.
  */
+export interface DismissableMenuOptions {
+  open: boolean;
+  onClose: () => void;
+  /**
+   * The control that opened the menu. Clicks on it are ignored (its own
+   * handler toggles), and Escape hands focus back to it.
+   */
+  returnFocusTo?: RefObject<HTMLElement | null>;
+}
+
 export function useDismissableMenu<T extends HTMLElement>({
   open,
   onClose,
-  /** The control that opened the menu. Clicks on it are ignored (its own
-   *  handler toggles), and Escape hands focus back to it. */
   returnFocusTo,
-}: {
-  open: boolean;
-  onClose: () => void;
-  returnFocusTo?: RefObject<HTMLElement | null>;
-}): RefObject<T | null> {
+}: DismissableMenuOptions): RefObject<T | null> {
   const panelRef = useRef<T>(null);
 
   useEffect(() => {
