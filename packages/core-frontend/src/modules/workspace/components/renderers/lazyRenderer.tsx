@@ -1,11 +1,5 @@
-import {
-  Component,
-  Suspense,
-  lazy,
-  type ComponentType,
-  type ErrorInfo,
-  type ReactNode,
-} from 'react';
+import { Suspense, lazy, useMemo, useState, type ComponentType } from 'react';
+import { ChunkErrorBoundary, RendererFallback } from './chunk-boundary';
 import type { FileRendererProps } from './types';
 
 /**
@@ -19,60 +13,7 @@ import type { FileRendererProps } from './types';
  * The lazy component is self-contained: it carries its own Suspense fallback
  * AND its own error boundary, so `getFileRenderer()` keeps returning a plain
  * `ComponentType<FileRendererProps>` and no call site changes.
- *
- * The error boundary is not optional politeness. A dynamic import fails on a
- * flaky network or after a deploy invalidates the old chunk hash; without a
- * boundary React unmounts the whole tree and the user gets a blank pane with
- * no way back. This is the repo's first error boundary.
  */
-
-interface BoundaryProps {
-  children: ReactNode;
-  /** Shown when the chunk fails to load. */
-  label: string;
-}
-
-interface BoundaryState {
-  failed: boolean;
-}
-
-class ChunkErrorBoundary extends Component<BoundaryProps, BoundaryState> {
-  state: BoundaryState = { failed: false };
-
-  static getDerivedStateFromError(): BoundaryState {
-    return { failed: true };
-  }
-
-  componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error('[renderer] failed to load viewer chunk', error, info.componentStack);
-  }
-
-  render() {
-    if (!this.state.failed) return this.props.children;
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-        <p className="text-ui text-ink-muted">
-          Could not load the {this.props.label} viewer.
-        </p>
-        <button
-          type="button"
-          className="rounded-full border border-line-strong px-[15px] py-[7px] text-ui font-medium text-ink transition-colors hover:bg-hover"
-          onClick={() => this.setState({ failed: false })}
-        >
-          Try again
-        </button>
-      </div>
-    );
-  }
-}
-
-function RendererFallback() {
-  return (
-    <div className="flex h-full items-center justify-center p-6">
-      <span className="text-ui text-ink-faint">Loading viewer…</span>
-    </div>
-  );
-}
 
 /**
  * Wrap a dynamic import as a drop-in renderer.
@@ -84,10 +25,31 @@ export function lazyRenderer(
   label: string,
   loader: () => Promise<{ default: ComponentType<FileRendererProps> }>,
 ): ComponentType<FileRendererProps> {
-  const Lazy = lazy(loader);
+  // Shared across every mount, and the reason "Try again" needs the dance
+  // below: `React.lazy` memoises the loader's outcome — including a REJECTION.
+  // Once this one has failed it throws the cached error forever, so clearing
+  // the boundary and re-rendering it is not a retry, it is the same failure
+  // again. Only a new lazy component can actually re-run the import.
+  const first = lazy(loader);
+
   return function LazyRenderer(props: FileRendererProps) {
+    const [attempt, setAttempt] = useState(0);
+
+    // Attempt 0 reuses the shared component so the common path is unchanged:
+    // a chunk already in the module cache resolves without re-suspending.
+    // Every later attempt builds a fresh lazy, which re-runs `import()` — cheap
+    // when the chunk is cached, and a real retry when it is not.
+    const Lazy = useMemo(() => (attempt === 0 ? first : lazy(loader)), [attempt]);
+
     return (
-      <ChunkErrorBoundary label={label}>
+      // `key` remounts the boundary, which is what clears its `failed` state —
+      // the boundary never resets itself, so the new lazy and a clean boundary
+      // always arrive together.
+      <ChunkErrorBoundary
+        key={attempt}
+        label={label}
+        onRetry={() => setAttempt((a) => a + 1)}
+      >
         <Suspense fallback={<RendererFallback />}>
           <Lazy {...props} />
         </Suspense>

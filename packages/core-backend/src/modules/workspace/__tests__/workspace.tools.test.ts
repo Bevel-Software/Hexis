@@ -16,6 +16,7 @@ import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { SpillStore } from '../spill-store.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { assertValidBranchName } from '../../workflow/git/branch-name.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -55,6 +56,12 @@ let fs: LocalFilesystem;
 let workspacePathCalls: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
 let writePolicy: RoutineWritePolicyService;
+/**
+ * The focused branch the resolved `ToolContext` carries — mirrors the branch an
+ * internal token bakes for the in-process agent. A test sets it to prove a
+ * branch-less `execute_command` falls back to the session's own workspace.
+ */
+let focusedBranch: string | undefined;
 
 async function start(
   scope: 'read' | 'write' = 'write',
@@ -65,6 +72,7 @@ async function start(
   await fs.writeFile('a.md', 'hello\nworld\n');
   workspacePathCalls = [];
   writePolicy = new RoutineWritePolicyService();
+  focusedBranch = undefined;
 
   const registry = new ToolRegistry();
   const resolve = async (auth: ToolAuth, signal: AbortSignal, sessionId?: string): Promise<ToolContext> => ({
@@ -72,6 +80,7 @@ async function start(
     scope: auth.scope,
     source: auth.source,
     sessionId,
+    focusedBranch,
     abortSignal: signal,
     workspaceService: {
       // Both entry points record, so the guard tests prove NEITHER resolves a
@@ -170,16 +179,45 @@ describe('workspace file primitives', () => {
     expect(res.exitCode).toBe(0);
   });
 
-  it('execute_command 400s when no branch is given (never clones "undefined")', async () => {
+  it('execute_command 400s when no branch is given AND no focused branch (external caller)', async () => {
     const base = await start();
-    // A missing branch must NOT resolve the workspace id to "undefined" and try
-    // to clone a branch literally named "undefined" — it must fail closed with a
-    // clear 4xx naming the missing branch context, BEFORE any workspace resolve.
+    // No `branch` arg and no `ctx.focusedBranch` (an external caller carries no
+    // focused branch): the branch context is genuinely absent, so it must NOT
+    // resolve the workspace id to "undefined" and try to clone a branch literally
+    // named "undefined" — it fails closed with a clear 4xx naming the missing
+    // branch context, BEFORE any workspace resolve.
+    expect(focusedBranch).toBeUndefined();
     const res = await post(`${base}/api/agent/tools/execute_command`, { command: 'echo should-not-run' });
     expect(res.status).toBe(400);
     expect((await res.json()).error).toMatch(/branch/i);
-    // The guard runs before `getWorkspacePath`, so no workspace (least of all the
-    // "undefined" one) is ever resolved — proving no clone is attempted.
+    // The guard runs before `getOrCreateForBranch`, so no workspace (least of all
+    // the "undefined" one) is ever resolved — proving no clone is attempted.
+    expect(workspacePathCalls).toEqual([]);
+  });
+
+  it('execute_command falls back to the session focused branch when branch is omitted', async () => {
+    const base = await start();
+    // The in-app chat agent, focused on `main`, may leave `branch` off a call.
+    // For an internal session that carries a focused branch, the shell runs
+    // against that branch's workspace and returns output end to end (AC2) —
+    // rather than failing closed the way a context-less external call does.
+    focusedBranch = 'main';
+    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { command: 'echo hello-exec' })).json()) as { stdout: string; exitCode: number };
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toContain('hello-exec');
+    // Resolved against the focused branch — never an "undefined" workspace.
+    expect(workspacePathCalls).toEqual(['main']);
+  });
+
+  it('execute_command does NOT fall back to the focused branch for an invalid value', async () => {
+    const base = await start();
+    // A present-but-broken branch ("undefined") must fail closed even when a
+    // focused branch is available — a broken value is never silently reinterpreted
+    // as the session's branch.
+    focusedBranch = 'main';
+    const res = await post(`${base}/api/agent/tools/execute_command`, { branch: 'undefined', command: 'echo should-not-run' });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/branch/i);
     expect(workspacePathCalls).toEqual([]);
   });
 
@@ -187,18 +225,21 @@ describe('workspace file primitives', () => {
   // `''` (like the missing field above) is refused a layer earlier by the input
   // schema's `minLength: 1`; the rest satisfy the schema and reach the handler,
   // so they exercise the guard itself. Both layers must produce the same 400.
-  // The malformed refs below are rejected by the shared `assertValidBranchName`,
-  // which replaced the hand-listed "undefined"/"null" reservations: those are
-  // legal git branch names, and the bug PR #285 fixed was an ABSENT `branch`
-  // (caught by the missing/non-string check above), not a caller that says
-  // "undefined" on purpose.
+  // The malformed refs below are rejected by the shared `assertValidBranchName`
+  // shape check; the literal "undefined"/"null" — which that validator ACCEPTS
+  // as ordinary git refs — are rejected by an explicit by-name check ahead of it
+  // (AC3 requires them to fail closed; see the dedicated test below).
   const invalidBranches: Array<[label: string, branch: string]> = [
     ['empty', ''],
     ['whitespace-only', '   '],
-    ['whitespace-padded', ' main '],
+    // Malformed refs — caught by the canonical `assertValidBranchName` shape
+    // check, not by any hand-maintained list of literals.
+    ['whitespace-padded (never silently trimmed)', ' main '],
     ['containing a space', 'alice/my draft'],
+    ['a ".." ref', 'foo..bar'],
     ['containing ".."', 'alice/../../etc'],
-    ['starting with "-"', '--upload-pack=touch'],
+    ['a leading dash (git would read it as a flag)', '-x'],
+    ['starting with "--" (flag injection)', '--upload-pack=touch'],
     ['containing "//"', 'alice//draft'],
     ['ending with "/"', 'alice/'],
     ['a segment starting with "."', 'alice/.hidden'],
@@ -217,16 +258,32 @@ describe('workspace file primitives', () => {
     });
   }
 
-  it('execute_command accepts a branch git itself considers valid (no literal-name reservations)', async () => {
-    const base = await start();
-    // "undefined"/"null" used to be hand-reserved here. They're ordinary branch
-    // names as far as git is concerned, and the real PR #285 guard is the
-    // missing/non-string check — so the validator must let them through.
-    for (const branch of ['undefined', 'null']) {
-      const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch, command: 'echo ok' })).json()) as { stdout: string; exitCode: number };
-      expect(res.exitCode).toBe(0);
+  /**
+   * The production regression this ticket bounced on: the guard's hand-written
+   * `"undefined"`/`"null"` rejection was replaced by the canonical
+   * `assertValidBranchName` alone. Both literals are *syntactically valid* git
+   * branch names, so the validator accepts them — a branch-less call then reached
+   * `getOrCreateForBranch("undefined")`, cloned a branch literally named
+   * `undefined` into `/app/workspaces/undefined/`, and 500'd in production.
+   *
+   * AC3 requires these literals to fail closed. Pinning the validator's own
+   * behaviour here is the point: it documents WHY the literal check cannot be
+   * folded into the shape check, so the next person who "simplifies" the guard
+   * down to `assertValidBranchName` gets a red test naming the reason rather than
+   * a fresh production 500.
+   */
+  it('rejects "undefined"/"null" even though the canonical validator accepts them', async () => {
+    for (const literal of ['undefined', 'null']) {
+      expect(() => assertValidBranchName(literal), `${literal} is a valid git ref`).not.toThrow();
     }
-    expect(workspacePathCalls).toEqual(['undefined', 'null']);
+    const base = await start();
+    for (const literal of ['undefined', 'null']) {
+      const res = await post(`${base}/api/agent/tools/execute_command`, { branch: literal, command: 'echo should-not-run' });
+      expect(res.status, `branch "${literal}" must 400`).toBe(400);
+      // The message names the literal, so the agent can see what it actually sent.
+      expect((await res.json()).error).toContain(literal);
+    }
+    expect(workspacePathCalls).toEqual([]);
   });
 
   it('execute_command validates the branch BEFORE the write-policy gate', async () => {

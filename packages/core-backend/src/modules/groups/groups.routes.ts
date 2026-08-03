@@ -35,6 +35,19 @@ import type {
  * whether or not the file exists — a missing one reads as null own-entries and
  * the chain decides.
  */
+
+/**
+ * How many requesters' verdicts resolve at once on the admin list.
+ *
+ * The per-caller batches above are ONE call each because they share a
+ * principal. The admin list does not: it resolves a different principal per
+ * requester, so the concurrency is the size of the pending backlog unless it is
+ * held down here. Small on purpose — this is a background-ish admin read, and
+ * latency matters far less than not letting one page load stampede the access
+ * layer.
+ */
+const REQUESTER_VERDICT_CONCURRENCY = 8;
+
 export function createGroupsRoutes(
   groupIndex: IGroupIndexService,
   requests: AccessRequestsService,
@@ -161,18 +174,32 @@ export function createGroupsRoutes(
 
       // Lazy fulfillment, admin side: one batch per DISTINCT requester (the
       // verdict is per person, so it can't share the caller's batch).
+      //
+      // In CHUNKS rather than one `Promise.all` over every requester: each call
+      // resolves a different principal's access config, so nothing is shared
+      // between them and the fan-out is as wide as the backlog is deep. The
+      // total work is the same; what is bounded is how much of it is in flight
+      // at once. `pendingAll` caps the backlog itself.
       const fulfilled: string[] = [];
       const stale = new Set<string>();
       const requesters = [...new Set(live.map((r) => r.requesterEmail))];
-      const verdicts = await Promise.all(
-        requesters.map(async (requester) => {
-          const groups = live.filter((r) => r.requesterEmail === requester).map((r) => byName.get(r.groupName)!);
-          return [
-            requester,
-            await accessControl.canReadBatch(groupsWorkspaceId(), requester, probesFor(groups)),
-          ] as const;
-        }),
-      );
+      const verdicts: (readonly [string, Awaited<ReturnType<typeof accessControl.canReadBatch>>])[] =
+        [];
+      for (let i = 0; i < requesters.length; i += REQUESTER_VERDICT_CONCURRENCY) {
+        verdicts.push(
+          ...(await Promise.all(
+            requesters.slice(i, i + REQUESTER_VERDICT_CONCURRENCY).map(async (requester) => {
+              const groups = live
+                .filter((r) => r.requesterEmail === requester)
+                .map((r) => byName.get(r.groupName)!);
+              return [
+                requester,
+                await accessControl.canReadBatch(groupsWorkspaceId(), requester, probesFor(groups)),
+              ] as const;
+            }),
+          )),
+        );
+      }
       const readableBy = new Map(verdicts);
       for (const row of live) {
         const group = byName.get(row.groupName)!;

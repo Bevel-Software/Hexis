@@ -88,6 +88,12 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
       // only for `external`/`session` callers, whose token carries no claim and
       // whose `sessionId` is injected by the MCP proxy's continuity convention.
       sessionId: auth.source === 'internal' ? auth.sessionId : sessionId ?? auth.sessionId,
+      // Only a trusted internal token conveys a focused branch; an external
+      // caller (connection key / MCP proxy) never does and must name the branch
+      // on every workspace tool. So a tool's focused-branch fallback is confined
+      // to the in-process agent — external calls keep failing closed on a missing
+      // branch, exactly as the required-branch contract demands.
+      focusedBranch: auth.source === 'internal' ? auth.focusedBranch : undefined,
       abortSignal,
       workspaceService: deps.workspaceService,
       workflowService: deps.workflowService,

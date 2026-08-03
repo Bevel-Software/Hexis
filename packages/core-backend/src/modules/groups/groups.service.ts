@@ -64,19 +64,32 @@ export class GroupIndexService implements IGroupIndexService {
     const cached = this.cache.get();
     if (cached) return cached;
     const entries = await this.build();
+    // A failed scan and a KB with genuinely no group folders both serve `[]`,
+    // but only the second is a fact worth holding for the TTL. Caching the
+    // failure would hide every group from every user for the full 60s AFTER
+    // the cause is gone — a clone mid-creation, a readdir that raced a
+    // checkout — and `invalidate()` only fires on a file-change event that may
+    // never arrive in that window. So a degraded read is served, not stored,
+    // and the next caller retries.
+    if (entries === null) return [];
     this.cache.set(entries);
     return entries;
   }
 
   // --- internal --------------------------------------------------------------
 
-  /**
-   * Degrades to `[]` on ANY failure rather than throwing. The Library must
-   * never break because a group folder can't be read — same philosophy as the
-   * skill and tool-manual scanners, and the reason the route's 500 is reserved
-   * for the per-caller half.
+   /**
+   * Degrades on ANY failure rather than throwing. The Library must never break
+   * because a group folder can't be read — same philosophy as the skill and
+   * tool-manual scanners, and the reason the route's 500 is reserved for the
+   * per-caller half.
+   *
+   * `null` is that degraded case and is deliberately NOT the same value as an
+   * empty array: a KB with no group folders returns `[]`, which is true and
+   * cacheable, while a failure returns `null`, which `catalog()` serves as `[]`
+   * without storing it.
    */
-  private async build(): Promise<GroupCatalogEntry[]> {
+  private async build(): Promise<GroupCatalogEntry[] | null> {
     try {
       const wsId = (await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH)).id;
       const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
@@ -116,7 +129,7 @@ export class GroupIndexService implements IGroupIndexService {
       console.warn(
         `[groups] group index unavailable: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return [];
+      return null;
     }
   }
 
