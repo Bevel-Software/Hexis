@@ -1,0 +1,14 @@
+{
+  "mode": "pre",
+  "tag": "auth",
+  "initialVersions": {
+    "@bevel-software/server": "0.1.0",
+    "@bevel-software/web": "0.1.0",
+    "@bevel-software/platform-core-backend": "0.1.1",
+    "@bevel-software/platform-core-frontend": "0.1.1",
+    "@bevel-software/platform-shared": "0.1.1"
+  },
+  "changesets": [
+    "auth-overhaul"
+  ]
+}

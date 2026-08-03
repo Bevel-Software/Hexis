@@ -18,10 +18,20 @@ export class AdminAccessService implements IAdminAccessService {
     private readonly workspaceService: WorkspaceService,
     /** Branch whose `roles.yaml` defines admins (the authoritative default branch). */
     private readonly branch: string,
+    /**
+     * Emails treated as admin WITHOUT consulting `roles.yaml` — the env
+     * bootstrap admin (`ADMIN_EMAIL`). A fresh deployment's KB may not list
+     * that email yet, and the bootstrap credential must be able to administer
+     * accounts/roles regardless; membership here tracks the env var, so
+     * removing the var removes the privilege.
+     */
+    private readonly alwaysAdminEmails: string[] = [],
   ) {}
 
   async isAdmin(email: string | undefined): Promise<boolean> {
     if (!email) return false;
+    const normalized = email.trim().toLowerCase();
+    if (this.alwaysAdminEmails.includes(normalized)) return true;
     try {
       // Ensure the authoritative clone is on disk, then resolve Admin-role
       // membership via the access model. Any failure (missing/invalid

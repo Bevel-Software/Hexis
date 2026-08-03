@@ -11,16 +11,22 @@ import { AUTH_COOKIE_NAME } from './auth.middleware.js'; // also imports Express
 export const AUTH_COOKIE_MAX_AGE_S = 7 * 24 * 60 * 60;
 
 /**
- * A pluggable SSO login method. Core ships password login only; the
- * composition root passes provider plugins (e.g. Microsoft OIDC, owned by the
- * sharepoint module) which mount their own routes under `/auth/<key>/…` and
- * are advertised to the login screen under `key` by the capability probe.
- * A plugin is only passed in when its machinery is configured AND the
- * instance hasn't switched it off — presence means enabled.
+ * A pluggable SSO login method. Core ships password login and (when
+ * configured) the generic OIDC provider; overlays may pass additional plugins
+ * (e.g. the enterprise "Sign in with Microsoft", owned by its sharepoint
+ * module). A plugin mounts its own routes under `/auth/<key>/…` and is
+ * advertised to the login screen by the capability probe, which renders one
+ * button per provider from `label` + `startPath`. A plugin is only present
+ * when its machinery is configured AND the instance hasn't switched it off —
+ * presence means enabled.
  */
 export interface AuthProviderPlugin {
-  /** Probe key + route namespace (e.g. 'microsoft' → /auth/microsoft/…). */
+  /** Probe key + route namespace (e.g. 'oidc' → /auth/oidc/…). */
   readonly key: string;
+  /** Login-button label (e.g. "Sign in with Microsoft"). */
+  readonly label: string;
+  /** Browser navigation target that starts the flow (e.g. '/api/auth/oidc/login'). */
+  readonly startPath: string;
   /** Mount the provider's routes (login redirect, callback) on the auth router. */
   mountRoutes(router: express.Router, authService: AuthService): void;
 }
@@ -33,7 +39,8 @@ export function createAuthRoutes(
 ): express.Router {
   const router = express.Router();
 
-  // POST /api/auth/login — email + shared-password login (unprotected)
+  // POST /api/auth/login — email + password login (unprotected): the env
+  // bootstrap admin or a per-user account password (see AuthService).
   router.post('/auth/login', async (req, res) => {
     if (!passwordLoginEnabled) {
       res.status(403).json({ error: 'Password login is disabled' });
@@ -68,15 +75,39 @@ export function createAuthRoutes(
   });
 
   // GET /api/auth/providers — unprotected capability probe so the login screen
-  // knows which login methods to render. SSO providers appear under their key.
+  // knows which login methods to render: the password form, plus one button
+  // per SSO provider (label + the path that starts its flow).
   router.get('/auth/providers', (_req, res) => {
     res.json({
       password: passwordLoginEnabled,
-      ...Object.fromEntries(providers.map((p) => [p.key, true])),
+      sso: providers.map((p) => ({ key: p.key, label: p.label, startPath: p.startPath })),
     });
   });
 
   for (const provider of providers) provider.mountRoutes(router, authService);
+
+  // POST /api/auth/change-password — self-service (protected). Requires the
+  // current password whenever one is set; an SSO-only account sets its first
+  // password without one.
+  router.post('/auth/change-password', authMiddleware, async (req, res) => {
+    const { currentPassword, newPassword } = req.body as {
+      currentPassword?: string;
+      newPassword?: string;
+    };
+    if (!newPassword) {
+      res.status(400).json({ error: 'newPassword is required' });
+      return;
+    }
+    try {
+      await authService.changePassword(req.userId!, currentPassword, newPassword);
+      res.json({ ok: true });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      // Policy violations and a wrong current password are caller errors, not
+      // server faults — and the message is safe to show verbatim.
+      res.status(400).json({ error: msg });
+    }
+  });
 
   // GET /api/auth/me — validate stored JWT, return user info (protected)
   router.get('/auth/me', authMiddleware, async (req, res) => {

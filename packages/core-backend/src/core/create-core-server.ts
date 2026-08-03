@@ -27,6 +27,7 @@ import {
   createSecretsVaultPublicRoutes,
 } from '../modules/secrets-vault/index.js';
 import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js';
+import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -300,6 +301,8 @@ export async function createCoreServer(
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));
+  // Account management (list/create password accounts) — admin-gated inside.
+  app.use('/api', core.authMiddleware, createAccountRoutes(core.authService, core.adminAccess));
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe
