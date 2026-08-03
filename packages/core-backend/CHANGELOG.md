@@ -1,5 +1,12 @@
 # @bevel-software/platform-core-backend
 
+## 0.2.1
+
+### Patch Changes
+
+- Ports the enterprise `dev`-branch `execute_command` fixes into the core (they landed upstream in files this package now owns): internal tokens can carry a `focusedBranch` claim, surfaced as `ToolContext.focusedBranch`, and a branch-less `execute_command` from an internal session falls back to it (external callers still fail closed with 400); the literal strings `"undefined"`/`"null"` are rejected by name as `branch` values ahead of the canonical shape validator, closing the clone-a-branch-named-"undefined" production 500.
+  - @bevel-software/platform-shared@0.2.1
+
 ## 0.2.0
 
 ### Minor Changes

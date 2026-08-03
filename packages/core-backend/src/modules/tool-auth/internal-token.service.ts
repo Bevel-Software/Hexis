@@ -18,6 +18,16 @@ export interface InternalTokenClaim {
    */
   sessionId?: string;
   /**
+   * The branch this run's workspace is focused on (the in-process agent's
+   * checked-out branch, or a background run's target branch). Surfaced as
+   * `ToolContext.focusedBranch` so an INTERNAL workspace tool can fall back to
+   * it when the model omits the `branch` argument — the in-app chat agent then
+   * acts on its own workspace even on a branch-less call, while external callers
+   * (no such claim) must still name the branch. Absent for identity-only /
+   * external-proxy tokens.
+   */
+  focusedBranch?: string;
+  /**
    * True when this token is the LOOPBACK identity of an external caller — the
    * MCP proxy mints one per OAuth/JWT MCP session (which has no `bevel_…`
    * connection key to pass through). The verifier resolves such tokens to
@@ -122,6 +132,7 @@ export class InternalTokenService {
     return {
       userId: payload.userId,
       ...(typeof payload.sessionId === 'string' ? { sessionId: payload.sessionId } : {}),
+      ...(typeof payload.focusedBranch === 'string' ? { focusedBranch: payload.focusedBranch } : {}),
       ...(payload.externalProxy === true ? { externalProxy: true } : {}),
     };
   }
