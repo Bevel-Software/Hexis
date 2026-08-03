@@ -23,6 +23,16 @@ describe('useLinksOut', () => {
     ]);
   });
 
+  // The angle-bracketed form is what `escapeSpacesInLinkDestinations` emits for
+  // a path with spaces in it, and the brackets are punctuation — the target the
+  // rail hands back has to be the path, spaces and anchor intact, or the row
+  // opens nothing.
+  it('unwraps an angle-bracketed destination carrying spaces', () => {
+    expect(run('Knowledge/A.md', 'The [goal](<Other File.md#goal>).')).toEqual([
+      { label: 'goal', target: 'Other File.md#goal' },
+    ]);
+  });
+
   // The predicate is `KbMarkdownView`'s own: exactly the links that open as
   // files in the workspace, and nothing that would take the reader off it.
   it('ignores external links and same-page anchors', () => {

@@ -102,6 +102,9 @@ export interface KbPageHeaderProps {
  */
 type CopyState = null | 'ok' | 'fail';
 
+/** How long a copy confirmation stays on the control that was clicked. */
+const COPY_FEEDBACK_MS = 1800;
+
 export function KbPageHeader({
   path,
   canWrite,
@@ -146,7 +149,7 @@ export function KbPageHeader({
   const report = useCallback(async (key: string, run: () => Promise<boolean>) => {
     const ok = await run();
     setCopied((prev) => ({ ...prev, [key]: ok ? 'ok' : 'fail' }));
-    window.setTimeout(() => setCopied((prev) => ({ ...prev, [key]: null })), 1800);
+    window.setTimeout(() => setCopied((prev) => ({ ...prev, [key]: null })), COPY_FEEDBACK_MS);
   }, []);
 
   const copyLabel = (key: string, idle: string) =>
@@ -207,9 +210,17 @@ export function KbPageHeader({
                 <MenuItem role="menuitem" onClick={() => { closeShare(); onShare(); }}>
                   <span className="flex items-center gap-2.5"><Users size={14} />Manage access…</span>
                 </MenuItem>
+                {/* The confirmation for THIS copy lives on the row itself, so
+                    closing the panel first unmounts the only thing that says
+                    whether it worked — and a copy that silently fails is the
+                    worst possible answer. Copy, let the row say so, and take
+                    the menu away once it has been said. */}
                 <MenuItem
                   role="menuitem"
-                  onClick={() => { closeShare(); void report('link', onCopyLink); }}
+                  onClick={async () => {
+                    await report('link', onCopyLink);
+                    window.setTimeout(closeShare, COPY_FEEDBACK_MS);
+                  }}
                 >
                   <span className="flex items-center gap-2.5">
                     <Link2 size={14} />

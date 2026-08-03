@@ -15,8 +15,8 @@ export const LIBRARY_ROOT = '/skills-and-tools';
 
 /**
  * What the sidebar should show as selected for a path. `null` on the pages that
- * are not a filtered view of the catalog — the all-groups index, propose, and
- * the item pages — where the gallery rows are all inactive.
+ * are not a filtered view of the catalog — the all-groups index and the item
+ * pages — where the gallery rows are all inactive.
  *
  * `matchPath` hands params back RAW (react-router decodes neither here nor in
  * `useParams`), so a group named `Sales & Ops` arrives as `Sales%20%26%20Ops`
@@ -56,22 +56,6 @@ export function pathForGroupsIndex(): string {
   return `${LIBRARY_ROOT}/groups`;
 }
 
-/*
- * `pathForPropose` was here, with `/propose` and its `group` query key frozen
- * by the master plan as the seam for the change-request flow.
- *
- * It is gone because the design it served is gone: the group page no longer
- * forks into "Add" for owners and "Propose" for everyone else — there is one
- * door, and where a skill lands is a property of the group, not of the button
- * (proto:2996-3002). Nothing links here any more, so the constructor, the
- * route and the page went together rather than leaving a URL nothing reaches.
- *
- * ALI: this crosses the seam the master plan reserved for you. If the
- * change-request flow still wants a page of its own, it should have a URL that
- * describes the change rather than the permission — and this is the commit
- * that removed the old one.
- */
-
 /**
  * Read a `:group` route param. React-router 7 hands params back RAW from both
  * `matchPath` and `useParams`, so every reader owes this decode — and a
@@ -96,16 +80,9 @@ export function pathForTool(slug: string): string {
   return `${LIBRARY_ROOT}/tools/${encodeURIComponent(slug)}`;
 }
 
-/**
- * Whether a path is the all-groups index or the propose page. Both light the
- * "All groups" row: you reached propose from the index, and the place you came
- * from should stay lit while you're there.
- */
+/** Whether a path is the all-groups index — the one path that lights the "All groups" row. */
 export function isGroupsIndexPath(pathname: string): boolean {
-  return (
-    matchPath({ path: `${LIBRARY_ROOT}/groups`, end: true }, pathname) !== null ||
-    matchPath({ path: `${LIBRARY_ROOT}/propose`, end: true }, pathname) !== null
-  );
+  return matchPath({ path: `${LIBRARY_ROOT}/groups`, end: true }, pathname) !== null;
 }
 
 /** A malformed escape is a bad link, not a crash — fall back to the raw segment. */

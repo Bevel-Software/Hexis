@@ -147,3 +147,60 @@ describe('SidebarFrame — resize', () => {
     expect(separator).toHaveAttribute('aria-valuenow', String(SIDEBAR_MAX_WIDTH));
   });
 });
+
+/**
+ * The lock a drag puts on the whole document, and getting it back off.
+ *
+ * `cursor` and `user-select` go on `document.body` — outside React's tree, so
+ * nothing unmounts them for us. Collapsing takes the separator away mid-drag
+ * and the `pointerup` that would have ended the drag never arrives, which is
+ * how the lock used to outlive the drag that set it and leave the entire app
+ * un-selectable under a resize cursor with no way back.
+ */
+describe('SidebarFrame — drag cleanup', () => {
+  beforeEach(() => {
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  });
+
+  function startDrag() {
+    render(
+      <SidebarFrame label="Library groups">
+        <span>x</span>
+      </SidebarFrame>,
+    );
+    const separator = screen.getByRole('separator', { name: /resize/i });
+    // The frame captures the pointer so a drag survives an iframe in the main
+    // column; happy-dom has no implementation to capture with.
+    separator.setPointerCapture = () => {};
+    fireEvent.pointerDown(separator, { button: 0, pointerId: 1 });
+    return separator;
+  }
+
+  const locked = () =>
+    document.body.style.cursor === 'col-resize' && document.body.style.userSelect === 'none';
+
+  it('locks the document while the drag is live, and lets go on pointerup', () => {
+    const separator = startDrag();
+    expect(locked()).toBe(true);
+    fireEvent.pointerUp(separator, { pointerId: 1 });
+    expect(locked()).toBe(false);
+    expect(document.body.style.cursor).toBe('');
+  });
+
+  it('lets go when a collapse takes the separator away mid-drag', () => {
+    startDrag();
+    expect(locked()).toBe(true);
+    act(() => setSidebarCollapsed(true));
+    expect(locked()).toBe(false);
+  });
+
+  // The other half of the same bug: ending a drag by collapsing has to FORGET
+  // it too, or the sidebar coming back re-applies a lock nobody asked for.
+  it('does not re-lock the document when the sidebar comes back', () => {
+    startDrag();
+    act(() => setSidebarCollapsed(true));
+    act(() => setSidebarCollapsed(false));
+    expect(locked()).toBe(false);
+  });
+});

@@ -4,7 +4,7 @@ import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
-import { KbFileRail } from './KbFileRail';
+import { KbFileRail, KB_FILE_RAIL_HEADING_ID } from './KbFileRail';
 import { useLinksOut } from '../hooks/useLinksOut';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { usePrViewer } from '../../pr/state/pr-viewer.context';
@@ -719,6 +719,7 @@ export function FileViewer() {
               roomy={explorerHidden}
         variant={shellVariant}
         scrollRef={editorContainerRef}
+        railLabelledBy={KB_FILE_RAIL_HEADING_ID}
         rail={
           railVisible ? (
             <KbFileRail

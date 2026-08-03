@@ -39,8 +39,22 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-function SectionHeading({ children }: { children: React.ReactNode }) {
-  return <div className="mb-2 text-label uppercase text-ink-faint">{children}</div>;
+/**
+ * The rail's own heading, so `KbDocumentShell`'s `<aside>` has something to be
+ * named by — an unnamed complementary landmark is one a screen reader can only
+ * announce as "complementary".
+ */
+export const KB_FILE_RAIL_HEADING_ID = 'kb-file-rail-heading';
+
+/* A real `h2`, not a styled div: these are the page's second-level sections
+   under `KbPageHeader`'s `h1`, and a heading that is only a font size does not
+   appear in the document outline anyone navigates by. */
+function SectionHeading({ id, children }: { id?: string; children: React.ReactNode }) {
+  return (
+    <h2 id={id} className="mb-2 text-label uppercase text-ink-faint">
+      {children}
+    </h2>
+  );
 }
 
 /** "Owned by Ali Raza", "Everyone can read" — whichever the access tree says. */
@@ -63,7 +77,7 @@ export function KbFileRail({
 
   return (
     <div className="border-l border-line pl-5">
-      <SectionHeading>About this file</SectionHeading>
+      <SectionHeading id={KB_FILE_RAIL_HEADING_ID}>About this file</SectionHeading>
       <div className="divide-y divide-line">
         {/* Never truncated. A truncated path is unusable for the one thing
             anyone copies a path for, so it wraps instead. */}

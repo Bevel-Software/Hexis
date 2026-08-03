@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import {
@@ -343,5 +343,51 @@ describe('GroupPage', () => {
     renderGroup('GTM');
     expect(screen.getByText('Loading the library…')).toBeInTheDocument();
     expect(screen.queryByText("This group doesn't exist yet.")).not.toBeInTheDocument();
+  });
+
+  /**
+   * "Last updated just now" is a CLAIM, and the page has to be able to back it.
+   * Both refetches behind the button return `void`, so the only honest end of
+   * the spin is the loads settling — which is what these two pin. The spinner
+   * is read off `animate-spin` because that class is the only thing in the DOM
+   * that distinguishes "checking" from "idle": both states render the same
+   * button with the same name.
+   */
+  describe('checking for updates', () => {
+    const refreshButton = () => screen.getByRole('button', { name: 'Check for updates' });
+    const spinning = () => refreshButton().querySelector('.animate-spin') !== null;
+
+    it('claims freshness only once the refetch has actually landed', async () => {
+      renderGroup('GTM');
+      await screen.findByRole('heading', { name: 'GTM', level: 1 });
+
+      let land!: (groups: GroupSummary[]) => void;
+      groupsMock.listGroups.mockReturnValueOnce(
+        new Promise<GroupSummary[]>((resolve) => {
+          land = resolve;
+        }),
+      );
+
+      fireEvent.click(refreshButton());
+      await waitFor(() => expect(spinning()).toBe(true));
+      // Still in flight — the page says nothing about being up to date.
+      expect(screen.queryByText('Last updated just now')).not.toBeInTheDocument();
+
+      await act(async () => {
+        land([gtm()]);
+      });
+      expect(await screen.findByText('Last updated just now')).toBeInTheDocument();
+    });
+
+    it('does not report success when the refetch fails', async () => {
+      renderGroup('GTM');
+      await screen.findByRole('heading', { name: 'GTM', level: 1 });
+
+      groupsMock.listGroups.mockRejectedValueOnce(new Error("Couldn't load groups."));
+      fireEvent.click(refreshButton());
+
+      await waitFor(() => expect(spinning()).toBe(false));
+      expect(screen.queryByText('Last updated just now')).not.toBeInTheDocument();
+    });
   });
 });

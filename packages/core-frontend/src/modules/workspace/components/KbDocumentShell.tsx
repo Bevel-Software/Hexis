@@ -58,6 +58,13 @@ export interface KbDocumentShellProps {
    * listener still catches the renderer's own scroller during capture.
    */
   scrollRef?: Ref<HTMLDivElement>;
+  /**
+   * The id of the heading that names `rail`, for the `<aside>`'s
+   * `aria-labelledby`. The shell cannot read a name out of a `ReactNode`, and
+   * an unnamed complementary landmark is one a screen reader can only announce
+   * as "complementary" — so the rail names itself and hands the id over.
+   */
+  railLabelledBy?: string;
   children: ReactNode;
 }
 
@@ -66,6 +73,7 @@ export function KbDocumentShell({
   variant = 'prose',
   roomy = false,
   scrollRef,
+  railLabelledBy,
   children,
 }: KbDocumentShellProps) {
   return (
@@ -91,7 +99,12 @@ export function KbDocumentShell({
         <div className="flex h-full min-h-0 w-full">
           <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">{children}</div>
           {rail && (
-            <aside className="w-[296px] flex-none overflow-y-auto py-4 pr-4">{rail}</aside>
+            <aside
+              aria-labelledby={railLabelledBy}
+              className="w-[296px] flex-none overflow-y-auto py-4 pr-4"
+            >
+              {rail}
+            </aside>
           )}
         </div>
       ) : rail ? (
@@ -109,7 +122,9 @@ export function KbDocumentShell({
           )}
         >
           <article className="min-w-0">{children}</article>
-          <aside className="min-w-0">{rail}</aside>
+          <aside aria-labelledby={railLabelledBy} className="min-w-0">
+            {rail}
+          </aside>
         </div>
       ) : (
         // `pt-3` is 12px — Knowledge's own top padding, NOT the app-wide 34px.

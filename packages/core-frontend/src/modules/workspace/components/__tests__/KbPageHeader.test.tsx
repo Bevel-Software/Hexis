@@ -167,6 +167,26 @@ describe('KbPageHeader', () => {
     expect(await screen.findByRole('button', { name: "Couldn't copy" })).toBeInTheDocument();
   });
 
+  // Copy link's confirmation is the ROW, and the row is inside the menu — so
+  // the menu has to outlive the copy. Closing it first would leave the one
+  // action on this page with no answer at all.
+  it('confirms a copied link on the row, before the menu goes away', async () => {
+    const user = userEvent.setup();
+    const { props } = renderHeader();
+    await user.click(screen.getByRole('button', { name: 'More sharing options' }));
+    await user.click(screen.getByRole('menuitem', { name: /Copy link to this page/ }));
+    expect(props.onCopyLink).toHaveBeenCalled();
+    expect(await screen.findByRole('menuitem', { name: /Copied/ })).toBeInTheDocument();
+  });
+
+  it('says so on the row when copying the link fails', async () => {
+    const user = userEvent.setup();
+    renderHeader({ onCopyLink: vi.fn(async () => false) });
+    await user.click(screen.getByRole('button', { name: 'More sharing options' }));
+    await user.click(screen.getByRole('menuitem', { name: /Copy link to this page/ }));
+    expect(await screen.findByRole('menuitem', { name: /Couldn't copy/ })).toBeInTheDocument();
+  });
+
   it('omits Copy page entirely when there is no markdown to copy', () => {
     renderHeader({ onCopyPage: undefined });
     expect(screen.queryByRole('button', { name: /Copy page/ })).not.toBeInTheDocument();

@@ -1213,7 +1213,11 @@ export function ManageAccessDialog({
                               onClick={() => {
                                 const dir = ancestor.replace(/\/?access\.md$/, '');
                                 onManageAncestor({
-                                  name: dir.split('/').pop() ?? dir,
+                                  // The same name the button just said. A
+                                  // root-level `access.md` leaves `dir` empty,
+                                  // and `''.split('/').pop()` is `''` — a
+                                  // dialog with no title.
+                                  name: folderLabel(ancestor),
                                   relativePath: `${kbDirName}/${dir}`,
                                   type: 'directory',
                                 });

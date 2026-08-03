@@ -49,8 +49,7 @@ export function LibraryRoutes() {
 
             {/* A group is a PLACE: `groups/:group` is a real page with a real
                 URL, and `GroupPage` — not the router — decides whether the
-                caller gets the member view or the locked one. `propose` is
-                Ali's seam; its `?group=` query is frozen by the plan. */}
+                caller gets the member view or the locked one. */}
             <Route path="groups" element={<GroupsIndexPage />} />
             <Route path="groups/:group" element={<GroupPage />} />
 
