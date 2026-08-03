@@ -83,8 +83,9 @@ export function createAuthRoutes(
   // welcome page's Done and the reminder pill's × are its two callers.
   router.post('/auth/onboarding-done', authMiddleware, async (req, res) => {
     try {
-      // The caller states WHICH account it believes it is concluding, and a
-      // mismatch is refused rather than applied to the token's owner.
+      // The caller must state WHICH account it believes it is concluding, and
+      // anything but an exact match is refused rather than applied to the
+      // token's owner.
       //
       // The bearer token lives in one shared localStorage key, so two accounts
       // in two tabs share it: a stale tab still rendering A, after B signs in
@@ -92,8 +93,14 @@ export function createAuthRoutes(
       // irreversibly conclude B's onboarding — an account B has no way to
       // reopen. `userId` is an assertion about intent, never an authorization:
       // the write still targets `req.userId` alone.
+      //
+      // REQUIRED, not merely checked-when-present. Treating an absent claim as
+      // consent reopens the same hole from the other side: a stale or malformed
+      // client that posts `{}` while rendering A would conclude B's onboarding
+      // unopposed. A caller that cannot name the account it means has not
+      // expressed the intent this route needs.
       const claimed = (req.body as { userId?: unknown } | undefined)?.userId;
-      if (typeof claimed === 'string' && claimed !== req.userId) {
+      if (typeof claimed !== 'string' || claimed !== req.userId) {
         res.status(409).json({ error: 'Session changed — sign in again' });
         return;
       }

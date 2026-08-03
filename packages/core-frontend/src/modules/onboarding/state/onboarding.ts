@@ -20,9 +20,9 @@ import { authFetch } from '../../../lib/api';
  *
  *  - `doneLocally` — an optimistic session override. The auth context's user
  *    object is a snapshot from sign-in; after POSTing we don't refetch it,
- *    we just remember the answer. A failed POST logs and keeps the override
- *    for the session — the pill returning on next sign-in is the correct
- *    outcome of a write that never landed.
+ *    we just remember the answer. A failed POST logs and DROPS the override
+ *    at once, so the pill comes back immediately rather than reappearing at
+ *    the next sign-in with no account of why it left.
  *  - `welcomed` (localStorage, per account) — "the welcome page was shown
  *    once". The auto-redirect there happens on the FIRST sign-in only;
  *    the pill, not the router, is the standing reminder. Per-browser by
@@ -30,7 +30,8 @@ import { authFetch } from '../../../lib/api';
  *    not a bug.
  */
 
-const welcomedKey = (email: string) => `bevel.onboarding.welcomed.${email.toLowerCase()}`;
+const WELCOMED_PREFIX = 'bevel.onboarding.welcomed.';
+const welcomedKey = (email: string) => `${WELCOMED_PREFIX}${email.toLowerCase()}`;
 
 const doneLocally = new Set<string>();
 const welcomedLocally = new Set<string>();
@@ -96,14 +97,24 @@ export function markOnboardingDone(userId: string, email: string): void {
     });
 }
 
-/** Test seam: forget the session overrides and the welcomed notes. */
+/**
+ * Test seam: forget the session overrides and the welcomed notes.
+ *
+ * Scans storage by PREFIX rather than walking `welcomedLocally`, because that
+ * set is not a record of what is in storage. `markWelcomed` returns early when
+ * the key is already there, so an email welcomed by an earlier test file — or
+ * by an earlier run against the same jsdom `localStorage` — never enters the
+ * set, and its key would survive a reset that only knew about the set. The
+ * next "greets ONCE" assertion would then read "already welcomed" and fail on
+ * a state no test put there.
+ */
 export function resetOnboardingForTests(): void {
-  for (const email of welcomedLocally) {
-    try {
-      window.localStorage.removeItem(welcomedKey(email));
-    } catch {
-      /* ignore */
+  try {
+    for (const key of Object.keys(window.localStorage)) {
+      if (key.startsWith(WELCOMED_PREFIX)) window.localStorage.removeItem(key);
     }
+  } catch {
+    /* ignore */
   }
   doneLocally.clear();
   welcomedLocally.clear();

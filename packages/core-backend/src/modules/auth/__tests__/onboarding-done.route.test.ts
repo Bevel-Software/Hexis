@@ -11,6 +11,9 @@ import type { AuthService } from '../auth.service.js';
  *
  *  - it acts on the AUTHENTICATED user (req.userId), never on a body param —
  *    there is no way to conclude someone else's onboarding;
+ *  - it REQUIRES the caller to name the account it means, and refuses anything
+ *    that is not an exact match — including a claim that is absent or not a
+ *    string, since "said nothing" is not the same as "meant this account";
  *  - it is idempotent from the caller's view (the service call is an UPDATE
  *    to the value it may already have), so both buttons can fire it blind;
  *  - unauthenticated callers never reach the service.
@@ -23,6 +26,10 @@ let server: HttpServer | null = null;
 afterEach(() => {
   server?.close();
   server = null;
+  // In a hook, not at the end of a test body: a failing assertion would
+  // otherwise leave a `console.error` spy installed and silence the rest of
+  // the file.
+  vi.restoreAllMocks();
 });
 
 function listen(service: Pick<AuthService, 'markOnboardingDone'>, authed = true): string {
@@ -57,12 +64,33 @@ describe('POST /auth/onboarding-done', () => {
     expect(markOnboardingDone).toHaveBeenCalledWith(USER_ID);
   });
 
-  it('still works for a caller that claims nothing', async () => {
-    const markOnboardingDone = vi.fn().mockResolvedValue(undefined);
+  /**
+   * A caller that names no account has not expressed the intent this route
+   * needs. Accepting `{}` as consent would reopen the stale-tab hole from the
+   * other side — an old or malformed client posting an empty body while
+   * rendering account A would conclude account B's onboarding unopposed — so
+   * the absent claim is refused exactly like a wrong one.
+   */
+  it('refuses a caller that claims nothing, and writes nothing', async () => {
+    const markOnboardingDone = vi.fn();
     const base = listen({ markOnboardingDone });
     const res = await fetch(`${base}/api/auth/onboarding-done`, { method: 'POST' });
-    expect(res.status).toBe(200);
-    expect(markOnboardingDone).toHaveBeenCalledWith(USER_ID);
+    expect(res.status).toBe(409);
+    expect(markOnboardingDone).not.toHaveBeenCalled();
+  });
+
+  // Same rule for a claim of the wrong TYPE: only an exact string match is
+  // consent, so a number that happens to stringify to the user id is not.
+  it('refuses a claim that is not a string', async () => {
+    const markOnboardingDone = vi.fn();
+    const base = listen({ markOnboardingDone });
+    const res = await fetch(`${base}/api/auth/onboarding-done`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ userId: { toString: () => USER_ID } }),
+    });
+    expect(res.status).toBe(409);
+    expect(markOnboardingDone).not.toHaveBeenCalled();
   });
 
   /**
@@ -99,12 +127,15 @@ describe('POST /auth/onboarding-done', () => {
     const markOnboardingDone = vi.fn().mockRejectedValue(new Error(detail));
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     const base = listen({ markOnboardingDone });
-    const res = await fetch(`${base}/api/auth/onboarding-done`, { method: 'POST' });
+    const res = await fetch(`${base}/api/auth/onboarding-done`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ userId: USER_ID }),
+    });
     expect(res.status).toBe(500);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('Could not save that');
     expect(body.error).not.toContain(detail);
     expect(logged).toHaveBeenCalledWith('Onboarding-done error:', detail);
-    logged.mockRestore();
   });
 });

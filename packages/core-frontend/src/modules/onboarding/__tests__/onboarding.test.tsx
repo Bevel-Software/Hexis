@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -21,11 +21,11 @@ import { resetOnboardingForTests } from '../state/onboarding';
  *    button conclude NOTHING — leaving and copying are not promises.
  */
 
+// No parameters: the mock never reads its arguments, and `vi.fn` records every
+// call regardless of the implementation's signature — so the call assertions
+// below keep working while lint stays clean.
 const { authFetchMock } = vi.hoisted(() => ({
-  authFetchMock: vi.fn(
-    async (_input: RequestInfo | URL, _init?: RequestInit) =>
-      ({ ok: true, status: 200 }) as Response,
-  ),
+  authFetchMock: vi.fn(async () => ({ ok: true, status: 200 }) as Response),
 }));
 vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock }));
 
@@ -61,6 +61,33 @@ const landingRoutes = (
 beforeEach(() => {
   resetOnboardingForTests();
   authFetchMock.mockClear();
+});
+
+/**
+ * jsdom ships no `navigator.clipboard`, so a copy test has to install one —
+ * but only THAT property, never a replacement `navigator`: the rest of the
+ * object (`userAgent`, `language`, whatever a library reaches for next) has no
+ * business changing because one test wanted a spy.
+ */
+let restoreClipboard: (() => void) | null = null;
+
+function stubClipboard() {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+  restoreClipboard = () => {
+    if (original) Object.defineProperty(navigator, 'clipboard', original);
+    else Reflect.deleteProperty(navigator, 'clipboard');
+  };
+  return writeText;
+}
+
+// In a hook, not at the end of a test body: a failing assertion would otherwise
+// leave the stub installed for every test after it.
+afterEach(() => {
+  restoreClipboard?.();
+  restoreClipboard = null;
+  vi.unstubAllGlobals();
 });
 
 describe('RootLanding — the one-time greeting', () => {
@@ -124,15 +151,13 @@ describe('WelcomePage', () => {
   });
 
   it('copies the visible snippet without concluding anything', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    const writeText = stubClipboard();
     mountPage();
     await userEvent.click(screen.getByRole('button', { name: 'Copy' }));
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining('/api/mcp'));
     // Copying is not Done: no server write, no navigation.
     expect(authFetchMock).not.toHaveBeenCalled();
     expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
-    vi.unstubAllGlobals();
   });
 
   it('Done concludes: server write + landing in the library', async () => {
