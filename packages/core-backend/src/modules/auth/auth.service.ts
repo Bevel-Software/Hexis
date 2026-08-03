@@ -1,4 +1,3 @@
-import { timingSafeEqual } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { eq } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
@@ -6,8 +5,27 @@ import type { CoreConfig } from '../../core-config.js';
 import { users } from '../database/schema.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { hashEmail } from '../../shared/hash-email.js';
+import {
+  hashPassword,
+  verifyPassword,
+  timingSafeStringEqual,
+  MIN_PASSWORD_LENGTH,
+} from './password-hash.js';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Decoy hash verified when the email is unknown or has no password set, so
+ * those paths cost the same scrypt work as a real wrong-password attempt —
+ * without it, response timing would reveal which emails have accounts.
+ * Lazily computed once; the compared password never matches it (verification
+ * result is discarded — those paths always refuse).
+ */
+let decoyHashPromise: Promise<string> | null = null;
+function decoyHash(): Promise<string> {
+  decoyHashPromise ??= hashPassword('bevel-decoy-password-never-matches');
+  return decoyHashPromise;
+}
 
 function toAuthUser(user: {
   id: string;
@@ -29,6 +47,21 @@ export class AuthService {
     private readonly config: CoreConfig,
   ) {}
 
+  /**
+   * Password login. Two credential sources, in order:
+   *
+   *  1. The env bootstrap admin (`ADMIN_EMAIL` + `ADMIN_PASSWORD`), checked
+   *     directly against the environment — never stored, so unsetting either
+   *     variable disables it immediately. Lets a fresh deployment sign in
+   *     before any account exists.
+   *  2. A per-user account: the `users` row's scrypt `password_hash`
+   *     (created by an admin from Roles & Members, or set by the user on
+   *     their Account page). Accounts that only ever signed in via SSO have
+   *     no hash and are refused here.
+   *
+   * A generic "Invalid credentials" error for every failure mode — never
+   * reveal whether the email exists or has a password.
+   */
   async loginWithPassword(
     email: string,
     password: string,
@@ -36,39 +69,142 @@ export class AuthService {
     const normalizedEmail = (email ?? '').trim().toLowerCase();
 
     if (!EMAIL_REGEX.test(normalizedEmail)) {
-      throw new Error('Invalid email');
+      throw new Error('Invalid credentials');
     }
     this.assertAllowedDomain(normalizedEmail);
-    if (!this.checkPassword(password ?? '')) {
-      throw new Error('Invalid password');
+
+    const provided = password ?? '';
+    const isEnvAdmin =
+      this.config.adminEmail.length > 0 &&
+      this.config.adminPassword.length > 0 &&
+      normalizedEmail === this.config.adminEmail &&
+      timingSafeStringEqual(provided, this.config.adminPassword);
+
+    if (isEnvAdmin) {
+      const defaultName = normalizedEmail.split('@')[0] || normalizedEmail;
+      const user = await this.upsertUserByEmail(normalizedEmail, defaultName);
+      return { token: this.signToken(user.id, user.email), user: toAuthUser(user) };
     }
 
-    // Derive a default display name from the local-part of the email
-    const defaultName = normalizedEmail.split('@')[0] || normalizedEmail;
-    const user = await this.upsertUserByEmail(normalizedEmail, defaultName);
+    const [user] = await this.db
+      .select()
+      .from(users)
+      .where(eq(users.email, normalizedEmail))
+      .limit(1);
+    // Always run one scrypt verification — against the stored hash when there
+    // is one, against the decoy otherwise — so unknown emails and
+    // password-less (SSO-only) accounts take the same time as a wrong
+    // password and can't be enumerated via response timing.
+    const stored = user?.passwordHash ?? (await decoyHash());
+    const matches = await verifyPassword(provided, stored);
+    if (!user?.passwordHash || !matches) {
+      throw new Error('Invalid credentials');
+    }
     return { token: this.signToken(user.id, user.email), user: toAuthUser(user) };
   }
 
   /**
-   * Establish a session for a user who authenticated via "Sign in with
-   * Microsoft". Same upsert-by-email + JWT path as password login — the only
-   * difference is identity came from a verified Microsoft id_token instead of
-   * the shared password. Email is the idempotency key, so a user who first
-   * used password login and later signs in with Microsoft (same email) keeps
-   * the same account/id.
+   * Establish a session for a user whose identity an SSO provider (the
+   * generic OIDC plugin, or the enterprise "Sign in with Microsoft") already
+   * verified. Same upsert-by-email + JWT path as password login. Email is the
+   * idempotency key, so a user who first used password login and later signs
+   * in via SSO (same email) keeps the same account/id.
    */
-  async loginWithMicrosoft(
+  async loginWithSso(
     email: string,
     name: string,
   ): Promise<{ token: string; user: AuthUser }> {
     const normalizedEmail = (email ?? '').trim().toLowerCase();
     if (!EMAIL_REGEX.test(normalizedEmail)) {
-      throw new Error('Microsoft sign-in returned an invalid email');
+      throw new Error('Sign-in returned an invalid email');
     }
     this.assertAllowedDomain(normalizedEmail);
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
     const user = await this.upsertUserByEmail(normalizedEmail, displayName);
     return { token: this.signToken(user.id, user.email), user: toAuthUser(user) };
+  }
+
+  /**
+   * Admin-driven account provisioning (Roles & Members → Accounts). Upserts
+   * the user by email and sets their password — re-provisioning an existing
+   * account (e.g. one that first arrived via SSO, or a reset for a locked-out
+   * user) is deliberate admin behavior, not an error.
+   */
+  async createAccount(
+    email: string,
+    name: string | undefined,
+    password: string,
+  ): Promise<AuthUser> {
+    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    if (!EMAIL_REGEX.test(normalizedEmail)) {
+      throw new Error('Invalid email');
+    }
+    this.assertAllowedDomain(normalizedEmail);
+    this.assertPasswordPolicy(password);
+    const suppliedName = (name ?? '').trim();
+    const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
+    const passwordHash = await hashPassword(password);
+    // One atomic upsert. On conflict (re-provisioning an existing account) an
+    // EXPLICITLY supplied name is persisted too; a blank name keeps the
+    // existing display name rather than clobbering it with the local-part
+    // fallback. `returning()` yields the authoritative row either way.
+    const [row] = await this.db
+      .insert(users)
+      .values({ email: normalizedEmail, name: displayName, passwordHash })
+      .onConflictDoUpdate({
+        target: users.email,
+        set: suppliedName
+          ? { passwordHash, name: suppliedName, updatedAt: new Date() }
+          : { passwordHash, updatedAt: new Date() },
+      })
+      .returning();
+    return toAuthUser(row);
+  }
+
+  /**
+   * Self-service password change (the Account page). The current password is
+   * required whenever one is set; an SSO-only account (no hash yet) may set
+   * its first password without one. The env bootstrap-admin credential is not
+   * affected — it lives in the environment, not in this row.
+   */
+  async changePassword(
+    userId: string,
+    currentPassword: string | undefined,
+    newPassword: string,
+  ): Promise<void> {
+    this.assertPasswordPolicy(newPassword);
+    const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!user) throw new Error('User not found');
+    if (user.passwordHash) {
+      if (!currentPassword || !(await verifyPassword(currentPassword, user.passwordHash))) {
+        throw new Error('Current password is incorrect');
+      }
+    }
+    const passwordHash = await hashPassword(newPassword);
+    await this.db
+      .update(users)
+      .set({ passwordHash, updatedAt: new Date() })
+      .where(eq(users.id, userId));
+  }
+
+  /** Accounts overview for the admin management screen (never exposes hashes). */
+  async listAccounts(): Promise<
+    Array<{ id: string; email: string; name: string; hasPassword: boolean; createdAt: Date }>
+  > {
+    const rows = await this.db.select().from(users).orderBy(users.email);
+    return rows.map((row) => ({
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      hasPassword: row.passwordHash != null,
+      createdAt: row.createdAt,
+    }));
+  }
+
+  private assertPasswordPolicy(password: string): void {
+    if ((password ?? '').length < MIN_PASSWORD_LENGTH) {
+      throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+    }
   }
 
   private signToken(userId: string, email: string): string {
@@ -179,21 +315,4 @@ export class AuthService {
     }
   }
 
-  private checkPassword(provided: string): boolean {
-    const expected = this.config.testPassword;
-    // Reject if no password is configured on the server
-    if (!expected) return false;
-
-    const a = Buffer.from(provided, 'utf8');
-    const b = Buffer.from(expected, 'utf8');
-    // Pad both buffers to the same length so timingSafeEqual runs unconditionally —
-    // returning early on length mismatch would leak the expected password's length via timing.
-    const len = Math.max(a.length, b.length);
-    const aPadded = Buffer.alloc(len);
-    const bPadded = Buffer.alloc(len);
-    a.copy(aPadded);
-    b.copy(bPadded);
-    const equal = timingSafeEqual(aPadded, bPadded);
-    return equal && a.length === b.length;
-  }
 }

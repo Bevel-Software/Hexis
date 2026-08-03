@@ -1,15 +1,16 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useAuth } from '../state/auth.context';
 import {
-  startMicrosoftLogin,
+  startSsoLogin,
   fetchLoginProviders,
   OAUTH_ERROR_KEY,
-} from '../services/microsoft-oauth';
+  type SsoProvider,
+} from '../services/sso';
 
 const OAUTH_ERROR_MESSAGES: Record<string, string> = {
-  state: 'Microsoft sign-in could not be verified. Please try again.',
-  auth: 'Microsoft sign-in failed. Please try again.',
-  start: 'Could not start Microsoft sign-in. Please try again.',
+  state: 'Sign-in could not be verified. Please try again.',
+  auth: 'Sign-in failed. Please try again.',
+  start: 'Could not start sign-in. Please try again.',
 };
 
 export function LoginScreen() {
@@ -21,23 +22,23 @@ export function LoginScreen() {
   // Default to password-only until the probe resolves, matching fetchLoginProviders'
   // failure fallback so we never flash a button the backend can't service.
   const [passwordEnabled, setPasswordEnabled] = useState(true);
-  const [microsoftEnabled, setMicrosoftEnabled] = useState(false);
+  const [ssoProviders, setSsoProviders] = useState<SsoProvider[]>([]);
 
-  // Surface an error returned by the OAuth callback (stored by useAuthState),
+  // Surface an error returned by an SSO callback (stored by useAuthState),
   // and probe which login methods this deployment offers.
   useEffect(() => {
     let mounted = true;
     const oauthError = sessionStorage.getItem(OAUTH_ERROR_KEY);
     if (oauthError) {
       sessionStorage.removeItem(OAUTH_ERROR_KEY);
-      setError(OAUTH_ERROR_MESSAGES[oauthError] ?? 'Microsoft sign-in failed.');
+      setError(OAUTH_ERROR_MESSAGES[oauthError] ?? 'Sign-in failed.');
     }
     // Capability probe: never set state after unmount.
     fetchLoginProviders()
       .then((providers) => {
         if (!mounted) return;
         setPasswordEnabled(providers.password);
-        setMicrosoftEnabled(providers.microsoft);
+        setSsoProviders(providers.sso);
       })
       .catch(() => {});
     return () => {
@@ -112,7 +113,7 @@ export function LoginScreen() {
           </div>
         )}
 
-        {passwordEnabled && microsoftEnabled && (
+        {passwordEnabled && ssoProviders.length > 0 && (
           <div className="flex items-center gap-3 text-xs text-slate-400">
             <span className="h-px flex-1 bg-slate-200" />
             or
@@ -120,15 +121,16 @@ export function LoginScreen() {
           </div>
         )}
 
-        {microsoftEnabled && (
+        {ssoProviders.map((provider) => (
           <button
+            key={provider.key}
             type="button"
-            onClick={startMicrosoftLogin}
+            onClick={() => startSsoLogin(provider)}
             className="w-full rounded-md border border-slate-300 bg-white text-slate-700 text-sm font-medium py-2 hover:bg-slate-50"
           >
-            Sign in with Microsoft
+            {provider.label}
           </button>
-        )}
+        ))}
       </form>
     </div>
   );

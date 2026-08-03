@@ -43,7 +43,32 @@ export class CoreConfig {
    */
   readonly spillRoot: string;
   readonly jwtSecret: string;
-  readonly testPassword: string;
+  /**
+   * Bootstrap admin credential, checked directly against the environment at
+   * login time (never stored). Lets a fresh deployment sign in before any
+   * account exists; that admin (or any user with the Admin role in
+   * `roles.yaml`) then creates per-user accounts from Roles & Members.
+   * Remove EITHER variable and the credential stops working immediately —
+   * accounts created in the database are unaffected. The email is also
+   * always recognized as an admin (see AdminAccessService), so a fresh KB
+   * whose `roles.yaml` doesn't list it yet is still administrable.
+   */
+  readonly adminEmail: string;
+  readonly adminPassword: string;
+  /**
+   * Generic OIDC single sign-on (any spec-compliant provider: Entra, Okta,
+   * Auth0, Keycloak, Google, …). Enabled when issuer URL + client id + client
+   * secret are ALL set; the issuer's `/.well-known/openid-configuration` is
+   * discovered at first use. The redirect URI to register with the provider is
+   * `<PUBLIC_BACKEND_URL>/api/auth/oidc/callback`.
+   */
+  readonly oidcIssuerUrl: string;
+  readonly oidcClientId: string;
+  readonly oidcClientSecret: string;
+  /** Space-separated scopes requested (default `openid profile email`). */
+  readonly oidcScopes: string;
+  /** Login-button label (default "Single sign-on"). */
+  readonly oidcProviderLabel: string;
   /** Clone/push URL for the KB repo. Any https git host (GitHub, GitLab, Bitbucket, Azure DevOps, self-hosted). */
   readonly kbRepoUrl: string;
   /** Directory name the KB lives under inside each user's workspace dir. */
@@ -116,6 +141,16 @@ export class CoreConfig {
    */
   readonly internalTokenSecret: string;
   /**
+   * Express `trust proxy` setting, from `TRUST_PROXY`: the number of reverse
+   * proxy hops in front of this backend (e.g. `1`), or an address/CIDR list
+   * (`loopback`, `10.0.0.0/8`). Unset (default) → forwarded headers are
+   * IGNORED and `req.ip` is the socket peer — correct for direct exposure,
+   * but behind a proxy it makes every client share the proxy's IP (so the
+   * per-IP login rate limit would pool all users). Set it to the actual hop
+   * count — never a blanket trust — so clients can't spoof X-Forwarded-For.
+   */
+  readonly trustProxy: string;
+  /**
    * Public base URL of THIS backend, used to build OAuth redirect URIs.
    * Must match a redirect URI registered with the OAuth provider(s).
    */
@@ -137,7 +172,24 @@ export class CoreConfig {
     this.backupsRoot = process.env.BACKUPS_ROOT || path.resolve(this.workspacesRoot, '..', 'backups');
     this.spillRoot = process.env.SPILL_ROOT || path.resolve(this.workspacesRoot, '..', 'tool-chain-spills');
     this.jwtSecret = process.env.JWT_SECRET || '';
-    this.testPassword = process.env.TEST_PASSWORD || '';
+    this.adminEmail = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+    this.adminPassword = process.env.ADMIN_PASSWORD || '';
+    if (this.adminEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.adminEmail)) {
+      throw new Error(`ADMIN_EMAIL is not a valid email: "${this.adminEmail}"`);
+    }
+    this.oidcIssuerUrl = (process.env.OIDC_ISSUER_URL || '').trim().replace(/\/+$/, '');
+    this.oidcClientId = (process.env.OIDC_CLIENT_ID || '').trim();
+    this.oidcClientSecret = (process.env.OIDC_CLIENT_SECRET || '').trim();
+    this.oidcScopes = (process.env.OIDC_SCOPES || 'openid profile email').trim();
+    this.oidcProviderLabel = (process.env.OIDC_PROVIDER_LABEL || 'Single sign-on').trim();
+    if (this.oidcIssuerUrl) {
+      // Parse-validate so a typo'd issuer fails at boot, not at first login.
+      try {
+        new URL(this.oidcIssuerUrl);
+      } catch {
+        throw new Error(`OIDC_ISSUER_URL is not a valid URL: "${this.oidcIssuerUrl}"`);
+      }
+    }
     // No default: the KB repo is deployment-specific, and a wrong fallback
     // would surface much later as a confusing clone failure. Fail at boot.
     this.kbRepoUrl = (process.env.KB_REPO_URL || '').trim();
@@ -185,6 +237,7 @@ export class CoreConfig {
       ''
     ).trim();
     this.internalTokenSecret = (process.env.INTERNAL_TOKEN_SECRET || '').trim();
+    this.trustProxy = (process.env.TRUST_PROXY || '').trim();
     this.publicBackendUrl = (process.env.PUBLIC_BACKEND_URL || `http://localhost:${this.port}`)
       .trim()
       .replace(/\/+$/, '');

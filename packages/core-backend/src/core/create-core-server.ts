@@ -27,6 +27,7 @@ import {
   createSecretsVaultPublicRoutes,
 } from '../modules/secrets-vault/index.js';
 import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js';
+import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -92,6 +93,17 @@ export async function createCoreServer(
   opts: { staticDir?: string } = {},
 ): Promise<ExpressApp> {
   const app = express();
+
+  // Honor forwarded client addresses ONLY when the deployment declares its
+  // proxy topology (TRUST_PROXY = hop count or CIDR list — see CoreConfig).
+  // Without it, `req.ip` is the socket peer: safe when directly exposed, but
+  // behind a proxy every client would share the proxy's address (pooling the
+  // per-IP login rate limit). A number is the hop count; anything else is
+  // passed through as Express's address/CIDR list form.
+  if (core.config.trustProxy) {
+    const raw = core.config.trustProxy;
+    app.set('trust proxy', /^\d+$/.test(raw) ? Number(raw) : raw);
+  }
 
   // `credentials: true` so EventSource (`withCredentials: true`) can carry
   // the `bevel_token` cookie set at login — the only auth path the
@@ -300,6 +312,8 @@ export async function createCoreServer(
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));
+  // Account management (list/create password accounts) — admin-gated inside.
+  app.use('/api', core.authMiddleware, createAccountRoutes(core.authService, core.adminAccess));
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe

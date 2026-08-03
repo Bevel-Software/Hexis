@@ -18,6 +18,12 @@ export const users = pgTable('users', {
   email: text('email').notNull().unique(),
   name: text('name').notNull(),
   avatarUrl: text('avatar_url'),
+  /**
+   * scrypt hash for password login (see auth/password-hash.ts). NULL for
+   * accounts that only ever signed in via SSO — password login refuses them
+   * until an admin (or the user, from their Account page) sets one.
+   */
+  passwordHash: text('password_hash'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });

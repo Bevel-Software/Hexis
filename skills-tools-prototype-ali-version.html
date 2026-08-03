@@ -1,0 +1,2761 @@
+<title>Bevel — Skills &amp; tools</title>
+<style>
+  /* ————— tokens — light-first, warm ink, one interactive blue ————— */
+  :root{
+    --bg:#FFFFFF; --side:#F7F6F4; --card:#FFFFFF; --card2:#FAFAF8; --inset:#F4F3F0;
+    --ink:#37352F; --ink2:#73706A; --ink3:#A3A099;
+    --line:rgba(55,53,47,.11); --line2:rgba(55,53,47,.19);
+    --hover:rgba(55,53,47,.05);
+    --accent:#2383E2; --accent-hover:#1B74CB;
+    --ok:#337B58; --wait:#C79100; --waitb:#F2C100; --attn:#CE5426;
+    --ok-soft:#EBF5EE; --wait-soft:#FEF8DC;
+    --sel:rgba(255,225,106,.55);
+    --shadow:0 18px 55px rgba(55,53,47,.16);
+    --card-shadow:0 1px 2px rgba(55,53,47,.05);
+    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  :root[data-theme="dark"]{
+    --bg:#191918; --side:#1F1F1E; --card:#232322; --card2:#2B2B2A; --inset:#1D1D1C;
+    --ink:#EDEDEA; --ink2:#A5A5A0; --ink3:#71716C;
+    --line:rgba(255,255,255,.08); --line2:rgba(255,255,255,.15);
+    --hover:rgba(255,255,255,.05);
+    --accent:#4E9FE0; --accent-hover:#5FACEA;
+    --ok:#7FBE95; --wait:#F0CC4E; --waitb:#F0CC4E; --attn:#E86B3F;
+    --ok-soft:rgba(127,190,149,.13); --wait-soft:rgba(240,204,78,.13);
+    --sel:rgba(240,204,78,.26);
+    --shadow:0 30px 90px rgba(0,0,0,.5);
+    --card-shadow:none;
+  }
+  :root[data-theme="light"]{
+    --bg:#FFFFFF; --side:#F7F6F4; --card:#FFFFFF; --card2:#FAFAF8; --inset:#F4F3F0;
+    --ink:#37352F; --ink2:#73706A; --ink3:#A3A099;
+    --line:rgba(55,53,47,.11); --line2:rgba(55,53,47,.19);
+    --hover:rgba(55,53,47,.05);
+    --accent:#2383E2; --accent-hover:#1B74CB;
+    --ok:#337B58; --wait:#C79100; --waitb:#F2C100; --attn:#CE5426;
+    --ok-soft:#EBF5EE; --wait-soft:#FEF8DC;
+    --sel:rgba(255,225,106,.55);
+    --shadow:0 18px 55px rgba(55,53,47,.16);
+    --card-shadow:0 1px 2px rgba(55,53,47,.05);
+  }
+
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html{height:100%}
+  body{min-height:100%;font-family:var(--sans);font-size:14px;line-height:1.5;color:var(--ink);background:var(--bg);
+    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  ::selection{background:var(--sel)}
+  button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;text-align:left}
+  input,textarea{font:inherit;color:inherit}
+  :focus-visible{outline:2px solid var(--ink2);outline-offset:2px;border-radius:6px}
+  @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+
+  /* ————— app frame: one bar across the top, sidebar under it ————— */
+  .topnav{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:6px;height:47px;padding:0 12px;
+    background:var(--bg);border-bottom:1px solid var(--line)}
+  .topnav .right{margin-left:auto;display:flex;align-items:center;gap:2px}
+  .wordmark{display:inline-flex;align-items:center;gap:8px;padding:5px 8px;border-radius:8px;transition:background .14s ease}
+  .wordmark:hover{background:var(--hover)}
+  .wordmark .tile{width:21px;height:21px;border-radius:6px;background:var(--ink);color:var(--bg);flex:0 0 21px;
+    display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:700}
+  .wordmark .bn{font-size:14.5px;font-weight:600;letter-spacing:-.012em}
+  .appchip{display:inline-flex;align-items:center;gap:8px;padding:5px 10px;border-radius:8px;font-size:13px;color:var(--ink2);
+    transition:background .14s ease,color .14s ease}
+  .appchip:hover,.appchip[aria-expanded="true"]{background:var(--hover);color:var(--ink)}
+  .appchip .chev{font-size:9px;color:var(--ink3)}
+  .who{display:inline-flex;align-items:center;gap:8px;padding:5px 9px;border-radius:8px;font-size:12.5px;color:var(--ink2);
+    transition:background .14s ease,color .14s ease}
+  .who:hover,.who[aria-expanded="true"]{background:var(--hover);color:var(--ink)}
+  .who .av{width:22px;height:22px;font-size:8.5px}
+  .iconbtn{position:relative;width:30px;height:30px;border-radius:8px;flex:0 0 30px;color:var(--ink3);
+    display:flex;align-items:center;justify-content:center;transition:background .14s ease,color .14s ease}
+  .iconbtn:hover,.iconbtn[aria-expanded="true"]{background:var(--hover);color:var(--ink)}
+  .iconbtn svg{width:16px;height:16px}
+  .iconbtn .badge{position:absolute;top:5px;right:5px;width:7px;height:7px;border-radius:50%;
+    background:var(--attn);border:1.5px solid var(--bg)}
+
+  .app{display:flex;min-height:calc(100dvh - 47px)}
+  .side{width:212px;flex:0 0 auto;position:sticky;top:47px;height:calc(100dvh - 47px);overflow:hidden;
+    border-right:1px solid var(--line);background:var(--side);
+    transition:width .24s cubic-bezier(.2,.8,.2,1)}
+  .side-inner{width:212px;height:100%;display:flex;flex-direction:column;padding:14px 14px 18px}
+  .app.collapsed .side{width:0;border-right-color:transparent}
+  #appmenu{left:12px;top:52px;bottom:auto;width:266px}
+  #setmenu{right:12px;left:auto;top:52px;bottom:auto;width:238px}
+  #pmenu{right:12px;left:auto;top:52px;bottom:auto;width:248px}
+  #appmenu .applogo{width:26px;height:26px;border-radius:7px;flex:0 0 26px;display:flex;align-items:center;
+    justify-content:center;font-size:12px;font-weight:700;background:var(--inset);border:1px solid var(--line);color:var(--ink2)}
+  #appmenu .user-option[aria-current="true"] .applogo{background:var(--ink);color:var(--bg);border-color:transparent}
+  .nav{display:flex;flex-direction:column;gap:1px}
+  .nav .lbl{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);font-weight:600;padding:16px 10px 7px}
+  .nav .lbl.folder{display:flex;align-items:center;gap:7px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--ink2)}
+  .nav .doc-link{font-size:13px;padding-left:24px;gap:8px}
+  .nav .doc-link .fdot{margin-left:auto}
+  .nav button{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-radius:7px;
+    font-size:13.5px;color:var(--ink2);transition:background .14s ease,color .14s ease}
+  .nav button:hover{background:var(--hover);color:var(--ink)}
+  .nav button[aria-current="true"]{color:var(--ink);font-weight:600;background:var(--hover)}
+  .nav .n{font-size:11.5px;color:var(--ink3);font-variant-numeric:tabular-nums;font-weight:400}
+  .nav .pending{font-size:10px;line-height:18px;min-width:18px;height:18px;padding:0 5px;border-radius:9px;
+    color:var(--wait);background:var(--wait-soft);font-weight:700;text-align:center;flex:0 0 auto}
+  .nav .locked{opacity:.45;cursor:default}
+  .nav .locked:hover{background:none;color:var(--ink2)}
+  .side .spacer{flex:1}
+
+  /* profile menu */
+  .pmenu{position:fixed;left:14px;bottom:64px;width:248px;background:var(--card);border:1px solid var(--line);
+    border-radius:12px;box-shadow:var(--shadow);padding:6px;display:none;z-index:60}
+  .pmenu.on{display:block}
+  .pmenu button{display:flex;flex-direction:column;gap:1px;width:100%;padding:8px 10px;border-radius:8px}
+  .pmenu button:hover{background:var(--hover)}
+  .pmenu .mt{font-size:13px;font-weight:500}
+  .pmenu .ms{font-size:11px;color:var(--ink3);line-height:1.4}
+  .pmenu .menu-label{font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);font-weight:700;
+    padding:10px 10px 5px;margin-top:4px;border-top:1px solid var(--line)}
+  .pmenu button.user-option{flex-direction:row;align-items:center;gap:9px}
+  .pmenu button.user-option .ui{min-width:0;flex:1}
+  .pmenu button.user-option .mt,.pmenu button.user-option .ms{display:block}
+  .pmenu button.user-option .check{color:var(--ok);font-weight:700}
+
+  /* small modal */
+  .mwrap{position:fixed;inset:0;z-index:70;display:none;align-items:center;justify-content:center;
+    background:rgba(55,53,47,.25);padding:16px}
+  .mwrap.on{display:flex}
+  .mcard{width:440px;max-width:100%;background:var(--card);border:1px solid var(--line);border-radius:16px;
+    box-shadow:var(--shadow);padding:24px}
+  .mcard h3{font-size:17px;font-weight:600;letter-spacing:-.012em;margin-bottom:6px}
+  .mcard p{font-size:13px;color:var(--ink2);line-height:1.55}
+  .mcard .endpoint{font-family:var(--mono);font-size:11.5px;background:var(--inset);border:1px solid var(--line);
+    border-radius:8px;padding:8px 11px;margin:14px 0;color:var(--ink);overflow-x:auto;white-space:nowrap}
+  .mcard .mfoot{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+
+  .main{flex:1;min-width:0}
+  .wrap{max-width:1180px;margin:0 auto;padding:26px 40px 110px}
+
+  /* search + strip */
+  .search{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line2);
+    border-radius:13px;padding:12px 16px;width:100%;cursor:pointer;transition:border-color .15s ease}
+  .search:hover{border-color:var(--ink3)}
+  .search .glyph{color:var(--ink3);font-size:15px}
+  .search input{flex:1;background:transparent;border:none;outline:none;font-size:15px;min-width:0}
+  .search input::placeholder{color:var(--ink3)}
+  .search kbd{font-family:var(--mono);font-size:11px;color:var(--ink3);border:1px solid var(--line);
+    border-radius:5px;padding:2px 6px;background:var(--inset)}
+  .strip{display:flex;flex-direction:column;margin-top:12px}
+  .strip-row{display:flex;align-items:center;gap:10px;padding:7px 6px;border-radius:9px;font-size:13px;color:var(--ink2);
+    transition:background .14s ease;width:100%}
+  .strip-row:hover{background:var(--hover);color:var(--ink)}
+  .sdot{width:6px;height:6px;border-radius:50%;flex:0 0 6px}
+  .sdot.wait{background:var(--waitb)} .sdot.ok{background:var(--ok)}
+  .strip-row .go{margin-left:auto;font-size:12px;color:var(--ink3);white-space:nowrap}
+
+  /* shelf */
+  .shelf-head{display:flex;align-items:baseline;gap:10px;margin:30px 0 14px}
+  .shelf-head h1{font-size:20px;font-weight:600;letter-spacing:-.014em}
+  .shelf-head .n{font-size:12px;color:var(--ink3);font-variant-numeric:tabular-nums}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(252px,1fr));gap:10px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px 12px;
+    display:flex;flex-direction:column;gap:6px;min-height:106px;box-shadow:var(--card-shadow);cursor:pointer;
+    position:relative;transition:border-color .15s ease,background .15s ease,transform .1s ease}
+  .copybtn{position:absolute;top:10px;right:10px;width:26px;height:26px;border-radius:7px;
+    display:flex;align-items:center;justify-content:center;color:var(--ink3);
+    background:var(--card);border:1px solid var(--line);opacity:0;transition:opacity .12s ease}
+  .card:hover .copybtn{opacity:1}
+  .copybtn:hover{color:var(--ink);background:var(--hover)}
+  .copybtn .ck{color:var(--ok);font-size:13px;font-weight:600}
+  .card:hover{border-color:var(--line2);background:var(--card2)}
+  .card:active{transform:scale(.995)}
+  .card .t{font-size:14.5px;font-weight:600;letter-spacing:-.008em;display:flex;align-items:center;gap:9px}
+  .card .t .new{font-size:10px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--ink2)}
+  .card .d{font-size:12.5px;color:var(--ink2);line-height:1.45;
+    display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .card .foot{margin-top:auto;display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink3);padding-top:6px}
+  .rdot{width:6px;height:6px;border-radius:50%;flex:0 0 6px}
+  .rdot.ok{background:var(--ok)} .rdot.wait{background:var(--waitb)} .rdot.none{background:var(--ink3);opacity:.5}
+  .card .foot .r-ok{color:var(--ok)} .card .foot .r-wait{color:var(--wait)}
+  .card .foot .upd{margin-left:auto;text-align:right}
+  .empty{padding:26px 4px;color:var(--ink3);font-size:13.5px}
+
+  /* logos */
+  .logo{width:26px;height:26px;border-radius:7px;background:var(--inset);border:1px solid var(--line);
+    display:inline-flex;align-items:center;justify-content:center;flex:0 0 26px}
+  .logo svg{width:15px;height:15px;display:block}
+  .logo .mg{font-size:11.5px;font-weight:700}
+  .logo.lg{width:40px;height:40px;border-radius:10px;flex-basis:40px}
+  .logo.lg svg{width:22px;height:22px}
+  .logo.lg .mg{font-size:16px}
+  .logo .ic-ink{color:var(--ink)}
+
+  /* ————— item page ————— */
+  .back{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--ink2);padding:6px 10px;
+    border-radius:8px;margin:2px 0 18px -10px}
+  .back:hover{background:var(--hover);color:var(--ink)}
+  .item-grid{display:grid;grid-template-columns:minmax(0,620px) 300px;gap:46px;align-items:start}
+  .item-grid.solo{grid-template-columns:minmax(0,1fr)}
+  .kicker{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink3);font-weight:600;margin-bottom:8px}
+  .item-title{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+  .item-title h1{font-size:26px;font-weight:600;letter-spacing:-.018em;line-height:1.15;text-wrap:balance}
+  .item-top{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}
+  .item-top .item-copy{min-width:0}
+  .sharebtn{display:inline-flex;align-items:center;gap:7px;padding:7px 16px;border-radius:99px;background:var(--inset);
+    border:1px solid var(--line);font-size:13px;font-weight:600;flex:0 0 auto;margin-top:18px}
+  .sharebtn:hover{background:var(--hover);border-color:var(--line2)}
+  .sharebtn svg{width:14px;height:14px}
+  .lede{font-size:14.5px;color:var(--ink2);line-height:1.55;max-width:56ch}
+
+  .ready{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:11px;font-size:13.5px;font-weight:500;margin-top:18px}
+  .ready.ok{background:var(--ok-soft);color:var(--ok)}
+  .ready.wait{background:var(--wait-soft);color:var(--wait)}
+  .ready.none{background:var(--inset);color:var(--ink2);font-weight:400}
+  .ready .fix{margin-left:auto}
+
+  .h4{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink3);font-weight:600;margin:26px 0 10px}
+  .invoke{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .invoke code{font-family:var(--mono);font-size:12.5px;background:var(--inset);border:1px solid var(--line);
+    border-radius:8px;padding:7px 12px;color:var(--ink)}
+  .invoke .hint{font-size:12px;color:var(--ink3)}
+
+  /* document */
+  .doc{border-top:1px solid var(--line);margin-top:10px;padding-top:4px;
+    font-size:13.5px;line-height:1.7;color:var(--ink2)}
+  .doc p{margin:10px 0}
+  .doc h2{font-size:15px;font-weight:600;color:var(--ink);margin:26px 0 6px;letter-spacing:-.01em}
+  .doc h3{font-size:13.5px;font-weight:600;color:var(--ink);margin:18px 0 4px}
+  .doc ul,.doc ol{margin:8px 0 12px 20px;display:flex;flex-direction:column;gap:5px}
+  .doc pre{font-family:var(--mono);font-size:11.5px;line-height:1.65;background:var(--inset);border:1px solid var(--line);
+    border-radius:9px;padding:11px 13px;overflow-x:auto;margin:10px 0;color:var(--ink2);white-space:pre}
+  .doc code{font-family:var(--mono);font-size:11.5px;background:var(--inset);border:1px solid var(--line);
+    border-radius:5px;padding:1px 5px;color:var(--ink)}
+  .doc pre code{border:none;background:none;padding:0}
+  .doc b,.doc strong{color:var(--ink);font-weight:600}
+  .doc .wiki{color:var(--ink);border-bottom:1px dotted var(--line2)}
+  .doc li.check{list-style:none;margin-left:-20px;display:flex;gap:9px;align-items:baseline}
+  .doc li.check .cb{width:11px;height:11px;border:1.5px solid var(--ink3);border-radius:3px;flex:0 0 11px;transform:translateY(1px)}
+  .doc .note{font-size:12.5px;color:var(--ink3);margin-top:10px}
+  .doc mark.anch{background:var(--sel);color:inherit;border-bottom:1px dotted var(--wait);border-radius:2px;padding:0 1px}
+  .doc hr{border:none;border-top:1px solid var(--line);margin:22px 0}
+  .doc blockquote{border-left:2px solid var(--line2);padding-left:12px;color:var(--ink3);margin:10px 0;font-size:13px}
+  .doc .tablewrap{overflow-x:auto;margin:12px 0}
+  .doc table{border-collapse:collapse;font-size:12.5px;min-width:100%}
+  .doc th,.doc td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top;line-height:1.5}
+  .doc th{color:var(--ink);font-weight:600;background:var(--inset);white-space:nowrap}
+
+  /* the skill's files — a skill is a folder */
+  .ftabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-top:22px;flex-wrap:wrap}
+  .ftab{padding:7px 11px 9px;color:var(--ink2);border-radius:8px 8px 0 0;
+    display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+  .ftab .mono{font-family:var(--mono);font-size:11.5px}
+  .ftab:hover{background:var(--hover);color:var(--ink)}
+  .ftab.on{color:var(--ink);box-shadow:inset 0 -2px 0 var(--ink)}
+  .ftab.on .mono{font-weight:600}
+  .fdot{width:5px;height:5px;border-radius:50%;background:var(--waitb);flex:0 0 5px}
+  /* the open file, as a box: header bar with its name and the one action, then the text */
+  .filepane{border:1px solid var(--line2);border-radius:12px;overflow:hidden;margin-top:16px;
+    background:var(--card);box-shadow:var(--card-shadow)}
+  .filebar{display:flex;align-items:center;gap:12px;padding:8px 14px;min-height:44px;
+    background:var(--card2);border-bottom:1px solid var(--line)}
+  .filebar .fname{font-family:var(--mono);font-size:11.5px;color:var(--ink2);margin-right:auto;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .filepane .doc{border-top:none;margin-top:0;padding:18px 24px 24px}
+  .filepane .doc>:first-child{margin-top:0}
+
+  /* people rail (admin console) */
+  .railhead{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink3);font-weight:600;margin-bottom:6px;
+    display:flex;align-items:center}
+  .railcount{display:inline-flex;min-width:17px;height:17px;padding:0 5px;border-radius:9px;background:var(--wait-soft);
+    color:var(--wait);font-size:10.5px;font-weight:700;align-items:center;justify-content:center;margin-left:8px;letter-spacing:0}
+  .railhint{font-size:12px;color:var(--ink3);line-height:1.5;margin-bottom:10px}
+
+  /* search dropdown — anchored under the toolbar */
+  .search-wrap{position:relative;z-index:30}
+  .sdrop{position:absolute;top:calc(100% + 8px);left:0;right:0;background:var(--card);border:1px solid var(--line);
+    border-radius:14px;box-shadow:var(--shadow);padding:6px;display:none;max-height:46vh;overflow-y:auto}
+  .sdrop.on{display:block}
+  .pal-row{display:flex;align-items:center;gap:11px;width:100%;padding:9px 10px;border-radius:9px}
+  .pal-row.sel{background:var(--hover)}
+  .slashic{width:26px;height:26px;border-radius:7px;border:1px solid var(--line);display:flex;align-items:center;
+    justify-content:center;font-family:var(--mono);font-size:12px;color:var(--ink2);flex:0 0 26px;background:var(--inset)}
+  .pal-row .pr-body{min-width:0;flex:1}
+  .pal-row .pr-t{font-size:13.5px;font-weight:500;display:block}
+  .pal-row .pr-d{font-size:12px;color:var(--ink3);display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pal-row .pr-k{font-size:11px;color:var(--ink3);flex:0 0 auto;white-space:nowrap}
+  .pal-empty{padding:18px;color:var(--ink3);font-size:13px}
+  /* ————— propose changes: read → edit → pending diff ————— */
+  .editbox textarea{display:block;width:100%;border:none;background:var(--inset);padding:18px 24px;
+    font-family:var(--mono);font-size:12px;line-height:1.7;min-height:340px;resize:vertical;outline:none;color:var(--ink)}
+  .editbox .ebar{display:flex;align-items:center;gap:8px;padding:10px 12px;border-top:1px solid var(--line);background:var(--card)}
+  .editbox .ebar .note{font-size:12px;color:var(--ink3);margin-right:auto}
+
+  /* the change box — what someone proposed, rendered like a review diff */
+  .changebox{border:1px solid var(--line2);border-radius:12px;overflow:hidden;margin-top:10px;background:var(--card)}
+  .changebox .chead{display:flex;align-items:center;gap:9px;padding:10px 13px;border-bottom:1px solid var(--line);background:var(--card2)}
+  .changebox .chead .who{font-size:12.5px;color:var(--ink2);min-width:0}
+  .changebox .chead .who b{color:var(--ink);font-weight:600}
+  .changebox .chead .stat{margin-left:auto;font-size:11.5px;white-space:nowrap;color:var(--ink3)}
+  .diff{font-family:var(--mono);font-size:11.5px;line-height:1.65;overflow-x:auto;background:var(--inset)}
+  .dl{display:block;white-space:pre-wrap;word-break:break-word;padding:1px 13px 1px 26px;position:relative;color:var(--ink2)}
+  .dl::before{position:absolute;left:10px;color:var(--ink3)}
+  .dl.add{background:var(--ok-soft);color:var(--ink)}
+  .dl.add::before{content:'+';color:var(--ok)}
+  .dl.del{background:color-mix(in srgb,var(--attn) 12%,transparent);color:var(--ink2)}
+  .dl.del::before{content:'−';color:var(--attn)}
+  .dl.gap{color:var(--ink3);background:var(--card2);font-size:10.5px;padding-left:13px;border-block:1px solid var(--line)}
+  .cfoot{display:flex;align-items:center;gap:8px;padding:10px 13px;border-top:1px solid var(--line);background:var(--card)}
+  .cfoot .pending{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:var(--wait)}
+  .cfoot .pending .cdot{width:6px;height:6px;border-radius:50%;background:var(--waitb)}
+  .cfoot .sub{font-size:11.5px;color:var(--ink3);min-width:0}
+  .cfoot .acts{margin-left:auto;display:flex;gap:8px;flex:0 0 auto}
+  /* blocked: it cannot be merged until its author redoes it */
+  .changebox.blocked{border-color:color-mix(in srgb,var(--attn) 40%,var(--line))}
+  .cfoot.conflict{flex-wrap:wrap;background:color-mix(in srgb,var(--attn) 7%,transparent)}
+  .cfoot .stopped{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:var(--attn)}
+  .cfoot .stopped::before{content:'!';width:15px;height:15px;border-radius:50%;background:var(--attn);color:var(--bg);
+    font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:0 0 15px}
+
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;font-size:12px;font-weight:500;
+    background:var(--inset);color:var(--ink2);white-space:nowrap}
+  .chip .cdot{width:5px;height:5px;border-radius:50%;background:currentColor}
+  .chip.ok{background:var(--ok-soft);color:var(--ok)}
+  .chiprow{display:flex;flex-wrap:wrap;gap:8px}
+  .chip.link{cursor:pointer;border:1px solid var(--line)}
+  .chip.link:hover{background:var(--hover);color:var(--ink)}
+  .kv{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;font-size:13.5px}
+  .kv+.kv{border-top:1px solid var(--line)}
+  .kv .k{min-width:0}
+  .kv .k .sub{font-size:12px;color:var(--ink3);display:block;margin-top:1px}
+  .kv .v{flex:0 0 auto}
+
+  .btn{display:inline-flex;align-items:center;gap:7px;padding:7px 15px;border-radius:99px;font-size:13px;font-weight:500;
+    border:1px solid var(--line2);background:transparent;transition:background .15s ease;white-space:nowrap}
+  .btn:hover{background:var(--hover)}
+  .btn.primary{background:var(--accent);color:#fff;border-color:transparent}
+  .btn.primary:hover{background:var(--accent-hover)}
+  .btn.connect{background:var(--accent);color:#fff;border-color:transparent}
+  .btn.connect:hover{background:var(--accent-hover)}
+  .btn.quiet{border-color:transparent;color:var(--ink2);padding:7px 9px}
+  .btn.quiet:hover{color:var(--ink);background:var(--hover)}
+  .btn.small{padding:4px 12px;font-size:12.5px}
+  .btn.tiny{padding:3px 10px;font-size:11.5px}
+  .btn.accept{background:var(--ok);border-color:transparent;color:#fff}
+  .btn.accept:hover{filter:brightness(.94)}
+
+  .ownerline{font-size:12.5px;color:var(--ink3);margin-top:26px;padding-top:14px;border-top:1px solid var(--line)}
+  .pathline{font-family:var(--mono);font-size:11px;color:var(--ink3);margin-top:26px}
+  .pathline+.ownerline{margin-top:10px}
+
+  /* ————— access (admin) ————— */
+  .acc{display:flex;align-items:center;gap:8px;margin-top:16px;padding:7px 9px 7px 13px;border:1px dashed var(--line2);
+    border-radius:10px;font-size:12.5px;color:var(--ink2);flex-wrap:wrap}
+  .acc .ak{font-weight:600;color:var(--ink)}
+  .admintag{font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3);font-weight:700;white-space:nowrap}
+  .acc .admintag{margin-left:auto}
+  .av{width:26px;height:26px;border-radius:50%;background:var(--inset);border:1px solid var(--line);
+    display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--ink2);flex:0 0 auto}
+  .avs{display:flex;align-items:center;gap:3px;flex-wrap:wrap}
+  .tag{font-size:9.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--ink3);
+    border:1px solid var(--line);border-radius:5px;padding:1px 5px;white-space:nowrap}
+
+  /* Share keeps access and role information out of the reading surface. */
+  .share-summary{margin-top:18px}
+  .share-section{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);font-weight:700;
+    margin:18px 0 7px}
+  .share-row{display:flex;align-items:center;gap:10px;padding:9px 0}
+  .share-row+.share-row{border-top:1px solid var(--line)}
+  .share-row .si{min-width:0;flex:1}
+  .share-row .sn{font-size:13.5px;font-weight:500;color:var(--ink);display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+  .share-row .ss{font-size:11.5px;color:var(--ink3);display:block;margin-top:1px}
+  .share-row .sr{font-size:11.5px;color:var(--ink2);flex:0 0 auto}
+  .share-link{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0 0;margin-top:8px;
+    border-top:1px solid var(--line)}
+  .share-link .sub{display:block;font-size:11.5px;color:var(--ink3);margin-top:1px}
+
+  /* ————— admin console — org chart ————— */
+  .oc-root{max-width:420px;margin:34px auto 0}
+  .oc-stem{width:1px;height:20px;background:var(--line2);margin:0 auto}
+  .oc-teams{display:grid;gap:0 14px;justify-content:center;grid-template-columns:repeat(2,minmax(230px,300px))}
+  .oc-cell{position:relative;padding-top:18px}
+  .oc-cell::before{content:"";position:absolute;top:0;left:-7px;right:-7px;height:1px;background:var(--line2)}
+  .oc-cell:first-child::before{left:50%}
+  .oc-cell:last-child::before{right:50%}
+  .oc-cell:only-child::before{display:none}
+  .oc-cell::after{content:"";position:absolute;top:0;left:50%;width:1px;height:18px;background:var(--line2)}
+  .oc-card{width:100%;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;
+    box-shadow:var(--card-shadow);cursor:pointer;display:flex;flex-direction:column;gap:8px;
+    transition:border-color .15s ease,background .15s ease}
+  .oc-card:hover{border-color:var(--line2);background:var(--card2)}
+  .oc-card:active{transform:scale(.995)}
+  .oc-card .t{font-size:14.5px;font-weight:600;letter-spacing:-.008em}
+  .oc-card .meta{font-size:12px;color:var(--ink3)}
+  .oc-card .row{display:flex;align-items:center;gap:10px;justify-content:space-between}
+  .oc-note{font-size:12px;color:var(--ink3);text-align:center;margin-top:30px;line-height:1.6}
+  .more-av{height:26px;min-width:26px;padding:0 7px;border-radius:13px;background:var(--inset);border:1px solid var(--line);
+    display:inline-flex;align-items:center;justify-content:center;font-size:10px;color:var(--ink2);font-weight:600}
+
+  /* ————— team page ————— */
+  .mem{display:flex;align-items:flex-start;gap:10px;padding:10px 0}
+  .mem+.mem{border-top:1px solid var(--line)}
+  .mem .av{margin-top:1px}
+  .mem .mi{min-width:0;flex:1}
+  .mem .mn{font-size:13px;font-weight:500;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .mem .msub{font-size:11.5px;color:var(--ink3);display:block}
+  .mem .mx{font-size:12px;color:var(--ink2);margin-top:5px;display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+  .mem .rm-x{color:var(--ink3);font-size:14px;padding:2px 7px;border-radius:6px;flex:0 0 auto}
+  .mem .rm-x:hover{background:var(--hover);color:var(--ink)}
+  .addin{width:100%;border:1px solid var(--line2);border-radius:9px;background:var(--inset);
+    padding:8px 11px;font-size:13px;outline:none;margin:14px 0 6px}
+  .addin:focus{border-color:var(--ink3)}
+  .mrows{max-height:250px;overflow-y:auto;margin:0 -6px}
+  .grant-link{display:flex;gap:10px;align-items:center;min-width:0;flex:1;padding:5px 7px;margin:-5px -7px;border-radius:8px}
+  .grant-link:hover{background:var(--hover)}
+  .grant-link::after{content:'›';margin-left:auto;color:var(--ink3);opacity:0;transition:opacity .14s ease}
+  .grant-link:hover::after{opacity:1}
+  .grant-link .sub{display:block;font-size:12px;color:var(--ink3);margin-top:1px}
+
+  #toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(8px);
+    background:var(--ink);color:var(--bg);font-size:13px;font-weight:500;padding:10px 18px;border-radius:99px;
+    opacity:0;pointer-events:none;transition:opacity .2s ease,transform .2s ease;z-index:80;max-width:82vw;text-align:center}
+  #toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+
+  @media (max-width:900px){
+    .app{flex-direction:column}
+    .side{width:100%;height:auto;position:static;overflow:visible;border-right:none;border-bottom:1px solid var(--line)}
+    .side-inner{width:100%;height:auto;flex-direction:row;align-items:center;gap:4px;flex-wrap:wrap;padding:12px 16px}
+    .nav{flex-direction:row;flex-wrap:wrap}
+    .nav .lbl{display:none}
+    .side .spacer{display:none}
+    .topnav .who span:not(.av){display:none}
+    .wrap{padding:18px 18px 90px}
+    .item-grid{grid-template-columns:1fr}
+    .item-top{gap:14px}
+    .oc-teams{grid-template-columns:1fr;gap:10px}
+    .oc-cell{padding-top:0}
+    .oc-cell::before,.oc-cell::after{display:none}
+    .oc-stem{display:none}
+    .oc-root{margin-top:22px}
+  }
+</style>
+
+<script type="text/plain" id="kb-overview">
+# What Bevel is
+
+Bevel is the knowledge layer a company's agents run on. Everything an agent needs
+in order to act on our behalf — what we sell, who we sell it to, how we work, what
+we have already learned — lives here as text, owned by a person, and versioned.
+
+## The one rule
+
+**If an agent needs to know it, it belongs here.** Not in a thread, not in
+someone's head, not in a deck attached to an email nobody can find in March.
+
+A page nobody owns is a page nobody trusts. Every page on the left has exactly one
+owner, and that owner is the only person who can approve a change to it.
+
+## How the company is organised
+
+| Team | Owns | Size |
+|---|---|---|
+| GTM | Pipeline, outbound, positioning | 36 |
+| Engineering | The platform | 64 |
+| Product | What we build and why | 30 |
+| Delivery | Client work | 34 |
+| Customer Success | Retention and expansion | 22 |
+| Operations | Finance, people, legal | 14 |
+
+## What to do when a page is wrong
+
+Propose the change. Do not open a thread about it, and do not work around it — a
+page everyone privately knows is wrong is worse than no page, because the agents
+cannot tell. See [[ways-of-working]].
+</script>
+
+<script type="text/plain" id="kb-ways-of-working">
+# Ways of working
+
+## Write for the reader who was not there
+
+Every page is read by someone with no context and by an agent with no judgement.
+Both need the same thing: the conclusion first, the reasoning after, and no
+pronouns pointing at something that was only ever said out loud.
+
+## Decisions
+
+A decision that is not written down did not happen. Record:
+
+1. What was decided, in one sentence.
+2. What it rules out — the option not taken matters more than the one taken.
+3. Who decided, and when.
+4. What would make us revisit it.
+
+The fourth line is the one everyone skips and the one that makes the page useful
+a year later.
+
+## Meetings
+
+- No meeting without a written question it exists to answer.
+- Notes land in the knowledge base the same day, or the meeting did not happen.
+- If the outcome changes a page, propose the change while it is still fresh.
+
+## Proposing a change
+
+Anyone may propose a change to any page. The owner approves it. There is no other
+route — no "quick edit", no side channel, no asking someone with admin rights to
+do it for you.
+
+> Owning a page is not a privilege, it is a duty to answer within a day.
+</script>
+
+<script type="text/plain" id="kb-icp">
+# Ideal customer profile
+
+The ICP is a **hypothesis**, not a description. It is written so that it can be
+proven wrong by a number, and it is revised when it is.
+
+## Current profile
+
+| Trait | Value |
+|---|---|
+| Size | 150–800 people |
+| Region | DACH, Benelux |
+| Trigger | Rolling out AI agents internally, first pilot already stalled |
+| Buyer | COO, Head of Operations, occasionally CTO |
+| Anti-signal | No internal owner for process documentation |
+
+## Why they buy
+
+Not "we want AI". Every one of them already tried, and the pilot stalled for the
+same reason: the agent had no reliable source of truth, so its output could not be
+trusted, so nobody used it.
+
+They are not buying a model. They are buying the thing that makes the model
+correct — and they have usually just paid to learn that themselves.
+
+## The anti-signal matters most
+
+If nobody inside owns process documentation, we lose. Not slowly — the pilot dies
+at week six when the first page goes stale and nobody notices. Qualify on this
+before anything else.
+
+## How we test it
+
+One hypothesis, one list, one campaign, one kill metric, set before launch. See
+[[outbound-playbook]].
+</script>
+
+<script type="text/plain" id="kb-outbound-playbook">
+# Outbound playbook
+
+Outbound is an experiment. A list that cannot lose cannot teach us anything.
+
+## Structure
+
+- One hypothesis per list. Never pour two personas into one sequence.
+- One campaign per list, so the numbers stay comparable.
+- A kill metric written down **before** launch: reply rate under 4% at 200 sent
+  means the hypothesis is dead, not that the copy needs another pass.
+
+## Copy
+
+1. Open on their deadline or their problem. Never on our product, never on AI.
+2. One proof point with a number in it, anonymised unless we have permission.
+3. Follow-ups add information. They never say "just bumping this".
+4. The last touch gives an explicit exit — it protects the sender and produces a
+   cleaner negative signal than silence.
+
+## Language
+
+German materially lifts reply rate in DACH. Only write it if the person handling
+replies can hold the conversation in German.
+
+## What we never do
+
+- Never start a campaign on someone else's behalf.
+- Never send to a list that has not been counted after import.
+- Never reuse a sender across two campaigns without excluding contacted leads.
+</script>
+
+<script type="text/plain" id="kb-ontology">
+# Product ontology
+
+The words we use for our own product, and the ones we have retired. If a word is
+not on this page, it is not ours yet.
+
+## Current vocabulary
+
+| We say | We do not say | Why |
+|---|---|---|
+| Knowledge base | Wiki, docs site | A wiki is edited by whoever is last; ours is owned and approved |
+| Page | Article, entry | Shortest word that is not overloaded |
+| Skill | Prompt, workflow, macro | A skill is a folder of instructions an agent runs |
+| Tool | Integration, connector | The thing an agent calls; a credential is not a tool |
+| Propose a change | Suggest an edit, open a PR | Says what happens; the git vocabulary stays out of the product |
+| Sub-group | Space, workspace, team folder | People create these and invite others |
+
+## Retired
+
+**Connectors** — we called integrations this until July. Screenshots in older
+material still say it. If you touch a page that uses it, fix it while you are
+there.
+
+## The rule for new words
+
+A new noun needs an owner and a page before it appears in the product. Naming a
+thing twice is how a product ends up with two of everything.
+</script>
+
+<script type="text/plain" id="kb-access-and-roles">
+# Access and roles
+
+## The model
+
+Everything sits in exactly one place: **company-wide**, or **one sub-group**.
+Nothing is in both. Company-wide means all 200 people. A sub-group is created by a
+person, who then invites others into it.
+
+| Role | Can |
+|---|---|
+| Member | Read everything they have access to, propose changes anywhere |
+| Owner | Approve changes to the pages and skills they own |
+| Admin | Manage access and membership; see everything |
+
+## Two things that are deliberately separate
+
+**Access** is who can see and use a thing — Admins manage it.
+**Approval** is who decides what a page says — the owner decides, and an Admin
+does not inherit that by being an Admin.
+
+Keeping these apart is the whole point. Someone who can grant themselves access to
+a page still cannot change what it says.
+
+## Agents
+
+An agent acts with exactly the access of the person who ran it — never more. It
+proposes changes the same way a person does, under that person's name, and the
+owner approves them the same way.
+
+## Credentials
+
+Personal credentials stay personal; team credentials are set once by an Admin. A
+credential is never written into a page. If you find one here, remove it and
+rotate it — in that order.
+</script>
+
+<script type="text/plain" id="md-heyreach-campaign">
+# HeyReach campaign setup
+
+## 1. Check the account state first
+
+`get_all_linked_in_accounts` and `get_all_campaigns` before anything else.
+
+- `authIsValid: false` → the LinkedIn session is dead, reconnect required. A real problem.
+- `isActive: false` → **not** a problem. It is derived, not a setting: a sender only
+  reads as active while a campaign is actually running. Draft, paused, cancelled and
+  failed campaigns all leave the sender "Available". It flips on its own when a
+  campaign starts. Do not tell the user to go activate anything.
+- `isValidNavigator` tells you whether InMail steps are viable at all.
+
+## 2. Read the existing sequence before writing one
+
+Always `get_campaign_sequence` first — on the target campaign, and on any campaign
+that already works, as a reference for valid node shapes.
+
+**Newly created HeyReach campaigns ship with stock demo copy.** It reads like a
+lead-gen agency pitch ("dropped a few likes on your posts lately… since you get 50+
+comments on average"). If the campaign is started without replacing it, that is what
+goes to real prospects. Check for it explicitly and flag it loudly.
+
+## 3. Sequence structure
+
+A tree of nodes: `nodeType`, `actionDelay`, `actionDelayUnit` (`HOUR`|`DAY`),
+`unconditionalNode`, `conditionalNode`, `payload`.
+
+Rules that the API enforces and will reject you for:
+
+- Every path ends in `END`.
+- `actionDelay >= 3 HOUR` (or use `DAY`) on **every** node following a
+  `CONNECTION_REQUEST`, `MESSAGE`, `INMAIL`, `VIEW_PROFILE`, `FOLLOW` or `LIKE_POST`
+  — including `END` nodes. Omitting it becomes `00:00:00` and the call fails.
+- `CONNECTION_REQUEST` needs both branches: `conditionalNode` = accepted,
+  `unconditionalNode` = not accepted.
+- `MESSAGE` and `INMAIL` need both, and their `conditionalNode` **must** be `END`
+  (that is the reply-detected exit).
+- `MESSAGE` may only appear after the lead is connected — on the accepted side of
+  `CONNECTION_REQUEST`, or under `CHECK_IS_CONNECTION`.
+
+Payloads:
+
+```
+MESSAGE  { messages: ["…{FIRST_NAME}…"], fallbackMessage: "…" }
+INMAIL   { messages: [{subject, message}], fallbackMessage: {subject, message} }
+CONNECTION_REQUEST { messages: [""], fallbackMessage: "", toBeWithdrawnAfterDays: 25 }
+```
+
+`fallbackMessage` is used when the variable cannot be filled — it must read
+correctly with the name removed entirely, not with a blank left in it.
+
+Prefer a `CHECK_IS_CONNECTION` root over a bare `CONNECTION_REQUEST` root: it
+handles leads who are already 1st-degree instead of failing their first step.
+
+## 4. Copy
+
+- Open on the prospect's deadline or problem, never on your product, and never on AI.
+- One concrete proof point with a number, anonymised unless you have permission to
+  name the client.
+- Follow-ups add information; they never say "just bumping this".
+- Last touch gives an explicit exit ("say so and I'll leave it there") — it protects
+  the sender's reputation and produces cleaner negative signal.
+- Match the copy to the persona. One list per hypothesis, one campaign per list; do
+  not pour mixed personas into one sequence. See [[icp-hypothesis-lists]].
+- For DACH prospects, German materially lifts reply rate — but only write it if the
+  human can handle replies in German. Ask.
+
+## 5. Wire it up
+
+```
+create_empty_list → create_campaign(name, listId, accountIds, schedule, sequenceJson)
+```
+
+Or on an existing campaign: `update_campaign_settings` (name + list),
+`update_campaign_accounts` (sender), `update_campaign_sequence`,
+`update_campaign_schedule`.
+
+Note that `update_campaign_settings` is where the lead list is bound — a campaign
+created earlier is often still pointing at an empty starter list.
+
+Set `excludeContactedFromOtherCampaigns: true` when running several campaigns off
+one sender, or the same person gets two different pitches.
+
+Schedule: business hours in the prospect's timezone, weekdays only
+(`W. Europe Standard Time` for DACH).
+
+## 6. Pre-launch checklist — report, do not act
+
+- [ ] Lead count verified via `get_list_by_id` (not the import response)
+- [ ] Demo copy gone, every message read end to end
+- [ ] `fallbackMessage` reads correctly for every step
+- [ ] InMail credits exist, if the sequence has an InMail branch — without them that
+      branch silently does nothing, and it is typically half the list
+- [ ] Sender attached, schedule set, daily limits sane (~20-25 connections/day/sender)
+
+**Never call `start_campaign`.** It sends messages to real people under the human's
+name. Present the checklist and stop.
+</script>
+
+<script type="text/plain" id="md-crd-skill">
+# Reading deck
+
+A **reading deck** is a document that lands in someone's inbox and is read with
+nobody there to narrate it. That single fact drives every rule here: no slide may
+depend on a speaker, every headline must carry its own conclusion, and anything a
+reader could misread has already failed.
+
+This skill exists because building one of these by feel costs a day of rework.
+Everything below was paid for once already — see `reference/LESSONS.md`.
+
+Version **1.4.1**. Changes are recorded in `CHANGELOG.md`.
+
+---
+
+## 0. Get the toolkit onto disk
+
+This skill is scripts plus reference docs, and the scripts have to run somewhere.
+Fetch the bundled files and write them into your working folder, preserving the
+structure:
+
+```
+scripts/check-layout.py     deterministic visual QA
+scripts/export-pdf.py       HTML -> PDF at native resolution
+scripts/embed-fonts.py      inline the webfonts
+scripts/video-to-gif.py     screen recording -> looping GIF (cross-platform)
+scripts/video-to-gif.sh     the same, for POSIX shells
+template/deck.html          the design system + worked examples of every component
+template/storyline.md       the outline you write before any HTML
+reference/QA-STANDARDS.md   researched MBB standards, with numbers and sources
+reference/DESIGN-SYSTEM.md  exact CSS spec — read before touching styling
+reference/LESSONS.md        the traps, and what each one cost
+```
+
+**Dependencies:** ffmpeg (GIFs and poster frames), Pillow (`pip install pillow`,
+PDF assembly), and Google Chrome (driven headlessly for rendering and
+measurement). All four scripts find Chrome automatically; set `CHROME_PATH` if
+yours lives somewhere unusual.
+
+**The KB copy is the source of truth.** If you improve the skill, land the change
+here as a change request (step 9) — not only in your local copy, which nobody
+else will ever see.
+
+---
+
+## The order of work
+
+Do these in order. Steps 1 and 2 are where the time is won or lost.
+
+### 1. Agree the structure before writing anything
+
+Ask for, or extract, the **content hierarchy** and **mirror it**. If the person
+gave you a nested list of sections, that IS the deck's structure. Reframing it
+into a problem/solution narrative is a *proposal* you offer, never a default you
+assume. Getting this wrong means rewriting every slide.
+
+Pin down, explicitly:
+
+| Question | Why it must be settled first |
+|---|---|
+| How many slides? | Copy density is a function of slide count. Changing it rewrites everything. |
+| Whose hierarchy? | Theirs, unless they ask for a reframe. |
+| Read-alone or presented? | Read-alone needs full sentences and no orphan context. |
+| Who is the reader? | Anchors every scope decision. |
+
+### 2. Write `storyline.md` before any HTML
+
+Arguing about an outline is cheap; arguing about markup is not. The storyline
+holds the slide map, the action titles, the horizontal-logic read-through, and —
+critically — two lists the deck itself cannot carry:
+
+- **Claims deliberately NOT made.** Anything the reader would *like* to hear but
+  the source does not support. Keeping these visible stops them leaking into the
+  copy.
+- **Open questions.** What the source cannot answer. Do not invent answers.
+
+Start from `template/storyline.md`.
+
+### 3. Write the deck
+
+Copy `template/` into your deck folder. `template/deck.html` carries the full
+design system, the layout contract in a head comment, and worked examples of
+every component. **Read `reference/DESIGN-SYSTEM.md` before changing any CSS.**
+
+**Pick a theme** — one attribute on `<html>`:
+
+    data-theme="sales"     light editorial, no accent colour  (default)
+    data-theme="signal"    dark, one purple accent on the icon badges
+
+Both themes share the same geometry, type scale and measure, so the QA
+thresholds mean the same thing in either. A theme is a token block; if you are
+typing a hex value into component CSS you are forking the stylesheet by
+accident.
+
+Action titles are the highest-leverage thing on the page. See
+`reference/QA-STANDARDS.md` §6 for the label-vs-assertion test.
+
+### 4. Media
+
+Screen recordings beat still screenshots for showing a product working.
+
+    scripts/video-to-gif.py recording.mov screenshots/01-thing.gif --width 1400
+
+It builds a two-pass palette so UI text stays sharp, and verifies the loop flag.
+The frame is kept **exactly as recorded** by default. Add `--crop` when the
+recording has dead space baked in.
+
+Whichever you use, do not force the clip into the grid's aspect ratio. Let the
+media keep its aspect and size the slot to match.
+
+**Then look at the last frame.** A GIF rests there every cycle. A recording that
+ends on an empty credentials form, a spinner, or an error will loop through that
+forever, under a headline claiming the opposite. Trim with `--to`.
+
+### 5. QA gate 1 — the deck is correct
+
+    scripts/check-layout.py deck.html --md storyline.md
+
+Must exit 0. Run it as often as you like while writing; it is fast.
+
+It measures what eyes miss: clipping, title-band drift, characters per line
+against the WCAG ceiling, type-scale creep, bold budget, headline orphans,
+vertical balance, column stranding, missing assets, placeholder text, whether the
+PDF is stale, and whether the storyline still matches the deck.
+
+**Also do a consistency pass no script covers yet:** grep every product noun and
+feature name across all slides and check that no two slides contradict each
+other, and that your prose vocabulary matches the words visible *inside* the
+screenshots.
+
+### 6. Make it actually self-contained
+
+    scripts/embed-fonts.py deck.html          # inline the webfonts
+    scripts/embed-fonts.py deck.html --check  # exit 1 if a remote fetch remains
+
+The template links Google Fonts so it stays readable while you author. That link
+is a **dependency**, and a deck is a document someone opens in five years,
+offline, behind a proxy. Embedding costs ~270KB and buys three things: it cannot
+break, it does not ping a third party from the recipient's network, and it
+removes the font race.
+
+### 7. Export
+
+    scripts/export-pdf.py deck.html
+
+**PDF has no animated raster format.** If the deck uses GIFs you must declare a
+poster frame per slot in `posters.json`, or the exporter freezes each on frame 1.
+Pick each frame for what it *proves*, not for where the clip happens to end.
+
+### 8. QA gate 2 — the deck is sendable, then ship
+
+    scripts/check-layout.py deck.html --md storyline.md --ship
+
+Must exit 0. This is a **different question** from gate 1. Gate 1 asks "is the
+deck correct?"; gate 2 asks "is it safe to leave the building?" — it escalates
+to failure the four things that are acceptable while authoring and unacceptable
+in a client's inbox: a placeholder where a screenshot should be, placeholder text
+in the copy, a stale PDF, and fonts fetched from a CDN at render time.
+
+| | Check |
+|---|---|
+| E2 | Client, product and person names spelled right — **check their website, not your notes** |
+| E5 | Every animated file has a deliberately chosen poster frame in `posters.json` |
+| E7 | Cover carries the client name, the date, and any confidentiality marking |
+| E8 | Every hyperlink resolves |
+| D6 | Numbers agree across pages; units and rounding consistent |
+
+The deck is a **folder**, not a file — `deck.html` needs `screenshots/`
+alongside it. Zip them.
+
+### 9. Write down what this build taught you — required, not optional
+
+**This is the step that makes the skill worth more next quarter than it is
+today.** Skip it and the next person re-learns the same thing at the same cost.
+
+Append to `reference/LESSONS.md` **in the knowledge base** — a lesson that only
+reaches your local copy is a lesson thrown away. Open a change request against
+this folder before you close the task.
+
+Three rules that keep the file useful rather than a dump:
+
+1. **One lesson per trap, not per incident.** If it is a new instance of an
+   existing lesson, strengthen that entry.
+2. **Delete lessons that stop being true.** A lessons file nobody trusts is a
+   lessons file nobody reads.
+3. **If the fix can be automated, automate it instead.** A lesson that could be a
+   check in `scripts/check-layout.py` belongs in the script.
+
+---
+
+## Non-negotiables
+
+These are cheap to honour and expensive to fix later.
+
+1. **Every headline is an assertion.** "Knowledge you can trust" is a label and
+   fails. "The graph stays current on its own" is a conclusion and passes.
+2. **The titles alone must tell the story.** Read only the h2s, top to bottom. If
+   that is a table of contents rather than an argument, the deck has no spine.
+3. **Never fabricate a capability.** If the source does not say it, it does not
+   go in — no matter how well it answers what the reader wants.
+4. **Measure, do not eyeball.** Every numeric claim about the layout comes from
+   `check-layout.py`.
+5. **Validate your validator.** Break the deck deliberately and confirm the
+   checker catches it. A check that always passes is worse than no check.
+6. **Flag, do not silently fix, a content contradiction.** It is usually a real
+   ambiguity in the product, not a typo.
+7. **Say what you did not do.** A deck that looks finished but is not is worse
+   than one that is visibly incomplete.
+8. **Leave the skill better than you found it.** Step 9 is not optional.
+</script>
+
+<script type="text/plain" id="md-crd-readme">
+# create-reading-deck
+
+Build a client-grade **reading deck** — a leave-behind that gets read with nobody
+there to narrate it.
+
+`SKILL.md` is the workflow; read it first. This file is the operational detail:
+how to get the toolkit onto a machine, what it depends on, and the three things
+people get wrong.
+
+## Getting it onto your machine
+
+The knowledge base is the source of truth. Two ways to work from it.
+
+**From an agent with knowledge-base access** — the normal path. `get_skill` with
+`name: create-reading-deck` returns the workflow; pass `file:` for each bundled
+path to pull the scripts and reference docs (§0 of `SKILL.md` lists them).
+
+**As a local Claude Code skill** — if you build decks often enough that you want
+`/create-reading-deck` on tap. The folder has to land at
+`~/.claude/skills/create-reading-deck/` and nowhere else. Restart Claude Code afterwards.
+
+A local copy is a **cache**, not a fork. Improvements go back to the KB (step 9),
+or the next person re-learns what you just learned.
+
+## The four things people get wrong
+
+1. **Writing copy before the slide count and structure are agreed.** Every change
+   to either rewrites everything downstream. Settle it first, in writing.
+2. **Topic labels instead of action titles.** "Knowledge you can trust" says
+   nothing. "The graph stays current on its own" is a claim someone can agree or
+   disagree with.
+3. **Shipping a deck that phones home for its fonts.** Run `embed-fonts.py` before
+   sending, or the deck renders in a fallback face offline.
+4. **Trusting your eyes for layout.** Run `check-layout.py`. It catches clipping,
+   over-long lines, type-scale creep and storyline drift that look fine at a glance.
+
+## Dependencies
+
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| ffmpeg | `brew install ffmpeg` | `winget install Gyan.FFmpeg` | `apt install ffmpeg` |
+| Pillow | `pip install pillow` | `pip install pillow` | `pip install pillow` |
+| Chrome | install normally | install normally | install normally |
+
+Chrome is driven headlessly for rendering and measurement. All four scripts find
+it automatically; if yours lives somewhere unusual, set `CHROME_PATH`.
+
+## Keeping the skill sharp
+
+Step 9 of `SKILL.md` is **required**: when a build teaches you something, append
+it to `reference/LESSONS.md` in the house format and open a change request
+against this folder before you close the task.
+</script>
+
+
+
+<script type="text/plain" id="md-crd-design">
+# Bevel Light Editorial — Reading-Deck Design System
+
+The spec for `template/deck.html` — and for any new deck built on it.
+
+A **reading deck** argues unattended, in a browser or as a PDF. No presenter, no
+narrator, no live Q&A. Every rule below protects that: fixed frames so nothing
+clips, one measure so nothing tires the eye, no colour so nothing encodes meaning
+the reader can't decode alone.
+
+All CSS here is quoted verbatim from the template. Copy it exactly. If you change a
+value you are authoring a different system — say so in the commit message.
+
+**Do not use this system for:** a stage deck (needs bigger type, fewer words), a
+deck over ~8 pages (see §9), or anything needing charts or tables (§9 — the
+system has no component for either).
+
+> §1–§13 describe the **sales** theme: light editorial, no accent colour. That
+> is the default and the one every number here was measured against. A second
+> theme, **signal** (dark, one purple accent), ships alongside it — see §14.
+
+---
+
+## 0 · The 30-second version
+
+| | |
+|---|---|
+| Page | `#ECEAE4` · Slide `#FAF9F6` · ink `#14130F` |
+| Type | Hanken Grotesk + IBM Plex Mono |
+| Scale | **110 / 56 / 28 / 22 / 18 / 13** — exactly six, forever |
+| Accent | none |
+| Native size | 1920 × 1080, scaled to fit width by a 10-line script |
+| Title | frozen in a 168px band, same y on every slide |
+| Measure | 680px body / 780px lede — never removed |
+| Body budget | **631px** of vertical space under the band, per slide |
+
+Shipped deck: 6 pages, 5 content slides + title. 3 looping GIFs at 2100×1682.
+
+---
+
+## 1 · Starting a new deck
+
+Copy the skill's `template/` folder. Then change exactly these seven things —
+nothing else in the boilerplate is deck-specific.
+
+| # | What | Where |
+|---|---|---|
+| 1 | `<title>` | `<head>` |
+| 2 | Capture standard block | `<head>` comment |
+| 3 | Title-slide `h1` / subtitle / legal line | `.title-center` |
+| 4 | `.foot` denominators on every slide | every `.foot` |
+| 5 | `.toplabel` taxonomy | every `.head` |
+| 6 | The five to seven `h2`s | every `.titleband` |
+| 7 | Poster frames: gif path → source, timestamp, reason | `posters.json` |
+
+**The fonts are a hard dependency, not a nicety.** Every character-count ceiling
+in §6 and §8 assumes Hanken Grotesk is loaded.
+</script>
+
+
+
+
+
+
+
+<script type="text/plain" id="code-crd-checklayout">
+#!/usr/bin/env python3
+"""
+check-layout.py — deterministic visual QA for a reading deck.
+
+Renders the deck in headless Chrome, injects a measurement probe, and reports
+pass/fail against numeric thresholds. Exits non-zero if any FAIL, so it can gate
+a commit.
+
+    ./check-layout.py deck.html                    # human report
+    ./check-layout.py deck.html --json             # machine-readable
+    ./check-layout.py deck.html --md storyline.md  # also check md<->html sync
+
+WHY THIS EXISTS
+Every check here corresponds to a defect that actually shipped in a real deck and
+had to be caught by eye. Eyes miss these; arithmetic does not.
+
+MEASUREMENT TRAPS THIS SCRIPT AVOIDS (learned the hard way):
+  * Slides are transform:scale()d to fit the viewport. getBoundingClientRect()
+    returns SCALED pixels and will silently give you nonsense (we once measured
+    23 CPL on a line that was really 84).
+  * .body is flex:1, so its scrollHeight always equals its own height. We
+    measure the union of its CHILDREN's bounds instead.
+  * Characters-per-line cannot be counted from the string: it depends on the
+    font's average advance. We measure the advance by rendering the actual text
+    in the actual computed font, then divide.
+"""
+
+# ----------------------------------------------------------------- thresholds
+# Every number here is defensible; see reference/QA-STANDARDS.md for sources.
+T = {
+    "cpl_target_max": 75,     # Bringhurst 45-75 for a single column
+    "cpl_hard_max": 80,       # WCAG 2.x SC 1.4.8 (AAA) ceiling for Latin script
+    "cpl_min": 40,            # below this, too many return sweeps
+    "type_scale_max": 6,      # distinct font sizes carrying text
+    "bold_ratio_max": 0.16,   # share of body words in <strong>
+    "bold_span_max": 5,       # words in one <strong>
+    "orphan_min_frac": 0.25,  # last line of a block vs the measure
+}
+</script>
+
+<header class="topnav" id="topnav"></header>
+<div class="app" id="app">
+  <aside class="side" id="side"></aside>
+  <main class="main"><div class="wrap" id="main"></div></main>
+</div>
+<div class="pmenu" id="pmenu"></div>
+<div class="pmenu" id="appmenu"></div>
+<div class="pmenu" id="setmenu"></div>
+<div class="mwrap" id="mwrap"></div>
+<div id="toast" role="status"></div>
+
+<script>
+/* =========================================================
+   User view — John Newcomer (GTM Team) — plus the Admin
+   console (profile menu → Admin console).
+   Data pulled live from the knowledge base (list_skills,
+   list_tool_setup, roles.yaml, access.md chain). The HeyReach
+   campaign skill carries its REAL full SKILL.md text.
+   ========================================================= */
+
+/* brand marks — official geometry, inlined (no external requests allowed) */
+const MARKS = {
+  slack:'<svg viewBox="0 0 122.8 122.8" aria-hidden="true"><path fill="#E01E5A" d="M25.8 77.6c0 7.1-5.8 12.9-12.9 12.9S0 84.7 0 77.6s5.8-12.9 12.9-12.9h12.9v12.9zM32.3 77.6c0-7.1 5.8-12.9 12.9-12.9s12.9 5.8 12.9 12.9v32.3c0 7.1-5.8 12.9-12.9 12.9s-12.9-5.8-12.9-12.9V77.6z"/><path fill="#36C5F0" d="M45.2 25.8c-7.1 0-12.9-5.8-12.9-12.9S38.1 0 45.2 0s12.9 5.8 12.9 12.9v12.9H45.2zM45.2 32.3c7.1 0 12.9 5.8 12.9 12.9s-5.8 12.9-12.9 12.9H12.9C5.8 58.1 0 52.3 0 45.2s5.8-12.9 12.9-12.9h32.3z"/><path fill="#2EB67D" d="M97 45.2c0-7.1 5.8-12.9 12.9-12.9s12.9 5.8 12.9 12.9-5.8 12.9-12.9 12.9H97V45.2zM90.5 45.2c0 7.1-5.8 12.9-12.9 12.9s-12.9-5.8-12.9-12.9V12.9C64.7 5.8 70.5 0 77.6 0s12.9 5.8 12.9 12.9v32.3z"/><path fill="#ECB22E" d="M77.6 97c7.1 0 12.9 5.8 12.9 12.9s-5.8 12.9-12.9 12.9-12.9-5.8-12.9-12.9V97h12.9zM77.6 90.5c-7.1 0-12.9-5.8-12.9-12.9s5.8-12.9 12.9-12.9h32.3c7.1 0 12.9 5.8 12.9 12.9s-5.8 12.9-12.9 12.9H77.6z"/></svg>',
+  github:'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>',
+  notion:'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952L12.21 19s0 .84-1.168.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.139c-.093-.514.28-.887.747-.933zM1.936 1.035l13.31-.98c1.634-.14 2.055-.047 3.082.7l4.249 2.986c.7.513.934.653.934 1.213v16.378c0 1.026-.373 1.634-1.68 1.726l-15.458.934c-.98.047-1.448-.093-1.962-.747l-3.129-4.06c-.56-.747-.793-1.306-.793-1.96V2.667c0-.839.374-1.54 1.447-1.632z"/></svg>',
+  gmail:'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#EA4335" d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"/></svg>',
+  gcal:'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M18.316 5.684H24v12.632h-5.684V5.684zM5.684 24h12.632v-5.684H5.684V24zM18.316 5.684V0H1.895A1.894 1.894 0 0 0 0 1.895v16.421h5.684V5.684h12.632zm-7.207 6.25v-.065c.272-.144.5-.349.687-.617s.279-.595.279-.982c0-.379-.099-.72-.3-1.025a2.05 2.05 0 0 0-.832-.714 2.703 2.703 0 0 0-1.197-.257c-.6 0-1.094.156-1.481.467-.386.311-.65.671-.793 1.078l1.085.452c.086-.249.224-.461.413-.633.189-.172.445-.257.767-.257.33 0 .602.088.816.264a.86.86 0 0 1 .322.703c0 .33-.12.589-.36.778-.24.19-.535.284-.886.284h-.567v1.085h.633c.407 0 .748.109 1.02.327.272.218.407.499.407.843 0 .336-.129.614-.387.832s-.565.327-.924.327c-.351 0-.651-.103-.897-.311-.248-.208-.422-.502-.521-.881l-1.096.452c.178.616.505 1.082.977 1.401.472.319.984.478 1.538.477a2.84 2.84 0 0 0 1.293-.291c.382-.193.684-.458.902-.794.218-.336.327-.72.327-1.149 0-.429-.115-.797-.344-1.105a2.067 2.067 0 0 0-.881-.689zm2.093-1.931l.602.913L15 10.045v5.744h1.187V8.446h-.827l-2.158 1.557zM22.105 0h-3.289v5.184H24V1.895A1.894 1.894 0 0 0 22.105 0zm-3.289 23.5l4.684-4.684h-4.684V23.5zM0 22.105C0 23.152.848 24 1.895 24h3.289v-5.184H0v3.289z"/></svg>',
+};
+
+const TOOLS = [
+  { id:'granola',  name:'Granola',         purpose:'Meeting notes and transcripts.', mono:['G','#7FA96B'],
+    can:['Search and read your meetings','Pull a full transcript into a plan or scope'],
+    vars:[{name:'Granola sign-in', scope:'personal', oauth:true}] },
+  { id:'notion',   name:'Notion',          purpose:'Pages and databases.', mark:'notion', ink:true,
+    can:['Search pages and databases','Create and update pages'],
+    vars:[{name:'Notion sign-in', scope:'personal', oauth:true}] },
+  { id:'slack',    name:'Slack',           purpose:'Messages, channels, and search.', mark:'slack',
+    can:['Post as the team bot','Read channel history','Search messages (with your personal token)'],
+    vars:[{name:'Team bot token', scope:'team', set:true},{name:'Personal token for search', scope:'personal'}] },
+  { id:'github',   name:'GitHub',          purpose:'Code, pull requests, and the website.', mark:'github', ink:true,
+    can:['Read repositories and pull requests','Open pull requests for website copy'],
+    vars:[{name:'GitHub personal access token', scope:'personal'}] },
+  { id:'heyreach', name:'HeyReach',        purpose:'LinkedIn outreach campaigns.', mono:['H','#5B7CFA'],
+    can:['Create and configure campaigns','Manage lead lists','Read conversations and stats'],
+    vars:[{name:'Personal HeyReach key', scope:'personal'}] },
+  { id:'serper',   name:'Serper',          purpose:'Web and news search.', mono:['S','#2BA79B'],
+    can:['Search the web and news for the news pipeline'],
+    vars:[{name:'Serper.dev API key', scope:'team', set:true}] },
+  { id:'gcal',     name:'Google Calendar', purpose:'Read and create events.', mark:'gcal',
+    can:['Read your calendars','Create and update events'],
+    vars:[{name:'Google sign-in', scope:'personal', oauth:true}] },
+  { id:'gmail',    name:'Gmail',           purpose:'Read and draft mail.', mark:'gmail',
+    can:['Search and read mail','Create drafts for you to send'],
+    vars:[{name:'Google sign-in', scope:'personal', oauth:true}] },
+];
+
+const CRED = { granola:false, notion:true, slack:false, github:false, heyreach:true, serper:true, gcal:false, gmail:false };
+
+const CATS = [
+  { id:'all', label:'All skills' },
+  { id:'gtm', label:'GTM' },
+  { id:'org', label:'Organization' },
+  { id:'general', label:'General' },
+];
+
+/* A skill lives in exactly one place: company-wide, or a sub-group someone
+   created and invited people into. Sub-group ids match team ids. */
+const SUBGROUPS = [
+  { id:'gtm',      label:'GTM' },
+  { id:'eng',      label:'Engineering' },
+  { id:'product',  label:'Product' },
+  { id:'delivery', label:'Delivery' },
+];
+
+const SKILLS = [
+  { id:'create-reading-deck', name:'Create reading deck', group:'gtm', tools:[], owner:'Ali Raza', updated:'30 Jun',
+    desc:'Build a client-grade reading deck — a leave-behind that reads without a presenter.',
+    instr:['Read the ask: audience, decision at stake, and what they should remember a week later.',
+      'Structure the story first — every slide title is an action title that states the takeaway.',
+      'Use the Bevel deck design system (light editorial theme unless the client brief says otherwise).',
+      'Record product moments as short looping clips; place them where they prove a claim.',
+      'Run the layout check: nothing overflows, nothing overlaps, every number has a source.',
+      'Export to PDF and deliver both files.'],
+    note:'A reading deck presents itself — if a slide needs you talking, rewrite the title.' },
+  { id:'heyreach-campaign', name:'HeyReach campaign', group:'gtm', tools:['heyreach'], owner:'Ali Raza', updated:'12 Jul',
+    desc:'Create and configure a LinkedIn outreach campaign — sequence, copy, senders, schedule.',
+    md:'md-heyreach-campaign' },
+  { id:'icp-hypothesis-lists', name:'ICP hypothesis lists', group:'gtm', tools:['heyreach'], owner:'Ali Raza', updated:'8 Jul',
+    desc:'Turn a closed deal into competing, falsifiable targeting hypotheses — one list and one campaign each.',
+    instr:['Pick the reference deal and write down why it actually closed — pain, trigger, buyer.',
+      'Derive the ICP traits worth testing: industry, size, role, observable trigger.',
+      'Form two or three competing hypotheses; each must be falsifiable with a number.',
+      'Build one lead list and one campaign per hypothesis so results stay comparable.',
+      'Define the kill metric per hypothesis before anything launches.'],
+    note:'Outbound is an experiment. If a list can’t lose, it can’t teach you anything.' },
+  { id:'salesnav-to-heyreach', name:'Sales Navigator to HeyReach', group:'gtm', tools:['heyreach'], owner:'Ali Raza', updated:'8 Jul',
+    desc:'Build a lead list from LinkedIn Sales Navigator and load it into HeyReach.',
+    instr:['Translate the ICP into Sales Navigator filters and construct the search URL.',
+      'Collect result rows page by page; skip profiles missing a real title or company.',
+      'Resolve each row to a public profile URL.',
+      'Create the HeyReach list and import; verify the final count matches what was collected.'],
+    note:'Quality beats volume — a hundred right people outperform a thousand maybes.' },
+  { id:'news-collect', name:'News · Collect', group:'org', tools:['serper'], owner:'Razvan Radulescu', updated:'12 Jul',
+    desc:'Search last week’s news across the org and competitor list, and file the findings.',
+    instr:['Read the org structure and the competitor list from the knowledge base.',
+      'Search the last seven days of news for each entity.',
+      'File each finding as a news item with source, date, and a one-line summary.'],
+    note:'Collect only. Rating happens in the next step, never here.' },
+  { id:'news-rate', name:'News · Rate relevance', group:'org', tools:[], owner:'Razvan Radulescu', updated:'12 Jul',
+    desc:'Score each found item’s relevance with a justification, and route it for review.',
+    instr:['Take this week’s collected items — never search for new ones.',
+      'Score company relevance with a one-line justification grounded in what we sell and to whom.',
+      'Route items: strong ones to review, weak ones discarded with the reason kept.'] },
+  { id:'news-team-scoring', name:'News · Team scoring', group:'org', tools:[], owner:'Razvan Radulescu', updated:'12 Jul',
+    desc:'Score the week’s accepted items for each team, grounded in the org structure.',
+    instr:['Take the human-accepted items of the week.',
+      'For each item, score relevance per team using the org structure — what each team owns and sells.',
+      'Write the score with its reasoning next to the item; newsletters use it in the next step.'] },
+  { id:'news-newsletters', name:'News · Newsletters', group:'org', tools:['slack'], owner:'Razvan Radulescu', updated:'12 Jul',
+    desc:'Write one personalized newsletter per team from the week’s scored items.',
+    instr:['For each team, take its scored items for the week — never re-rate them.',
+      'Write a short newsletter: what happened, why it matters to this team, one suggested action.',
+      'Deliver via the team bot and mark the covered items as sent.'] },
+  { id:'create-tool-manual', name:'Create tool manual', group:'general', tools:[], owner:'Razvan Radulescu', updated:'21 Jul',
+    desc:'Make an external service callable by agents — credentials stay in the vault, the tool is shared with the team.',
+    instr:['Identify the service and the few calls the team actually needs from it.',
+      'Write the tool manual: what it does, each call, what each call needs.',
+      'Name the credentials the tool requires — values live in the vault, never in the manual.',
+      'Test one real call end to end, then share the tool with the team.'],
+    note:'A tool nobody can safely call is documentation. A tool with pasted secrets is a leak.' },
+  { id:'plan-update', name:'Plan update', group:'general', tools:['granola'], owner:'Juan', updated:'18 Jul',
+    desc:'Reconcile project plans against reality, flag slippage, and deliver a digest for confirmation.',
+    instr:['Read every active project plan.',
+      'Gather evidence since the last update: delivery logs, review one-pagers, meeting notes.',
+      'Reconcile each milestone: done, on track, slipping — with the evidence next to it.',
+      'Regenerate the timelines and the portfolio view.',
+      'Deliver the digest as one change for an owner to confirm.'],
+    note:'Never move a date silently. Slippage is information, not embarrassment.' },
+  { id:'project-scoping', name:'Project scoping', group:'general', tools:['granola'], owner:'Juan', updated:'18 Jul',
+    desc:'Scope a project into a plan — objective, milestones, stakeholders — delivered for confirmation.',
+    instr:['Start from what exists: a guided interview, documents, or meeting transcripts.',
+      'Write the objective and the success criteria — measurable, dated.',
+      'Break the work into milestones and workstreams with owners.',
+      'List the needs and stakeholders; name what’s missing.',
+      'Generate the timeline and deliver the plan as one change for confirmation.'] },
+  { id:'update-website', name:'Update website', group:'general', tools:['github'], owner:'Ali Raza', updated:'26 Jul',
+    desc:'Sync the website’s marketing copy with the Product ontology and propose the update for review.',
+    instr:['Read the product capabilities from the knowledge base.',
+      'Diff them against the live website copy, section by section.',
+      'Propose the copy changes as one reviewable update — never publish directly.'],
+    note:'The website follows the knowledge base, not the other way around.' },
+];
+
+/* multi-file skills — a skill is a folder; create-reading-deck is real: 12 files on main */
+const SKILL_FILES = {
+  'create-reading-deck': [
+    { id:'main', file:'SKILL.md', mdId:'md-crd-skill' },
+    { id:'readme', file:'README.md', mdId:'md-crd-readme' },
+    { id:'design', file:'reference/DESIGN-SYSTEM.md', mdId:'md-crd-design', excerpt:'64 KB' },
+    { id:'check-layout', file:'scripts/check-layout.py', codeId:'code-crd-checklayout', excerpt:'23 KB' },
+  ],
+};
+const skillFiles = s => SKILL_FILES[s.id] || [{ id:'main', file:'SKILL.md', inline:s }];
+const exNote = f => '<p class="note" style="margin-top:14px">Excerpt — the full file ('+esc(f.excerpt)+') lives in the knowledge base.</p>';
+
+/* One text per file, read once from the page and kept here afterwards. An
+   approved proposal rewrites it — that write is the merge commit in the real
+   product; here it is just the new string. */
+const FILE_TEXT = {};
+const fileKey = (s,f) => s.id+':'+f.id;
+function fileText(s, f){
+  const k = fileKey(s,f);
+  if(FILE_TEXT[k] == null){
+    const src = f.mdId || f.codeId || (f.inline && f.inline.md);
+    if(f.stub) FILE_TEXT[k] = f.file+' · '+f.stub+' — not loaded in this prototype. The full file lives in the knowledge base.';
+    else if(src) FILE_TEXT[k] = document.getElementById(src).textContent.trim();
+    else FILE_TEXT[k] = f.inline.instr.map((i,n)=>(n+1)+'. '+i).join('\n') + (f.inline.note ? '\n\n'+f.inline.note : '');
+  }
+  return FILE_TEXT[k];
+}
+const setFileText = (s,f,txt) => { FILE_TEXT[fileKey(s,f)] = txt; };
+function fileDoc(s, f){
+  const txt = fileText(s, f);
+  if(f.stub) return '<p>'+esc(txt)+'</p>';
+  if(f.codeId) return '<pre><code>'+esc(txt)+'</code></pre>'+(f.excerpt?exNote(f):'');
+  return mdRender(txt)+(f.excerpt?exNote(f):'');
+}
+
+/* =========================================================
+   Secrets — every credential the tools need, in one place.
+   The values themselves are never shown, to anyone.
+   ========================================================= */
+function renderSecrets(){
+  const me = currentUser();
+  const rows = [];
+  for(const t of TOOLS) for(const v of t.vars) rows.push({ t, v });
+  const personal = rows.filter(r=>r.v.scope==='personal');
+  const team = rows.filter(r=>r.v.scope==='team');
+  const row = (r, isTeam) => {
+    let right;
+    if(isTeam) right = r.v.set
+      ? '<span class="chip ok"><span class="cdot"></span>Set</span>'+(me.admin?'<button class="btn tiny quiet" data-secret-rotate="'+esc(r.v.name)+'">Replace</button>':'')
+      : (me.admin?'<button class="btn small" data-secret-rotate="'+esc(r.v.name)+'">Add key</button>':'<span class="chip">Not set</span>');
+    else right = (state.connected[r.t.id] || CRED[r.t.id])
+      ? '<span class="chip ok"><span class="cdot"></span>Connected</span>'
+      : '<button class="btn small" data-connect="'+r.t.id+'">'+(r.v.oauth?'Sign in':'Add key')+'</button>';
+    return '<div class="kv"><span class="k" style="display:flex;gap:10px;align-items:center;min-width:0">'+logoHtml(r.t)+
+      '<span style="min-width:0"><button class="grant-link" data-item="tool:'+r.t.id+'" style="padding:0;margin:0">'+esc(r.v.name)+'</button>'+
+      '<span class="sub">'+esc(r.t.name)+'</span></span></span>'+
+      '<span class="v" style="display:flex;gap:8px;align-items:center">'+right+'</span></div>';
+  };
+  return '<button class="back" data-exit-settings>‹ Back</button>'+
+    '<div class="item-grid solo"><article>'+
+      '<div class="kicker">Settings</div>'+
+      '<div class="item-title"><h1>Secrets</h1></div>'+
+      '<p class="lede">The keys and sign-ins the tools need. Values are write-only — once set, nobody sees them again, including agents.</p>'+
+      '<div class="h4">Yours<span style="font-weight:400;letter-spacing:0;text-transform:none;font-size:11.5px;margin-left:8px">Only you can use these</span></div>'+
+      personal.map(r=>row(r,false)).join('')+
+      '<div class="h4">The team’s<span style="font-weight:400;letter-spacing:0;text-transform:none;font-size:11.5px;margin-left:8px">'+
+        (me.admin?'One value for everyone — you can change these':'One value for everyone — an Admin sets these')+'</span></div>'+
+      team.map(r=>row(r,true)).join('')+
+      '<div class="ownerline">A secret never goes in a skill or a page. If you find one written into text, remove it and replace it — in that order.</div>'+
+    '</article></div>';
+}
+
+/* =========================================================
+   Knowledge — the second app. Same files, same propose flow;
+   organised as folders instead of skills.
+   ========================================================= */
+const KB = [
+  { id:'overview', folder:'Company', title:'What Bevel is', file:'Company/overview.md', owner:'Razvan Radulescu', mdId:'kb-overview' },
+  { id:'ways-of-working', folder:'Company', title:'Ways of working', file:'Company/ways-of-working.md', owner:'Juan Viera', mdId:'kb-ways-of-working' },
+  { id:'icp', folder:'GTM', title:'Ideal customer profile', file:'GTM/icp.md', owner:'Ali Raza', mdId:'kb-icp' },
+  { id:'outbound-playbook', folder:'GTM', title:'Outbound playbook', file:'GTM/outbound-playbook.md', owner:'Ali Raza', mdId:'kb-outbound-playbook' },
+  { id:'ontology', folder:'Product', title:'Product ontology', file:'Product/ontology.md', owner:'Juan Viera', mdId:'kb-ontology' },
+  { id:'access-and-roles', folder:'Engineering', title:'Access and roles', file:'Engineering/access-and-roles.md', owner:'Razvan Radulescu', mdId:'kb-access-and-roles' },
+];
+const kbById = id => KB.find(d=>d.id===id);
+const kbBox = d => ({ id:'knowledge', owner:d.owner });   /* a page's owner approves it, same as a skill's */
+const kbFolders = () => { const o=[]; for(const d of KB) if(!o.includes(d.folder)) o.push(d.folder); return o; };
+
+/* =========================================================
+   Proposed changes.
+   A proposal is a branch and a pull request in the git layer
+   underneath. None of that vocabulary reaches the screen: a
+   person edits the text, and what they changed sits under the
+   file until the owner approves it. Skills and knowledge pages
+   go through exactly the same flow.
+   ========================================================= */
+const PROPOSALS = [];
+let propSeq = 0;
+const proposalsFor = (boxId, fileId) => PROPOSALS.filter(p=>p.box===boxId && p.file===fileId && p.status==='pending');
+const proposalFor = (boxId, fileId) => proposalsFor(boxId, fileId)[0];
+const pendingForSkill = s => PROPOSALS.filter(p=>p.box===s.id && p.status==='pending');
+/* a proposal targets a file inside a box: a skill folder, or the knowledge base */
+function targetOf(boxId, fileId){
+  if(boxId==='knowledge'){ const d = kbById(fileId); return d && { c:kbBox(d), f:d }; }
+  const s = skillById(boxId); if(!s) return null;
+  const f = skillFiles(s).find(x=>x.id===fileId);
+  return f && { c:s, f };
+}
+function seedProposal(boxId, fileId, find, replace, by, when){
+  const t = targetOf(boxId, fileId); if(!t) return;
+  const base = fileText(t.c, t.f);
+  if(!base.includes(find)) return;
+  PROPOSALS.push({ id:'p-'+(++propSeq), box:boxId, file:fileId, by, when, status:'pending',
+    base, text:base.replace(find, replace) });
+}
+
+/* ————— when someone else's change lands first —————
+   Every proposal was written against the text as it stood at the time. Once a
+   different change is approved, the others have to be carried onto the new text.
+   Touching a different part of the file carries over silently, the way git
+   rebases a clean patch. Touching the same lines cannot be carried over by
+   anyone but the author, so it is marked and the merge is blocked. */
+function hunksOf(base, text){
+  const rows = diffLines(base, text), out = [];
+  let i = 0;
+  while(i < rows.length){
+    if(rows[i][0]==='ctx'){ i++; continue; }
+    const del = [], add = [];
+    let anchor = null;
+    for(let k=i-1;k>=0;k--) if(rows[k][0]==='ctx'){ anchor = rows[k][1]; break; }
+    while(i<rows.length && rows[i][0]!=='ctx'){ (rows[i][0]==='del'?del:add).push(rows[i][1]); i++; }
+    out.push({ del, add, anchor });
+  }
+  return out;
+}
+/* returns the proposal's text carried onto `cur`, or null if it cannot be */
+function carryOnto(p, cur){
+  let out = cur;
+  for(const h of hunksOf(p.base, p.text)){
+    if(h.del.length){
+      const oldBlock = h.del.join('\n');
+      if(!out.includes(oldBlock)) return null;          /* those lines are gone or already changed */
+      out = out.replace(oldBlock, h.add.join('\n'));
+    } else {
+      if(h.anchor == null || !out.includes(h.anchor)) return null;
+      out = out.replace(h.anchor, h.anchor+'\n'+h.add.join('\n'));
+    }
+  }
+  return out;
+}
+/* after a change lands, bring every other pending change on that file up to date */
+function reconcile(boxId, fileId){
+  const t = targetOf(boxId, fileId); if(!t) return 0;
+  const cur = fileText(t.c, t.f);
+  let blocked = 0;
+  for(const p of proposalsFor(boxId, fileId)){
+    if(p.base === cur) continue;
+    const carried = carryOnto(p, cur);
+    if(carried == null){ p.conflict = true; blocked++; }
+    else { p.base = cur; p.text = carried; p.conflict = false; }
+  }
+  return blocked;
+}
+
+/* =========================================================
+   Access — one truth, two lenses.
+   People and teams come from the real roles.yaml; the grant
+   topology mirrors the live knowledge base: everything is in
+   the baseline except the sub-group categories (GTM, Engineering)
+   and HeyReach, which belong to their sub-group.
+   ========================================================= */
+const PEOPLE = [
+  { id:'razvan', name:'Razvan Radulescu', email:'razvan.radulescu@bevel.software', admin:true },
+  { id:'ali',    name:'Ali Raza',         email:'ali.raza@bevel.software',         admin:true },
+  { id:'juan',   name:'Juan Viera',       email:'juan@bevel.software',             admin:true },
+  { id:'john',   name:'John Newcomer',    email:'john.newcomer@bevel.software' },
+  { id:'maya',   name:'Maya Chen',        email:'maya.chen@bevel.software' },
+  { id:'elena',  name:'Elena Petrov',     email:'elena.petrov@bevel.software' },
+  { id:'devon',  name:'Devon Brooks',     email:'devon.brooks@bevel.software' },
+  { id:'priya',  name:'Priya Shah',       email:'priya.shah@bevel.software' },
+  { id:'marcus', name:'Marcus Lind',      email:'marcus.lind@bevel.software' },
+  { id:'sofia',  name:'Sofia Costa',      email:'sofia.costa@bevel.software' },
+  { id:'nora',   name:'Nora Fischer',     email:'nora.fischer@bevel.software' },
+  { id:'owen',   name:'Owen Hughes',      email:'owen.hughes@bevel.software' },
+  { id:'leah',   name:'Leah Martin',      email:'leah.martin@bevel.software' },
+  { id:'ivan',   name:'Ivan Horvat',      email:'ivan.horvat@bevel.software' },
+  { id:'agent',  name:'Coding agent',     email:'coding-agent@bevel.software',     agent:true },
+];
+const ORG_SIZE = 200;
+const TEAMS = [
+  { id:'gtm',      name:'GTM',              headcount:36, members:['ali','john','maya'] },
+  { id:'eng',      name:'Engineering',      headcount:64, members:['razvan','elena','devon','agent'] },
+  { id:'product',  name:'Product',          headcount:30, members:['juan','priya'] },
+  { id:'delivery', name:'Delivery',         headcount:34, members:['marcus','sofia'] },
+  { id:'success',  name:'Customer Success', headcount:22, members:['nora','owen'] },
+  { id:'ops',      name:'Operations',       headcount:14, members:['leah','ivan'] },
+];
+/* the 7 Engineering skills — real names from the knowledge base */
+const ENG_SKILLS = [
+  { id:'architecture-review', name:'Architecture review', group:'eng', tools:[], owner:'Razvan Radulescu', updated:'24 Jul',
+    desc:'Review a proposed system change against the current architecture and record the tradeoffs.',
+    instr:['Read the proposal and the relevant architecture records.','Identify affected boundaries, data flows, and operational risks.','Recommend approve, revise, or reject with explicit tradeoffs.'] },
+  { id:'create-ticket', name:'Create ticket', group:'eng', tools:[], owner:'Razvan Radulescu', updated:'22 Jul',
+    desc:'Turn a scoped change into an implementation-ready engineering ticket.',
+    instr:['Confirm the desired outcome and constraints.','Write acceptance criteria and verification steps.','Link relevant context and assign the owning team.'] },
+  { id:'delivery-address-review', name:'Delivery · Address review', group:'eng', tools:[], owner:'Razvan Radulescu', updated:'20 Jul', desc:'Address review feedback before implementation continues.', instr:['Collect open review findings.','Resolve or explicitly defer each finding.','Record the resulting decisions.'] },
+  { id:'delivery-coding', name:'Delivery · Coding', group:'eng', tools:[], owner:'Razvan Radulescu', updated:'20 Jul', desc:'Implement a reviewed engineering ticket within its agreed boundaries.', instr:['Read the ticket and repository guidance.','Implement the smallest complete change.','Run the relevant local checks.'] },
+  { id:'delivery-local-testing', name:'Delivery · Local testing', group:'eng', tools:[], owner:'Razvan Radulescu', updated:'20 Jul', desc:'Verify a delivery locally before it is shared for remote testing.', instr:['Run targeted automated checks.','Exercise the changed user flow.','Report evidence and remaining risks.'] },
+  { id:'delivery-remote-testing', name:'Delivery · Remote testing', group:'eng', tools:[], owner:'Razvan Radulescu', updated:'20 Jul', desc:'Verify a delivery in the shared environment.', instr:['Deploy to the shared test environment.','Run the acceptance criteria.','Record pass, fail, and follow-up work.'] },
+  { id:'direction-fit-review', name:'Direction fit review', group:'eng', tools:[], owner:'Razvan Radulescu', updated:'19 Jul', desc:'Check that proposed work supports the agreed product direction.', instr:['Read the proposal and current direction.','Identify alignment and conflicts.','Recommend proceed, reshape, or stop.'] },
+];
+/* grants: categories, whole tools, and individual items — per team, plus the company baseline */
+const ACCESS = {
+  company:{ cats:['org','general'], tools:['granola','notion','slack','github','serper','gcal','gmail'], items:[] },
+  gtm:    { cats:['gtm'], tools:['heyreach'], items:[] },
+  eng:    { cats:['eng'], tools:[],           items:[] },
+  product:{ cats:[], tools:[], items:[] },
+  delivery:{ cats:[], tools:[], items:[] },
+  success:{ cats:[], tools:[], items:[] },
+  ops:    { cats:[], tools:[], items:[] },
+};
+const EXCEPTIONS = [                       /* person-level grants — always the marked exception */
+  { person:'john', kind:'skill', id:'create-ticket' },
+];
+const EXCLUSIONS = [];                     /* items pulled out of a category grant */
+
+const personById = id => PEOPLE.find(p=>p.id===id);
+const teamById = id => TEAMS.find(t=>t.id===id);
+const initials = p => p.name.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
+const avHtml = p => '<span class="av" title="'+esc(p.name)+'">'+esc(initials(p))+'</span>';
+const CAT_LABEL = id => id==='company' ? 'Company-wide'
+  : (SUBGROUPS.find(g=>g.id===id)?.label || CATS.find(c=>c.id===id)?.label || id);
+const SHELF_LABEL = id => id==='owned' ? 'Owned by me' : CAT_LABEL(id);
+/* Every skill and every tool sits in exactly one place: company-wide, or one
+   sub-group. These four helpers are the only definition of that. */
+const shelfFor = s => whoCanUse('skill',s.id).everyone ? 'company' : s.group;
+const shelfForTool = id => { const w=whoCanUse('tool',id); return w.everyone ? 'company' : (w.teams[0]?.id || 'company'); };
+const shelfSkills = cat => cat==='owned' ? ownedSkills()
+  : cat==='all' ? [...SKILLS, ...ENG_SKILLS]
+  : cat==='company' ? [...SKILLS, ...ENG_SKILLS].filter(s=>whoCanUse('skill',s.id).everyone)
+  : catSkills(cat).filter(s=>shelfFor(s)===cat);
+const shelfTools = cat => cat==='owned' ? []
+  : cat==='all' ? TOOLS.map(t=>t.id)
+  : TOOLS.map(t=>t.id).filter(id=>shelfForTool(id)===cat);
+const catSkills = id => id==='eng' ? ENG_SKILLS : SKILLS.filter(s=>s.group===id);
+const groupOf = id => (SKILLS.find(s=>s.id===id) || {}).group || (ENG_SKILLS.find(s=>s.id===id) ? 'eng' : null);
+const itemName = (kind,id) => kind==='tool' ? (toolById(id)||{}).name
+  : (skillById(id) || ENG_SKILLS.find(s=>s.id===id) || {}).name;
+const isExcluded = (kind,id) => EXCLUSIONS.some(x=>x.kind===kind && x.id===id);
+function teamGrants(tid, kind, id){
+  const a = ACCESS[tid]; if(!a) return false;
+  if(a.items.some(i=>i.kind===kind && i.id===id)) return true;
+  if(kind==='tool') return a.tools.includes(id);
+  return a.cats.includes(groupOf(id)) && !isExcluded(kind,id);
+}
+/* who can use an item — the single source both lenses read */
+function whoCanUse(kind, id){
+  const everyone = teamGrants('company', kind, id);
+  const teams = TEAMS.filter(t=>teamGrants(t.id, kind, id));
+  const people = EXCEPTIONS.filter(x=>x.kind===kind && x.id===id).map(x=>personById(x.person));
+  return { everyone, teams, people };
+}
+function visibleToMe(kind, id){
+  if(currentUser().admin) return true;
+  const w = whoCanUse(kind, id);
+  return w.everyone || w.teams.some(t=>t.members.includes(state.user)) || w.people.some(p=>p.id===state.user);
+}
+function baselineCounts(){
+  const skills = ACCESS.company.cats.reduce((n,c)=>n+catSkills(c).filter(s=>!isExcluded('skill',s.id)).length,0) +
+    ACCESS.company.items.filter(i=>i.kind==='skill').length;
+  return { skills, tools:ACCESS.company.tools.length };
+}
+const GROUP_PATH = { gtm:'Skills/GTM', org:'Skills/Organization', general:'Skills/General', eng:'Skills/Engineering' };
+const skillPath = s => (GROUP_PATH[s.group]||'Skills')+'/'+s.id;
+
+/* =========================================================
+   State + helpers
+   ========================================================= */
+const state = { app:'skills', user:'ali', view:'skills', cat:'all', item:null, q:'', connected:{}, editing:null,
+  collapsed:false, menu:false, appMenu:false, pal:{open:false}, tabFile:'main', team:null, kbDoc:'overview' };
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const toolById = id => TOOLS.find(t=>t.id===id);
+const skillById = id => SKILLS.find(s=>s.id===id) || ENG_SKILLS.find(s=>s.id===id);
+const currentUser = () => personById(state.user);
+const ownsSkill = s => !!s && s.owner===currentUser().name;
+const proposalAuthor = p => personById(p.by) || {name:p.by||'A teammate',email:''};
+const ownedSkills = () => SKILLS.filter(ownsSkill);
+const myProposals = () => PROPOSALS.filter(p=>p.by===state.user);
+
+function logoHtml(t, lg){
+  const cls = 'logo'+(lg?' lg':'');
+  if(t.mark) return '<span class="'+cls+(t.ink?'"':'"')+'>'+(t.ink?'<span class="ic-ink" style="display:flex">':'')+MARKS[t.mark]+(t.ink?'</span>':'')+'</span>';
+  return '<span class="'+cls+'"><span class="mg" style="color:'+t.mono[1]+'">'+esc(t.mono[0])+'</span></span>';
+}
+function connected(tid){
+  const t = toolById(tid);
+  if(t.vars.every(v=>v.scope==='team')) return true;
+  if(t.id==='slack') return true;                 /* team bot covers the skills that post */
+  return state.connected[tid] || CRED[tid];
+}
+function readiness(s){
+  const missing = s.tools.filter(t=>!connected(t));
+  return missing.length ? { ok:false, missing } : { ok:true };
+}
+function toast(msg){
+  const t=$('#toast'); t.textContent=msg; t.classList.add('on');
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('on'),2800);
+}
+
+/* small markdown renderer for real KB files: headings, lists, checklists,
+   fenced + indented code, tables, blockquotes, rules */
+function mdRender(raw){
+  const HTML_COMMENT = new RegExp('<'+'!--[\\s\\S]*?--'+'>','g');   /* built dynamically — a literal one breaks HTML script parsing */
+  let md = raw.replace(/^\s*---[\s\S]*?---\s*/,'').replace(HTML_COMMENT,'').trim();
+  const lines = md.split('\n');
+  let out=[], inCode=false, code=[], list=null, para=[], table=null, quote=null, ind=null;
+  const inline = s => esc(s)
+    .replace(/\[\[([^\]]+)\]\]/g,'<span class="wiki">$1</span>')
+    .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
+    .replace(/`([^`]+)`/g,'<code>$1</code>');
+  const closeList = ()=>{ if(list){ out.push(list==='ol'?'</ol>':'</ul>'); list=null; } };
+  const openList = kind => { if(list!==kind){ closeList(); out.push(kind==='ol'?'<ol>':'<ul>'); list=kind; } };
+  const flushPara = ()=>{ if(para.length){ out.push('<p>'+inline(para.join(' '))+'</p>'); para=[]; } };
+  const flushTable = ()=>{ if(table){ out.push('<div class="tablewrap"><table>'+table.join('')+'</table></div>'); table=null; } };
+  const flushQuote = ()=>{ if(quote){ out.push('<blockquote>'+quote.map(inline).join('<br>')+'</blockquote>'); quote=null; } };
+  const flushInd = ()=>{ if(ind){ out.push('<pre><code>'+esc(ind.join('\n'))+'</code></pre>'); ind=null; } };
+  const flushAll = ()=>{ flushPara(); closeList(); flushTable(); flushQuote(); flushInd(); };
+  for(const line of lines){
+    if(line.trim().startsWith('```')){
+      flushAll();
+      if(!inCode){ inCode=true; code=[]; }
+      else { out.push('<pre><code>'+esc(code.join('\n'))+'</code></pre>'); inCode=false; }
+      continue;
+    }
+    if(inCode){ code.push(line); continue; }
+    if(!list && /^\s{4,}\S/.test(line) && !line.trim().startsWith('- ')){
+      flushPara(); flushTable(); flushQuote();
+      (ind ||= []).push(line.replace(/^\s{4}/,''));
+      continue;
+    }
+    flushInd();
+    const t = line.trim();
+    if(!t){ flushAll(); continue; }
+    if(t==='---'){ flushAll(); out.push('<hr>'); continue; }
+    if(t.startsWith('|')){
+      flushPara(); closeList(); flushQuote();
+      if(/^[\s|:\-]+$/.test(t)) continue;                               /* separator row */
+      const cells = t.replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>inline(c.trim()));
+      const tag = table ? 'td' : 'th';
+      (table ||= []).push('<tr>'+cells.map(c=>'<'+tag+'>'+(c||'&nbsp;')+'</'+tag+'>').join('')+'</tr>');
+      continue;
+    }
+    flushTable();
+    if(t.startsWith('> ') || t==='>'){
+      flushPara(); closeList();
+      (quote ||= []).push(t.replace(/^>\s?/,''));
+      continue;
+    }
+    flushQuote();
+    if(t.startsWith('# ')){ flushPara(); closeList(); continue; }        /* h1 = page title, skip */
+    if(t.startsWith('## ')){ flushPara(); closeList(); out.push('<h2>'+inline(t.slice(3))+'</h2>'); continue; }
+    if(t.startsWith('### ')){ flushPara(); closeList(); out.push('<h3>'+inline(t.slice(4))+'</h3>'); continue; }
+    if(t.startsWith('- [ ]')){
+      flushPara(); openList('ul');
+      out.push('<li class="check"><span class="cb"></span><span>'+inline(t.slice(5).trim())+'</span></li>'); continue;
+    }
+    if(t.startsWith('- ')){
+      flushPara(); openList('ul');
+      out.push('<li>'+inline(t.slice(2))+'</li>'); continue;
+    }
+    if(/^\d+\.\s/.test(t)){
+      flushPara(); openList('ol');
+      out.push('<li>'+inline(t.replace(/^\d+\.\s*/,''))+'</li>'); continue;
+    }
+    if(list && /^\s{2,}/.test(line)){
+      const last = out[out.length-1];
+      out[out.length-1] = last.endsWith('</span></li>')
+        ? last.replace(/<\/span><\/li>$/,' '+inline(t)+'</span></li>')
+        : last.replace(/<\/li>$/,' '+inline(t)+'</li>');
+      continue;
+    }
+    para.push(t);
+  }
+  flushAll();
+  return out.join('\n');
+}
+
+/* =========================================================
+   Sidebar
+   ========================================================= */
+const SIDE_SVG = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="3"/><line x1="6.2" y1="2.5" x2="6.2" y2="13.5"/></svg>';
+function renderSide(){
+  /* what I see is derived from the same grants the admin edits */
+  const me = currentUser();
+  /* one count per group — its skills and its tools together */
+  const count = cat => shelfSkills(cat).filter(s=>visibleToMe('skill',s.id)).length +
+    shelfTools(cat).filter(id=>visibleToMe('tool',id)).length;
+  const navBtn = (cat,label) => '<button data-nav="skills:'+cat+'" aria-current="'+(state.view==='skills'&&state.cat===cat&&!state.item)+'">'+
+    '<span>'+esc(label)+'</span><span class="n">'+count(cat)+'</span></button>';
+  const amIn = g => me.admin || (teamById(g.id)?.members || []).includes(me.id);
+  let html = '<div class="side-inner">';
+  if(state.app==='knowledge'){
+    html += '<nav class="nav">';
+    for(const folder of kbFolders()){
+      html += '<div class="lbl folder">'+esc(folder)+'</div>';
+      html += KB.filter(d=>d.folder===folder).map(d=>
+        '<button class="doc-link" data-doc="'+d.id+'" aria-current="'+(state.kbDoc===d.id)+'">'+
+        '<span>'+esc(d.title)+'</span>'+(proposalFor('knowledge',d.id)?'<span class="fdot"></span>':'')+'</button>').join('');
+    }
+    html += '</nav>';
+  } else {
+    html += '<nav class="nav">';
+    html += navBtn('all', 'All skills & tools');
+    html += navBtn('owned', 'Owned by me');
+    html += navBtn('company', 'Company-wide');
+    html += '<div class="lbl">Sub-groups</div>';
+    html += SUBGROUPS.map(g=> amIn(g)
+      ? navBtn(g.id, g.label)
+      : '<button class="locked" tabindex="-1" title="Ask a member of '+esc(g.label)+' to invite you">'+
+        '<span>'+esc(g.label)+'</span><span class="n">'+(shelfSkills(g.id).length+shelfTools(g.id).length)+'</span></button>').join('');
+    html += '</nav>';
+  }
+  html += '<div class="spacer"></div>';
+  html += '</div>';
+  $('#side').innerHTML = html;
+  $('#side').querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>{
+    const [v,c] = b.dataset.nav.split(':');
+    state.view=v; state.cat=c; state.item=null; state.q=''; state.editing=null; state.team=null;
+    render();
+  });
+  $('#side').querySelectorAll('[data-doc]').forEach(b=>b.onclick=()=>{
+    state.kbDoc=b.dataset.doc; state.editing=null; render(); window.scrollTo({top:0});
+  });
+}
+
+/* ————— the bar across the top: brand and app on the left, you on the right ————— */
+const SIGNOUT_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" aria-hidden="true"><path d="M6.2 2.5H3.4a1.4 1.4 0 0 0-1.4 1.4v8.2a1.4 1.4 0 0 0 1.4 1.4h2.8"/><path d="M10.6 11.2 13.8 8l-3.2-3.2M13.4 8H6.2"/></svg>';
+function renderTop(){
+  const me = currentUser();
+  const app = APPS.find(a=>a.id===state.app);
+  /* a credential you have not set yet is the one thing settings needs to tell you about */
+  const unset = TOOLS.some(t=>t.vars.some(v=>v.scope==='personal') && !(state.connected[t.id]||CRED[t.id]));
+  $('#topnav').innerHTML =
+    '<button class="iconbtn" id="side-toggle" title="Hide or show the sidebar" aria-label="Hide or show the sidebar">'+SIDE_SVG+'</button>'+
+    '<button class="wordmark" id="brand" aria-haspopup="true" title="Switch app">'+
+      '<span class="tile">B</span><span class="bn">Bevel</span></button>'+
+    '<button class="appchip" id="appchip" aria-haspopup="true" aria-expanded="'+!!state.appMenu+'">'+
+      esc(app.name)+'<span class="chev">▾</span></button>'+
+    '<span class="right">'+
+      '<button class="who" id="me" aria-haspopup="true" aria-expanded="'+!!state.menu+'">'+avHtml(me)+
+        '<span>'+esc(me.email.split('@')[0])+'</span></button>'+
+      '<button class="iconbtn" id="gear" aria-haspopup="true" aria-expanded="'+!!state.setMenu+'" title="Settings" aria-label="Settings">'+
+        GEAR_SVG+(unset?'<span class="badge"></span>':'')+'</button>'+
+      '<button class="iconbtn" id="signout" title="Sign out" aria-label="Sign out">'+SIGNOUT_SVG+'</button>'+
+    '</span>';
+  const openApps = e=>{ e.stopPropagation(); state.appMenu=!state.appMenu; state.setMenu=false; state.menu=false; renderAppMenu(); renderSetMenu(); renderMenu(); renderTop(); };
+  $('#brand').onclick = openApps;
+  $('#appchip').onclick = openApps;
+  $('#gear').onclick = e=>{ e.stopPropagation(); state.setMenu=!state.setMenu; state.appMenu=false; state.menu=false; renderSetMenu(); renderAppMenu(); renderMenu(); renderTop(); };
+  $('#me').onclick = e=>{ e.stopPropagation(); state.menu=!state.menu; state.setMenu=false; state.appMenu=false; renderMenu(); renderSetMenu(); renderAppMenu(); renderTop(); };
+  $('#side-toggle').onclick = ()=>{ state.collapsed=!state.collapsed; applyCollapse(); };
+  $('#signout').onclick = ()=>toast('Sign-out isn’t wired up in this prototype.');
+}
+
+/* settings, next to your name */
+const GEAR_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+function renderSetMenu(){
+  const m = $('#setmenu');
+  if(!state.setMenu){ m.classList.remove('on'); const g=$('#gear'); if(g) g.setAttribute('aria-expanded','false'); return; }
+  m.innerHTML = '<button data-set="secrets"><span class="mt">Secrets</span>'+
+      '<span class="ms">Keys and sign-ins the tools use</span></button>'+
+    (currentUser().admin
+      ? '<button data-set="roles"><span class="mt">Roles &amp; members</span>'+
+        '<span class="ms">Teams, access, and who is an Admin</span></button>'
+      : '');
+  m.classList.add('on');
+  const g=$('#gear'); if(g) g.setAttribute('aria-expanded','true');
+  m.querySelectorAll('[data-set]').forEach(b=>b.onclick=()=>{
+    state.setMenu=false; renderSetMenu();
+    state.item=null; state.editing=null;
+    if(b.dataset.set==='secrets'){ state.view='secrets'; }
+    else { state.app='skills'; state.view='console'; state.team=null; }
+    render(); window.scrollTo({top:0});
+  });
+}
+
+/* the corner mark switches app, the way Jira's does */
+const APPS = [
+  { id:'skills', name:'Skills & tools', sub:'What the assistant can do', mark:'S' },
+  { id:'knowledge', name:'Knowledge', sub:'Everything the company knows', mark:'K' },
+];
+function renderAppMenu(){
+  const m = $('#appmenu');
+  if(!state.appMenu){ m.classList.remove('on'); return; }
+  m.innerHTML = '<div class="menu-label" style="margin-top:0;border-top:none">Switch app</div>'+
+    APPS.map(a=>'<button class="user-option" data-app="'+a.id+'" aria-current="'+(state.app===a.id)+'">'+
+      '<span class="applogo">'+esc(a.mark)+'</span>'+
+      '<span class="ui"><span class="mt">'+esc(a.name)+'</span><span class="ms">'+esc(a.sub)+'</span></span>'+
+      (state.app===a.id?'<span class="check">✓</span>':'')+'</button>').join('');
+  m.classList.add('on');
+  m.querySelectorAll('[data-app]').forEach(b=>b.onclick=()=>{
+    state.appMenu=false;
+    if(state.app!==b.dataset.app){ state.app=b.dataset.app; state.item=null; state.editing=null; state.team=null; state.view='skills'; }
+    renderAppMenu(); render(); window.scrollTo({top:0});
+  });
+}
+
+function applyCollapse(){
+  $('#app').classList.toggle('collapsed', !!state.collapsed);
+}
+
+/* profile menu + external-agent-access modal */
+function renderMenu(){
+  const m = $('#pmenu');
+  if(!state.menu){ m.classList.remove('on'); return; }
+  m.innerHTML = '<button data-m="agent"><span class="mt">Set up external agent access</span><span class="ms">Let Claude Code or another agent work as you</span></button>'+
+    '<div class="menu-label">Switch user</div>'+['ali','john'].map(id=>{
+      const p=personById(id), active=id===state.user;
+      return '<button class="user-option" data-switch-user="'+id+'">'+avHtml(p)+'<span class="ui"><span class="mt">'+esc(p.name)+'</span><span class="ms">'+(p.admin?'Admin · skill owner':'Member · GTM')+'</span></span>'+
+        (active?'<span class="check">✓</span>':'')+'</button>';
+    }).join('');
+  m.classList.add('on');
+  m.querySelector('[data-m="agent"]').onclick = ()=>{ state.menu=false; renderMenu(); openAgentModal(); };
+  m.querySelectorAll('[data-switch-user]').forEach(b=>b.onclick=()=>switchUser(b.dataset.switchUser));
+}
+function switchUser(id){
+  if(state.user===id){ state.menu=false; renderMenu(); return; }
+  state.user=id; state.menu=false; state.editing=null; state.team=null;
+  if(state.view==='console' && !currentUser().admin) state.view='skills';
+  render();
+  toast('Now viewing as '+currentUser().name+' — '+(currentUser().admin?'Admin and skill owner.':'normal member.'));
+}
+const agentPrompt = () => 'Connect to the Bevel team knowledge base. Add the external agent endpoint https://kb.bevel.software/mcp and sign in as '+currentUser().email+' when the browser opens. Then list my skills to confirm the connection.';
+function openAgentModal(){
+  const w = $('#mwrap');
+  w.innerHTML = '<div class="mcard">'+
+    '<h3>External agent access</h3>'+
+    '<p>Connect Claude Code or another external agent. It signs in with a key and acts with exactly your access — never more.</p>'+
+    '<div class="mfoot"><button class="btn quiet" data-m-close>Close</button>'+
+    '<button class="btn primary" data-copy="'+esc(agentPrompt())+'">Copy prompt</button></div></div>';
+  w.classList.add('on');
+  w.onclick = e=>{ if(e.target===w) closeAgentModal(); };
+  w.querySelector('[data-m-close]').onclick = closeAgentModal;
+  wire(w);
+}
+function closeAgentModal(){ $('#mwrap').classList.remove('on'); $('#mwrap').innerHTML=''; }
+
+/* =========================================================
+   Search dropdown — under the toolbar, "/" from anywhere
+   ========================================================= */
+function slashSearch(){
+  const wasConsole = state.view==='console';
+  if(wasConsole){ state.view='skills'; state.team=null; }
+  if(state.item || wasConsole){ state.item=null; state.editing=null; render(); }
+  const a = $('#ask');
+  if(a){ a.focus(); openSdrop(); }
+}
+function openSdrop(){
+  state.pal.open = true;
+  state.pal.q = $('#ask') ? $('#ask').value : '';
+  state.pal.sel = 0;
+  renderSdrop();
+}
+function renderSdrop(){
+  const el = $('#sdrop'); if(!el) return;
+  if(!state.pal.open){ el.classList.remove('on'); el.innerHTML=''; return; }
+  const q = (state.pal.q||'').trim().toLowerCase();
+  const match = (n,d)=>!q || (n+' '+d).toLowerCase().includes(q);
+  const rows = [
+    ...[...SKILLS, ...ENG_SKILLS].filter(s=>visibleToMe('skill',s.id) && match(s.name,s.desc)).map(s=>({ kind:'skill', id:s.id, t:s.name, d:s.desc,
+      k:'Skill · '+CAT_LABEL(shelfFor(s)) })),
+    ...TOOLS.filter(t=>visibleToMe('tool',t.id) && match(t.name,t.purpose)).map(t=>({ kind:'tool', id:t.id, t:t.name, d:t.purpose,
+      k:'Tool · '+CAT_LABEL(shelfForTool(t.id)), logo:t })),
+  ];
+  state.pal.rows = rows;
+  if(state.pal.sel >= rows.length) state.pal.sel = Math.max(0, rows.length-1);
+  el.innerHTML = rows.length ? rows.map((r,i)=>
+    '<button class="pal-row'+(i===state.pal.sel?' sel':'')+'" data-pi="'+i+'">'+
+      (r.kind==='skill' ? '<span class="slashic">/</span>' : logoHtml(r.logo))+
+      '<span class="pr-body"><span class="pr-t">'+esc(r.t)+'</span><span class="pr-d">'+esc(r.d)+'</span></span>'+
+      '<span class="pr-k">'+esc(r.k)+'</span>'+
+    '</button>').join('')
+    : '<div class="pal-empty">Nothing matches “'+esc(state.pal.q)+'”.</div>';
+  el.classList.add('on');
+  el.querySelectorAll('[data-pi]').forEach(b=>{
+    b.onclick = ()=>openPalRow(state.pal.rows[+b.dataset.pi]);
+    b.onmousemove = ()=>{ const i=+b.dataset.pi; if(state.pal.sel!==i){ state.pal.sel=i; renderSdrop(); } };
+  });
+}
+function palScroll(){ const el=$('#sdrop .pal-row.sel'); el&&el.scrollIntoView({block:'nearest'}); }
+function openPalRow(r){
+  closeSdrop();
+  state.item = r.kind+':'+r.id; state.editing=null; state.tabFile='main';
+  state.view='skills';
+  if(r.kind==='tool'){ if(state.cat!=='all' && state.cat!==shelfForTool(r.id)) state.cat=shelfForTool(r.id); }
+  else { const s=skillById(r.id); if(state.cat!=='all' && !(state.cat==='owned'&&ownsSkill(s)) && state.cat!==shelfFor(s)) state.cat=shelfFor(s); }
+  render(); window.scrollTo({top:0});
+}
+function closeSdrop(){ state.pal={open:false}; const el=$('#sdrop'); if(el){ el.classList.remove('on'); el.innerHTML=''; } }
+function wireSearch(){
+  const si = $('#ask'); if(!si) return;
+  si.onfocus = openSdrop;
+  si.oninput = ()=>{ state.pal.q=si.value; state.pal.sel=0; state.pal.open=true; renderSdrop(); };
+  si.onkeydown = e=>{
+    if(e.key==='ArrowDown'){ e.preventDefault(); state.pal.sel=Math.min(state.pal.sel+1, (state.pal.rows||[]).length-1); renderSdrop(); palScroll(); }
+    else if(e.key==='ArrowUp'){ e.preventDefault(); state.pal.sel=Math.max(state.pal.sel-1, 0); renderSdrop(); palScroll(); }
+    else if(e.key==='Enter'){ const r=(state.pal.rows||[])[state.pal.sel]; if(r) openPalRow(r); }
+    else if(e.key==='Escape'){ closeSdrop(); si.blur(); }
+  };
+}
+
+/* =========================================================
+   Shelf
+   ========================================================= */
+const COPY_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.8"/><rect x="2.5" y="2.5" width="8" height="8" rx="1.8"/></svg>';
+/* access is an admin job, so the button says so and only they see it */
+const ACCESS_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" aria-hidden="true"><circle cx="6" cy="5.5" r="2.4"/><path d="M1.9 13.4c.5-2.2 2.1-3.4 4.1-3.4s3.6 1.2 4.1 3.4"/><circle cx="12" cy="6.4" r="1.8"/><path d="M11.2 10.2c1.7-.3 3 .8 3.4 2.6"/></svg>';
+const accessBtn = (kind,id) => currentUser().admin
+  ? '<button class="sharebtn" data-access="'+kind+':'+id+'">'+ACCESS_SVG+' Manage access</button>' : '';
+function skillCard(s){
+  const r = readiness(s);
+  const reviewCount = ownsSkill(s) ? pendingForSkill(s).length : 0;
+  const myOpen = PROPOSALS.some(p=>p.box===s.id && p.status==='pending' && p.by===state.user);
+  const footBits =
+    (r.ok ? '' : '<span class="rdot wait"></span><span class="r-wait">Needs '+esc(toolById(r.missing[0]).name)+'</span>')+
+    (reviewCount ? '<span class="upd" style="color:var(--wait)">'+reviewCount+' proposed '+(reviewCount===1?'change':'changes')+' · review</span>' :
+      (myOpen ? '<span class="upd">Your change · pending</span>' : ''));
+  return '<div class="card" role="button" tabindex="0" data-item="skill:'+s.id+'">'+
+    '<button class="copybtn" data-copyskill="/'+esc(s.id)+'" title="Copy /'+esc(s.id)+'" aria-label="Copy invocation">'+COPY_SVG+'</button>'+
+    '<span class="t">'+esc(s.name)+(s.updated==='26 Jul'?'<span class="new">Updated</span>':'')+'</span>'+
+    '<span class="d">'+esc(s.desc)+'</span>'+
+    (footBits?'<span class="foot">'+footBits+'</span>':'')+
+  '</div>';
+}
+function toolCard(t){
+  const teamOnly = t.vars.every(v=>v.scope==='team');
+  const on = connected(t.id);
+  let foot;
+  if(teamOnly) foot = '<span class="rdot none"></span><span>Team key · set up</span>';
+  else if(on)  foot = '<span class="rdot ok"></span><span class="r-ok">Connected</span>';
+  else {
+    const oauth = t.vars.some(v=>v.oauth);
+    foot = oauth ? '<button class="btn tiny connect" data-connect="'+t.id+'">Connect</button>'
+                 : '<button class="btn tiny connect" data-item="tool:'+t.id+'">Connect</button>';
+  }
+  return '<div class="card" role="button" tabindex="0" style="min-height:96px" data-item="tool:'+t.id+'">'+
+    '<span class="t">'+logoHtml(t)+esc(t.name)+'</span>'+
+    '<span class="d">'+esc(t.purpose)+'</span>'+
+    '<span class="foot">'+foot+'</span>'+
+  '</div>';
+}
+
+function renderShelf(){
+  let html = '<div class="search-wrap"><div class="search" style="cursor:text">'+
+    '<span class="glyph">⌕</span>'+
+    '<input id="ask" type="text" placeholder="Search skills and tools" autocomplete="off" aria-label="Search skills and tools">'+
+    '<kbd>/</kbd></div><div class="sdrop" id="sdrop"></div></div>';
+
+  {
+    /* what is waiting on me, and what I am waiting on */
+    const rows=[];
+    for(const s of ownedSkills()){
+      const n = pendingForSkill(s).length;
+      if(n) rows.push('<button class="strip-row" data-item="skill:'+s.id+'"><span class="sdot wait"></span>'+
+        n+' proposed '+(n===1?'change':'changes')+' to '+esc(s.name)+' '+(n===1?'needs':'need')+' your approval<span class="go">Review ›</span></button>');
+    }
+    for(const p of myProposals()){
+      const s = skillById(p.box); if(!s || ownsSkill(s)) continue;
+      if(p.status==='pending') rows.push('<button class="strip-row" data-item="skill:'+s.id+'"><span class="sdot wait"></span>'+
+        'Your change to '+esc(s.name)+' is pending approval<span class="go">View ›</span></button>');
+      else if(p.status==='approved') rows.push('<button class="strip-row" data-item="skill:'+s.id+'"><span class="sdot ok"></span>'+
+        'Your change to '+esc(s.name)+' was approved '+esc(p.decided||'')+'<span class="go">View ›</span></button>');
+    }
+    if(rows.length) html += '<div class="strip">'+rows.join('')+'</div>';
+
+    /* a shelf holds both — the skills and the tools that belong to this group */
+    const skills = shelfSkills(state.cat).filter(s=>visibleToMe('skill',s.id));
+    const tools = shelfTools(state.cat).map(toolById).filter(t=>visibleToMe('tool',t.id));
+    const emptyMsg = state.cat==='owned' ? 'You don’t own any skills yet.'
+      : state.cat==='company' ? 'Nothing is shared company-wide yet.'
+      : 'Nothing in this sub-group yet — add a skill or a tool.';
+    html += '<div class="shelf-head"><h1>'+esc(SHELF_LABEL(state.cat))+'</h1><span class="n">'+(skills.length+tools.length)+'</span></div>';
+    if(!skills.length && !tools.length) html += '<div class="empty">'+emptyMsg+'</div>';
+    if(skills.length) html += '<div class="h4" style="margin-top:0">Skills</div><div class="grid">'+skills.map(skillCard).join('')+'</div>';
+    if(tools.length) html += '<div class="h4">Tools</div><div class="grid tools">'+tools.map(toolCard).join('')+'</div>';
+  }
+  return html;
+}
+
+/* =========================================================
+   Item pages
+   ========================================================= */
+/* The skill page is the heading, its files, and the open file. Nothing else. */
+function renderSkillItem(s){
+  const ownerView = ownsSkill(s);
+  const files = skillFiles(s);
+  if(!files.find(f=>f.id===state.tabFile)) state.tabFile='main';
+  const af = files.find(f=>f.id===state.tabFile);
+  const editing = state.editing === fileKey(s,af);
+  const prop = proposalFor(s.id, af.id);
+
+  const tabs = '<div class="ftabs">'+files.map(f=>
+    '<button class="ftab'+(f.id===af.id?' on':'')+'" data-ftab="'+f.id+'" title="'+esc(f.file)+'">'+
+    '<span class="mono">'+esc(f.file)+'</span>'+
+    (proposalFor(s.id,f.id)?'<span class="fdot"></span>':'')+'</button>').join('')+'</div>';
+
+  const body = filePane(s, af);
+
+  return '<button class="back" data-back>‹ '+esc(SHELF_LABEL(state.cat))+'</button>'+
+    '<div class="item-grid solo"><article id="article">'+
+      '<div class="item-top"><div class="item-copy">'+
+      '<div class="item-title"><h1>'+esc(s.name)+'</h1></div></div>'+
+      accessBtn('skill', s.id)+'</div>'+
+      tabs+
+      body+
+    '</article></div>';
+}
+
+/* ————— one file, in a box: read it, or propose a change to it —————
+   Used by both apps — a skill's file and a knowledge page are the same thing. */
+function filePane(c, f){
+  const editing = state.editing === fileKey(c,f);
+  const props = proposalsFor(c.id, f.id);
+  const ownerView = c.owner === currentUser().name;
+  const mineOpen = props.some(p=>p.by===state.user);
+  const key = c.id+'|'+f.id;
+  const inner = editing
+    ? '<div class="filebar"><span class="fname">'+esc(f.file)+' — editing</span></div>'+
+      '<div class="editbox"><textarea id="edit-text" spellcheck="false">'+esc(fileText(c,f))+'</textarea>'+
+      '<div class="ebar"><span class="note">Nothing changes until '+esc(c.owner)+' approves it.</span>'+
+      '<button class="btn small" data-edit-cancel>Cancel</button>'+
+      '<button class="btn small primary" data-edit-submit="'+key+'">Propose changes</button></div></div>'
+    : '<div class="filebar"><span class="fname">'+esc(f.file)+'</span>'+
+      (f.stub || mineOpen ? '' : '<button class="btn small" data-propose="'+key+'">Propose changes</button>')+'</div>'+
+      '<div class="doc" id="doc">'+fileDoc(c,f)+'</div>';
+  return '<div class="filepane">'+inner+'</div>'+
+    (editing ? '' : props.map(p=>changeBox(c, f, p, ownerView)).join(''));
+}
+
+/* ————— what changed, and who is waiting on whom ————— */
+function diffLines(a, b){
+  const A=a.split('\n'), B=b.split('\n'), m=A.length, n=B.length;
+  const dp=Array.from({length:m+1},()=>new Uint32Array(n+1));
+  for(let i=m-1;i>=0;i--) for(let j=n-1;j>=0;j--)
+    dp[i][j] = A[i]===B[j] ? dp[i+1][j+1]+1 : Math.max(dp[i+1][j], dp[i][j+1]);
+  const out=[]; let i=0, j=0;
+  while(i<m && j<n){
+    if(A[i]===B[j]){ out.push(['ctx',A[i]]); i++; j++; }
+    else if(dp[i+1][j] >= dp[i][j+1]) out.push(['del',A[i++]]);
+    else out.push(['add',B[j++]]);
+  }
+  while(i<m) out.push(['del',A[i++]]);
+  while(j<n) out.push(['add',B[j++]]);
+  return out;
+}
+function diffHtml(base, text){
+  const rows = diffLines(base, text);
+  const keep = new Set();
+  rows.forEach((r,i)=>{ if(r[0]!=='ctx') for(let k=i-2;k<=i+2;k++) if(k>=0 && k<rows.length) keep.add(k); });
+  const gap = n => '<span class="dl gap">'+n+' unchanged '+(n===1?'line':'lines')+'</span>';
+  let html='', hidden=0;
+  rows.forEach((r,i)=>{
+    if(!keep.has(i)){ hidden++; return; }
+    if(hidden){ html += gap(hidden); hidden=0; }
+    html += '<span class="dl '+r[0]+'">'+(esc(r[1]) || '&nbsp;')+'</span>';
+  });
+  if(hidden) html += gap(hidden);
+  return html;
+}
+function changeBox(s, f, p, ownerView){
+  const author = proposalAuthor(p);
+  const mine = p.by === state.user;
+  const who = mine ? 'You' : author.name;
+  const first = author.name.split(' ')[0];
+  /* blocked: someone else's change landed on the same lines first */
+  if(p.conflict){
+    const acts = ownerView
+      ? '<span class="acts"><button class="btn tiny quiet" data-prop-decline="'+p.id+'">Decline</button></span>'
+      : (mine ? '<span class="acts"><button class="btn tiny quiet" data-prop-withdraw="'+p.id+'">Withdraw</button></span>' : '');
+    return '<div class="changebox blocked">'+
+      '<div class="chead">'+avHtml(author)+'<span class="who"><b>'+esc(who)+'</b> proposed a change · '+esc(p.when)+'</span>'+
+      '<span class="stat">'+esc(f.file)+'</span></div>'+
+      '<div class="diff">'+diffHtml(p.base, p.text)+'</div>'+
+      '<div class="cfoot conflict"><span class="stopped">Blocked — these lines changed after this was written</span>'+
+      '<span class="sub">'+esc(mine
+        ? 'Resolve it with your agent against the current text, then propose the change again.'
+        : first+' has to resolve it with their agent against the current text and propose again. It cannot be approved as it stands.')+
+      '</span>'+acts+'</div></div>';
+  }
+  const acts = ownerView
+    ? '<span class="acts"><button class="btn tiny quiet" data-prop-decline="'+p.id+'">Decline</button>'+
+      '<button class="btn tiny accept" data-prop-approve="'+p.id+'">Approve</button></span>'
+    : (mine ? '<span class="acts"><button class="btn tiny quiet" data-prop-withdraw="'+p.id+'">Withdraw</button></span>' : '');
+  return '<div class="changebox">'+
+    '<div class="chead">'+avHtml(author)+'<span class="who"><b>'+esc(who)+'</b> proposed a change · '+esc(p.when)+'</span>'+
+    '<span class="stat">'+esc(f.file)+'</span></div>'+
+    '<div class="diff">'+diffHtml(p.base, p.text)+'</div>'+
+    '<div class="cfoot"><span class="pending"><span class="cdot"></span>Pending approval</span>'+
+    '<span class="sub">'+esc(ownerView ? 'You decide — you own this.' : 'Waiting on '+s.owner)+'</span>'+
+    acts+'</div></div>';
+}
+
+function renderToolItem(t){
+  const rows = t.vars.map(v=>{
+    let right;
+    if(v.scope==='team') right = v.set ? '<span class="chip ok"><span class="cdot"></span>Set by an Admin</span>' : '<span class="chip">Not set</span>';
+    else {
+      const on = state.connected[t.id] || CRED[t.id];
+      right = on ? '<span class="chip ok"><span class="cdot"></span>Connected</span>'
+        : '<button class="btn small" data-connect="'+t.id+'">'+(v.oauth?'Sign in':'Add key')+'</button>';
+    }
+    return '<div class="kv"><span class="k">'+esc(v.name)+
+      '<span class="sub">'+(v.scope==='team'?'One value for the whole team — already handled':'Each person sets their own')+'</span></span>'+
+      '<span class="v">'+right+'</span></div>';
+  }).join('');
+  const powers = SKILLS.filter(s=>s.tools.includes(t.id));
+  return '<button class="back" data-back>‹ '+esc(SHELF_LABEL(state.cat))+'</button>'+
+    '<div class="item-grid solo"><article>'+
+      '<div class="item-top"><div class="item-copy"><div class="kicker">Tool · '+esc(CAT_LABEL(shelfForTool(t.id)))+'</div>'+
+      '<div class="item-title">'+logoHtml(t,true)+'<h1>'+esc(t.name)+'</h1></div>'+
+      '<p class="lede">'+esc(t.purpose)+'</p></div>'+
+      accessBtn('tool', t.id)+'</div>'+
+      '<div class="h4">Your connection</div>'+rows+
+      '<div class="h4">What it lets the assistant do</div>'+
+      '<div class="doc" style="border-top:none;padding-top:0"><ul style="list-style:none;margin-left:0">'+
+        t.can.map(c=>'<li>· '+esc(c)+'</li>').join('')+'</ul></div>'+
+      '<div class="h4">Powers these skills</div>'+
+      (powers.length?'<div class="chiprow">'+powers.map(s=>'<button class="chip link" data-item="skill:'+s.id+'">'+esc(s.name)+'</button>').join('')+'</div>'
+        :'<p style="font-size:13px;color:var(--ink2)">No skills use this yet.</p>')+
+      '<div class="ownerline">Managed by the Admins.</div>'+
+    '</article></div>';
+}
+
+/* =========================================================
+   Knowledge — the folder tree is in the sidebar, so the middle
+   is only ever the page you opened.
+   ========================================================= */
+function renderKnowledge(){
+  const d = kbById(state.kbDoc) || KB[0];
+  state.kbDoc = d.id;
+  return '<div class="item-grid solo"><article id="article">'+
+    '<div class="item-top"><div class="item-copy">'+
+      '<div class="kicker">'+esc(d.folder)+'</div>'+
+      '<div class="item-title"><h1>'+esc(d.title)+'</h1></div></div></div>'+
+    filePane(kbBox(d), d)+
+    '<div class="ownerline">Owned by '+esc(d.owner)+' — they approve changes to this page.</div>'+
+  '</article></div>';
+}
+
+/* =========================================================
+   Share contains access, ownership, and role information.
+   Admins can continue from it into access management.
+   One grant model, two lenses: the item page answers "who can
+   use this?", the console answers "what does this team have?"
+   ========================================================= */
+function openSharePanel(kind,id){
+  const name=itemName(kind,id);
+  const w=whoCanUse(kind,id);
+  const s=kind==='skill'?skillById(id):null;
+  const me=currentUser();
+  const op=s ? PEOPLE.find(p=>p.name===s.owner) : null;
+  const admins=PEOPLE.filter(p=>p.admin);
+  const accessName=w.everyone ? 'Everyone at Bevel'
+    : (w.teams.length?w.teams.map(t=>t.name).join(', '):'Restricted access');
+  const accessSub=w.everyone ? ORG_SIZE+' people can use this '+kind
+    : (w.teams.length?'Members of '+w.teams.map(t=>t.name).join(', '):'Only individually added people can use it');
+  const memberRow=(!op || me.id!==op.id) ? '<div class="share-row">'+avHtml(me)+
+    '<span class="si"><span class="sn">'+esc(me.name)+(me.id===op?.id?' <span class="tag">Owner</span>':'')+'</span><span class="ss">'+esc(me.email)+'</span></span>'+
+    '<span class="sr">'+(me.admin?'Admin':'Member')+'</span></div>' : '';
+  const ownerRow=op ? '<div class="share-row">'+avHtml(op)+'<span class="si"><span class="sn">'+esc(op.name)+
+    '<span class="tag">Owner</span>'+(op.admin?'<span class="tag">Admin</span>':'')+'</span><span class="ss">Confirms suggested content changes</span></span></div>' : '';
+  const otherAdmins=admins.filter(p=>(!op||p.id!==op.id) && p.id!==me.id);
+  const adminNames=otherAdmins.map(p=>p.name.split(' ')[0]).join(', ');
+  const link=location.href.split('#')[0]+'#item='+kind+':'+id+'&user='+state.user;
+  const m=openModal('<h3>Share '+esc(kind)+'</h3><p>Access, ownership, and roles for <strong style="color:var(--ink)">'+esc(name)+'</strong>.</p>'+
+    '<div class="share-summary"><div class="share-section">Access</div><div class="share-row"><span class="logo"><span class="mg">B</span></span>'+
+      '<span class="si"><span class="sn">'+esc(accessName)+'</span><span class="ss">'+esc(accessSub)+'</span></span><span class="sr">Can use</span></div>'+
+    '<div class="share-section">People</div>'+ownerRow+memberRow+
+      '<div class="share-row"><span class="avs">'+otherAdmins.map(avHtml).join('')+'</span><span class="si"><span class="sn">'+esc(adminNames||'Admins')+'</span><span class="ss">Can manage who has access</span></span><span class="sr">Admins</span></div>'+
+    '<div class="share-link"><span><span class="sn" style="font-size:13px;font-weight:500">Link access</span><span class="sub">Works for people listed above</span></span>'+
+      '<button class="btn small" data-copy="'+esc(link)+'">'+COPY_SVG+' Copy link</button></div></div>'+
+    '<div class="mfoot">'+(me.admin?'<button class="btn quiet" data-share-manage>Manage access</button>':'<span style="font-size:11.5px;color:var(--ink3);margin-right:auto">Ask an Admin to change access.</span>')+
+      '<button class="btn" data-m-close>Done</button></div>');
+  const manage=m.querySelector('[data-share-manage]');
+  if(manage) manage.onclick=()=>openAccessPanel(kind,id);
+}
+
+function accStrip(kind, id){
+  const w = whoCanUse(kind, id);
+  const s = kind==='skill' ? skillById(id) : null;
+  const who = w.everyone ? 'Everyone at Bevel'
+    : (w.teams.length ? w.teams.map(t=>t.name).join(' · ') : 'No one yet');
+  const extra = w.people.length ? ' · +'+w.people.length+(w.people.length===1?' person':' people') : '';
+  return '<div class="acc"><span class="ak">Access</span><span'+(w.everyone||w.teams.length?'':' style="color:var(--wait)"')+'>'+
+    esc(who)+extra+'</span>'+
+    '<span style="color:var(--ink3)">·</span><span>Owner: '+esc(s?s.owner:'the Admins')+'</span>'+
+    '<button class="btn tiny quiet" data-acc>Manage</button>'+
+    '<span class="admintag">Admins only</span></div>';
+}
+
+function openModal(html){
+  const w = $('#mwrap');
+  w.innerHTML = '<div class="mcard">'+html+'</div>';
+  w.classList.add('on');
+  w.onclick = e=>{ if(e.target===w) closeAgentModal(); };
+  w.querySelectorAll('[data-m-close]').forEach(b=>b.onclick=closeAgentModal);
+  wire(w);
+  return w;
+}
+
+function openAccessPanel(kind, id, fork){
+  if(!currentUser().admin){ openSharePanel(kind,id); return; }
+  const name = itemName(kind, id);
+  const w = whoCanUse(kind, id);
+  const s = kind==='skill' ? skillById(id) : null;
+  const grp = kind==='skill' ? groupOf(id) : null;
+  let body = '';
+  if(fork){
+    body = '<p style="margin-top:12px">Everyone’s access here comes from the <strong>'+esc(CAT_LABEL(fork))+'</strong> category — the whole category is granted to everyone at Bevel.</p>'+
+      '<div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">'+
+      '<button class="btn small" data-p-exclude>Exclude just this skill</button>'+
+      '<button class="btn small quiet" data-p-cat>Open the category</button></div>';
+  } else {
+    const rows = [];
+    if(w.everyone){
+      const viaCat = kind==='skill' && ACCESS.company.cats.includes(grp);
+      rows.push('<div class="kv"><span class="k">Everyone at Bevel'+
+        '<span class="sub">'+(viaCat?'Via the '+esc(CAT_LABEL(grp))+' category':'In the baseline — every team gets it')+'</span></span>'+
+        '<span class="v"><button class="btn tiny quiet" data-p-rm="everyone">Remove</button></span></div>');
+    } else if(kind==='skill' && isExcluded(kind,id) && ACCESS.company.cats.includes(grp)){
+      rows.push('<div class="kv"><span class="k">Everyone at Bevel'+
+        '<span class="sub">Excluded from the '+esc(CAT_LABEL(grp))+' category</span></span>'+
+        '<span class="v"><button class="btn tiny quiet" data-p-restore>Restore</button></span></div>');
+    }
+    for(const t of w.teams){
+      const direct = ACCESS[t.id].items.some(i=>i.kind===kind&&i.id===id) || (kind==='tool'&&ACCESS[t.id].tools.includes(id));
+      rows.push('<div class="kv"><span class="k">'+esc(t.name)+
+        '<span class="sub">'+(direct?'Added directly':'Via the '+esc(CAT_LABEL(grp))+' category')+'</span></span>'+
+        '<span class="v"><button class="btn tiny quiet" data-p-rm="team:'+t.id+'">Remove</button></span></div>');
+    }
+    for(const p of w.people){
+      rows.push('<div class="kv"><span class="k" style="display:flex;gap:10px;align-items:center">'+avHtml(p)+
+        '<span>'+esc(p.name)+'<span class="sub">Added individually</span></span></span>'+
+        '<span class="v"><button class="btn tiny quiet" data-p-rm="person:'+p.id+'">Remove</button></span></div>');
+    }
+    if(!rows.length) rows.push('<p style="margin-top:12px;color:var(--wait);font-size:13px">No one can use this right now — add a team below.</p>');
+    const op = s ? (PEOPLE.find(p=>p.name===s.owner) || PEOPLE.find(p=>p.name.split(' ')[0]===s.owner)) : null;
+    body = rows.join('')+
+      '<div class="kv"><span class="k" style="display:flex;gap:10px;align-items:center">'+(op?avHtml(op):'')+
+      '<span>'+esc(s?s.owner:'The Admins')+'<span class="sub">Owner — confirms changes here</span></span></span><span class="v"></span></div>';
+    if(!w.everyone){
+      body += '<input class="addin" id="acc-add" type="text" placeholder="Add a team or person" autocomplete="off">'+
+        '<div class="mrows" id="acc-rows"></div>';
+    } else {
+      body += '<p style="font-size:12px;color:var(--ink3);margin-top:12px">Everyone can already use this. Admins can always see everything.</p>';
+    }
+  }
+  const m = openModal('<h3>Who can use '+esc(name)+'</h3>'+body+
+    '<div class="mfoot" style="align-items:center"><span class="admintag" style="margin-right:auto">Only Admins see this</span>'+
+    (fork?'<button class="btn quiet" data-p-back>‹ Back</button>':'<button class="btn quiet" data-m-close>Close</button>')+'</div>');
+  const refresh = ()=>{ render(); openAccessPanel(kind, id); };
+  if(fork){
+    m.querySelector('[data-p-exclude]').onclick = ()=>{
+      EXCLUSIONS.push({kind, id});
+      toast('Excluded — only teams you add can use it now.');
+      refresh();
+    };
+    m.querySelector('[data-p-cat]').onclick = ()=>{
+      closeAgentModal(); state.view='console'; state.team='company'; state.item=null; render(); window.scrollTo({top:0});
+    };
+    m.querySelector('[data-p-back]').onclick = ()=>openAccessPanel(kind, id);
+    return;
+  }
+  m.querySelectorAll('[data-p-rm]').forEach(b=>b.onclick=()=>{
+    const v = b.dataset.pRm;
+    if(v==='everyone'){
+      if(kind==='skill' && ACCESS.company.cats.includes(grp)){ openAccessPanel(kind, id, grp); return; }
+      if(kind==='tool') ACCESS.company.tools = ACCESS.company.tools.filter(x=>x!==id);
+      ACCESS.company.items = ACCESS.company.items.filter(i=>!(i.kind===kind&&i.id===id));
+      toast('Removed from the baseline.');
+      refresh(); return;
+    }
+    const [g, pid] = v.split(':');
+    if(g==='team'){
+      const a = ACCESS[pid];
+      if(kind==='tool') a.tools = a.tools.filter(x=>x!==id);
+      a.items = a.items.filter(i=>!(i.kind===kind&&i.id===id));
+      toast('Removed for '+teamById(pid).name+'.');
+    } else {
+      const i = EXCEPTIONS.findIndex(x=>x.person===pid && x.kind===kind && x.id===id);
+      if(i>=0) EXCEPTIONS.splice(i,1);
+      toast('Removed for '+personById(pid).name+'.');
+    }
+    refresh();
+  });
+  const rb = m.querySelector('[data-p-restore]');
+  if(rb) rb.onclick = ()=>{
+    const i = EXCLUSIONS.findIndex(x=>x.kind===kind&&x.id===id);
+    if(i>=0) EXCLUSIONS.splice(i,1);
+    toast('Restored — everyone can use it again.');
+    refresh();
+  };
+  const inp = m.querySelector('#acc-add');
+  if(inp){
+    const rowsEl = m.querySelector('#acc-rows');
+    const draw = ()=>{
+      const q = inp.value.trim().toLowerCase();
+      const cand = [
+        ...TEAMS.filter(t=>!w.teams.some(x=>x.id===t.id))
+          .map(t=>({g:'team', id:t.id, t:t.name, d:t.members.map(m2=>personById(m2).name.split(' ')[0]).join(', '), k:'Team'})),
+        ...PEOPLE.filter(p=>!w.people.some(x=>x.id===p.id) && !w.teams.some(t=>t.members.includes(p.id)))
+          .map(p=>({g:'person', id:p.id, t:p.name, d:p.email, k:'Person'})),
+      ].filter(c=>!q || (c.t+' '+c.d).toLowerCase().includes(q));
+      rowsEl.innerHTML = cand.map(c=>'<button class="pal-row" data-pk="'+c.g+':'+c.id+'">'+
+        (c.g==='team'?'<span class="slashic">'+esc(c.t[0])+'</span>':avHtml(personById(c.id)))+
+        '<span class="pr-body"><span class="pr-t">'+esc(c.t)+'</span><span class="pr-d">'+esc(c.d)+'</span></span>'+
+        '<span class="pr-k">'+esc(c.k)+'</span></button>').join('')
+        || '<div class="pal-empty">No one left to add.</div>';
+      rowsEl.querySelectorAll('[data-pk]').forEach(b=>b.onclick=()=>{
+        const [g, pid] = b.dataset.pk.split(':');
+        if(g==='team'){
+          if(kind==='tool') ACCESS[pid].tools.push(id);
+          else ACCESS[pid].items.push({kind, id});
+          toast('Added — everyone on '+teamById(pid).name+' can use it now.');
+        } else {
+          EXCEPTIONS.push({person:pid, kind, id});
+          toast('Added for '+personById(pid).name+' — an individual exception.');
+        }
+        refresh();
+      });
+    };
+    inp.oninput = draw; draw();
+  }
+}
+
+function peoplePreview(ids,total){
+  const shown=ids.map(personById).filter(p=>p&&!p.agent).slice(0,5);
+  const left=Math.max(0,total-shown.length);
+  return shown.map(avHtml).join('')+(left?'<span class="more-av">+'+left+'</span>':'');
+}
+function renderConsole(){
+  const base = baselineCounts();
+  const teamCard = t => {
+    const a = ACCESS[t.id];
+    const adds = [
+      ...a.cats.map(c=>CAT_LABEL(c)+' — '+catSkills(c).length+' skills'),
+      ...a.tools.map(x=>toolById(x).name),
+      ...a.items.map(i=>itemName(i.kind, i.id)),
+    ];
+    return '<div class="oc-cell"><button class="oc-card" data-team="'+t.id+'">'+
+      '<span class="t">'+esc(t.name)+'</span>'+
+      '<span class="row"><span class="avs">'+peoplePreview(t.members,t.headcount)+'</span>'+
+      '<span class="meta">'+t.headcount+' members</span></span>'+
+      (adds.length ? '<span class="chiprow">'+adds.map(x=>'<span class="chip">+ '+esc(x)+'</span>').join('')+'</span>'
+                   : '<span class="meta">The baseline only — nothing extra yet.</span>')+
+    '</button></div>';
+  };
+  const admins = PEOPLE.filter(p=>p.admin).map(p=>p.name);
+  return '<button class="back" data-exit-console>‹ Skills</button>'+
+    '<div class="kicker">Admin console</div>'+
+    '<div class="item-title"><h1>Teams</h1></div>'+
+    '<p class="lede">A 200-person organization. Everyone starts from the baseline at the top; each team adds what it needs. Select a team to manage its access and membership.</p>'+
+    '<div class="oc-root"><button class="oc-card" data-team="company">'+
+      '<span class="t">Everyone at Bevel</span>'+
+      '<span class="row"><span class="avs">'+peoplePreview(PEOPLE.filter(p=>!p.agent).map(p=>p.id),ORG_SIZE)+'</span>'+
+      '<span class="meta">'+ORG_SIZE+' people</span></span>'+
+      '<span class="chiprow"><span class="chip">'+base.skills+' skills</span><span class="chip">'+base.tools+' tools</span></span>'+
+      '<span class="meta">The baseline — what every team starts from.</span>'+
+    '</button><div class="oc-stem"></div></div>'+
+    '<div class="oc-teams">'+TEAMS.map(teamCard).join('')+'</div>'+
+    '<div class="oc-note">'+esc(admins.slice(0,-1).join(', ')+' and '+admins[admins.length-1])+
+      ' are Admins — they manage access and can always see everything.</div>';
+}
+
+function grantRow(tid, kind, id){
+  let icon='', title='', sub='', target='';
+  if(kind==='cat'){
+    title = CAT_LABEL(id)+' — category';
+    sub = catSkills(id).length+' skills · includes new skills automatically';
+    target=' data-grant-cat="'+id+'"';
+  } else if(kind==='tool'){
+    const t = toolById(id); icon = logoHtml(t); title = t.name; sub = 'Tool · '+t.purpose;
+    target=' data-item="tool:'+id+'"';
+  } else {
+    icon = '<span class="slashic">/</span>';
+    title = itemName('skill', id); sub = 'Skill · from the '+CAT_LABEL(groupOf(id))+' category';
+    target=' data-item="skill:'+id+'"';
+  }
+  return '<div class="kv"><button class="grant-link"'+target+'>'+icon+
+    '<span style="min-width:0">'+esc(title)+'<span class="sub">'+esc(sub)+'</span></span></button>'+
+    '<span class="v"><button class="btn tiny quiet" data-g-rm="'+tid+'|'+kind+'|'+id+'">Remove</button></span></div>';
+}
+
+function renderTeam(tid){
+  const isCo = tid==='company';
+  const t = isCo ? null : teamById(tid);
+  if(!isCo && !t){ state.team=null; return renderConsole(); }
+  const a = ACCESS[tid];
+  const base = baselineCounts();
+  let shelf = '';
+  if(isCo){
+    shelf += '<div class="h4">Skills everyone can use</div>'+
+      ((a.cats.map(c=>grantRow(tid,'cat',c)).join('')+
+        a.items.filter(i=>i.kind==='skill').map(i=>grantRow(tid,'skill',i.id)).join('')) ||
+       '<p style="font-size:13px;color:var(--ink2);padding:4px 0 2px">No skills in the baseline yet.</p>');
+    if(EXCLUSIONS.length) shelf += '<div class="h4">Excluded from the baseline</div>'+EXCLUSIONS.map(x=>
+      '<div class="kv"><button class="grant-link" data-item="'+x.kind+':'+x.id+'"><span>'+esc(itemName(x.kind,x.id))+
+      '<span class="sub">Pulled out of the '+esc(CAT_LABEL(groupOf(x.id)))+' category — only teams granted it directly can use it</span></span></button>'+
+      '<span class="v"><button class="btn tiny quiet" data-x-restore="'+x.kind+'|'+x.id+'">Restore</button></span></div>').join('');
+    shelf += '<div class="h4">Tools everyone can use</div>'+
+      (a.tools.map(x=>grantRow(tid,'tool',x)).join('') ||
+       '<p style="font-size:13px;color:var(--ink2);padding:4px 0 2px">No tools in the baseline yet.</p>');
+    shelf += '<div style="margin-top:16px"><button class="btn small" data-add-grants="company">+ Add to the baseline</button></div>';
+  } else {
+    shelf += '<div class="h4">From everyone at Bevel</div>'+
+      '<div class="kv"><span class="k">The baseline<span class="sub">'+base.skills+' skills · '+base.tools+' tools — granted to everyone</span></span>'+
+      '<span class="v"><button class="btn tiny quiet" data-team="company">View ›</button></span></div>';
+    const rows = a.cats.map(c=>grantRow(tid,'cat',c))
+      .concat(a.tools.map(x=>grantRow(tid,'tool',x)))
+      .concat(a.items.map(i=>grantRow(tid, i.kind==='tool'?'tool':'skill', i.id)));
+    shelf += '<div class="h4">'+esc(t.name)+' also gets</div>'+
+      (rows.join('') || '<p style="font-size:13px;color:var(--ink2);padding:4px 0 2px">Nothing extra yet — this team uses the baseline.</p>');
+    shelf += '<div style="margin-top:16px"><button class="btn small" data-add-grants="'+tid+'">+ Add skills or tools</button></div>';
+  }
+  const people = isCo ? PEOPLE.filter(p=>!p.agent) : t.members.map(personById);
+  const peopleCount = isCo ? ORG_SIZE : t.headcount;
+  const memRow = p => {
+    const exx = EXCEPTIONS.map((x,i)=>({x,i})).filter(e=>e.x.person===p.id);
+    return '<div class="mem">'+avHtml(p)+'<span class="mi">'+
+      '<span class="mn">'+esc(p.name)+(p.admin?'<span class="tag">Admin</span>':'')+(p.agent?'<span class="tag">Agent account</span>':'')+'</span>'+
+      '<span class="msub">'+esc(p.email)+'</span>'+
+      exx.map(e=>'<span class="mx">Also has '+esc(itemName(e.x.kind,e.x.id))+' — added individually'+
+        '<button class="btn tiny quiet" data-ex-rm="'+e.i+'">Remove</button></span>').join('')+
+      '</span>'+
+      (!isCo?'<button class="rm-x" data-mem-rm="'+tid+'|'+p.id+'" title="Remove from '+esc(t.name)+'" aria-label="Remove '+esc(p.name)+' from '+esc(t.name)+'">×</button>':'')+
+    '</div>';
+  };
+  return '<button class="back" data-team="">‹ Teams</button>'+
+    '<div class="item-grid"><article>'+
+      '<div class="kicker">'+(isCo?'Admin console':'Admin console · Team')+'</div>'+
+      '<div class="item-title"><h1>'+esc(isCo?'Everyone at Bevel':t.name)+'</h1></div>'+
+      '<p class="lede">'+(isCo?'The baseline. Anything granted here can be used by every person on every team.'
+                              :'People on this team get the baseline, plus anything granted on this page.')+'</p>'+
+      shelf+
+    '</article>'+
+    '<aside><div class="railhead">'+(isCo?'People':'Members')+
+      '<span class="railcount" style="display:inline-flex;background:var(--inset);color:var(--ink2)">'+peopleCount+'</span></div>'+
+      '<div class="railhint">Showing '+people.length+' sample '+(people.length===1?'profile':'profiles')+' of '+peopleCount+'.</div>'+
+      people.map(memRow).join('')+
+      (!isCo?'<div style="margin-top:14px"><button class="btn small" data-add-person="'+tid+'">+ Add person</button></div>':'')+
+    '</aside></div>';
+}
+
+function openGrantModal(tid, q0){
+  const isCo = tid==='company';
+  const target = isCo ? 'the baseline' : teamById(tid).name;
+  const candidates = ()=>{
+    const list = [];
+    for(const c of ['gtm','org','general','eng']){
+      if(ACCESS[tid].cats.includes(c)) continue;
+      if(!isCo && ACCESS.company.cats.includes(c)) continue;
+      list.push({g:'cat', id:c, t:CAT_LABEL(c)+' — category', d:catSkills(c).length+' skills · includes new skills automatically', k:'Category'});
+    }
+    for(const tl of TOOLS){
+      if(teamGrants(tid,'tool',tl.id)) continue;
+      if(!isCo && teamGrants('company','tool',tl.id)) continue;
+      list.push({g:'tool', id:tl.id, t:tl.name, d:tl.purpose, k:'Tool', logo:tl});
+    }
+    for(const s of [...SKILLS, ...ENG_SKILLS]){
+      if(teamGrants(tid,'skill',s.id)) continue;
+      if(!isCo && teamGrants('company','skill',s.id)) continue;
+      list.push({g:'skill', id:s.id, t:s.name, d:'Skill · from the '+CAT_LABEL(groupOf(s.id))+' category', k:'Skill'});
+    }
+    return list;
+  };
+  const m = openModal('<h3>Add to '+esc(target)+'</h3>'+
+    '<p>Granting a category covers every skill in it, including new ones.</p>'+
+    '<input class="addin" id="g-add" type="text" placeholder="Search skills, tools, and categories" autocomplete="off">'+
+    '<div class="mrows" id="g-rows"></div>'+
+    '<div class="mfoot"><button class="btn quiet" data-m-close>Done</button></div>');
+  const inp = m.querySelector('#g-add'), rowsEl = m.querySelector('#g-rows');
+  const draw = ()=>{
+    const q = inp.value.trim().toLowerCase();
+    const cand = candidates().filter(c=>!q || (c.t+' '+c.d).toLowerCase().includes(q));
+    rowsEl.innerHTML = cand.map(c=>'<button class="pal-row" data-gk="'+c.g+':'+c.id+'">'+
+      (c.logo?logoHtml(c.logo):'<span class="slashic">'+(c.g==='cat'?'▤':'/')+'</span>')+
+      '<span class="pr-body"><span class="pr-t">'+esc(c.t)+'</span><span class="pr-d">'+esc(c.d)+'</span></span>'+
+      '<span class="pr-k">'+esc(c.k)+'</span></button>').join('')
+      || '<div class="pal-empty">Nothing left to add — '+esc(target)+' already covers it all.</div>';
+    rowsEl.querySelectorAll('[data-gk]').forEach(b=>b.onclick=()=>{
+      const [g, id] = b.dataset.gk.split(':');
+      if(g==='cat') ACCESS[tid].cats.push(id);
+      else if(g==='tool') ACCESS[tid].tools.push(id);
+      else ACCESS[tid].items.push({kind:'skill', id});
+      toast('Added to '+target+'.');
+      render();
+      openGrantModal(tid, inp.value);
+    });
+  };
+  if(q0) inp.value = q0;
+  inp.oninput = draw; draw();
+  setTimeout(()=>inp.focus(), 40);
+}
+
+function openPersonModal(tid){
+  const t = teamById(tid);
+  const left = PEOPLE.filter(p=>!t.members.includes(p.id));
+  const m = openModal('<h3>Add a person to '+esc(t.name)+'</h3>'+
+    '<p>They get everything this team can use.</p>'+
+    '<div class="mrows" style="margin-top:12px">'+
+    (left.map(p=>'<button class="pal-row" data-pp="'+p.id+'">'+avHtml(p)+
+      '<span class="pr-body"><span class="pr-t">'+esc(p.name)+'</span><span class="pr-d">'+esc(p.email)+'</span></span>'+
+      (p.admin?'<span class="pr-k">Admin</span>':(p.agent?'<span class="pr-k">Agent account</span>':''))+
+      '</button>').join('') || '<div class="pal-empty">Everyone is already on this team.</div>')+
+    '</div><div class="mfoot"><button class="btn quiet" data-m-close>Close</button></div>');
+  m.querySelectorAll('[data-pp]').forEach(b=>b.onclick=()=>{
+    t.members.push(b.dataset.pp);
+    t.headcount++;
+    toast(personById(b.dataset.pp).name+' added to '+t.name+'.');
+    closeAgentModal();
+    render();
+  });
+}
+
+/* =========================================================
+   Render + wiring
+   ========================================================= */
+function wire(root){
+  root.querySelectorAll('[data-share]').forEach(b=>b.onclick=e=>{
+    e.stopPropagation();
+    const [kind,id]=b.dataset.share.split(':');
+    openSharePanel(kind,id);
+  });
+  root.querySelectorAll('[data-access]').forEach(b=>b.onclick=e=>{
+    e.stopPropagation();
+    const [kind,id]=b.dataset.access.split(':');
+    openAccessPanel(kind,id);
+  });
+  root.querySelectorAll('[data-ftab]').forEach(b=>b.onclick=e=>{
+    e.stopPropagation(); state.tabFile=b.dataset.ftab; state.editing=null; render();
+  });
+  root.querySelectorAll('[data-item]').forEach(b=>b.onclick=e=>{
+    e.stopPropagation();
+    state.item=b.dataset.item; state.editing=null; state.tabFile='main';
+    const [k,id]=state.item.split(':');
+    state.team=null;
+    state.view='skills';
+    if(k==='tool'){ if(state.cat!=='all'&&state.cat!==shelfForTool(id)) state.cat=shelfForTool(id); }
+    else { const s=skillById(id); if(state.cat!=='all'&&!(state.cat==='owned'&&ownsSkill(s))&&s&&state.cat!==shelfFor(s)) state.cat=shelfFor(s); }
+    render(); window.scrollTo({top:0});
+  });
+  root.querySelectorAll('[data-grant-cat]').forEach(b=>b.onclick=()=>{
+    state.view='skills'; state.cat=b.dataset.grantCat; state.item=null; state.team=null; state.editing=null;
+    render(); window.scrollTo({top:0});
+  });
+  root.querySelectorAll('[data-back]').forEach(b=>b.onclick=()=>{ state.item=null; state.editing=null; render(); });
+  /* propose → edit → pending. A branch and a pull request underneath; none of
+     that shows here, only the text and who has to say yes. */
+  root.querySelectorAll('[data-propose]').forEach(b=>b.onclick=()=>{
+    const [box,fid]=b.dataset.propose.split('|');
+    const t=targetOf(box,fid); if(!t) return;
+    state.editing=fileKey(t.c,t.f);
+    render();
+  });
+  root.querySelectorAll('[data-edit-cancel]').forEach(b=>b.onclick=()=>{ state.editing=null; render(); });
+  root.querySelectorAll('[data-edit-submit]').forEach(b=>b.onclick=()=>{
+    const [box,fid]=b.dataset.editSubmit.split('|');
+    const t=targetOf(box,fid); if(!t) return;
+    const base=fileText(t.c,t.f), text=$('#edit-text').value;
+    if(text.trim()===base.trim()){ toast('Nothing changed yet — edit the text first.'); return; }
+    PROPOSALS.push({ id:'p-'+(++propSeq), box, file:fid, by:state.user, when:'today', status:'pending', base, text });
+    state.editing=null; render();
+    toast('Sent to '+t.c.owner+' — nothing changes until they approve.');
+  });
+  root.querySelectorAll('[data-prop-approve]').forEach(b=>b.onclick=()=>{
+    const p=PROPOSALS.find(x=>x.id===b.dataset.propApprove); if(!p) return;
+    const t=targetOf(p.box,p.file); if(!t) return;
+    if(p.conflict || p.base!==fileText(t.c,t.f)){    /* never merge onto text it was not written against */
+      p.conflict=true; render();
+      toast('Blocked — '+proposalAuthor(p).name.split(' ')[0]+' has to resolve this against the current text first.');
+      return;
+    }
+    setFileText(t.c,t.f,p.text);
+    p.status='approved'; p.decided='today';
+    const blocked=reconcile(p.box,p.file);
+    render();
+    toast(blocked
+      ? 'Approved. '+blocked+' other change'+(blocked===1?'':'s')+' on this file '+(blocked===1?'is':'are')+' now blocked — same lines.'
+      : 'Approved — it now reads with '+proposalAuthor(p).name.split(' ')[0]+'’s change.');
+  });
+  root.querySelectorAll('[data-prop-decline]').forEach(b=>b.onclick=()=>{
+    const p=PROPOSALS.find(x=>x.id===b.dataset.propDecline); if(!p) return;
+    p.status='declined'; p.decided='today';
+    render();
+    toast('Declined. Nothing was changed.');
+  });
+  root.querySelectorAll('[data-prop-withdraw]').forEach(b=>b.onclick=()=>{
+    const i=PROPOSALS.findIndex(x=>x.id===b.dataset.propWithdraw);
+    if(i>=0) PROPOSALS.splice(i,1);
+    render();
+    toast('Withdrawn.');
+  });
+  root.querySelectorAll('[data-connect]').forEach(b=>b.onclick=e=>{
+    e.stopPropagation();
+    const t=toolById(b.dataset.connect);
+    state.connected[t.id]=true;
+    render();
+    toast(t.vars.some(v=>v.oauth)?'Signed in to '+t.name+'.':'Key added for '+t.name+'.');
+  });
+  root.querySelectorAll('[data-copy]').forEach(b=>b.onclick=e=>{
+    e.stopPropagation();
+    const v=b.dataset.copy;
+    (navigator.clipboard?.writeText(v)||Promise.reject()).then(()=>{
+      if(b._t) clearTimeout(b._t);
+      if(!b.dataset.orig) b.dataset.orig=b.innerHTML;
+      b.innerHTML='✓ Copied';
+      b._t=setTimeout(()=>{ b.innerHTML=b.dataset.orig; },1400);
+    }).catch(()=>toast(v));
+  });
+  root.querySelectorAll('[data-copyskill]').forEach(b=>b.onclick=e=>{
+    e.stopPropagation();
+    const v=b.dataset.copyskill;
+    (navigator.clipboard?.writeText(v)||Promise.reject()).then(()=>{
+      if(b._t) clearTimeout(b._t);
+      b.innerHTML='<span class="ck">✓</span>';
+      b._t=setTimeout(()=>{ b.innerHTML=COPY_SVG; },1200);
+    }).catch(()=>toast(v));
+  });
+  /* admin surfaces */
+  root.querySelectorAll('[data-acc]').forEach(b=>b.onclick=e=>{
+    e.stopPropagation();
+    const [k,id]=(state.item||'').split(':');
+    if(k) openAccessPanel(k,id);
+  });
+  root.querySelectorAll('[data-team]').forEach(b=>b.onclick=e=>{
+    e.stopPropagation(); closeAgentModal();
+    state.view='console'; state.team=b.dataset.team||null; state.item=null; state.editing=null;
+    render(); window.scrollTo({top:0});
+  });
+  root.querySelectorAll('[data-exit-console]').forEach(b=>b.onclick=()=>{
+    state.view='skills'; state.team=null; render();
+  });
+  root.querySelectorAll('[data-exit-settings]').forEach(b=>b.onclick=()=>{
+    state.view='skills'; state.team=null; render(); window.scrollTo({top:0});
+  });
+  root.querySelectorAll('[data-secret-rotate]').forEach(b=>b.onclick=()=>
+    toast('“'+b.dataset.secretRotate+'” — a new value would be requested here. It is never displayed afterwards.'));
+  root.querySelectorAll('[data-add-grants]').forEach(b=>b.onclick=()=>openGrantModal(b.dataset.addGrants));
+  root.querySelectorAll('[data-add-person]').forEach(b=>b.onclick=()=>openPersonModal(b.dataset.addPerson));
+  root.querySelectorAll('[data-g-rm]').forEach(b=>b.onclick=()=>{
+    const [tid,kind,id]=b.dataset.gRm.split('|');
+    const a=ACCESS[tid];
+    if(kind==='cat') a.cats=a.cats.filter(x=>x!==id);
+    else if(kind==='tool') a.tools=a.tools.filter(x=>x!==id);
+    else a.items=a.items.filter(i=>!(i.kind==='skill'&&i.id===id));
+    toast('Removed.');
+    render();
+  });
+  root.querySelectorAll('[data-x-restore]').forEach(b=>b.onclick=()=>{
+    const [kind,id]=b.dataset.xRestore.split('|');
+    const i=EXCLUSIONS.findIndex(x=>x.kind===kind&&x.id===id);
+    if(i>=0) EXCLUSIONS.splice(i,1);
+    toast('Restored to the baseline.');
+    render();
+  });
+  root.querySelectorAll('[data-mem-rm]').forEach(b=>b.onclick=()=>{
+    const [tid,pid]=b.dataset.memRm.split('|');
+    const t=teamById(tid);
+    t.members=t.members.filter(x=>x!==pid);
+    t.headcount=Math.max(0,t.headcount-1);
+    toast(personById(pid).name+' removed from '+t.name+' — they keep the baseline.');
+    render();
+  });
+  root.querySelectorAll('[data-ex-rm]').forEach(b=>b.onclick=()=>{
+    EXCEPTIONS.splice(+b.dataset.exRm,1);
+    toast('Individual access removed.');
+    render();
+  });
+}
+
+function render(){
+  if(state.view==='console' && !currentUser().admin){ state.view='skills'; state.team=null; }
+  renderTop();
+  renderSide();
+  const main = $('#main');
+  if(state.view==='secrets'){
+    main.innerHTML = renderSecrets();
+    wire(main);
+  } else if(state.app==='knowledge'){
+    main.innerHTML = renderKnowledge();
+    wire(main);
+    if(state.editing) setTimeout(()=>$('#edit-text')?.focus(), 40);
+  } else if(state.view==='console'){
+    main.innerHTML = state.team ? renderTeam(state.team) : renderConsole();
+    wire(main);
+  } else if(state.item){
+    const [kind,id] = state.item.split(':');
+    main.innerHTML = kind==='skill' ? renderSkillItem(skillById(id)) : renderToolItem(toolById(id));
+    wire(main);
+    if(state.editing) setTimeout(()=>$('#edit-text')?.focus(), 40);
+  } else {
+    main.innerHTML = renderShelf();
+    wire(main);
+    wireSearch();
+  }
+}
+
+document.addEventListener('keydown', e=>{
+  if(e.key==='Escape'){
+    if(state.pal && state.pal.open) closeSdrop();
+    else if($('#mwrap').classList.contains('on')) closeAgentModal();
+    else if(state.appMenu){ state.appMenu=false; renderAppMenu(); }
+    else if(state.setMenu){ state.setMenu=false; renderSetMenu(); }
+    else if(state.menu){ state.menu=false; renderMenu(); }
+    else if(state.view==='secrets'){ state.view='skills'; render(); }
+    else if(state.editing){ state.editing=null; render(); }
+    else if(state.item){ state.item=null; render(); }
+    else if(state.view==='console'){ if(state.team) state.team=null; else state.view='skills'; render(); }
+  }
+  if(e.key==='/'){
+    const el=document.activeElement;
+    if(el && (el.tagName==='INPUT'||el.tagName==='TEXTAREA')) return;
+    e.preventDefault();
+    slashSearch();
+  }
+});
+document.addEventListener('mousedown', e=>{
+  if(state.pal && state.pal.open && !e.target.closest('.search-wrap')) closeSdrop();
+});
+document.addEventListener('click', e=>{
+  if(state.menu && !e.target.closest('#pmenu') && !e.target.closest('#me')){ state.menu=false; renderMenu(); }
+  if(state.appMenu && !e.target.closest('#appmenu') && !e.target.closest('#brand') && !e.target.closest('#appchip')){ state.appMenu=false; renderAppMenu(); }
+  if(state.setMenu && !e.target.closest('#setmenu') && !e.target.closest('#gear')){ state.setMenu=false; renderSetMenu(); }
+});
+
+/* boot from hash for demos/QA: #item=skill:heyreach-campaign&view=tools&theme=light */
+try{
+  const hp = new URLSearchParams(location.hash.slice(1));
+  if(hp.get('user') && PEOPLE.some(p=>p.id===hp.get('user'))) state.user = hp.get('user');
+  if(hp.get('app') && APPS.some(a=>a.id===hp.get('app'))) state.app = hp.get('app');
+  if(hp.get('doc') && kbById(hp.get('doc'))) state.kbDoc = hp.get('doc');
+  if(hp.get('view')) state.view = hp.get('view');
+  if(hp.get('cat')) state.cat = hp.get('cat');
+  if(hp.get('item')) state.item = hp.get('item');
+  if(hp.get('tab')) state.tabFile = hp.get('tab');
+  if(hp.get('team')) state.team = hp.get('team');
+  if(hp.get('theme')) document.documentElement.dataset.theme = hp.get('theme');
+}catch(e){}
+
+/* two changes already in flight, so the pending state is visible on arrival */
+seedProposal('heyreach-campaign', 'main',
+  'human can handle replies in German. Ask.',
+  'human can handle replies in German. For Swiss prospects write High German\n  without ß — it does not exist in CH orthography and reads as a typo. Ask.',
+  'john', '29 Jul');
+seedProposal('create-reading-deck', 'design',
+  'say so in the commit message.',
+  'say so in the change request.',
+  'john', '30 Jul');
+seedProposal('knowledge', 'icp',
+  '| Size | 150–800 people |',
+  '| Size | 150–800 people, or 80+ if they run a shared services function |',
+  'john', '31 Jul');
+/* Maya edited the same row, so approving either one blocks the other */
+seedProposal('knowledge', 'icp',
+  '| Size | 150–800 people |',
+  '| Size | 250–1500 people — under 250 has never closed |',
+  'maya', '31 Jul');
+/* …while a change to a different section carries over on its own */
+seedProposal('knowledge', 'icp',
+  '| Region | DACH, Benelux |',
+  '| Region | DACH, Benelux, Nordics |',
+  'devon', '31 Jul');
+
+render();
+applyCollapse();
+try{
+  const hp2 = new URLSearchParams(location.hash.slice(1));
+  if(hp2.get('menu')){ state.menu=true; renderMenu(); }
+  if(hp2.get('pal')){ state.pal={open:true,q:'',sel:0}; renderSdrop(); }
+  if(hp2.get('acc') && state.item){
+    const [k,id] = state.item.split(':');
+    openAccessPanel(k, id, hp2.get('acc')==='fork' ? groupOf(id) : undefined);
+  }
+  if(hp2.get('share') && state.item){
+    const [k,id] = state.item.split(':');
+    openSharePanel(k,id);
+  }
+  if(hp2.get('review')) setTimeout(()=>$('.changebox')?.scrollIntoView({block:'center'}),120);
+  if(hp2.get('grants')) openGrantModal(hp2.get('grants'));
+}catch(e){}
+</script>
