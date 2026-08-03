@@ -9,25 +9,37 @@ import { hashPassword } from '../password-hash.js';
  * db.select()/insert()/update() consumes the next queued result; awaiting any
  * point of the chain resolves it.
  */
+interface FakeChain extends PromiseLike<unknown> {
+  values: (...args: unknown[]) => FakeChain;
+  set: (...args: unknown[]) => FakeChain;
+  where: (...args: unknown[]) => FakeChain;
+  limit: (...args: unknown[]) => FakeChain;
+  from: (...args: unknown[]) => FakeChain;
+  orderBy: (...args: unknown[]) => FakeChain;
+  returning: (...args: unknown[]) => FakeChain;
+  onConflictDoUpdate: (...args: unknown[]) => FakeChain;
+}
+
 function makeFakeDb(queue: unknown[]) {
   const captured: { values: unknown[]; set: unknown[] } = { values: [], set: [] };
-  function nextChain() {
+  function nextChain(): FakeChain {
     const result = queue.shift();
-    const chain: any = {};
-    const passthrough = (recorder?: (args: any[]) => void) =>
-      vi.fn((...args: any[]) => {
+    const passthrough = (recorder?: (args: unknown[]) => void) =>
+      vi.fn((...args: unknown[]) => {
         recorder?.(args);
         return chain;
       });
-    chain.values = passthrough((a) => captured.values.push(a[0]));
-    chain.set = passthrough((a) => captured.set.push(a[0]));
-    chain.where = passthrough();
-    chain.limit = passthrough();
-    chain.from = passthrough();
-    chain.orderBy = passthrough();
-    chain.returning = passthrough();
-    chain.onConflictDoUpdate = passthrough();
-    chain.then = (onF: any, onR: any) => Promise.resolve(result).then(onF, onR);
+    const chain: FakeChain = {
+      values: passthrough((a) => captured.values.push(a[0])),
+      set: passthrough((a) => captured.set.push(a[0])),
+      where: passthrough(),
+      limit: passthrough(),
+      from: passthrough(),
+      orderBy: passthrough(),
+      returning: passthrough(),
+      onConflictDoUpdate: passthrough(),
+      then: (onFulfilled, onRejected) => Promise.resolve(result).then(onFulfilled, onRejected),
+    };
     return chain;
   }
   const db = {
@@ -128,6 +140,25 @@ describe('AuthService.createAccount / changePassword', () => {
     expect(user.email).toBe('alice@example.com');
     const set = captured.set[0] as { passwordHash: string };
     expect(set.passwordHash.startsWith('scrypt:')).toBe(true);
+  });
+
+  it('createAccount persists an explicitly supplied name on re-provisioning', async () => {
+    // Existing row has name 'Alice'; admin re-provisions with a new name.
+    const { db, captured } = makeFakeDb([[ROW], undefined]);
+    const svc = new AuthService(db, makeConfig());
+    const user = await svc.createAccount('alice@example.com', 'Alice Lidell', 'brand-new-pass');
+    const set = captured.set[0] as { name?: string };
+    expect(set.name).toBe('Alice Lidell');
+    expect(user.name).toBe('Alice Lidell');
+  });
+
+  it('createAccount without a name keeps the existing display name', async () => {
+    const { db, captured } = makeFakeDb([[ROW], undefined]);
+    const svc = new AuthService(db, makeConfig());
+    const user = await svc.createAccount('alice@example.com', undefined, 'brand-new-pass');
+    const set = captured.set[0] as { name?: string };
+    expect(set.name).toBeUndefined();
+    expect(user.name).toBe('Alice');
   });
 
   it('createAccount enforces the password policy', async () => {

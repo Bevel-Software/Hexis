@@ -14,6 +14,19 @@ import {
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/**
+ * Decoy hash verified when the email is unknown or has no password set, so
+ * those paths cost the same scrypt work as a real wrong-password attempt —
+ * without it, response timing would reveal which emails have accounts.
+ * Lazily computed once; the compared password never matches it (verification
+ * result is discarded — those paths always refuse).
+ */
+let decoyHashPromise: Promise<string> | null = null;
+function decoyHash(): Promise<string> {
+  decoyHashPromise ??= hashPassword('bevel-decoy-password-never-matches');
+  return decoyHashPromise;
+}
+
 function toAuthUser(user: {
   id: string;
   email: string;
@@ -78,7 +91,13 @@ export class AuthService {
       .from(users)
       .where(eq(users.email, normalizedEmail))
       .limit(1);
-    if (!user?.passwordHash || !(await verifyPassword(provided, user.passwordHash))) {
+    // Always run one scrypt verification — against the stored hash when there
+    // is one, against the decoy otherwise — so unknown emails and
+    // password-less (SSO-only) accounts take the same time as a wrong
+    // password and can't be enumerated via response timing.
+    const stored = user?.passwordHash ?? (await decoyHash());
+    const matches = await verifyPassword(provided, stored);
+    if (!user?.passwordHash || !matches) {
       throw new Error('Invalid credentials');
     }
     return { token: this.signToken(user.id, user.email), user: toAuthUser(user) };
@@ -122,14 +141,22 @@ export class AuthService {
     }
     this.assertAllowedDomain(normalizedEmail);
     this.assertPasswordPolicy(password);
-    const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
+    const suppliedName = (name ?? '').trim();
+    const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
     const user = await this.upsertUserByEmail(normalizedEmail, displayName);
     const passwordHash = await hashPassword(password);
+    // Persist an EXPLICITLY supplied name on re-provisioning too (the upsert
+    // keeps the existing row's name); when the admin left it blank, keep the
+    // existing name rather than clobbering it with the local-part fallback.
     await this.db
       .update(users)
-      .set({ passwordHash, updatedAt: new Date() })
+      .set(
+        suppliedName
+          ? { passwordHash, name: suppliedName, updatedAt: new Date() }
+          : { passwordHash, updatedAt: new Date() },
+      )
       .where(eq(users.id, user.id));
-    return toAuthUser(user);
+    return toAuthUser({ ...user, name: suppliedName || user.name });
   }
 
   /**

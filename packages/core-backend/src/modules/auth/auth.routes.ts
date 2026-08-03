@@ -1,6 +1,7 @@
 import express from 'express';
 import type { AuthService } from './auth.service.js';
 import { AUTH_COOKIE_NAME } from './auth.middleware.js'; // also imports Express Request augmentation
+import { FixedWindowRateLimiter } from './rate-limit.js';
 
 /**
  * Max age of the JWT cookie (seconds). Matches the JWT's own `expiresIn:
@@ -39,6 +40,18 @@ export function createAuthRoutes(
 ): express.Router {
   const router = express.Router();
 
+  // Brute-force guards on the password endpoints (scrypt also makes each
+  // attempt expensive server-side, so these double as DoS protection):
+  //  - login: a tight per-(ip, email) budget plus a wider per-ip budget so a
+  //    single address can't spray many emails; the pair key resets on a
+  //    successful login.
+  //  - change-password: per authenticated account (a stolen session must not
+  //    get unlimited guesses at the current password).
+  const loginPairLimiter = new FixedWindowRateLimiter(10, 15 * 60_000);
+  const loginIpLimiter = new FixedWindowRateLimiter(50, 15 * 60_000);
+  const changePasswordLimiter = new FixedWindowRateLimiter(10, 15 * 60_000);
+  const clientIp = (req: express.Request) => req.ip ?? req.socket.remoteAddress ?? 'unknown';
+
   // POST /api/auth/login — email + password login (unprotected): the env
   // bootstrap admin or a per-user account password (see AuthService).
   router.post('/auth/login', async (req, res) => {
@@ -51,9 +64,19 @@ export function createAuthRoutes(
       res.status(400).json({ error: 'email and password are required' });
       return;
     }
+    const ip = clientIp(req);
+    const pairKey = `${ip}|${email.trim().toLowerCase()}`;
+    if (!loginPairLimiter.consume(pairKey) || !loginIpLimiter.consume(ip)) {
+      res.status(429).json({ error: 'Too many attempts. Try again later.' });
+      return;
+    }
 
     try {
       const result = await authService.loginWithPassword(email, password);
+      // A real login clears the pair budget — a user who fumbled a few
+      // attempts isn't rate-limited on their next visit. (The wider per-ip
+      // window intentionally keeps counting.)
+      loginPairLimiter.reset(pairKey);
       // Also set the JWT as an HttpOnly cookie so transports that can't
       // carry headers (EventSource for SSE, image tags) authenticate
       // automatically. JSON callers continue to use the Bearer header
@@ -96,6 +119,10 @@ export function createAuthRoutes(
     };
     if (!newPassword) {
       res.status(400).json({ error: 'newPassword is required' });
+      return;
+    }
+    if (!changePasswordLimiter.consume(req.userId!)) {
+      res.status(429).json({ error: 'Too many attempts. Try again later.' });
       return;
     }
     try {
