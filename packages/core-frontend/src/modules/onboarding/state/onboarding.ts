@@ -67,18 +67,33 @@ export function markWelcomed(email: string): void {
   emit();
 }
 
-export function markOnboardingDone(email: string): void {
+export function markOnboardingDone(userId: string, email: string): void {
   if (doneLocally.has(email)) return;
   doneLocally.add(email);
   emit();
-  // Fire-and-record: the UI has already concluded, and the server write is
-  // idempotent. On failure the pill simply returns next sign-in — the honest
-  // outcome of a write that never landed.
-  void authFetch('/api/auth/onboarding-done', { method: 'POST' })
+  // `userId` states WHICH account this click meant. The bearer token is one
+  // shared localStorage key, so a tab still rendering account A after account
+  // B signed in elsewhere would otherwise conclude B's onboarding with A's
+  // intent. The server refuses the mismatch (409) rather than applying it.
+  void authFetch('/api/auth/onboarding-done', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId }),
+  })
     .then((res) => {
-      if (!res.ok) console.error('onboarding-done failed:', res.status);
+      if (res.ok) return;
+      console.error('onboarding-done failed:', res.status);
+      // The write did not land, so the UI must stop claiming it did — the
+      // pill comes back now rather than mysteriously reappearing on the next
+      // sign-in. A 409 in particular means this tab is stale.
+      doneLocally.delete(email);
+      emit();
     })
-    .catch((err) => console.error('onboarding-done failed:', err));
+    .catch((err) => {
+      console.error('onboarding-done failed:', err);
+      doneLocally.delete(email);
+      emit();
+    });
 }
 
 /** Test seam: forget the session overrides and the welcomed notes. */
@@ -135,6 +150,6 @@ export function useOnboarding(): OnboardingController {
     showPill: !done,
     shouldWelcome: !done && !hasBeenWelcomed(email),
     markWelcomed: () => markWelcomed(email),
-    markDone: () => markOnboardingDone(email),
+    markDone: () => markOnboardingDone(user.id, email),
   };
 }

@@ -306,11 +306,26 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
       <Route path="/external-agent-access" element={<ExternalAgentAccessPage />} />
       <Route path="/roles-and-members" element={<AdminRolesPage />} />
       <Route path="/tools" element={<ToolsExplorerPage />} />
-      {/* `/` alone consults the onboarding: a brand-new account's FIRST visit
-          lands on the welcome page, everyone else (and every later visit)
-          goes to Knowledge as always. The `*` catch-all stays a plain
-          redirect — a mistyped URL is not a reason to be onboarded. */}
+      {/* `/` consults the onboarding: a brand-new account's FIRST visit lands
+          on the welcome page, everyone else (and every later visit) goes to
+          Knowledge as always.
+
+          `/auth/*` lands the same way, and that is not decoration. The SSO
+          callback scrubs its own URL with a RAW `history.replaceState`
+          (`microsoft-oauth.ts`), which BrowserRouter never observes — react
+          -router only re-reads location on its own navigations and on
+          popstate. So after a Microsoft sign-in the address bar says `/`
+          while the router still matches `/auth/microsoft/callback`. Before
+          this feature that was invisible, because `/` and `*` both redirected
+          to Knowledge; the moment they differ, the first SSO sign-in — the
+          exact case onboarding exists for — would fall through the catch-all
+          and never be greeted. Routing the callback path here fixes it
+          without moving the token-scrub out of the service that owns it.
+
+          The `*` catch-all stays a plain redirect: a mistyped URL is not a
+          reason to be onboarded. */}
       <Route path="/" element={<RootLanding />} />
+      <Route path="/auth/*" element={<RootLanding />} />
       <Route path="*" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
     </Routes>
   );

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Check, Copy, X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
@@ -46,11 +46,22 @@ export function WelcomePage() {
   const snippet = client.snip(mcpUrlFromOrigin(window.location.origin));
   const firstName = (user?.name ?? '').trim().split(/\s+/)[0] || 'there';
 
+  // One timer, cleared before it is replaced: a second copy inside the 1.5s
+  // window would otherwise inherit the FIRST copy's expiry and blank the
+  // checkmark almost immediately.
+  const resetTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(resetTimer.current), []);
+
   async function copySnippet() {
     const ok = await copyToClipboard(snippet);
-    setCopied(ok ? 'ok' : 'fail');
     if (!ok) toast(COPY_FAILED_TOAST);
-    window.setTimeout(() => setCopied('idle'), 1500);
+    window.clearTimeout(resetTimer.current);
+    // Back to idle FIRST, so a repeat copy is a real state change and the
+    // live region announces it again — setting 'ok' over 'ok' is a no-op that
+    // says nothing to a screen reader.
+    setCopied('idle');
+    window.setTimeout(() => setCopied(ok ? 'ok' : 'fail'), 0);
+    resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
   }
 
   function done() {
@@ -72,13 +83,23 @@ export function WelcomePage() {
 
       {/* One snippet, chosen, instead of three printed at once: which client
           you use is a decision made before this page existed, so it is a
-          control rather than something to scroll past. */}
-      <div className="mt-2.5 flex gap-0.5 rounded-lg bg-sunken p-0.5">
+          control rather than something to scroll past.
+
+          A radiogroup, not three `aria-pressed` toggles: these are mutually
+          exclusive and one is always chosen, which is what `radio` means and
+          what `pressed` does not — three independent toggles tell a screen
+          reader that any combination, including none, is possible. */}
+      <div
+        role="radiogroup"
+        aria-label="Your agent"
+        className="mt-2.5 flex gap-0.5 rounded-lg bg-sunken p-0.5"
+      >
         {AGENT_CLIENTS.map((c) => (
           <button
             key={c.id}
             type="button"
-            aria-pressed={c.id === client.id}
+            role="radio"
+            aria-checked={c.id === client.id}
             onClick={() => setClientId(c.id)}
             className={cn(
               'flex-1 whitespace-nowrap rounded-md px-2 py-1.5 text-detail transition-colors',

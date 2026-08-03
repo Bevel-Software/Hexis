@@ -43,19 +43,45 @@ function listen(service: Pick<AuthService, 'markOnboardingDone'>, authed = true)
 }
 
 describe('POST /auth/onboarding-done', () => {
-  it('marks the caller — and only the caller — done', async () => {
+  it('marks the caller done when the claimed account matches the token', async () => {
     const markOnboardingDone = vi.fn().mockResolvedValue(undefined);
     const base = listen({ markOnboardingDone });
     const res = await fetch(`${base}/api/auth/onboarding-done`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      // A body naming somebody else must be ignored, not honored.
-      body: JSON.stringify({ userId: 'somebody-else' }),
+      body: JSON.stringify({ userId: USER_ID }),
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
     expect(markOnboardingDone).toHaveBeenCalledTimes(1);
     expect(markOnboardingDone).toHaveBeenCalledWith(USER_ID);
+  });
+
+  it('still works for a caller that claims nothing', async () => {
+    const markOnboardingDone = vi.fn().mockResolvedValue(undefined);
+    const base = listen({ markOnboardingDone });
+    const res = await fetch(`${base}/api/auth/onboarding-done`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(markOnboardingDone).toHaveBeenCalledWith(USER_ID);
+  });
+
+  /**
+   * The stale-tab case. Two accounts share one bearer-token key in
+   * localStorage: a tab still rendering A, after B signs in elsewhere, sends
+   * A's intent with B's token. Concluding B's onboarding there would be
+   * irreversible — there is no API to undo it — so the mismatch is refused
+   * and NOTHING is written.
+   */
+  it('refuses when the claimed account is not the token holder, and writes nothing', async () => {
+    const markOnboardingDone = vi.fn();
+    const base = listen({ markOnboardingDone });
+    const res = await fetch(`${base}/api/auth/onboarding-done`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ userId: 'a-different-account' }),
+    });
+    expect(res.status).toBe(409);
+    expect(markOnboardingDone).not.toHaveBeenCalled();
   });
 
   it('never reaches the service unauthenticated', async () => {
@@ -66,11 +92,19 @@ describe('POST /auth/onboarding-done', () => {
     expect(markOnboardingDone).not.toHaveBeenCalled();
   });
 
-  it('reports a failed write as a 500, not as success', async () => {
-    const markOnboardingDone = vi.fn().mockRejectedValue(new Error('db down'));
+  // A failed write must not be reported as success — and must not narrate the
+  // database to the client either. Same rule as /auth/login.
+  it('reports a failed write as a generic 500, keeping the detail server-side', async () => {
+    const detail = 'connection to 10.0.0.4:5432 refused';
+    const markOnboardingDone = vi.fn().mockRejectedValue(new Error(detail));
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     const base = listen({ markOnboardingDone });
     const res = await fetch(`${base}/api/auth/onboarding-done`, { method: 'POST' });
     expect(res.status).toBe(500);
-    expect(((await res.json()) as { error: string }).error).toBe('db down');
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('Could not save that');
+    expect(body.error).not.toContain(detail);
+    expect(logged).toHaveBeenCalledWith('Onboarding-done error:', detail);
+    logged.mockRestore();
   });
 });

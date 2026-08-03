@@ -22,7 +22,10 @@ import { resetOnboardingForTests } from '../state/onboarding';
  */
 
 const { authFetchMock } = vi.hoisted(() => ({
-  authFetchMock: vi.fn(async () => ({ ok: true, status: 200 }) as Response),
+  authFetchMock: vi.fn(
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      ({ ok: true, status: 200 }) as Response,
+  ),
 }));
 vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock }));
 
@@ -116,7 +119,7 @@ describe('WelcomePage', () => {
     // Claude default: the bare URL.
     expect(screen.getByText(/\/api\/mcp$/)).toBeInTheDocument();
     expect(screen.queryByText(/mcpServers/)).toBeNull();
-    await userEvent.click(screen.getByRole('button', { name: 'Cursor & Others' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'Cursor & Others' }));
     expect(screen.getByText(/mcpServers/)).toBeInTheDocument();
   });
 
@@ -135,8 +138,28 @@ describe('WelcomePage', () => {
   it('Done concludes: server write + landing in the library', async () => {
     mountPage();
     await userEvent.click(screen.getByRole('button', { name: 'Done' }));
-    expect(authFetchMock).toHaveBeenCalledWith('/api/auth/onboarding-done', { method: 'POST' });
+    expect(authFetchMock).toHaveBeenCalledWith(
+      '/api/auth/onboarding-done',
+      expect.objectContaining({ method: 'POST' }),
+    );
     expect(screen.getByTestId('pathname')).toHaveTextContent('/skills-and-tools');
+  });
+
+  // Exclusive-choice semantics: `radio` says one of these is always chosen
+  // and the others are not. Three `aria-pressed` toggles said any combination,
+  // including none, was possible.
+  it('presents the client picker as an exclusive choice', async () => {
+    mountPage();
+    const group = screen.getByRole('radiogroup', { name: 'Your agent' });
+    const options = screen.getAllByRole('radio');
+    expect(group).toContainElement(options[0]!);
+    expect(options.map((o) => o.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
+    await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
+    expect(screen.getAllByRole('radio').map((o) => o.getAttribute('aria-checked'))).toEqual([
+      'false',
+      'true',
+      'false',
+    ]);
   });
 
   it('the skip link leaves without concluding', async () => {
@@ -168,18 +191,55 @@ describe('ConnectAgentPill', () => {
     expect(screen.queryByRole('button', { name: 'Connect your agent' })).toBeNull();
   });
 
+  // `page`, not `true` — the pill navigates, so the value that means "this is
+  // the page you are on" is the one a screen reader announces as such.
   it('wears the selected state on the welcome page itself', () => {
     mountPill(newUser(), WELCOME_PATH);
     expect(screen.getByRole('button', { name: 'Connect your agent' })).toHaveAttribute(
       'aria-current',
-      'true',
+      'page',
+    );
+  });
+
+  it('claims no current page anywhere else', () => {
+    mountPill();
+    expect(screen.getByRole('button', { name: 'Connect your agent' })).not.toHaveAttribute(
+      'aria-current',
     );
   });
 
   it('the × concludes — same field as Done — and the pill goes', async () => {
     mountPill();
     await userEvent.click(screen.getByRole('button', { name: /^Dismiss/ }));
-    expect(authFetchMock).toHaveBeenCalledWith('/api/auth/onboarding-done', { method: 'POST' });
+    expect(authFetchMock).toHaveBeenCalledWith(
+      '/api/auth/onboarding-done',
+      expect.objectContaining({ method: 'POST' }),
+    );
     expect(screen.queryByRole('button', { name: 'Connect your agent' })).toBeNull();
+  });
+
+  // The stale-tab guard's client half: the request states which account it
+  // means, so the server can refuse to conclude somebody else's onboarding.
+  it('states which account it is concluding', async () => {
+    mountPill();
+    await userEvent.click(screen.getByRole('button', { name: /^Dismiss/ }));
+    const init = authFetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(init?.body as string)).toEqual({ userId: 'u1' });
+  });
+
+  /**
+   * A write that never landed must not leave the UI claiming it did. The pill
+   * comes back immediately, rather than mysteriously reappearing at the next
+   * sign-in with no account of why it left.
+   */
+  it('brings the pill back when the server refuses the write', async () => {
+    authFetchMock.mockResolvedValueOnce({ ok: false, status: 409 } as Response);
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mountPill();
+    await userEvent.click(screen.getByRole('button', { name: /^Dismiss/ }));
+    expect(
+      await screen.findByRole('button', { name: 'Connect your agent' }),
+    ).toBeInTheDocument();
+    errors.mockRestore();
   });
 });

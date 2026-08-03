@@ -83,11 +83,29 @@ export function createAuthRoutes(
   // welcome page's Done and the reminder pill's × are its two callers.
   router.post('/auth/onboarding-done', authMiddleware, async (req, res) => {
     try {
+      // The caller states WHICH account it believes it is concluding, and a
+      // mismatch is refused rather than applied to the token's owner.
+      //
+      // The bearer token lives in one shared localStorage key, so two accounts
+      // in two tabs share it: a stale tab still rendering A, after B signs in
+      // elsewhere, would otherwise send A's intent with B's token and
+      // irreversibly conclude B's onboarding — an account B has no way to
+      // reopen. `userId` is an assertion about intent, never an authorization:
+      // the write still targets `req.userId` alone.
+      const claimed = (req.body as { userId?: unknown } | undefined)?.userId;
+      if (typeof claimed === 'string' && claimed !== req.userId) {
+        res.status(409).json({ error: 'Session changed — sign in again' });
+        return;
+      }
       await authService.markOnboardingDone(req.userId!);
       res.json({ ok: true });
     } catch (error) {
+      // Logged in full, returned generic — same rule as `/auth/login` above.
+      // A raw driver message here would hand an unauthenticated-adjacent
+      // caller the schema, the host, or the connection string.
       const msg = error instanceof Error ? error.message : 'Unknown error';
-      res.status(500).json({ error: msg });
+      console.error('Onboarding-done error:', msg);
+      res.status(500).json({ error: 'Could not save that' });
     }
   });
 
