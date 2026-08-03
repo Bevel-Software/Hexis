@@ -18,6 +18,7 @@ import { SpillStore } from '../modules/workspace/spill-store.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
+import { OidcAuthProvider } from '../modules/auth/oidc-auth-provider.js';
 import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
 import { AccessControlService } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
@@ -326,7 +327,14 @@ export async function createCoreServices(
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the
   // default branch (no env allow-list).
-  const adminAccess = new AdminAccessService(accessControl, workspaceService, DEFAULT_BRANCH);
+  const adminAccess = new AdminAccessService(
+    accessControl,
+    workspaceService,
+    DEFAULT_BRANCH,
+    // The env bootstrap admin administers accounts/roles even before the KB's
+    // roles.yaml lists it (see AdminAccessService).
+    config.adminEmail ? [config.adminEmail] : [],
+  );
 
   // Secrets Vault: the per-user store of credentials (static API keys + OAuth
   // tokens) that back UTCP tool variables (`${FOO_API_KEY}`). Encrypted at rest
@@ -501,6 +509,26 @@ export async function createCoreServices(
   });
   pendingCommitsWorker.start();
 
+  // SSO providers. The array REFERENCE is shared with the caller's port — an
+  // overlay pushes its own plugins into it after construction (they mount when
+  // the server is built, later). Core contributes the generic OIDC provider
+  // when the env configures one.
+  const authProviders = ports.authProviders ?? [];
+  if (config.oidcIssuerUrl && config.oidcClientId && config.oidcClientSecret) {
+    authProviders.push(
+      new OidcAuthProvider({
+        issuerUrl: config.oidcIssuerUrl,
+        clientId: config.oidcClientId,
+        clientSecret: config.oidcClientSecret,
+        scopes: config.oidcScopes,
+        label: config.oidcProviderLabel,
+        publicBackendUrl: config.publicBackendUrl,
+        publicFrontendUrl: config.publicFrontendUrl,
+        cookieSecure: config.publicBackendUrl.startsWith('https'),
+      }),
+    );
+  }
+
   return {
     config,
     db,
@@ -544,6 +572,6 @@ export async function createCoreServices(
     // (or, for the array, pushes into) these after construction.
     sessionSink: ports.sessionSink ?? new UuidSessionSink(),
     usageMeter: ports.usageMeter ?? unmeteredLlmUsage,
-    authProviders: ports.authProviders ?? [],
+    authProviders,
   };
 }

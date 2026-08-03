@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { Boxes, KeyRound, LibraryBig, Lock, Settings, Users } from 'lucide-react';
+import { Boxes, CircleUserRound, KeyRound, LibraryBig, Lock, Settings, Users } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useAdmin } from '../../admin/state/admin.context';
 import { useAppRegistry, type AdminMenuItem } from '../../../core/registry';
@@ -75,6 +75,16 @@ const CORE_MENU_ITEMS: AdminMenuItem[] = [
     label: 'Browse available tools',
     onSelect: ({ navigate, closeMenu }) => {
       navigate('/tools');
+      closeMenu();
+    },
+  },
+  {
+    id: 'account',
+    order: 90,
+    icon: <CircleUserRound size={14} />,
+    label: 'Account',
+    onSelect: ({ navigate, closeMenu }) => {
+      navigate('/account');
       closeMenu();
     },
   },
