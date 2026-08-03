@@ -141,6 +141,16 @@ export class CoreConfig {
    */
   readonly internalTokenSecret: string;
   /**
+   * Express `trust proxy` setting, from `TRUST_PROXY`: the number of reverse
+   * proxy hops in front of this backend (e.g. `1`), or an address/CIDR list
+   * (`loopback`, `10.0.0.0/8`). Unset (default) → forwarded headers are
+   * IGNORED and `req.ip` is the socket peer — correct for direct exposure,
+   * but behind a proxy it makes every client share the proxy's IP (so the
+   * per-IP login rate limit would pool all users). Set it to the actual hop
+   * count — never a blanket trust — so clients can't spoof X-Forwarded-For.
+   */
+  readonly trustProxy: string;
+  /**
    * Public base URL of THIS backend, used to build OAuth redirect URIs.
    * Must match a redirect URI registered with the OAuth provider(s).
    */
@@ -227,6 +237,7 @@ export class CoreConfig {
       ''
     ).trim();
     this.internalTokenSecret = (process.env.INTERNAL_TOKEN_SECRET || '').trim();
+    this.trustProxy = (process.env.TRUST_PROXY || '').trim();
     this.publicBackendUrl = (process.env.PUBLIC_BACKEND_URL || `http://localhost:${this.port}`)
       .trim()
       .replace(/\/+$/, '');

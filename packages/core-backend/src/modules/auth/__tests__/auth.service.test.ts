@@ -21,7 +21,11 @@ interface FakeChain extends PromiseLike<unknown> {
 }
 
 function makeFakeDb(queue: unknown[]) {
-  const captured: { values: unknown[]; set: unknown[] } = { values: [], set: [] };
+  const captured: { values: unknown[]; set: unknown[]; conflict: unknown[] } = {
+    values: [],
+    set: [],
+    conflict: [],
+  };
   function nextChain(): FakeChain {
     const result = queue.shift();
     const passthrough = (recorder?: (args: unknown[]) => void) =>
@@ -37,7 +41,7 @@ function makeFakeDb(queue: unknown[]) {
       from: passthrough(),
       orderBy: passthrough(),
       returning: passthrough(),
-      onConflictDoUpdate: passthrough(),
+      onConflictDoUpdate: passthrough((a) => captured.conflict.push(a[0])),
       then: (onFulfilled, onRejected) => Promise.resolve(result).then(onFulfilled, onRejected),
     };
     return chain;
@@ -133,31 +137,35 @@ describe('AuthService.loginWithPassword — per-user accounts', () => {
 });
 
 describe('AuthService.createAccount / changePassword', () => {
-  it('createAccount upserts the user and stores a verifying hash', async () => {
-    const { db, captured } = makeFakeDb([[ROW], undefined]);
+  it('createAccount upserts the user in ONE query and stores a verifying hash', async () => {
+    const { db, captured } = makeFakeDb([[ROW]]);
     const svc = new AuthService(db, makeConfig());
     const user = await svc.createAccount('alice@example.com', 'Alice', 'brand-new-pass');
     expect(user.email).toBe('alice@example.com');
-    const set = captured.set[0] as { passwordHash: string };
-    expect(set.passwordHash.startsWith('scrypt:')).toBe(true);
+    // Insert values carry the hash; the conflict branch re-sets it too.
+    const values = captured.values[0] as { passwordHash: string; name: string };
+    expect(values.passwordHash.startsWith('scrypt:')).toBe(true);
+    expect(values.name).toBe('Alice');
+    const conflict = captured.conflict[0] as { set: { passwordHash: string } };
+    expect(conflict.set.passwordHash.startsWith('scrypt:')).toBe(true);
   });
 
   it('createAccount persists an explicitly supplied name on re-provisioning', async () => {
-    // Existing row has name 'Alice'; admin re-provisions with a new name.
-    const { db, captured } = makeFakeDb([[ROW], undefined]);
+    // Existing row conflicts; admin re-provisions with a new name.
+    const { db, captured } = makeFakeDb([[{ ...ROW, name: 'Alice Lidell' }]]);
     const svc = new AuthService(db, makeConfig());
     const user = await svc.createAccount('alice@example.com', 'Alice Lidell', 'brand-new-pass');
-    const set = captured.set[0] as { name?: string };
-    expect(set.name).toBe('Alice Lidell');
+    const conflict = captured.conflict[0] as { set: { name?: string } };
+    expect(conflict.set.name).toBe('Alice Lidell');
     expect(user.name).toBe('Alice Lidell');
   });
 
-  it('createAccount without a name keeps the existing display name', async () => {
-    const { db, captured } = makeFakeDb([[ROW], undefined]);
+  it('createAccount without a name keeps the existing display name on conflict', async () => {
+    const { db, captured } = makeFakeDb([[ROW]]);
     const svc = new AuthService(db, makeConfig());
     const user = await svc.createAccount('alice@example.com', undefined, 'brand-new-pass');
-    const set = captured.set[0] as { name?: string };
-    expect(set.name).toBeUndefined();
+    const conflict = captured.conflict[0] as { set: { name?: string } };
+    expect(conflict.set.name).toBeUndefined();
     expect(user.name).toBe('Alice');
   });
 

@@ -94,6 +94,17 @@ export async function createCoreServer(
 ): Promise<ExpressApp> {
   const app = express();
 
+  // Honor forwarded client addresses ONLY when the deployment declares its
+  // proxy topology (TRUST_PROXY = hop count or CIDR list — see CoreConfig).
+  // Without it, `req.ip` is the socket peer: safe when directly exposed, but
+  // behind a proxy every client would share the proxy's address (pooling the
+  // per-IP login rate limit). A number is the hop count; anything else is
+  // passed through as Express's address/CIDR list form.
+  if (core.config.trustProxy) {
+    const raw = core.config.trustProxy;
+    app.set('trust proxy', /^\d+$/.test(raw) ? Number(raw) : raw);
+  }
+
   // `credentials: true` so EventSource (`withCredentials: true`) can carry
   // the `bevel_token` cookie set at login — the only auth path the
   // EventSource API supports. `origin: true` reflects the request origin

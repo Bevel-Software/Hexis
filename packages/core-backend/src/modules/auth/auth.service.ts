@@ -143,20 +143,22 @@ export class AuthService {
     this.assertPasswordPolicy(password);
     const suppliedName = (name ?? '').trim();
     const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
-    const user = await this.upsertUserByEmail(normalizedEmail, displayName);
     const passwordHash = await hashPassword(password);
-    // Persist an EXPLICITLY supplied name on re-provisioning too (the upsert
-    // keeps the existing row's name); when the admin left it blank, keep the
-    // existing name rather than clobbering it with the local-part fallback.
-    await this.db
-      .update(users)
-      .set(
-        suppliedName
+    // One atomic upsert. On conflict (re-provisioning an existing account) an
+    // EXPLICITLY supplied name is persisted too; a blank name keeps the
+    // existing display name rather than clobbering it with the local-part
+    // fallback. `returning()` yields the authoritative row either way.
+    const [row] = await this.db
+      .insert(users)
+      .values({ email: normalizedEmail, name: displayName, passwordHash })
+      .onConflictDoUpdate({
+        target: users.email,
+        set: suppliedName
           ? { passwordHash, name: suppliedName, updatedAt: new Date() }
           : { passwordHash, updatedAt: new Date() },
-      )
-      .where(eq(users.id, user.id));
-    return toAuthUser({ ...user, name: suppliedName || user.name });
+      })
+      .returning();
+    return toAuthUser(row);
   }
 
   /**
