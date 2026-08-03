@@ -26,6 +26,14 @@ jobs:
       pull-requests: write
       issues: write
       statuses: write
+      # The agent's Review Policy will not hand out a go-ahead without green
+      # CI, and CI here is a CHECK RUN, not a commit status — two different
+      # APIs behind two different scopes. `statuses: write` covers the second
+      # (its own verdict, CodeRabbit's) and nothing at all of the first, so
+      # `gh pr checks` came back "Resource not accessible by integration" on
+      # every run whatever the build was doing, and the agent correctly
+      # bounced the PR for evidence it was not allowed to look at.
+      checks: read
 
     steps:
       # Instant sign of life: react 👀 to the triggering comment so the author
