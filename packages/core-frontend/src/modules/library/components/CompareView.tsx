@@ -1,12 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import {
-  DEFAULT_BRANCH,
-  protectedBranchDisplayName,
-  type PullRequestDetail,
-  type PullRequestSummary,
-} from '@bevel-software/platform-shared';
+import { type PullRequestDetail, type PullRequestSummary } from '@bevel-software/platform-shared';
+import { Badge, Banner, Button, Surface, TextAreaField } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
+import { cn } from '../../../lib/utils';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
@@ -14,31 +11,31 @@ import { mergePullRequest } from '../../pr/services/pr-merge.api';
 import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
 import { postPrComment } from '../../pr/services/pr-comments.api';
 import { readFileOnBranch, type LibrarySkill } from '../services/library.api';
+import { useDefaultBranchFile } from '../hooks/useDefaultBranchFile';
 import { diffLines, type DiffLine } from '../utils/diff';
 
 interface CompareViewProps {
   skill: LibrarySkill;
-  /** Content of a main-side file (SKILL.md body included), null while loading. */
-  mainContent(relFile: string): string | null;
-  loadMainFile(relFile: string): void;
   cr: PullRequestSummary;
   onClose(): void;
   onResolved(kind: 'applied' | 'sent-back'): void;
 }
 
 /**
- * Owner review = compare, not overlay: two panels side by side — left is the
- * skill on the default branch, right is the change-request branch. Removed
- * text tints red on the left, added text green on the right (via the module's
- * line differ over real per-branch file contents); changed files get an amber
- * dot in both lists, files new on the branch get a NEW row. Apply / Send back
- * act through the existing change-request services. Esc exits the compare
- * (registered as its own modal layer so the detail dialog beneath survives).
+ * The whole change request, as one decision — Juan's change-request view.
+ *
+ * The per-file boxes on the skill page answer "what does this do to the file I
+ * am reading?". This answers the different question an owner has to answer
+ * before applying anything: what does this change do to the SKILL? So it reads
+ * top-down as an argument — what is being asked, why, how big it is, and only
+ * then the files — rather than as two panels to compare word by word.
+ *
+ * The layout is deliberately fixed to the viewport: the buttons never move and
+ * the document scrolls to meet them. A decision surface where the verdict
+ * scrolls off screen invites the reader to act before reaching the bottom.
  */
 export function CompareView({
   skill,
-  mainContent,
-  loadMainFile,
   cr,
   onClose,
   onResolved,
@@ -51,6 +48,7 @@ export function CompareView({
   const [busy, setBusy] = useState(false);
   const [sendBackOpen, setSendBackOpen] = useState(false);
   const [sendBackNote, setSendBackNote] = useState('');
+  const [blocked, setBlocked] = useState(false);
 
   const isTop = useModalLayer(true);
   useEffect(() => {
@@ -71,7 +69,9 @@ export function CompareView({
         if (!cancelled) setDetail(d);
       })
       .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Couldn't load this change request.");
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Couldn't load this change request.");
+        }
       });
     return () => {
       cancelled = true;
@@ -101,42 +101,57 @@ export function CompareView({
     () => (detail?.files ?? []).filter((f) => !f.path.startsWith(prefix)).length,
     [detail, prefix],
   );
-  const branchFiles = useMemo(
+  const allFiles = useMemo(
     () => [...mainFiles, ...addedFiles.filter((f) => !mainFiles.includes(f))],
     [mainFiles, addedFiles],
   );
 
-  // Land on the first changed (or added) file once the detail is in.
-  const [selected, setSelected] = useState<string>('SKILL.md');
-  const landed = useRef(false);
-  useEffect(() => {
-    if (!detail || landed.current) return;
-    landed.current = true;
-    const first = branchFiles.find((f) => changedFiles.has(f));
-    if (first) setSelected(first);
-  }, [detail, branchFiles, changedFiles]);
+  /** The scale line: how much of the skill this touches, in the KB's own terms. */
+  const scale = useMemo(() => {
+    const files = (detail?.files ?? []).filter((f) => f.path.startsWith(prefix));
+    return {
+      files: files.length,
+      plus: files.reduce((n, f) => n + f.additions, 0),
+      minus: files.reduce((n, f) => n + f.deletions, 0),
+    };
+  }, [detail, prefix]);
 
-  const loadBranchFile = useCallback(
-    (rel: string) => {
-      if (branchContents[rel] !== undefined) return;
-      setBranchContents((c) => ({ ...c, [rel]: null }));
-      readFileOnBranch(cr.branch, `${skill.path}/${rel}`)
-        .then((content) => setBranchContents((c) => ({ ...c, [rel]: content })))
-        .catch(() => setBranchContents((c) => ({ ...c, [rel]: '' })));
-    },
-    [branchContents, cr.branch, skill.path],
-  );
+  /**
+   * Land on the first changed file, until the reader picks one — DERIVED, so
+   * the landing happens on the render the detail arrives rather than one render
+   * later. `picked` staying null is what keeps "I haven't chosen yet" distinct
+   * from "I chose SKILL.md".
+   */
+  const [picked, setPicked] = useState<string | null>(null);
+  const selected = picked ?? allFiles.find((f) => changedFiles.has(f)) ?? 'SKILL.md';
+  const setSelected = setPicked;
 
+  /**
+   * In-flight guard as a ref, not as a `null` placeholder written into state:
+   * writing the placeholder was a synchronous setState inside the effect, which
+   * costs a cascading render on every file click. The ref answers "already
+   * asked?" without a render, and only the arriving content is state.
+   */
+  const asked = useRef<Set<string>>(new Set());
   useEffect(() => {
-    loadBranchFile(selected);
-    if (!addedFiles.includes(selected)) loadMainFile(selected);
-  }, [selected, loadBranchFile, loadMainFile, addedFiles]);
+    if (!asked.current.has(selected)) {
+      asked.current.add(selected);
+      readFileOnBranch(cr.branch, `${skill.path}/${selected}`)
+        .then((content) => setBranchContents((c) => ({ ...c, [selected]: content })))
+        .catch(() => setBranchContents((c) => ({ ...c, [selected]: '' })));
+    }
+  }, [selected, cr.branch, skill.path]);
 
   const isAdded = addedFiles.includes(selected);
-  const mainRaw = isAdded ? null : mainContent(selected);
+  // Raw-vs-raw. `mainContent` hands back SKILL.md's PARSED body (frontmatter
+  // already stripped by the skills API), and diffing that against a raw branch
+  // read renders the frontmatter as a deletion and the whole file as changed.
+  const mainOnBranch = useDefaultBranchFile(isAdded ? null : `${skill.path}/${selected}`);
+  const mainRaw = isAdded ? null : mainOnBranch;
   const branchRaw = branchContents[selected] ?? null;
   const diff: DiffLine[] | null =
-    !isAdded && mainRaw !== null && branchRaw !== null ? diffLines(mainRaw, branchRaw) : null;
+    branchRaw === null ? null : diffLines(isAdded ? '' : (mainRaw ?? ''), branchRaw);
+  const touchesSelected = changedFiles.has(selected);
 
   async function applyChanges() {
     setBusy(true);
@@ -145,7 +160,14 @@ export function CompareView({
       await mergePullRequest(cr.number);
       onResolved('applied');
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't apply this change request.");
+      const message = err instanceof Error ? err.message : '';
+      // Git refusing the merge IS the conflict answer — say what happened and
+      // what fixes it, instead of leaving a button that will fail again.
+      if (/conflict|not mergeable|cannot be merged|needs? resolution/i.test(message)) {
+        setBlocked(true);
+      } else {
+        setError(message || "Couldn't apply this change request.");
+      }
       setBusy(false);
     }
   }
@@ -164,194 +186,259 @@ export function CompareView({
     }
   }
 
-  const fileRow = (rel: string, side: 'main' | 'branch') => {
-    const added = addedFiles.includes(rel);
-    const active = selected === rel;
-    return (
-      <button
-        key={rel}
-        type="button"
-        className={`flex w-full items-center gap-2 rounded-[9px] border px-2.5 py-1.5 text-left transition-colors ${
-          active
-            ? 'border-[#0d9488] bg-[#e6f7f4]'
-            : added
-              ? 'border-[#a9e8cd] bg-[#f2fcf8] hover:border-[#7fd0c4]'
-              : 'border-line bg-[#fafbfd] hover:border-[#7fd0c4]'
-        }`}
-        onClick={() => setSelected(rel)}
-      >
-        <span className={`font-mono text-[11.5px] font-semibold ${active ? 'text-[#0f766e]' : 'text-ink-muted'}`}>
-          {rel}
-        </span>
-        {rel === 'SKILL.md' && (
-          <span className="rounded-full bg-white px-1.5 text-[9.5px] font-bold tracking-[.04em] text-[#0f766e] shadow-[inset_0_0_0_1px_#d2e9e4]">
-            MAIN
-          </span>
-        )}
-        {added && side === 'branch' && (
-          <span className="rounded-full bg-[#e0f8ee] px-1.5 text-[9.5px] font-bold tracking-[.04em] text-[#0a8f60]">
-            NEW
-          </span>
-        )}
-        {!added && changedFiles.has(rel) && (
-          <span
-            className="h-[7px] w-[7px] shrink-0 rounded-full bg-[#f59e0b]"
-            title="Changed in this request"
-          />
-        )}
-      </button>
-    );
-  };
-
-  const lineView = (lines: DiffLine[] | null, raw: string | null, hide: 'added' | 'removed') => {
-    if (raw === null && lines === null) {
-      return <div className="p-3 text-xs text-ink-faint">Loading…</div>;
-    }
-    const rendered = lines
-      ? lines.filter((l) => l.kind !== hide)
-      : (raw ?? '').split('\n').map((text) => ({ kind: 'same' as const, text }));
-    return (
-      <pre className="whitespace-pre-wrap break-words rounded-[13px] border border-line bg-[#f7f9fb] p-3 font-mono text-[11.5px] leading-relaxed text-ink-muted">
-        {rendered.map((l, i) => (
-          <div
-            key={i}
-            className={
-              l.kind === 'removed'
-                ? 'lib-line-removed rounded px-1'
-                : l.kind === 'added'
-                  ? 'lib-line-added rounded px-1'
-                  : 'px-1'
-            }
-          >
-            {l.text || ' '}
-          </div>
-        ))}
-      </pre>
-    );
-  };
+  const author = cr.appAuthor?.name ?? cr.author.name ?? cr.author.login;
+  const firstName = author.split(' ')[0];
+  const why = authorsReason(detail?.body);
 
   return (
-    <div className="fixed inset-0 z-[60]" role="dialog" aria-modal="true" aria-label={`Compare change request: ${cr.title}`}>
+    <div
+      className="fixed inset-0 z-[60] flex flex-col"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Change request: ${cr.title}`}
+    >
       <div className="absolute inset-0 bg-scrim" onClick={onClose} />
-      <div className="absolute inset-x-4 bottom-[5vh] top-[5vh] flex gap-3.5">
-        {/* left: the default branch */}
-        <section className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-[20px] border border-line bg-white shadow-[0_30px_80px_rgba(22,35,58,0.30)]">
-          <div className="absolute left-6 right-6 top-0 h-[3px] rounded-full bg-gradient-to-r from-transparent via-[#10b981] to-transparent" />
-          <div className="flex items-center gap-3 px-5 pb-3 pt-5">
-            <div className="min-w-0">
-              <div className="truncate text-[17px] font-bold text-ink">{skill.name}</div>
-              <div className="text-[11px] uppercase tracking-[.08em] text-ink-faint">
-                Skill · {protectedBranchDisplayName(DEFAULT_BRANCH)}
-              </div>
-            </div>
-          </div>
-          <div className="flex-1 overflow-y-auto px-5 pb-5">
-            <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-ink-faint">
-              Files on {protectedBranchDisplayName(DEFAULT_BRANCH)}
-            </h4>
-            <div className="mb-4 flex flex-col gap-1.5">{mainFiles.map((f) => fileRow(f, 'main'))}</div>
-            <h4 className="mb-2 font-mono text-[11px] text-ink-muted">{selected}</h4>
-            {isAdded ? (
-              <div className="rounded-[13px] border border-dashed border-line p-4 text-center text-xs text-ink-faint">
-                This file doesn't exist here yet
-              </div>
-            ) : (
-              lineView(diff, mainRaw, 'added')
-            )}
-          </div>
-        </section>
 
-        {/* right: the change-request branch */}
-        <section className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-[20px] border border-line bg-white shadow-[0_30px_80px_rgba(22,35,58,0.30)]">
-          <div className="absolute left-6 right-6 top-0 h-[3px] rounded-full bg-gradient-to-r from-transparent via-[#0d9488] to-transparent" />
-          <div className="flex items-center gap-3 px-5 pb-3 pt-5">
-            <div className="min-w-0">
-              <div className="truncate text-[17px] font-bold text-ink">{cr.title}</div>
-              <div className="truncate text-[11px] text-ink-faint">
-                <span className="font-mono">{cr.branch}</span>
-                {' · by '}
-                {cr.appAuthor?.name ?? cr.author.name ?? cr.author.login}
-              </div>
-            </div>
-            <div className="relative ml-auto flex shrink-0 items-center gap-2">
-              <button
-                type="button"
-                disabled={busy}
-                className="rounded-[10px] border border-[#f5c2c2] bg-[#fdecec] px-3.5 py-2 text-[12.5px] font-bold text-[#c53030] transition-transform hover:-translate-y-px disabled:opacity-60"
-                onClick={() => setSendBackOpen((o) => !o)}
-              >
-                Send back
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                className="rounded-[10px] bg-gradient-to-br from-[#0d9488] to-[#0f766e] px-3.5 py-2 text-[12.5px] font-bold text-white shadow-[0_4px_14px_rgba(13,148,136,0.22)] transition-transform hover:-translate-y-px disabled:opacity-60"
-                onClick={() => void applyChanges()}
-              >
-                {busy ? 'Working…' : 'Apply changes'}
-              </button>
-              <button
-                type="button"
-                aria-label="Close compare"
-                className="flex h-[30px] w-[30px] items-center justify-center rounded-full border border-line bg-white text-[13px] text-ink-muted hover:border-[#7fd0c4] hover:text-ink"
-                onClick={onClose}
-              >
-                ✕
-              </button>
-              {sendBackOpen && (
-                <div className="absolute right-0 top-full z-10 mt-2 w-72 rounded-[14px] border border-line bg-white p-3.5 shadow-[0_16px_44px_rgba(22,35,58,0.24)]">
-                  <label className="block text-[10px] font-bold uppercase tracking-[.07em] text-ink-faint">
-                    Note for the author (optional)
-                    <textarea
-                      rows={3}
-                      className="mt-1 w-full resize-y rounded-lg border border-line px-2 py-1.5 text-xs font-normal normal-case tracking-normal text-ink outline-none focus:border-[#0d9488]"
-                      value={sendBackNote}
-                      onChange={(e) => setSendBackNote(e.target.value)}
-                    />
-                  </label>
-                  <div className="mt-2 flex justify-end">
-                    <button
-                      type="button"
-                      disabled={busy}
-                      className="rounded-[10px] bg-[#fdecec] px-3.5 py-2 text-[12.5px] font-bold text-[#c53030] shadow-[inset_0_0_0_1px_#f3c4c4] disabled:opacity-60"
-                      onClick={() => void sendBack()}
-                    >
-                      Send back
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-          {error && <div className="mx-5 mb-2 rounded-lg bg-[#fdecec] px-3 py-2 text-xs text-[#c53030]">{error}</div>}
-          <div className="flex-1 overflow-y-auto px-5 pb-5">
-            <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-ink-faint">
-              Files on this draft
+      <Surface
+        tone="surface"
+        radius="2xl"
+        elevation="overlay"
+        className="relative mx-auto mt-[4vh] mb-[4vh] flex h-[92vh] w-full max-w-5xl flex-col overflow-hidden"
+      >
+        <div className="flex items-start gap-4 px-8 pt-7">
+          <div className="min-w-0 flex-1">
+            <p className="text-label font-semibold uppercase text-ink-faint">Change request</p>
+            <h1 className="mt-1 text-title font-medium text-ink">{cr.title}</h1>
+            <p className="mt-2 flex flex-wrap items-center gap-2 text-detail text-ink-muted">
+              <span>{author}</span>
+              <span aria-hidden="true" className="text-ink-faint">·</span>
+              <span className="font-mono">{cr.branch}</span>
               {outsideCount > 0 && (
-                <span className="ml-2 normal-case tracking-normal text-[#6d28d9]">
+                <Badge tone="wait" size="xs">
                   +{outsideCount} file{outsideCount === 1 ? '' : 's'} outside this skill
-                </span>
+                </Badge>
               )}
-            </h4>
-            <div className="mb-4 flex flex-col gap-1.5">{branchFiles.map((f) => fileRow(f, 'branch'))}</div>
-            <div className="mb-2 flex items-center justify-between">
-              <h4 className="font-mono text-[11px] text-ink-muted">{selected}</h4>
-              <button
-                type="button"
-                className="rounded-lg bg-[#e0f8ee] px-3.5 py-1 text-[11.5px] font-bold text-[#0a8f60] shadow-[inset_0_0_0_1px_#a9e8cd] transition-transform hover:-translate-y-px"
-                onClick={() => {
-                  if (kbDirName) {
-                    navigate(kbFileUrl(cr.branch, `${kbDirName}/${skill.path}/${selected}`));
-                  }
-                }}
-              >
-                Edit
-              </button>
-            </div>
-            {lineView(diff, branchRaw, 'removed')}
+            </p>
           </div>
-        </section>
-      </div>
+          <Button variant="quiet" size="sm" onClick={onClose} aria-label="Close change request">
+            ✕
+          </Button>
+        </div>
+
+        {/* Why, in the author's words. Omitted rather than faked when the
+            request carries no description — an empty quote block reads as the
+            author having said nothing worth reading. */}
+        {why && (
+          <blockquote className="mx-8 mt-5 border-l-2 border-line-strong pl-4 text-body text-ink">
+            {why}
+          </blockquote>
+        )}
+
+        {/* Never state a scale we do not have yet. `detail` can take many
+            seconds, and "0 files · +0 −0" is not a loading state — it is a
+            claim that this change request does nothing. */}
+        <p className="mt-5 px-8 text-detail tabular-nums text-ink-faint">
+          {detail === null ? (
+            'Measuring the change…'
+          ) : (
+            <>
+              {scale.files} file{scale.files === 1 ? '' : 's'} ·{' '}
+              <span className="text-ok">+{scale.plus}</span>{' '}
+              <span className="text-danger">−{scale.minus}</span>
+            </>
+          )}
+        </p>
+
+        {error && (
+          <Banner tone="danger" role="alert" className="mx-8 mt-4">
+            {error}
+          </Banner>
+        )}
+
+        {blocked && (
+          <Banner tone="wait" role="alert" className="mx-8 mt-4">
+            <b className="font-semibold">Can't apply</b> — files changed after {firstName} wrote
+            this, so there is no honest before and after to apply. Sending it back for a redo
+            against the current text is the fix.
+          </Banner>
+        )}
+
+        {/* The folder on the left, the file with the change marked in it on the
+            right — the same reading as version history.
+
+            NO responsive variants here, deliberately: the running app loads
+            ZERO `@media` rules (checked in the browser), so an `md:`-prefixed
+            class is dead text — the same trap the deleted slate palette was.
+            The overlay has a fixed max width anyway, so one split is the whole
+            story. */}
+        <div className="mt-4 grid min-h-0 flex-1 grid-cols-[13.5rem_minmax(0,1fr)] gap-7 px-8">
+          <Surface
+            tone="surface"
+            radius="lg"
+            elevation="none"
+            className="self-start overflow-y-auto p-2.5"
+          >
+            {allFiles.map((rel) => {
+              const added = addedFiles.includes(rel);
+              const on = selected === rel;
+              return (
+                <button
+                  key={rel}
+                  type="button"
+                  className={cn(
+                    'flex w-full items-center gap-2 rounded-sm px-2.5 py-1.5 text-left font-mono text-meta transition-colors',
+                    on ? 'bg-hover font-semibold text-ink' : 'text-ink-muted hover:bg-hover',
+                  )}
+                  onClick={() => setSelected(rel)}
+                >
+                  <span className="truncate">{rel}</span>
+                  {added ? (
+                    <Badge tone="ok" size="xs" className="ml-auto shrink-0">
+                      New
+                    </Badge>
+                  ) : (
+                    changedFiles.has(rel) && (
+                      <span
+                        className="ml-auto size-1.5 shrink-0 rounded-full bg-wait-dot"
+                        title="Changed in this request"
+                      />
+                    )
+                  )}
+                </button>
+              );
+            })}
+          </Surface>
+
+          <div className="flex min-h-0 flex-col">
+            <div className="flex items-center gap-3 pb-1">
+              <span className="truncate font-mono text-meta text-ink-faint">
+                {selected}
+                {detail === null
+                  ? ''
+                  : touchesSelected
+                    ? ' · what changes is marked'
+                    : ' · not touched by this request'}
+              </span>
+              {kbDirName && (
+                <Button
+                  variant="quiet"
+                  size="tiny"
+                  className="ml-auto"
+                  onClick={() =>
+                    navigate(kbFileUrl(cr.branch, `${kbDirName}/${skill.path}/${selected}`))
+                  }
+                >
+                  Open in editor
+                </Button>
+              )}
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {/* The diff only needs the two file contents, so it renders as
+                  soon as those arrive rather than waiting on the (slow) detail
+                  fetch that tells us which files were touched. */}
+              <MarkedFile
+                diff={diff}
+                raw={detail !== null && !touchesSelected ? (mainRaw ?? branchRaw) : null}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* The verdict. Fixed to the bottom of the surface — a decision the
+            reader has to scroll to find is one they will make without reading. */}
+        <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-line bg-sunken px-8 py-4">
+          <p className="mr-auto max-w-[52ch] text-meta text-ink-muted">
+            {blocked
+              ? `Nothing changes for anyone until ${firstName} proposes it again against the current text.`
+              : 'Every agent that connects after this picks it up. There is no staged rollout.'}
+          </p>
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => setSendBackOpen(true)}>
+            Send back with a note
+          </Button>
+          {!blocked && (
+            <Button variant="primary" size="sm" disabled={busy} onClick={() => void applyChanges()}>
+              {busy ? 'Working…' : 'Apply changes'}
+            </Button>
+          )}
+        </div>
+
+        {sendBackOpen && (
+          <div className="absolute inset-x-0 bottom-0 border-t border-line bg-surface px-8 py-5 shadow-overlay">
+            <label className="block text-label font-semibold uppercase text-ink-faint">
+              Note for the author (optional)
+              <TextAreaField
+                rows={3}
+                className="mt-1.5 font-normal normal-case tracking-normal"
+                value={sendBackNote}
+                onChange={(e) => setSendBackNote(e.target.value)}
+              />
+            </label>
+            <div className="mt-3 flex justify-end gap-2">
+              <Button variant="quiet" size="sm" onClick={() => setSendBackOpen(false)} disabled={busy}>
+                Cancel
+              </Button>
+              <Button variant="danger" size="sm" onClick={() => void sendBack()} disabled={busy}>
+                {busy ? 'Working…' : 'Send back'}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Surface>
     </div>
+  );
+}
+
+/**
+ * The author's reason, or nothing.
+ *
+ * A change request's body is part human and part machine: the backend appends
+ * an `## Affected owners` block (and hidden identity markers) to whatever the
+ * author wrote, and our propose flow writes no description at all — so the body
+ * is USUALLY pure machinery. Rendering it as a pull-quote under the title
+ * presents a routing table as the reason someone wants this change. Everything
+ * from the first generated heading on is dropped; what survives is quoted only
+ * if a human actually wrote it.
+ */
+function authorsReason(body: string | undefined): string | null {
+  if (!body) return null;
+  const human = body
+    .split(/^##\s+/m)[0]
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .trim();
+  return human.length > 0 ? human : null;
+}
+
+/**
+ * The file with the change marked in it — one document, not two panes. Removed
+ * passages stay in place struck through, added ones sit where they will land,
+ * so what you read is the file as it would become.
+ */
+function MarkedFile({ diff, raw }: { diff: DiffLine[] | null; raw: string | null }) {
+  if (raw !== null) {
+    return (
+      <pre className="whitespace-pre-wrap break-words font-mono text-detail leading-relaxed text-ink-muted">
+        {raw}
+      </pre>
+    );
+  }
+  if (diff === null) {
+    return <p className="py-6 text-center text-detail text-ink-faint">Loading…</p>;
+  }
+  return (
+    <pre className="lib-sug whitespace-pre-wrap break-words font-mono text-detail leading-relaxed text-ink-muted">
+      {diff.map((l, i) =>
+        l.kind === 'removed' ? (
+          <del key={i} className="block">
+            {l.text || ' '}
+          </del>
+        ) : l.kind === 'added' ? (
+          <ins key={i} className="block">
+            {l.text || ' '}
+          </ins>
+        ) : (
+          <div key={i}>{l.text || ' '}</div>
+        ),
+      )}
+    </pre>
   );
 }

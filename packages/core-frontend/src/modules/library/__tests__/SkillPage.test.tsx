@@ -6,6 +6,7 @@ import {
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
 import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
+import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { LibraryContextValue } from '../state/library-data';
 
@@ -15,18 +16,24 @@ const apiMock = vi.hoisted(() => ({
   getSkill: vi.fn(),
   getSkillFile: vi.fn(),
   readFileOnBranch: vi.fn(),
-  suggestChange: vi.fn(),
+  proposeChange: vi.fn(),
+  mergePullRequest: vi.fn(),
+  cancelPullRequest: vi.fn(),
 }));
 vi.mock('../services/library.api', () => ({
   DEFAULT_WORKSPACE_ID: 'target-company-state',
   getSkill: apiMock.getSkill,
   getSkillFile: apiMock.getSkillFile,
   readFileOnBranch: apiMock.readFileOnBranch,
-  suggestChange: apiMock.suggestChange,
+  proposeChange: apiMock.proposeChange,
   listSkills: vi.fn(),
   listOpenChangeRequests: vi.fn(),
   listMyChangeRequests: vi.fn(),
   suggestionBranchFor: vi.fn(),
+}));
+vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: apiMock.mergePullRequest }));
+vi.mock('../../pr/services/pr-cancel.api', () => ({
+  cancelPullRequest: apiMock.cancelPullRequest,
 }));
 
 // Keep the markdown pipeline (mermaid etc.) out of this test — the stub renders
@@ -92,8 +99,25 @@ const slackTool: ToolSecrets = {
   ],
 };
 
-function libraryValue(owned: boolean): LibraryContextValue {
+/** An open change request from someone else, touching SKILL.md. */
+const foreignCr = {
+  number: 7,
+  title: 'Changes from Olga — newsletter',
+  author: { login: 'bevel-bot', name: 'Bevel Bot' },
+  appAuthor: { name: 'Olga Martin' },
+  branch: 'suggestions/olga/newsletter',
+  base: 'main',
+  state: 'open',
+  createdAt: new Date().toISOString(),
+  touchedNodePaths: ['Skills/newsletter/SKILL.md'],
+  review: {},
+  url: '',
+} as unknown as PullRequestSummary;
+
+function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: number[] = []): LibraryContextValue {
   return {
+    crs,
+    myCrNumbers: new Set(mine),
     items: [
       {
         kind: 'skill',
@@ -110,8 +134,6 @@ function libraryValue(owned: boolean): LibraryContextValue {
     tools: [slackTool],
     allowedToolsBySkill: new Map([['newsletter', ['slack_post_message']]]),
     ownedSkills: owned ? new Set(['newsletter']) : new Set<string>(),
-    crs: [],
-    myCrNumbers: new Set<number>(),
     loading: false,
     error: null,
     reload: () => {},
@@ -122,8 +144,8 @@ function libraryValue(owned: boolean): LibraryContextValue {
   } as unknown as LibraryContextValue;
 }
 
-function renderPage(owned: boolean) {
-  libraryMock.value = libraryValue(owned);
+function renderPage(owned: boolean, crs: PullRequestSummary[] = [], mine: number[] = []) {
+  libraryMock.value = libraryValue(owned, crs, mine);
   return render(
     <MemoryRouter initialEntries={['/skills-and-tools/skills/newsletter']}>
       <AuthContext.Provider value={auth}>
@@ -137,11 +159,30 @@ function renderPage(owned: boolean) {
   );
 }
 
+/**
+ * SKILL.md as it sits in git — frontmatter and all. The skills API strips the
+ * frontmatter off `skill.body`, so the difference between these two is exactly
+ * the bug the raw-vs-raw rule exists to prevent.
+ */
+const RAW_MAIN = `---
+name: newsletter
+allowed-tools: [slack_post_message]
+---
+# Newsletter drafter
+Collect the news and draft the letter.`;
+const RAW_BRANCH = RAW_MAIN.replace('draft the letter', 'ship the letter');
+
 beforeEach(() => {
   apiMock.getSkill.mockReset().mockResolvedValue(skillDetail);
   apiMock.getSkillFile.mockReset().mockResolvedValue('watchlist:\n  - topic: AI');
-  apiMock.readFileOnBranch.mockReset().mockResolvedValue('');
-  apiMock.suggestChange.mockReset();
+  apiMock.readFileOnBranch
+    .mockReset()
+    .mockImplementation((branch: string) =>
+      Promise.resolve(branch.startsWith('suggestions/') ? RAW_BRANCH : RAW_MAIN),
+    );
+  apiMock.proposeChange.mockReset().mockResolvedValue({ branch: 'b' });
+  apiMock.mergePullRequest.mockReset().mockResolvedValue(undefined);
+  apiMock.cancelPullRequest.mockReset().mockResolvedValue(undefined);
 });
 
 describe('SkillPage', () => {
@@ -208,5 +249,118 @@ describe('SkillPage', () => {
     expect(
       await screen.findByText(/doesn't exist, or you don't have access to it/),
     ).toBeInTheDocument();
+  });
+});
+
+describe('SkillPage — proposing a change', () => {
+  it('seeds the editor from the RAW file, so frontmatter survives a proposal', async () => {
+    renderPage(false);
+    fireEvent.click(await screen.findByRole('button', { name: 'Propose changes' }));
+
+    const box = await screen.findByRole('textbox', { name: /Propose changes to SKILL\.md/ });
+    // Not `skill.body` — that has had the frontmatter parsed off, and the
+    // editor's text is written back as the WHOLE file.
+    await waitFor(() => expect(box).toHaveValue(RAW_MAIN));
+    expect((box as HTMLTextAreaElement).value).toContain('allowed-tools:');
+    // The reassurance sits where the fear is.
+    expect(screen.getByText(/Nothing changes until .* approves it/)).toBeInTheDocument();
+  });
+
+  it('sends the whole new text', async () => {
+    renderPage(false);
+    fireEvent.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    const box = await screen.findByRole('textbox', { name: /Propose changes to SKILL\.md/ });
+    await waitFor(() => expect(box).toHaveValue(RAW_MAIN));
+
+    const next = RAW_MAIN.replace('draft the letter', 'rewrite the letter');
+    fireEvent.change(box, { target: { value: next } });
+    fireEvent.click(screen.getByRole('button', { name: 'Propose changes' }));
+
+    await waitFor(() => expect(apiMock.proposeChange).toHaveBeenCalled());
+    expect(apiMock.proposeChange.mock.calls[0][0]).toMatchObject({
+      skillName: 'newsletter',
+      repoRelativePath: 'Skills/newsletter/SKILL.md',
+      content: next,
+    });
+  });
+
+  it("writes back in the file's own line endings", async () => {
+    const crlfMain = RAW_MAIN.replace(/\n/g, '\r\n');
+    apiMock.readFileOnBranch.mockImplementation((branch: string) =>
+      Promise.resolve(branch.startsWith('suggestions/') ? RAW_BRANCH : crlfMain),
+    );
+    renderPage(false);
+    fireEvent.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    const box = await screen.findByRole('textbox', { name: /Propose changes to SKILL\.md/ });
+    await waitFor(() => expect((box as HTMLTextAreaElement).value.length).toBeGreaterThan(10));
+
+    // What a real textarea hands back: LF, whatever went in.
+    fireEvent.change(box, {
+      target: { value: RAW_MAIN.replace('draft the letter', 'ship the letter') },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Propose changes' }));
+
+    await waitFor(() => expect(apiMock.proposeChange).toHaveBeenCalled());
+    const sent: string = apiMock.proposeChange.mock.calls[0][0].content;
+    // Restored to CRLF, so only the edited line differs on disk.
+    expect(sent).toContain('\r\n');
+    expect(sent).toBe(crlfMain.replace('draft the letter', 'ship the letter'));
+  });
+
+  it('refuses to send an unedited file', async () => {
+    renderPage(false);
+    fireEvent.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    const box = await screen.findByRole('textbox', { name: /Propose changes to SKILL\.md/ });
+    await waitFor(() => expect(box).toHaveValue(RAW_MAIN));
+    fireEvent.click(screen.getByRole('button', { name: 'Propose changes' }));
+
+    expect(await screen.findByText(/Nothing changed yet/)).toBeInTheDocument();
+    expect(apiMock.proposeChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('SkillPage — deciding on a change', () => {
+  it("shows a non-owner the change box without a verdict, and names who decides", async () => {
+    renderPage(false, [foreignCr]);
+
+    expect(await screen.findByText(/proposed a change/)).toBeInTheDocument();
+    expect(screen.getByText('Pending approval')).toBeInTheDocument();
+    expect(screen.getByText(/Waiting on/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Decline' })).toBeNull();
+  });
+
+  it('lets the owner approve, and merges the change request', async () => {
+    renderPage(true, [foreignCr]);
+
+    const approve = await screen.findByRole('button', { name: 'Approve' });
+    expect(screen.getByText('You decide — you own this.')).toBeInTheDocument();
+
+    fireEvent.click(approve);
+    await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
+  });
+
+  it('marks the box blocked when the merge comes back conflicted', async () => {
+    apiMock.mergePullRequest.mockRejectedValueOnce(new Error('merge conflict in SKILL.md'));
+    renderPage(true, [foreignCr]);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    expect(
+      await screen.findByText(/these lines changed after this was written/),
+    ).toBeInTheDocument();
+    // A change that cannot land must not keep offering the button that fails.
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+  });
+
+  it('offers the author Withdraw instead of a verdict, and only once per file', async () => {
+    renderPage(false, [foreignCr], [7]);
+
+    const withdraw = await screen.findByRole('button', { name: 'Withdraw' });
+    // You already have a proposal on this file — a second would fork it.
+    expect(screen.queryByRole('button', { name: 'Propose changes' })).toBeNull();
+
+    fireEvent.click(withdraw);
+    await waitFor(() => expect(apiMock.cancelPullRequest).toHaveBeenCalledWith(7));
   });
 });

@@ -106,29 +106,34 @@ export function suggestionBranchFor(userEmail: string, skillName: string): strin
   return `suggestions/${branchSegment(userEmail.split('@')[0])}/${branchSegment(skillName)}`;
 }
 
-export interface SuggestChangeInput {
+export interface ProposeChangeInput {
   skillName: string;
-  /** Repo-root-relative path of the file being suggested on. */
+  /** Repo-root-relative path of the file being proposed on. */
   repoRelativePath: string;
-  /** Exact text to replace (must occur in the branch's current file content). */
-  find: string;
-  replace: string;
+  /** The file's full new text — what the author typed in the editor. */
+  content: string;
   /** Optional "why" — lands in the change-request description / a comment. */
   note?: string;
   userEmail: string;
   userName: string;
-  /** The caller's open suggestion change request for this skill, if any. */
+  /** The caller's open change request for this skill, if any. */
   existingCr?: PullRequestSummary | null;
 }
 
 /**
- * The real suggest-a-change flow: commit the edit to the user's suggestion
- * branch (`suggestions/<user>/<skill>`, forked from the default branch) and
- * make sure an open change request against the default branch exists for it.
- * Save = share: `writeFile` on the branch workspace auto-commits and pushes,
- * so the suggestion is durable the moment this resolves.
+ * Propose a change: commit the new text to the author's suggestion branch
+ * (`suggestions/<user>/<skill>`, forked from the default branch) and make sure
+ * an open change request against the default branch exists for it.
+ *
+ * Save = share: `writeFile` on the branch workspace auto-commits and pushes, so
+ * the proposal is durable the moment this resolves — there is no local-only
+ * state that could be lost between here and the owner reading it.
+ *
+ * One branch and one change request PER PERSON PER SKILL, not per file: a
+ * proposal that rewrites a step and its example touches two files and is one
+ * decision, so it has to arrive as one thing to approve.
  */
-export async function suggestChange(input: SuggestChangeInput): Promise<{ branch: string }> {
+export async function proposeChange(input: ProposeChangeInput): Promise<{ branch: string }> {
   const branch = input.existingCr?.branch ?? suggestionBranchFor(input.userEmail, input.skillName);
 
   if (!input.existingCr) {
@@ -141,12 +146,11 @@ export async function suggestChange(input: SuggestChangeInput): Promise<{ branch
   }
 
   const { workspace } = await getOrCreateWorkspace(branch);
-  const wsPath = `${workspace.kbDirName}/${input.repoRelativePath}`;
-  const current = await readFile(workspace.id, wsPath);
-  if (!current.includes(input.find)) {
-    throw new Error('Select a plain stretch of text to suggest on.');
-  }
-  await writeFile(workspace.id, wsPath, current.replace(input.find, input.replace));
+  await writeFile(
+    workspace.id,
+    `${workspace.kbDirName}/${input.repoRelativePath}`,
+    input.content,
+  );
 
   if (input.existingCr) {
     if (input.note) {
@@ -156,7 +160,7 @@ export async function suggestChange(input: SuggestChangeInput): Promise<{ branch
     await openChangeRequest({
       sourceBranch: branch,
       targetBranch: DEFAULT_BRANCH,
-      title: `Suggestions from ${input.userName} — ${input.skillName}`,
+      title: `Changes from ${input.userName} — ${input.skillName}`,
       description: input.note || undefined,
     });
   }

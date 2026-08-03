@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   DEFAULT_BRANCH,
@@ -6,24 +6,28 @@ import {
   type PullRequestSummary,
 } from '@bevel-software/platform-shared';
 import '../../library.css';
-import { Badge, Banner, Button } from '../../../../shared/components';
+import { Badge, Button } from '../../../../shared/components';
 import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
 import { kbFileUrl, resolveRelativePath } from '../../../workspace/routing/kb-routes';
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
-import { readFileOnBranch, suggestChange } from '../../services/library.api';
+import { mergePullRequest } from '../../../pr/services/pr-merge.api';
+import { proposeChange } from '../../services/library.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
+import { useCrFileDiffs } from '../../hooks/useCrFileDiffs';
+import { useDefaultBranchFile } from '../../hooks/useDefaultBranchFile';
 import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast';
 import { LIBRARY_ROOT } from '../../routes/library-paths';
-import { diffLines, hasChanges, type DiffLine } from '../../utils/diff';
+import { ownersTextOf } from '../../utils/group-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
 import { StatusDot } from '../StatusDot';
 import { ChangeRequestDock } from '../ChangeRequestDock';
 import { CompareView } from '../CompareView';
-import { SuggestChange } from '../SuggestChange';
 import { SkillFileTabs } from './SkillFileTabs';
 import { SkillFilePane } from './SkillFilePane';
+import { SkillFileEditor } from './SkillFileEditor';
+import { SkillChangeBox } from './SkillChangeBox';
 
 /**
  * One skill, as a page — the prototype's skill item (line 1964), which says of
@@ -52,7 +56,6 @@ export function SkillPage() {
 
   const [selected, setSelected] = useState('SKILL.md');
   const [compareCr, setCompareCr] = useState<PullRequestSummary | null>(null);
-  const fileViewRef = useRef<HTMLDivElement>(null);
 
   // Ownership is a property of the CATALOG entry, not of the skill document —
   // it comes from the per-file ACL the provider already resolved, so the page
@@ -65,6 +68,18 @@ export function SkillPage() {
   const skill = detail.skill;
   const skillPath = skill?.path ?? '';
   const prefix = `${skillPath}/`;
+
+  /**
+   * Who has to say yes. A skill has no owner of its own — it inherits its group
+   * folder's `access.md` — so the people who review a change to it are the
+   * group's owners. Naming the wrong reviewer is worse than naming none, hence
+   * the neutral fallback when the group index hasn't resolved.
+   */
+  const ownerName = useMemo(() => {
+    const group = skill ? groupOfPath(skill.path) : null;
+    const summary = group ? data.groupSummaries.find((g) => g.name === group) : undefined;
+    return summary ? ownersTextOf(summary) : 'the owner';
+  }, [skill, data.groupSummaries]);
 
   const files = useMemo(
     () => ['SKILL.md', ...(skill?.files ?? []).map((f) => f.slice(prefix.length))],
@@ -114,78 +129,105 @@ export function SkillPage() {
     return set;
   }, [skillCrs, prefix]);
 
-  // The caller's own pending suggestion, read off its branch and diffed against
-  // what is on the default branch right now.
-  const [branchRevision, setBranchRevision] = useState(0);
   const fileRepoPath = `${skillPath}/${active}`;
-  const ownCrTouchesFile = ownCr !== null && ownCr.touchedNodePaths.includes(fileRepoPath);
+
+  /** Bumped after every write so the branch reads re-run against fresh content. */
+  const [revision, setRevision] = useState(0);
+  const [editing, setEditing] = useState(false);
+  const [busyCr, setBusyCr] = useState<number | null>(null);
+  /**
+   * Change requests a merge attempt has REFUSED. Git is the only thing that can
+   * answer "does this still apply?", and it answers when asked to merge — so
+   * this fills in from failures rather than from a guess made up front.
+   */
+  const [blockedCrs, setBlockedCrs] = useState<Set<number>>(new Set());
 
   /**
-   * Stored WITH the request it answers, so switching tabs cannot show the
-   * previous file's branch content for a frame. The alternative — clearing the
-   * state at the top of the effect — is a synchronous setState in an effect
-   * body, which costs a cascading render on every tab click; keying it means
-   * the stale value simply stops matching and reads as absent.
+   * The file's raw bytes on the default branch. `raw` above is what gets
+   * RENDERED (SKILL.md arrives from the skills API with its frontmatter already
+   * parsed off); this is what gets diffed and edited. Mixing the two marks the
+   * frontmatter as a deletion and, on submit, would commit it away.
    */
-  const branchKey = `${ownCr?.branch ?? ''}::${fileRepoPath}::${branchRevision}`;
-  const [branchFile, setBranchFile] = useState<{ key: string; content: string } | null>(null);
-  const branchRaw = branchFile?.key === branchKey ? branchFile.content : null;
+  const rawOnMain = useDefaultBranchFile(skillPath ? fileRepoPath : null, revision);
 
-  useEffect(() => {
-    if (!ownCr || !ownCrTouchesFile) return;
-    let cancelled = false;
-    readFileOnBranch(ownCr.branch, fileRepoPath)
-      .then((content) => {
-        if (!cancelled) setBranchFile({ key: branchKey, content });
-      })
-      .catch(() => {
-        /* branch unreadable — fall back to the clean view rather than an error */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [ownCr, ownCrTouchesFile, fileRepoPath, branchKey]);
+  /** Every open change request's version of the file on screen. */
+  const crDiffs = useCrFileDiffs(skillCrs, fileRepoPath, rawOnMain, revision);
 
-  const suggestionDiff: DiffLine[] | null = useMemo(() => {
-    if (raw === null || branchRaw === null) return null;
-    const d = diffLines(raw, branchRaw);
-    return hasChanges(d) ? d : null;
-  }, [raw, branchRaw]);
+  /** The change requests with something to say about THIS file. */
+  const boxes = useMemo(
+    () => skillCrs.filter((c) => c.touchedNodePaths.includes(fileRepoPath)),
+    [skillCrs, fileRepoPath],
+  );
+
+  const iAlreadyProposedHere = boxes.some((c) => data.myCrNumbers.has(c.number));
 
   const openInEditor = useCallback(
     (wsRelative: string) => navigate(kbFileUrl(DEFAULT_BRANCH, wsRelative)),
     [navigate],
   );
 
-  const handleSuggest = useCallback(
-    async (find: string, replace: string, note: string) => {
-      if (!user) throw new Error('Sign in to suggest a change.');
-      await suggestChange({
-        skillName: name,
-        repoRelativePath: fileRepoPath,
-        find,
-        replace,
-        note: note || undefined,
-        userEmail: user.email,
-        userName: user.name,
-        existingCr: ownCr,
-      });
-      toast('Suggestion saved to your draft');
-      setBranchRevision((r) => r + 1);
-      data.reload();
-    },
-    [user, name, fileRepoPath, ownCr, toast, data],
-  );
+  async function submitProposal(content: string) {
+    if (!user) throw new Error('Sign in to propose a change.');
+    await proposeChange({
+      skillName: name,
+      repoRelativePath: fileRepoPath,
+      content,
+      userEmail: user.email,
+      userName: user.name,
+      existingCr: ownCr,
+    });
+    setEditing(false);
+    setRevision((r) => r + 1);
+    toast(`Sent to ${ownerName} — nothing changes until they approve it.`);
+    data.reload();
+  }
 
-  async function withdrawOwn() {
-    if (!ownCr) return;
+  async function approve(cr: PullRequestSummary) {
+    setBusyCr(cr.number);
     try {
-      await cancelPullRequest(ownCr.number);
-      toast('Suggestion withdrawn');
-      setBranchFile(null);
+      await mergePullRequest(cr.number);
+      toast('Approved — the skill now reads with that change.');
+      setRevision((r) => r + 1);
       data.reload();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Couldn't withdraw the suggestion.");
+      const message = err instanceof Error ? err.message : '';
+      // A refusal to merge is the answer to "does this still apply?" — record
+      // it against this request so the box stops offering Approve, rather than
+      // reporting a generic failure the owner can only retry.
+      if (/conflict|not mergeable|cannot be merged|needs? resolution/i.test(message)) {
+        setBlockedCrs((s) => new Set(s).add(cr.number));
+        toast('Blocked — the file changed after this was written.');
+      } else {
+        toast(message || "Couldn't approve this change.");
+      }
+    } finally {
+      setBusyCr(null);
+    }
+  }
+
+  async function decline(cr: PullRequestSummary) {
+    setBusyCr(cr.number);
+    try {
+      await cancelPullRequest(cr.number);
+      toast('Declined. Nothing was changed.');
+      data.reload();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Couldn't decline this change.");
+    } finally {
+      setBusyCr(null);
+    }
+  }
+
+  async function withdraw(cr: PullRequestSummary) {
+    setBusyCr(cr.number);
+    try {
+      await cancelPullRequest(cr.number);
+      toast('Withdrawn.');
+      data.reload();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Couldn't withdraw this change.");
+    } finally {
+      setBusyCr(null);
     }
   }
 
@@ -219,10 +261,6 @@ export function SkillPage() {
     return (
       <CompareView
         skill={skill}
-        mainContent={(rel) => (rel === 'SKILL.md' ? skill.body : detail.fileContent(rel))}
-        loadMainFile={(rel) => {
-          if (rel !== 'SKILL.md') detail.loadFile(rel);
-        }}
         cr={compareCr}
         onClose={() => setCompareCr(null)}
         onResolved={(kind) => {
@@ -264,45 +302,81 @@ export function SkillPage() {
         files={files}
         selected={active}
         pending={pendingFiles}
-        onSelect={setSelected}
-      />
-
-      <SkillFilePane
-        file={active}
-        raw={raw}
-        suggestion={suggestionDiff}
-        bodyRef={fileViewRef}
-        onOpenLink={(href) => {
-          if (!kbDirName) return;
-          openInEditor(resolveRelativePath(`${kbDirName}/${skill.path}/${active}`, href));
+        onSelect={(f) => {
+          setSelected(f);
+          setEditing(false);
         }}
-        actions={
-          owned && kbDirName ? (
-            <Button
-              variant="outline"
-              size="tiny"
-              onClick={() => openInEditor(`${kbDirName}/${skill.path}/${active}`)}
-            >
-              Edit
-            </Button>
-          ) : null
-        }
-        notice={
-          suggestionDiff ? (
-            <Banner tone="wait" role="status" className="mx-3.5 mt-3">
-              <span className="flex flex-wrap items-center gap-3">
-                Your pending suggestions are shown inline
-                <Button variant="danger" size="tiny" onClick={() => void withdrawOwn()}>
-                  Withdraw
-                </Button>
-              </span>
-            </Banner>
-          ) : null
-        }
       />
 
-      <SuggestChange containerRef={fileViewRef} raw={raw} onSubmit={handleSuggest} />
+      {editing && rawOnMain !== null ? (
+        <SkillFileEditor
+          file={active}
+          base={rawOnMain}
+          owner={ownerName}
+          onCancel={() => setEditing(false)}
+          onSubmit={submitProposal}
+        />
+      ) : (
+        <SkillFilePane
+          file={active}
+          raw={raw}
+          suggestion={null}
+          onOpenLink={(href) => {
+            if (!kbDirName) return;
+            openInEditor(resolveRelativePath(`${kbDirName}/${skill.path}/${active}`, href));
+          }}
+          actions={
+            <>
+              {/* One open proposal per person per file. A second "Propose
+                  changes" would fork your own pending change into two
+                  decisions the owner has to reconcile. */}
+              {rawOnMain !== null && !iAlreadyProposedHere && (
+                <Button variant="outline" size="tiny" onClick={() => setEditing(true)}>
+                  Propose changes
+                </Button>
+              )}
+              {owned && kbDirName && (
+                <Button
+                  variant="quiet"
+                  size="tiny"
+                  onClick={() => openInEditor(`${kbDirName}/${skill.path}/${active}`)}
+                >
+                  Edit
+                </Button>
+              )}
+            </>
+          }
+        />
+      )}
 
+      {/* Every open proposal on this file, under the file it is about. The
+          owner decides here; the author can take theirs back. */}
+      {!editing &&
+        boxes.map((cr) => {
+          const mine = data.myCrNumbers.has(cr.number);
+          return (
+            <SkillChangeBox
+              key={cr.number}
+              file={active}
+              author={cr.appAuthor?.name ?? cr.author.name ?? cr.author.login}
+              when={formatWhen(cr.createdAt)}
+              mine={mine}
+              canDecide={owned && !mine}
+              diff={crDiffs.get(cr.number) ?? null}
+              blocked={blockedCrs.has(cr.number)}
+              owner={ownerName}
+              busy={busyCr === cr.number}
+              onApprove={() => void approve(cr)}
+              onDecline={() => void decline(cr)}
+              onWithdraw={() => void withdraw(cr)}
+              onOpenFull={owned ? () => setCompareCr(cr) : undefined}
+            />
+          );
+        })}
+
+      {/* The dock lists change requests touching ANY file of the skill — the
+          boxes above only cover the one on screen, so without it a proposal to
+          a file you are not looking at has no way to reach you. */}
       {owned && <ChangeRequestDock crs={skillCrs} onSelect={setCompareCr} />}
     </Article>
   );
@@ -311,6 +385,20 @@ export function SkillPage() {
 /** Does this change request touch anything inside the skill folder? */
 function touchesSkill(cr: PullRequestSummary, skillPath: string): boolean {
   return cr.touchedNodePaths.some((p) => p === skillPath || p.startsWith(`${skillPath}/`));
+}
+
+/**
+ * "today", "yesterday", or a plain date. A change box is read by someone
+ * deciding whether to act now, and "3 Aug" answers that worse than "today"
+ * does — but an exact timestamp answers it no better, so it stops there.
+ */
+function formatWhen(iso: string): string {
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) return 'recently';
+  const days = Math.floor((Date.now() - then.getTime()) / 86_400_000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  return then.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
 
 /**

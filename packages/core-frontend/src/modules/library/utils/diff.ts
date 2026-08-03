@@ -9,10 +9,17 @@ export interface DiffLine {
   text: string;
 }
 
-/** Split keeping no trailing phantom line for a trailing newline. */
+/**
+ * Split keeping no trailing phantom line for a trailing newline.
+ *
+ * CRLF is normalised away first. A KB file checked out on Windows has `\r\n`
+ * endings while a `<textarea>` hands its value back as `\n` (the HTML spec's
+ * value normalisation), so without this EVERY line of an edited file compares
+ * unequal and a one-word change renders as a whole-file rewrite.
+ */
 function toLines(s: string): string[] {
   if (s === '') return [];
-  const lines = s.split('\n');
+  const lines = s.replace(/\r\n?/g, '\n').split('\n');
   if (lines[lines.length - 1] === '') lines.pop();
   return lines;
 }
@@ -99,4 +106,51 @@ function lcsDiff(a: string[], b: string[]): DiffLine[] {
 /** True when the diff contains at least one removed/added line. */
 export function hasChanges(lines: DiffLine[]): boolean {
   return lines.some((l) => l.kind !== 'same');
+}
+
+/** A run of unchanged lines the reader does not need to see, stated as a count. */
+export interface DiffGap {
+  kind: 'gap';
+  /** How many unchanged lines were folded away. */
+  count: number;
+}
+
+export type CollapsedDiff = DiffLine | DiffGap;
+
+/**
+ * Fold long unchanged stretches into "N unchanged lines", keeping `context`
+ * lines either side of every change.
+ *
+ * A change box answers one question — what is different? — and a proposal that
+ * touches two lines of a 300-line SKILL.md should not make the reader scroll
+ * 300 lines to find them. Gaps are only worth it when they save more than they
+ * cost: a run of `context * 2` or fewer is left alone rather than replaced by a
+ * line of text about the same size.
+ */
+export function collapseUnchanged(lines: DiffLine[], context = 2): CollapsedDiff[] {
+  const keep = new Set<number>();
+  lines.forEach((l, i) => {
+    if (l.kind === 'same') return;
+    for (let k = i - context; k <= i + context; k++) {
+      if (k >= 0 && k < lines.length) keep.add(k);
+    }
+  });
+
+  const out: CollapsedDiff[] = [];
+  let hidden = 0;
+  const flush = () => {
+    if (hidden > 0) out.push({ kind: 'gap', count: hidden });
+    hidden = 0;
+  };
+
+  lines.forEach((l, i) => {
+    if (keep.has(i)) {
+      flush();
+      out.push(l);
+    } else {
+      hidden++;
+    }
+  });
+  flush();
+  return out;
 }

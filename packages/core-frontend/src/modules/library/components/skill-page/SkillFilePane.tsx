@@ -1,4 +1,4 @@
-import type { ReactNode, RefObject } from 'react';
+import type { ReactNode } from 'react';
 import { Surface } from '../../../../shared/components';
 import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdownView';
 import type { DiffLine } from '../../utils/diff';
@@ -18,8 +18,6 @@ interface SkillFilePaneProps {
   actions?: ReactNode;
   /** Sits between the bar and the body: the "your suggestions are inline" strip. */
   notice?: ReactNode;
-  /** Text selections inside this element are what `SuggestChange` listens for. */
-  bodyRef?: RefObject<HTMLDivElement | null>;
   /** Follow a relative link out of rendered markdown. */
   onOpenLink?(href: string): void;
 }
@@ -38,7 +36,6 @@ export function SkillFilePane({
   suggestion,
   actions,
   notice,
-  bodyRef,
   onOpenLink,
 }: SkillFilePaneProps) {
   return (
@@ -55,7 +52,7 @@ export function SkillFilePane({
 
       {notice}
 
-      <div ref={bodyRef} className="px-6 py-4">
+      <div className="px-6 py-4">
         {raw === null ? (
           <p className="py-4 text-center text-detail text-ink-faint">Loading…</p>
         ) : suggestion ? (
