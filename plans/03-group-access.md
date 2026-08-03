@@ -163,7 +163,9 @@ Implementation: `const { workspaceId: ctxWorkspaceId, kbDirName } = useWorkspace
 // packages/core-frontend/src/modules/library/utils/group-folders.ts
 import { GROUPS_DIR, LEGACY_SKILLS_DIR, LEGACY_TOOLS_DIR } from '@bevel-software/platform-shared';
 export interface GroupFolder { folder: string; root: 'Groups' | 'Skills' | 'Tools' }
-/** Physical KB folders backing a logical group, derived from its items' repo-relative
+/** Physical KB folders backing a logical group. SUPERSEDED as the page's source:
+ *  `GroupSummary.folders` now arrives from the backend's folder scan, so a group
+ *  with no items still reports its folder. Kept for callers that only hold item
  *  paths. Mirrors groupOfPath(): seg0 ∈ GROUP_ROOTS, seg1 === group, ≥3 segments.
  *  Order: Groups, Skills, Tools. Deduped. Empty input → []. */
 export function groupFoldersFor(group: string, itemPaths: string[]): GroupFolder[]
@@ -273,7 +275,7 @@ No new storage. All truth stays in git: `Groups/<G>/access.md` (and legacy `Skil
    function PrincipalChips({ roles, users }: { roles: string[]; users: { name: string; email: string }[] })
    function OverridesList({ overrides, truncated }: { overrides: AccessOverride[]; truncated: boolean })
    ```
-   - `GroupAccessSection`: `const folders = useMemo(() => groupFoldersFor(group, itemPaths), …)`; renders nothing (`null`) when `folders.length === 0`; legacy Banner when `folders.length > 1`; one `GroupAccessCard` per folder (`showFolderLabel = folders.length > 1`).
+   - `GroupAccessSection`: folders come from the SERVER — `GroupSummary.folders`, which `GroupIndexService` discovered by `readdir` — not from the items' paths. Deriving them from `itemPaths` would make an empty group's access surface disappear, which is exactly the gap §6 used to carry. Renders nothing (`null`) when `folders.length === 0`; legacy Banner when `folders.length > 1`; one `GroupAccessCard` per folder (`showFolderLabel = folders.length > 1`).
    - `GroupAccessCard`: `useGroupFolderAccess(folder.folder)` + `useWorkspace().kbDirName` + local `const [manageOpen, setManageOpen] = useState(false)`. Renders per §2.2. When open:
      ```tsx
      <ManageAccessDialog
@@ -360,7 +362,7 @@ No DELETEs. No changes to `modules/pr/`, `modules/review/`, `DetailDialog.tsx`, 
 - **Unmigrated KB (legacy roots)**: `groupFoldersFor` yields `Skills/<G>` / `Tools/<G>`; two independent cards + migration Banner; each Manage edits its own folder's `access.md`. Mid-migration (both roots) → up to three cards, Groups first. `groupOfPath` accepts all three roots, so derivation is uniform.
 - **Tool with no group** (`Tools/slack.tool`, 2 segments → `groupOfPath` null): never reaches a group page; `GroupAccessSection` is only rendered for real group filters/pages, and returns `null` for empty `folders` as a second guard. Its access remains governed by parents/root — out of this surface's scope by design.
 - **Pseudo-rows** ("Owned by me", "Everything", "Yours alone"): not groups; section never rendered for them (`filter.kind === 'group'` guard).
-- **Empty group folder** (folder exists, no items): groups are derived from items today, so no page/section exists — acceptable; noted as a known gap for the group-page feature.
+- **Empty group folder** (folder exists, no items): **closed** — this was written when groups were derived from items. They are not any more: `GroupIndexService.scanFolders()` enumerates the group roots with `readdir`, so a zero-item group is a real catalog entry with real `folders`, and its page keeps both the `Access` section and `Share`. The rule that replaced the gap: a group EXISTS because a folder exists, and counting is a separate question — the same rule the locked-groups surface needs in order to show a group you cannot read.
 - **kbDirName null**: Manage disabled (title tooltip); summary still loads (repo-relative paths don't need kbDirName).
 - **Edit-lock 409** ("being edited by …"): surfaced by the dialog's existing `mutateError` path — no new handling.
 - **Inherited grant revoke / deny-here rollback (409 inherited / deny-ineffective / stale-ancestor)**: all inside the unmodified dialog, already handled.

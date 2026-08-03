@@ -12,6 +12,18 @@ export interface AccessRequestRow {
 }
 
 /**
+ * Ceiling on one `pendingAll()` read.
+ *
+ * The admin route resolves access per DISTINCT requester, and those verdicts
+ * do not share a cache entry across principals — so an unbounded backlog turns
+ * one admin page load into unbounded work. Oldest-first means the cap drops the
+ * NEWEST rows, which a later load still finds; nothing is lost, it is deferred.
+ * Well above any real pending queue, low enough that a runaway one cannot take
+ * the endpoint down.
+ */
+export const PENDING_SCAN_LIMIT = 500;
+
+/**
  * Storage for group access requests. Postgres only — this service writes no KB
  * files: the ONE write path into the knowledge base for access remains the
  * existing grant/revoke direct-commit flow, which is also what RESOLVES these
@@ -57,8 +69,11 @@ export class AccessRequestsService {
       );
   }
 
-  /** Every pending request, oldest first. The route filters it to the caller's groups. */
-  async pendingAll(): Promise<AccessRequestRow[]> {
+  /**
+   * Pending requests, oldest first, capped at {@link PENDING_SCAN_LIMIT}. The
+   * route filters the page to the caller's groups.
+   */
+  async pendingAll(limit: number = PENDING_SCAN_LIMIT): Promise<AccessRequestRow[]> {
     return this.db
       .select({
         id: groupAccessRequests.id,
@@ -69,7 +84,8 @@ export class AccessRequestsService {
       })
       .from(groupAccessRequests)
       .where(eq(groupAccessRequests.status, 'pending'))
-      .orderBy(asc(groupAccessRequests.createdAt));
+      .orderBy(asc(groupAccessRequests.createdAt))
+      .limit(limit);
   }
 
   /** One pending row by id, or null when it's missing or already settled. */

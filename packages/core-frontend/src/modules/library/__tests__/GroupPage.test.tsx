@@ -234,6 +234,23 @@ describe('GroupPage', () => {
     expect(screen.getByText('No tools yet.')).toBeInTheDocument();
   });
 
+  it('keeps Share on an EMPTY group — the folder is what carries access, not the items', async () => {
+    // Groups used to be derived from their items, which meant a group with
+    // nothing in it had no folder to manage and silently lost its access
+    // surface. `folders` now comes from the backend's readdir, so an empty
+    // group is still a place whose sharing can be changed.
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+    groupsMock.listGroups.mockResolvedValue([gtm({ skillCount: 0, toolCount: 0 })]);
+    renderGroup('GTM');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Share' }));
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access directory knowledge-base/Groups/GTM',
+      }),
+    ).toBeInTheDocument();
+  });
+
   it('Share IS the manage-access dialog, opened on this group\'s directory', async () => {
     renderGroup('GTM');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();

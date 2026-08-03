@@ -63,6 +63,11 @@ export function LockedGroupView({ group, onRequested, onUnlocked, onManage }: Lo
       // Access arrived between the page load and the click. Nothing went
       // wrong — the group is simply open now, so open it.
       if (err instanceof AlreadyReadableError) {
+        // Released BEFORE handing off, because `onUnlocked` is not guaranteed
+        // to swap this view out synchronously — if it kicks off an async
+        // reload, this component renders again in the meantime and the button
+        // would be stuck disabled with nothing left to re-enable it.
+        setRequesting(false);
         onUnlocked();
         return;
       }

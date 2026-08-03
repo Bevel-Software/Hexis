@@ -165,6 +165,45 @@ describe('GroupIndexService', () => {
     warn.mockRestore();
   });
 
+  test('a failed scan is served but NOT cached — the next call retries', async () => {
+    await mkdir(join(kb(), 'Groups', 'GTM'), { recursive: true });
+    let fail = true;
+    const flaky = {
+      // Fails once, the way a default-branch clone mid-creation does, then
+      // recovers. If the empty result were cached, GTM would stay hidden from
+      // every user for the full TTL after the cause was gone.
+      getOrCreateForBranch: async () => {
+        if (fail) throw new Error('clone in progress');
+        return { id: wsId };
+      },
+      getWorkspacePath: async (id: string) => join(root, id),
+    } as unknown as WorkspaceService;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const service = svc({ workspace: flaky });
+
+    await expect(service.catalog()).resolves.toEqual([]);
+
+    fail = false;
+    expect((await service.catalog()).map((g) => g.name)).toEqual(['GTM']);
+    warn.mockRestore();
+  });
+
+  test('a genuinely empty KB IS cached — an empty result is a fact, not a failure', async () => {
+    let scans = 0;
+    const counting = {
+      getOrCreateForBranch: async () => {
+        scans += 1;
+        return { id: wsId };
+      },
+      getWorkspacePath: async (id: string) => join(root, id),
+    } as unknown as WorkspaceService;
+    const service = svc({ workspace: counting });
+
+    await expect(service.catalog()).resolves.toEqual([]);
+    await expect(service.catalog()).resolves.toEqual([]);
+    expect(scans).toBe(1);
+  });
+
   test('caches for the TTL and rescans after invalidate()', async () => {
     await mkdir(join(kb(), 'Groups', 'GTM'), { recursive: true });
     const service = svc();
