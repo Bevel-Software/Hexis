@@ -9,6 +9,12 @@ import { hashEmail } from '../../shared/hash-email.js';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/**
+ * Narrow a `users` row down to what a client is allowed to see. One place
+ * rather than three inline object literals, so a column added to the table is
+ * never accidentally shipped to the browser — and so every session-issuing
+ * path returns the same shape.
+ */
 function toAuthUser(user: {
   id: string;
   email: string;

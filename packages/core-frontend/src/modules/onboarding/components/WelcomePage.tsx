@@ -52,6 +52,12 @@ export function WelcomePage() {
   const resetTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(resetTimer.current), []);
 
+  /**
+   * Copy the snippet currently on screen, and say so — as a checkmark for
+   * anyone watching and as a live-region announcement for anyone not. A
+   * failure is reported, never swallowed: the toast names the alternative
+   * (select the text) instead of leaving a button that silently did nothing.
+   */
   async function copySnippet() {
     const ok = await copyToClipboard(snippet);
     if (!ok) toast(COPY_FAILED_TOAST);
@@ -64,6 +70,11 @@ export function WelcomePage() {
     resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
   }
 
+  /**
+   * Conclude the onboarding and leave for the library. The toast says where
+   * the setup went, because a page that disappears for good on one click owes
+   * you the way back — and the pill is about to vanish with it.
+   */
   function done() {
     onboarding.markDone();
     toast('Done — reopen the setup any time from your profile menu → External agent access.');

@@ -32,6 +32,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/**
+ * Mount the auth router on a throwaway port with a stand-in auth middleware,
+ * and return its base URL. `authed: false` makes that middleware reject like
+ * the real one, which is how the "never reaches the service" case is proved
+ * rather than assumed.
+ */
 function listen(service: Pick<AuthService, 'markOnboardingDone'>, authed = true): string {
   const app = express();
   app.use(express.json());

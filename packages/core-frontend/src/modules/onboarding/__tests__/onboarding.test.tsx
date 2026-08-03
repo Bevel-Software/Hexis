@@ -31,12 +31,19 @@ vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock }));
 
 /** A user the server considers NOT onboarded (the explicit false matters). */
 const newUser = () => authValue({ user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone: false } });
+/** The same account after the server has recorded the onboarding as done. */
 const doneUser = () => authValue({ user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone: true } });
 
+/** Renders the current path, so a redirect can be asserted as a destination. */
 function LocationProbe() {
   return <div data-testid="pathname">{useLocation().pathname}</div>;
 }
 
+/**
+ * Render `ui` inside the three contexts the onboarding actually reads — a
+ * router at `route`, an auth context holding `auth`, and the toast provider —
+ * plus the location probe every redirect assertion below looks at.
+ */
 function mount(ui: React.ReactNode, auth = newUser(), route = '/') {
   return render(
     <MemoryRouter initialEntries={[route]}>

@@ -35,6 +35,11 @@ export function ConnectAgentPill() {
 
   if (!onboarding.showPill) return null;
 
+  /**
+   * The × — the same one-way server write as the welcome page's Done, not a
+   * "remind me later" this app never implements. It ends the reminder
+   * everywhere the account signs in, so it is worth the acknowledgement below.
+   */
   function dismiss() {
     onboarding.markDone();
     // The pill is about to unmount from under the pointer AND from under

@@ -31,16 +31,27 @@ import { authFetch } from '../../../lib/api';
  */
 
 const WELCOMED_PREFIX = 'bevel.onboarding.welcomed.';
+
+/**
+ * The storage key holding "this account has seen the welcome page", keyed by
+ * lower-cased email so `Juan@…` and `juan@…` are one person rather than two
+ * greetings.
+ */
 const welcomedKey = (email: string) => `${WELCOMED_PREFIX}${email.toLowerCase()}`;
 
 const doneLocally = new Set<string>();
 const welcomedLocally = new Set<string>();
 const listeners = new Set<() => void>();
 
+/** Tell every mounted `useOnboarding` that the overrides above moved. */
 function emit(): void {
   listeners.forEach((l) => l());
 }
 
+/**
+ * The `useSyncExternalStore` half of the subscription: register a listener and
+ * hand back its unsubscribe, so a hook that unmounts stops being notified.
+ */
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
@@ -57,6 +68,11 @@ function hasBeenWelcomed(email: string): boolean {
   }
 }
 
+/**
+ * Note that this account has now been greeted, which is what makes the
+ * welcome redirect one-time. Idempotent: already-welcomed returns without
+ * touching storage or waking listeners.
+ */
 export function markWelcomed(email: string): void {
   if (hasBeenWelcomed(email)) return;
   welcomedLocally.add(email);
@@ -68,6 +84,15 @@ export function markWelcomed(email: string): void {
   emit();
 }
 
+/**
+ * Conclude the connect-your-agent onboarding — the shared act behind the
+ * welcome page's Done and the pill's ×.
+ *
+ * Optimistic: the pill disappears on the click, before the server answers,
+ * because a reminder that lingers while a request flies reads as a control
+ * that did not work. The override is dropped again if the write fails, so the
+ * UI never keeps claiming something the server refused.
+ */
 export function markOnboardingDone(userId: string, email: string): void {
   if (doneLocally.has(email)) return;
   doneLocally.add(email);

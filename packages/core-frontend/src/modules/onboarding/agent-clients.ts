@@ -40,4 +40,9 @@ export const AGENT_CLIENTS: AgentClient[] = [
   },
 ];
 
+/**
+ * The MCP endpoint for a given page origin — the one URL every snippet above
+ * is built from. Derived rather than configured, so a deployment on any host
+ * hands out its own address without anyone remembering to update a constant.
+ */
 export const mcpUrlFromOrigin = (origin: string): string => `${origin}/api/mcp`;
