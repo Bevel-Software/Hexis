@@ -3,6 +3,23 @@
 Repo: `/Users/empire23/CodeBases/skill-and-tool-management`, branch `skills-and-tools-ui`.
 Owner: Juan. Scope: GROUP-level access surface only. Ali owns the skill page, the change-request flow, and the Share-panel-on-item-page (his lens work); nothing in this design touches `modules/pr/`, `modules/review/`, or the skill half of `DetailDialog`.
 
+> **AS BUILT — read this before §3, §4.3, §4.5, §5 or §7.**
+>
+> This document is the design as written, kept for the reasoning. Two things
+> changed during implementation and the sections below were NOT updated in
+> place, because the arguments in them are still why the code looks the way it
+> does:
+>
+> 1. **There is no `GroupAccessSection`, `GroupAccessCard`, `group-folders.ts`
+>    or `useGroupAccess.ts`.** The read-only summary card collapsed into the
+>    `Share` button on `GroupPage`, which opens `ManageAccessDialog` on the
+>    group's folder — one surface instead of a summary plus an escalation that
+>    could disagree with it. See §5 item 8 for what shipped.
+> 2. **Folders come from the server, not from item paths.** `GroupSummary.folders`
+>    is `GroupIndexService`'s `readdir` result, so a group with no items still
+>    has a folder to share. Every `groupFoldersFor(group, itemPaths)` reference
+>    below predates that and describes a derivation the page no longer does.
+
 ---
 
 ## 1. Goal + non-goals
@@ -265,26 +282,29 @@ No new storage. All truth stays in git: `Groups/<G>/access.md` (and legacy `Skil
 5. **MODIFY** `src/modules/access/components/ManageAccessDialog.tsx` — optional `workspaceId` prop (§4.2), `props.workspaceId ?? ctx.workspaceId` at L193.
 6. **CREATE** `src/modules/library/utils/group-folders.ts` — `GroupFolder`, `groupFoldersFor` (§4.3).
 7. **CREATE** `src/modules/library/hooks/useGroupAccess.ts` — `useGroupFolderAccess` (§4.5).
-8. **CREATE** `src/modules/library/components/GroupAccessSection.tsx`
+8. ~~**CREATE** `src/modules/library/components/GroupAccessSection.tsx`~~ — **SUPERSEDED during implementation. No such component exists; do not build one from this section.**
+
+   The read-only summary card was designed before `ManageAccessDialog` was the one access surface. Building both would have meant two renderings of the same rules that could disagree, so the section collapsed into a single `Share` button in the group page's title row, which opens the dialog directly on the group's folder. The dialog already renders read-only for a non-writer — its own `canWrite` verdict decides — so "who is this shared with?" and "change who it is shared with" are one control instead of a summary plus an escalation.
+
+   What shipped, in `GroupPage.tsx`:
+
    ```tsx
-   export interface GroupAccessSectionProps { group: string; itemPaths: string[] }
-   export function GroupAccessSection({ group, itemPaths }: GroupAccessSectionProps)
-   // internal, not exported:
-   function GroupAccessCard({ group, folder, showFolderLabel }:
-     { group: string; folder: GroupFolder; showFolderLabel: boolean })
-   function PrincipalChips({ roles, users }: { roles: string[]; users: { name: string; email: string }[] })
-   function OverridesList({ overrides, truncated }: { overrides: AccessOverride[]; truncated: boolean })
-   ```
-   - `GroupAccessSection`: folders come from the SERVER — `GroupSummary.folders`, which `GroupIndexService` discovered by `readdir` — not from the items' paths. Deriving them from `itemPaths` would make an empty group's access surface disappear, which is exactly the gap §6 used to carry. Renders nothing (`null`) when `folders.length === 0`; legacy Banner when `folders.length > 1`; one `GroupAccessCard` per folder (`showFolderLabel = folders.length > 1`).
-   - `GroupAccessCard`: `useGroupFolderAccess(folder.folder)` + `useWorkspace().kbDirName` + local `const [manageOpen, setManageOpen] = useState(false)`. Renders per §2.2. When open:
-     ```tsx
+   const primaryFolder = summary ? primaryFolderOf(summary) : null;   // utils/group-summary.ts
+   // …title row…
+   {primaryFolder && <Button variant="outline" size="sm" onClick={() => setManageFolder(primaryFolder)}>Share</Button>}
+   // …
+   {manageFolder && kbDirName && (
      <ManageAccessDialog
-       entry={{ name: group, relativePath: `${kbDirName}/${folder.folder}`, type: 'directory' }}
-       workspaceId={DEFAULT_WORKSPACE_ID}
-       onClose={() => { setManageOpen(false); reload(); }}
+       entry={{ name: manageFolder.split('/').pop() ?? manageFolder,
+                relativePath: `${kbDirName}/${manageFolder}`, type: 'directory' }}
+       …
      />
-     ```
-   - Design system only: `Surface`, `Banner`, `Badge`, `Button`, `ListRow` from the barrel; token classes only (`text-label`, `text-meta`, `text-detail`, `text-body`, `text-strong`, `text-ink*`); no raw hex, no slate, no off-scale sizes, no bare `rounded`; compose with `cn()`.
+   )}
+   ```
+
+   The part of this section that DID survive is where the folder comes from: `primaryFolderOf` reads `summary.folders`, the backend's `readdir` result, never the items' paths. That is what keeps a zero-item group's access surface alive (§6) — an items-derived folder list is empty for an empty group, and the `Share` button would vanish with it. Pinned by *"keeps Share on an EMPTY group"* in `GroupPage.test.tsx`.
+
+   Consequently unbuilt as specified: `GroupAccessCard`, `PrincipalChips`, `OverridesList`, `utils/group-folders.ts` (item 6) and `hooks/useGroupAccess.ts` (item 7). The multi-folder legacy-root case (§2.2) is handled by `primaryFolderOf` preferring the `Groups/`-rooted folder rather than by one card per folder.
 9. **MODIFY** `src/modules/library/components/LibraryPage.tsx` (fallback mount) **or** `GroupPage.tsx` (primary) per §3, plus (fallback case only) add `path: string` to the private `GalleryItem`.
 
 No DELETEs. No changes to `modules/pr/`, `modules/review/`, `DetailDialog.tsx`, or any skill-page file.
@@ -359,10 +379,10 @@ No DELETEs. No changes to `modules/pr/`, `modules/review/`, `DetailDialog.tsx`, 
 - **403 / errors on the summary**: danger Banner + Try again. We do NOT default-allow (unlike `useFileAccess`) — this is a display of record, and the backend gate protects writes regardless.
 - **403 on overrides**: block silently omitted (viewer can't read the folder's interior — nothing to disclose).
 - **Empty access.md / no grants**: readers empty + restricted → "Nobody has been given access yet — Admins can always see it."; writers empty → "Only Admins can change this group." (true via admin-rescue).
-- **Unmigrated KB (legacy roots)**: `groupFoldersFor` yields `Skills/<G>` / `Tools/<G>`; two independent cards + migration Banner; each Manage edits its own folder's `access.md`. Mid-migration (both roots) → up to three cards, Groups first. `groupOfPath` accepts all three roots, so derivation is uniform.
-- **Tool with no group** (`Tools/slack.tool`, 2 segments → `groupOfPath` null): never reaches a group page; `GroupAccessSection` is only rendered for real group filters/pages, and returns `null` for empty `folders` as a second guard. Its access remains governed by parents/root — out of this surface's scope by design.
+- **Unmigrated KB (legacy roots)**: the server reports every constituent folder in `GroupSummary.folders` (`Skills/<G>`, `Tools/<G>`, `Groups/<G>`). As built there is one `Share`, not one card per folder: `primaryFolderOf` picks the `Groups/`-rooted folder when it exists and the first otherwise, which is the same primary-folder rule the backend uses to resolve the group's principals — so the folder the page talks ABOUT is the folder it edits. Managing the other legacy folder's `access.md` separately is not reachable from this surface; it is a known limitation of the collapse, not an oversight.
+- **Tool with no group** (`Tools/slack.tool`, 2 segments → `groupOfPath` null): never reaches a group page, so the access surface is never rendered for it; `Share` is additionally hidden whenever `primaryFolderOf` returns null. Its access remains governed by parents/root — out of this surface's scope by design.
 - **Pseudo-rows** ("Owned by me", "Everything", "Yours alone"): not groups; section never rendered for them (`filter.kind === 'group'` guard).
-- **Empty group folder** (folder exists, no items): **closed** — this was written when groups were derived from items. They are not any more: `GroupIndexService.scanFolders()` enumerates the group roots with `readdir`, so a zero-item group is a real catalog entry with real `folders`, and its page keeps both the `Access` section and `Share`. The rule that replaced the gap: a group EXISTS because a folder exists, and counting is a separate question — the same rule the locked-groups surface needs in order to show a group you cannot read.
+- **Empty group folder** (folder exists, no items): **closed** — this was written when groups were derived from items. They are not any more: `GroupIndexService.scanFolders()` enumerates the group roots with `readdir`, so a zero-item group is a real catalog entry with real `folders`, and its page keeps `Share`. The rule that replaced the gap: a group EXISTS because a folder exists, and counting is a separate question — the same rule the locked-groups surface needs in order to show a group you cannot read.
 - **kbDirName null**: Manage disabled (title tooltip); summary still loads (repo-relative paths don't need kbDirName).
 - **Edit-lock 409** ("being edited by …"): surfaced by the dialog's existing `mutateError` path — no new handling.
 - **Inherited grant revoke / deny-here rollback (409 inherited / deny-ineffective / stale-ancestor)**: all inside the unmodified dialog, already handled.

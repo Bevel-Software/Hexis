@@ -34,13 +34,12 @@ vi.mock('../services/groups.api', () => ({
   AlreadyReadableError: class AlreadyReadableError extends Error {},
 }));
 
-// The page's access section fetches on mount. Stub that seam so these tests
-// exercise the page's judgement rather than the network — and so the suite
-// doesn't wait on a connection refusal. `GroupAccessSection.test.tsx` is where
-// the section's own behaviour is covered.
-// The ONE access surface. Mocked at the component: its own behaviour lives in
-// the access module's tests — what this file owes is that the page opens it on
-// the right DIRECTORY.
+// The ONE access surface — the separate summary section this page was designed
+// with never shipped, so there is no `GroupAccessSection.test.tsx` to defer to.
+// Mocked at the component: the dialog fetches on mount, and stubbing that seam
+// keeps these tests on the page's judgement rather than the network. Its own
+// behaviour lives in the access module's tests; what this file owes is that the
+// page opens it on the right DIRECTORY.
 vi.mock('../../access/components/ManageAccessDialog', () => ({
   ManageAccessDialog: ({
     entry,
