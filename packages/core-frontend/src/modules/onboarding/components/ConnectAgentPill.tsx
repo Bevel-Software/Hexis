@@ -1,4 +1,5 @@
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useState } from 'react';
+import { useInRouterContext, useLocation, useNavigate } from 'react-router-dom';
 import { X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useLibraryToast } from '../../library/state/toast';
@@ -27,13 +28,24 @@ import { WELCOME_PATH } from '../paths';
  * about what just happened.
  */
 export function ConnectAgentPill() {
+  // `SidebarFrame` mounts this, and SidebarFrame is a layout primitive that
+  // must stay renderable on its own — its unit tests mount it bare, and so
+  // could any future consumer. `useNavigate`/`useLocation` THROW outside a
+  // Router, so the check happens here, in a component whose only job is to
+  // decide, and the hooks live one level down where they are guaranteed a
+  // Router. No router, no reminder: the pill's whole purpose is to take you
+  // somewhere.
+  if (!useInRouterContext()) return null;
+  return <RoutedConnectAgentPill />;
+}
+
+function RoutedConnectAgentPill() {
   const onboarding = useOnboarding();
   const navigate = useNavigate();
   const toast = useLibraryToast();
   const { pathname } = useLocation();
+  const [announcement, setAnnouncement] = useState('');
   const selected = pathname === WELCOME_PATH;
-
-  if (!onboarding.showPill) return null;
 
   /**
    * The × — the same one-way server write as the welcome page's Done, not a
@@ -42,11 +54,26 @@ export function ConnectAgentPill() {
    */
   function dismiss() {
     onboarding.markDone();
-    // The pill is about to unmount from under the pointer AND from under
-    // keyboard focus. The toast is the acknowledgement and the receipt —
-    // without it a screen-reader user gets silence and a focus reset with no
-    // account of why.
-    toast('Reminder dismissed — the setup lives in your profile menu, under External agent access.');
+    const said =
+      'Reminder dismissed — the setup lives in your profile menu, under External agent access.';
+    // Said twice, on purpose, because the pill is about to unmount from under
+    // the pointer AND from under keyboard focus. The toast is the visible
+    // receipt but only exists inside the Library's provider; the live region
+    // below is this component's own, survives the pill's removal, and is what
+    // keeps the confirmation from going silent on Knowledge.
+    toast(said);
+    setAnnouncement(said);
+  }
+
+  // The live region is OUTSIDE the `showPill` guard so it is still mounted at
+  // the moment the pill disappears — a region that unmounts in the same commit
+  // as the thing it is announcing announces nothing.
+  if (!onboarding.showPill) {
+    return (
+      <span role="status" aria-live="polite" className="sr-only">
+        {announcement}
+      </span>
+    );
   }
 
   return (
@@ -55,7 +82,7 @@ export function ConnectAgentPill() {
         'group/pill mb-1.5 flex flex-none items-center rounded-full transition-colors',
         selected
           ? 'bg-accent/15'
-          : 'bg-accent/8 hover:bg-accent/15 motion-safe:animate-[onboarding-pulse_2.6s_ease-out_infinite]',
+          : 'bg-accent/8 hover:bg-accent/15 motion-safe:animate-onboarding-pulse-slow',
       )}
     >
       <button
@@ -72,7 +99,7 @@ export function ConnectAgentPill() {
           aria-hidden
           className={cn(
             'size-1.5 flex-none rounded-full bg-accent',
-            !selected && 'motion-safe:animate-[onboarding-blink_2.4s_ease-in-out_infinite]',
+            !selected && 'motion-safe:animate-onboarding-blink',
           )}
         />
         <span className="truncate">Connect your agent</span>

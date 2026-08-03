@@ -50,22 +50,31 @@ function readStoredWidth(): number {
 }
 
 let collapsed = false;
+let instant = false;
 let width = typeof window === 'undefined' ? SIDEBAR_DEFAULT_WIDTH : readStoredWidth();
 // One frozen object per state, so `useSyncExternalStore` can compare by
 // identity. Returning a fresh `{ collapsed, width }` from the snapshot would
 // re-render every subscriber on every unrelated store read, and React would
 // (rightly) warn about an unstable snapshot.
-let snapshot: SidebarState = { collapsed, width };
+let snapshot: SidebarState = { collapsed, width, instant };
 
 export interface SidebarState {
   collapsed: boolean;
   width: number;
+  /**
+   * Whether the CURRENT collapsed value arrived without a gesture, and so must
+   * not be performed. Toggling the nav is something you did and deserves the
+   * 240ms; the welcome page hiding it for the length of a greeting is not, and
+   * animating that reads as the nav flinching on the way in and opening by
+   * itself on the way out.
+   */
+  instant: boolean;
 }
 
 const listeners = new Set<() => void>();
 
 function emit(): void {
-  snapshot = { collapsed, width };
+  snapshot = { collapsed, width, instant };
   listeners.forEach((l) => l());
 }
 
@@ -74,15 +83,25 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
+/** The toolbar button. A gesture, so it always animates. */
 export function toggleSidebar(): void {
   collapsed = !collapsed;
+  instant = false;
   emit();
 }
 
-/** Direct set — the toolbar toggle's target, and how tests reset the module. */
-export function setSidebarCollapsed(value: boolean): void {
+/**
+ * Direct set — the toolbar toggle's target, and how tests reset the module.
+ *
+ * @param instantly true when the change must not be performed: the nav simply
+ *   is, or is not, in the next frame. `instant` rides along on the snapshot
+ *   rather than being cleared on a timer, because the next change is what
+ *   makes it stale — and every writer states its own intent.
+ */
+export function setSidebarCollapsed(value: boolean, instantly = false): void {
   if (value === collapsed) return;
   collapsed = value;
+  instant = instantly;
   emit();
 }
 
@@ -125,4 +144,5 @@ export function useSidebar(): SidebarState {
 const DEFAULT_SNAPSHOT: SidebarState = {
   collapsed: false,
   width: SIDEBAR_DEFAULT_WIDTH,
+  instant: false,
 };

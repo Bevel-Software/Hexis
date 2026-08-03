@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { cn } from '../../../lib/utils';
+import { ConnectAgentPill } from '../../onboarding/components/ConnectAgentPill';
 import {
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
@@ -46,7 +47,7 @@ export function SidebarFrame({
   /** Names the region and its resize handle, e.g. `Library groups`. */
   label: string;
 }) {
-  const { collapsed, width } = useSidebar();
+  const { collapsed, width, instant } = useSidebar();
   const [dragging, setDragging] = useState(false);
   const asideRef = useRef<HTMLElement>(null);
 
@@ -150,8 +151,10 @@ export function SidebarFrame({
           'h-full shrink-0 overflow-hidden border-r bg-sidebar',
           collapsed ? 'border-r-transparent' : 'border-line',
           // An easing curve would lag the cursor, so the transition is off for
-          // the duration of the drag (proto:89).
-          dragging
+          // the duration of the drag (proto:89) — and off again for a change
+          // nobody gestured at (`instant`), where a 240ms slide would be the
+          // nav appearing to move on its own.
+          dragging || instant
             ? 'transition-none'
             : 'transition-[width] duration-[240ms] ease-[cubic-bezier(.2,.8,.2,1)]',
         )}
@@ -160,6 +163,16 @@ export function SidebarFrame({
         {/* proto:104 — `padding:16px 14px 18px`, and an explicit width so the
             column does not reflow while the frame animates to zero. */}
         <div className="flex h-full flex-col px-3.5 pt-4 pb-[18px]" style={{ width }}>
+          {/* The connect-your-agent CTA sits above whatever list this sidebar
+              is holding — the one row that has to be true before the rows
+              under it mean anything.
+
+              HERE, not in either surface's own sidebar, because there is one
+              sidebar: mounting it in the Library's meant a person who skipped
+              the welcome page and stayed in Knowledge — where the app lands by
+              default — never saw the reminder at all. One frame, one pill,
+              both surfaces. It renders nothing once onboarding is done. */}
+          <ConnectAgentPill />
           {children}
         </div>
       </aside>

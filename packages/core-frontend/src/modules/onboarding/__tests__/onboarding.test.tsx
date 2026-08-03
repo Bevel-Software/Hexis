@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, renderHook, screen, cleanup, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { AuthContext } from '../../auth/state/auth.context';
@@ -10,6 +10,7 @@ import { ConnectAgentPill } from '../components/ConnectAgentPill';
 import { RootLanding } from '../components/RootLanding';
 import { WELCOME_PATH } from '../paths';
 import { resetOnboardingForTests } from '../state/onboarding';
+import { setSidebarCollapsed, useSidebar } from '../../layout/state/sidebar';
 
 /**
  * The onboarding contract, end to end on the client:
@@ -29,22 +30,54 @@ const { authFetchMock } = vi.hoisted(() => ({
 }));
 vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock }));
 
+/**
+ * The `RequestInit` of a recorded `authFetch` call.
+ *
+ * The mock declares no parameters — deliberately, so lint stays clean — which
+ * leaves `mock.calls` typed as an empty tuple even though the calls really do
+ * carry two arguments. Naming that gap ONCE, here, is better than a cast at
+ * every assertion that wants to read a request body.
+ */
+function fetchInit(call = 0): RequestInit | undefined {
+  return (authFetchMock.mock.calls[call] as unknown as [string, RequestInit] | undefined)?.[1];
+}
+
 /** A user the server considers NOT onboarded (the explicit false matters). */
 const newUser = () => authValue({ user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone: false } });
 /** The same account after the server has recorded the onboarding as done. */
 const doneUser = () => authValue({ user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone: true } });
 
-/** Renders the current path, so a redirect can be asserted as a destination. */
-function LocationProbe() {
-  return <div data-testid="pathname">{useLocation().pathname}</div>;
+/** Reads the sidebar store the way a component would. */
+function sidebarState() {
+  return renderHook(() => useSidebar()).result.current;
 }
+
+/** Where we are, and whether we got here by being greeted. */
+function LocationProbe() {
+  const { pathname, state } = useLocation();
+  const greeting = (state as { greeting?: boolean } | null)?.greeting === true;
+  return (
+    <>
+      <div data-testid="pathname">{pathname}</div>
+      <div data-testid="greeting">{String(greeting)}</div>
+    </>
+  );
+}
+
+/** The welcome page as the first-sign-in redirect leaves it: greeted. */
+const greeted = { pathname: WELCOME_PATH, state: { greeting: true } };
 
 /**
  * Render `ui` inside the three contexts the onboarding actually reads — a
  * router at `route`, an auth context holding `auth`, and the toast provider —
- * plus the location probe every redirect assertion below looks at.
+ * plus the location probe every redirect assertion below looks at. `route`
+ * takes a location object when a test needs to arrive as the greeting does.
  */
-function mount(ui: React.ReactNode, auth = newUser(), route = '/') {
+function mount(
+  ui: React.ReactNode,
+  auth = newUser(),
+  route: string | { pathname: string; state?: unknown } = '/',
+) {
   return render(
     <MemoryRouter initialEntries={[route]}>
       <AuthContext.Provider value={auth}>
@@ -103,6 +136,13 @@ describe('RootLanding — the one-time greeting', () => {
     expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
   });
 
+  // The flag the page reads to know this arrival is a ceremony rather than a
+  // visit — the sidebar collapse hangs off it, and only this navigation sets it.
+  it('marks the automatic redirect as a greeting', () => {
+    mount(landingRoutes);
+    expect(screen.getByTestId('greeting')).toHaveTextContent('true');
+  });
+
   it('sends everyone the server marked done straight to Knowledge', () => {
     mount(landingRoutes, doneUser());
     expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
@@ -133,19 +173,131 @@ describe('RootLanding — the one-time greeting', () => {
 });
 
 describe('WelcomePage', () => {
-  const mountPage = (auth = newUser()) =>
+  // Default: the ordinary visit, from the sidebar pill. The greeting — the
+  // one-time redirect — is the special case, and says so at each call site.
+  const mountPage = (auth = newUser(), route: string | typeof greeted = WELCOME_PATH) =>
     mount(
       <Routes>
         <Route path={WELCOME_PATH} element={<WelcomePage />} />
         <Route path="/skills-and-tools" element={<div>library</div>} />
+        <Route path="/skills-and-tools/yours" element={<div>your group</div>} />
       </Routes>,
       auth,
-      WELCOME_PATH,
+      route,
     );
 
   it('addresses the person by first name', () => {
     mountPage();
     expect(screen.getByRole('heading', { name: 'Welcome, Juan' })).toBeInTheDocument();
+  });
+
+  /**
+   * The entrance must BEGIN on a painted frame. A CSS animation runs on the
+   * document timeline whether or not the browser is producing frames, so an
+   * animation attached at mount can elapse entirely during a cold boot and
+   * never be seen — the bug that made this page "just appear" at every
+   * duration we tried. Held invisible first, animating second.
+   */
+  it('starts its entrance on a painted frame, not at mount', async () => {
+    mountPage(newUser(), greeted);
+    const title = screen.getByRole('heading', { name: 'Welcome, Juan' });
+    const body = screen.getByText(/company’s shared library/).parentElement!;
+    // An inline style, deliberately — a utility class would depend on Tailwind
+    // having compiled it, and that is exactly what failed silently before.
+    expect(title.style.opacity).toBe('0');
+    expect(body.style.opacity).toBe('0');
+    await waitFor(() => {
+      expect(title.className).toContain('animate-onboarding-greeting');
+      expect(body.className).toContain('animate-onboarding-body');
+    });
+    // …and never both at once: held invisible and animating would fight.
+    expect(title.style.opacity).toBe('');
+    expect(body.style.opacity).toBe('');
+  });
+
+  /**
+   * Being welcomed happens once. Opening the same page from the pill later is
+   * a visit, and a 2.6s arrival every time you come back to copy your MCP
+   * snippet is a page you learn to dread — so there is no hold and no fade,
+   * only the page.
+   */
+  it('does not replay the entrance when you open it from the pill', () => {
+    mountPage();
+    const title = screen.getByRole('heading', { name: 'Welcome, Juan' });
+    expect(title.style.opacity).toBe('');
+    expect(title.className).not.toContain('animate-onboarding-greeting');
+  });
+
+  // However the sign-in record spells it. The page addressed to one person is
+  // the last place that should get their name wrong.
+  it('capitalizes the name whatever the account holds', () => {
+    mountPage(authValue({ user: { id: 'u1', email: 'j@bevel.software', name: 'juan viera', onboardingDone: false } }));
+    expect(screen.getByRole('heading', { name: 'Welcome, Juan' })).toBeInTheDocument();
+  });
+
+  it('greets someone with no name at all', () => {
+    mountPage(authValue({ user: { id: 'u1', email: 'j@bevel.software', name: '', onboardingDone: false } }));
+    expect(screen.getByRole('heading', { name: 'Welcome, there' })).toBeInTheDocument();
+  });
+
+  /**
+   * The nav gets out of the way for the greeting and STAYS out — there is no
+   * restore. Putting it back meant leaving a screen with no nav and arriving
+   * at one where the nav had opened itself, which is the app rearranging a
+   * page you asked for. Whether the sidebar shows is the toolbar toggle's to
+   * say, and after the greeting it says whatever it said last.
+   */
+  it('collapses the sidebar for the greeting, without animating it', () => {
+    setSidebarCollapsed(false);
+    mountPage(newUser(), greeted);
+    expect(sidebarState()).toMatchObject({ collapsed: true, instant: true });
+  });
+
+  it('leaves it collapsed when you go to your own group', async () => {
+    setSidebarCollapsed(false);
+    mountPage(newUser(), greeted);
+    await userEvent.click(screen.getByRole('button', { name: /Go to your skills/ }));
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/skills-and-tools/yours');
+    expect(sidebarState().collapsed).toBe(true);
+  });
+
+  it('leaves it collapsed after Done too', async () => {
+    setSidebarCollapsed(false);
+    mountPage(newUser(), greeted);
+    await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(sidebarState().collapsed).toBe(true);
+  });
+
+  /**
+   * The one case where the nav is showing on the way out: you opened it
+   * yourself while you were here. The page collapses once, on arrival, and
+   * never touches the store again — so your gesture is the last word.
+   */
+  it('respects a sidebar you opened yourself while reading the page', async () => {
+    setSidebarCollapsed(false);
+    mountPage(newUser(), greeted);
+    expect(sidebarState().collapsed).toBe(true);
+    setSidebarCollapsed(false); // …the toolbar toggle, from the user's hand
+    await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(sidebarState().collapsed).toBe(false);
+  });
+
+  it('leaves it collapsed for someone who arrived that way', () => {
+    setSidebarCollapsed(true);
+    const { unmount } = mountPage(newUser(), greeted);
+    expect(sidebarState().collapsed).toBe(true);
+    unmount();
+    expect(sidebarState().collapsed).toBe(true);
+  });
+
+  // Reached from the pill it is a page, not a ceremony: the nav it was just
+  // clicked in stays exactly where it is.
+  it('leaves the sidebar alone when you open it from the pill', () => {
+    setSidebarCollapsed(false);
+    const { unmount } = mountPage();
+    expect(sidebarState().collapsed).toBe(false);
+    unmount();
+    expect(sidebarState().collapsed).toBe(false);
   });
 
   it('shows one snippet at a time, following the picker', async () => {
@@ -167,14 +319,29 @@ describe('WelcomePage', () => {
     expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
   });
 
-  it('Done concludes: server write + landing in the library', async () => {
+  // Exact, not a substring: `/skills-and-tools` is a PREFIX of the personal
+  // group's path, so a loose match would pass even if Done dropped someone in
+  // the whole company's catalog instead of their own shelf.
+  it('Done concludes: server write + landing in your own group', async () => {
     mountPage();
     await userEvent.click(screen.getByRole('button', { name: 'Done' }));
     expect(authFetchMock).toHaveBeenCalledWith(
       '/api/auth/onboarding-done',
       expect.objectContaining({ method: 'POST' }),
     );
-    expect(screen.getByTestId('pathname')).toHaveTextContent('/skills-and-tools');
+    expect(screen.getByTestId('pathname')).toHaveTextContent(/^\/skills-and-tools\/yours$/);
+  });
+
+  // Both exits, one destination — stated as its own fact so a future change to
+  // either button has to face the question deliberately.
+  it('sends you to the same place whether you finish or skip', async () => {
+    mountPage();
+    await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+    const afterDone = screen.getByTestId('pathname').textContent;
+    cleanup();
+    mountPage();
+    await userEvent.click(screen.getByRole('button', { name: /Go to your skills/ }));
+    expect(screen.getByTestId('pathname')).toHaveTextContent(afterDone!);
   });
 
   // Exclusive-choice semantics: `radio` says one of these is always chosen
@@ -194,11 +361,13 @@ describe('WelcomePage', () => {
     ]);
   });
 
-  it('the skip link leaves without concluding', async () => {
+  // Into the person's OWN group, not the whole catalog — the same place the
+  // sidebar's personal row goes.
+  it('the skip link leaves for your own group, without concluding', async () => {
     mountPage();
-    await userEvent.click(screen.getByRole('button', { name: /Go to your library/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Go to your skills/ }));
     expect(authFetchMock).not.toHaveBeenCalled();
-    expect(screen.getByTestId('pathname')).toHaveTextContent('/skills-and-tools');
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/skills-and-tools/yours');
   });
 });
 
@@ -216,6 +385,9 @@ describe('ConnectAgentPill', () => {
     mountPill();
     await userEvent.click(screen.getByRole('button', { name: 'Connect your agent' }));
     expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
+    // …as a plain visit. The pill opens the page; it does not re-run the
+    // first-sign-in ceremony that folds the nav it lives in away.
+    expect(screen.getByTestId('greeting')).toHaveTextContent('false');
   });
 
   it('renders nothing once the server says done', () => {
@@ -255,8 +427,7 @@ describe('ConnectAgentPill', () => {
   it('states which account it is concluding', async () => {
     mountPill();
     await userEvent.click(screen.getByRole('button', { name: /^Dismiss/ }));
-    const init = authFetchMock.mock.calls[0]?.[1];
-    expect(JSON.parse(init?.body as string)).toEqual({ userId: 'u1' });
+    expect(JSON.parse(String(fetchInit()?.body))).toEqual({ userId: 'u1' });
   });
 
   /**

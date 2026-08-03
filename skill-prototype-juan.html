@@ -3579,8 +3579,10 @@ function agentModal(){
    the same task — the modal remains for anyone arriving later through the
    profile menu, this page is the front door.
 
-   "Go to your library →" is a skip, not a gate: nothing here is mandatory,
-   and the sidebar pill keeps the door open for whoever leaves.
+   "Go to your skills →" is a skip, not a gate: nothing here is mandatory,
+   and the sidebar pill keeps the door open for whoever leaves. It lands in
+   the person's own space rather than the whole catalog — the library is the
+   company's, and this exit goes to the part of it that is theirs.
    ========================================================= */
 function renderWelcome(){
   const c = AGENT_CLIENTS.filter(function(x){ return x.id===state.agentClient; })[0] || AGENT_CLIENTS[0];
@@ -3599,7 +3601,7 @@ function renderWelcome(){
     snipHtml(c.snip)+
     '<div class="wfoot">'+
     '<button class="btn primary wcta" data-mcpdone>Done</button>'+
-    '<button class="wskip" data-welcomeskip>Go to your library →</button>'+
+    '<button class="wskip" data-welcomeskip>Go to your skills →</button>'+
     '</div></div>';
 }
 
@@ -4224,7 +4226,7 @@ const CLICKS = {
   /* The sidebar pill and the profile menu lead here; re-arming `wseen` lets
      the page fade in again on a deliberate return. */
   'data-welcome': ()=>{ state.app='skills'; state.view='welcome'; state.wseen=false; render(); window.scrollTo({top:0}); },
-  'data-welcomeskip': ()=>{ state.view='home'; render(); window.scrollTo({top:0}); },
+  'data-welcomeskip': ()=>{ state.view='personal'; state.space=null; render(); window.scrollTo({top:0}); },
   /* "Done" is the person's own word for it — the app takes it and concludes:
      pill gone, welcome page over, modal closed. The door stays in the profile
      menu, and the toast says so. */

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import {
+  emptyMessageFor,
   filterLibraryItems,
   groupCounts,
   neededToolsFor,
@@ -8,6 +9,7 @@ import {
   toolStatus,
   type LibraryFilterable,
 } from '../utils/status';
+import { toastDuration } from '../utils/toast-duration';
 
 function tool(overrides: Partial<ToolSecrets>): ToolSecrets {
   return {
@@ -149,5 +151,60 @@ describe('groupCounts', () => {
 
   it('is empty when nothing is grouped', () => {
     expect(groupCounts([{ kind: 'skill', name: 'a', description: '', owned: true, group: null }])).toEqual([]);
+  });
+});
+
+describe('emptyMessageFor', () => {
+  /**
+   * An empty view and a failed search are different facts, and saying the
+   * wrong one is worse than saying nothing: told "you're not responsible for
+   * changes in any skills yet" after mistyping a search, you would believe the
+   * shelf was empty rather than that you had missed.
+   */
+  it('names why the view is empty when nobody searched', () => {
+    expect(emptyMessageFor({ kind: 'owned' }, '')).toBe(
+      "You're not responsible for changes in any skills yet.",
+    );
+  });
+
+  it('blames the search when there is one, in that same view', () => {
+    expect(emptyMessageFor({ kind: 'owned' }, 'postgres')).toBe('Nothing here matches yet.');
+    // Whitespace is not a search.
+    expect(emptyMessageFor({ kind: 'owned' }, '   ')).toBe(
+      "You're not responsible for changes in any skills yet.",
+    );
+  });
+
+  it('leaves the other views on the general wording', () => {
+    expect(emptyMessageFor({ kind: 'all' }, '')).toBe('Nothing here matches yet.');
+    expect(emptyMessageFor({ kind: 'ungrouped' }, '')).toBe('Nothing here matches yet.');
+  });
+});
+
+describe('toastDuration', () => {
+  /**
+   * The flat 2.6s was set when the only toast said "Copied". A 76-character
+   * confirmation on that budget is unreadable — the message is the whole point
+   * of a toast, so how long it stays has to follow how long it takes to read.
+   */
+  it('gives a long message time to be read', () => {
+    const done = 'Done — reopen the setup any time from your profile menu → External agent access.';
+    expect(toastDuration(done)).toBeGreaterThan(4500);
+  });
+
+  it('does not blink a short one', () => {
+    expect(toastDuration('Copied')).toBe(3000);
+  });
+
+  // Nothing camps on the screen: a runaway message is still a message you can
+  // ignore, but a permanent one is a bug wearing a toast.
+  it('caps however long the message is', () => {
+    expect(toastDuration('x'.repeat(5000))).toBe(9000);
+  });
+
+  it('is never shorter for a longer message', () => {
+    const lengths = [0, 10, 40, 80, 160, 400];
+    const times = lengths.map((n) => toastDuration('x'.repeat(n)));
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
   });
 });

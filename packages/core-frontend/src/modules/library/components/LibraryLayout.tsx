@@ -9,7 +9,6 @@ import { libraryFilterForPath, pathForLibraryFilter } from '../routes/library-pa
 import { groupCounts } from '../utils/status';
 import { useSidebar } from '../../layout/state/sidebar';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
-import { ConnectAgentPill } from '../../onboarding/components/ConnectAgentPill';
 import { GroupsSidebar } from './GroupsSidebar';
 import { NewGroupDialog } from './NewGroupDialog';
 
@@ -79,12 +78,6 @@ export function LibraryLayout() {
   return (
     <div className="flex h-full min-h-0 bg-canvas text-ink">
       <SidebarFrame label="Library groups">
-        {/* The connect-your-agent CTA, above everything — the one row that
-            has to be true before the rows under it mean anything. Mounted
-            here rather than in GroupsSidebar so the sidebar stays the pure
-            view of the URL it documents itself to be; the pill owns its own
-            state (the onboarding store) and its own navigation. */}
-        <ConnectAgentPill />
         <GroupsSidebar
           filter={filter}
           onSelect={(next) => navigate(pathForLibraryFilter(next))}

@@ -15,8 +15,14 @@ import { WELCOME_PATH } from '../paths';
  * `useOnboarding` is provider-tolerant, so `ShellRoutes` stays renderable
  * without the full stack (its own documented property); providerless or
  * signed out this is exactly the old `<Navigate to={KB_ROUTE_PREFIX}>`.
+ *
+ * The redirect carries `greeting`, and it is the ONLY navigation that does:
+ * arriving here because you just signed in is a different event from opening
+ * the same page from the sidebar, and the page needs to tell them apart to
+ * know whether it is a ceremony or a page. See `WelcomePage`.
  */
 export function RootLanding() {
   const { shouldWelcome } = useOnboarding();
-  return <Navigate to={shouldWelcome ? WELCOME_PATH : KB_ROUTE_PREFIX} replace />;
+  if (!shouldWelcome) return <Navigate to={KB_ROUTE_PREFIX} replace />;
+  return <Navigate to={WELCOME_PATH} state={{ greeting: true }} replace />;
 }
