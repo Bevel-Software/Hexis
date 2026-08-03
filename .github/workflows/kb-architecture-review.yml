@@ -34,6 +34,11 @@ jobs:
       # every run whatever the build was doing, and the agent correctly
       # bounced the PR for evidence it was not allowed to look at.
       checks: read
+      # And `actions: read` beside it, because the agent asks BOTH questions:
+      # the check runs on a commit, and the workflow runs behind them. Granting
+      # only the first still left it reporting 403 on "Actions workflow runs"
+      # and caveating a go-ahead for evidence it could only half see.
+      actions: read
 
     steps:
       # Instant sign of life: react 👀 to the triggering comment so the author
