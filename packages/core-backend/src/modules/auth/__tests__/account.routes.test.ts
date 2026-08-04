@@ -3,6 +3,7 @@ import express from 'express';
 import type { Server } from 'node:http';
 import { createAccountRoutes } from '../account.routes.js';
 import type { AuthService } from '../auth.service.js';
+import type { AccountErasureService } from '../account-erasure.service.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 
 const authService = {
@@ -11,6 +12,10 @@ const authService = {
   ]),
   createAccount: vi.fn(async (email: string) => ({ id: 'u2', email, name: 'B' })),
 } as unknown as AuthService;
+
+const accountErasure = {
+  eraseUser: vi.fn(async () => true),
+} as unknown as AccountErasureService;
 
 function makeApp(opts: { admin: boolean; email?: string }) {
   const adminAccess: IAdminAccessService = {
@@ -25,7 +30,7 @@ function makeApp(opts: { admin: boolean; email?: string }) {
     req.userEmail = opts.email ?? 'caller@example.com';
     next();
   });
-  app.use('/api', createAccountRoutes(authService, adminAccess));
+  app.use('/api', createAccountRoutes(authService, adminAccess, accountErasure));
   return app;
 }
 
@@ -33,6 +38,7 @@ let server: Server;
 afterEach(() => {
   server?.close();
   vi.mocked(authService.createAccount).mockClear();
+  vi.mocked(accountErasure.eraseUser).mockClear().mockResolvedValue(true);
 });
 
 async function listen(app: express.Express): Promise<string> {
@@ -72,6 +78,26 @@ describe('account routes — admin gate', () => {
     });
     expect(create.status).toBe(201);
     expect(authService.createAccount).toHaveBeenCalledWith('b@example.com', 'B', 'long-enough-pw');
+  });
+
+  it('erasure: refuses non-admins, refuses self, 404s unknown, 204s success', async () => {
+    const nonAdmin = await listen(makeApp({ admin: false }));
+    expect((await fetch(`${nonAdmin}/api/admin/accounts/u9`, { method: 'DELETE' })).status).toBe(403);
+    expect(accountErasure.eraseUser).not.toHaveBeenCalled();
+    server.close();
+
+    const base = await listen(makeApp({ admin: true }));
+    // Self-erasure (caller is stamped as u1) is refused with an explanation.
+    const self = await fetch(`${base}/api/admin/accounts/u1`, { method: 'DELETE' });
+    expect(self.status).toBe(400);
+    expect(((await self.json()) as { error: string }).error).toMatch(/own account/i);
+    expect(accountErasure.eraseUser).not.toHaveBeenCalled();
+
+    vi.mocked(accountErasure.eraseUser).mockResolvedValueOnce(false);
+    expect((await fetch(`${base}/api/admin/accounts/ghost`, { method: 'DELETE' })).status).toBe(404);
+
+    expect((await fetch(`${base}/api/admin/accounts/u2`, { method: 'DELETE' })).status).toBe(204);
+    expect(accountErasure.eraseUser).toHaveBeenLastCalledWith('u2');
   });
 
   it('400s on missing fields and surfaces service validation errors', async () => {
