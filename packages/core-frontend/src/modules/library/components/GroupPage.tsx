@@ -9,15 +9,11 @@ import {
   pathForTool,
 } from '../routes/library-paths';
 import { primaryFolderOf } from '../utils/group-summary';
-import { useGroupAccessRequests } from '../hooks/useGroupAccessRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { useLibraryToast } from '../state/toast';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
 import { GroupBreadcrumb, GroupItemSections, PageNote, ShareGlyph } from './group-page-parts';
-import { AccessRequestsBanner } from './AccessRequestsBanner';
-import { LockedGroupView } from './LockedGroupView';
 
 /**
  * One group, as a place: `/skills-and-tools/groups/:group`.
@@ -28,22 +24,17 @@ import { LockedGroupView } from './LockedGroupView';
  * FILTER to a group; what they could not do is be linked to, bookmarked, or
  * handed to somebody. That is the whole difference this page makes.
  *
- * WHICH VIEW: the page decides member-vs-locked, not the router and not the
- * sidebar. The rule is deliberately generous — the member view renders when the
- * folder verdict says `canRead`, OR when the caller's catalog already contains
- * an item in the group. Access resolution is closeness-first, so a per-file
- * grant can hand somebody one skill inside a folder they cannot read; hiding an
- * item the platform already returned would be a lie in the other direction.
- * Locked therefore means: the summary says no AND the catalog agrees.
+ * Fail-closed like the rest of the platform: a group the caller cannot access
+ * never reaches this page's data (the groups endpoint omits it and the catalog
+ * has none of its items), so an inaccessible group renders exactly like one
+ * that does not exist.
  */
 export function GroupPage() {
   const params = useParams();
   const group = decodeGroupSegment(params.group ?? '');
   const data = useLibrary();
   const navigate = useNavigate();
-  const toast = useLibraryToast();
   const { kbDirName } = useWorkspace();
-  const requests = useGroupAccessRequests();
   const [detail, setDetail] = useState<DetailTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
@@ -80,12 +71,11 @@ export function GroupPage() {
   }
 
   /**
-   * THE access surface — one dialog, three openers: the title row's `Share`,
-   * the locked view's `Manage access` (a locked-out Admin unlocking
-   * themselves), and the request banner (an owner letting somebody else in).
-   * There is deliberately no read-only sibling: the dialog itself degrades to
-   * read-only when the resolved verdict says the caller cannot write, so a
-   * second "view access" panel would be the same information twice.
+   * THE access surface — one dialog, two openers: the title row's `Share` and
+   * the Manage-access affordances. There is deliberately no read-only sibling:
+   * the dialog itself degrades to read-only when the resolved verdict says the
+   * caller cannot write, so a second "view access" panel would be the same
+   * information twice.
    *
    * `kbDirName` gates it because the resolver addresses files repo-relative and
    * the dialog strips that prefix — without it the path we would hand over is
@@ -101,46 +91,16 @@ export function GroupPage() {
         }}
         onClose={() => {
           setManageFolder(null);
-          // Granting IS approving: the request retires itself server-side once
-          // the requester can read, so closing the dialog is the moment to ask
-          // again rather than a moment to mark anything approved here.
           data.reloadGroups();
-          requests.reload();
         }}
       />
     ) : null;
 
-  async function dismiss(id: string) {
-    try {
-      await requests.dismiss(id);
-    } catch {
-      toast("Couldn't dismiss that — try again.");
-      requests.reload();
-    }
-  }
-
   // Nothing has spoken yet: the catalog is still loading, the group index is
   // still loading, and no item has proven the group exists. Deciding now would
-  // flash "doesn't exist" (or a locked splash) at somebody who is simply early.
+  // flash "doesn't exist" at somebody who is simply early.
   if (groupItems.length === 0 && (data.loading || data.groupsLoading)) {
     return <PageNote>Loading the library…</PageNote>;
-  }
-
-  if (summary && !summary.canRead && groupItems.length === 0) {
-    return (
-      <>
-        <LockedGroupView
-          group={summary}
-          onRequested={data.reloadGroups}
-          onUnlocked={() => {
-            data.reload();
-            data.reloadGroups();
-          }}
-          onManage={setManageFolder}
-        />
-        {manageDialog}
-      </>
-    );
   }
 
   // No summary, no items, and the endpoint did NOT fail — the group really is
@@ -185,18 +145,6 @@ export function GroupPage() {
           </Button>
         )}
       </div>
-
-      {/* Somebody is waiting on the person reading this. It goes ABOVE the
-          setup banner because a request is about a human, and the folder's
-          owners are the only people who can answer it. */}
-      <AccessRequestsBanner
-        group={group}
-        folders={summary?.folders ?? []}
-        requests={requests.requests.filter((r) => r.group === group)}
-        onManage={setManageFolder}
-        onDismiss={(id) => void dismiss(id)}
-        className="mt-4"
-      />
 
       {attention > 0 && (
         <Banner role="status" tone="wait" className="mt-4">

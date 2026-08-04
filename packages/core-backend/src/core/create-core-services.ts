@@ -22,7 +22,7 @@ import { AccessControlService } from '../modules/access/access-control.service.j
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
-import { GroupIndexService, AccessRequestsService } from '../modules/groups/index.js';
+import { GroupIndexService } from '../modules/groups/index.js';
 import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
@@ -91,7 +91,6 @@ export interface CoreServices {
   skillService: SkillService;
   toolManualService: ToolManualService;
   groupIndexService: GroupIndexService;
-  groupAccessRequests: AccessRequestsService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
@@ -200,9 +199,6 @@ export async function createCoreServices(
     toolManualService,
     config.kbDirName,
   );
-  // "Let me in" requests against those groups. Postgres-backed, so a request
-  // survives a reload and a restart; retired lazily when the requester can read.
-  const groupAccessRequests = new AccessRequestsService(db);
   // Auth service — resolves identities for login, PR author attribution, and
   // access lookups. (Change requests now store the author email directly, so
   // PullRequestService no longer depends on it for attribution.)
@@ -544,7 +540,6 @@ export async function createCoreServices(
     skillService,
     toolManualService,
     groupIndexService,
-    groupAccessRequests,
     authService,
     authMiddleware,
     accountErasureService,

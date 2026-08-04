@@ -75,17 +75,7 @@ const summary = (over: Partial<GroupSummary> = {}): GroupSummary => ({
   owners: { roles: [], users: [{ name: 'Olga Ivanova', email: 'olga@bevel.software' }] },
   writers: { roles: ['Admin'], users: [] },
   readers: { restricted: true, roles: ['GTM Team'], users: [] },
-  hasRequested: false,
   ...over,
-});
-
-const LOCKED = summary({
-  name: 'Finance',
-  folders: ['Groups/Finance'],
-  canRead: false,
-  skillCount: 3,
-  toolCount: 1,
-  readers: null,
 });
 
 function LocationProbe() {
@@ -115,10 +105,10 @@ const row = (name: RegExp | string) => screen.getByRole('button', { name });
 describe('GroupsIndexPage', () => {
   beforeEach(() => {
     dataMock.useLibraryData.mockReturnValue(CATALOG);
-    groupsMock.listGroups.mockResolvedValue([summary(), LOCKED]);
+    groupsMock.listGroups.mockResolvedValue([summary()]);
   });
 
-  it('names itself and its three sections', async () => {
+  it('names itself and its two sections', async () => {
     renderIndex();
     expect(await screen.findByRole('heading', { name: 'All groups', level: 1 })).toBeInTheDocument();
     expect(
@@ -126,7 +116,6 @@ describe('GroupsIndexPage', () => {
     ).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Yours' })).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: "Groups you're in" })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Ask to join' })).toBeInTheDocument();
   });
 
   it("offers the caller's own group under Yours, and opens it", async () => {
@@ -196,43 +185,23 @@ describe('GroupsIndexPage', () => {
     expect(await screen.findByRole('button', { name: /^GTM .* 1$/ })).toBeInTheDocument();
   });
 
-  it('lists a group the caller cannot read under Ask to join, marked Locked', async () => {
+  it('never lists a group the endpoint omitted (fail-closed: absent = invisible)', async () => {
+    // The backend only returns accessible groups, and this page adds nothing
+    // on top: a group the caller cannot access has no row, no name, no counts.
+    groupsMock.listGroups.mockResolvedValue([summary()]);
     renderIndex();
-    const finance = await screen.findByRole('button', { name: /^Finance/ });
-    expect(finance).toHaveAccessibleName('Finance Run by Olga Ivanova 3 skills · 1 tools Locked');
-    expect(screen.getByTitle('Locked')).toBeInTheDocument();
-    fireEvent.click(finance);
-    await waitFor(() => expect(href()).toBe('/skills-and-tools/groups/Finance'));
+    await screen.findByRole('button', { name: /^GTM/ });
+    expect(screen.queryByRole('button', { name: /^Finance/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Ask to join' })).not.toBeInTheDocument();
   });
 
-  it('says Requested instead of Locked once the caller has asked to join', async () => {
-    groupsMock.listGroups.mockResolvedValue([summary(), { ...LOCKED, hasRequested: true }]);
-    renderIndex();
-    // The one thing this row can tell you that you did not already know is
-    // whether you have already asked — so it says that instead of the obvious.
-    expect(await screen.findByTitle('Requested')).toBeInTheDocument();
-    expect(screen.queryByTitle('Locked')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Finance/ })).toHaveAccessibleName(
-      'Finance Run by Olga Ivanova 3 skills · 1 tools Requested',
-    );
-  });
-
-  it('moves a locked group into Groups you’re in when an item grant reaches inside', async () => {
+  it('lists a group an item grant reaches inside, even without a summary', async () => {
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,
       skills: [{ name: 'budget', description: '', path: 'Groups/Finance/budget' }],
     });
     renderIndex();
-    await screen.findByRole('button', { name: /^Finance/ });
-    expect(screen.queryByRole('heading', { name: 'Ask to join' })).not.toBeInTheDocument();
-    expect(screen.queryByTitle('Locked')).not.toBeInTheDocument();
-  });
-
-  it('drops the Ask to join section when every group is readable', async () => {
-    groupsMock.listGroups.mockResolvedValue([summary()]);
-    renderIndex();
-    await screen.findByRole('button', { name: /^GTM/ });
-    expect(screen.queryByRole('heading', { name: 'Ask to join' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /^Finance/ })).toBeInTheDocument();
   });
 
   it('lists a catalog-derived group with counts alone when no summary vouches for it', async () => {

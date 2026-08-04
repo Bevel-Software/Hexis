@@ -119,8 +119,11 @@ const gtm = (over: Partial<GroupSummary> = {}): GroupSummary => ({
   toolCount: 1,
   owners: { roles: [], users: [{ name: 'Olga Ivanova', email: 'olga@bevel.software' }] },
   writers: { roles: ['Admin'], users: [] },
-  readers: { restricted: true, roles: ['GTM Team'], users: [{ name: 'Ali Baba', email: null }] },
-  hasRequested: false,
+  readers: {
+    restricted: true,
+    roles: ['GTM Team'],
+    users: [{ name: 'Ali Baba', email: 'ali@bevel.software' }],
+  },
   ...over,
 });
 
@@ -265,36 +268,36 @@ describe('GroupPage', () => {
     ).toBeInTheDocument();
   });
 
-  it('locks a group the caller cannot read and shows nothing inside it', async () => {
+  it('a group the caller cannot access renders exactly like one that does not exist', async () => {
+    // Fail-closed: the endpoint omits inaccessible groups, so the page cannot
+    // tell "hidden from you" apart from "absent" — which is the point.
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+    groupsMock.listGroups.mockResolvedValue([]);
+    renderGroup('Finance');
+    expect(await screen.findByText("This group doesn't exist yet.")).toBeInTheDocument();
+  });
+
+  it('a locked-out admin (canWrite via admin-rescue) still gets the page and Share', async () => {
     dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
     groupsMock.listGroups.mockResolvedValue([
-      gtm({ name: 'Finance', folders: ['Groups/Finance'], canRead: false, readers: null }),
+      gtm({ name: 'Finance', folders: ['Groups/Finance'], canRead: false, canWrite: true }),
     ]);
     renderGroup('Finance');
-    expect(
-      await screen.findByRole('button', { name: 'Subscribe to its skills and tools' }),
-    ).toBeInTheDocument();
-    expect(screen.getByText('Run by Olga Ivanova.')).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: 'Skills' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Propose a skill or tool' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Share' })).toBeInTheDocument();
   });
 
   it('keeps the member view when an item-level grant beats the folder verdict', async () => {
     // Closeness-first resolution hands this caller one skill inside a folder
-    // they cannot read. The platform already returned it; the page shows it.
+    // they cannot read; the group itself is absent from the (fail-closed)
+    // summaries. The platform already returned the item; the page shows it.
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,
       skills: [{ name: 'budget', description: '', path: 'Groups/Finance/budget' }],
       tools: [],
     });
-    groupsMock.listGroups.mockResolvedValue([
-      gtm({ name: 'Finance', folders: ['Groups/Finance'], canRead: false, readers: null }),
-    ]);
+    groupsMock.listGroups.mockResolvedValue([]);
     renderGroup('Finance');
     expect(await screen.findByTestId('library-card-skill-budget')).toBeInTheDocument();
-    expect(
-      screen.queryByRole('button', { name: 'Subscribe to its skills and tools' }),
-    ).not.toBeInTheDocument();
   });
 
   it('says so when the group does not exist', async () => {

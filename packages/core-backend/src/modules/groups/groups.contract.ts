@@ -4,18 +4,15 @@
  * boundary, one place, derived from the path exactly the way `groupOfPath`
  * derives it.
  *
- * `GET /api/groups` is the one enumeration surface. It is deliberately readable
- * by every authenticated user — a group the caller CANNOT read still appears,
- * carrying its name, its constituent folders, its totals and who runs it, so
- * the Library can show it as locked and offer a way in. What it never carries
- * for a non-reader is item names, the reader roster, or any email.
+ * `GET /api/groups` is the one enumeration surface, and it follows the KB's
+ * read model to the letter: a group the caller cannot access is simply ABSENT
+ * from the response — same fail-closed posture as the file tree, the skill
+ * catalog and the tool listing. There is no locked-group discovery and no
+ * access-request machinery; joining a group is an `access.md` grant made
+ * through the normal access-management flow.
  */
 
-/**
- * Access-rule principals as the resolver hands them back — emails always
- * present. This is the SERVER-side shape (`catalog()`); the wire type below
- * nulls the emails for callers who cannot read the group.
- */
+/** Access-rule principals as the resolver hands them back. */
 export interface ResolvedPrincipals {
   roles: string[];
   users: { name: string; email: string }[];
@@ -25,47 +22,36 @@ export interface ResolvedReaders extends ResolvedPrincipals {
   restricted: boolean;
 }
 
-/** Wire-side principals: `email` is null on entries the caller cannot read. */
-export interface GroupPrincipals {
-  roles: string[];
-  /** email is null on entries the caller cannot read (no email leakage to non-readers). */
-  users: { name: string; email: string | null }[];
-}
-
-export interface GroupReaders extends GroupPrincipals {
-  restricted: boolean;
-}
-
 /** One group as `GET /api/groups` reports it, resolved for ONE caller. */
 export interface GroupSummary {
   /** Group folder name, e.g. `GTM`. */
   name: string;
   /** Repo-relative constituent folders, e.g. `['Groups/GTM']`. */
   folders: string[];
-  /** Per-caller; locked === !canRead. */
+  /**
+   * Per-caller. Every returned group has `canRead` or `canWrite`; a group
+   * with neither is not returned at all.
+   */
   canRead: boolean;
   /**
    * Per-caller; true ⇒ may manage access. Resolved as write on the folder's
    * `access.md`, which admin-rescues — so a platform Admin locked OUT of
-   * reading still gets `canWrite: true` and the self-service way back in.
+   * reading still sees the group and gets the self-service way back in.
    */
   canWrite: boolean;
   /** Caller-INDEPENDENT total (the group's whole content, not the caller's slice). */
   skillCount: number;
   toolCount: number;
   /** For display: "Run by …" (fallback chain: owners → writers → 'the workspace admins'). */
-  owners: GroupPrincipals;
-  writers: GroupPrincipals;
-  /** null when `!canRead` — a locked group never advertises its share list. */
-  readers: GroupReaders | null;
-  /** The caller has a pending access request; always false when `canRead`. */
-  hasRequested: boolean;
+  owners: ResolvedPrincipals;
+  writers: ResolvedPrincipals;
+  readers: ResolvedReaders;
 }
 
 /**
  * The caller-INDEPENDENT slice of a group — what `catalog()` computes once and
- * caches. Everything per-caller (`canRead`/`canWrite`/`hasRequested`, the
- * withheld readers, the stripped emails) is resolved per request in the route.
+ * caches. The per-caller verdicts (`canRead`/`canWrite`, and whether the group
+ * appears at all) are resolved per request in the route.
  */
 export interface GroupCatalogEntry {
   name: string;
@@ -75,17 +61,6 @@ export interface GroupCatalogEntry {
   owners: ResolvedPrincipals;
   writers: ResolvedPrincipals;
   readers: ResolvedReaders;
-}
-
-/** One pending access request, as the admin-gated list surface reports it. */
-export interface GroupAccessRequestEntry {
-  id: string;
-  group: string;
-  requesterName: string;
-  /** Admin-gated surface ONLY — never present on `GET /api/groups`. */
-  requesterEmail: string;
-  /** ISO timestamp. */
-  createdAt: string;
 }
 
 export interface IGroupIndexService {
