@@ -15,19 +15,29 @@ import type { Database } from '../../database/connection.js';
  * behavior (claim fencing etc.) is covered elsewhere; this pins the
  * check-then-insert decision logic.
  */
+interface SelectChain extends PromiseLike<unknown> {
+  from: (...args: unknown[]) => SelectChain;
+  where: (...args: unknown[]) => SelectChain;
+}
+
+interface InsertChain extends PromiseLike<unknown> {
+  values: (...args: unknown[]) => InsertChain;
+}
+
 function makeFakeDb(existingCount: number) {
   const inserted: unknown[] = [];
-  const selectChain: any = {};
-  selectChain.from = vi.fn(() => selectChain);
-  selectChain.where = vi.fn(() => selectChain);
-  selectChain.then = (onF: any, onR: any) =>
-    Promise.resolve([{ count: existingCount }]).then(onF, onR);
-  const insertChain: any = {};
-  insertChain.values = vi.fn((v: unknown) => {
-    inserted.push(v);
-    return insertChain;
-  });
-  insertChain.then = (onF: any, onR: any) => Promise.resolve(undefined).then(onF, onR);
+  const selectChain: SelectChain = {
+    from: vi.fn(() => selectChain),
+    where: vi.fn(() => selectChain),
+    then: (onF, onR) => Promise.resolve([{ count: existingCount }]).then(onF, onR),
+  };
+  const insertChain: InsertChain = {
+    values: vi.fn((v: unknown) => {
+      inserted.push(v);
+      return insertChain;
+    }),
+    then: (onF, onR) => Promise.resolve(undefined).then(onF, onR),
+  };
   const db = {
     select: vi.fn(() => selectChain),
     insert: vi.fn(() => insertChain),

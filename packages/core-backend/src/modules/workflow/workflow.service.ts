@@ -327,10 +327,13 @@ export class WorkflowService implements IWorkflowService {
    * `needs_attention` row: once the ladder has escalated to a human, more
    * agent runs on the same divergence are just a loop.
    *
-   * One row, first conflicted path as the representative: the recovery
+   * One row, smallest conflicted path as the representative: the recovery
    * agent's job is "bring the BRANCH into a pushable state", so one ladder
    * per divergence — not one per conflicted file, which would multiply
-   * agent runs for a single underlying conflict.
+   * agent runs for a single underlying conflict. Sorted so the choice is
+   * stable across retries regardless of how the caller ordered the paths —
+   * a shifting representative would slip past `enqueueIfAbsent`'s
+   * per-(workspace, branch, path) dedup and start a second ladder.
    *
    * Best-effort by design — the caller is already surfacing the conflict
    * error; a queue hiccup must not mask it.
@@ -344,7 +347,7 @@ export class WorkflowService implements IWorkflowService {
       const queued = await this.pendingCommits.enqueueIfAbsent({
         workspaceId,
         branch: err.branch,
-        path: err.conflictedPaths[0],
+        path: [...err.conflictedPaths].sort()[0],
         authorEmail: user?.email ?? RECOVERY_BOT_EMAIL,
         authorName: user?.name ?? RECOVERY_BOT_NAME,
       });
@@ -1418,16 +1421,19 @@ export class WorkflowService implements IWorkflowService {
     // this a read right after a merge misses the just-merged change. Best-effort:
     // the merge already succeeded on origin, so a pull hiccup must not fail the
     // response (a later fetch/pull reconciles).
+    let targetWorkspaceId: string | undefined;
     try {
       const targetWorkspace = await this.workspaceService.getOrCreateForBranch(baseBranch);
+      targetWorkspaceId = targetWorkspace.id;
       await this.git.pull(targetWorkspace.id);
     } catch (err) {
       // Still best-effort for the merge response (the merge already landed
       // on origin) — but a rebase CONFLICT here means the target workspace
       // is stranded (local commits vs origin, never self-heals), so queue
-      // the background recovery ladder before shrugging.
-      if (err instanceof PullRebaseConflictError) {
-        const targetWorkspaceId = encodeURIComponent(baseBranch);
+      // the background recovery ladder before shrugging. A conflict can
+      // only have come from the pull, so the workspace id is always set on
+      // this arm — the guard just satisfies the narrowing.
+      if (err instanceof PullRebaseConflictError && targetWorkspaceId) {
         await this.queuePullConflictRecovery(targetWorkspaceId, err, user);
       }
       console.warn(

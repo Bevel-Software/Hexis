@@ -1403,12 +1403,23 @@ export class GitService implements IGitService {
         // A failed rebase leaves the repo in a "REBASE_HEAD" / detached-apply state,
         // which makes every subsequent git command behave unexpectedly. Return the
         // working tree to a clean state before surfacing the original error.
-        await this.git(cwd, ['rebase', '--abort']).catch(() => undefined);
-        if (conflictedPaths.length > 0) {
+        let abortSucceeded = true;
+        await this.git(cwd, ['rebase', '--abort']).catch(() => {
+          abortSucceeded = false;
+        });
+        if (abortSucceeded && conflictedPaths.length > 0) {
           // Typed so the workflow layer can queue background recovery — this
           // divergence never resolves on its own (every retry pull hits the
           // same conflict) and the unpushed local commits are someone's saved
           // content stuck violating save=share.
+          //
+          // Gated on the abort succeeding: a failed abort means either no
+          // rebase was ever active (the unmerged paths pre-date this pull —
+          // some earlier operation left the index broken) or the clone is in
+          // a state git itself can't unwind. Queueing recovery there would
+          // point the worker's commitFile at a repo mid-conflict, risking a
+          // commit full of conflict markers — surface the raw error instead
+          // and leave diagnosis to a human.
           throw new PullRebaseConflictError(
             branch,
             conflictedPaths,
