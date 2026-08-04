@@ -387,6 +387,11 @@ export async function createCoreServices(
     // the binding is only dereferenced at call time, long after boot).
     (bearer) => mcpOAuthProvider.revokeByAccessToken(bearer),
   );
+  // A changed secret invalidates the proxy's remembered manual failures for
+  // that user (null = shared secret → everyone), so a just-repaired
+  // credential is retried on the very next session build instead of waiting
+  // out the failure memo's TTL.
+  secretsVaultService.onMutation((changedUserId) => mcpService.clearManualFailures(changedUserId));
   // MCP OAuth 2.1 authorization server (our own AS): lets MCP clients with no
   // pre-shared connection key connect via the standard 401 → discovery → DCR →
   // authorize (PKCE) flow. The authorize step routes the browser to /connect
