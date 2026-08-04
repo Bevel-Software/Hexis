@@ -43,6 +43,7 @@ import { SecretsPage } from '../modules/secrets-vault/components/SecretsPage';
 import { AccountPage } from '../modules/auth/components/AccountPage';
 import { ExternalAgentAccessPage } from '../modules/toolbar/components/ExternalAgentAccessPage';
 import { AdminRolesPage } from '../modules/admin/components/AdminRolesPage';
+import { UserAccountsPage } from '../modules/admin/components/UserAccountsPage';
 import { ToolsExplorerPage } from '../modules/tools/ToolsExplorerPage';
 import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
@@ -302,6 +303,7 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
       <Route path="/account" element={<AccountPage />} />
       <Route path="/external-agent-access" element={<ExternalAgentAccessPage />} />
       <Route path="/roles-and-members" element={<AdminRolesPage />} />
+      <Route path="/user-accounts" element={<UserAccountsPage />} />
       <Route path="/tools" element={<ToolsExplorerPage />} />
       <Route path="/" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
       <Route path="*" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />

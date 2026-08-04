@@ -324,8 +324,13 @@ export async function createCoreServer(
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));
-  // Account management (list/create password accounts) — admin-gated inside.
-  app.use('/api', core.authMiddleware, createAccountRoutes(core.authService, core.adminAccess));
+  // Account management (list/create password accounts, GDPR erasure) —
+  // admin-gated inside.
+  app.use('/api', core.authMiddleware, createAccountRoutes(
+    core.authService,
+    core.adminAccess,
+    core.accountErasureService,
+  ));
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe

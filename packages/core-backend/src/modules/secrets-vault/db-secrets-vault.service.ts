@@ -95,6 +95,27 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     return this.cryptoInstance;
   }
 
+  // ── Mutation listeners ─────────────────────────────────────────────────────
+  // Notified after any secret mutation: `userId` for a per-user secret, null
+  // for a SHARED one (affects every user). Lets caches keyed on credential
+  // validity (e.g. the MCP proxy's manual-failure memo) invalidate the moment
+  // a credential changes instead of waiting out a TTL.
+  private readonly mutationListeners: Array<(userId: string | null) => void> = [];
+
+  onMutation(listener: (userId: string | null) => void): void {
+    this.mutationListeners.push(listener);
+  }
+
+  private notifyMutation(userId: string | null): void {
+    for (const listener of this.mutationListeners) {
+      try {
+        listener(userId);
+      } catch (err) {
+        console.warn('[vault] mutation listener failed:', err instanceof Error ? err.message : err);
+      }
+    }
+  }
+
   async list(userId: string): Promise<SecretSummary[]> {
     const rows = await this.db
       .select()
@@ -130,6 +151,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         set: { kind: 'static', label, valueEncrypted, oauthMeta: null, updatedAt: new Date() },
       })
       .returning();
+    this.notifyMutation(userId);
     return this.toSummary(row);
   }
 
@@ -153,6 +175,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         set: { kind: 'oauth', label, valueEncrypted, oauthMeta, updatedAt: new Date() },
       })
       .returning();
+    this.notifyMutation(userId);
     return this.toSummary(row);
   }
 
@@ -162,6 +185,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .where(and(eq(secrets.id, id), eq(secrets.userId, userId)))
       .returning({ id: secrets.id });
     if (res.length === 0) throw new SecretNotFoundError(id);
+    this.notifyMutation(userId);
   }
 
   async putSharedStatic(input: PutSharedStaticSecretInput): Promise<SecretSummary> {
@@ -186,6 +210,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         set: { kind: 'static', label, valueEncrypted, oauthMeta: null, updatedAt: new Date() },
       })
       .returning();
+    this.notifyMutation(null);
     return this.toSummary(row);
   }
 
@@ -195,6 +220,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .where(and(isNull(secrets.userId), eq(secrets.key, key)))
       .returning({ id: secrets.id });
     if (res.length === 0) throw new SecretNotFoundError(key);
+    this.notifyMutation(null);
   }
 
   async removeUserByKey(userId: string, key: string): Promise<void> {
@@ -203,6 +229,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .where(and(eq(secrets.userId, userId), eq(secrets.key, key)))
       .returning({ id: secrets.id });
     if (res.length === 0) throw new SecretNotFoundError(key);
+    this.notifyMutation(userId);
   }
 
   async statusFor(userId: string, keys: string[]): Promise<SecretConfigStatus[]> {
@@ -319,6 +346,8 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .update(secrets)
       .set({ valueEncrypted: this.crypto().encrypt(JSON.stringify(next)), updatedAt: new Date() })
       .where(and(eq(secrets.id, id), eq(secrets.userId, userId)));
+    // Fresh tokens just landed — let credential-validity caches retry NOW.
+    this.notifyMutation(userId);
   }
 
   async putSharedOAuthClientSecret(input: {
@@ -345,6 +374,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         targetWhere: isNull(secrets.userId),
         set: { kind: 'oauth', valueEncrypted, oauthMeta, updatedAt: new Date() },
       });
+    this.notifyMutation(null);
   }
 
   async beginToolOAuthByKey(input: {
@@ -552,6 +582,10 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .update(secrets)
       .set({ valueEncrypted: this.crypto().encrypt(JSON.stringify(next)), updatedAt: new Date() })
       .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)));
+    // A successful refresh is a credential repair — notify so dependent caches
+    // (the MCP proxy's manual-failure memo) retry immediately. `row.userId` is
+    // null for a shared (admin-scope) row, which maps to "affects everyone".
+    this.notifyMutation(row.userId);
     return refreshed.access_token;
   }
 
@@ -579,6 +613,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         targetWhere: isNull(secrets.userId),
         set: { kind: 'oauth', valueEncrypted, oauthMeta, updatedAt: new Date() },
       });
+    this.notifyMutation(null);
   }
 
   async getSharedOAuthProvider(key: string): Promise<OAuthProviderConfig | null> {

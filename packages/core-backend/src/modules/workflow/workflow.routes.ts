@@ -192,9 +192,12 @@ export function createWorkflowRoutes(
   });
 
   router.post('/workspace/:id/workflow/update-from-remote', async (req, res) => {
-    if (!(await requireUser(req, res))) return;
+    // The user is threaded through so a pull-conflict recovery row is
+    // attributed to whoever triggered the sync (see updateFromRemote).
+    const user = await requireUser(req, res);
+    if (!user) return;
     try {
-      await workflow.updateFromRemote(req.params.id);
+      await workflow.updateFromRemote(req.params.id, user);
       res.json({ status: 'updated' });
     } catch (err) {
       const { status, body } = toHttpError(err);
