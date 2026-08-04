@@ -582,6 +582,10 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .update(secrets)
       .set({ valueEncrypted: this.crypto().encrypt(JSON.stringify(next)), updatedAt: new Date() })
       .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)));
+    // A successful refresh is a credential repair — notify so dependent caches
+    // (the MCP proxy's manual-failure memo) retry immediately. `row.userId` is
+    // null for a shared (admin-scope) row, which maps to "affects everyone".
+    this.notifyMutation(row.userId);
     return refreshed.access_token;
   }
 
@@ -609,6 +613,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         targetWhere: isNull(secrets.userId),
         set: { kind: 'oauth', valueEncrypted, oauthMeta, updatedAt: new Date() },
       });
+    this.notifyMutation(null);
   }
 
   async getSharedOAuthProvider(key: string): Promise<OAuthProviderConfig | null> {

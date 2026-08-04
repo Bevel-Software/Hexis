@@ -540,12 +540,16 @@ export class McpService {
           continue;
         }
       }
+      // Captured BEFORE the awaited attempt: if a secrets change clears the
+      // memo while registration is in flight, the stale failure from the OLD
+      // credential must not resurrect an entry the clear removed.
+      const generation = this.manualFailures.currentGeneration;
       try {
         const result = await client.registerManual(m);
         if (result && result.success === false) {
           const errs = Array.isArray(result.errors) ? result.errors.join('; ') : 'unknown error';
           if (isKb) throw new Error(`Bevel tool discovery failed: ${errs}`);
-          this.manualFailures.recordFailure(userId, name, errs);
+          this.manualFailures.recordFailure(userId, name, errs, generation);
           console.warn(`[mcp] skipping manual "${name}": ${errs}`);
         } else if (!isKb) {
           this.manualFailures.clear(userId, name);
@@ -555,7 +559,7 @@ export class McpService {
         // validated, so this is a runtime, not a schema, problem.
         if (isKb) throw err;
         const message = err instanceof Error ? err.message : String(err);
-        this.manualFailures.recordFailure(userId, name, message);
+        this.manualFailures.recordFailure(userId, name, message, generation);
         console.warn(`[mcp] skipping manual "${name}": ${message}`);
       }
     }

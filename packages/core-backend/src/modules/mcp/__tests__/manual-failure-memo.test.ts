@@ -43,6 +43,22 @@ describe('ManualFailureMemo', () => {
     expect(memo.recentFailure('u2', 'granola')).toBeUndefined();
   });
 
+  it('an out-of-order completion after a clear cannot resurrect the failure', () => {
+    const memo = new ManualFailureMemo(60_000, () => 0);
+    // A registration attempt captures the generation, then awaits its (slow)
+    // network call…
+    const generation = memo.currentGeneration;
+    // …meanwhile the user repairs their credential (secrets change → clear).
+    memo.clearUser('u1');
+    // The stale attempt completes with a failure from the OLD credential —
+    // recording against the captured generation is a no-op.
+    memo.recordFailure('u1', 'notion', 'invalid_token (stale)', generation);
+    expect(memo.recentFailure('u1', 'notion')).toBeUndefined();
+    // A FRESH attempt (current generation) records normally.
+    memo.recordFailure('u1', 'notion', 'still broken', memo.currentGeneration);
+    expect(memo.recentFailure('u1', 'notion')).toBe('still broken');
+  });
+
   it('prunes expired entries so the map stays bounded', () => {
     let now = 0;
     const memo = new ManualFailureMemo(1000, () => now);

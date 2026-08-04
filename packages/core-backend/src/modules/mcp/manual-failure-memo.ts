@@ -17,11 +17,24 @@
  */
 export class ManualFailureMemo {
   private readonly failures = new Map<string, { message: string; expiresAt: number }>();
+  /**
+   * Advanced by every clear operation. A registration attempt captures the
+   * generation BEFORE its (slow, awaited) network call and hands it back to
+   * {@link recordFailure} — if a clear happened in between (the user just
+   * repaired the credential), the stale in-flight failure is discarded instead
+   * of resurrecting a memo entry the clear was meant to remove.
+   */
+  private generation = 0;
 
   constructor(
     private readonly ttlMs: number = 5 * 60_000,
     private readonly now: () => number = Date.now,
   ) {}
+
+  /** Capture before an awaited registration attempt; pass to {@link recordFailure}. */
+  get currentGeneration(): number {
+    return this.generation;
+  }
 
   private key(userId: string, manualName: string): string {
     return `${userId} ${manualName}`;
@@ -36,7 +49,13 @@ export class ManualFailureMemo {
     return this.failures.get(this.key(userId, manualName))?.message;
   }
 
-  recordFailure(userId: string, manualName: string, message: string): void {
+  /**
+   * Record a failure — unless `generation` (captured before the attempt) is
+   * stale, meaning a clear ran while the attempt was in flight. Dropping the
+   * record is the conservative direction: the worst case is one extra retry.
+   */
+  recordFailure(userId: string, manualName: string, message: string, generation?: number): void {
+    if (generation !== undefined && generation !== this.generation) return;
     this.failures.set(this.key(userId, manualName), {
       message,
       expiresAt: this.now() + this.ttlMs,
@@ -45,6 +64,7 @@ export class ManualFailureMemo {
 
   /** Forget a pair (e.g. after a successful registration proves the credential works again). */
   clear(userId: string, manualName: string): void {
+    this.generation += 1;
     this.failures.delete(this.key(userId, manualName));
   }
 
@@ -54,6 +74,7 @@ export class ManualFailureMemo {
    * waiting out the TTL.
    */
   clearUser(userId: string): void {
+    this.generation += 1;
     const prefix = `${userId} `;
     for (const k of this.failures.keys()) {
       if (k.startsWith(prefix)) this.failures.delete(k);
@@ -62,6 +83,7 @@ export class ManualFailureMemo {
 
   /** Forget everything — a SHARED secret changed, which can affect any user. */
   clearAll(): void {
+    this.generation += 1;
     this.failures.clear();
   }
 }
