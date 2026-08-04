@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { UserAccountsPage } from '../components/UserAccountsPage';
 import { AdminContext } from '../state/admin.context';
@@ -75,17 +75,29 @@ describe('UserAccountsPage', () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
     expect(screen.getByText(/Single sign-on only/)).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: 'Set password' })).toHaveLength(1);
-    expect(screen.getAllByRole('button', { name: 'Delete account' })).toHaveLength(1);
+    expect(
+      screen.getByRole('button', { name: 'Set password for alice@example.com' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Delete account alice@example.com' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Set password for admin@example.com' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Delete account admin@example.com' }),
+    ).not.toBeInTheDocument();
   });
 
   it('sets a password for a user WITHOUT touching their name', async () => {
     renderPage();
     await waitFor(() => screen.getByText('Alice'));
-    await userEvent.click(screen.getByRole('button', { name: 'Set password' }));
-    await userEvent.type(screen.getByLabelText('New password'), 'fresh-password-1');
-    const buttons = screen.getAllByRole('button', { name: 'Set password' });
-    await userEvent.click(buttons[buttons.length - 1]);
+    await userEvent.click(screen.getByRole('button', { name: 'Set password for alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    // Empty password → the confirm button stays disabled; nothing is sent.
+    expect(dialog.getByRole('button', { name: 'Set password' })).toBeDisabled();
+    await userEvent.type(dialog.getByLabelText('New password'), 'fresh-password-1');
+    await userEvent.click(dialog.getByRole('button', { name: 'Set password' }));
     await waitFor(() =>
       expect(createAccount).toHaveBeenCalledWith('alice@example.com', '', 'fresh-password-1'),
     );
@@ -97,13 +109,24 @@ describe('UserAccountsPage', () => {
   it('deletes an account after confirmation', async () => {
     renderPage();
     await waitFor(() => screen.getByText('Alice'));
-    await userEvent.click(screen.getByRole('button', { name: 'Delete account' }));
-    // Confirm dialog's primary button carries the same label; last rendered wins.
-    const buttons = screen.getAllByRole('button', { name: 'Delete account' });
-    await userEvent.click(buttons[buttons.length - 1]);
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
     await waitFor(() => expect(deleteAccount).toHaveBeenCalledWith('u-alice'));
     // List reloaded after the delete.
     expect(listAccounts).toHaveBeenCalledTimes(2);
+  });
+
+  it('a failed delete closes the dialog, surfaces the error, and does not reload', async () => {
+    vi.mocked(deleteAccount).mockRejectedValueOnce(new Error('Failed to erase user'));
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByText('Failed to erase user')).toBeInTheDocument();
+    expect(listAccounts).toHaveBeenCalledTimes(1);
   });
 
   it('adds a new account and refreshes the list', async () => {

@@ -3,7 +3,6 @@ import express from 'express';
 import type { Server } from 'node:http';
 import { createAccountRoutes } from '../account.routes.js';
 import type { AuthService } from '../auth.service.js';
-import type { AccountErasureService } from '../account-erasure.service.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 
 const authService = {
@@ -13,9 +12,11 @@ const authService = {
   createAccount: vi.fn(async (email: string) => ({ id: 'u2', email, name: 'B' })),
 } as unknown as AuthService;
 
+// Satisfies the route's narrow Pick<IAccountErasureService, 'eraseUser'>
+// contract directly — no concrete-service cast needed.
 const accountErasure = {
-  eraseUser: vi.fn(async () => true),
-} as unknown as AccountErasureService;
+  eraseUser: vi.fn(async (_userId: string) => true),
+};
 
 function makeApp(opts: { admin: boolean; email?: string }) {
   const adminAccess: IAdminAccessService = {
@@ -98,6 +99,18 @@ describe('account routes — admin gate', () => {
 
     expect((await fetch(`${base}/api/admin/accounts/u2`, { method: 'DELETE' })).status).toBe(204);
     expect(accountErasure.eraseUser).toHaveBeenLastCalledWith('u2');
+  });
+
+  it('erasure failure → 500 with a generic body (no internal error text)', async () => {
+    const base = await listen(makeApp({ admin: true }));
+    vi.mocked(accountErasure.eraseUser).mockRejectedValueOnce(
+      new Error('relation "users" does not exist'),
+    );
+    const res = await fetch(`${base}/api/admin/accounts/u2`, { method: 'DELETE' });
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('Failed to erase user');
+    expect(JSON.stringify(body)).not.toContain('relation');
   });
 
   it('400s on missing fields and surfaces service validation errors', async () => {

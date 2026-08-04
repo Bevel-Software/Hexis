@@ -1,6 +1,6 @@
 import express from 'express';
 import type { AuthService } from './auth.service.js';
-import type { AccountErasureService } from './account-erasure.service.js';
+import type { IAccountErasureService } from './account-erasure.service.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import './auth.middleware.js'; // Express Request augmentation
 
@@ -16,7 +16,7 @@ import './auth.middleware.js'; // Express Request augmentation
 export function createAccountRoutes(
   authService: AuthService,
   adminAccess: IAdminAccessService,
-  accountErasure: AccountErasureService,
+  accountErasure: Pick<IAccountErasureService, 'eraseUser'>,
 ): express.Router {
   const router = express.Router();
 
@@ -69,6 +69,12 @@ export function createAccountRoutes(
     }
     try {
       const erased = await accountErasure.eraseUser(userId);
+      // Accountability record for the destructive path: WHO erased WHOM, by
+      // id only — the target's email must not outlive the erasure in logs.
+      console.log(
+        '[accounts] erasure audit:',
+        JSON.stringify({ action: 'erase-user', actorUserId: req.userId, targetUserId: userId, erased }),
+      );
       if (!erased) {
         res.status(404).json({ error: 'No such user' });
         return;

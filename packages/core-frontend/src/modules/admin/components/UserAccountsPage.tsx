@@ -51,7 +51,11 @@ export function UserAccountsPage() {
         setAccounts(rows);
         setError(null);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : "Couldn't load accounts."));
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : "Couldn't load accounts.");
+        // Leave no eternal "Loading…" next to the error banner.
+        setAccounts((prev) => prev ?? []);
+      });
   }, []);
 
   useEffect(() => {
@@ -82,7 +86,7 @@ export function UserAccountsPage() {
   }
 
   async function confirmSetPassword() {
-    if (!passwordTarget || savingPassword) return;
+    if (!passwordTarget || savingPassword || newPassword.length === 0) return;
     setSavingPassword(true);
     setPasswordError(null);
     try {
@@ -181,6 +185,7 @@ export function UserAccountsPage() {
                         onClick={() => openPasswordDialog(account)}
                         className="text-xs px-2 py-1 rounded text-slate-700 hover:bg-slate-100 border border-slate-200"
                         title="Set a new sign-in password for this account."
+                        aria-label={`Set password for ${account.email}`}
                       >
                         Set password
                       </button>
@@ -190,6 +195,7 @@ export function UserAccountsPage() {
                         onClick={() => setPendingDelete(account)}
                         className="text-xs px-2 py-1 rounded text-red-700 hover:bg-red-50 border border-red-200"
                         title="Permanently delete this account and its personal data."
+                        aria-label={`Delete account ${account.email}`}
                       >
                         Delete account
                       </button>
@@ -271,7 +277,7 @@ export function UserAccountsPage() {
             </button>
             <button
               onClick={confirmSetPassword}
-              disabled={savingPassword}
+              disabled={savingPassword || newPassword.length === 0}
               className="px-3 py-1.5 text-sm rounded bg-bevel hover:bg-bevel-deep text-white disabled:opacity-50"
             >
               {savingPassword ? 'Saving…' : 'Set password'}
@@ -336,8 +342,10 @@ export function UserAccountsPage() {
             {pendingDelete?.name} ({pendingDelete?.email})
           </span>
           ? This removes their personal data for good and anonymizes their past review activity.
-          Their saves in the knowledge base keep their history. They can sign in again later, but
-          will start fresh.
+          Their saves in the knowledge base keep their history.{' '}
+          {pendingDelete?.hasPassword
+            ? 'To sign in again they will need an admin to create a new account for them.'
+            : 'They can sign in again later with single sign-on, but will start fresh.'}
         </p>
       </Dialog>
     </>
