@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { GitService } from '../git.service.js';
+import { PullRebaseConflictError } from '../../workflow.errors.js';
 import { runGit, gitOut, stubWorkflowHooks, stubWorkspaceService } from './git-test-helpers.js';
 
 /** See git.service.createBranch.test.ts — same prod-mirroring layout. */
@@ -228,5 +229,78 @@ describe('GitService.pull', () => {
     // The dirty tracked edit survived — autostash reapplied it after the rebase.
     const dash = await fs.readFile(path.join(repo, 'dash.html'), 'utf8');
     expect(dash).toBe('v1\n');
+  });
+
+  // The production stuck-workspace state: a local commit and an origin commit
+  // both rewrote the same file, so replaying the local commit conflicts. The
+  // pull must (a) abort the rebase so the clone isn't left in a detached
+  // apply state, (b) surface a TYPED error naming the contested paths so the
+  // workflow layer can queue background recovery, and (c) leave the local
+  // commit intact (it's someone's saved content).
+  it('throws PullRebaseConflictError with the conflicted paths and aborts the rebase cleanly', async () => {
+    const { upstream, repo } = await seedWorkspace(root, workspaceId);
+
+    // Shared base version of the contested file.
+    await fs.writeFile(path.join(repo, 'PR-7.html'), 'base\n');
+    await runGit(repo, ['add', '.']);
+    await runGit(repo, ['commit', '-m', 'add overview']);
+    await runGit(repo, ['push', 'origin', 'target-company-state']);
+
+    // Origin rewrites it one way...
+    const pusher = path.join(root, '.conflict-pusher');
+    await runGit(root, ['clone', upstream, pusher]);
+    await fs.writeFile(path.join(pusher, 'PR-7.html'), 'origin version\n');
+    await runGit(pusher, ['add', '.']);
+    await runGit(pusher, ['commit', '-m', 'origin rewrite']);
+    await runGit(pusher, ['push', 'origin', 'target-company-state']);
+
+    // ...and the local branch rewrites it another way (the stranded commit).
+    await fs.writeFile(path.join(repo, 'PR-7.html'), 'local version\n');
+    await runGit(repo, ['add', '.']);
+    await runGit(repo, ['commit', '-m', 'local rewrite']);
+    const localHead = await gitOut(repo, ['rev-parse', 'HEAD']);
+
+    const svc = new GitService(
+      stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }),
+      stubWorkflowHooks(),
+      'knowledge-base',
+    );
+
+    const err = await svc.pull(workspaceId).then(() => null).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PullRebaseConflictError);
+    expect((err as PullRebaseConflictError).branch).toBe('target-company-state');
+    expect((err as PullRebaseConflictError).conflictedPaths).toEqual(['PR-7.html']);
+
+    // The rebase was aborted: no in-progress rebase state, clean tree, and
+    // the local commit is still HEAD with its version of the file on disk.
+    await expect(
+      fs.access(path.join(repo, '.git', 'rebase-merge')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await gitOut(repo, ['status', '--porcelain'])).toBe('');
+    expect(await gitOut(repo, ['rev-parse', 'HEAD'])).toBe(localHead);
+    // \r tolerated: Windows checkouts with autocrlf rewrite the file on the
+    // abort's checkout — content identity is what matters here.
+    const onDisk = await fs.readFile(path.join(repo, 'PR-7.html'), 'utf8');
+    expect(onDisk.replace(/\r/g, '')).toBe('local version\n');
+  });
+
+  // hasUnpushedCommits backs the worker's no-op arm (see runPendingCommit).
+  it('hasUnpushedCommits: false when in sync, true once a local commit lands', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(
+      stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }),
+      stubWorkflowHooks(),
+      'knowledge-base',
+    );
+
+    await expect(svc.hasUnpushedCommits(workspaceId)).resolves.toBe(false);
+
+    await fs.writeFile(path.join(repo, 'new.txt'), 'x\n');
+    await runGit(repo, ['add', '.']);
+    await runGit(repo, ['commit', '-m', 'unpushed']);
+    await expect(svc.hasUnpushedCommits(workspaceId)).resolves.toBe(true);
+
+    await runGit(repo, ['push', 'origin', 'target-company-state']);
+    await expect(svc.hasUnpushedCommits(workspaceId)).resolves.toBe(false);
   });
 });
