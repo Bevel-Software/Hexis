@@ -32,6 +32,7 @@ import type { SpillStore } from '../workspace/spill-store.js';
 import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
 import type { McpSessionStore } from './mcp-session-store.js';
 import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
+import { ManualFailureMemo } from './manual-failure-memo.js';
 
 /**
  * Configuration for the loopback proxy. `loopbackBaseUrl` is the backend's own
@@ -173,6 +174,9 @@ function skillPromptText(skill: LoadedSkill): string {
  * as the session's loopback bearer instead.
  */
 export class McpService {
+  // Circuit breaker for manuals whose credentials just failed — see the memo.
+  private readonly manualFailures = new ManualFailureMemo();
+
   constructor(
     private readonly sessionStore: McpSessionStore,
     private readonly opts: McpProxyOptions,
@@ -231,7 +235,7 @@ export class McpService {
     // lives ONCE behind the REST surface.
     const manuals = await this.fetchManualTemplates(loopbackBearer);
     const client = await this.buildClient(loopbackBearer, userId, manuals);
-    const tools = await this.discoverTools(client, manuals);
+    const tools = await this.discoverTools(client, manuals, userId);
     // Confirms the MCP session was built for a connecting client (vs. an
     // in-process agent code-mode client, which never runs createSession) and
     // how many tools discovery yielded before listing/filtering.
@@ -505,24 +509,44 @@ export class McpService {
    * the proxy's advertised shape. A failure registering a user `.tool` is
    * isolated (logged + skipped) so one broken manual never breaks the session;
    * the KB manual failing is fatal (the core toolset is unusable).
+   *
+   * Failures are memoized per (user, manual) for a few minutes (see
+   * {@link ManualFailureMemo}): sessions rebuild constantly, and a manual with
+   * a broken credential (expired OAuth, revoked key) would otherwise re-dial
+   * its provider on every single build.
    */
-  private async discoverTools(client: CodeModeUtcpClient, manuals: CallTemplate[]): Promise<ProxiedTool[]> {
+  private async discoverTools(
+    client: CodeModeUtcpClient,
+    manuals: CallTemplate[],
+    userId: string,
+  ): Promise<ProxiedTool[]> {
     for (const m of manuals) {
       const isKb = m.name === EXTERNAL_KB_MANUAL_NAME;
+      const name = String(m.name);
+      if (!isKb) {
+        const recent = this.manualFailures.recentFailure(userId, name);
+        if (recent !== undefined) {
+          console.warn(`[mcp] skipping manual "${name}" (recent failure, not retried): ${recent}`);
+          continue;
+        }
+      }
       try {
         const result = await client.registerManual(m);
         if (result && result.success === false) {
           const errs = Array.isArray(result.errors) ? result.errors.join('; ') : 'unknown error';
           if (isKb) throw new Error(`Bevel tool discovery failed: ${errs}`);
-          console.warn(`[mcp] skipping manual "${String(m.name)}": ${errs}`);
+          this.manualFailures.recordFailure(userId, name, errs);
+          console.warn(`[mcp] skipping manual "${name}": ${errs}`);
+        } else if (!isKb) {
+          this.manualFailures.clear(userId, name);
         }
       } catch (err) {
         // Registration (network/discovery) failure — the templates are already
         // validated, so this is a runtime, not a schema, problem.
         if (isKb) throw err;
-        console.warn(
-          `[mcp] skipping manual "${String(m.name)}": ${err instanceof Error ? err.message : String(err)}`,
-        );
+        const message = err instanceof Error ? err.message : String(err);
+        this.manualFailures.recordFailure(userId, name, message);
+        console.warn(`[mcp] skipping manual "${name}": ${message}`);
       }
     }
     const utcpTools = await client.getTools();
