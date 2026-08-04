@@ -177,6 +177,16 @@ export class McpService {
   // Circuit breaker for manuals whose credentials just failed — see the memo.
   private readonly manualFailures = new ManualFailureMemo();
 
+  /**
+   * Invalidate remembered manual failures — wired to the secrets vault's
+   * mutation listener, so a just-repaired credential is retried on the very
+   * next session build. `null` = a shared secret changed (affects everyone).
+   */
+  clearManualFailures(userId: string | null): void {
+    if (userId === null) this.manualFailures.clearAll();
+    else this.manualFailures.clearUser(userId);
+  }
+
   constructor(
     private readonly sessionStore: McpSessionStore,
     private readonly opts: McpProxyOptions,

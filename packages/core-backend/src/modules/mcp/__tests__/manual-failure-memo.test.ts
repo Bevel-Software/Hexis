@@ -23,6 +23,26 @@ describe('ManualFailureMemo', () => {
     expect(memo.recentFailure('u1', 'notion')).toBeUndefined();
   });
 
+  it('clearUser() forgets ONLY that user (a secrets change retries immediately)', () => {
+    const memo = new ManualFailureMemo(60_000, () => 0);
+    memo.recordFailure('u1', 'notion', 'invalid_token');
+    memo.recordFailure('u1', 'granola', 'expired');
+    memo.recordFailure('u2', 'notion', 'invalid_token');
+    memo.clearUser('u1');
+    expect(memo.recentFailure('u1', 'notion')).toBeUndefined();
+    expect(memo.recentFailure('u1', 'granola')).toBeUndefined();
+    expect(memo.recentFailure('u2', 'notion')).toBe('invalid_token');
+  });
+
+  it('clearAll() forgets everything (a shared secret changed)', () => {
+    const memo = new ManualFailureMemo(60_000, () => 0);
+    memo.recordFailure('u1', 'notion', 'x');
+    memo.recordFailure('u2', 'granola', 'y');
+    memo.clearAll();
+    expect(memo.recentFailure('u1', 'notion')).toBeUndefined();
+    expect(memo.recentFailure('u2', 'granola')).toBeUndefined();
+  });
+
   it('prunes expired entries so the map stays bounded', () => {
     let now = 0;
     const memo = new ManualFailureMemo(1000, () => now);
