@@ -5,6 +5,13 @@ import { useLibrary, type LibraryItem } from '../state/library-data';
 import { pathForTool } from '../routes/library-paths';
 import { filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
+import { useWorkspace } from '../../workspace/state/workspace.context';
+import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { mergePullRequest } from '../../pr/services/pr-merge.api';
+import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
+import { useLibraryToast } from '../state/toast';
+import { joinRequestsFor } from '../utils/join-requests';
+import { AccessRequestsBanner } from './AccessRequestsBanner';
 import { GroupItemSections } from './group-page-parts';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 
@@ -45,13 +52,53 @@ function headingFor(filter: LibraryFilter): string {
 export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const data = useLibrary();
   const navigate = useNavigate();
+  const toast = useLibraryToast();
+  const { kbDirName } = useWorkspace();
   const [query, setQuery] = useState('');
   const [detail, setDetail] = useState<DetailTarget | null>(null);
+  /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
+  const [manageFolder, setManageFolder] = useState<string | null>(null);
 
   const visible = useMemo(
     () => filterLibraryItems(data.items, filter, query),
     [data.items, filter, query],
   );
+
+  /**
+   * Pending join requests, one banner per group the CALLER manages, on the
+   * Everything view only. Everything is where an admin lands, so it is the
+   * one place a request is guaranteed to be SEEN — the group's own page also
+   * carries its banner, but nobody visits a group to find out that somebody
+   * wants into it.
+   */
+  const pendingByGroup = useMemo(() => {
+    if (filter.kind !== 'all') return [];
+    return data.groupSummaries
+      .filter((g) => g.canWrite)
+      .map((g) => ({ group: g.name, folders: g.folders, rows: joinRequestsFor(data.crs, g.name) }))
+      .filter((g) => g.rows.length > 0)
+      .sort((a, b) => a.group.localeCompare(b.group));
+  }, [filter, data.groupSummaries, data.crs]);
+
+  async function approve(number: number) {
+    try {
+      await mergePullRequest(number);
+      toast('Approved — merging their access now.');
+    } catch {
+      toast("Couldn't approve that — try again.");
+    }
+    data.reload();
+    data.reloadGroups();
+  }
+
+  async function dismiss(number: number) {
+    try {
+      await cancelPullRequest(number);
+    } catch {
+      toast("Couldn't dismiss that — try again.");
+    }
+    data.reload();
+  }
 
   /**
    * Integrations open a PAGE, skills still open the dialog. The asymmetry is
@@ -87,6 +134,18 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
       </div>
 
       <div className="mt-5" />
+
+      {pendingByGroup.map(({ group, folders, rows }) => (
+        <AccessRequestsBanner
+          key={group}
+          group={group}
+          folders={folders}
+          requests={rows}
+          onManage={setManageFolder}
+          onApprove={(n) => void approve(n)}
+          onDismiss={(n) => void dismiss(n)}
+        />
+      ))}
 
       {data.error ? (
         <Banner role="alert" tone="danger">
@@ -129,6 +188,23 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
         />
       )}
 
+      {/* `kbDirName` gates it — the resolver addresses files repo-relative
+          and the dialog strips that prefix, so without it the path we hand
+          over is not the path we mean. */}
+      {manageFolder && kbDirName && (
+        <ManageAccessDialog
+          entry={{
+            name: manageFolder.split('/').pop() ?? manageFolder,
+            relativePath: `${kbDirName}/${manageFolder}`,
+            type: 'directory',
+          }}
+          onClose={() => {
+            setManageFolder(null);
+            data.reloadGroups();
+            data.reload();
+          }}
+        />
+      )}
     </>
   );
 }

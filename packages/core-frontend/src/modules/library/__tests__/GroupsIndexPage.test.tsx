@@ -75,6 +75,8 @@ const summary = (over: Partial<GroupSummary> = {}): GroupSummary => ({
   owners: { roles: [], users: [{ name: 'Olga Ivanova', email: 'olga@bevel.software' }] },
   writers: { roles: ['Admin'], users: [] },
   readers: { restricted: true, roles: ['GTM Team'], users: [] },
+  hasRequested: false,
+  requestNumber: null,
   ...over,
 });
 

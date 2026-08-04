@@ -38,6 +38,26 @@ export function LibraryLayout() {
     () => groupCounts(items).map((g) => ({ ...g, attention: attentionOf(items, g.group) })),
     [items],
   );
+  /**
+   * Groups the caller cannot get into, alphabetical.
+   *
+   * `canRead` is the folder verdict; the catalog is the other witness, and it
+   * wins when it disagrees. Access resolves closeness-first, so a per-file grant
+   * can hand somebody one skill inside a folder they cannot read — showing that
+   * group locked while its skill sits in the gallery above would be the Library
+   * contradicting itself. Same rule as `GroupPage`'s member-vs-locked decision,
+   * which is what keeps the row and the page it opens in agreement.
+   */
+  const lockedGroups = useMemo(() => {
+    const visible = new Set(items.map((i) => i.group).filter((g): g is string => g !== null));
+    return groupSummaries
+      // A manager (canWrite via admin-rescue) is not locked out — their group
+      // belongs with the ones they run, not below the gap.
+      .filter((g) => !g.canRead && !g.canWrite && !visible.has(g.name))
+      .map((g) => g.name)
+      .sort((a, b) => a.localeCompare(b));
+  }, [groupSummaries, items]);
+
   const ownedCount = useMemo(() => items.filter((i) => i.owned).length, [items]);
   /**
    * Owned items that are waiting on their owner. This — not `ownedCount` — is
@@ -60,6 +80,7 @@ export function LibraryLayout() {
         filter={filter}
         onSelect={(next) => navigate(pathForLibraryFilter(next))}
         groups={groups}
+        lockedGroups={lockedGroups}
         ownedCount={ownedCount}
         ownedAttention={ownedAttention}
         personalGroupLabel={personalGroupName(user?.name)}

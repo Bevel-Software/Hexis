@@ -20,6 +20,7 @@ function renderSidebar(over: Partial<GroupsSidebarProps> = {}) {
       { group: 'GTM', count: 3, attention: 2 },
       { group: 'Product', count: 0, attention: 0 },
     ],
+    lockedGroups: [],
     ownedCount: 2,
     ownedAttention: 0,
     personalGroupLabel: "Juan's Group",

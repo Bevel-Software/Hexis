@@ -18,6 +18,7 @@ function sidebar(over: Partial<GroupsSidebarProps> = {}) {
     filter: { kind: 'all' },
     onSelect: vi.fn(),
     groups: [{ group: 'Engineering', count: 4, attention: 0 }],
+    lockedGroups: [],
     ownedCount: 2,
     ownedAttention: 0,
     personalGroupLabel: "Juan's Group",

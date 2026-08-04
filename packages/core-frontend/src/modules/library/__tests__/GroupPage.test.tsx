@@ -124,6 +124,8 @@ const gtm = (over: Partial<GroupSummary> = {}): GroupSummary => ({
     roles: ['GTM Team'],
     users: [{ name: 'Ali Baba', email: 'ali@bevel.software' }],
   },
+  hasRequested: false,
+  requestNumber: null,
   ...over,
 });
 
@@ -268,22 +270,34 @@ describe('GroupPage', () => {
     ).toBeInTheDocument();
   });
 
-  it('a group the caller cannot access renders exactly like one that does not exist', async () => {
-    // Fail-closed: the endpoint omits inaccessible groups, so the page cannot
-    // tell "hidden from you" apart from "absent" — which is the point.
+  it('an UNDISCOVERABLE group renders exactly like one that does not exist', async () => {
+    // Fail-closed: the endpoint omits groups with no verdict at all, so the
+    // page cannot tell "hidden from you" apart from "absent" — the point.
     dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
     groupsMock.listGroups.mockResolvedValue([]);
     renderGroup('Finance');
     expect(await screen.findByText("This group doesn't exist yet.")).toBeInTheDocument();
   });
 
-  it('a locked-out admin (canWrite via admin-rescue) still gets the page and Share', async () => {
+  it('a DISCOVERABLE group the caller cannot read shows the locked view', async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+    groupsMock.listGroups.mockResolvedValue([
+      gtm({ name: 'Finance', folders: ['Groups/Finance'], canRead: false }),
+    ]);
+    renderGroup('Finance');
+    expect(
+      await screen.findByRole('button', { name: 'Subscribe to its skills and tools' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Skills' })).not.toBeInTheDocument();
+  });
+
+  it('a locked-out admin (canWrite via admin-rescue) gets the locked view with Manage access', async () => {
     dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
     groupsMock.listGroups.mockResolvedValue([
       gtm({ name: 'Finance', folders: ['Groups/Finance'], canRead: false, canWrite: true }),
     ]);
     renderGroup('Finance');
-    expect(await screen.findByRole('button', { name: 'Share' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Manage access' })).toBeInTheDocument();
   });
 
   it('keeps the member view when an item-level grant beats the folder verdict', async () => {

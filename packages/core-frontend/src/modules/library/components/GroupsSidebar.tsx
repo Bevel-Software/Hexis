@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { cn } from '../../../lib/utils';
 import type { LibraryFilter } from '../utils/status';
+import { LockGlyph } from './LockGlyph';
 
 export interface GroupsSidebarProps {
   /** What the URL has selected, or null on a page with no gallery filter. */
@@ -9,6 +10,11 @@ export interface GroupsSidebarProps {
   onSelect(filter: LibraryFilter): void;
   /** Readable groups, with their item count and how many integrations need setup. */
   groups: { group: string; count: number; attention: number }[];
+  /**
+   * Groups the caller cannot read, alphabetical. Rendered after a gap, with a
+   * lock instead of a count.
+   */
+  lockedGroups: string[];
   ownedCount: number;
   /**
    * How many of the caller's OWN items are waiting on them. Drives the amber
@@ -49,6 +55,7 @@ export function GroupsSidebar({
   filter,
   onSelect,
   groups,
+  lockedGroups,
   ownedCount,
   ownedAttention,
   personalGroupLabel,
@@ -90,6 +97,33 @@ export function GroupsSidebar({
           {count}
         </span>
       )}
+    </button>
+  );
+
+  /**
+   * A group the caller cannot read. Same chrome as every other row, because it
+   * is the same kind of thing — a place in the workspace — and demoting it
+   * visually would undo the reason it is listed at all.
+   *
+   * The count box holds a lock instead of a number, and holds it in the SAME
+   * slot so the column of counts stays a column. Never a count (the caller
+   * cannot see inside to count anything) and never the amber attention badge
+   * (a non-member has nothing to fix). The accessible name carries the state in
+   * words, so the glyph itself can stay decorative.
+   */
+  const lockedRow = (name: string) => (
+    <button
+      key={`locked:${name}`}
+      type="button"
+      aria-label={`${name} (locked)`}
+      aria-current={filter?.kind === 'group' && filter.group === name}
+      className={rowClass(filter?.kind === 'group' && filter.group === name)}
+      onClick={() => onSelect({ kind: 'group', group: name })}
+    >
+      <span className="truncate">{name}</span>
+      <span className="flex h-4.5 shrink-0 basis-5.5 items-center justify-center text-ink-faint">
+        <LockGlyph className="size-3" />
+      </span>
     </button>
   );
 
@@ -161,6 +195,11 @@ export function GroupsSidebar({
               attention > 0 ? 'pending' : 'count',
             ),
           )}
+          {/* Locked groups, after the prototype's 14px `.navgap`. The gap is the
+              whole statement: these are in the same list because they are in the
+              same workspace, and below a break because you are not in them. */}
+          {lockedGroups.length > 0 && <div className="h-3.5" aria-hidden="true" />}
+          {lockedGroups.map(lockedRow)}
         </nav>
 
         {attentionCount > 0 && (
@@ -184,7 +223,10 @@ export function GroupsSidebar({
  *
  * The heading says what this list IS rather than what its rows are called:
  * these folders are the set mounted into the caller's MCP — the agent's
- * working context — not merely a directory of groups.
+ * working context — not merely a directory of groups. (The locked rows that
+ * trail the list sit below a gap for exactly that reason: they are in the
+ * workspace but not in your MCP, and the break is what keeps the heading
+ * honest about them.)
  *
  * `All groups` used to be a row here. It went: the index is where you go to
  * find a group you are NOT in, which is a rare errand, and it sat above the

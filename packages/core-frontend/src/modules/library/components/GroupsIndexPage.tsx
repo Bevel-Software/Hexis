@@ -8,12 +8,15 @@ import { LIBRARY_ROOT, pathForGroup } from '../routes/library-paths';
 import { ownersTextOf } from '../utils/group-summary';
 import type { GroupSummary } from '../services/groups.api';
 import { GroupIndexRow } from './GroupIndexRow';
+import { LockGlyph } from './LockGlyph';
 
 /**
  * The all-groups index — `/skills-and-tools/groups`.
  *
- * Fail-closed like every other read surface: the groups endpoint only returns
- * groups the caller can access, so every row here is one they can open.
+ * The sidebar can only show groups you are IN. This page also shows the ones
+ * you may DISCOVER — the endpoint returns a group exactly when the caller is
+ * a member, manages it, or can read its `access.md` (the discovery grant), so
+ * a group with none of those is absent here too, not merely unlabelled.
  *
  * Two sources, one list. The `GET /api/groups` summaries are authoritative
  * about existence and access; the caller's own catalog is authoritative about
@@ -29,6 +32,8 @@ interface IndexEntry {
   skillCount: number;
   toolCount: number;
   attention: number;
+  /** The caller can see inside: folder read, manage rights, or item grants. */
+  member: boolean;
 }
 
 export function GroupsIndexPage() {
@@ -48,18 +53,25 @@ export function GroupsIndexPage() {
       .sort((a, b) => a.localeCompare(b))
       .map((name) => {
         const summary = groupSummaries.find((g) => g.name === name) ?? null;
+        const derivedSkills = countKind(items, name, 'skill');
+        const derivedTools = countKind(items, name, 'integration');
+        const hasItems = derivedSkills + derivedTools > 0;
         return {
           name,
           summary,
           // The summary's counts are the group's TOTALS; the catalog's are the
           // caller's slice. Prefer the totals — a member should see the same
           // "4 skills" here as on the group page.
-          skillCount: summary ? summary.skillCount : countKind(items, name, 'skill'),
-          toolCount: summary ? summary.toolCount : countKind(items, name, 'integration'),
+          skillCount: summary ? summary.skillCount : derivedSkills,
+          toolCount: summary ? summary.toolCount : derivedTools,
           attention: attentionOf(items, name),
+          member: summary ? summary.canRead || summary.canWrite || hasItems : hasItems,
         };
       });
   }, [groupSummaries, items]);
+
+  const mine = entries.filter((e) => e.member);
+  const locked = entries.filter((e) => !e.member);
 
   return (
     <div className="pb-14">
@@ -93,9 +105,9 @@ export function GroupsIndexPage() {
         <div className="py-16 text-center text-ui text-ink-faint">Loading groups…</div>
       ) : (
         <>
-          <SectionHead count={entries.length}>{"Groups you're in"}</SectionHead>
+          <SectionHead count={mine.length}>{"Groups you're in"}</SectionHead>
           <RowList>
-            {entries.map((entry) => (
+            {mine.map((entry) => (
               <GroupIndexRow
                 key={entry.name}
                 label={entry.name}
@@ -118,6 +130,40 @@ export function GroupsIndexPage() {
               />
             ))}
           </RowList>
+
+          {locked.length > 0 && (
+            <>
+              <SectionHead count={locked.length}>Ask to join</SectionHead>
+              <RowList>
+                {locked.map((entry) => (
+                  <GroupIndexRow
+                    key={entry.name}
+                    label={entry.name}
+                    {...describe(entry)}
+                    /* The row has to SAY it is locked, not just look it — the
+                       glyph is decorative (`aria-hidden`) and the word beside
+                       it is what a screen reader and the tests both read.
+                       Once a join CR is open the chip states that instead:
+                       the one thing this row can tell you that you did not
+                       already know is whether you have already asked. */
+                    trailing={
+                      entry.summary?.hasRequested ? (
+                        <Badge tone="wait" size="xs" title="Requested" className="uppercase">
+                          Requested
+                        </Badge>
+                      ) : (
+                        <Badge tone="outline" size="xs" title="Locked" className="uppercase">
+                          <LockGlyph className="size-2.5 shrink-0" />
+                          Locked
+                        </Badge>
+                      )
+                    }
+                    onOpen={() => navigate(pathForGroup(entry.name))}
+                  />
+                ))}
+              </RowList>
+            </>
+          )}
         </>
       )}
     </div>

@@ -9,11 +9,17 @@ import {
   pathForTool,
 } from '../routes/library-paths';
 import { primaryFolderOf } from '../utils/group-summary';
+import { joinRequestsFor } from '../utils/join-requests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { mergePullRequest } from '../../pr/services/pr-merge.api';
+import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
+import { useLibraryToast } from '../state/toast';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
 import { GroupBreadcrumb, GroupItemSections, PageNote, ShareGlyph } from './group-page-parts';
+import { AccessRequestsBanner } from './AccessRequestsBanner';
+import { LockedGroupView } from './LockedGroupView';
 
 /**
  * One group, as a place: `/skills-and-tools/groups/:group`.
@@ -24,16 +30,20 @@ import { GroupBreadcrumb, GroupItemSections, PageNote, ShareGlyph } from './grou
  * FILTER to a group; what they could not do is be linked to, bookmarked, or
  * handed to somebody. That is the whole difference this page makes.
  *
- * Fail-closed like the rest of the platform: a group the caller cannot access
- * never reaches this page's data (the groups endpoint omits it and the catalog
- * has none of its items), so an inaccessible group renders exactly like one
- * that does not exist.
+ * WHICH VIEW: the page decides member-vs-locked, not the router and not the
+ * sidebar. The member view renders when the folder verdict says `canRead`, OR
+ * when the caller's catalog already contains an item in the group (a per-file
+ * grant can hand somebody one skill inside a folder they cannot read). Locked
+ * means: the summary says no AND the catalog agrees — which can only happen
+ * for a DISCOVERABLE group, because an undiscoverable one never reaches this
+ * page's data at all and renders like one that does not exist.
  */
 export function GroupPage() {
   const params = useParams();
   const group = decodeGroupSegment(params.group ?? '');
   const data = useLibrary();
   const navigate = useNavigate();
+  const toast = useLibraryToast();
   const { kbDirName } = useWorkspace();
   const [detail, setDetail] = useState<DetailTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
@@ -91,16 +101,57 @@ export function GroupPage() {
         }}
         onClose={() => {
           setManageFolder(null);
+          // Granting through the dialog answers a pending join request too —
+          // reload so the requester's CR banner and the roster both catch up.
           data.reloadGroups();
+          data.reload();
         }}
       />
     ) : null;
 
+  /** Approve = merge the join CR; the merge gate is the security boundary. */
+  async function approve(number: number) {
+    try {
+      await mergePullRequest(number);
+      toast('Approved — merging their access now.');
+    } catch {
+      toast("Couldn't approve that — try again.");
+    }
+    data.reload();
+    data.reloadGroups();
+  }
+
+  async function dismiss(number: number) {
+    try {
+      await cancelPullRequest(number);
+    } catch {
+      toast("Couldn't dismiss that — try again.");
+    }
+    data.reload();
+  }
+
   // Nothing has spoken yet: the catalog is still loading, the group index is
   // still loading, and no item has proven the group exists. Deciding now would
-  // flash "doesn't exist" at somebody who is simply early.
+  // flash "doesn't exist" (or a locked splash) at somebody who is simply early.
   if (groupItems.length === 0 && (data.loading || data.groupsLoading)) {
     return <PageNote>Loading the library…</PageNote>;
+  }
+
+  if (summary && !summary.canRead && groupItems.length === 0) {
+    return (
+      <>
+        <LockedGroupView
+          group={summary}
+          onRequested={data.reloadGroups}
+          onUnlocked={() => {
+            data.reload();
+            data.reloadGroups();
+          }}
+          onManage={setManageFolder}
+        />
+        {manageDialog}
+      </>
+    );
   }
 
   // No summary, no items, and the endpoint did NOT fail — the group really is
@@ -145,6 +196,21 @@ export function GroupPage() {
           </Button>
         )}
       </div>
+
+      {/* Somebody is waiting on the person reading this. Rendered only for a
+          group manager (canWrite) — every member can see the CRs elsewhere,
+          but only the people who can act on a request get its banner. */}
+      {summary?.canWrite && (
+        <AccessRequestsBanner
+          group={group}
+          folders={summary.folders}
+          requests={joinRequestsFor(data.crs, group)}
+          onManage={setManageFolder}
+          onApprove={(n) => void approve(n)}
+          onDismiss={(n) => void dismiss(n)}
+          className="mt-4"
+        />
+      )}
 
       {attention > 0 && (
         <Banner role="status" tone="wait" className="mt-4">
