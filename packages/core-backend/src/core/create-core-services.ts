@@ -4,8 +4,6 @@ import {
   DEFAULT_BRANCH,
   PROTECTED_BRANCHES,
   GROUPS_DIR,
-  LEGACY_SKILLS_DIR,
-  LEGACY_TOOLS_DIR,
 } from '@bevel-software/platform-shared';
 import { CoreConfig } from '../core-config.js';
 import { getDb, type Database } from '../modules/database/connection.js';
@@ -187,11 +185,11 @@ export async function createCoreServices(
   const routineWritePolicy = new RoutineWritePolicyService();
   // Skills: discovered from the default-branch workspace only (global catalog).
   const skillService = new SkillService(workspaceService, accessControl, config.kbDirName);
-  // Tool manuals: user-authored `*.tool` files under `Tools/` in the default
+  // Tool manuals: user-authored `*.tool` files under `Groups/` in the default
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
   const toolManualService = new ToolManualService(workspaceService, accessControl, config.kbDirName);
-  // Groups: the folders under `Groups/` (plus the legacy roots) that carry a
+  // Groups: the folders under `Groups/` that carry a
   // team's skills AND the tools they need. Enumerated for EVERY authenticated
   // caller — a group they cannot read still exists for them, as a locked one —
   // with the counts read off the two catalogs above rather than a second scan.
@@ -311,16 +309,15 @@ export async function createCoreServices(
   // caches are independent, so the split preserves behavior.)
   fileChangeNotifier.onFilesChanged(({ branch, paths }) => {
     if (branch !== DEFAULT_BRANCH) return;
-    // Both catalogs now live under `Groups/`, so a change there invalidates
-    // both; the legacy roots stay watched until the KB migration lands.
-    const touched = (dir: string) =>
-      paths.some((p) => p.startsWith(`${config.kbDirName}/${dir}/`));
-    if (touched(GROUPS_DIR) || touched(LEGACY_TOOLS_DIR)) toolManualService.invalidate();
-    if (touched(GROUPS_DIR) || touched(LEGACY_SKILLS_DIR)) skillService.invalidate();
-    // The group index spans all three roots — and an access grant lands as a
-    // default-branch change to `<root>/<group>/access.md`, so this is also what
-    // makes a newly-granted group unlock within one round-trip instead of one TTL.
-    if (touched(GROUPS_DIR) || touched(LEGACY_SKILLS_DIR) || touched(LEGACY_TOOLS_DIR)) {
+    // Skills, tools and the group index all live under `Groups/`, so one
+    // touch check drives all three caches. An access grant lands as a
+    // default-branch change to `Groups/<group>/access.md`, so this is also
+    // what makes a newly-granted group unlock within one round-trip instead
+    // of one TTL.
+    const touched = paths.some((p) => p.startsWith(`${config.kbDirName}/${GROUPS_DIR}/`));
+    if (touched) {
+      toolManualService.invalidate();
+      skillService.invalidate();
       groupIndexService.invalidate();
     }
   });

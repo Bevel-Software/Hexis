@@ -4,8 +4,6 @@ import type { Dirent } from 'node:fs';
 import {
   DEFAULT_BRANCH,
   GROUPS_DIR,
-  LEGACY_SKILLS_DIR,
-  LEGACY_TOOLS_DIR,
   groupOfPath,
 } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
@@ -18,9 +16,6 @@ import type { GroupCatalogEntry, IGroupIndexService } from './groups.contract.js
 
 const CACHE_TTL_MS = 60_000;
 
-/** The roots whose DIRECT subfolders are groups — merged layout first. */
-const GROUP_SCAN_ROOTS = [GROUPS_DIR, LEGACY_SKILLS_DIR, LEGACY_TOOLS_DIR] as const;
-
 /**
  * The group index: every group folder in the default-branch KB, with its
  * caller-independent totals and access principals.
@@ -28,14 +23,13 @@ const GROUP_SCAN_ROOTS = [GROUPS_DIR, LEGACY_SKILLS_DIR, LEGACY_TOOLS_DIR] as co
  * Two decisions worth keeping straight:
  *
  *  - **Enumeration is a readdir, counting is not.** A group EXISTS because a
- *    folder exists (`readdir` of the three roots, union by name), but its
- *    counts come from the already-cached global catalogs —
- *    `skillService.listSkills(undefined)` and
+ *    folder exists (`readdir` of `Groups/`), but its counts come from the
+ *    already-cached global catalogs — `skillService.listSkills(undefined)` and
  *    `toolManualService.listAllSummaries()` — bucketed by `groupOfPath`. A
  *    second `walkFiles` pass would re-read the same tree and could disagree
  *    with the catalogs about what counts as a skill.
- *  - **Loose files are not groups.** `Tools/slack.tool` sits directly under a
- *    root, so it is a file, not a directory — the same ≥3-segment rule
+ *  - **Loose files are not groups.** `Groups/slack.tool` sits directly under
+ *    the root, so it is a file, not a directory — the same ≥3-segment rule
  *    `groupOfPath` applies, arrived at from the other side.
  *
  * Cached for {@link CACHE_TTL_MS} and dropped by `invalidate()` from the
@@ -104,11 +98,8 @@ export class GroupIndexService implements IGroupIndexService {
 
       const entries: GroupCatalogEntry[] = [];
       for (const [name, groupFolders] of folders) {
-        // The `Groups/`-rooted folder is the primary: post-migration it is the
-        // only one, and pre-migration it is the one the migration keeps. The
-        // principals of a group that spans `Skills/X` + `Tools/X` therefore
-        // come from ONE folder — an approximation the migration collapses.
-        const primary = groupFolders.find((f) => f.startsWith(`${GROUPS_DIR}/`)) ?? groupFolders[0];
+        // One folder, one access boundary — the folder IS the group.
+        const [primary] = groupFolders;
         const [owners, writers, readers] = await Promise.all([
           this.accessControl.eligibleOwners(wsId, primary),
           this.accessControl.eligibleWriters(wsId, primary),
@@ -133,22 +124,18 @@ export class GroupIndexService implements IGroupIndexService {
     }
   }
 
-  /** name → repo-relative constituent folders, in root order (`Groups/` first). */
+  /** name → repo-relative group folder (always a single-element list). */
   private async scanFolders(kbRoot: string): Promise<Map<string, string[]>> {
     const byName = new Map<string, string[]>();
-    for (const root of GROUP_SCAN_ROOTS) {
-      let children: Dirent[];
-      try {
-        children = await fs.readdir(path.join(kbRoot, root), { withFileTypes: true });
-      } catch {
-        continue; // a root the KB doesn't have (pre- or post-migration) is not an error
-      }
-      for (const child of children) {
-        if (!child.isDirectory() || child.name.startsWith('.')) continue;
-        const list = byName.get(child.name);
-        if (list) list.push(`${root}/${child.name}`);
-        else byName.set(child.name, [`${root}/${child.name}`]);
-      }
+    let children: Dirent[];
+    try {
+      children = await fs.readdir(path.join(kbRoot, GROUPS_DIR), { withFileTypes: true });
+    } catch {
+      return byName; // a KB without a `Groups/` root simply has no groups
+    }
+    for (const child of children) {
+      if (!child.isDirectory() || child.name.startsWith('.')) continue;
+      byName.set(child.name, [`${GROUPS_DIR}/${child.name}`]);
     }
     return byName;
   }

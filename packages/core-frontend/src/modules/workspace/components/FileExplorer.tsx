@@ -24,8 +24,6 @@ import {
   validateFilename,
   KNOWLEDGE_BASE_DIR,
   GROUPS_DIR,
-  LEGACY_SKILLS_DIR,
-  LEGACY_TOOLS_DIR,
   DATA_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
@@ -897,9 +895,9 @@ export function FileExplorer() {
   const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);
 
   // KB content splits Knowledge (`KnowledgeBase/`), Data (`Data/`), Agents
-  // (`Agents/`), Pipelines (`Pipelines/`), Skills (`Skills/`) and Tools
-  // (`Tools/`) into separate top-level folders; surface them as labelled sections
-  // rather than a single flat root. The Knowledge section hoists `KnowledgeBase/`'s
+  // (`Agents/`), Pipelines (`Pipelines/`) and Groups (`Groups/`) into separate
+  // top-level folders; surface them as labelled sections rather than a single
+  // flat root. The Knowledge section hoists `KnowledgeBase/`'s
   // children and folds in any other top-level content folder (e.g. a stray
   // `Legal/`); loose top-level files (access.md, roles.yaml) sit below a divider.
   // Clones that predate the split (none of the well-known root dirs) fall back
@@ -916,18 +914,13 @@ export function FileExplorer() {
     const agents = findDir(AGENTS_DIR);
     const pipelines = findDir(PIPELINES_DIR);
     const groups = findDir(GROUPS_DIR);
-    // Pre-merge clones still have the split pair; both are rendered so a KB
-    // that has not migrated does not lose its skills and tools from the tree.
-    const skills = findDir(LEGACY_SKILLS_DIR);
-    const tools = findDir(LEGACY_TOOLS_DIR);
-    if (!knowledgeBase && !data && !agents && !pipelines && !groups && !skills && !tools)
-      return null;
+    if (!knowledgeBase && !data && !agents && !pipelines && !groups) return null;
     // Any other top-level content folder (e.g. a stray `Legal/`) folds into Knowledge.
     const otherDirs = kids.filter(
       (c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name),
     );
-    // Present Knowledge, Data, Agents, Pipelines and Groups as named roots
-    // (plus the legacy Skills/Tools pair while it still exists). Knowledge is synthetic so it can relabel `KnowledgeBase` and
+    // Present Knowledge, Data, Agents, Pipelines and Groups as named roots.
+    // Knowledge is synthetic so it can relabel `KnowledgeBase` and
     // absorb the stray content folders; it reuses KnowledgeBase's own path so
     // file ops on the row still resolve.
     const knowledge: FileTreeEntry | null = knowledgeBase
@@ -945,18 +938,12 @@ export function FileExplorer() {
       ? { ...pipelines, name: PIPELINES_DIR }
       : null;
     const groupsRoot: FileTreeEntry | null = groups ? { ...groups, name: GROUPS_DIR } : null;
-    const skillsRoot: FileTreeEntry | null = skills
-      ? { ...skills, name: LEGACY_SKILLS_DIR }
-      : null;
-    const toolsRoot: FileTreeEntry | null = tools ? { ...tools, name: LEGACY_TOOLS_DIR } : null;
     return {
       knowledge,
       data: dataRoot,
       agents: agentsRoot,
       pipelines: pipelinesRoot,
       groups: groupsRoot,
-      skills: skillsRoot,
-      tools: toolsRoot,
       looseFiles: kids.filter((c) => c.type === 'file'),
     };
   }, [mergedTree]);
@@ -1044,12 +1031,6 @@ export function FileExplorer() {
             )}
             {sections.groups && (
               <FileTreeNode entry={sections.groups} depth={0} accent collapseChildren />
-            )}
-            {sections.skills && (
-              <FileTreeNode entry={sections.skills} depth={0} accent collapseChildren />
-            )}
-            {sections.tools && (
-              <FileTreeNode entry={sections.tools} depth={0} accent collapseChildren />
             )}
             {sections.looseFiles.length > 0 && (
               <>

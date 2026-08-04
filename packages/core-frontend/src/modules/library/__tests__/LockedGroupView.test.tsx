@@ -175,12 +175,8 @@ describe('LockedGroupView', () => {
   });
 
   it('gives a locked-out admin the self-service way in', () => {
-    const { onManage } = renderLocked(
-      finance({ canWrite: true, folders: ['Skills/Finance', 'Groups/Finance'] }),
-    );
+    const { onManage } = renderLocked(finance({ canWrite: true, folders: ['Groups/Finance'] }));
     fireEvent.click(screen.getByRole('button', { name: 'Manage access' }));
-    // The `Groups/`-rooted folder wins, so the page acts on the folder it talks
-    // about — the same primary-folder rule the backend resolves principals with.
     expect(onManage).toHaveBeenCalledWith('Groups/Finance');
   });
 

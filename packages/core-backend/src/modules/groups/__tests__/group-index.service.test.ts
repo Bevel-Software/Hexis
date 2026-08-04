@@ -77,22 +77,19 @@ describe('GroupIndexService', () => {
     expect(catalog[1].folders).toEqual(['Groups/GTM']);
   });
 
-  test('unions legacy Skills/ and Tools/ subfolders into one group (unmigrated KB)', async () => {
+  test('the retired Skills/ and Tools/ roots are NOT group roots', async () => {
     await mkdir(join(kb(), 'Skills', 'GTM'), { recursive: true });
     await mkdir(join(kb(), 'Tools', 'GTM'), { recursive: true });
-    await mkdir(join(kb(), 'Skills', 'Product'), { recursive: true });
+    await mkdir(join(kb(), 'Groups', 'Engineering'), { recursive: true });
 
     const catalog = await svc().catalog();
-    expect(catalog.map((g) => g.name)).toEqual(['GTM', 'Product']);
-    expect(catalog[0].folders).toEqual(['Skills/GTM', 'Tools/GTM']);
-    expect(catalog[1].folders).toEqual(['Skills/Product']);
+    expect(catalog.map((g) => g.name)).toEqual(['Engineering']);
   });
 
-  test('ignores loose files and dot-dirs under the group roots', async () => {
-    await mkdir(join(kb(), 'Tools'), { recursive: true });
-    await writeFile(join(kb(), 'Tools', 'slack.tool'), '{}');
+  test('ignores loose files and dot-dirs under the group root', async () => {
     await mkdir(join(kb(), 'Groups', '.hidden'), { recursive: true });
     await mkdir(join(kb(), 'Groups', 'GTM'), { recursive: true });
+    await writeFile(join(kb(), 'Groups', 'slack.tool'), '{}');
 
     const catalog = await svc().catalog();
     expect(catalog.map((g) => g.name)).toEqual(['GTM']);
@@ -104,8 +101,8 @@ describe('GroupIndexService', () => {
 
     const catalog = await svc({
       skills: skills('Groups/GTM/outreach', 'Groups/GTM/newsletter', 'Groups/Product/roadmap'),
-      // `Tools/slack.tool` is ungrouped (two segments) — it counts nowhere.
-      tools: tools('Groups/GTM/heyreach.tool', 'Tools/slack.tool'),
+      // `Groups/slack.tool` is ungrouped (two segments) — it counts nowhere.
+      tools: tools('Groups/GTM/heyreach.tool', 'Groups/slack.tool'),
     }).catalog();
 
     const gtm = catalog.find((g) => g.name === 'GTM')!;
@@ -116,19 +113,7 @@ describe('GroupIndexService', () => {
     expect(product.toolCount).toBe(0);
   });
 
-  test('counts a legacy group across both of its roots', async () => {
-    await mkdir(join(kb(), 'Skills', 'GTM'), { recursive: true });
-    await mkdir(join(kb(), 'Tools', 'GTM'), { recursive: true });
-
-    const catalog = await svc({
-      skills: skills('Skills/GTM/outreach'),
-      tools: tools('Tools/GTM/heyreach.tool'),
-    }).catalog();
-    expect(catalog[0]).toMatchObject({ name: 'GTM', skillCount: 1, toolCount: 1 });
-  });
-
-  test('resolves principals on the Groups/-rooted folder when a group spans both layouts', async () => {
-    await mkdir(join(kb(), 'Skills', 'GTM'), { recursive: true });
+  test('resolves principals on the group folder', async () => {
     await mkdir(join(kb(), 'Groups', 'GTM'), { recursive: true });
 
     const seen: string[] = [];
@@ -142,13 +127,13 @@ describe('GroupIndexService', () => {
     } as unknown as IAccessControl;
 
     const catalog = await svc({ access }).catalog();
-    expect(catalog[0].folders).toEqual(['Groups/GTM', 'Skills/GTM']);
+    expect(catalog[0].folders).toEqual(['Groups/GTM']);
     expect(seen).toEqual(['Groups/GTM']);
     expect(catalog[0].owners.users).toEqual([OLGA]);
     expect(catalog[0].readers).toEqual({ restricted: false, roles: [], users: [] });
   });
 
-  test('missing Groups/Skills/Tools roots yield an empty list, not an error', async () => {
+  test('a missing Groups/ root yields an empty list, not an error', async () => {
     await expect(svc().catalog()).resolves.toEqual([]);
   });
 

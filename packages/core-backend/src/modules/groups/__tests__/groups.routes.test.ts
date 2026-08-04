@@ -93,10 +93,8 @@ async function makeHarness(opts: HarnessOpts = {}) {
   const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-routes-'));
   tmpDirs.push(workspaceDir);
   const kbRoot = path.join(workspaceDir, KB);
-  // A migrated group (Groups/GTM) and a legacy one spanning both roots.
   await fs.mkdir(path.join(kbRoot, 'Groups', 'GTM'), { recursive: true });
-  await fs.mkdir(path.join(kbRoot, 'Skills', 'Finance'), { recursive: true });
-  await fs.mkdir(path.join(kbRoot, 'Tools', 'Finance'), { recursive: true });
+  await fs.mkdir(path.join(kbRoot, 'Groups', 'Finance'), { recursive: true });
 
   const workspaceService = {
     getOrCreateForBranch: async () => ({ id: wsId }),
@@ -190,27 +188,26 @@ describe('/api/groups routes', () => {
     }
   });
 
-  it('merges the legacy roots, sorts by name, and counts by groupOfPath', async () => {
+  it('sorts by name and counts by groupOfPath (ungrouped items count nowhere)', async () => {
     const h = await makeHarness({
       skills: [{ name: 'outreach', description: '', path: 'Groups/GTM/outreach' }],
       tools: [
-        { slug: 'ledger', name: 'ledger', path: 'Tools/Finance/ledger.tool', type: 'inline' },
-        { slug: 'slack', name: 'slack', path: 'Tools/slack.tool', type: 'inline' },
+        { slug: 'ledger', name: 'ledger', path: 'Groups/Finance/ledger.tool', type: 'inline' },
+        { slug: 'slack', name: 'slack', path: 'Groups/slack.tool', type: 'inline' },
       ],
     });
     server = h.server;
     const { status, groups } = await listGroups(h.baseUrl);
     expect(status).toBe(200);
     expect(groups.map((g) => g.name)).toEqual(['Finance', 'GTM']);
-    expect(groups[0].folders).toEqual(['Skills/Finance', 'Tools/Finance']);
+    expect(groups[0].folders).toEqual(['Groups/Finance']);
     expect(groups[0]).toMatchObject({ skillCount: 0, toolCount: 1 });
     expect(groups[1]).toMatchObject({ folders: ['Groups/GTM'], skillCount: 1, toolCount: 0 });
   });
 
-  it('ORs canRead/canWrite across a group’s folders and withholds readers when locked', async () => {
+  it('resolves canRead/canWrite per group and withholds readers when locked', async () => {
     const h = await makeHarness({
-      // Readable through the Tools half only — the OR still unlocks Finance.
-      readable: { [ALI]: ['Tools/Finance'] },
+      readable: { [ALI]: ['Groups/Finance'] },
       writable: { [ALI]: [] },
     });
     server = h.server;
@@ -297,7 +294,7 @@ describe('/api/groups routes', () => {
 
   it('POST access-requests: 404 unknown-group, 409 already-readable, 200 + idempotent repeat', async () => {
     const requests = makeRequests();
-    const h = await makeHarness({ requests, readable: { [ALI]: ['Skills/Finance'] } });
+    const h = await makeHarness({ requests, readable: { [ALI]: ['Groups/Finance'] } });
     server = h.server;
 
     const unknown = await fetch(`${h.baseUrl}/api/groups/Nope/access-requests`, { method: 'POST' });

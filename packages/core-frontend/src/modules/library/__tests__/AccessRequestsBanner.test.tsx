@@ -67,16 +67,6 @@ describe('AccessRequestsBanner', () => {
     expect(onManage).toHaveBeenCalledWith('Groups/Finance');
   });
 
-  it('offers one button per folder on an unmigrated KB, named by its root', () => {
-    // `Skills/Finance` and `Tools/Finance` carry SEPARATE access.md files —
-    // one button would silently grant half the group.
-    const { onManage } = renderBanner([request()], ['Skills/Finance', 'Tools/Finance']);
-    expect(screen.queryByRole('button', { name: 'Manage access' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Manage access (Skills)' }));
-    expect(onManage).toHaveBeenCalledWith('Skills/Finance');
-    fireEvent.click(screen.getByRole('button', { name: 'Manage access (Tools)' }));
-    expect(onManage).toHaveBeenCalledWith('Tools/Finance');
-  });
 
   it('dismisses one named requester at a time', () => {
     const { onDismiss } = renderBanner([

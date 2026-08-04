@@ -62,15 +62,7 @@ export function readersTextOf(summary: Pick<GroupSummary, 'readers'>): string | 
   return named.length > 0 ? named.join(', ') : null;
 }
 
-/**
- * The folder a group's writes and links point at.
- *
- * An unmigrated KB splits one group across `Skills/<G>` and `Tools/<G>`; a
- * migrated one has a single `Groups/<G>`. When both exist mid-migration the
- * `Groups/`-rooted folder is the destination, which is the same primary-folder
- * rule the backend uses to resolve principals — so the folder the page talks
- * ABOUT is the folder the page links TO.
- */
+/** The folder a group's writes and links point at — its single `Groups/<G>` folder. */
 export function primaryFolderOf(summary: Pick<GroupSummary, 'folders'>): string | null {
-  return summary.folders.find((f) => f.startsWith('Groups/')) ?? summary.folders[0] ?? null;
+  return summary.folders[0] ?? null;
 }

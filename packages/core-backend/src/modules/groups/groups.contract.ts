@@ -1,8 +1,8 @@
 /**
- * Groups — the folders under `Groups/` (and, until the KB migration lands, the
- * legacy `Skills/` + `Tools/` roots) that carry a team's skills and the tools
- * those skills need. A group is a FOLDER, never a role: one access boundary,
- * one place, derived from the path exactly the way `groupOfPath` derives it.
+ * Groups — the folders under `Groups/` that carry a team's skills and the
+ * tools those skills need. A group is a FOLDER, never a role: one access
+ * boundary, one place, derived from the path exactly the way `groupOfPath`
+ * derives it.
  *
  * `GET /api/groups` is the one enumeration surface. It is deliberately readable
  * by every authenticated user — a group the caller CANNOT read still appears,
@@ -40,7 +40,7 @@ export interface GroupReaders extends GroupPrincipals {
 export interface GroupSummary {
   /** Group folder name, e.g. `GTM`. */
   name: string;
-  /** Repo-relative constituent folders, e.g. `['Groups/GTM']` or `['Skills/GTM','Tools/GTM']`. */
+  /** Repo-relative constituent folders, e.g. `['Groups/GTM']`. */
   folders: string[];
   /** Per-caller; locked === !canRead. */
   canRead: boolean;

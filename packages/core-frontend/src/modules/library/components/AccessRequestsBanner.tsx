@@ -56,13 +56,9 @@ export function AccessRequestsBanner({
       <p>{line}</p>
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        {/* One button per constituent folder. An unmigrated KB splits a group
-            across `Skills/<G>` and `Tools/<G>`, and they carry SEPARATE
-            `access.md` files — one button would silently grant half the group.
-            After the migration the same code renders one unlabelled button. */}
         {folders.map((folder) => (
           <Button key={folder} variant="outline" size="sm" onClick={() => onManage(folder)}>
-            {folders.length === 1 ? 'Manage access' : `Manage access (${rootLabel(folder)})`}
+            Manage access
           </Button>
         ))}
 
@@ -82,10 +78,3 @@ export function AccessRequestsBanner({
   );
 }
 
-/**
- * `Skills/GTM` → `Skills`. The root a folder hangs off is the only thing that
- * distinguishes two buttons that would otherwise read identically.
- */
-function rootLabel(folder: string): string {
-  return folder.split('/')[0] ?? folder;
-}
