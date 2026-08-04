@@ -65,8 +65,19 @@ export function createAuthRoutes(
       return;
     }
     const ip = clientIp(req);
+    // IP budget FIRST, and it returns before the pair key exists. Order is the
+    // whole guard here: `consume` inserts an entry for any key it has not seen,
+    // and that entry lives for the full 15-minute window. Consuming the pair
+    // budget first therefore let an address that was ALREADY over its IP limit
+    // keep minting `ip|email` entries, one per attacker-chosen email — and
+    // since `consume` scans the whole map on every call, that growth is also a
+    // latency tax on every legitimate login for the rest of the window.
+    if (!loginIpLimiter.consume(ip)) {
+      res.status(429).json({ error: 'Too many attempts. Try again later.' });
+      return;
+    }
     const pairKey = `${ip}|${email.trim().toLowerCase()}`;
-    if (!loginPairLimiter.consume(pairKey) || !loginIpLimiter.consume(ip)) {
+    if (!loginPairLimiter.consume(pairKey)) {
       res.status(429).json({ error: 'Too many attempts. Try again later.' });
       return;
     }
