@@ -277,6 +277,31 @@ describe('SkillPage', () => {
     expect(panel.getAttribute('aria-labelledby')).toBe(skillTab.id);
   });
 
+  /**
+   * `aria-labelledby` is a space-separated IDREF list, so an unencoded
+   * `notes draft.md` would reference two ids that do not exist and the panel
+   * would lose its name. KB paths with spaces are ordinary here.
+   */
+  it('keeps a filename with a space as one valid IDREF', async () => {
+    apiMock.getSkill.mockResolvedValue({
+      ...skillDetail,
+      files: ['Skills/newsletter/notes draft.md'],
+    });
+    renderPage(false);
+
+    const tab = await screen.findByRole('tab', { name: /notes draft\.md/ });
+    expect(tab.id).toContain('notes%20draft.md');
+    expect(tab.id).not.toMatch(/\s/);
+
+    fireEvent.click(tab);
+
+    // One token, and it resolves to this tab.
+    const labelledBy = screen.getByRole('tabpanel').getAttribute('aria-labelledby')!;
+    expect(labelledBy).not.toMatch(/\s/);
+    expect(labelledBy.split(' ')).toHaveLength(1);
+    expect(document.getElementById(labelledBy)).toBe(tab);
+  });
+
   it('keeps the panel wired while the editor replaces the reading pane', async () => {
     renderPage(false);
     fireEvent.click(await screen.findByRole('button', { name: 'Propose changes' }));
