@@ -166,7 +166,12 @@ export class CreatorAccessService implements ICreatorAccess {
             try {
               // Idempotent merge into whatever is on disk by write time — a
               // concurrent creator's grant survives; ours lands next to it.
-              return spliceGrant(current, 'read', principal, { allowScalar: false }).text;
+              // `target: 'folder'` so a new-format access.md (body-governed)
+              // gets the grant in its FOLDER rules, never its self-frontmatter.
+              return spliceGrant(current, 'read', principal, {
+                allowScalar: false,
+                target: 'folder',
+              }).text;
             } catch (err) {
               warnSkipped(rel, err);
               return current;
