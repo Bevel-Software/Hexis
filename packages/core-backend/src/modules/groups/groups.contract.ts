@@ -4,12 +4,28 @@
  * boundary, one place, derived from the path exactly the way `groupOfPath`
  * derives it.
  *
- * `GET /api/groups` is the one enumeration surface, and it follows the KB's
- * read model to the letter: a group the caller cannot access is simply ABSENT
- * from the response — same fail-closed posture as the file tree, the skill
- * catalog and the tool listing. There is no locked-group discovery and no
- * access-request machinery; joining a group is an `access.md` grant made
- * through the normal access-management flow.
+ * Enumeration follows the KB's read model with NO special cases: a group
+ * appears for a caller exactly when the access resolution says something
+ * about it —
+ *
+ *   - MEMBER: the caller can read the folder itself (`canRead`).
+ *   - MANAGER: the caller can write the folder's `access.md` (`canWrite`,
+ *     admin-rescued).
+ *   - DISCOVERABLE: the caller can read the `access.md` FILE — which, in the
+ *     new body-governed format, is granted by the file's own
+ *     `read: everyone` frontmatter (see `accessMdSelfEntries`). The group
+ *     shows locked, and the caller may ask to join.
+ *
+ * A group where all three verdicts are false is ABSENT from the response —
+ * name, counts and principals never leave the backend. Making a group secret
+ * is therefore an ordinary access edit: drop the `everyone` grant from its
+ * access.md frontmatter.
+ *
+ * Requesting access is a CHANGE REQUEST, not a bespoke system: the join
+ * route commits "add me to the body's `read:` list" on a draft branch and
+ * opens a CR that the folder's writers approve by merging (or by granting
+ * via Manage access, which makes the CR moot). To agents these are plain
+ * change requests; only the UI dresses them up.
  */
 
 /** Access-rule principals as the resolver hands them back. */
@@ -29,8 +45,9 @@ export interface GroupSummary {
   /** Repo-relative constituent folders, e.g. `['Groups/GTM']`. */
   folders: string[];
   /**
-   * Per-caller. Every returned group has `canRead` or `canWrite`; a group
-   * with neither is not returned at all.
+   * Per-caller: the caller can read the FOLDER (membership). Every returned
+   * group has at least one of `canRead` / `canWrite` / discoverability; a
+   * group with none is not returned at all.
    */
   canRead: boolean;
   /**
@@ -46,6 +63,13 @@ export interface GroupSummary {
   owners: ResolvedPrincipals;
   writers: ResolvedPrincipals;
   readers: ResolvedReaders;
+  /**
+   * The caller has an OPEN join change request for this group (their
+   * deterministic join branch has an open CR). Always false for a member.
+   */
+  hasRequested: boolean;
+  /** The open join CR's number when `hasRequested` (deep-links the UI). */
+  requestNumber: number | null;
 }
 
 /**

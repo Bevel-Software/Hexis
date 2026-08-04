@@ -35,6 +35,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+import { GROUPS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from './access-control.interface.js';
 import { spliceGrant, type Principal } from './access-splice.js';
@@ -159,6 +160,15 @@ export class CreatorAccessService implements ICreatorAccess {
           warnSkipped(rel, err);
           return null;
         }
+        // A DIRECT group folder (`Groups/<Name>`) seeds the new-format
+        // access.md: `read: everyone` in the FRONTMATTER makes the group
+        // discoverable (anyone may open the file and ask to join), while the
+        // BODY — the folder's actual rules — names only the creator, who
+        // gets read+write+owner: creating a group makes you the one who
+        // runs it (adds content, manages access, answers join requests).
+        // The `read: []` placeholder is what makes the body parse as rules
+        // from the first byte, so every later splice targets the body.
+        const isGroupRoot = new RegExp(`^${GROUPS_DIR}/[^/]+$`).test(acc);
         return {
           kind: 'seed-access-md',
           wsRelPath: `${this.kbDirName}/${acc}/access.md`,
@@ -168,10 +178,23 @@ export class CreatorAccessService implements ICreatorAccess {
               // concurrent creator's grant survives; ours lands next to it.
               // `target: 'folder'` so a new-format access.md (body-governed)
               // gets the grant in its FOLDER rules, never its self-frontmatter.
-              return spliceGrant(current, 'read', principal, {
+              let text = current;
+              if (isGroupRoot && !current.trim()) {
+                text = '---\nread:\n  - everyone\n---\nread: []\n';
+              }
+              let out = spliceGrant(text, 'read', principal, {
                 allowScalar: false,
                 target: 'folder',
               }).text;
+              if (isGroupRoot && !current.trim()) {
+                for (const verb of ['write', 'owner'] as const) {
+                  out = spliceGrant(out, verb, principal, {
+                    allowScalar: false,
+                    target: 'folder',
+                  }).text;
+                }
+              }
+              return out;
             } catch (err) {
               warnSkipped(rel, err);
               return current;
