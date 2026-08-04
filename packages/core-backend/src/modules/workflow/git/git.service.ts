@@ -29,6 +29,7 @@ import {
   BranchAuthorshipError,
   WorkflowValidationError,
   ProtectedBranchError,
+  PullRebaseConflictError,
 } from '../workflow.errors.js';
 
 const execFileAsync = promisify(execFile);
@@ -1387,14 +1388,63 @@ export class GitService implements IGitService {
         const remoteRef = await this.refreshRemoteBranchRef(cwd, branch);
         await this.git(cwd, ['rebase', '--autostash', remoteRef]);
       } catch (err) {
+        // Capture the contested paths BEFORE the abort wipes the rebase
+        // state — `--diff-filter=U` lists exactly the files whose replay
+        // conflicted. Best-effort: an empty list just means this wasn't a
+        // content conflict (or the probe itself failed) and the raw error
+        // is surfaced unchanged.
+        let conflictedPaths: string[] = [];
+        try {
+          const { stdout } = await this.git(cwd, ['diff', '--name-only', '--diff-filter=U']);
+          conflictedPaths = stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+        } catch {
+          // fall through with an empty list
+        }
         // A failed rebase leaves the repo in a "REBASE_HEAD" / detached-apply state,
         // which makes every subsequent git command behave unexpectedly. Return the
         // working tree to a clean state before surfacing the original error.
         await this.git(cwd, ['rebase', '--abort']).catch(() => undefined);
+        if (conflictedPaths.length > 0) {
+          // Typed so the workflow layer can queue background recovery — this
+          // divergence never resolves on its own (every retry pull hits the
+          // same conflict) and the unpushed local commits are someone's saved
+          // content stuck violating save=share.
+          throw new PullRebaseConflictError(
+            branch,
+            conflictedPaths,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
         throw err;
       }
       this.accessControl?.invalidate(workspaceId);
     });
+  }
+
+  /**
+   * Does the checked-out branch carry commits its remote-tracking ref
+   * doesn't reach? Purely local (`rev-list` against
+   * `refs/remotes/origin/<branch>` — no network), so a stale tracking ref
+   * can only over-report: commits that were in fact already pushed make
+   * this return true, and the follow-up push is a harmless no-op. A
+   * missing tracking ref (branch never pushed) counts as unpushed — that
+   * IS unshared work.
+   *
+   * Used by the pending-commits worker's no-op arm: a clean tree does NOT
+   * mean "nothing to share" when a prior best-effort push (the autosave
+   * path) failed and left the committed change stranded locally.
+   */
+  async hasUnpushedCommits(workspaceId: string): Promise<boolean> {
+    const cwd = await this.repoDir(workspaceId);
+    const branch = await this.currentBranch(cwd);
+    try {
+      const { stdout } = await this.git(cwd, [
+        'rev-list', '--count', `refs/remotes/origin/${branch}..HEAD`,
+      ]);
+      return Number(stdout.trim()) > 0;
+    } catch {
+      return true;
+    }
   }
 
   /**
