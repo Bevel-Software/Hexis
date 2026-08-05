@@ -2,6 +2,8 @@ import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import {
   DEFAULT_BRANCH,
+  branchModelFromEnv,
+  configureBranchModel,
   PROTECTED_BRANCHES,
   GROUPS_DIR,
 } from '@bevel-software/platform-shared';
@@ -136,6 +138,11 @@ export async function createCoreServices(
   // Fail fast on a runtime whose git is too old for `--no-write-fetch-head`
   // (see `git-version.ts`): every clone, fetch and refresh below depends on it,
   // so an unsupported binary is better surfaced here than at the first merge.
+  // The branch model, before anything reads it. The backend takes it from the
+  // environment; the browser is served the same shape by `GET /api/config`.
+  // This used to happen at import time inside the shared module, which is what
+  // forced the frontend to bake it into its bundle.
+  configureBranchModel(branchModelFromEnv());
   await assertGitVersion();
   const db = getDb(config.databaseUrl);
   // Migrations must run BEFORE any service that reads or writes a managed

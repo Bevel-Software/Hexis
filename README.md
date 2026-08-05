@@ -56,11 +56,11 @@ outgoing one still holds it.
 | `JWT_SECRET` | yes | Signs login sessions + OAuth state |
 | `ADMIN_EMAIL` | yes | The deployment owner: always an admin (whatever the sign-in method), and the initial Admin of a freshly seeded KB |
 | `ADMIN_PASSWORD` | with password login | Password half of the bootstrap credential — checked against the env, never stored. Not needed when `LOGIN_PASSWORD=false` |
-| `KB_REPO_URL` | yes | https clone/push URL of the knowledge-base repo (any git host) |
-| `GIT_TOKEN` / `GIT_USERNAME` | yes | Git credential (Basic password / host-specific username) |
+| `KB_REPO_URL` | setup screen | https clone/push URL of the knowledge-base repo (any git host). Leave unset and an admin supplies it on first sign-in |
+| `GIT_TOKEN` / `GIT_USERNAME` | setup screen | Git credential (Basic password / host-specific username). Also settable on first sign-in, where it can be tested against the host |
 | `SECRETS_ENC_KEY` | yes | 32-byte key (base64/hex) encrypting vault secrets + MCP OAuth tokens |
 | `KB_DIR_NAME` | no | Directory name of the KB clone inside each workspace |
-| `DEFAULT_BRANCH` / `PROTECTED_BRANCHES` | no | Branch model (baked into the frontend at build time too) |
+| `DEFAULT_BRANCH` / `PROTECTED_BRANCHES` | no | Branch model. Runtime only — the frontend fetches it from `/api/config`, so one build serves any deployment |
 | `PORT` | no | Backend port (default 3001) |
 | `PUBLIC_BACKEND_URL` / `PUBLIC_FRONTEND_URL` | prod | Public origins for OAuth redirects + bounces |
 | `TENANT_ID` | no | Slug branding every credential prefix (default `bevel`) |

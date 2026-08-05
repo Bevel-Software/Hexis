@@ -4,7 +4,7 @@ import { Button, Dialog, TextField } from '../../../shared/components';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { createDirectory } from '../../workspace/services/workspace.api';
 import { GROUPS_DIR } from '@bevel-software/platform-shared';
-import { DEFAULT_WORKSPACE_ID } from '../services/library.api';
+import { defaultWorkspaceId } from '../services/library.api';
 import { pathForGroup } from '../routes/library-paths';
 import { useLibraryToast } from '../state/toast';
 
@@ -57,7 +57,7 @@ export function NewGroupDialog({ existing, onClose, onCreated }: NewGroupDialogP
     if (!canCreate || !kbDirName) return;
     setBusy(true);
     try {
-      await createDirectory(DEFAULT_WORKSPACE_ID, `${kbDirName}/${GROUPS_DIR}/${trimmed}`);
+      await createDirectory(defaultWorkspaceId(), `${kbDirName}/${GROUPS_DIR}/${trimmed}`);
       onCreated();
       onClose();
       navigate(pathForGroup(trimmed));

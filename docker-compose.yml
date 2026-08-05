@@ -34,12 +34,6 @@ services:
         # be confirmed by sha, e.g. `GIT_SHA=$(git rev-parse HEAD) docker
         # compose build`. Unset → health reports 'unknown'.
         GIT_SHA: ${GIT_SHA:-}
-        # Branch model — must be build args (not just runtime env below)
-        # because they're baked into the frontend bundle at `vite build` time.
-        # Keep these in sync with the runtime values below so the server-side
-        # checks match the bundled frontend.
-        DEFAULT_BRANCH: ${DEFAULT_BRANCH:-}
-        PROTECTED_BRANCHES: ${PROTECTED_BRANCHES:-}
     # NO host port is published here, deliberately. A reverse proxy (Coolify,
     # Traefik, nginx) reaches the container on this port over the compose
     # network, and publishing a FIXED host port alongside that breaks every
@@ -89,7 +83,9 @@ services:
       - ALLOWED_EMAIL_DOMAINS=${ALLOWED_EMAIL_DOMAINS:-}
       - KB_REPO_URL=${KB_REPO_URL}
       - KB_DIR_NAME=${KB_DIR_NAME}
-      # Branch model (backend runtime). Must match the build args above.
+      # Branch model. Runtime only now — the frontend is served these over
+      # /api/config instead of having them compiled in, so one image runs
+      # anywhere and renaming a branch no longer needs a rebuild.
       - DEFAULT_BRANCH=${DEFAULT_BRANCH}
       - PROTECTED_BRANCHES=${PROTECTED_BRANCHES}
       # 32-byte key (base64 or hex) encrypting secrets-vault values + MCP

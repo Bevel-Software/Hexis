@@ -30,6 +30,7 @@ import {
 import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
+import { DEFAULT_BRANCH, PROTECTED_BRANCHES } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -147,6 +148,29 @@ export async function createCoreServer(
   // rollout matches the merged commit before smoke-testing it.
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', sha: GIT_SHA, timestamp: Date.now() });
+  });
+
+  /**
+   * The handful of facts the browser needs BEFORE it can render anything, and
+   * therefore before it can authenticate: the branch model.
+   *
+   * Unauthenticated on purpose. The login screen, the router and every module
+   * that reads `DEFAULT_BRANCH` are loaded before a session exists, so a gated
+   * endpoint could not answer in time. What it discloses is two branch names —
+   * which every change request and every URL already shows to anyone who does
+   * get in — and nothing about the repository they live in.
+   *
+   * This replaces baking the values into the frontend bundle at build time.
+   * One artifact now serves any deployment, and renaming a branch no longer
+   * means a rebuild.
+   */
+  app.get('/api/config', (_req, res) => {
+    res.json({
+      branchModel: {
+        defaultBranch: DEFAULT_BRANCH,
+        protectedBranches: [...PROTECTED_BRANCHES],
+      },
+    });
   });
 
   // Overlay boot-time side effects (startup reconciles, periodic sweeps).
