@@ -117,31 +117,6 @@ export function SkillPage() {
     () => (skillPath ? data.crs.filter((c) => touchesSkill(c, skillPath)) : []),
     [data.crs, skillPath],
   );
-  /**
-   * The caller's own open change request for this skill, resolved by BRANCH.
-   *
-   * Not by touched paths: `touchedNodePaths` is documented "Empty if not yet
-   * computed", and while it is empty every path-derived check collapses at
-   * once — the request stops looking like it touches this skill, so `ownCr`
-   * goes null, the editor offers itself again, and `proposeChange` takes its
-   * no-existing-request path and opens a SECOND change request against the
-   * branch that already has one.
-   *
-   * The branch is deterministic (`suggestionBranchFor`) and exists from the
-   * moment the request does, so it answers "is this mine?" in the window where
-   * paths cannot. The path-based lookup stays as a fallback — it can only add
-   * matches, never remove them — so a request opened on some other branch (by
-   * an agent, say) is still recognised as the caller's.
-   */
-  const myBranch = user ? suggestionBranchFor(user.email, name) : null;
-  const ownCr = useMemo(
-    () =>
-      data.crs.find((c) => data.myCrNumbers.has(c.number) && c.branch === myBranch) ??
-      skillCrs.find((c) => data.myCrNumbers.has(c.number)) ??
-      null,
-    [data.crs, data.myCrNumbers, myBranch, skillCrs],
-  );
-
   /** Which tabs get a dot: the files an open change request actually touches. */
   const pendingFiles = useMemo(() => {
     const set = new Set<string>();
@@ -214,17 +189,52 @@ export function SkillPage() {
   );
 
   /**
-   * Whether to offer the editor. Keyed off `ownCr` — which knows the caller's
-   * request by branch — rather than off `boxes`, which cannot see a request
-   * whose touched paths have not been computed yet and would hand out a second
-   * editor over the top of one.
+   * The caller's own open change request for the file ON SCREEN, resolved by
+   * BRANCH first.
    *
-   * Consequence worth knowing: one open proposal per person per SKILL, not per
-   * file. Adding a second file to a request you already have open now means
-   * withdrawing it (or asking your agent), which is the cost of never being
-   * able to fork your own pending change in two.
+   * Not by touched paths alone: `touchedNodePaths` is documented "Empty if not
+   * yet computed", and while it is empty every path-derived check collapses at
+   * once — the request stops looking like it touches this file, the editor
+   * offers itself again, and `proposeChange` takes its no-existing-request
+   * path and opens a SECOND change request against the branch that already has
+   * one. The branch is deterministic (`suggestionBranchFor`) and exists from
+   * the moment the request does, so it answers "is this mine, about this
+   * file?" in the window where paths cannot.
+   *
+   * Three clauses, in order of how much they know:
+   *  - my request on this file's own branch — closes the uncomputed window for
+   *    requests opened since branches started carrying the file;
+   *  - my request whose computed paths include this file — catches requests
+   *    opened on branches this page cannot predict (by an agent, say);
+   *  - my request on the LEGACY skill-level branch while its paths are still
+   *    uncomputed — it may be about any file here, so every file treats it as
+   *    its own rather than offering an editor that would fork it.
    */
-  const iAlreadyProposedHere = ownCr !== null;
+  const myFileBranch = user ? suggestionBranchFor(user.email, name, active) : null;
+  const mySkillBranch = user ? suggestionBranchFor(user.email, name) : null;
+  const ownCrForFile = useMemo(
+    () =>
+      data.crs.find((c) => data.myCrNumbers.has(c.number) && c.branch === myFileBranch) ??
+      boxes.find((c) => data.myCrNumbers.has(c.number)) ??
+      data.crs.find(
+        (c) =>
+          data.myCrNumbers.has(c.number) &&
+          c.branch === mySkillBranch &&
+          c.touchedNodePaths.length === 0,
+      ) ??
+      null,
+    [data.crs, data.myCrNumbers, myFileBranch, mySkillBranch, boxes],
+  );
+
+  /**
+   * Whether to offer the editor: only when the caller has no open proposal on
+   * THIS file. Per FILE, not per skill — a pending proposal on SKILL.md must
+   * not lock `sources.yaml`; each file's proposal is its own branch and its
+   * own change request, decided on its own. What stays closed is re-proposing
+   * on a file with a proposal already pending, which would fork one pending
+   * change into two decisions the owner has to reconcile.
+   */
+  const iAlreadyProposedHere = ownCrForFile !== null;
 
   const openInEditor = useCallback(
     (wsRelative: string) => navigate(kbFileUrl(DEFAULT_BRANCH, wsRelative)),
@@ -236,10 +246,11 @@ export function SkillPage() {
     await proposeChange({
       skillName: name,
       repoRelativePath: fileRepoPath,
+      file: active,
       content,
       userEmail: user.email,
       userName: user.name,
-      existingCr: ownCr,
+      existingCr: ownCrForFile,
     });
     setEditing(false);
     setRevision((r) => r + 1);

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import {
   WorkspaceContext,
@@ -34,9 +34,13 @@ vi.mock('../services/library.api', () => ({
   listMyChangeRequests: vi.fn(),
   // Real behaviour, not a stub: the page resolves the caller's own request by
   // this branch name, so a `vi.fn()` returning undefined would quietly disable
-  // the very lookup these tests are checking.
-  suggestionBranchFor: (email: string, skill: string) =>
-    `suggestions/${email.split('@')[0]}/${skill}`,
+  // the very lookup these tests are checking. Mirrors the real function: with
+  // a file the branch carries it (`--<slug>`), without one it is the legacy
+  // skill-level name.
+  suggestionBranchFor: (email: string, skill: string, file?: string) =>
+    `suggestions/${email.split('@')[0]}/${skill}${
+      file === undefined ? '' : `--${file.toLowerCase().replace(/[^a-z0-9._-]+/g, '-')}`
+    }`,
 }));
 vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: apiMock.mergePullRequest }));
 vi.mock('../../pr/services/pr-cancel.api', () => ({
@@ -559,6 +563,28 @@ describe('SkillPage — deciding on a change', () => {
   });
 
   /**
+   * The dock is fixed-position chrome that can sit ON the column it is about,
+   * so `»` folds it to a slim tab on the edge. What survives the fold is the
+   * landmark (still reachable), the count (still a signal), and the way back.
+   */
+  it('collapses the dock to an edge tab and back', async () => {
+    renderPage(true, [foreignCr]);
+    await screen.findByRole('complementary', { name: 'Change requests for this skill' });
+    expect(screen.getByText('Changes from Olga — newsletter')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse the change requests' }));
+
+    expect(screen.queryByText('Changes from Olga — newsletter')).toBeNull();
+    const dock = screen.getByRole('complementary', { name: 'Change requests for this skill' });
+    const show = within(dock).getByRole('button', { name: 'Show the change requests' });
+    // The count is the one thing the tab still says.
+    expect(within(show).getByText('1')).toBeInTheDocument();
+
+    fireEvent.click(show);
+    expect(await screen.findByText('Changes from Olga — newsletter')).toBeInTheDocument();
+  });
+
+  /**
    * `author.login` is the shared service account, and arrives as an opaque
    * `user-<hash>`. When the app user can't be resolved the surface must say so
    * neutrally rather than print the id as if it were a person.
@@ -825,9 +851,39 @@ describe('SkillPage — deciding on a change', () => {
    * `touchedNodePaths` is "Empty if not yet computed". In that window every
    * path-derived check collapses together — so the page used to offer a second
    * editor, and submitting it opened a SECOND change request against a branch
-   * that already had one. Resolving by branch closes the window.
+   * that already had one. Resolving by branch closes the window per file: the
+   * branch names the file it is about, so only that file recognises it.
    */
-  it("recognises the caller's own request before its touched paths are computed", async () => {
+  it("recognises the caller's own per-file request before its touched paths are computed", async () => {
+    const uncomputed = {
+      ...foreignCr,
+      appAuthor: { name: 'Razvan' },
+      branch: 'suggestions/razvan/newsletter--skill.md',
+      touchedNodePaths: [],
+    } as unknown as PullRequestSummary;
+
+    renderPage(false, [uncomputed], [uncomputed.number]);
+    await screen.findByRole('heading', { name: 'newsletter' });
+
+    // The rest of the skill stays open to propose on — prove the editor CAN
+    // appear on another file first, so the absence below is the gate at work
+    // rather than data that never arrived.
+    fireEvent.click(screen.getByRole('tab', { name: 'sources.yaml' }));
+    expect(await screen.findByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
+
+    // No second editor over the top of a request that already exists.
+    fireEvent.click(screen.getByRole('tab', { name: 'SKILL.md' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Propose changes' })).toBeNull(),
+    );
+  });
+
+  /**
+   * A request from before branches carried the file cannot say which file it
+   * is about while its paths are uncomputed — so every file treats it as its
+   * own rather than offering an editor that would fork it.
+   */
+  it("holds every file for a legacy skill-level request until its paths are computed", async () => {
     const uncomputed = {
       ...foreignCr,
       appAuthor: { name: 'Razvan' },
@@ -838,7 +894,10 @@ describe('SkillPage — deciding on a change', () => {
     renderPage(false, [uncomputed], [uncomputed.number]);
     await screen.findByRole('heading', { name: 'newsletter' });
 
-    // No second editor over the top of a request that already exists.
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Propose changes' })).toBeNull(),
+    );
+    fireEvent.click(screen.getByRole('tab', { name: 'sources.yaml' }));
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: 'Propose changes' })).toBeNull(),
     );
@@ -853,5 +912,48 @@ describe('SkillPage — deciding on a change', () => {
 
     fireEvent.click(withdraw);
     await waitFor(() => expect(apiMock.cancelPullRequest).toHaveBeenCalledWith(7));
+  });
+
+  /**
+   * The gate is per FILE, not per skill. A pending proposal on SKILL.md used
+   * to hide "Propose changes" on every other file of the skill — the exact
+   * bug: once you proposed anywhere, the rest of the skill was closed to you.
+   */
+  it('keeps offering the editor on files your pending proposal does not touch', async () => {
+    renderPage(false, [foreignCr], [7]);
+
+    // My proposal on SKILL.md: no editor there…
+    await screen.findByRole('button', { name: 'Withdraw' });
+    expect(screen.queryByRole('button', { name: 'Propose changes' })).toBeNull();
+
+    // …but sources.yaml is still mine to propose on.
+    fireEvent.click(screen.getByRole('tab', { name: 'sources.yaml' }));
+    expect(await screen.findByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
+  });
+
+  /**
+   * And proposing there opens a request of its OWN — `existingCr: null`, so
+   * `proposeChange` mints the file's branch and a fresh change request instead
+   * of growing the one already pending on SKILL.md.
+   */
+  it('opens a separate change request for a second file, not a rider on the first', async () => {
+    renderPage(false, [foreignCr], [7]);
+    await screen.findByRole('heading', { name: 'newsletter' });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'sources.yaml' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Propose changes' }));
+
+    const box = await screen.findByRole('textbox', { name: /Propose changes to sources\.yaml/ });
+    await waitFor(() => expect((box as HTMLTextAreaElement).value.length).toBeGreaterThan(10));
+    fireEvent.change(box, { target: { value: 'watchlist:\n  - topic: robotics' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Propose changes' }));
+
+    await waitFor(() => expect(apiMock.proposeChange).toHaveBeenCalled());
+    expect(apiMock.proposeChange.mock.calls[0][0]).toMatchObject({
+      skillName: 'newsletter',
+      repoRelativePath: 'Skills/newsletter/sources.yaml',
+      file: 'sources.yaml',
+      existingCr: null,
+    });
   });
 });
