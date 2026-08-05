@@ -260,7 +260,7 @@ export function UserAccountsPage() {
             <button
               type="submit"
               disabled={adding}
-              className="rounded-md bg-bevel text-white text-sm font-medium px-3 py-1.5 hover:bg-bevel-deep disabled:opacity-60 disabled:cursor-not-allowed"
+              className="rounded-md bg-accent text-white text-sm font-medium px-3 py-1.5 hover:bg-accent-hover disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {adding ? 'Adding…' : 'Add account'}
             </button>
@@ -286,7 +286,7 @@ export function UserAccountsPage() {
             <button
               onClick={confirmSetPassword}
               disabled={savingPassword || newPassword.length === 0}
-              className="px-3 py-1.5 text-sm rounded-sm bg-bevel hover:bg-bevel-deep text-white disabled:opacity-50"
+              className="px-3 py-1.5 text-sm rounded-sm bg-accent hover:bg-accent-hover text-white disabled:opacity-50"
             >
               {savingPassword ? 'Saving…' : 'Set password'}
             </button>

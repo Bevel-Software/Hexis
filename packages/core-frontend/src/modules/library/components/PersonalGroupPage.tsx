@@ -75,7 +75,10 @@ export function PersonalGroupPage() {
         skillItems={skillItems}
         toolItems={toolItems}
         onOpen={openItem}
-        emptySkills="No skills of your own yet. Anything your agent writes outside a group lands here."
+        // An empty room should say what to do in it, not explain its own filing
+        // rule. "Anything your agent writes outside a group lands here" was
+        // true and told nobody how to make the first thing appear.
+        emptySkills="No skills of your own yet. Ask your agent to create skills."
         emptyTools="No sign-ins of your own yet."
       />
 

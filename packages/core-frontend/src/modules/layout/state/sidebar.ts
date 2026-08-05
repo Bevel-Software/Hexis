@@ -28,6 +28,12 @@ export const SIDEBAR_MAX_WIDTH = 460;
 
 const WIDTH_STORAGE_KEY = 'bevel.sidebarWidth';
 
+/**
+ * Hold a width inside the range above, rounded to a whole pixel. Every way a
+ * width can arrive — a drag, a stored value, a caller — goes through here, so
+ * there is no path by which the nav ends up too narrow to read or wide enough
+ * to crowd out the page.
+ */
 export const clampSidebarWidth = (w: number): number =>
   Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(w)));
 
@@ -50,39 +56,68 @@ function readStoredWidth(): number {
 }
 
 let collapsed = false;
+let instant = false;
 let width = typeof window === 'undefined' ? SIDEBAR_DEFAULT_WIDTH : readStoredWidth();
 // One frozen object per state, so `useSyncExternalStore` can compare by
 // identity. Returning a fresh `{ collapsed, width }` from the snapshot would
 // re-render every subscriber on every unrelated store read, and React would
 // (rightly) warn about an unstable snapshot.
-let snapshot: SidebarState = { collapsed, width };
+let snapshot: SidebarState = { collapsed, width, instant };
 
 export interface SidebarState {
   collapsed: boolean;
   width: number;
+  /**
+   * Whether the CURRENT collapsed value arrived without a gesture, and so must
+   * not be performed. Toggling the nav is something you did and deserves the
+   * 240ms; the welcome page hiding it for the length of a greeting is not, and
+   * animating that reads as the nav flinching on the way in and opening by
+   * itself on the way out.
+   */
+  instant: boolean;
 }
 
 const listeners = new Set<() => void>();
 
+/**
+ * Publish the current values as a NEW frozen snapshot, then wake subscribers.
+ * Rebuilding the object here — rather than in the getter — is what lets
+ * `useSyncExternalStore` compare by identity: unchanged state keeps the same
+ * object, so a read never looks like a change.
+ */
 function emit(): void {
-  snapshot = { collapsed, width };
+  snapshot = { collapsed, width, instant };
   listeners.forEach((l) => l());
 }
 
+/**
+ * The `useSyncExternalStore` half: register a listener and hand back its
+ * unsubscribe, so an unmounted component stops being notified.
+ */
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
 
+/** The toolbar button. A gesture, so it always animates. */
 export function toggleSidebar(): void {
   collapsed = !collapsed;
+  instant = false;
   emit();
 }
 
-/** Direct set — the toolbar toggle's target, and how tests reset the module. */
-export function setSidebarCollapsed(value: boolean): void {
+/**
+ * Direct set — the toolbar toggle's target, and how tests reset the module.
+ *
+ * @param instantly true when the change must not be performed: the nav simply
+ *   is, or is not, in the next frame. `instant` rides along on the snapshot
+ *   rather than being cleared on a timer, because the next change is what
+ *   makes it stale — and every writer states its own intent.
+ */
+export function setSidebarCollapsed(value: boolean, instantly = false): void {
   if (value === collapsed) return;
   collapsed = value;
+  instant = instantly;
   emit();
 }
 
@@ -113,6 +148,7 @@ export function commitSidebarWidth(): void {
   }
 }
 
+/** Subscribe a component to the sidebar's state. Re-renders only on a real change. */
 export function useSidebar(): SidebarState {
   return useSyncExternalStore(
     subscribe,
@@ -125,4 +161,5 @@ export function useSidebar(): SidebarState {
 const DEFAULT_SNAPSHOT: SidebarState = {
   collapsed: false,
   width: SIDEBAR_DEFAULT_WIDTH,
+  instant: false,
 };

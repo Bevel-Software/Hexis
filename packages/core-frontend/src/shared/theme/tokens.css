@@ -43,9 +43,26 @@
 
   /* ── interactive ──────────────────────────────────────────────────────
      Exactly ONE interactive colour. If something is blue it is clickable
-     and primary; everything else earns attention through weight, not hue. */
-  --color-accent: #2383e2;
-  --color-accent-hover: #1b74cb;
+     and primary; everything else earns attention through weight, not hue.
+
+     Both values are the prototype's blues darkened by the same 5 points of
+     HSL lightness; hue (209.8°) and saturation (76.7%) are untouched, as is
+     the 6.1-point accent→hover gap, so the hover step feels identical.
+
+     The darkening is a CONTRAST fix, not a taste one. The accent carries
+     both roles — `bg-accent` under `text-white` (Button's primary variant,
+     ported from the prototype's `.btn.primary`) and `text-accent` on the
+     white canvas — and both are the same colour pair against #ffffff. The
+     prototype's #2383e2 gives 3.88:1 there, under the 4.5:1 that WCAG AA
+     asks for the text-xs/text-sm labels these controls use. #1b76d0 gives
+     4.62:1 and fixes both roles at once, which is why this is an edit here
+     rather than a foreground change at the call sites.
+
+     `__tests__/accent-contrast.test.ts` parses these two lines and fails if
+     either drops below 4.5:1 — the ratio is invisible to the build, exactly
+     like the palette counts the design-system ratchet guards.             */
+  --color-accent: #1b76d0;
+  --color-accent-hover: #1867b4;
 
   /* ── status ───────────────────────────────────────────────────────────
      `wait` is the text/icon colour; `wait-dot` is the saturated fill used

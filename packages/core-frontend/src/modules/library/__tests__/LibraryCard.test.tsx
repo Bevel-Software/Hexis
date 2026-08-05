@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { LibraryCard, type LibraryCardProps } from '../components/LibraryCard';
-import { personalGroupName } from '../utils/personal-group';
+import { displayFirstName, personalGroupName } from '../utils/personal-group';
 
 /**
  * What a card says when it has nothing to report, and what it says when it has.
@@ -91,5 +91,23 @@ describe('personalGroupName', () => {
     // true for whoever is reading it.
     expect(personalGroupName(null)).toBe('Yours');
     expect(personalGroupName('   ')).toBe('Yours');
+  });
+});
+
+describe('displayFirstName', () => {
+  // A sign-in record is not a style guide: an account created from a lowercase
+  // name should still be greeted the way a person writes their own.
+  it('capitalizes the first name', () => {
+    expect(displayFirstName('juan viera')).toBe('Juan');
+    expect(displayFirstName('Juan Viera')).toBe('Juan');
+    expect(displayFirstName('  juan  ')).toBe('Juan');
+  });
+
+  // Empty rather than a fallback, because the two callers want different
+  // words for it — "Yours" on the group heading, "there" on the welcome page.
+  it('gives nothing back when there is no name, and lets the caller decide', () => {
+    expect(displayFirstName(null)).toBe('');
+    expect(displayFirstName(undefined)).toBe('');
+    expect(displayFirstName('   ')).toBe('');
   });
 });

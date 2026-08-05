@@ -1,32 +1,37 @@
 import { useCallback, useRef, useState, type ReactNode } from 'react';
-import { Surface } from '../../../shared/components';
+import { cn } from '../../../lib/utils';
+import { toastDuration } from '../utils/toast-duration';
 import { ToastContext, type ShowToast, type ToastTone } from './toast.context';
 
 /**
- * Bottom-center toast from the approved mock — one line, auto-dismissing.
+ * Bottom-center toast — the prototype's `#toast` (proto:719).
  *
- * The chrome is the design system's floating-surface recipe (`Surface` at
- * `overlay` elevation), NOT a second one: this component used to hand-roll a
- * teal border, teal text and a bespoke shadow from raw hex, which made every
- * message in the Library the only teal thing on screen.
+ * An INK pill: dark plate, canvas text, fully round, no border and no shadow.
+ * It was a teal-on-white card built from four raw hex values left over from a
+ * retired mock, which made the one element that appears over every screen the
+ * one element belonging to no theme. The prototype's answer is better and
+ * simpler — the only inverted surface in the app, so it reads as the app
+ * speaking rather than as a panel that wandered in.
  *
- * Tone colours the TEXT, not the surface. A toast floats over arbitrary
- * content, so it needs an opaque surface and a hairline to stay legible —
- * which is exactly what `--color-ok` / `--color-danger` are specified for
- * ("the text/icon colour", `tokens.css`). It also keeps the app's rule that
- * attention comes from weight, not hue.
+ * Tone colours the PLATE, not the text. That is the opposite of `Banner`
+ * (`bg-*-soft text-*`) and it is forced by the inversion: `--color-ok` on
+ * `--color-ink` is a 2.4:1 contrast ratio and `--color-danger` on it is
+ * 1.9:1, so tone-as-text is unreadable here however well it works on a light
+ * surface. Against canvas text the three plates run 12.3:1 (ink), 5.1:1 (ok)
+ * and 6.5:1 (danger) — all clear of 4.5:1 — and the pill stays one inverted
+ * shape across every tone instead of flipping to a light card for errors.
  *
  * The channel itself — `ToastContext` and `useLibraryToast` — lives in
- * `./toast.context.ts` so this module exports nothing but the component.
+ * `./toast.context.ts` so this module exports nothing but the component;
+ * `utils/toast-duration.ts` is split out for the same fast-refresh reason.
  */
 
-/** Tone maps to a text colour only; the surface stays neutral. Kept next to
- *  the markup that consumes it rather than in the context module, because it
- *  is a rendering detail of this component. */
+/** Kept next to the markup that consumes it rather than in the context
+ *  module, because which plate a tone maps to is a rendering detail. */
 const TONE: Record<ToastTone, string> = {
-  neutral: 'text-ink',
-  ok: 'text-ok',
-  danger: 'text-danger',
+  neutral: 'bg-ink',
+  ok: 'bg-ok',
+  danger: 'bg-danger',
 };
 
 export function LibraryToastProvider({ children }: { children: ReactNode }) {
@@ -36,25 +41,30 @@ export function LibraryToastProvider({ children }: { children: ReactNode }) {
   const show = useCallback<ShowToast>((msg, tone = 'neutral') => {
     setToast({ message: msg, tone });
     if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => setToast(null), 2600);
+    timer.current = setTimeout(() => setToast(null), toastDuration(msg));
   }, []);
 
   return (
     <ToastContext.Provider value={show}>
       {children}
-      <Surface
+      <div
         role="status"
         aria-live="polite"
-        radius="lg"
-        elevation="overlay"
-        // The element stays mounted so the slide-out animates; `tone` is read
-        // from the last toast shown, which is also the one sliding away.
-        className={`fixed left-1/2 bottom-6 -translate-x-1/2 z-[80] pointer-events-none px-5 py-2.5 text-detail font-semibold transition-transform duration-300 ${
-          TONE[toast?.tone ?? 'neutral']
-        } ${toast ? 'translate-y-0' : 'translate-y-24'}`}
+        className={cn(
+          'pointer-events-none fixed bottom-7 left-1/2 z-[80] -translate-x-1/2',
+          'max-w-[82vw] rounded-full px-[18px] py-2.5',
+          'text-center text-ui font-medium text-canvas',
+          // The element stays mounted so the fade-out animates; `tone` is read
+          // from the last toast shown, which is also the one on its way out.
+          TONE[toast?.tone ?? 'neutral'],
+          // Opacity AND an 8px lift, as the prototype does: a pill that only
+          // slid would be readable while it was still arriving.
+          'transition-[opacity,transform] duration-200 ease-out',
+          toast ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0',
+        )}
       >
         {toast?.message}
-      </Surface>
+      </div>
     </ToastContext.Provider>
   );
 }

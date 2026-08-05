@@ -24,6 +24,19 @@ export const users = pgTable('users', {
    * until an admin (or the user, from their Account page) sets one.
    */
   passwordHash: text('password_hash'),
+  /**
+   * The one onboarding fact the server keeps: has this person concluded the
+   * connect-your-agent setup (the welcome page's Done, or the reminder
+   * pill's dismiss — one field, both doors). False drives the pill in every
+   * browser the account signs into; true ends it everywhere at once, which
+   * is exactly what localStorage could not promise.
+   *
+   * Existing accounts are NOT backfilled to true: the column simply defaults
+   * to false, so everyone is greeted once and anyone already connected
+   * clicks Done. A plain `ADD COLUMN` is worth more than the branching a
+   * backfill would need, and being shown the setup once costs a click.
+   */
+  onboardingDone: boolean('onboarding_done').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
