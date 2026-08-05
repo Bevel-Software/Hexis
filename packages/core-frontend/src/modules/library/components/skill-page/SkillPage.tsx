@@ -179,20 +179,22 @@ export function SkillPage() {
       toast('Approved — the skill now reads with that change.');
       setRevision((r) => r + 1);
       data.reload();
+      // The pane renders `skill.body`, which this hook holds and the merge just
+      // changed. Without re-reading it the page keeps showing the pre-merge
+      // text under a message saying the skill now reads with the change.
+      detail.reload();
     },
-    onFailed(refusal) {
+    onFailed(number, refusal) {
+      // A conflict is the one refusal that makes Approve pointless to retry, so
+      // it withdraws the button — in the SAME commit as the refusal, which is
+      // why this is not derived from `refusals` in an effect: a commit's delay
+      // leaves the failed button live and clickable.
       if (refusal.conflicts) {
+        setBlockedCrs((s) => (s.has(number) ? s : new Set(s).add(number)));
         toast('Blocked — the file changed after this was written.');
       }
     },
   });
-
-  useEffect(() => {
-    // A conflict is the one refusal that makes Approve pointless to retry.
-    for (const [number, refusal] of applying.refusals) {
-      if (refusal.conflicts) setBlockedCrs((s) => (s.has(number) ? s : new Set(s).add(number)));
-    }
-  }, [applying.refusals]);
 
   /**
    * The file's raw bytes on the default branch. `raw` above is what gets

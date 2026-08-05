@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import {
   WorkspaceContext,
@@ -657,6 +657,64 @@ describe('SkillPage — deciding on a change', () => {
     bus.emit({ kind: 'change-request-merged', number: 7, id: 1, ts: '' } as WorkflowEvent);
 
     expect(await screen.findByText(/the skill now reads with that change/)).toBeInTheDocument();
+  });
+
+  /**
+   * "The skill now reads with that change" has to be TRUE of what is on screen.
+   *
+   * The reading pane renders `skill.body` from `useSkillDetail`, which fetches
+   * once per skill — so a merge changed the file on the server while the pane
+   * kept rendering the text from before it, directly under a message saying it
+   * had changed. Re-reading the skill is what makes the sentence honest.
+   */
+  it('re-reads the skill so the pane shows the merged text', async () => {
+    const bus = makeFakeBus();
+    renderPage(true, [foreignCr], [], bus);
+    expect((await screen.findByTestId('md-view')).textContent).toContain('draft the letter');
+
+    // What the server returns once the change request has landed.
+    apiMock.getSkill.mockResolvedValue({
+      ...skillDetail,
+      body: '# Newsletter drafter\nCollect the news and ship the letter.',
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
+    bus.emit({ kind: 'change-request-merged', number: 7, id: 1, ts: '' } as WorkflowEvent);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('md-view').textContent).toContain('ship the letter'),
+    );
+  });
+
+  /**
+   * `closed` is not `merged`. Someone declining the change request in another
+   * tab while this apply is in flight takes it out of `open` — and a poll that
+   * only asked "has it left open?" reported that as a successful apply.
+   */
+  it('does not report a closed change request as applied', async () => {
+    vi.useFakeTimers();
+    try {
+      const bus = makeFakeBus();
+      renderPage(true, [foreignCr], [], bus);
+      // `findBy*` needs real timers to settle the initial load.
+      await vi.waitFor(() => screen.getByRole('button', { name: 'Approve' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+      await vi.waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
+
+      // No bus event — someone closed it instead, and only the poll can see that.
+      apiMock.fetchPrDetail.mockResolvedValue({ number: 7, state: 'closed', approvals: [] });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(screen.queryByText(/the skill now reads with that change/)).toBeNull();
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'This change request was closed before it could be applied.',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('marks the box blocked when the merge comes back conflicted', async () => {

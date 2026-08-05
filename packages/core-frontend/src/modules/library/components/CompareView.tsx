@@ -177,7 +177,7 @@ export function CompareView({
    */
   const applying = useApplyChangeRequest({
     onApplied: () => onResolved('applied'),
-    onFailed: (refusal) => {
+    onFailed: (_number, refusal) => {
       // Git refusing the merge IS the conflict answer — say what happened and
       // what fixes it, instead of leaving a button that will fail again. Any
       // other refusal (an approval the gate is still waiting on, a transient

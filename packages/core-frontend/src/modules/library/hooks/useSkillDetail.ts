@@ -15,6 +15,15 @@ export interface SkillDetailState {
   fileContent(relFile: string): string | null;
   /** Kick off (or re-use) the fetch for a bundled file. */
   loadFile(relFile: string): void;
+  /**
+   * Re-read the skill from the server, discarding the cached file contents.
+   *
+   * Needed because the body this hook holds is the ONLY copy the reading pane
+   * renders, and a merge changes it underneath us: without this, approving a
+   * change request left the pane showing the pre-merge text under a message
+   * saying the skill now reads with that change.
+   */
+  reload(): void;
 }
 
 export function useSkillDetail(name: string): SkillDetailState {
@@ -23,13 +32,32 @@ export function useSkillDetail(name: string): SkillDetailState {
   const [error, setError] = useState<string | null>(null);
   const [contents, setContents] = useState<Record<string, string>>({});
   const inFlight = useRef<Set<string>>(new Set());
+  /** Bumped by `reload()`; re-runs the fetch below without changing skills. */
+  const [revision, setRevision] = useState(0);
+  /**
+   * Which skill the state on screen belongs to. The distinction cannot come
+   * from `revision` — after one reload it is non-zero for the NEXT skill too —
+   * so the effect asks this instead of inferring from the counter.
+   */
+  const shownName = useRef<string | null>(null);
+
+  const reload = useCallback(() => setRevision((r) => r + 1), []);
 
   useEffect(() => {
     let cancelled = false;
-    setSkill(null);
+    // Switching SKILLS blanks first: the old body belongs to a different page
+    // and must not be shown for even one frame under the new name. A RELOAD of
+    // the same skill does the opposite — it keeps the current text on screen
+    // while the new copy is in flight, since stale by one request beats
+    // flashing the whole page through its loading state on every merge.
+    const switching = shownName.current !== name;
+    shownName.current = name;
+    if (switching) {
+      setSkill(null);
+      setLoading(true);
+    }
     setContents({});
     inFlight.current = new Set();
-    setLoading(true);
     setError(null);
     getSkill(name)
       .then((s) => {
@@ -45,7 +73,7 @@ export function useSkillDetail(name: string): SkillDetailState {
     return () => {
       cancelled = true;
     };
-  }, [name]);
+  }, [name, revision]);
 
   const loadFile = useCallback(
     (relFile: string) => {
@@ -70,5 +98,5 @@ export function useSkillDetail(name: string): SkillDetailState {
     [contents],
   );
 
-  return { skill, loading, error, fileContent, loadFile };
+  return { skill, loading, error, fileContent, loadFile, reload };
 }

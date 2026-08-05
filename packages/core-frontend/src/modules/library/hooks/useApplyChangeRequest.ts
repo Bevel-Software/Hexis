@@ -60,7 +60,13 @@ export interface ApplyChangeRequest {
  */
 export function useApplyChangeRequest(opts: {
   onApplied(): void;
-  onFailed?(refusal: ApplyRefusal): void;
+  /**
+   * Which change request was refused, and why. The number is passed because a
+   * caller showing several boxes has to attribute the refusal to one of them,
+   * and reading it back out of `refusals` in an effect costs a commit — during
+   * which a conflicted change request still offers the button that just failed.
+   */
+  onFailed?(number: number, refusal: ApplyRefusal): void;
 }): ApplyChangeRequest {
   const { onApplied, onFailed } = opts;
   const bus = useEventBus();
@@ -79,11 +85,18 @@ export function useApplyChangeRequest(opts: {
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  /** Latest callbacks, so the bus subscription never has to re-register. */
+  /**
+   * Latest callbacks, so the bus subscription never has to re-register.
+   * Assigned in an effect rather than during render: a render React discards
+   * (StrictMode, a suspended sibling) must not leave a ref pointing at
+   * callbacks from a commit that never happened.
+   */
   const onAppliedRef = useRef(onApplied);
   const onFailedRef = useRef(onFailed);
-  onAppliedRef.current = onApplied;
-  onFailedRef.current = onFailed;
+  useEffect(() => {
+    onAppliedRef.current = onApplied;
+    onFailedRef.current = onFailed;
+  });
 
   const stop = useCallback(() => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
@@ -99,7 +112,7 @@ export function useApplyChangeRequest(opts: {
     (number: number, refusal: ApplyRefusal) => {
       stop();
       setRefusals((m) => new Map(m).set(number, refusal));
-      onFailedRef.current?.(refusal);
+      onFailedRef.current?.(number, refusal);
     },
     [stop],
   );
@@ -185,14 +198,22 @@ export function useApplyChangeRequest(opts: {
               conflicts: false,
             });
           }, APPLY_RESULT_TIMEOUT_MS);
-          // Backstop for a lost event: once the change request leaves `open`,
-          // the apply landed whether or not its event reached us.
+          // Backstop for a lost event. `merged` is the ONLY state that means
+          // the apply landed — `closed` means somebody declined or withdrew it
+          // while this was running, and treating "left `open`" as success
+          // reported a declined change as applied.
           pollRef.current = setInterval(() => {
             if (runningRef.current !== cr.number) return;
             void fetchPrDetail(cr.number, { fresh: true })
               .then((latest) => {
                 if (runningRef.current !== cr.number) return;
-                if (latest.state !== 'open') succeed();
+                if (latest.state === 'merged') succeed();
+                else if (latest.state !== 'open') {
+                  fail(cr.number, {
+                    reason: 'This change request was closed before it could be applied.',
+                    conflicts: false,
+                  });
+                }
               })
               .catch(() => undefined);
           }, APPLY_POLL_INTERVAL_MS);
