@@ -255,7 +255,8 @@ const MENU_MIN_WIDTH = 200;
  * the panel stays inside `Dialog`'s focus trap, which queries its own subtree,
  * so the items remain Tab-reachable. Being fixed, it has to be re-anchored to
  * the trigger's measured rect on scroll and resize — the same shape
- * `BranchSwitcher` uses for its portaled menu.
+ * `BranchSwitcher` uses for its portaled menu — and, because both boxes can
+ * change size with the menu still open, whenever either one is resized.
  *
  * The anchor is the panel's own DOM PARENT — i.e. render this where the
  * `absolute` panel used to sit, and it lines up against the same box `absolute`
@@ -284,6 +285,8 @@ function AnchoredMenu({
   const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
   useLayoutEffect(() => {
+    const panel = panelRef.current;
+    const anchorEl = panel?.parentElement ?? null;
     const place = () => {
       const el = panelRef.current;
       const anchor = el?.parentElement?.getBoundingClientRect();
@@ -307,14 +310,32 @@ function AnchoredMenu({
       const above = anchor.top - MENU_GAP - h;
       const top =
         below + h > window.innerHeight - MENU_MARGIN && above >= MENU_MARGIN ? above : below;
-      setPos({ top, left, width: w });
+      // Keep the previous object when nothing moved. `place` runs on every
+      // scroll frame and on every observed resize, and a fresh object each time
+      // would re-render for nothing — and, since the panel is what's observed,
+      // feed the observer its own output.
+      setPos((prev) =>
+        prev && prev.top === top && prev.left === left && prev.width === w
+          ? prev
+          : { top, left, width: w },
+      );
     };
     place();
+    // Both measured boxes move under us while the menu is open, and neither
+    // move fires scroll or resize. The trigger relabels itself as verbs are
+    // toggled ("Can edit" → "Owner, Can download"), which shifts `anchor.right`
+    // out from under a right-aligned panel; the panel itself grows and shrinks
+    // as the suggestion list follows what's typed, so one measured to fit below
+    // ends up hanging off the bottom it was checked against.
+    const observer = new ResizeObserver(place);
+    if (anchorEl) observer.observe(anchorEl);
+    if (panel) observer.observe(panel);
     window.addEventListener('resize', place);
     // Capture phase: the dialog body is what scrolls, and scroll events don't
     // bubble to `window`.
     window.addEventListener('scroll', place, true);
     return () => {
+      observer.disconnect();
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', place, true);
     };
