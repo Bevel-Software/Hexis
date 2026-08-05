@@ -29,6 +29,15 @@ interface AppLayoutProps {
   chat?: ReactNode;
 }
 
+/**
+ * Picks the layout the viewport can actually hold: the resizable three-pane
+ * split, or the chat-first mobile one once the panes stop fitting side by
+ * side.
+ *
+ * The swap is conditional on a 'chat' pane existing at all — a core-only build
+ * has no chat to pin full-screen, so it stays on the resizable layout at every
+ * width rather than falling into a mobile layout with an empty main pane.
+ */
 export function AppLayout(props: AppLayoutProps) {
   const isMobile = useMediaQuery(TOOLBAR_STACK_QUERY);
   // The mobile layout pins the chat pane full-screen, so it only makes sense

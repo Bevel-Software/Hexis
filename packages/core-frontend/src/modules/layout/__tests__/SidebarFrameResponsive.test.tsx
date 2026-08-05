@@ -13,6 +13,11 @@ import {
   useSidebar,
 } from '../state/sidebar';
 
+/**
+ * Cross the narrow breakpoint. happy-dom answers `matchMedia` out of
+ * `innerWidth`, so moving the viewport is how a test reaches the drawer
+ * layout — there is no CSS engine here to do it for us.
+ */
 function setViewportWidth(width: number): void {
   const testWindow = window as typeof window & {
     happyDOM: { setInnerWidth(value: number): void };
@@ -20,6 +25,7 @@ function setViewportWidth(width: number): void {
   testWindow.happyDOM.setInnerWidth(width);
 }
 
+/** Mount a frame and hand back the `<aside>` — what most assertions here are about. */
 function renderFrame(): HTMLElement {
   const { container } = render(
     <SidebarFrame label="Library groups">
@@ -29,6 +35,11 @@ function renderFrame(): HTMLElement {
   return container.querySelector('aside') as HTMLElement;
 }
 
+/**
+ * The same mount, keeping the whole render result. The backdrop is a SIBLING
+ * of the aside rather than a child, so a test that needs it cannot get there
+ * from the element `renderFrame` returns.
+ */
 function renderFrameWithContainer() {
   return render(
     <SidebarFrame label="Library groups">
@@ -169,6 +180,7 @@ describe('SidebarFrame — narrow viewport', () => {
    */
   it('never publishes a narrow breakpoint with a still-showing sidebar', () => {
     const seen: Array<{ narrow: boolean; collapsed: boolean }> = [];
+    /** Records every sidebar snapshot it is rendered for, in order. */
     function Probe() {
       const { narrow, collapsed } = useSidebar();
       seen.push({ narrow, collapsed });

@@ -11,6 +11,14 @@ import { toggleSidebar, useSidebar } from '../../layout/state/sidebar';
 import { LIBRARY_ROOT } from '../../library/routes/library-paths';
 import { TOOLBAR_STACK_QUERY } from '../../layout/breakpoints';
 
+/**
+ * The app's top bar: the nav toggle, the app switcher, and whatever the
+ * registry contributes beside them.
+ *
+ * It lives in the shell ABOVE the app surfaces rather than inside either one,
+ * which is why the nav toggle survives a switch between Knowledge and Skills &
+ * Tools instead of being re-mounted by each.
+ */
 export function Toolbar() {
   const registry = useAppRegistry();
   const location = useLocation();

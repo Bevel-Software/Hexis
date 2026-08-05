@@ -30,6 +30,15 @@ interface MobileChatLayoutProps {
   chat?: ReactNode;
 }
 
+/**
+ * The phone layout: chat holds the screen, and the other two panes arrive over
+ * it — the explorer as the shared sidebar drawer, the viewer as a slide-over
+ * sheet — so there is always exactly one thing to read.
+ *
+ * The explorer goes through `SidebarFrame` rather than a drawer of its own,
+ * which is what makes the toolbar's nav toggle mean the same thing here as it
+ * does on desktop.
+ */
 export function MobileChatLayout({
   header,
   panes,

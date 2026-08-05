@@ -54,6 +54,14 @@ function computePanelPosition(triggerRect: DOMRect): {
   return { top: triggerRect.bottom + GAP, left, width };
 }
 
+/**
+ * The toolbar's branch picker: which shared draft you are on, and every way to
+ * leave it — switch, create, propose as a change request, delete.
+ *
+ * An enterprise contribution rather than core furniture, so it arrives through
+ * the registry's toolbar-item slot and the core build simply has no branch
+ * control.
+ */
 export function BranchSwitcher() {
   const git = useGit();
   const navigate = useNavigate();

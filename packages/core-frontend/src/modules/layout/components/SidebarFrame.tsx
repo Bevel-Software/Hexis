@@ -102,6 +102,11 @@ export function SidebarFrame({
     const aside = asideRef.current;
     (aside?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR) ?? aside)?.focus?.();
 
+    /**
+     * The drawer's key handling: Escape dismisses, but only when this is the
+     * topmost modal layer, and Tab wraps at both ends so focus cannot walk out
+     * of a drawer that is covering the page behind it.
+     */
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         if (!isTopModalLayer()) return;

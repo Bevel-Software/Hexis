@@ -6,6 +6,14 @@ import { NARROW_PX, NARROW_QUERY, TOOLBAR_STACK_QUERY } from '../breakpoints';
 
 const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 
+/**
+ * Read a source file as text, relative to `src`.
+ *
+ * These tests assert on the SOURCE rather than on rendered output because
+ * Tailwind's arbitrary variants (`max-[900px]:`) never reach the DOM under
+ * happy-dom — no stylesheet is compiled, so a drifted breakpoint would sail
+ * past any rendering assertion. Reading the file is the only way to catch it.
+ */
 function readSource(relativePath: string): string {
   return readFileSync(join(SRC_DIR, relativePath), 'utf8');
 }

@@ -98,6 +98,13 @@ export function GroupSection({
   );
 }
 
+/**
+ * The auto-filling card track a group's contents sit in.
+ *
+ * The track floor is `min(236px, 100%)` rather than a flat 236px so a
+ * container narrower than one card still gets a single column that fits,
+ * instead of one card overflowing its own grid on a phone.
+ */
 export function CardGrid({
   items,
   onOpen,

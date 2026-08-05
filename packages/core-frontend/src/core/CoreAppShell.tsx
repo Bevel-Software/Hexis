@@ -243,6 +243,15 @@ function KnowledgeSurface() {
   );
 }
 
+/**
+ * Everything that frames the active app: the banner strip, the toolbar, and
+ * the surface the registry routes into.
+ *
+ * Exported for its tests rather than for composition — `ShellRoutes` is the
+ * only caller. It sits above the app surfaces because the toolbar does, and
+ * the toolbar has to outlive a route change to keep the nav toggle in one
+ * place across Knowledge and Skills & Tools.
+ */
 export function AppChrome() {
   const registry = useAppRegistry();
   const location = useLocation();

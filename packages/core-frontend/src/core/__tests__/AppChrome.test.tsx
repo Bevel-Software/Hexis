@@ -20,6 +20,12 @@ vi.mock('../../modules/admin/components/RolesCorruptedBanner', () => ({
   RolesCorruptedBanner: () => null,
 }));
 
+/**
+ * A stand-in app surface carrying the two gestures these tests need — the
+ * toolbar's nav toggle and a navigation — plus the sidebar's collapsed state
+ * as an assertable `<output>`. Registered under two routes so "navigate"
+ * genuinely changes the path rather than re-rendering the same one.
+ */
 function RouteHarness({ destination }: { destination: string }) {
   const navigate = useNavigate();
   const { collapsed } = useSidebar();
@@ -51,6 +57,11 @@ const apps: AppDef[] = [
   },
 ];
 
+/**
+ * Cross the narrow breakpoint. happy-dom answers `matchMedia` out of
+ * `innerWidth`, so moving the viewport is how a test reaches the drawer
+ * layout — there is no CSS engine here to do it for us.
+ */
 function setViewportWidth(width: number): void {
   const testWindow = window as typeof window & {
     happyDOM: { setInnerWidth(value: number): void };
@@ -58,6 +69,11 @@ function setViewportWidth(width: number): void {
   testWindow.happyDOM.setInnerWidth(width);
 }
 
+/**
+ * Mount the chrome at a given viewport width. The width is set BEFORE render
+ * so the first render already sees the breakpoint, matching a real page load
+ * on a phone rather than a desktop mount that later resizes.
+ */
 function renderChrome(width: number) {
   setViewportWidth(width);
   return render(

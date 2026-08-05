@@ -11,6 +11,11 @@ import {
 } from '../SidebarFrame';
 import { setSidebarCollapsed, setSidebarNarrow } from '../../state/sidebar';
 
+/**
+ * Cross the narrow breakpoint. happy-dom answers `matchMedia` out of
+ * `innerWidth`, so moving the viewport is how a test reaches the drawer
+ * layout — there is no CSS engine here to do it for us.
+ */
 function setViewportWidth(width: number): void {
   const testWindow = window as typeof window & {
     happyDOM: { setInnerWidth(value: number): void };
@@ -18,6 +23,11 @@ function setViewportWidth(width: number): void {
   testWindow.happyDOM.setInnerWidth(width);
 }
 
+/**
+ * A stand-in toolbar. It reaches the explorer through the layout CONTEXT
+ * rather than a prop, which is the wiring under test: the real toolbar renders
+ * outside this layout and can only drive it through the reported controller.
+ */
 function HeaderToggle() {
   const { toggleExplorer, canToggleChat } = useLayout();
   return (
@@ -30,6 +40,10 @@ function HeaderToggle() {
   );
 }
 
+/**
+ * Mount the layout at a route, with a distinct marker in each of the three
+ * panes so an assertion can tell which one is actually showing.
+ */
 function renderLayout(initialPath: string) {
   return render(
     <MemoryRouter initialEntries={[initialPath]}>
