@@ -10,11 +10,9 @@ import {
 } from '../routes/library-paths';
 import { primaryFolderOf } from '../utils/group-summary';
 import { joinRequestsFor } from '../utils/join-requests';
+import { useJoinRequestActions } from '../hooks/useJoinRequestActions';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { mergePullRequest } from '../../pr/services/pr-merge.api';
-import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
-import { useLibraryToast } from '../state/toast';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
 import { GroupBreadcrumb, GroupItemSections, PageNote, ShareGlyph } from './group-page-parts';
@@ -43,7 +41,7 @@ export function GroupPage() {
   const group = decodeGroupSegment(params.group ?? '');
   const data = useLibrary();
   const navigate = useNavigate();
-  const toast = useLibraryToast();
+  const { approve, dismiss } = useJoinRequestActions();
   const { kbDirName } = useWorkspace();
   const [detail, setDetail] = useState<DetailTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
@@ -108,27 +106,6 @@ export function GroupPage() {
         }}
       />
     ) : null;
-
-  /** Approve = merge the join CR; the merge gate is the security boundary. */
-  async function approve(number: number) {
-    try {
-      await mergePullRequest(number);
-      toast('Approved — merging their access now.');
-    } catch {
-      toast("Couldn't approve that — try again.");
-    }
-    data.reload();
-    data.reloadGroups();
-  }
-
-  async function dismiss(number: number) {
-    try {
-      await cancelPullRequest(number);
-    } catch {
-      toast("Couldn't dismiss that — try again.");
-    }
-    data.reload();
-  }
 
   // Nothing has spoken yet: the catalog is still loading, the group index is
   // still loading, and no item has proven the group exists. Deciding now would

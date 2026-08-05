@@ -22,7 +22,8 @@ vi.mock('../services/groups.api', () => ({
 }));
 
 import { LibraryToastProvider } from '../state/toast';
-import { LockedGroupView, joinNames, firstNames } from '../components/LockedGroupView';
+import { LockedGroupView } from '../components/LockedGroupView';
+import { joinNames, firstNames } from '../utils/names';
 
 const finance = (over: Partial<GroupSummary> = {}): GroupSummary => ({
   name: 'Finance',

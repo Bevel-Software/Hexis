@@ -1,5 +1,6 @@
 import { Banner, Button } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
+import { joinNames } from '../utils/names';
 
 /**
  * Somebody asked to join this group — the owner-side face of a join change
@@ -56,9 +57,14 @@ export function AccessRequestsBanner({
     <Banner role="status" tone="wait" className={cn('mb-4', className)}>
       <p>{line}</p>
 
-      <div className="mt-2 flex flex-wrap items-center gap-2">
+      {/* One row per requester, each NAMING the person its buttons act on.
+          Two identical Approve/Dismiss pairs under a sentence listing three
+          names is a coin toss — the aria-labels distinguish them for a screen
+          reader, so the visible row has to do the same for everyone else. */}
+      <div className="mt-2 flex flex-col gap-1.5">
         {requests.map((request) => (
-          <span key={request.number} className="inline-flex items-center gap-1.5">
+          <div key={request.number} className="flex flex-wrap items-center gap-2">
+            <span className="min-w-0 flex-1 truncate font-semibold">{request.requesterName}</span>
             <Button
               variant="outline"
               size="sm"
@@ -75,20 +81,16 @@ export function AccessRequestsBanner({
             >
               Dismiss
             </Button>
-          </span>
+          </div>
         ))}
         {folders.map((folder) => (
-          <Button key={folder} variant="quiet" size="sm" onClick={() => onManage(folder)}>
-            Manage access
-          </Button>
+          <div key={folder}>
+            <Button variant="quiet" size="sm" onClick={() => onManage(folder)}>
+              Manage access
+            </Button>
+          </div>
         ))}
       </div>
     </Banner>
   );
-}
-
-/** `A`, `A and B`, `A, B and C` — the way a person lists people out loud. */
-function joinNames(names: string[]): string {
-  if (names.length <= 1) return names[0] ?? '';
-  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
 }

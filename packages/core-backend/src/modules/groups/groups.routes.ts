@@ -155,21 +155,32 @@ export function createGroupsRoutes(
       // Case-sensitive, like `groupOfPath` — the group name IS the folder name.
       const group = catalog.find((g) => g.name === req.params.name);
       const wsId = groupsWorkspaceId();
-      const folder = group?.folders[0];
+      // Same ANY-folder shape `GET /groups` resolves with, so a group can
+      // never be listed as discoverable there and rejected as unknown here.
+      const verdicts = group
+        ? await accessControl.canReadBatch(
+            wsId,
+            email,
+            group.folders.flatMap((f) => [memberProbe(f), accessMdOf(f)]),
+          )
+        : new Map<string, boolean>();
+      const any = (probe: (f: string) => string) =>
+        group?.folders.some((f) => verdicts.get(probe(f)) === true) ?? false;
       // Discovery gate, fail-closed: an unknown group and a group the caller
       // cannot discover answer IDENTICALLY, so probing can't confirm existence.
-      const verdicts = group
-        ? await accessControl.canReadBatch(wsId, email, [memberProbe(folder!), accessMdOf(folder!)])
-        : new Map<string, boolean>();
-      if (!group || verdicts.get(accessMdOf(folder!)) !== true) {
+      if (!group || !any(accessMdOf)) {
         res.status(404).json({ error: 'Unknown group', kind: 'unknown-group' });
         return;
       }
-      if (verdicts.get(memberProbe(folder!)) === true) {
+      if (any(memberProbe)) {
         // Access landed between page load and click — reload, don't ask.
         res.status(409).json({ error: 'You can already read this group', kind: 'already-readable' });
         return;
       }
+      // The grant is written to the group's primary folder — the one the
+      // summary's `folders[0]` names and the banner's touched-path check
+      // expects.
+      const folder = group.folders[0];
 
       const branch = joinBranchFor(email, group.name);
       const existing = openJoinCr(await workflow.listChangeRequestsAuthoredBy(email), email, group.name);
@@ -186,7 +197,7 @@ export function createGroupsRoutes(
         // exists (or raced) — proceed against it
       }
       const ws = await workspaceService.getOrCreateForBranch(branch);
-      const accessPath = `${kbDirName}/${accessMdOf(folder!)}`;
+      const accessPath = `${kbDirName}/${accessMdOf(folder)}`;
       const current = await workspaceService.readFile(ws.id, accessPath).catch(() => '');
       const spliced = spliceGrant(
         current,

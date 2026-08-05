@@ -103,8 +103,8 @@ export class SkillService implements ISkillService {
   }
 
   private async scanDisk(): Promise<ParsedSkill[]> {
-    // Ensure the default-branch clone exists, then scan its Skills/ dir. Any
-    // failure (no workspace, no Skills/ dir) degrades to an empty catalog — the
+    // Ensure the default-branch clone exists, then scan its Groups/ dir. Any
+    // failure (no workspace, no Groups/ dir) degrades to an empty catalog — the
     // manual/tools must never break because skills can't be read.
     let wsId: string;
     try {

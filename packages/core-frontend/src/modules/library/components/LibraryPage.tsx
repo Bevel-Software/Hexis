@@ -7,10 +7,8 @@ import { filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { mergePullRequest } from '../../pr/services/pr-merge.api';
-import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
-import { useLibraryToast } from '../state/toast';
 import { joinRequestsFor } from '../utils/join-requests';
+import { useJoinRequestActions } from '../hooks/useJoinRequestActions';
 import { AccessRequestsBanner } from './AccessRequestsBanner';
 import { GroupItemSections } from './group-page-parts';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
@@ -52,7 +50,7 @@ function headingFor(filter: LibraryFilter): string {
 export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const data = useLibrary();
   const navigate = useNavigate();
-  const toast = useLibraryToast();
+  const { approve, dismiss } = useJoinRequestActions();
   const { kbDirName } = useWorkspace();
   const [query, setQuery] = useState('');
   const [detail, setDetail] = useState<DetailTarget | null>(null);
@@ -79,26 +77,6 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
       .filter((g) => g.rows.length > 0)
       .sort((a, b) => a.group.localeCompare(b.group));
   }, [filter, data.groupSummaries, data.crs]);
-
-  async function approve(number: number) {
-    try {
-      await mergePullRequest(number);
-      toast('Approved — merging their access now.');
-    } catch {
-      toast("Couldn't approve that — try again.");
-    }
-    data.reload();
-    data.reloadGroups();
-  }
-
-  async function dismiss(number: number) {
-    try {
-      await cancelPullRequest(number);
-    } catch {
-      toast("Couldn't dismiss that — try again.");
-    }
-    data.reload();
-  }
 
   /**
    * Integrations open a PAGE, skills still open the dialog. The asymmetry is

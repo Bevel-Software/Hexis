@@ -41,7 +41,7 @@ describe('ontologyOf', () => {
     expect(ontologyOf('KnowledgeBase/Ops/Knowledge/x.md')).toBe('KnowledgeBase/Ops');
   });
 
-  it('returns null for Skills and root config (neutral)', () => {
+  it('returns null for Groups and root config (neutral)', () => {
     expect(ontologyOf('Groups/some-skill/SKILL.md')).toBeNull();
     expect(ontologyOf('access.md')).toBeNull();
     expect(ontologyOf('roles.yaml')).toBeNull();
