@@ -25,12 +25,12 @@ vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryD
 
 const groupsMock = vi.hoisted(() => ({
   listGroups: vi.fn(),
-  listGroupAccessRequests: vi.fn(),
+  listJoinRequests: vi.fn(),
 }));
 vi.mock('../services/groups.api', () => ({
   listGroups: groupsMock.listGroups,
-  listGroupAccessRequests: groupsMock.listGroupAccessRequests,
-  dismissGroupAccessRequest: vi.fn(),
+  listJoinRequests: groupsMock.listJoinRequests,
+  reconcileJoinRequest: vi.fn(),
   requestGroupAccess: vi.fn(),
   AlreadyReadableError: class AlreadyReadableError extends Error {},
 }));
@@ -178,7 +178,7 @@ describe('LibraryRoutes', () => {
     dataMock.useLibraryData.mockReturnValue(CATALOG);
     groupsMock.listGroups.mockResolvedValue(GROUPS);
     toolPageMock.useToolPage.mockReturnValue(TOOL_PAGE_STATE);
-    groupsMock.listGroupAccessRequests.mockResolvedValue([]);
+    groupsMock.listJoinRequests.mockResolvedValue([]);
   });
 
   it('renders the gallery at /skills-and-tools with heading Library', async () => {

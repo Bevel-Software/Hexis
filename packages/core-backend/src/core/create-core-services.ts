@@ -22,7 +22,7 @@ import { AccessControlService } from '../modules/access/access-control.service.j
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
-import { GroupIndexService } from '../modules/groups/index.js';
+import { GroupIndexService, JoinRequestsService } from '../modules/groups/index.js';
 import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
@@ -91,6 +91,7 @@ export interface CoreServices {
   skillService: SkillService;
   toolManualService: ToolManualService;
   groupIndexService: GroupIndexService;
+  joinRequestsService: JoinRequestsService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
@@ -295,6 +296,12 @@ export async function createCoreServices(
     // it reach every hook point.
     workflowHooks,
   );
+
+  // Join requests: derived entirely from two copies of a group's `access.md`
+  // (the request's branch vs the default branch), so it holds no state — it
+  // only needs to read files at refs and to close a request whose proposals
+  // have all landed.
+  const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
 
   // Subscriber A — catalog freshness: a committed change drops the affected
   // caches immediately instead of waiting out their TTLs. The tool/skill
@@ -540,6 +547,7 @@ export async function createCoreServices(
     skillService,
     toolManualService,
     groupIndexService,
+    joinRequestsService,
     authService,
     authMiddleware,
     accountErasureService,

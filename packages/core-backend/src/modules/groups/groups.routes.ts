@@ -12,6 +12,7 @@ import { spliceGrant } from '../access/access-splice.js';
 import { WorkflowDomainError } from '../workflow/workflow.errors.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { groupsWorkspaceId } from './groups.service.js';
+import type { JoinRequestsService } from './join-requests.service.js';
 import type {
   GroupCatalogEntry,
   GroupSummary,
@@ -21,8 +22,10 @@ import type {
 /**
  * Browser-facing (JWT) group routes, mounted behind `authMiddleware`:
  *
- *   GET  /api/groups                    → { groups: GroupSummary[] }
- *   POST /api/groups/:name/join-request → { ok, number }   (opens a CR)
+ *   GET  /api/groups                            → { groups: GroupSummary[] }
+ *   POST /api/groups/:name/join-request         → { ok, number }  (opens a CR)
+ *   GET  /api/groups/:name/join-requests        → { requests }    (managers)
+ *   POST /api/groups/:name/join-requests/:n/reconcile → { closed }
  *
  * Enumeration is three verdicts per (caller, group), all of them ordinary
  * access resolution — no special cases, no side tables:
@@ -34,11 +37,13 @@ import type {
  *
  * All three false ⇒ the group is absent from the response entirely.
  *
- * The join request is a plain change request: one commit on the caller's
- * deterministic join branch adding them to the body `read:` list, opened
- * against the default branch. The folder's writers approve by merging.
- * `hasRequested` is derived from the caller's own open CRs — nothing is
- * stored anywhere else.
+ * A join request is a plain change request whose branch edits the group's
+ * `access.md`. Managers do NOT merge it: they read its individual proposals
+ * (see `join-proposals.ts`), grant the ones they accept through the ordinary
+ * access path, and the request retires itself once its rules are a subset of
+ * the default branch's — reconciled here, lazily on listing and eagerly right
+ * after a grant. Nothing about the lifecycle is stored; it is derived from
+ * two copies of one file.
  *
  * Auth gating is explicit and uniform: `authMiddleware` at the mount, PLUS a
  * `req.userEmail` check in every handler (the skills-routes pattern) so a
@@ -50,6 +55,7 @@ export function createGroupsRoutes(
   accessControl: IAccessControl,
   workflow: IWorkflowService,
   workspaceService: WorkspaceService,
+  joinRequests: JoinRequestsService,
   kbDirName: string,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
 ): express.Router {
@@ -214,8 +220,9 @@ export function createGroupsRoutes(
         targetBranch: DEFAULT_BRANCH,
         title: `Join request: ${group.name}`,
         description:
-          `${user.name} asked to join ${group.name}. Merging adds them to the group's ` +
-          `read access; rejecting declines the request.`,
+          `${user.name} asked to join ${group.name}. A manager of the group accepts by ` +
+          `granting the access this branch proposes; the request closes itself once ` +
+          `every proposal has landed.`,
       });
       res.json({ ok: true, number: detail.number });
     } catch (err) {
@@ -225,6 +232,90 @@ export function createGroupsRoutes(
       }
       console.error('[groups] failed to open a join request:', err);
       res.status(500).json({ error: 'Failed to request access' });
+    }
+  });
+
+  /**
+   * Resolve the caller as a MANAGER of `name` — the only role that may see or
+   * settle its join requests. Returns the group's primary folder, or null
+   * after answering the request.
+   *
+   * A non-manager gets an empty list rather than a 403 (the frontend asks
+   * unconditionally, exactly as it does for every other group surface), and
+   * an unknown group is indistinguishable from an unmanaged one.
+   */
+  async function requireManager(
+    req: express.Request,
+    res: express.Response,
+    onDenied: () => void,
+  ): Promise<{ group: GroupCatalogEntry; folder: string; user: AuthUser } | null> {
+    const email = req.userEmail;
+    if (!email) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return null;
+    }
+    const group = (await groupIndex.catalog()).find((g) => g.name === req.params.name);
+    if (!group) {
+      onDenied();
+      return null;
+    }
+    const writable = await accessControl.canWriteBatch(
+      groupsWorkspaceId(),
+      email,
+      group.folders.map(accessMdOf),
+    );
+    if (!group.folders.some((f) => writable.get(accessMdOf(f)) === true)) {
+      onDenied();
+      return null;
+    }
+    const user = await resolveUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return null;
+    }
+    return { group, folder: group.folders[0], user };
+  }
+
+  router.get('/groups/:name/join-requests', async (req, res) => {
+    try {
+      const ctx = await requireManager(req, res, () => res.json({ requests: [] }));
+      if (!ctx) return;
+      const crs = await workflow.listChangeRequests();
+      res.json({
+        requests: await joinRequests.list(ctx.group.name, ctx.folder, crs, ctx.user),
+      });
+    } catch (err) {
+      console.error('[groups] failed to list join requests:', err);
+      res.status(500).json({ error: 'Failed to list join requests' });
+    }
+  });
+
+  /**
+   * Settle one request if its proposals have all landed on the default
+   * branch. Called right after a grant so the banner updates in the same
+   * round-trip; the listing does the same thing lazily, so skipping this (a
+   * dropped response, a closed tab) only delays it.
+   */
+  router.post('/groups/:name/join-requests/:number/reconcile', async (req, res) => {
+    try {
+      const ctx = await requireManager(req, res, () =>
+        res.status(404).json({ error: 'Not found' }),
+      );
+      if (!ctx) return;
+      const number = Number(req.params.number);
+      if (!Number.isSafeInteger(number) || number <= 0) {
+        res.status(400).json({ error: 'Invalid change request number' });
+        return;
+      }
+      const cr = (await workflow.listChangeRequests()).find((c) => c.number === number);
+      if (!cr) {
+        res.status(404).json({ error: 'Not found' });
+        return;
+      }
+      res.json({ closed: await joinRequests.reconcile(ctx.group.name, ctx.folder, cr, ctx.user) });
+    } catch (err) {
+      console.error('[groups] failed to reconcile a join request:', err);
+      res.status(500).json({ error: 'Failed to update the request' });
     }
   });
 

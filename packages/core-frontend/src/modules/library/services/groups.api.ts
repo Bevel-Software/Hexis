@@ -82,3 +82,54 @@ export async function requestGroupAccess(name: string): Promise<{ number: number
   }
   return handleApiResponse<{ ok: true; number: number }>(res);
 }
+
+/**
+ * ONE grant a join request is proposing — a principal and the verb it would
+ * get. Mirrors the backend's `JoinProposal`; `principal` is the shape the
+ * access-grant API takes, so accepting is a plain grant.
+ */
+export interface JoinProposal {
+  verb: 'read' | 'write' | 'owner' | 'download';
+  /** Canonical identity (lowercased email / canonical role) — a stable key. */
+  id: string;
+  principal:
+    | { kind: 'user'; email: string; displayName: string }
+    | { kind: 'role'; role: string };
+  label: string;
+}
+
+export interface JoinRequest {
+  number: number;
+  branch: string;
+  requesterName: string;
+  createdAt: string;
+  /** Still-pending proposals; a request with none left is already closed. */
+  proposals: JoinProposal[];
+}
+
+/**
+ * Open join requests for a group the caller MANAGES, each with what it still
+ * proposes. Non-managers get `[]` (never a 403), so the caller may ask
+ * unconditionally — the same posture every other group surface takes.
+ */
+export async function listJoinRequests(name: string): Promise<JoinRequest[]> {
+  const data = await handleApiResponse<{ requests: JoinRequest[] }>(
+    await authFetch(`/api/groups/${encodeURIComponent(name)}/join-requests`),
+  );
+  return data.requests;
+}
+
+/**
+ * Ask the server to settle a request whose proposals have all landed. Called
+ * after a grant so the banner updates now rather than on the next listing —
+ * which reconciles anyway, so a failure here only delays it.
+ */
+export async function reconcileJoinRequest(name: string, number: number): Promise<boolean> {
+  const data = await handleApiResponse<{ closed: boolean }>(
+    await authFetch(
+      `/api/groups/${encodeURIComponent(name)}/join-requests/${number}/reconcile`,
+      { method: 'POST' },
+    ),
+  );
+  return data.closed;
+}

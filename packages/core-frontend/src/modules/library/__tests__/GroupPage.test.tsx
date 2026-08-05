@@ -22,14 +22,14 @@ vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryD
 
 const groupsMock = vi.hoisted(() => ({
   listGroups: vi.fn(),
-  listGroupAccessRequests: vi.fn(),
-  dismissGroupAccessRequest: vi.fn(),
+  listJoinRequests: vi.fn(),
+  reconcileJoinRequest: vi.fn(),
   requestGroupAccess: vi.fn(),
 }));
 vi.mock('../services/groups.api', () => ({
   listGroups: groupsMock.listGroups,
-  listGroupAccessRequests: groupsMock.listGroupAccessRequests,
-  dismissGroupAccessRequest: groupsMock.dismissGroupAccessRequest,
+  listJoinRequests: groupsMock.listJoinRequests,
+  reconcileJoinRequest: groupsMock.reconcileJoinRequest,
   requestGroupAccess: groupsMock.requestGroupAccess,
   AlreadyReadableError: class AlreadyReadableError extends Error {},
 }));
@@ -159,9 +159,9 @@ describe('GroupPage', () => {
   beforeEach(() => {
     dataMock.useLibraryData.mockReturnValue(CATALOG);
     groupsMock.listGroups.mockResolvedValue([gtm()]);
-    groupsMock.listGroupAccessRequests.mockResolvedValue([]);
+    groupsMock.listJoinRequests.mockResolvedValue([]);
+    groupsMock.reconcileJoinRequest.mockResolvedValue(false);
     groupsMock.requestGroupAccess.mockResolvedValue(undefined);
-    groupsMock.dismissGroupAccessRequest.mockResolvedValue(undefined);
   });
 
   it("shows only the group's own skills and tools", async () => {

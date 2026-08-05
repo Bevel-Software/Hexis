@@ -15,6 +15,7 @@ import type { ISkillService, SkillSummary } from '../../skills/skills.contract.j
 import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
 import { GroupIndexService } from '../groups.service.js';
 import { createGroupsRoutes } from '../groups.routes.js';
+import type { JoinRequestsService } from '../join-requests.service.js';
 import type { GroupSummary, IGroupIndexService } from '../groups.contract.js';
 
 /**
@@ -103,6 +104,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
 
   const workflow = {
     listChangeRequestsAuthoredBy: vi.fn(async () => opts.authoredCrs ?? []),
+    listChangeRequests: vi.fn(async () => opts.authoredCrs ?? []),
     createBranch: vi.fn(async () => ({ name: 'x', isDefault: false, isProtected: false })),
     commitChanges: vi.fn(async () => null),
     openChangeRequest: vi.fn(async () => ({ number: 42 })),
@@ -127,10 +129,21 @@ async function makeHarness(opts: HarnessOpts = {}) {
     }
     next();
   });
+  const joinRequests = {
+    list: vi.fn(async () => []),
+    reconcile: vi.fn(async () => false),
+  } as unknown as JoinRequestsService;
+
   app.use(
     '/api',
-    createGroupsRoutes(index, accessControl, workflow, workspaceService, KB, async (req) =>
-      req.userEmail ? { ...ALI_USER, email: req.userEmail } : null,
+    createGroupsRoutes(
+      index,
+      accessControl,
+      workflow,
+      workspaceService,
+      joinRequests,
+      KB,
+      async (req) => (req.userEmail ? { ...ALI_USER, email: req.userEmail } : null),
     ),
   );
 
@@ -138,7 +151,14 @@ async function makeHarness(opts: HarnessOpts = {}) {
     const s = app.listen(0, () => resolve(s));
   });
   const addr = server.address() as AddressInfo;
-  return { server, baseUrl: `http://127.0.0.1:${addr.port}`, accessControl, workflow, workspaceService };
+  return {
+    server,
+    baseUrl: `http://127.0.0.1:${addr.port}`,
+    accessControl,
+    workflow,
+    workspaceService,
+    joinRequests,
+  };
 }
 
 function close(s: Server): Promise<void> {
@@ -306,6 +326,65 @@ describe('/api/groups routes', () => {
     expect(status).toBe(200);
     expect(groups[0]).toMatchObject({ hasRequested: false });
     warn.mockRestore();
+  });
+
+  it('join-requests: a MANAGER gets the service\'s list for the group', async () => {
+    const h = await makeHarness({ writable: { [ALI]: ['Groups/GTM/access.md'] } });
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ requests: [] });
+    expect(h.joinRequests.list).toHaveBeenCalledWith(
+      'GTM',
+      'Groups/GTM',
+      expect.anything(),
+      expect.objectContaining({ email: ALI }),
+    );
+  });
+
+  it('join-requests: a NON-manager gets [] rather than a 403, and the service is never asked', async () => {
+    // The frontend asks unconditionally; "am I a manager here" stays a
+    // question only the server answers.
+    const h = await makeHarness({ readable: MEMBER_OF_BOTH });
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ requests: [] });
+    expect(h.joinRequests.list).not.toHaveBeenCalled();
+  });
+
+  it('reconcile: 404 for a non-manager, and for a change request that is not open', async () => {
+    const h = await makeHarness({ readable: MEMBER_OF_BOTH });
+    server = h.server;
+    const denied = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests/7/reconcile`, {
+      method: 'POST',
+    });
+    expect(denied.status).toBe(404);
+    expect(h.joinRequests.reconcile).not.toHaveBeenCalled();
+
+    const manager = await makeHarness({ writable: { [ALI]: ['Groups/GTM/access.md'] } });
+    await close(h.server);
+    server = manager.server;
+    const missing = await fetch(`${manager.baseUrl}/api/groups/GTM/join-requests/999/reconcile`, {
+      method: 'POST',
+    });
+    expect(missing.status).toBe(404);
+  });
+
+  it('reconcile: a manager settles an open request through the service', async () => {
+    const open = cr({ number: 7 });
+    const h = await makeHarness({
+      writable: { [ALI]: ['Groups/GTM/access.md'] },
+      authoredCrs: [open],
+    });
+    (h.workflow.listChangeRequests as ReturnType<typeof vi.fn>) = vi.fn(async () => [open]);
+    (h.joinRequests.reconcile as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests/7/reconcile`, {
+      method: 'POST',
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ closed: true });
   });
 
   it('500s with { error: "Failed to list groups" } when the index throws', async () => {

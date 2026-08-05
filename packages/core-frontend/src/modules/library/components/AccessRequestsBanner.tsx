@@ -1,38 +1,35 @@
 import { Banner, Button } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import { joinNames } from '../utils/names';
+import type { JoinProposal, JoinRequest } from '../services/groups.api';
 
 /**
- * Somebody asked to join this group — the owner-side face of a join change
+ * Somebody asked to join this group — the manager-side face of a join change
  * request.
  *
- * A join request IS a CR (one commit adding the requester to the group's
- * `access.md` body `read:` list), so the two actions here are CR actions
- * wearing friendlier copy: Approve merges it, Dismiss rejects it. `Manage
- * access` stays as the third path — granting somebody in through the dialog
- * makes their CR moot, and merging it afterwards is a harmless no-op diff.
+ * It shows what the request PROPOSES, one row per grant, because that is what
+ * accepting acts on: each Accept writes exactly that one grant onto the
+ * default branch through the ordinary access path. The request's branch is
+ * never merged, so a request naming five people can be answered with two
+ * yeses and three ignores, and nothing the branch happens to carry besides
+ * the grants can ride in on a click.
  *
- * The rows come from the caller's CR list filtered by the join-branch
- * convention (`isJoinBranchFor`) — nothing here fetches; the Library's data
- * host already carries every open CR.
+ * Naming the verb is not pedantry: a request may propose `write` or `owner`
+ * rather than `read`, and "asked to join" would hide that. Whatever the
+ * branch asks for is what the row says.
+ *
+ * Decline rejects the whole request. Manage access is the third path — a
+ * manager who wants to do something other than what was proposed opens the
+ * dialog, and the request settles itself if that covers it.
  */
-
-export interface JoinRequestRow {
-  /** The change request number — what Approve/Dismiss act on. */
-  number: number;
-  requesterName: string;
-}
 
 export interface AccessRequestsBannerProps {
   group: string;
   /** Repo-relative group folder for `Manage access` (single-element today). */
   folders: string[];
-  requests: JoinRequestRow[];
+  requests: JoinRequest[];
   onManage(folder: string): void;
-  /** Merge the CR — approving IS merging. */
-  onApprove(number: number): void;
-  /** Reject the CR. */
-  onDismiss(number: number): void;
+  onAccept(request: JoinRequest, proposal: JoinProposal): void;
+  onDecline(request: JoinRequest): void;
   className?: string;
 }
 
@@ -41,46 +38,54 @@ export function AccessRequestsBanner({
   folders,
   requests,
   onManage,
-  onApprove,
-  onDismiss,
+  onAccept,
+  onDecline,
   className,
 }: AccessRequestsBannerProps) {
   if (requests.length === 0) return null;
 
-  const names = requests.map((r) => r.requesterName);
-  const line =
-    requests.length === 1
-      ? `${names[0]} asked to join ${group} — approving merges their request.`
-      : `${requests.length} people asked to join ${group}: ${joinNames(names)}.`;
-
   return (
     <Banner role="status" tone="wait" className={cn('mb-4', className)}>
-      <p>{line}</p>
+      <p>
+        {requests.length === 1
+          ? `${requests[0].requesterName} asked to join ${group}.`
+          : `${requests.length} people asked to join ${group}.`}
+      </p>
 
-      {/* One row per requester, each NAMING the person its buttons act on.
-          Two identical Approve/Dismiss pairs under a sentence listing three
-          names is a coin toss — the aria-labels distinguish them for a screen
-          reader, so the visible row has to do the same for everyone else. */}
-      <div className="mt-2 flex flex-col gap-1.5">
+      <div className="mt-2 flex flex-col gap-2">
         {requests.map((request) => (
-          <div key={request.number} className="flex flex-wrap items-center gap-2">
-            <span className="min-w-0 flex-1 truncate font-semibold">{request.requesterName}</span>
-            <Button
-              variant="outline"
-              size="sm"
-              aria-label={`Approve request from ${request.requesterName}`}
-              onClick={() => onApprove(request.number)}
-            >
-              Approve
-            </Button>
-            <Button
-              variant="quiet"
-              size="sm"
-              aria-label={`Dismiss request from ${request.requesterName}`}
-              onClick={() => onDismiss(request.number)}
-            >
-              Dismiss
-            </Button>
+          <div key={request.number} className="flex flex-col gap-1">
+            {requests.length > 1 && (
+              <span className="text-meta font-semibold text-ink">{request.requesterName}</span>
+            )}
+            {request.proposals.map((proposal) => (
+              <div
+                key={`${proposal.verb}:${proposal.id}`}
+                className="flex flex-wrap items-center gap-2"
+              >
+                <span className="min-w-0 flex-1 truncate">
+                  {proposal.label} — <span className="font-semibold">{proposal.verb}</span>
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  aria-label={`Grant ${proposal.verb} to ${proposal.label}`}
+                  onClick={() => onAccept(request, proposal)}
+                >
+                  Accept
+                </Button>
+              </div>
+            ))}
+            <div>
+              <Button
+                variant="quiet"
+                size="sm"
+                aria-label={`Decline the request from ${request.requesterName}`}
+                onClick={() => onDecline(request)}
+              >
+                Decline
+              </Button>
+            </div>
           </div>
         ))}
         {folders.map((folder) => (

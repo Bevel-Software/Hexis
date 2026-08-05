@@ -9,14 +9,12 @@ import {
   pathForTool,
 } from '../routes/library-paths';
 import { primaryFolderOf } from '../utils/group-summary';
-import { joinRequestsFor } from '../utils/join-requests';
-import { useJoinRequestActions } from '../hooks/useJoinRequestActions';
+import { GroupJoinRequests } from './GroupJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
 import { GroupBreadcrumb, GroupItemSections, PageNote, ShareGlyph } from './group-page-parts';
-import { AccessRequestsBanner } from './AccessRequestsBanner';
 import { LockedGroupView } from './LockedGroupView';
 
 /**
@@ -41,12 +39,13 @@ export function GroupPage() {
   const group = decodeGroupSegment(params.group ?? '');
   const data = useLibrary();
   const navigate = useNavigate();
-  const { approve, dismiss } = useJoinRequestActions();
   const { kbDirName } = useWorkspace();
   const [detail, setDetail] = useState<DetailTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
   const [manageFolder, setManageFolder] = useState<string | null>(null);
+  /** Bumped when an access edit lands, so the join-request surface refetches. */
+  const [accessRevision, setAccessRevision] = useState(0);
 
   const summary = useMemo(
     () => data.groupSummaries.find((g) => g.name === group) ?? null,
@@ -99,10 +98,11 @@ export function GroupPage() {
         }}
         onClose={() => {
           setManageFolder(null);
-          // Granting through the dialog answers a pending join request too —
-          // reload so the requester's CR banner and the roster both catch up.
+          // Granting through the dialog can settle a pending join request —
+          // refresh the roster, the catalog and the request surface together.
           data.reloadGroups();
           data.reload();
+          setAccessRevision((r) => r + 1);
         }}
       />
     ) : null;
@@ -178,13 +178,11 @@ export function GroupPage() {
           group manager (canWrite) — every member can see the CRs elsewhere,
           but only the people who can act on a request get its banner. */}
       {summary?.canWrite && (
-        <AccessRequestsBanner
+        <GroupJoinRequests
           group={group}
           folders={summary.folders}
-          requests={joinRequestsFor(data.crs, group)}
           onManage={setManageFolder}
-          onApprove={(n) => void approve(n)}
-          onDismiss={(n) => void dismiss(n)}
+          reloadSignal={accessRevision}
           className="mt-4"
         />
       )}
