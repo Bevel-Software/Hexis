@@ -300,13 +300,16 @@ describe('Toolbar', () => {
       ).toHaveAttribute('aria-expanded', 'false');
     });
 
-    // Two surfaces answer "do I have a sidebar?" two ways — Knowledge declares
-    // a `sidebar` pane, the Library is known by its path — but there is only
-    // ever ONE button, never one per surface.
+    // Three surfaces answer "do I have a sidebar?" two ways — Knowledge
+    // declares a `sidebar` pane, the Library and the settings pages are known
+    // by their paths — but there is only ever ONE button, never one per
+    // surface. The settings case is what catches anyone adding a second,
+    // settings-specific toggle instead of reusing SidebarToggle.
     it.each([
       ['the Library, by path', '/skills-and-tools', false],
       ['Knowledge, by its sidebar pane', '/workspace/main', true],
       ['both at once, without doubling up', '/skills-and-tools', true],
+      ['a settings page, by its route table', '/secrets', false],
     ])('renders exactly one toggle on %s', (_name, route, canToggleExplorer) => {
       renderToolbar({ route, layout: { canToggleExplorer } });
       expect(screen.getAllByRole('button', { name: /(hide|show) sidebar/i })).toHaveLength(1);
@@ -314,9 +317,16 @@ describe('Toolbar', () => {
       expect(screen.queryByRole('button', { name: /file explorer/i })).toBeNull();
     });
 
-    it('does not render where there is no sidebar to control', () => {
+    // This used to assert the opposite, at this same route — which was the bug
+    // written down as a test: /secrets had no nav, so it had nothing to
+    // toggle. There is no nav-less surface below the toolbar any more, so
+    // there is no negative case left to pin (`/` only redirects to
+    // /workspace).
+    it('renders on a settings page, which has a nav now', () => {
       renderToolbar({ route: '/secrets', layout: { canToggleExplorer: false } });
-      expect(screen.queryByRole('button', { name: /(hide|show) sidebar/i })).toBeNull();
+      expect(
+        screen.getByRole('button', { name: /(hide|show) sidebar/i }),
+      ).toBeInTheDocument();
     });
   });
 
@@ -403,20 +413,33 @@ describe('Toolbar', () => {
       await openMenu();
       // Registry-contributed row merged with the core rows.
       expect(row('Stub extension')).toBeInTheDocument();
-      expect(row('Skills & Tools')).toBeInTheDocument();
       expect(row('External agent access')).toBeInTheDocument();
       expect(row('Secrets')).toBeInTheDocument();
       expect(row('Browse available tools')).toBeInTheDocument();
       // Admin only section + its rows are hidden for non-admins.
-      expect(screen.queryByText('Admin only')).toBeNull();
+      // Scoped to the panel: the settings nav renders this same string, and
+      // an unscoped query would throw on multiple matches the day a test
+      // mounts both. This harness never does — that is why it passes today —
+      // but the trap is now real enough to be worth closing.
+      expect(within(panel()).queryByText('Admin only')).toBeNull();
       expect(noRow(/Roles/)).toBeNull();
       expect(noRow('Stub admin row')).toBeNull();
+    });
+
+    // Skills & Tools is an APP, and apps live in the app switcher — which
+    // already lists it AND marks it as current. Carrying it here too gave one
+    // destination two front doors, only one of which could tell you that you
+    // were already standing behind it.
+    it('does not offer Skills & Tools, which belongs to the app switcher', async () => {
+      renderToolbar();
+      await openMenu();
+      expect(noRow(/Skills & Tools/)).toBeNull();
     });
 
     it('shows the Admin only section with its rows to an admin', async () => {
       renderToolbar({ isAdmin: true });
       await openMenu();
-      expect(screen.getByText('Admin only')).toBeInTheDocument();
+      expect(within(panel()).getByText('Admin only')).toBeInTheDocument();
       expect(row(/Roles/)).toBeInTheDocument();
       expect(row('Stub admin row')).toBeInTheDocument();
       // All-user rows are still present alongside the admin ones.
@@ -431,7 +454,6 @@ describe('Toolbar', () => {
         ['External agent access', '/external-agent-access'],
         ['Secrets', '/secrets'],
         ['Browse available tools', '/tools'],
-        ['Skills & Tools', '/skills-and-tools'],
       ] as const) {
         await openMenu();
         await userEvent.click(row(label));
