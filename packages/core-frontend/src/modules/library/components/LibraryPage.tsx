@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import '../library.css';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 import { pathForSkill, pathForTool } from '../routes/library-paths';
-import { filterLibraryItems, type LibraryFilter } from '../utils/status';
+import { emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
@@ -121,7 +121,9 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
       ) : data.loading ? (
         <div className="py-16 text-center text-ui text-ink-faint">Loading the library…</div>
       ) : visible.length === 0 ? (
-        <div className="py-16 text-center text-ui text-ink-faint">Nothing here matches yet.</div>
+        <div className="py-16 text-center text-ui text-ink-faint">
+          {emptyMessageFor(filter, query)}
+        </div>
       ) : (
         // Skills and tools, split — the same two bands a group page has.
         // One undifferentiated grid made you read every card's body to learn

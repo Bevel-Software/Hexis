@@ -8,6 +8,7 @@ import {
   SIDEBAR_MIN_WIDTH,
   setSidebarCollapsed,
   setSidebarWidth,
+  toggleSidebar,
 } from '../state/sidebar';
 
 /**
@@ -81,6 +82,30 @@ describe('SidebarFrame — collapsed', () => {
   it('goes inert when hidden, so tab order does not walk into a nav nobody can see', () => {
     setSidebarCollapsed(true);
     expect(frame()).toHaveAttribute('inert');
+  });
+
+  /**
+   * A gesture is performed; a fact is not. Hiding the nav yourself earns the
+   * 240ms slide, but the welcome page hiding it for the length of a greeting
+   * must not animate — a sidebar that moves on its own reads as a glitch on
+   * the way in and as the nav opening itself on the way out.
+   */
+  it('animates a change you made', () => {
+    act(() => setSidebarCollapsed(true));
+    expect(frame().className).toContain('transition-[width]');
+  });
+
+  it('does not animate one nobody asked for', () => {
+    act(() => setSidebarCollapsed(true, true));
+    expect(frame().className).toContain('transition-none');
+  });
+
+  // The flag must not outlive the change that set it, or the toolbar button
+  // would silently stop animating for the rest of the session.
+  it('goes back to animating as soon as somebody uses the button', () => {
+    act(() => setSidebarCollapsed(true, true));
+    act(() => toggleSidebar());
+    expect(frame().className).toContain('transition-[width]');
   });
 
   // A handle you can drag while the thing it sizes is at zero width would be

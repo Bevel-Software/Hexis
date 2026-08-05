@@ -21,6 +21,73 @@
   --color-bevel-soft: #ede6ff;
 }
 
+/* Onboarding motion, used only through `motion-safe:` utilities so that
+   `prefers-reduced-motion` silences all of it at the call sites:
+   - `onboarding-pulse`: a soft accent ring that swells and fades — the CTA
+     breathing. Box-shadow, not scale: the text must hold still while the
+     control calls.
+   - `onboarding-fade`: the welcome page's arrival, in two beats.
+
+   NAMED animations rather than `animate-[onboarding-fade_2.2s_…]` arbitrary
+   values, and the difference is not tidiness. An arbitrary value encodes the
+   duration IN THE CLASS NAME, so retuning 1.4s → 2.2s mints a class Tailwind
+   has never generated — and the dev server does not reliably rescan this
+   package (it is symlinked into `apps/web/node_modules`), so the browser is
+   left holding a stylesheet in which the new class matches NOTHING. The
+   animation does not slow down; it silently stops existing, and the page
+   "just appears". Here the class name is stable and the timing lives in CSS,
+   which hot-reloads reliably — so tuning these numbers is now a CSS edit that
+   takes effect, not a gamble on a cache. */
+@theme {
+  /* The greeting, alone: the name lands and is allowed to be read. */
+  --animate-onboarding-greeting: onboarding-fade 2.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+  /* Everything under it, starting at the moment the greeting's opacity
+     completes (55% of 2.2s) — the second beat, not a second event. */
+  --animate-onboarding-body: onboarding-fade 1.5s cubic-bezier(0.16, 1, 0.3, 1) 1.1s both;
+  /* The welcome page's Done, and the sidebar pill — the pill breathes slower,
+     because it lives in the corner of your eye rather than under your cursor. */
+  --animate-onboarding-pulse: onboarding-pulse 2.4s ease-out infinite;
+  --animate-onboarding-pulse-slow: onboarding-pulse 2.6s ease-out infinite;
+  --animate-onboarding-blink: onboarding-blink 2.4s ease-in-out infinite;
+}
+@keyframes onboarding-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-accent) 30%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+@keyframes onboarding-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+/* A slow arrival. The opacity finishes well before the travel does, so the
+   words are readable early and the page keeps settling under them — a fade
+   that ends the moment it becomes legible reads as a flicker at this
+   duration. */
+@keyframes onboarding-fade {
+  0% {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 /* Tailwind Typography ships dark <pre> backgrounds by default; the app is
    light-only, so retheme prose code blocks onto the design tokens.
    These MUST resolve through tokens rather than a raw palette: consuming

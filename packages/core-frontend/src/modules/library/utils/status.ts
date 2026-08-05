@@ -127,6 +127,24 @@ export type LibraryFilter =
   /** Owned by someone, in no group — the prototype calls these "yours alone". */
   | { kind: 'ungrouped' };
 
+/**
+ * What an empty view says.
+ *
+ * A SEARCH that found nothing is about the search, in every view — the shelf
+ * is not empty, your words just missed it. With no query the emptiness is
+ * about the view itself, and each view is empty for its own reason: "Owned by
+ * me" holds the things whose upkeep is yours, so its empty state says that,
+ * rather than reporting a failed match nobody attempted.
+ *
+ * Here rather than in `LibraryPage`, because a component file that also
+ * exports a plain function breaks fast refresh for the whole module.
+ */
+export function emptyMessageFor(filter: LibraryFilter, query: string): string {
+  if (query.trim()) return 'Nothing here matches yet.';
+  if (filter.kind === 'owned') return "You're not responsible for changes in any skills yet.";
+  return 'Nothing here matches yet.';
+}
+
 export interface LibraryFilterable {
   kind: 'skill' | 'integration';
   name: string;

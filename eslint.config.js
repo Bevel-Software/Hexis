@@ -25,4 +25,11 @@ export default defineConfig([
     files: ['packages/core-frontend/**/*.{ts,tsx}', 'apps/web/**/*.{ts,tsx}'],
     extends: [reactHooks.configs.flat.recommended, reactRefresh.configs.vite],
   },
+  {
+    // Operator scripts, run by hand with `node`, not bundled and not typed.
+    // CommonJS is what `node scripts/x.cjs` wants, so the rule that forbids
+    // `require()` in app source is measuring the wrong thing here.
+    files: ['packages/*/scripts/**/*.cjs', 'scripts/**/*.{js,mjs,cjs}'],
+    rules: { '@typescript-eslint/no-require-imports': 'off' },
+  },
 ])

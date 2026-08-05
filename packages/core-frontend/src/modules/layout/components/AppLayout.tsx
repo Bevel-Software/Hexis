@@ -16,6 +16,12 @@ interface AppLayoutProps {
    * on unmount (app switched away → no panes to toggle).
    */
   onController?: (controller: LayoutController | null) => void;
+  /**
+   * Pinned above the sidebar's content. Supplied by the shell (the
+   * composition root), so this module never names a domain component — see
+   * `SidebarFrame`'s `header`.
+   */
+  sidebarHeader?: ReactNode;
   // Legacy named slots, kept as a convenience/compat signature.
   explorer?: ReactNode;
   viewer?: ReactNode;
