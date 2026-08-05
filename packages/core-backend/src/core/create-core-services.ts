@@ -12,6 +12,7 @@ import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
 import { KbSeedService } from '../modules/workspace/kb-seed.service.js';
+import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
 import { SpillStore } from '../modules/workspace/spill-store.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
@@ -107,6 +108,8 @@ export interface CoreServices {
   pendingCommitsWorker: PendingCommitsWorker;
   recoveryBot: AuthUser;
   adminAccess: AdminAccessService;
+  /** Deployment settings, env-first — the KB remote resolves through these. */
+  settings: DeploymentSettingsService;
   secretsVaultService: DbSecretsVaultService;
   externalApiKeyService: ExternalApiKeyService;
   internalTokenService: InternalTokenService;
@@ -146,35 +149,51 @@ export async function createCoreServices(
   // `migrations/` folder, tracked in `__drizzle_migrations_core`. An
   // enterprise overlay runs its own history AFTER this (see migrate.ts).
   await runCoreMigrations(db, coreMigrationsDir());
+
+  // Deployment settings come next, before ANY service is built: the KB remote
+  // is resolved through them, and a fresh install has none of it in the
+  // environment. `load()` is env-first, so an existing deployment sees exactly
+  // what it saw before — a stored row only answers where a variable is silent.
+  const settings = new DeploymentSettingsService(db, config.secretsEncKey);
+  await settings.load();
+  // A token supplied through the setup screen has to reach the credential
+  // helper, which reads `$GITHUB_TOKEN` at call time.
+  settings.syncGitTokenEnv();
+
+  // `kbDirName` is read ONCE and threaded into a dozen services as a plain
+  // string, which is why changing it needs a restart (the setting says so).
+  // The remote URL and username are read per-operation instead, so an admin
+  // finishing setup can clone immediately without bouncing the process.
+  const kbDirName = settings.resolve('kbDirName') || 'knowledge-base';
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
-    config.kbRepoUrl,
-    config.kbDirName,
-    config.gitUsername,
+    () => settings.resolve('kbRepoUrl'),
+    kbDirName,
+    () => settings.resolve('gitUsername') || 'x-access-token',
   );
   // Seed (or top-up) the KB remote before the first clone so the rest of the app
   // can keep assuming the remote already carries the protected branches + base
   // scaffolding — a fresh or partially-populated remote no longer needs to have
   // been forked from the standalone template.
   const kbSeedService = new KbSeedService(
-    config.kbRepoUrl,
+    () => settings.resolve('kbRepoUrl'),
     config.kbTemplateDir,
     [...PROTECTED_BRANCHES],
     DEFAULT_BRANCH,
     // The deployment owner is the initial Admin of a freshly seeded KB — the
     // same answer `SEED_ADMIN_EMAILS` used to ask for a second time.
     [config.adminEmail],
-    config.gitUsername,
+    () => settings.resolve('gitUsername') || 'x-access-token',
   );
   workspaceService.setSeedService(kbSeedService);
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
   const spillStore = new SpillStore(config.spillRoot);
-  const accessControl = new AccessControlService(workspaceService, config.kbDirName);
+  const accessControl = new AccessControlService(workspaceService, kbDirName);
   // Creator read-grant on creation: read is default-deny, so every surface
   // that creates KB files/folders (human routes, agent tools, upload apply)
   // consults this planner to keep creations visible to their creator.
-  const creatorAccess = new CreatorAccessService(workspaceService, accessControl, config.kbDirName);
+  const creatorAccess = new CreatorAccessService(workspaceService, accessControl, kbDirName);
 
   // Ontology-session boundary: records each agent run's touched ontologies and
   // blocks writes once a run has crossed ontologies. Postgres-backed so the
@@ -186,11 +205,11 @@ export async function createCoreServices(
   // one run, unlike the Postgres-backed ontology touched-set above.
   const routineWritePolicy = new RoutineWritePolicyService();
   // Skills: discovered from the default-branch workspace only (global catalog).
-  const skillService = new SkillService(workspaceService, accessControl, config.kbDirName);
+  const skillService = new SkillService(workspaceService, accessControl, kbDirName);
   // Tool manuals: user-authored `*.tool` files under `Groups/` in the default
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
-  const toolManualService = new ToolManualService(workspaceService, accessControl, config.kbDirName);
+  const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName);
   // Groups: the folders under `Groups/` that carry a
   // team's skills AND the tools they need. Enumerated for EVERY authenticated
   // caller — a group they cannot read still exists for them, as a locked one —
@@ -200,7 +219,7 @@ export async function createCoreServices(
     accessControl,
     skillService,
     toolManualService,
-    config.kbDirName,
+    kbDirName,
   );
   // Auth service — resolves identities for login, PR author attribution, and
   // access lookups. (Change requests now store the author email directly, so
@@ -221,7 +240,7 @@ export async function createCoreServices(
   const gitService = new GitService(
     workspaceService,
     workflowHooks,
-    config.kbDirName,
+    kbDirName,
     workspaceMutex,
     accessControl,
   );
@@ -239,7 +258,7 @@ export async function createCoreServices(
     workspaceMutex,
     config.workspacesRoot,
     config.backupsRoot,
-    config.kbDirName,
+    kbDirName,
   );
   // Late-bind the diff service into WorkspaceService so file writes/moves
   // trigger backup updates. (GitService used to take a diffService too — for
@@ -290,7 +309,7 @@ export async function createCoreServices(
     accessControl,
     fileLockService,
     pendingCommitsService,
-    config.kbDirName,
+    kbDirName,
     eventBus,
     fileChangeNotifier,
     // Exposed as `workflowService.hooks` — the SAME instance GitService and
@@ -319,7 +338,7 @@ export async function createCoreServices(
     // default-branch change to `Groups/<group>/access.md`, so this is also
     // what makes a newly-granted group unlock within one round-trip instead
     // of one TTL.
-    const touched = paths.some((p) => p.startsWith(`${config.kbDirName}/${GROUPS_DIR}/`));
+    const touched = paths.some((p) => p.startsWith(`${kbDirName}/${GROUPS_DIR}/`));
     if (touched) {
       toolManualService.invalidate();
       skillService.invalidate();
@@ -465,7 +484,7 @@ export async function createCoreServices(
     workspaceService,
     workflowService,
     events: eventBus,
-    kbDirName: config.kbDirName,
+    kbDirName: kbDirName,
     creatorAccess,
   });
   const toolHandlerFactory = createToolHandlerFactory(resolveToolContext);
@@ -543,6 +562,7 @@ export async function createCoreServices(
     db,
     workspaceService,
     kbSeedService,
+    settings,
     spillStore,
     accessControl,
     creatorAccess,

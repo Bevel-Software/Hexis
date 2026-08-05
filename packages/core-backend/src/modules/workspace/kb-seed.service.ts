@@ -96,13 +96,21 @@ export class KbSeedService implements IKbSeedService {
    * @param gitUsername      Basic-auth username for git-over-HTTPS (provider-specific).
    */
   constructor(
-    private readonly kbRepoUrl: string,
+    kbRepoUrl: string | (() => string),
     private readonly kbTemplateDir: string,
     private readonly protectedBranches: readonly string[],
     private readonly defaultBranch: string,
     private readonly seedAdminEmails: readonly string[],
-    private readonly gitUsername: string = 'x-access-token',
-  ) {}
+    gitUsername: string | (() => string) = 'x-access-token',
+  ) {
+    // A getter is read per-operation, so a remote supplied through the setup
+    // screen is seeded against without restarting; a string is still accepted.
+    this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
+    this.gitUsername = typeof gitUsername === 'function' ? gitUsername : () => gitUsername;
+  }
+
+  private readonly kbRepoUrl: () => string;
+  private readonly gitUsername: () => string;
 
   ensureRemoteSeeded(): Promise<void> {
     // Cache the promise, not just a boolean, so concurrent first-callers share
@@ -123,7 +131,7 @@ export class KbSeedService implements IKbSeedService {
     if (heads.size === 0) {
       if (this.seedAdminEmails.length === 0) {
         throw new Error(
-          `KB remote ${redact(this.kbRepoUrl)} is empty and cannot be seeded: ` +
+          `KB remote ${redact(this.kbRepoUrl())} is empty and cannot be seeded: ` +
             'no initial Admin was supplied. A seeded KB with no Admin is unusable ' +
             '(access resolution requires at least one Admin). Unreachable in ' +
             'normal operation — ADMIN_EMAIL is required at boot — so this guards ' +
@@ -236,7 +244,7 @@ export class KbSeedService implements IKbSeedService {
       // Username is provider-specific; the token is always the Basic-auth password.
       args.push(
         '-c',
-        `credential.helper=!f() { echo "username=${this.gitUsername}"; echo "password=$GITHUB_TOKEN"; }; f`,
+        `credential.helper=!f() { echo "username=${this.gitUsername()}"; echo "password=$GITHUB_TOKEN"; }; f`,
       );
     }
     return args;
@@ -260,7 +268,7 @@ export class KbSeedService implements IKbSeedService {
 
   /** Set of branch names on the remote (empty ⇒ uninitialised repo). */
   private async lsRemoteHeads(): Promise<Set<string>> {
-    const out = await this.git(null, [...this.credArgs(), 'ls-remote', '--heads', this.kbRepoUrl]);
+    const out = await this.git(null, [...this.credArgs(), 'ls-remote', '--heads', this.kbRepoUrl()]);
     const heads = new Set<string>();
     for (const line of out.split('\n')) {
       const m = line.match(/\srefs\/heads\/(.+)$/);
@@ -330,7 +338,7 @@ export class KbSeedService implements IKbSeedService {
           await this.git(dir, ['branch', branch]);
         }
       }
-      await this.git(dir, ['remote', 'add', 'origin', this.kbRepoUrl]);
+      await this.git(dir, ['remote', 'add', 'origin', this.kbRepoUrl()]);
       // Push only the protected branches — never the stray init branch if it
       // isn't itself protected.
       await this.git(dir, [...this.credArgs(), 'push', '-u', 'origin', ...this.protectedBranches]);
@@ -343,7 +351,7 @@ export class KbSeedService implements IKbSeedService {
   /** Create a missing protected branch on the remote, pointed at `base`'s tip. */
   private async createBranchOnRemote(branch: string, base: string): Promise<void> {
     await this.withTempDir(async (dir) => {
-      await this.git(dir, [...this.credArgs(), 'clone', '--depth', '1', '-b', base, this.kbRepoUrl, dir]);
+      await this.git(dir, [...this.credArgs(), 'clone', '--depth', '1', '-b', base, this.kbRepoUrl(), dir]);
       // Push base's fetched tip up under the new branch name.
       await this.git(dir, [...this.credArgs(), 'push', 'origin', `HEAD:refs/heads/${branch}`]);
       console.log(`[kb-seed] Created missing protected branch "${branch}" from "${base}"`);

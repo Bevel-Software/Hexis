@@ -231,15 +231,14 @@ export class CoreConfig {
         throw new Error(`OIDC_ISSUER_URL is not a valid URL: "${this.oidcIssuerUrl}"`);
       }
     }
-    // No default: the KB repo is deployment-specific, and a wrong fallback
-    // would surface much later as a confusing clone failure. Fail at boot.
+    // No default, and no longer fatal when absent: an unconfigured deployment
+    // boots into the setup screen, where an admin supplies it (and where the
+    // value can be verified against the real remote before it is saved). What
+    // stays fatal is a value that is present and WRONG — see
+    // `validateKbIdentity` — because that surfaces later as a confusing clone
+    // failure instead of a clear one now.
     this.kbRepoUrl = (process.env.KB_REPO_URL || '').trim();
-    if (this.kbRepoUrl === '') {
-      throw new Error(
-        'KB_REPO_URL is required — the https clone/push URL of the git repository that stores your knowledge base.',
-      );
-    }
-    this.kbDirName = process.env.KB_DIR_NAME || 'knowledge-base';
+    this.kbDirName = (process.env.KB_DIR_NAME || '').trim();
     // Provider-neutral git token: operators can set GIT_TOKEN (or the legacy
     // GITHUB_TOKEN / GH_TOKEN). Normalize onto GITHUB_TOKEN — the name the
     // credential helper and every `$GITHUB_TOKEN` read + redaction use — so all
@@ -316,25 +315,28 @@ export class CoreConfig {
     return `${this.tenantId}-mcp_`;
   }
 
+  /**
+   * Validate the KB-identity inputs THAT WERE SUPPLIED. Absent is fine — the
+   * setup screen collects them — but a present-and-malformed value fails at
+   * boot rather than later, as a clone error nobody can read.
+   */
   private validateKbIdentity(): void {
-    // Validate the two KB-identity inputs up front: `kbRepoUrl` (the clone/push
-    // URL) must be a valid https URL, and `kbDirName` (the dir the clone lives
-    // under in each workspace) must be a single safe path segment. A bad value
-    // in either otherwise surfaces much later as a confusing clone/path failure.
-    let parsed: URL;
-    try {
-      parsed = new URL(this.kbRepoUrl);
-    } catch {
-      throw new Error(`KB_REPO_URL is not a valid URL: ${this.kbRepoUrl}`);
-    }
-    if (parsed.protocol !== 'https:') {
-      throw new Error(`KB_REPO_URL must use https://: ${this.kbRepoUrl}`);
+    if (this.kbRepoUrl) {
+      let parsed: URL;
+      try {
+        parsed = new URL(this.kbRepoUrl);
+      } catch {
+        throw new Error(`KB_REPO_URL is not a valid URL: ${this.kbRepoUrl}`);
+      }
+      if (parsed.protocol !== 'https:') {
+        throw new Error(`KB_REPO_URL must use https://: ${this.kbRepoUrl}`);
+      }
     }
 
     // Joined with workspace paths via path.join — separators or ".." would let it
     // escape the workspace dir.
+    if (!this.kbDirName) return;
     if (
-      !this.kbDirName ||
       this.kbDirName === '.' ||
       this.kbDirName === '..' ||
       this.kbDirName.includes('/') ||

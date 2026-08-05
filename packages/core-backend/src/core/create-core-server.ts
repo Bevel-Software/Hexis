@@ -29,6 +29,7 @@ import {
 } from '../modules/secrets-vault/index.js';
 import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
+import { createSetupRoutes } from '../modules/settings/setup.routes.js';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -333,6 +334,10 @@ export async function createCoreServer(
     core.adminAccess,
     core.accountErasureService,
   ));
+  // First-run setup. Mounted with the other authed routes but touching NO
+  // workspace — it has to work on a deployment that has no knowledge base yet,
+  // which is the whole reason it exists.
+  app.use('/api', core.authMiddleware, createSetupRoutes(core.settings, core.adminAccess));
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe
