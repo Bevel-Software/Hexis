@@ -7,6 +7,7 @@ import { GroupPage } from '../components/GroupPage';
 import { GroupsIndexPage } from '../components/GroupsIndexPage';
 import { PersonalGroupPage } from '../components/PersonalGroupPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
+import { SkillPage } from '../components/skill-page/SkillPage';
 import { LIBRARY_ROOT } from './library-paths';
 
 /**
@@ -50,10 +51,11 @@ export function LibraryRoutes() {
                 (`…/tools/:slug#authorized`). */}
             <Route path="tools/:slug" element={<ToolPage />} />
 
-            {/* CONTRACT (Ali): the skill page mounts at `skills/:name`
-                (`:name` = `encodeURIComponent(skill name)`), HERE, above the
-                fallback. Insert the route; change nothing else. Until it
-                exists that URL redirects to the gallery, which is harmless. */}
+            {/* The skill page, per the contract this file reserved: `:name` is
+                `encodeURIComponent(skill name)`, and it sits above the `*`
+                fallback so the URL resolves instead of bouncing to the
+                gallery. It replaces the detail dialog for skills. */}
+            <Route path="skills/:name" element={<SkillPage />} />
           </Route>
 
           {/* An unknown subpath is a stale or mistyped link, not an error page —

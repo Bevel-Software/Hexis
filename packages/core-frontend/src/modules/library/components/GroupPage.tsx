@@ -2,12 +2,16 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
-import { decodeGroupSegment, pathForGroupsIndex, pathForTool } from '../routes/library-paths';
+import {
+  decodeGroupSegment,
+  pathForGroupsIndex,
+  pathForSkill,
+  pathForTool,
+} from '../routes/library-paths';
 import { primaryFolderOf } from '../utils/group-summary';
 import { GroupJoinRequests } from './GroupJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
 import { BandControls, GroupBreadcrumb, GroupItemSections, PageNote } from './group-page-parts';
 import { PageActions } from './PageActions';
@@ -37,7 +41,6 @@ export function GroupPage() {
   const data = useLibrary();
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
-  const [detail, setDetail] = useState<DetailTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   // The Skills band's two controls. `filterOn` narrows the band to what is
   // waiting on the reader; `refresh` re-reads the catalog and then says when it
@@ -110,20 +113,13 @@ export function GroupPage() {
   const shownSkills = filterOn ? skillItems.filter((i) => i.status.state !== 'ok') : skillItems;
 
   /**
-   * Same split as the gallery: a tool opens its PAGE, a skill still opens the
-   * dialog. Kept identical to `LibraryPage.openItem` on purpose — a card must
-   * do the same thing wherever you clicked it.
-   *
-   * CONTRACT (Ali): when `skills/:name` lands, the second half becomes
-   * `navigate(pathForSkill(item.id))` and the dialog below goes away.
+   * Both kinds open a PAGE — `skills/:name` has landed, so the contract this
+   * function used to carry is discharged and the dialog is gone. Kept identical
+   * to `LibraryPage.openItem` on purpose: a card must do the same thing
+   * wherever you clicked it.
    */
   function openItem(item: LibraryItem) {
-    if (item.kind === 'integration') {
-      navigate(pathForTool(item.id));
-      return;
-    }
-    const skill = data.skills.find((s) => s.name === item.id);
-    if (skill) setDetail({ kind: 'skill', skill, owned: item.owned });
+    navigate(item.kind === 'integration' ? pathForTool(item.id) : pathForSkill(item.id));
   }
 
   /**
@@ -285,19 +281,6 @@ export function GroupPage() {
           primaryPath={primaryFolder}
           canWrite={summary.canWrite}
           onClose={() => setAddOpen(false)}
-        />
-      )}
-
-      {detail && (
-        <DetailDialog
-          target={detail}
-          tools={data.tools}
-          skills={data.skills}
-          allowedToolsBySkill={data.allowedToolsBySkill}
-          crs={data.crs}
-          myCrNumbers={data.myCrNumbers}
-          onClose={() => setDetail(null)}
-          onDataChanged={data.reload}
         />
       )}
 

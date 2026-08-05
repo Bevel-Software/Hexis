@@ -80,6 +80,18 @@ export function pathForTool(slug: string): string {
   return `${LIBRARY_ROOT}/tools/${encodeURIComponent(slug)}`;
 }
 
+/**
+ * The route for one skill. `:name` is the skill's folder name — the same id the
+ * catalog, the card and `GET /api/skills/:name` all use — so the URL a card
+ * navigates to is the URL the page fetches from, with no lookup table in
+ * between. Encoded here rather than at each link site for the same reason
+ * `pathForTool` is: three surfaces build it (gallery card, group card, the tool
+ * page's "Powers these skills" chips).
+ */
+export function pathForSkill(name: string): string {
+  return `${LIBRARY_ROOT}/skills/${encodeURIComponent(name)}`;
+}
+
 /** Whether a path is the all-groups index — the one path that lights the "All groups" row. */
 export function isGroupsIndexPath(pathname: string): boolean {
   return matchPath({ path: `${LIBRARY_ROOT}/groups`, end: true }, pathname) !== null;
