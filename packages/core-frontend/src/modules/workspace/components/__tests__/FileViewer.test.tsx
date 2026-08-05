@@ -420,13 +420,14 @@ describe('FileViewer', () => {
   // never exist, and the access-denied view lives at the route level. See
   // FileRoute.test.tsx's file-denied cases.)
 
-  it('shows the canonical-state banner on a protected branch but keeps editing enabled', () => {
-    // Write access is now governed by roles.yaml + access.md and enforced by
-    // the backend at commit time — the editor itself is no longer disabled
-    // based on branch name. The banner stays as informational copy.
+  it('keeps editing enabled on a protected branch and shows no canonical-state banner', () => {
+    // Write access is governed by roles.yaml + access.md and enforced by the
+    // backend at commit time — the editor is not disabled based on branch
+    // name. The informational strip that used to explain the protected branch
+    // is gone; nothing narrates the branch to the reader here anymore.
     render(<ViewerHarness initialContent="official" branch="current-company-state" />);
     expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
-    expect(screen.getByText(/current company state/i)).toBeInTheDocument();
+    expect(screen.queryByText(/current company state/i)).not.toBeInTheDocument();
   });
 
   it('goes read-only and shows AccessRestrictedBanner when canWrite is false on a protected branch', async () => {
