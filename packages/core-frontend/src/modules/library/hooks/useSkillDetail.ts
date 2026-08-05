@@ -40,6 +40,14 @@ export function useSkillDetail(name: string): SkillDetailState {
    * so the effect asks this instead of inferring from the counter.
    */
   const shownName = useRef<string | null>(null);
+  /**
+   * Which load the `contents` map belongs to. A bundled-file read started
+   * before a reload resolves after it, and without this its (pre-merge) text
+   * lands in the map the reload just cleared — where the `contents[relFile]`
+   * guard below then treats it as fetched and never asks again. The stale tab
+   * would stay stale for as long as the page is open.
+   */
+  const epoch = useRef(0);
 
   const reload = useCallback(() => setRevision((r) => r + 1), []);
 
@@ -58,6 +66,7 @@ export function useSkillDetail(name: string): SkillDetailState {
     }
     setContents({});
     inFlight.current = new Set();
+    epoch.current += 1;
     setError(null);
     getSkill(name)
       .then((s) => {
@@ -79,15 +88,23 @@ export function useSkillDetail(name: string): SkillDetailState {
     (relFile: string) => {
       if (contents[relFile] !== undefined || inFlight.current.has(relFile)) return;
       inFlight.current.add(relFile);
+      // Which load this read belongs to. A reload moves the epoch on, and an
+      // answer from the previous one is about a file as it read BEFORE the
+      // merge — dropping it lets the re-issued read fill the gap instead.
+      const mine = epoch.current;
       getSkillFile(name, relFile)
         .then((content) => {
+          if (epoch.current !== mine) return;
           setContents((c) => ({ ...c, [relFile]: content }));
         })
         .catch(() => {
+          if (epoch.current !== mine) return;
           setContents((c) => ({ ...c, [relFile]: "Couldn't load this file." }));
         })
         .finally(() => {
-          inFlight.current.delete(relFile);
+          // Only if the set is still this load's — the effect swaps in a fresh
+          // one, and deleting from that would clear a live read's guard.
+          if (epoch.current === mine) inFlight.current.delete(relFile);
         });
     },
     [name, contents],

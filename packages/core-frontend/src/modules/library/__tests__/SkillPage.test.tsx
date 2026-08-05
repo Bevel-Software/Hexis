@@ -654,7 +654,7 @@ describe('SkillPage — deciding on a change', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
 
-    bus.emit({ kind: 'change-request-merged', number: 7, id: 1, ts: '' } as WorkflowEvent);
+    act(() => bus.emit({ kind: 'change-request-merged', number: 7, id: 1, ts: '' }));
 
     expect(await screen.findByText(/the skill now reads with that change/)).toBeInTheDocument();
   });
@@ -680,7 +680,7 @@ describe('SkillPage — deciding on a change', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
-    bus.emit({ kind: 'change-request-merged', number: 7, id: 1, ts: '' } as WorkflowEvent);
+    act(() => bus.emit({ kind: 'change-request-merged', number: 7, id: 1, ts: '' }));
 
     await waitFor(() =>
       expect(screen.getByTestId('md-view').textContent).toContain('ship the letter'),
@@ -724,15 +724,17 @@ describe('SkillPage — deciding on a change', () => {
     await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
 
     // Conflicts arrive HERE, never as a rejection of the call above.
-    bus.emit({
-      kind: 'change-request-merge-failed',
-      number: 7,
-      forUserId: 'u1',
-      reason: 'This draft conflicts with the target and needs resolving first.',
-      conflicts: true,
-      id: 2,
-      ts: '',
-    } as WorkflowEvent);
+    act(() =>
+      bus.emit({
+        kind: 'change-request-merge-failed',
+        number: 7,
+        forUserId: 'u1',
+        reason: 'This draft conflicts with the target and needs resolving first.',
+        conflicts: true,
+        id: 2,
+        ts: '',
+      }),
+    );
 
     expect(
       await screen.findByText(/these lines changed after this was written/),
@@ -753,15 +755,17 @@ describe('SkillPage — deciding on a change', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
 
-    bus.emit({
-      kind: 'change-request-merge-failed',
-      number: 7,
-      forUserId: 'u1',
-      reason: 'Waiting on approval for Skills/newsletter/sources.yaml from Design.',
-      conflicts: false,
-      id: 3,
-      ts: '',
-    } as WorkflowEvent);
+    act(() =>
+      bus.emit({
+        kind: 'change-request-merge-failed',
+        number: 7,
+        forUserId: 'u1',
+        reason: 'Waiting on approval for Skills/newsletter/sources.yaml from Design.',
+        conflicts: false,
+        id: 3,
+        ts: '',
+      }),
+    );
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Waiting on approval for Skills/newsletter/sources.yaml from Design.',

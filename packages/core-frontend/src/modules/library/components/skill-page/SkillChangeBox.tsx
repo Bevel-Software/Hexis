@@ -146,33 +146,41 @@ export function SkillChangeBox({
                 : `${first} has to redo it against the current text and propose again. It cannot be approved as it stands.`}
             </span>
           </>
-        ) : busy ? (
-          /* The apply is running. It is announced rather than only spelled on
-             the button, because the merge happens on the server after the
-             request returns and can take tens of seconds — long enough that a
-             silent button reads as a click that did nothing. */
-          <span
-            role="status"
-            aria-live="polite"
-            className="flex items-center gap-1.5 text-detail font-semibold text-wait"
-          >
-            <span className="size-1.5 animate-pulse rounded-full bg-wait-dot" />
-            {phase === 'approving' ? 'Recording your approval…' : 'Applying the change…'}
-          </span>
         ) : (
           <>
-            <span className="flex items-center gap-1.5 text-detail font-semibold text-wait">
-              <span className="size-1.5 rounded-full bg-wait-dot" />
-              Pending approval
+            {/* ONE live region across the whole idle↔busy transition, rather
+                than one mounted when the apply starts. A live region inserted
+                in the same breath as its text is widely not announced at all —
+                assistive tech watches regions it was already holding. So this
+                element persists and only its TEXT changes, which is the change
+                that gets read out. It is also why the busy state is not a
+                separate branch: a branch would unmount this one.
+
+                The wait itself is worth announcing because the merge runs on
+                the server after the request returns and takes tens of seconds
+                — a silent button reads as a click that did nothing. */}
+            <span
+              role="status"
+              aria-live="polite"
+              className="flex items-center gap-1.5 text-detail font-semibold text-wait"
+            >
+              <span className={cn('size-1.5 rounded-full bg-wait-dot', busy && 'animate-pulse')} />
+              {busy
+                ? phase === 'approving'
+                  ? 'Recording your approval…'
+                  : 'Applying the change…'
+                : 'Pending approval'}
             </span>
-            <span className="text-meta text-ink-faint">
-              {canDecide ? 'You decide — you own this.' : `Waiting on ${owner ?? 'the owner'}`}
-            </span>
+            {!busy && (
+              <span className="text-meta text-ink-faint">
+                {canDecide ? 'You decide — you own this.' : `Waiting on ${owner ?? 'the owner'}`}
+              </span>
+            )}
             {/* What the server said, verbatim. The gate names the files and the
                 people it is still waiting on, and that sentence is the whole
                 value — paraphrasing it to "couldn't approve" would strip the
                 one part the owner can act on. */}
-            {refusal && (
+            {refusal && !busy && (
               <span role="alert" className="w-full text-meta text-danger">
                 {refusal}
               </span>
