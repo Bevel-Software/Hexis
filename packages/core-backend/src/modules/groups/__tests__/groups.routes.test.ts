@@ -105,6 +105,9 @@ async function makeHarness(opts: HarnessOpts = {}) {
   const workflow = {
     listChangeRequestsAuthoredBy: vi.fn(async () => opts.authoredCrs ?? []),
     listChangeRequests: vi.fn(async () => opts.authoredCrs ?? []),
+    getChangeRequest: vi.fn(
+      async (n: number) => (opts.authoredCrs ?? []).find((c) => c.number === n) ?? null,
+    ),
     createBranch: vi.fn(async () => ({ name: 'x', isDefault: false, isProtected: false })),
     commitChanges: vi.fn(async () => null),
     openChangeRequest: vi.fn(async () => ({ number: 42 })),
@@ -353,31 +356,31 @@ describe('/api/groups routes', () => {
     expect(h.joinRequests.list).not.toHaveBeenCalled();
   });
 
-  it('reconcile: 404 for a non-manager, and for a change request that is not open', async () => {
-    const h = await makeHarness({ readable: MEMBER_OF_BOTH });
+  it('reconcile: 404 for a non-manager — indistinguishable from a missing request', async () => {
+    const h = await makeHarness({ readable: MEMBER_OF_BOTH, authoredCrs: [cr({ number: 7 })] });
     server = h.server;
     const denied = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests/7/reconcile`, {
       method: 'POST',
     });
     expect(denied.status).toBe(404);
     expect(h.joinRequests.reconcile).not.toHaveBeenCalled();
+  });
 
-    const manager = await makeHarness({ writable: { [ALI]: ['Groups/GTM/access.md'] } });
-    await close(h.server);
-    server = manager.server;
-    const missing = await fetch(`${manager.baseUrl}/api/groups/GTM/join-requests/999/reconcile`, {
+  it('reconcile: 404 for a manager when the change request does not exist', async () => {
+    const h = await makeHarness({ writable: { [ALI]: ['Groups/GTM/access.md'] } });
+    server = h.server;
+    const missing = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests/999/reconcile`, {
       method: 'POST',
     });
     expect(missing.status).toBe(404);
+    expect(h.joinRequests.reconcile).not.toHaveBeenCalled();
   });
 
   it('reconcile: a manager settles an open request through the service', async () => {
-    const open = cr({ number: 7 });
     const h = await makeHarness({
       writable: { [ALI]: ['Groups/GTM/access.md'] },
-      authoredCrs: [open],
+      authoredCrs: [cr({ number: 7 })],
     });
-    (h.workflow.listChangeRequests as ReturnType<typeof vi.fn>) = vi.fn(async () => [open]);
     (h.joinRequests.reconcile as ReturnType<typeof vi.fn>).mockResolvedValue(true);
     server = h.server;
     const res = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests/7/reconcile`, {

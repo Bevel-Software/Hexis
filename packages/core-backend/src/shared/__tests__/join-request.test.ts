@@ -8,15 +8,20 @@ import { assertValidBranchName } from '../../modules/workflow/git/branch-name.js
  *
  *  - UNIQUENESS (the write side): distinct requesters and distinct groups must
  *    never share a branch, or one person's commit lands on another's request.
- *    Both inputs the name is built from are lossy, which is what the tag fixes.
- *  - RECOGNISABILITY (the read side): the owner-side banner must spot OTHER
- *    people's join branches without knowing their email, so the predicate
- *    matches the shape, not the tag.
+ *    Both inputs the name is built from are lossy; the requester tag fixes it.
+ *  - EXACT GROUP IDENTITY (the read side): the settle decision is "the diff
+ *    is empty", so matching a branch to the WRONG group reads an unchanged
+ *    file, sees an empty diff, and destroys somebody else's request. The
+ *    group tag is recomputed from the exact name so shape-matching can never
+ *    cross groups; only the requester half matches by shape (the reader has
+ *    no email to recompute it from).
  */
+const TAG = '[0-9a-z]{7}';
+
 describe('joinBranchFor', () => {
   it('produces a valid branch name that follows the draft convention', () => {
     const branch = joinBranchFor('ali@bevel.software', 'GTM');
-    expect(branch).toMatch(/^ali\/join-gtm-[0-9a-z]{7}$/);
+    expect(branch).toMatch(new RegExp(`^ali/join-gtm-${TAG}-${TAG}$`));
     expect(() => assertValidBranchName(branch)).not.toThrow();
   });
 
@@ -25,17 +30,14 @@ describe('joinBranchFor', () => {
   });
 
   it('separates requesters who share a localpart across domains', () => {
-    // Regression: without the tag both collapse to `ali/join-gtm`, so the
-    // second requester's grant commit lands on the first one's branch and
-    // merging the FIRST request silently admits BOTH.
+    // Regression: without the requester tag both collapse to one branch, so
+    // the second requester's grant commit lands on the first one's branch.
     expect(joinBranchFor('ali@bevel.software', 'GTM')).not.toBe(
       joinBranchFor('ali@other.com', 'GTM'),
     );
   });
 
   it('separates groups whose names kebab to the same slug', () => {
-    // `Finance!` and `Finance` both slug to `finance`; without the tag the
-    // second request is answered with the first one's change request.
     expect(joinBranchFor('ali@bevel.software', 'Finance!')).not.toBe(
       joinBranchFor('ali@bevel.software', 'Finance'),
     );
@@ -48,14 +50,14 @@ describe('joinBranchFor', () => {
   it('still yields a valid, matchable branch for a group with no alphanumerics', () => {
     const branch = joinBranchFor('ali@bevel.software', '!!!');
     expect(kebabGroupName('!!!')).toBe('');
-    expect(branch).toMatch(/^ali\/join-[0-9a-z]{7}$/);
+    expect(branch).toMatch(new RegExp(`^ali/join-${TAG}-${TAG}$`));
     expect(() => assertValidBranchName(branch)).not.toThrow();
     expect(isJoinBranchFor(branch, '!!!')).toBe(true);
   });
 });
 
 describe('isJoinBranchFor', () => {
-  it("recognises somebody ELSE's join branch (the tag is not recomputed)", () => {
+  it("recognises somebody ELSE's join branch (the requester tag is not recomputed)", () => {
     expect(isJoinBranchFor(joinBranchFor('juan@bevel.software', 'GTM'), 'GTM')).toBe(true);
     expect(isJoinBranchFor(joinBranchFor('ali@other.com', 'GTM'), 'GTM')).toBe(true);
   });
@@ -64,14 +66,29 @@ describe('isJoinBranchFor', () => {
     expect(isJoinBranchFor(joinBranchFor('ali@bevel.software', 'Finance'), 'GTM')).toBe(false);
   });
 
+  it('NEVER crosses slug-colliding groups — the destructive-settle regression', () => {
+    // `Finance!`, `finance` and `Finance` all slug to `finance`. A listing
+    // for one that matched another's branch would read that branch's copy of
+    // ITS OWN access.md (unchanged there), see an empty diff, and settle —
+    // closing a change request and deleting a branch belonging to a
+    // different group. The recomputed group tag is what forbids the match.
+    const forBang = joinBranchFor('ali@bevel.software', 'Finance!');
+    expect(isJoinBranchFor(forBang, 'finance')).toBe(false);
+    expect(isJoinBranchFor(forBang, 'Finance')).toBe(false);
+    expect(isJoinBranchFor(forBang, 'Finance!')).toBe(true);
+    expect(isJoinBranchFor(joinBranchFor('ali@bevel.software', 'finance'), 'Finance!')).toBe(false);
+  });
+
   it('rejects ordinary draft branches and near-misses', () => {
+    const good = joinBranchFor('ali@bevel.software', 'GTM');
+    const [, suffix] = good.split('/');
     for (const branch of [
       'ali/gtm',
-      'ali/join-gtm', // no tag — the pre-tag shape
-      'ali/join-gtm-SHOUTY', // tag is lowercase base36
-      'ali/join-gtm-abc', // wrong tag length
-      'ali/join-gtm-abc1234/extra',
-      'join-gtm-abc1234', // no author segment
+      'ali/join-gtm', // no tags — the pre-tag shape
+      'ali/join-gtm-abc1234', // one tag only
+      `ali/${suffix.toUpperCase()}`, // tags are lowercase base36
+      `ali/${suffix}/extra`,
+      suffix, // no author segment
     ]) {
       expect(isJoinBranchFor(branch, 'GTM'), branch).toBe(false);
     }

@@ -131,6 +131,20 @@ describe('GroupJoinRequests', () => {
     });
   });
 
+  it('a failed grant keeps the proposal on offer and never asks to reconcile', async () => {
+    // The optimistic removal must not survive a grant that didn't land — the
+    // refetch restores the row, and reconciling would be asking the server to
+    // settle a request whose proposal is still pending.
+    accessMock.grantAccess.mockRejectedValue(new Error('Not allowed'));
+    renderBanner();
+    fireEvent.click(await screen.findByRole('button', { name: 'Grant read to Ali Baba' }));
+    await waitFor(() => expect(accessMock.grantAccess).toHaveBeenCalledTimes(1));
+    expect(
+      await screen.findByRole('button', { name: 'Grant read to Ali Baba' }),
+    ).toBeInTheDocument();
+    expect(groupsMock.reconcileJoinRequest).not.toHaveBeenCalled();
+  });
+
   it('declining rejects the change request', async () => {
     renderBanner();
     fireEvent.click(

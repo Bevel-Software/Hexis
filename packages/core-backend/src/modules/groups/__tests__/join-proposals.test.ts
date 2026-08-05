@@ -46,13 +46,14 @@ describe('pendingProposals', () => {
   });
 
   it('is EMPTY when the branch grants a SUBSET (its proposal already landed)', () => {
-    const branch = base('read:\n  - GTM Team\n');
+    const branch = base('read:\n  - Olga Ivanova <olga@bevel.software>\n');
     expect(pendingProposals(branch, DEFAULT_MD, PATH)).toEqual([]);
   });
 
-  it('ignores a REMOVAL — a branch that drops a grant proposes nothing', () => {
+  it('ignores a REMOVAL — a branch that drops one grant but keeps the rest proposes nothing', () => {
     // Revoking is not something this surface accepts; the branch stays an
-    // ordinary change request in the review UI.
+    // ordinary change request in the review UI. (Distinct from the subset
+    // case above: here GTM Team survives and only Olga is dropped.)
     const branch = base('read:\n  - GTM Team\n');
     expect(pendingProposals(branch, DEFAULT_MD, PATH)).toEqual([]);
   });
@@ -87,10 +88,14 @@ describe('pendingProposals', () => {
   });
 
   it('does not confuse the SELF-frontmatter with folder rules', () => {
-    // `read: everyone` in the frontmatter governs the access.md FILE (it is
-    // what makes the group discoverable), not the folder — so it must never
-    // show up as a proposal to grant everyone read on the group.
-    const branch = base('read:\n  - GTM Team\n  - Olga Ivanova <olga@bevel.software>\n');
+    // The frontmatter governs the access.md FILE, not the folder. The branch
+    // here DIFFERS from the default in its frontmatter only (an extra
+    // self-read grant) while carrying identical folder rules — so an
+    // implementation that read the wrong block would report a proposal, and
+    // the correct one reports none. (Identical inputs would prove nothing.)
+    const branch =
+      '---\nread:\n  - everyone\n  - Ali Baba <ali@bevel.software>\n---\n' +
+      'read:\n  - GTM Team\n  - Olga Ivanova <olga@bevel.software>\n';
     expect(pendingProposals(branch, DEFAULT_MD, PATH)).toEqual([]);
   });
 });

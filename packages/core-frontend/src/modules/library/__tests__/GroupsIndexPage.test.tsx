@@ -187,6 +187,32 @@ describe('GroupsIndexPage', () => {
     expect(await screen.findByRole('button', { name: /^GTM .* 1$/ })).toBeInTheDocument();
   });
 
+  it('lists a DISCOVERABLE locked group under Ask to join, Locked or Requested', async () => {
+    groupsMock.listGroups.mockResolvedValue([
+      summary(),
+      summary({ name: 'Finance', folders: ['Groups/Finance'], canRead: false, canWrite: false }),
+    ]);
+    renderIndex();
+    expect(await screen.findByRole('heading', { name: 'Ask to join' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Finance/ })).toBeInTheDocument();
+    expect(screen.getByTitle('Locked')).toBeInTheDocument();
+
+    // Once the caller's join request is open, the chip says THAT instead —
+    // the one thing the row can tell you that you did not already know.
+    groupsMock.listGroups.mockResolvedValue([
+      summary({
+        name: 'Finance',
+        folders: ['Groups/Finance'],
+        canRead: false,
+        canWrite: false,
+        hasRequested: true,
+        requestNumber: 9,
+      }),
+    ]);
+    renderIndex();
+    expect(await screen.findByTitle('Requested')).toBeInTheDocument();
+  });
+
   it('never lists a group the endpoint omitted (fail-closed: absent = invisible)', async () => {
     // The backend only returns accessible groups, and this page adds nothing
     // on top: a group the caller cannot access has no row, no name, no counts.

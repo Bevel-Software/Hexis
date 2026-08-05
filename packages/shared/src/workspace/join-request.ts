@@ -5,30 +5,37 @@
  * A join request IS a change request: a draft branch carrying one commit that
  * adds the requester to the group's `access.md` body `read:` list, opened
  * against the default branch. What makes it recognisable — to the `Requested`
- * chip, to the owner-side banner, to idempotency — is this branch-name
- * convention. Both sides (backend route, frontend banners) read it from here
- * so they can never drift.
+ * chip, to the manager-side proposals surface, to idempotency — is only this
+ * branch-name convention. Both sides (backend, frontend) read it from here so
+ * they can never drift.
  *
- *   <email-localpart>/join-<group-kebab>-<tag>
+ *   <email-localpart>/join-<group-kebab>-<groupTag>-<requesterTag>
  *
  * follows the workspace's existing `<email-localpart>/<kebab-slug>` draft
- * convention, so join branches sort with the requester's other drafts and the
- * branch-authorship delete rule applies unchanged.
+ * convention, so join branches sort with the requester's other drafts and
+ * the branch-authorship delete rule applies unchanged.
  *
- * WHY THE TAG: the localpart and the kebab slug are both LOSSY. Without it,
- * `ali@bevel.software` and `ali@other.com` share one branch (a second
- * requester's commit lands on the first one's branch, so merging the first
- * request silently admits both), and `Finance` and `Finance!` share one too
- * (the second request is answered with the first one's change request). The
- * tag is derived from the FULL email plus the EXACT group name, so distinct
- * requesters and case-/punctuation-distinct groups always get distinct
- * branches.
+ * WHY TWO TAGS: the localpart and the kebab slug are both LOSSY, and each
+ * loss has its own failure:
  *
- * The tag is a collision-avoidance device, not a security boundary — nothing
- * trusts a branch name. Approval is gated by the merge rule (an approver must
- * be able to write the touched `access.md`), and the owner-side banner
- * additionally verifies that a change request touches exactly that file
- * before it dresses one up as a join request.
+ *  - `groupTag` — over the EXACT group name, recomputable by anyone who
+ *    knows the group. `Finance!` and `finance` share the slug `finance`;
+ *    without this tag, listing one group's requests would match the other's
+ *    branches, read the wrong `access.md` (unchanged on that branch), see an
+ *    empty diff and SETTLE the request — closing a change request and
+ *    deleting a branch that belong to a different group. The settle decision
+ *    is "the diff is empty", so group identity must be exact BEFORE the diff
+ *    is consulted, and `isJoinBranchFor` recomputes this tag to make it so.
+ *  - `requesterTag` — over the full email (+ group), NOT recomputable by a
+ *    reader (a manager listing requests does not know each requester's
+ *    email; `isJoinBranchFor` matches its shape only). It exists so
+ *    `ali@bevel.software` and `ali@other.com` never share a branch — else
+ *    the second requester's commit lands on the first one's branch.
+ *
+ * The tags are collision-avoidance devices, not a security boundary —
+ * nothing grants access based on a branch name. Grants happen through the
+ * ordinary access mutation path, and settling only ever closes a request
+ * whose file adds nothing over the default branch.
  */
 
 /** Group name → the kebab slug used in the join branch (lossy by design). */
@@ -42,7 +49,7 @@ export function kebabGroupName(group: string): string {
     .replace(/^-|-$/g, '');
 }
 
-/** Length of the branch-name disambiguator, in base-36 characters. */
+/** Length of each branch-name tag, in base-36 characters. */
 const TAG_LENGTH = 7;
 
 /**
@@ -63,31 +70,37 @@ function shortTag(input: string): string {
   return hash.toString(36).padStart(TAG_LENGTH, '0').slice(-TAG_LENGTH);
 }
 
+/** The exact-group tag — recomputable from the group name alone. */
+function groupTag(group: string): string {
+  return shortTag(`g:${group}`);
+}
+
 /** The deterministic join branch for (requester, group). */
 export function joinBranchFor(email: string, group: string): string {
   const normalizedEmail = email.trim().toLowerCase();
   const localpart = normalizedEmail.split('@')[0] || normalizedEmail;
   const slug = kebabGroupName(group);
-  const tag = shortTag(`${normalizedEmail}\n${group}`);
+  const requester = shortTag(`u:${normalizedEmail}\n${group}`);
   // A group whose name has no alphanumerics at all (`!!!`) kebabs to '' — the
-  // tag alone still yields a valid, matchable branch.
-  return slug ? `${localpart}/join-${slug}-${tag}` : `${localpart}/join-${tag}`;
+  // tags alone still yield a valid, matchable branch.
+  const middle = slug ? `${slug}-` : '';
+  return `${localpart}/join-${middle}${groupTag(group)}-${requester}`;
 }
 
 /**
- * Does `branch` look like SOMEBODY's join branch for `group`?
+ * Does `branch` look like SOMEBODY's join branch for EXACTLY `group`?
  *
- * The tag is deliberately NOT recomputed here: this predicate runs on other
- * people's branches (the owner-side banner shows every requester), and their
- * email is not in hand. It matches the SHAPE — which is why the banner pairs
- * it with a touched-path check rather than trusting the name alone. The
- * requester's identity comes from the change request's own attribution.
+ * The group half (slug + `groupTag`) is recomputed and must match — this is
+ * what keeps slug-colliding groups (`Finance!` vs `finance`) from seeing,
+ * and worse settling, each other's requests. The requester half cannot be
+ * recomputed (the reader has no email) and matches by shape; the requester's
+ * identity comes from the change request's own attribution.
  */
 export function isJoinBranchFor(branch: string, group: string): boolean {
   const slug = kebabGroupName(group);
-  const tag = `[0-9a-z]{${TAG_LENGTH}}`;
-  const suffix = slug ? `join-${escapeRegExp(slug)}-${tag}` : `join-${tag}`;
-  return new RegExp(`^[^/]+/${suffix}$`).test(branch);
+  const middle = slug ? `${escapeRegExp(slug)}-` : '';
+  const requester = `[0-9a-z]{${TAG_LENGTH}}`;
+  return new RegExp(`^[^/]+/join-${middle}${groupTag(group)}-${requester}$`).test(branch);
 }
 
 function escapeRegExp(s: string): string {

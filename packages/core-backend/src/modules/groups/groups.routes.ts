@@ -302,12 +302,12 @@ export function createGroupsRoutes(
         res.status(404).json({ error: 'Not found' }),
       );
       if (!ctx) return;
-      const number = Number(req.params.number);
-      if (!Number.isSafeInteger(number) || number <= 0) {
+      const crNumber = Number(req.params.number);
+      if (!Number.isSafeInteger(crNumber) || crNumber <= 0) {
         res.status(400).json({ error: 'Invalid change request number' });
         return;
       }
-      const cr = (await workflow.listChangeRequests()).find((c) => c.number === number);
+      const cr = await workflow.getChangeRequest(crNumber);
       if (!cr) {
         res.status(404).json({ error: 'Not found' });
         return;

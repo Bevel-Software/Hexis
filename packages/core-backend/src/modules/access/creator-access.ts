@@ -178,15 +178,21 @@ export class CreatorAccessService implements ICreatorAccess {
               // concurrent creator's grant survives; ours lands next to it.
               // `target: 'folder'` so a new-format access.md (body-governed)
               // gets the grant in its FOLDER rules, never its self-frontmatter.
-              let text = current;
-              if (isGroupRoot && !current.trim()) {
-                text = '---\nread:\n  - everyone\n---\nread: []\n';
-              }
-              let out = spliceGrant(text, 'read', principal, {
+              // Only the TEMPLATE is gated on the file being absent — never
+              // overwrite content somebody else got there first with. The
+              // grants are NOT gated: this plan only exists because the
+              // folder was being created, so a non-empty `current` here means
+              // a CONCURRENT creator seeded it first, and both initiators of
+              // a group deserve the full creator grants. spliceGrant is
+              // duplicate-safe, so re-applying over their entries no-ops.
+              let out = isGroupRoot && !current.trim()
+                ? '---\nread:\n  - everyone\n---\nread: []\n'
+                : current;
+              out = spliceGrant(out, 'read', principal, {
                 allowScalar: false,
                 target: 'folder',
               }).text;
-              if (isGroupRoot && !current.trim()) {
+              if (isGroupRoot) {
                 for (const verb of ['write', 'owner'] as const) {
                   out = spliceGrant(out, verb, principal, {
                     allowScalar: false,

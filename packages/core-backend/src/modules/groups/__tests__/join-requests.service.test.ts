@@ -6,7 +6,10 @@ import {
   type ChangeRequest,
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import {
+  workspaceIdForBranch,
+  type WorkspaceService,
+} from '../../workspace/workspace.service.js';
 import { JoinRequestsService } from '../join-requests.service.js';
 
 /**
@@ -82,10 +85,13 @@ describe('JoinRequestsService.list', () => {
       'open',
       'hash-ali',
       DEFAULT_BRANCH,
-      DEFAULT_BRANCH,
+      // The WORKSPACE id, which merely happens to equal the branch name for
+      // slash-less branches — assert the encoding so a slashed default
+      // branch could never silently break this.
+      workspaceIdForBranch(DEFAULT_BRANCH),
     );
     expect(h.workflow.deleteBranch).toHaveBeenCalledWith(
-      DEFAULT_BRANCH,
+      workspaceIdForBranch(DEFAULT_BRANCH),
       joinBranchFor(ALI, 'GTM'),
       ACTOR,
     );
@@ -114,13 +120,34 @@ describe('JoinRequestsService.list', () => {
     warn.mockRestore();
   });
 
-  it('still closes the request when the branch delete fails', async () => {
+  it('still closes the request when the branch delete fails, and says so', async () => {
     const h = makeHarness(refs(PROPOSING_MD, PROPOSING_MD));
     (h.workflow.deleteBranch as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('protected'));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    await h.svc.list('GTM', FOLDER, [cr()], ACTOR);
+    // The request still settles (omitted from the list) — the leftover branch
+    // is cosmetic, and the failure is logged rather than swallowed.
+    await expect(h.svc.list('GTM', FOLDER, [cr()], ACTOR)).resolves.toEqual([]);
     expect(h.workflow.rejectChangeRequest).toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not delete'));
     warn.mockRestore();
+  });
+
+  it('NEVER settles a slug-colliding other group\'s request (branch match is exact)', async () => {
+    // `Finance!` slugs to `finance` too. Its branch's copy of
+    // `Groups/finance/access.md` is unchanged, so if the branch matched, the
+    // empty diff would settle — closing a change request and deleting a
+    // branch that belong to a DIFFERENT group. The group tag in the branch
+    // name is what forbids the match.
+    const other = cr({ branch: joinBranchFor(ALI, 'Finance!') });
+    const h = makeHarness({
+      [`origin/${DEFAULT_BRANCH}`]: DEFAULT_MD,
+      [`origin/${joinBranchFor(ALI, 'Finance!')}`]: DEFAULT_MD,
+    });
+    await expect(h.svc.list('finance', 'Groups/finance', [other], ACTOR)).resolves.toEqual([]);
+    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
+    expect(h.workflow.deleteBranch).not.toHaveBeenCalled();
+    await expect(h.svc.reconcile('finance', 'Groups/finance', other, ACTOR)).resolves.toBe(false);
+    expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
   });
 });
 
