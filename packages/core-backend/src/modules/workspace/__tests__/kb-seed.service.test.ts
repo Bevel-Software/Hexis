@@ -253,5 +253,28 @@ describe('KbSeedService', () => {
         expect(await exists(path.join(dir, `${claimed}/.gitkeep`))).toBe(true);
       }
     });
+
+    /**
+     * The name is joined onto the repo root and onto `<dir>/.gitkeep`, so a
+     * separator or a `..` would write outside the repo being seeded. Refused
+     * at CONSTRUCTION, so a bad value surfaces at boot rather than part-way
+     * through seeding somebody's knowledge base.
+     */
+    it.each(['../escape', 'nested/dir', '/absolute', '..', '.', ''])(
+      'refuses %j as a reserved root',
+      (bad) => {
+        expect(() => makeSeeder('unused', ADMINS, [bad])).toThrow(/single path segment/);
+      },
+    );
+
+    /**
+     * Being reserved is what makes a name worth claiming — the file tree
+     * renders it as its own root instead of folding it into Knowledge — so the
+     * names in `kb-layout.ts` must stay ACCEPTED here. A guard that rejected
+     * them would reject the only real use of this argument.
+     */
+    it('accepts the reserved names a distribution actually claims', () => {
+      expect(() => makeSeeder('unused', ADMINS, ['Data', 'Agents', 'Pipelines'])).not.toThrow();
+    });
   });
 });

@@ -48,6 +48,32 @@ const REQUIRED_FILES: readonly string[] = ['access.md', 'CLAUDE.md', '.beveligno
  */
 export const CORE_REQUIRED_DIRS: readonly string[] = [KNOWLEDGE_BASE_DIR, GROUPS_DIR];
 
+/**
+ * A reserved root must be ONE path segment — `Data`, not `Data/x`, `../x` or
+ * `/x`. The name is joined onto the repo root, so anything else writes outside
+ * the repo being seeded.
+ *
+ * Deliberately NOT a check against the reserved-root set in `kb-layout.ts`:
+ * `Data`, `Agents` and `Pipelines` are all in that set, and they are precisely
+ * what a distribution passes here. Being reserved is what makes a name worth
+ * claiming — the file tree renders it as its own root instead of folding it
+ * into Knowledge — so rejecting reserved names would reject the only real use.
+ */
+function assertRootSegment(dir: string): void {
+  if (
+    !dir ||
+    dir === '.' ||
+    dir === '..' ||
+    dir.includes('/') ||
+    dir.includes('\\') ||
+    path.isAbsolute(dir)
+  ) {
+    throw new Error(
+      `Reserved KB root must be a single path segment (no separators, no ".."); got "${dir}"`,
+    );
+  }
+}
+
 /** Redact the token from any string that might surface in a log or error. */
 function redact(s: string): string {
   const token = process.env.GITHUB_TOKEN;
@@ -111,6 +137,13 @@ export class KbSeedService implements IKbSeedService {
     private readonly gitUsername: string = 'x-access-token',
     extraDirs: readonly string[] = [],
   ) {
+    // Every entry is joined onto the repo root and onto `<dir>/.gitkeep`, so a
+    // separator or a `..` would place directories and files OUTSIDE the repo
+    // being seeded. Checked here rather than in the loop so a bad value fails
+    // at construction — at boot, next to the rest of the wiring — instead of
+    // part-way through seeding somebody's knowledge base. Same contract, and
+    // the same reason, as `KB_DIR_NAME` in `CoreConfig`.
+    for (const dir of extraDirs) assertRootSegment(dir);
     this.requiredDirs = [...CORE_REQUIRED_DIRS, ...extraDirs];
   }
 
