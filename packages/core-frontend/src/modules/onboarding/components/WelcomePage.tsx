@@ -4,7 +4,7 @@ import { Check, Copy, X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { Button, IconButton } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
-import { useLibraryToast } from '../../library/state/toast';
+import { useLibraryToast } from '../../library/state/toast.context';
 import { copyToClipboard, COPY_FAILED_TOAST } from '../../library/utils/clipboard';
 import { pathForLibraryFilter } from '../../library/routes/library-paths';
 import { displayFirstName } from '../../library/utils/personal-group';
@@ -195,7 +195,7 @@ export function WelcomePage() {
    */
   async function copySnippet() {
     const ok = await copyToClipboard(snippet);
-    if (!ok) toast(COPY_FAILED_TOAST);
+    if (!ok) toast(COPY_FAILED_TOAST, 'danger');
     window.clearTimeout(resetTimer.current);
     // Back to idle FIRST, so a repeat copy is a real state change and the
     // live region announces it again — setting 'ok' over 'ok' is a no-op that

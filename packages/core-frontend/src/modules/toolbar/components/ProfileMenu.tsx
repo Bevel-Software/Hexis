@@ -1,19 +1,11 @@
-import { Fragment, useCallback, useMemo, useRef, useState } from 'react';
-import {
-  Boxes,
-  ChevronDown,
-  CircleUserRound,
-  KeyRound,
-  LibraryBig,
-  Lock,
-  LogOut,
-  Users,
-} from 'lucide-react';
+import { Fragment, useCallback, useRef, useState } from 'react';
+import { ChevronDown, LogOut } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { useAuth } from '../../auth/state/auth.context';
 import { useAdmin } from '../../admin/state/admin.context';
-import { useAppRegistry, type AdminMenuItem } from '../../../core/registry';
+import type { AdminMenuItem } from '../../../core/registry';
+import { useMenuSections } from '../../settings/settings-nav-items';
 import {
   MenuItem,
   MenuLabel,
@@ -23,93 +15,6 @@ import {
 import { cn } from '../../../lib/utils';
 
 const MENU_ID = 'app-profile-menu';
-
-/**
- * The core menu rows. Everything else (Connectors, Watchlist, Routines,
- * Connected apps, feedback, LLM configuration, user accounts, …) is
- * registry-contributed — see the enterprise shell's `adminMenuItems`. The
- * `order` values interleave the two lists to reproduce the historical row
- * order. In THIS repo the registry is empty (`makeRegistry({})`), so the menu
- * is these six rows and no more; the enterprise app gets all thirteen.
- *
- * All core rows NAVIGATE — the settings surfaces are standalone routed pages
- * below the persistent toolbar, not dialogs. The `dialog` contract on
- * {@link AdminMenuItem} stays supported for registry-contributed rows.
- */
-const CORE_MENU_ITEMS: AdminMenuItem[] = [
-  {
-    id: 'skills-and-tools',
-    order: 35,
-    icon: <LibraryBig size={15} />,
-    label: 'Skills & Tools',
-    onSelect: ({ navigate, closeMenu }) => {
-      navigate('/skills-and-tools');
-      closeMenu();
-    },
-  },
-  {
-    id: 'external-agent-access',
-    order: 40,
-    icon: <KeyRound size={15} />,
-    label: 'External agent access',
-    onSelect: ({ navigate, closeMenu }) => {
-      navigate('/external-agent-access');
-      closeMenu();
-    },
-  },
-  {
-    id: 'secrets',
-    order: 50,
-    icon: <Lock size={15} />,
-    label: 'Secrets',
-    onSelect: ({ navigate, closeMenu }) => {
-      navigate('/secrets');
-      closeMenu();
-    },
-  },
-  {
-    id: 'browse-tools',
-    order: 70,
-    icon: <Boxes size={15} />,
-    label: 'Browse available tools',
-    onSelect: ({ navigate, closeMenu }) => {
-      navigate('/tools');
-      closeMenu();
-    },
-  },
-  {
-    id: 'account',
-    order: 90,
-    icon: <CircleUserRound size={15} />,
-    label: 'Account',
-    onSelect: ({ navigate, closeMenu }) => {
-      navigate('/account');
-      closeMenu();
-    },
-  },
-  {
-    id: 'roles-members',
-    section: 'admin',
-    order: 10,
-    icon: <Users size={15} />,
-    label: 'Roles & Members',
-    onSelect: ({ navigate, closeMenu }) => {
-      navigate('/roles-and-members');
-      closeMenu();
-    },
-  },
-  {
-    id: 'user-accounts',
-    section: 'admin',
-    order: 20,
-    icon: <CircleUserRound size={15} />,
-    label: 'User accounts',
-    onSelect: ({ navigate, closeMenu }) => {
-      navigate('/user-accounts');
-      closeMenu();
-    },
-  },
-];
 
 /** First letters of the first two words — the prototype's `initials` (proto:2315). */
 function initials(name: string): string {
@@ -172,12 +77,19 @@ function Avatar({ user, className }: { user: AuthUser; className?: string }) {
  * Open/close mechanics are `useDismissableMenu` (outside click, Escape,
  * focus back to the trigger) rather than the bespoke pair of document
  * listeners this component used to carry.
+ *
+ * This dropdown is the DOOR into the settings surfaces, not their navigation —
+ * they keep their own nav once you are inside (see `SettingsLayout`). Both
+ * render the same list from `settings-nav-items`, so they cannot drift. It
+ * still lists rows the nav deliberately excludes — dialog rows, and anything
+ * the enterprise shell contributes that lives elsewhere in the app — because
+ * running arbitrary actions is this surface's job and not the nav's.
  */
 export function ProfileMenu() {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
   const { isAdmin, unreadCount } = useAdmin();
-  const registry = useAppRegistry();
+  const { defaultItems, adminItems } = useMenuSections();
   const [open, setOpen] = useState(false);
   // Per-row dialog open flags, keyed by item id. A plain map (rather than one
   // "active dialog" slot) preserves the historical behavior where two dialogs
@@ -201,15 +113,6 @@ export function ProfileMenu() {
     returnFocusTo: triggerRef,
   });
 
-  const { defaultItems, adminItems } = useMemo(() => {
-    const all = [...CORE_MENU_ITEMS, ...registry.adminMenuItems];
-    const bySection = (section: 'default' | 'admin') =>
-      all
-        .filter((item) => (item.section ?? 'default') === section)
-        .sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
-    return { defaultItems: bySection('default'), adminItems: bySection('admin') };
-  }, [registry]);
-
   // Only admins have the Feedback Inbox, so the unread badge is admin-only too.
   const showBadge = isAdmin && unreadCount > 0;
 
@@ -223,12 +126,27 @@ export function ProfileMenu() {
     setOpenDialogs((prev) => ({ ...prev, [id]: false }));
   };
 
+  /**
+   * `dialog` → `onSelect` → `path`, and the order is the contract.
+   *
+   * Dialog stays first because that is the documented precedence registry rows
+   * were written against. `path` is LAST so it can never shadow a row that
+   * asked to run its own code — it is the fallback that lets a row which only
+   * needs to navigate say so as data instead of as a closure.
+   */
   const handleSelect = (item: AdminMenuItem) => {
     if (item.dialog) {
       openDialog(item.id);
       return;
     }
-    item.onSelect?.({ closeMenu: close, navigate });
+    if (item.onSelect) {
+      item.onSelect({ closeMenu: close, navigate });
+      return;
+    }
+    if (item.path) {
+      navigate(item.path);
+      close();
+    }
   };
 
   const renderRow = (item: AdminMenuItem) => (
