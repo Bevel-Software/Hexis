@@ -195,7 +195,7 @@ export function WelcomePage() {
    */
   async function copySnippet() {
     const ok = await copyToClipboard(snippet);
-    if (!ok) toast(COPY_FAILED_TOAST);
+    if (!ok) toast(COPY_FAILED_TOAST, 'danger');
     window.clearTimeout(resetTimer.current);
     // Back to idle FIRST, so a repeat copy is a real state change and the
     // live region announces it again — setting 'ok' over 'ok' is a no-op that

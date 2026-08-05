@@ -35,13 +35,22 @@ const TONE: Record<ToastTone, string> = {
 };
 
 export function LibraryToastProvider({ children }: { children: ReactNode }) {
-  const [toast, setToast] = useState<{ message: string; tone: ToastTone } | null>(null);
+  // `visible` rather than dropping the toast to null on expiry: the element
+  // stays mounted so the exit animates, so its tone has to outlive the message.
+  const [toast, setToast] = useState<{
+    message: string;
+    tone: ToastTone;
+    visible: boolean;
+  } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const show = useCallback<ShowToast>((msg, tone = 'neutral') => {
-    setToast({ message: msg, tone });
+    setToast({ message: msg, tone, visible: true });
     if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => setToast(null), toastDuration(msg));
+    timer.current = setTimeout(
+      () => setToast((prev) => (prev ? { ...prev, visible: false } : null)),
+      toastDuration(msg),
+    );
   }, []);
 
   return (
@@ -54,16 +63,21 @@ export function LibraryToastProvider({ children }: { children: ReactNode }) {
           'pointer-events-none fixed bottom-7 left-1/2 z-[80] -translate-x-1/2',
           'max-w-[82vw] rounded-full px-[18px] py-2.5',
           'text-center text-ui font-medium text-canvas',
-          // The element stays mounted so the fade-out animates; `tone` is read
-          // from the last toast shown, which is also the one on its way out.
+          // Read from the toast on its way out, not reset to neutral. The
+          // transition covers opacity and transform but NOT background-color,
+          // so dropping the tone on expiry would snap a danger toast from red
+          // to ink the instant it starts leaving — a jump, not a fade.
           TONE[toast?.tone ?? 'neutral'],
           // Opacity AND an 8px lift, as the prototype does: a pill that only
           // slid would be readable while it was still arriving.
           'transition-[opacity,transform] duration-200 ease-out',
-          toast ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0',
+          toast?.visible ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0',
         )}
       >
-        {toast?.message}
+        {/* Cleared on expiry even though the plate lingers: the pill is only
+            transparent, not unmounted, so a stale message would stay readable
+            to a screen reader long after it left the screen. */}
+        {toast?.visible ? toast.message : null}
       </div>
     </ToastContext.Provider>
   );
