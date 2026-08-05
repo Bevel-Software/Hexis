@@ -30,15 +30,24 @@ pnpm build
 
 # 3. Configure
 cp .env.example .env   # then fill in at least: DATABASE_URL, JWT_SECRET,
-                       # TEST_PASSWORD, KB_REPO_URL, GIT_TOKEN, SECRETS_ENC_KEY,
-                       # SEED_ADMIN_EMAILS (for an empty KB repo)
+                       # ADMIN_EMAIL + ADMIN_PASSWORD (your way in before any
+                       # account exists), KB_REPO_URL, GIT_TOKEN,
+                       # SECRETS_ENC_KEY, SEED_ADMIN_EMAILS (for an empty KB repo)
 
 # 4. Run (backend :3001 + Vite dev server :5173)
 pnpm dev
 ```
 
 Or run the whole thing in Docker: `docker compose up` (Postgres + the app serving
-the built SPA on :3001).
+the built SPA on :3001). Use `APP_PORT=8080 docker compose up` for a different
+host port.
+
+**Behind a reverse proxy** (Coolify, Traefik, nginx), deploy with an explicit
+`-f docker-compose.yml`. That skips `docker-compose.override.yml`, so the app
+publishes no host port and the proxy reaches it on port 3001 over the compose
+network. Publishing a fixed host port instead makes every redeploy fail with
+`port is already allocated`, because the replacement container starts while the
+outgoing one still holds it.
 
 ## Environment variables (core subset)
 
@@ -46,7 +55,7 @@ the built SPA on :3001).
 | --- | --- | --- |
 | `DATABASE_URL` | yes | Postgres connection string |
 | `JWT_SECRET` | yes | Signs login sessions + OAuth state |
-| `TEST_PASSWORD` | yes* | Shared password for password login (`LOGIN_PASSWORD=false` disables the method) |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | first boot | Bootstrap admin sign-in, checked against the env and never stored — the only way into a deployment with no accounts yet. Unset either to revoke it |
 | `KB_REPO_URL` | yes | https clone/push URL of the knowledge-base repo (any git host) |
 | `GIT_TOKEN` / `GIT_USERNAME` | yes | Git credential (Basic password / host-specific username) |
 | `SECRETS_ENC_KEY` | yes | 32-byte key (base64/hex) encrypting vault secrets + MCP OAuth tokens |
@@ -57,6 +66,9 @@ the built SPA on :3001).
 | `PUBLIC_BACKEND_URL` / `PUBLIC_FRONTEND_URL` | prod | Public origins for OAuth redirects + bounces |
 | `TENANT_ID` | no | Slug branding every credential prefix (default `bevel`) |
 | `ALLOWED_EMAIL_DOMAINS` | no | Email-domain allow-list for login |
+| `LOGIN_PASSWORD` | no | `false` hides password login and rejects `/api/auth/login` |
+| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | no | Generic OIDC single sign-on; the method appears once all three are set |
+| `TRUST_PROXY` | behind a proxy | Reverse-proxy hop count, so `req.ip` and the per-IP login rate limit see the real client |
 | `KB_TEMPLATE_DIR` | no | Overrides the packaged KB seed template |
 | `ONTOLOGY_SESSION_BLOCK` | no | Ontology-session touch tracking toggle (default on) |
 
