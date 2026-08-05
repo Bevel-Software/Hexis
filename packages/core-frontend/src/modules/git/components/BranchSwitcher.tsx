@@ -201,6 +201,7 @@ export function BranchSwitcher() {
   // protected branch", which the share flow enforces server-side too.
   const canOpenPr = !!currentBranch && !currentBranch.isProtected;
 
+  /** Discard a draft, confirming first when the remote ref goes with it. */
   async function doDelete(name: string, hasRemote: boolean) {
     // Two reasons a branch reaches doDelete: (1) it's an orphan with no
     // remote counterpart (PR merged + remote head pruned — tidy-up, no
@@ -220,6 +221,11 @@ export function BranchSwitcher() {
     }
   }
 
+  /**
+   * Move to another branch. Under the per-branch workspace model the URL IS
+   * the switch — changing it triggers the bootstrap — so there is no git
+   * operation to perform here.
+   */
   function doSwitch(name: string) {
     // No-op when the user clicks the branch they're already on — otherwise a dirty
     // tree would pop the commit-first dialog for a switch that has nothing to do.
@@ -240,6 +246,11 @@ export function BranchSwitcher() {
     navigate(kbFileUrl(name, openFilePath ?? ''));
   }
 
+  /**
+   * Turn the typed "what are you changing?" sentence into a draft branch and
+   * navigate onto it. Creating and arriving are one gesture — a draft you
+   * cannot see yet would be a branch nobody asked for.
+   */
   async function doCreate() {
     const text = newBranchName.trim();
     if (!text) return;
@@ -259,6 +270,12 @@ export function BranchSwitcher() {
     }
   }
 
+  /**
+   * Propose the current draft against `base`, by handing off to whichever
+   * change-request port is registered rather than deciding here what
+   * "propose" means — enterprise routes it through the chat agent, core opens
+   * the dialog.
+   */
   function doOpenPr(base: string) {
     if (!currentBranch) return;
     // Hand off to the registered change-request port. The enterprise registry

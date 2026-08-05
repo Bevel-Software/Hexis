@@ -102,6 +102,14 @@ function AuthenticatedApp() {
   );
 }
 
+/**
+ * The signed-in app: builds the workspace, git, auto-pull and PR-viewer state
+ * and provides all of it to everything below.
+ *
+ * Split out from `AuthenticatedApp` so this half runs INSIDE the event-bus
+ * provider — these hooks subscribe to bus events, which a sibling of the
+ * provider could not reach.
+ */
 function AuthenticatedAppInner() {
   const registry = useAppRegistry();
   const workspaceState = useWorkspaceState();
@@ -450,6 +458,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * The auth boundary. Nothing below it mounts until there is a session, so no
+ * downstream provider has to carry a "signed out" case.
+ */
 function AppShell() {
   return (
     <AuthGate>
@@ -458,6 +470,12 @@ function AppShell() {
   );
 }
 
+/**
+ * The package's entry point: hand it a registry and it is the whole app.
+ *
+ * Core contributions merge AHEAD of registry-contributed ones, so a downstream
+ * build adds to the app rather than reordering what core already put there.
+ */
 export function CoreAppShell({ registry }: { registry: AppRegistry }) {
   // Core contributions merge ahead of registry-contributed ones: the review
   // file-viewer panel (core — it renders the pending-changes session served

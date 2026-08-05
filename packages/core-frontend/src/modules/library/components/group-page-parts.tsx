@@ -206,6 +206,11 @@ export function GroupItemSections({
   );
 }
 
+/**
+ * The centred, quiet line a page shows when it has nothing else to say —
+ * empty, loading, or unreachable. One component so those three states are
+ * spaced and toned identically instead of each page inventing its own.
+ */
 export function PageNote({ children }: { children: ReactNode }) {
   return <div className="py-16 text-center text-ui text-ink-faint">{children}</div>;
 }
