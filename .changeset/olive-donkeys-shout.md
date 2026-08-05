@@ -7,9 +7,9 @@ file used to hide "Propose changes" on every other file of that skill until the
 first proposal was withdrawn or decided — the editor was gated on the caller
 having any open change request touching the skill folder, so a pending edit to
 SKILL.md locked the whole bundle. Each file now carries its own suggestion
-branch (`suggestions/<user>/<skill>--<file>`) and opens its own change request,
-titled with the file so the owner's dock can tell several apart, and each is
-approved or declined on its own.
+branch (`suggestions/<user>/<skill>--<file>-<digest>`) and opens its own change
+request, titled with the file so the owner's dock can tell several apart, and
+each is approved or declined on its own.
 
 The file lands flattened into the last branch segment (`--<file>`) rather than
 nested under the skill (`/<file>`): a skill-level branch from before files were
@@ -25,6 +25,17 @@ collapses `..` and rewrites a trailing `.lock` — both are rejected outright by
 the backend's branch-name validator, and a skill shipping a `deps.lock` beside
 its SKILL.md would otherwise have been unproposable with only a bare 400 to
 explain it.
+
+Because that sanitising is lossy, the branch also carries a short digest of the
+path it came from. Every character git will not take becomes `-`, so
+`reference/DESIGN-SYSTEM.md` and `reference-design-system.md` reduced to the
+same branch — and since a request is matched to the file on screen by branch,
+the first file's pending request was served to the second as its own, leaving
+the second unproposable and writing any proposal on it into the first file's
+request. The digest is taken before sanitising, so the two stay apart. The
+readable slug is now also truncated to fit git's 255-character ceiling on a
+ref, which nothing upstream had bounded; the digest survives the truncation, so
+two long paths sharing a prefix still get their own branches.
 
 The owner's change-request dock gets the two things that per-file requests made
 necessary: a `»` control that folds it to a slim tab on the viewport edge (it

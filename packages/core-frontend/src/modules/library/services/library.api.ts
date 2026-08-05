@@ -113,6 +113,39 @@ function branchSegment(raw: string): string {
   return cleaned || 'user';
 }
 
+/** Git's own ceiling on a ref name; a longer one is refused outright. */
+const MAX_BRANCH_LENGTH = 255;
+
+/**
+ * A 32-bit FNV-1a digest of the file path, as fixed-width hex.
+ *
+ * What matters is WHAT it hashes: the raw path, before `branchSegment` has
+ * touched it. `branchSegment` is lossy by design — every character git will
+ * not take becomes '-', so `reference/DESIGN-SYSTEM.md` and
+ * `reference-design-system.md` come out of it as the same slug. Two files
+ * sharing one branch is not a cosmetic clash: `SkillPage` decides which
+ * request belongs to the open file BY BRANCH, so the first file's pending
+ * request is handed to the second as its own, the editor stays closed, and a
+ * proposal on the second file is written into the first file's request
+ * instead of opening its own.
+ *
+ * Not a cryptographic hash and does not need to be — it separates the files
+ * within one skill folder, and 32 bits is orders of magnitude more than the
+ * dozens of paths that live there.
+ */
+function pathDigest(raw: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < raw.length; i += 1) {
+    hash ^= raw.charCodeAt(i);
+    // ×16777619 (the FNV prime) written as shifts, so it stays in 32 bits.
+    hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+/** Drop separators a truncation may have left dangling on the end. */
+const trimEnd = (s: string): string => s.replace(/[-./]+$/, '');
+
 /**
  * The one suggestion branch per user per skill FILE (see mocks/README.md —
  * suggestions are git). The file lands FLATTENED into the last segment
@@ -122,13 +155,35 @@ function branchSegment(raw: string): string {
  * `suggestions/u/skill/anything` while one exists — the ref would have to be
  * a file and a directory at once.
  *
- * Without `file` this returns that legacy skill-level name, which callers
- * still need in order to RECOGNISE requests opened before branches carried
- * the file — not to open new ones.
+ * The file segment is a readable slug plus a digest of the path it came from.
+ * The slug alone cannot identify the file — it is lossy (see `pathDigest`) —
+ * and it is unbounded, while the ref it lands in is capped at 255. So the
+ * digest carries the identity and the slug is free to be truncated to
+ * whatever room the base leaves, staying human-readable without being load
+ * bearing.
+ *
+ * Without `file` this returns the legacy skill-level name, byte for byte as
+ * before — callers still need it in order to RECOGNISE requests opened before
+ * branches carried the file, and those branches already exist under that
+ * exact name.
  */
 export function suggestionBranchFor(userEmail: string, skillName: string, file?: string): string {
   const base = `suggestions/${branchSegment(userEmail.split('@')[0])}/${branchSegment(skillName)}`;
-  return file === undefined ? base : `${base}--${branchSegment(file)}`;
+  if (file === undefined) return base;
+
+  const digest = pathDigest(file);
+  // The `--` joiner and the `-<digest>` are the parts that cannot be dropped;
+  // whatever the cap leaves after them is the slug's to use.
+  const fixedCost = 2 + digest.length + 1;
+  // A base long enough to crowd out the digest is pathological (a ~240-char
+  // skill name), but truncating it beats emitting a ref git will reject.
+  const head =
+    base.length + fixedCost <= MAX_BRANCH_LENGTH
+      ? base
+      : trimEnd(base.slice(0, MAX_BRANCH_LENGTH - fixedCost));
+  const slug = trimEnd(branchSegment(file).slice(0, MAX_BRANCH_LENGTH - head.length - fixedCost));
+
+  return slug ? `${head}--${slug}-${digest}` : `${head}--${digest}`;
 }
 
 export interface ProposeChangeInput {
