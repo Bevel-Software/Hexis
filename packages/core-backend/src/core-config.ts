@@ -59,8 +59,9 @@ export class CoreConfig {
   /**
    * Password half of the bootstrap credential, checked directly against the
    * environment at login time (never stored) so a fresh deployment can sign in
-   * before any account exists. Unset it and the credential stops working
-   * immediately; accounts in the database are unaffected.
+   * before any account exists. Captured ONCE here, so changing or unsetting it
+   * takes effect on the next restart rather than at once — accounts in the
+   * database are unaffected either way.
    *
    * Required only when password login is ENABLED. An SSO-only deployment
    * (`LOGIN_PASSWORD=false`) would otherwise have to mint a shared password
@@ -148,8 +149,12 @@ export class CoreConfig {
    * secrets: the secrets-vault values and the MCP OAuth client secrets/tokens.
    * Read from `SECRETS_ENC_KEY`, falling back to the legacy
    * `CONNECTOR_CONFIG_ENC_KEY` → `SHAREPOINT_TOKEN_ENC_KEY` chain so existing
-   * deploys keep decrypting without re-keying. Empty = secret values can't be
-   * saved (a clear error surfaces only when a secret is actually written/read).
+   * deploys keep decrypting without re-keying.
+   *
+   * REQUIRED. It used to be optional, with the failure surfacing only when
+   * somebody wrote a secret — which now includes the git token typed into the
+   * setup screen, so an unset key turns the first-run flow into a dead end at
+   * the last step. Refusing to boot names the variable instead.
    */
   readonly secretsEncKey: string;
   /**
@@ -192,7 +197,17 @@ export class CoreConfig {
     this.workspacesRoot = process.env.WORKSPACES_ROOT || path.resolve(process.cwd(), 'workspaces');
     this.backupsRoot = process.env.BACKUPS_ROOT || path.resolve(this.workspacesRoot, '..', 'backups');
     this.spillRoot = process.env.SPILL_ROOT || path.resolve(this.workspacesRoot, '..', 'tool-chain-spills');
-    this.jwtSecret = process.env.JWT_SECRET || '';
+    // Required, and checked BEFORE the auth routes it signs for are ever
+    // mounted. Empty, the first login attempt fails deep inside the JWT library
+    // with a message about a missing key — a boot error naming the variable is
+    // the same information, hours earlier.
+    this.jwtSecret = (process.env.JWT_SECRET || '').trim();
+    if (!this.jwtSecret) {
+      throw new Error(
+        'JWT_SECRET is required — it signs login sessions. Generate one with: ' +
+          `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`,
+      );
+    }
     // Parsed here rather than beside the other toggles below: whether the
     // bootstrap PASSWORD is required depends on it.
     this.loginPasswordEnabled =
@@ -270,6 +285,13 @@ export class CoreConfig {
       process.env.SHAREPOINT_TOKEN_ENC_KEY ||
       ''
     ).trim();
+    if (!this.secretsEncKey) {
+      throw new Error(
+        'SECRETS_ENC_KEY is required — it encrypts the secrets vault, the MCP OAuth ' +
+          'tokens and the git credential saved from the setup screen. Generate one ' +
+          `with: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`,
+      );
+    }
     this.internalTokenSecret = (process.env.INTERNAL_TOKEN_SECRET || '').trim();
     this.trustProxy = (process.env.TRUST_PROXY || '').trim();
     this.publicBackendUrl = (process.env.PUBLIC_BACKEND_URL || `http://localhost:${this.port}`)

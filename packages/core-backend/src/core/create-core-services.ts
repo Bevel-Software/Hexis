@@ -112,6 +112,14 @@ export interface CoreServices {
   adminAccess: AdminAccessService;
   /** Deployment settings, env-first — the KB remote resolves through these. */
   settings: DeploymentSettingsService;
+  /**
+   * The knowledge-base directory name IN EFFECT — environment first, then the
+   * stored setting, then the default. Published here because `config.kbDirName`
+   * is only the environment's half of that answer: reading it directly gives
+   * the empty string on any deployment configured through the setup screen, and
+   * every path built from it would be wrong.
+   */
+  kbDirName: string;
   secretsVaultService: DbSecretsVaultService;
   externalApiKeyService: ExternalApiKeyService;
   internalTokenService: InternalTokenService;
@@ -570,6 +578,7 @@ export async function createCoreServices(
     workspaceService,
     kbSeedService,
     settings,
+    kbDirName,
     spillStore,
     accessControl,
     creatorAccess,

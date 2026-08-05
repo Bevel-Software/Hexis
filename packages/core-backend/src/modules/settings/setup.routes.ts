@@ -5,6 +5,7 @@ import type { IAdminAccessService } from '../admin/admin.interface.js';
 import {
   DeploymentSettingsService,
   SettingsValidationError,
+  validateHttpsRemote,
 } from './deployment-settings.service.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
@@ -117,6 +118,17 @@ export function createSetupRoutes(
       res.status(400).json({ ok: false, error: 'Enter the repository URL first.' });
       return;
     }
+    // The SAME rule the setting is validated by, applied before the value ever
+    // reaches git. Without it this endpoint is argument injection: a value
+    // beginning `--upload-pack=` makes git run a command of the caller's
+    // choosing, and `ext::sh -c …` is a transport whose entire purpose is to
+    // execute one. Both are admin-only, but "admin" is not "may run arbitrary
+    // commands as the server process".
+    const urlProblem = validateHttpsRemote(url);
+    if (urlProblem) {
+      res.status(400).json({ ok: false, error: urlProblem });
+      return;
+    }
     if (!/^[A-Za-z0-9._-]+$/.test(username)) {
       // Interpolated into the credential-helper snippet below.
       res.status(400).json({ ok: false, error: 'The username contains unsupported characters.' });
@@ -130,7 +142,9 @@ export function createSetupRoutes(
       const args = ['-c', 'credential.helper=', ...(token
         ? ['-c', `credential.helper=!f() { echo "username=${username}"; echo "password=$BEVEL_TEST_TOKEN"; }; f`]
         : []),
-        'ls-remote', '--heads', url];
+        // `--end-of-options` on top of the validation above: belt and braces,
+        // so nothing that arrives here can ever be read as a flag.
+        'ls-remote', '--heads', '--end-of-options', url];
       const { stdout } = await execFileAsync('git', args, {
         timeout: 20_000,
         env: {

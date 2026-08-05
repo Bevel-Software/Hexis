@@ -61,8 +61,9 @@ services:
       # method, and the initial Admin written into a freshly seeded KB.
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
       # Bootstrap password credential — checked against the environment at login
-      # time and never stored, so unsetting it revokes the credential
-      # immediately. Required only while password login is enabled.
+      # time and never stored. Read ONCE at startup, so changing or unsetting it
+      # takes effect when the container restarts, not before. Required only
+      # while password login is enabled.
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       # Generic OIDC single sign-on; the method appears once all three are set.
       - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}

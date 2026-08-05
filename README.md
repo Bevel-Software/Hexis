@@ -29,9 +29,11 @@ pnpm install
 pnpm build
 
 # 3. Configure
-cp .env.example .env   # then fill in at least: DATABASE_URL, JWT_SECRET,
-                       # ADMIN_EMAIL + ADMIN_PASSWORD (your way in before any
-                       # account exists), KB_REPO_URL, GIT_TOKEN, SECRETS_ENC_KEY
+cp .env.example .env   # then fill in: DATABASE_URL, JWT_SECRET,
+                       # SECRETS_ENC_KEY, ADMIN_EMAIL — plus ADMIN_PASSWORD
+                       # unless you set LOGIN_PASSWORD=false. The knowledge-base
+                       # repo and its token are asked for on the setup screen at
+                       # first sign-in, where they can be tested before saving.
 
 # 4. Run (backend :3001 + Vite dev server :5173)
 pnpm dev

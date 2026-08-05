@@ -251,12 +251,12 @@ export async function createCoreServer(
   const sessionOntologyGate = {
     service: core.sessionOntologyService,
     enabled: core.config.ontologySessionBlock,
-    kbDirName: core.config.kbDirName,
+    kbDirName: core.kbDirName,
     recoveryBotEmail: RECOVERY_BOT_EMAIL,
     hooks: core.workflowService.hooks,
   };
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.accessControl, core.config.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink);
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService);
   registerToolManualsTools(core.toolRegistry, toolsRouter, ta, th, core.toolManualService, {
     accessControl: core.accessControl,
@@ -300,7 +300,7 @@ export async function createCoreServer(
     core.workflowService,
     core.eventBus,
     core.accessControl,
-    core.config.kbDirName,
+    core.kbDirName,
     core.creatorAccess,
   ));
   // Workflow is the only branches / changes / change-request surface. The
@@ -323,7 +323,7 @@ export async function createCoreServer(
     core.authService,
     core.workflowService,
     core.accessControl,
-    core.config.kbDirName,
+    core.kbDirName,
   ));
   app.use('/api', core.authMiddleware, createAccessRoutes(
     core.accessControl,
@@ -332,7 +332,7 @@ export async function createCoreServer(
     core.workflowService,
     core.eventBus,
     core.db,
-    core.config.kbDirName,
+    core.kbDirName,
   ));
   app.use('/api', core.authMiddleware, createSkillsRoutes(core.skillService));
   // Group enumeration + join requests. Browser-only (JWT), and fail-closed
@@ -345,7 +345,7 @@ export async function createCoreServer(
     core.workflowService,
     core.workspaceService,
     core.joinRequestsService,
-    core.config.kbDirName,
+    core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
   ));
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;

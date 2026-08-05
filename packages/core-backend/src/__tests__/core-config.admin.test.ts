@@ -18,6 +18,10 @@ const REQUIRED = {
   KB_REPO_URL: 'https://example.com/org/kb.git',
   ADMIN_EMAIL: 'root@example.com',
   ADMIN_PASSWORD: 'sup3r-secret',
+  // The other two boot requirements, so a case about the admin pair fails for
+  // the reason it is testing rather than for a missing neighbour.
+  JWT_SECRET: 'test-jwt-secret',
+  SECRETS_ENC_KEY: 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=',
 };
 
 let saved: NodeJS.ProcessEnv;
@@ -26,7 +30,16 @@ beforeEach(() => {
   saved = { ...process.env };
   // A clean slate for the keys under test; anything else the constructor reads
   // has a default or is supplied by REQUIRED.
-  for (const key of ['ADMIN_EMAIL', 'ADMIN_PASSWORD', 'LOGIN_PASSWORD', 'SEED_ADMIN_EMAILS']) {
+  for (const key of [
+    'ADMIN_EMAIL',
+    'ADMIN_PASSWORD',
+    'LOGIN_PASSWORD',
+    'SEED_ADMIN_EMAILS',
+    'JWT_SECRET',
+    'SECRETS_ENC_KEY',
+    'CONNECTOR_CONFIG_ENC_KEY',
+    'SHAREPOINT_TOKEN_ENC_KEY',
+  ]) {
     delete process.env[key];
   }
   Object.assign(process.env, REQUIRED);
@@ -66,6 +79,28 @@ describe('CoreConfig — the deployment owner', () => {
   it('normalizes the owner address, since it is matched against sign-in emails', () => {
     process.env.ADMIN_EMAIL = '  Root@Example.COM  ';
     expect(new CoreConfig().adminEmail).toBe('root@example.com');
+  });
+
+  /**
+   * Both sign what the deployment hands out — sessions, and the git credential
+   * the setup screen stores. Unset, the failure used to surface at the first
+   * login or the last step of first-run setup; a boot error naming the variable
+   * is the same information, much earlier.
+   */
+  it('refuses to boot without JWT_SECRET', () => {
+    delete process.env.JWT_SECRET;
+    expect(() => new CoreConfig()).toThrow(/JWT_SECRET is required/);
+  });
+
+  it('refuses to boot without SECRETS_ENC_KEY', () => {
+    delete process.env.SECRETS_ENC_KEY;
+    expect(() => new CoreConfig()).toThrow(/SECRETS_ENC_KEY is required/);
+  });
+
+  it('still accepts the legacy encryption-key names', () => {
+    delete process.env.SECRETS_ENC_KEY;
+    process.env.CONNECTOR_CONFIG_ENC_KEY = 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=';
+    expect(() => new CoreConfig()).not.toThrow();
   });
 
   it('ignores a leftover SEED_ADMIN_EMAILS instead of failing on it', () => {

@@ -24,7 +24,14 @@ export interface SettingDef {
   restartToApply?: boolean;
 }
 
-const HTTPS_URL = (value: string): string | null => {
+/**
+ * The one rule for what a KB remote may look like, shared by the setting below
+ * and the connection test — which must apply it BEFORE handing the value to
+ * git. An unvalidated string reaching `git ls-remote` is argument injection:
+ * `--upload-pack=…` runs a command of the caller's choosing, and git's `ext::`
+ * transport is a shell escape by design.
+ */
+export const validateHttpsRemote = (value: string): string | null => {
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -41,7 +48,7 @@ export const CORE_SETTINGS: SettingDef[] = [
   {
     key: 'kbRepoUrl',
     envVar: 'KB_REPO_URL',
-    validate: HTTPS_URL,
+    validate: validateHttpsRemote,
   },
   {
     key: 'gitToken',
@@ -101,6 +108,19 @@ export interface ResolvedSetting {
  * Values are cached in memory after {@link load}. Reads happen on every clone
  * and every git call, and a database round-trip there would be a tax on the
  * hot path for data that changes about twice in a deployment's life.
+ *
+ * WHICH MAKES THE CACHE PER-PROCESS, and that is a real constraint rather than
+ * an oversight: a second replica keeps serving what it read at boot until it
+ * restarts. It is acceptable here only because of what these settings are —
+ * the knowledge-base connection, written once during first-run setup, on a
+ * deployment that has nothing to serve until it is. Nobody is mid-session on a
+ * second replica at that moment.
+ *
+ * It stops being acceptable the moment a setting is something an operator
+ * changes on a live multi-replica deployment. Adding one means adding
+ * invalidation with it — the event bus already carries user-scoped and
+ * broadcast messages, so a `settings-changed` event that triggers `load()` is
+ * the natural shape.
  */
 export class DeploymentSettingsService {
   private readonly defs = new Map<string, SettingDef>();

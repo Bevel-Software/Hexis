@@ -188,8 +188,8 @@ export class KbSeedService implements IKbSeedService {
           added.push('roles.yaml');
         } else {
           console.warn(
-            `[kb-seed] Branch "${branch}" is missing roles.yaml but no initial Admin ` +
-              'is unset — leaving it absent. Access resolution will fail until an ' +
+            `[kb-seed] Branch "${branch}" is missing roles.yaml and ADMIN_EMAIL is ` +
+              'unset — leaving it absent. Access resolution will fail until an ' +
               'Admin roles.yaml exists; set ADMIN_EMAIL or add roles.yaml manually.',
           );
         }

@@ -70,7 +70,12 @@ export function SetupScreen({ settings, onSaved }: Props) {
     setDraft((d) => ({ ...d, [key]: value }));
     // The message described the old value; keeping it beside a new one would
     // be a complaint about something the reader already fixed.
-    setProblems(({ [key]: _gone, ...rest }) => rest);
+    setProblems((current) => {
+      if (!(key in current)) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
     setTest(null);
   }
 
