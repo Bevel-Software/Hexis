@@ -11,15 +11,12 @@
 @import './shared/theme/index.css';
 @plugin "@tailwindcss/typography";
 
-/* Brand purple. Not part of the design system: the prototype has no purple,
-   and the fate of these 46 call sites is an open decision (T21). Kept here,
-   outside `shared/theme/`, so the token module stays free of undecided
-   values. */
-@theme {
-  --color-bevel: #863bff;
-  --color-bevel-deep: #7e14ff;
-  --color-bevel-soft: #ede6ff;
-}
+/* T21 is resolved: the brand purple is retired. Every call site now uses the
+   design system's `accent` / `accent-hover`, so the app has ONE accent colour
+   instead of a blue token and a purple one competing for the same job. The
+   `--color-bevel*` tokens are deliberately not kept as aliases — an alias
+   would let new purple call sites appear without anyone re-opening the
+   decision. */
 
 /* Onboarding motion, used only through `motion-safe:` utilities so that
    `prefers-reduced-motion` silences all of it at the call sites:

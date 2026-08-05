@@ -106,7 +106,7 @@ function FrontmatterValue({
           e.preventDefault();
           onOpenFile(href);
         }}
-        className="text-bevel hover:text-bevel-deep hover:underline cursor-pointer"
+        className="text-accent hover:text-accent-hover hover:underline cursor-pointer"
       >
         {label}
       </a>

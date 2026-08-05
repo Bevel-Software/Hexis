@@ -321,7 +321,7 @@ function NewRoleControl({
         <button
           type="button"
           onClick={submit}
-          className="px-2 py-1 text-xs rounded bg-bevel hover:bg-bevel-deep text-white disabled:opacity-50 flex items-center gap-1"
+          className="px-2 py-1 text-xs rounded bg-accent hover:bg-accent-hover text-white disabled:opacity-50 flex items-center gap-1"
         >
           Add
         </button>
@@ -930,7 +930,7 @@ function ConfirmDialog({
             onClick={onConfirm}
             disabled={busy}
             className={`px-3 py-1.5 text-xs rounded text-white disabled:opacity-50 flex items-center gap-1 ${
-              danger ? 'bg-red-600 hover:bg-red-700' : 'bg-bevel hover:bg-bevel-deep'
+              danger ? 'bg-red-600 hover:bg-red-700' : 'bg-accent hover:bg-accent-hover'
             }`}
           >
             {busy && <Loader2 size={12} className="animate-spin" />}

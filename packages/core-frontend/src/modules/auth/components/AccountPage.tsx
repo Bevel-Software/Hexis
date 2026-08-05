@@ -102,7 +102,7 @@ export function AccountPage() {
           <button
             type="submit"
             disabled={submitting}
-            className="rounded-md bg-bevel text-white text-sm font-medium px-4 py-2 hover:bg-bevel-deep disabled:opacity-60 disabled:cursor-not-allowed"
+            className="rounded-md bg-accent text-white text-sm font-medium px-4 py-2 hover:bg-accent-hover disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {submitting ? 'Saving…' : 'Change password'}
           </button>
