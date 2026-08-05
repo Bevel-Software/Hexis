@@ -100,7 +100,7 @@ export function SuggestChange({ containerRef, raw, onSubmit }: SuggestChangeProp
       {chip && !form && (
         <button
           type="button"
-          className="fixed z-[85] flex items-center gap-1.5 rounded-full bg-slate-800 px-3.5 py-1.5 text-xs font-semibold text-white shadow-[0_8px_24px_rgba(22,35,58,0.32)] hover:bg-slate-700"
+          className="fixed z-[85] flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-1.5 text-xs font-semibold text-white shadow-[0_8px_24px_rgba(22,35,58,0.32)] hover:bg-ink-muted"
           style={{ left: chip.left, top: chip.top }}
           onClick={() => {
             setForm(chip);
@@ -115,7 +115,7 @@ export function SuggestChange({ containerRef, raw, onSubmit }: SuggestChangeProp
       )}
       {form && (
         <div
-          className="fixed z-[85] w-[290px] rounded-[14px] border border-slate-200 bg-white p-4 shadow-[0_16px_44px_rgba(22,35,58,0.24)]"
+          className="fixed z-[85] w-[290px] rounded-[14px] border border-line bg-white p-4 shadow-[0_16px_44px_rgba(22,35,58,0.24)]"
           style={{
             left: Math.min(Math.max(8, form.left), window.innerWidth - 300),
             top: Math.min(Math.max(8, form.top + 34), window.innerHeight - 260),
@@ -123,23 +123,23 @@ export function SuggestChange({ containerRef, raw, onSubmit }: SuggestChangeProp
           role="dialog"
           aria-label="Suggest a change"
         >
-          <h5 className="mb-2 text-[12.5px] font-bold text-slate-800">Suggest a change</h5>
+          <h5 className="mb-2 text-[12.5px] font-bold text-ink">Suggest a change</h5>
           <div className="mb-1 max-h-[58px] overflow-auto rounded-md bg-[#fdecec] px-2 py-1 font-mono text-[11px] text-[#b91c1c] line-through">
             {form.text}
           </div>
-          <label className="mb-1 mt-2 block text-[10px] font-bold uppercase tracking-[.07em] text-slate-400">
+          <label className="mb-1 mt-2 block text-[10px] font-bold uppercase tracking-[.07em] text-ink-faint">
             Your version
             <textarea
               rows={3}
-              className="mt-1 w-full resize-y rounded-lg border border-slate-200 px-2 py-1.5 text-xs font-normal normal-case tracking-normal text-slate-800 outline-none focus:border-[#0d9488]"
+              className="mt-1 w-full resize-y rounded-lg border border-line px-2 py-1.5 text-xs font-normal normal-case tracking-normal text-ink outline-none focus:border-[#0d9488]"
               value={replaceValue}
               onChange={(e) => setReplaceValue(e.target.value)}
             />
           </label>
-          <label className="mb-1 mt-2 block text-[10px] font-bold uppercase tracking-[.07em] text-slate-400">
+          <label className="mb-1 mt-2 block text-[10px] font-bold uppercase tracking-[.07em] text-ink-faint">
             Note (optional)
             <input
-              className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs font-normal normal-case tracking-normal text-slate-800 outline-none focus:border-[#0d9488]"
+              className="mt-1 w-full rounded-lg border border-line px-2 py-1.5 text-xs font-normal normal-case tracking-normal text-ink outline-none focus:border-[#0d9488]"
               placeholder="Why this change?"
               value={note}
               onChange={(e) => setNote(e.target.value)}
@@ -149,7 +149,7 @@ export function SuggestChange({ containerRef, raw, onSubmit }: SuggestChangeProp
           <div className="mt-3 flex justify-end gap-2">
             <button
               type="button"
-              className="rounded-[10px] border border-slate-200 px-3.5 py-2 text-[12.5px] font-semibold text-slate-500 hover:text-slate-800"
+              className="rounded-[10px] border border-line px-3.5 py-2 text-[12.5px] font-semibold text-ink-muted hover:text-ink"
               onClick={() => setForm(null)}
               disabled={busy}
             >

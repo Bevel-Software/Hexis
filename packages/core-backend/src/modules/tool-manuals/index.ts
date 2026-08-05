@@ -8,5 +8,7 @@ export {
   EXTERNAL_KB_MANUAL_NAME,
   type IToolManualService,
   type ToolManualSummary,
+  type ToolManualDetail,
+  type ToolCapability,
   type ToolManualType,
 } from './tool-manuals.contract.js';

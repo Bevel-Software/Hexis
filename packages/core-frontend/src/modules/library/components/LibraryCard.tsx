@@ -1,7 +1,8 @@
-import { useRef, type PointerEvent } from 'react';
-import { GearIcon } from './GearIcon';
-import { StatusGem } from './StatusGem';
-import type { AttentionStatus } from '../utils/status';
+import { Badge, Surface } from '../../../shared/components';
+import { cn } from '../../../lib/utils';
+import { StatusDot } from './StatusDot';
+import { ToolLogo } from './ToolLogo';
+import type { AttentionStatus, GemState } from '../utils/status';
 
 export interface LibraryCardProps {
   kind: 'skill' | 'integration';
@@ -9,19 +10,36 @@ export interface LibraryCardProps {
   name: string;
   description: string;
   owned: boolean;
-  /** Rendered in the footer ONLY when it needs attention (mock rule). */
   status: AttentionStatus;
-  picked: boolean;
-  /** Card-body click: toggle loadout membership (rect feeds the particle flight). */
-  onToggle(fromRect: DOMRect): void;
-  /** Top-right info button: open the detail dialog. */
-  onInfo(): void;
+  /**
+   * The skill's declared `version:` frontmatter, when it has one. Most skills
+   * do not, so this slot is empty far more often than it is full — which is
+   * why it is a quiet right-aligned note and not a badge.
+   */
+  version?: string;
+  /** Open the item. The whole card is the target. */
+  onOpen(): void;
 }
 
+const STATUS_INK: Record<GemState, string> = {
+  ok: 'text-ok',
+  warn: 'text-wait',
+  err: 'text-danger',
+};
+
 /**
- * One gallery card. Deliberately icon/emoji-free (approved design). Skills get
- * the green top accent strip; integrations the gear chrome (4 corner gears +
- * 1 center, slow-spinning on hover). 3D tilt + glare follow the pointer.
+ * One gallery card — the prototype's `.card` (line 158).
+ *
+ * The whole card is one `<button>` that opens the item, which is why there is
+ * no ⓘ affordance any more: it used to exist because the card body was spent
+ * on toggling loadout membership, so opening needed its own target. With the
+ * loadout gone the card has a single action, and a card with a single action
+ * should not have two controls.
+ *
+ * The two-line clamp on the description is load-bearing, not cosmetic. Skill
+ * descriptions run to full paragraphs, so without it a card grows to whatever
+ * its longest text needs and the grid stops being a grid. `min-h` sets the
+ * floor, the clamp sets the ceiling, and every card lands between them.
  */
 export function LibraryCard({
   kind,
@@ -30,103 +48,67 @@ export function LibraryCard({
   description,
   owned,
   status,
-  picked,
-  onToggle,
-  onInfo,
+  version,
+  onOpen,
 }: LibraryCardProps) {
-  const ref = useRef<HTMLDivElement>(null);
-
-  function onPointerMove(e: PointerEvent<HTMLDivElement>) {
-    const el = ref.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    const px = (e.clientX - r.left) / r.width;
-    const py = (e.clientY - r.top) / r.height;
-    el.style.transform = `translateY(-12px) scale(1.045) rotateX(${(0.5 - py) * 10}deg) rotateY(${(px - 0.5) * 10}deg)`;
-    el.style.setProperty('--lib-mx', `${px * 100}%`);
-    el.style.setProperty('--lib-my', `${py * 100}%`);
-  }
-
-  function onPointerLeave() {
-    if (ref.current) ref.current.style.transform = '';
-  }
-
-  const needsAttention = kind === 'integration' && status.state !== 'ok';
+  /**
+   * What the bottom-left says, and when it says anything at all.
+   *
+   * A TOOL always states its connection, because that is the only question
+   * anyone asks of a tool and the answer changes without warning — `Connected`
+   * or `Needs …`, never a third thing.
+   *
+   * A SKILL is silent unless something is in its way. A skill has no state of
+   * its own to report; a green "Ready" on every skill in the grid is a row of
+   * noise that says nothing, and it buries the two cards that DO need you.
+   */
+  const footNote = kind === 'integration' || status.state !== 'ok' ? status : null;
 
   return (
-    <div
-      ref={ref}
+    <Surface
+      as="button"
+      type="button"
       data-testid={`library-card-${kind}-${id}`}
-      role="button"
-      tabIndex={0}
-      aria-pressed={picked}
-      aria-label={`${name} — ${picked ? 'remove from loadout' : 'add to loadout'}`}
-      className={`lib-card ${kind === 'skill' ? 'lib-card-skill' : 'lib-card-tool'} ${picked ? 'lib-card-picked' : ''} flex min-h-[180px] flex-col gap-2.5 p-4`}
-      onPointerMove={onPointerMove}
-      onPointerLeave={onPointerLeave}
-      onClick={() => {
-        const el = ref.current;
-        if (el) onToggle(el.getBoundingClientRect());
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          const el = ref.current;
-          if (el) onToggle(el.getBoundingClientRect());
-        }
-      }}
+      interactive
+      padded
+      className="flex min-h-28 flex-col gap-1.5 text-left"
+      onClick={onOpen}
     >
-      {kind === 'integration' && (
-        <div className="lib-gears">
-          <GearIcon />
-          <GearIcon />
-          <GearIcon />
-          <GearIcon />
-          <GearIcon />
-        </div>
+      <span className="flex items-center gap-2">
+        {/* Only tools carry a mark. A skill has no brand to recognise — its
+            name IS the thing — and a monogram beside every skill would add a
+            column of coloured squares that distinguish nothing. */}
+        {kind === 'integration' && <ToolLogo slug={id} name={name} />}
+        <span className="truncate text-lede font-semibold text-ink">{name}</span>
+        {owned && (
+          <Badge tone="outline" size="xs" className="shrink-0 uppercase">
+            Owner
+          </Badge>
+        )}
+      </span>
+
+      {description && (
+        <span className="line-clamp-2 text-detail text-ink-muted">{description}</span>
       )}
-      <div className="lib-card-glare" />
-      <button
-        type="button"
-        aria-label={`Details for ${name}`}
-        title="Details"
-        className={`absolute right-2.5 top-2.5 z-[3] flex h-6 w-6 items-center justify-center rounded-full border bg-white/85 font-serif text-xs font-bold italic transition-all hover:scale-110 hover:border-[#0d9488] hover:bg-white hover:text-[#0f766e] ${picked ? 'border-[#9dd8cd] text-slate-500' : 'border-slate-200 text-slate-400'}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          onInfo();
-        }}
-      >
-        i
-      </button>
-      <div className="pr-6">
-        <div className="text-[14.5px] font-bold tracking-[.01em] text-slate-800">{name}</div>
-        <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] uppercase tracking-[.08em] text-slate-400">
-          {kind === 'skill' ? 'Skill' : 'Integration'}
-          {owned && (
-            <span className="rounded-full border border-[#f0dda6] bg-[#fdf3d8] px-1.5 text-[9.5px] font-bold tracking-[.05em] text-[#92600a]">
-              OWNER
+
+      {/* The foot exists only when it has something to say. An empty strip
+          still costs the two lines of description their room, so a healthy
+          skill with no version simply ends after its description — which is
+          what makes the cards that DO carry a note stand out at a glance. */}
+      {(footNote || version) && (
+        <span className="mt-auto flex items-center gap-1.5 pt-2 text-meta text-ink-faint">
+          {footNote && (
+            <span className={cn('flex items-center gap-1.5 font-semibold', STATUS_INK[footNote.state])}>
+              <StatusDot state={footNote.state} />
+              {footNote.text}
             </span>
           )}
-        </div>
-      </div>
-      <div className="relative flex-1 text-xs text-slate-500">{description}</div>
-      {needsAttention && (
-        <div
-          className={`flex items-center border-t pt-2.5 ${picked ? 'border-[#bde4dc]' : 'border-slate-200'}`}
-        >
-          <span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500">
-            <StatusGem state={status.state} />
-            {status.text}
-          </span>
-        </div>
+          {/* `ml-auto` on the version, not on the status: the version is the
+              thing pinned right, and it has to stay pinned there whether or
+              not a status is sharing the row. */}
+          {version && <span className="ml-auto shrink-0 tabular-nums">v{version}</span>}
+        </span>
       )}
-      <div className="lib-hover-cta">
-        {picked ? (
-          <span className="lib-hc-remove">− Remove</span>
-        ) : (
-          <span className="lib-hc-add">+ Add to loadout</span>
-        )}
-      </div>
-    </div>
+    </Surface>
   );
 }

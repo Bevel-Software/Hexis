@@ -1,209 +1,25 @@
 /**
- * Library module — game-feel visual layer (approved mock: mocks/mock-a2-game-library.html).
- * Deliberately teal-accented (#0d9488), NOT brand purple: the user moved this
- * view off the brand color on purpose. Everything here is scoped under `lib-`
- * class names; layout is Tailwind in the components, this file holds only the
- * pieces Tailwind can't express well: keyframes, glossy status gems, particle
- * flight, gear chrome, 3D card tilt + glare, slot/dock animations, diff marks.
+ * Library module — the CSS the components can't express in Tailwind.
+ *
+ * This file used to be a second design system: a game-feel layer from
+ * `mocks/mock-a2-game-library.html` with a teal accent, glossy status gems,
+ * 3D card tilt + pointer glare, spinning gear chrome, hover CTAs and particle
+ * flight — 331 lines and 106 raw hex values on its own radius and type scale.
+ *
+ * That direction was superseded by the flat prototype the app is migrating to
+ * (`skill-prototype-juan.html`), which has none of those things, so the layer
+ * was removed rather than re-tinted. What survives is the part that carries
+ * meaning rather than mood: the loadout slot animation (it shows an item
+ * arriving, which is otherwise invisible), the change-request dock entrance,
+ * and the diff marks.
+ *
+ * Everything below now reads from `shared/theme/tokens.css`. Keep it that way:
+ * a colour that isn't a token here is a colour nothing else can retheme.
  */
 
-/* ── status gems ── */
-.lib-gem {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10px;
-  font-weight: 800;
-  flex-shrink: 0;
-  box-shadow:
-    0 2px 8px rgba(22, 35, 58, 0.18),
-    inset 0 2px 3px rgba(255, 255, 255, 0.6),
-    inset 0 -3px 4px rgba(0, 0, 0, 0.18);
-}
-.lib-gem-ok {
-  background: radial-gradient(circle at 35% 30%, #a7ffd9, #10b981 60%, #0a8f60);
-  color: #05402a;
-}
-.lib-gem-warn {
-  background: radial-gradient(circle at 35% 30%, #ffe3b0, #f59e0b 60%, #cc7a00);
-  color: #5a3400;
-}
-.lib-gem-err {
-  background: radial-gradient(circle at 35% 30%, #ffc3ca, #ef4444 60%, #c22738);
-  color: #4d0810;
-}
-.lib-gem-off {
-  background: radial-gradient(circle at 35% 30%, #f1f5f9, #c4cfdc 60%, #8fa0b3);
-  color: #42536b;
-}
-
-/* ── cards: 3D tilt + glare + hover CTA ── */
-.lib-grid {
-  perspective: 1200px;
-}
-.lib-card {
-  position: relative;
-  border-radius: 16px;
-  overflow: hidden;
-  cursor: pointer;
-  user-select: none;
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  transform-style: preserve-3d;
-  will-change: transform;
-  transition:
-    transform 0.18s ease-out,
-    box-shadow 0.25s,
-    border-color 0.25s,
-    background 0.25s;
-  box-shadow: 0 2px 10px rgba(22, 35, 58, 0.06);
-}
-.lib-card:hover {
-  border-color: #7fd0c4;
-  box-shadow:
-    0 22px 40px rgba(22, 35, 58, 0.16),
-    0 0 0 1px rgba(13, 148, 136, 0.08);
-  z-index: 2;
-}
-.lib-card-glare {
-  position: absolute;
-  inset: 0;
-  border-radius: 16px;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.2s;
-  background: radial-gradient(
-    320px circle at var(--lib-mx, 50%) var(--lib-my, 50%),
-    rgba(255, 255, 255, 0.65),
-    transparent 55%
-  );
-}
-.lib-card:hover .lib-card-glare {
-  opacity: 1;
-}
-/* green accent strip — skill cards only */
-.lib-card-skill::before {
-  content: '';
-  position: absolute;
-  left: 14px;
-  right: 14px;
-  top: 0;
-  height: 2.5px;
-  border-radius: 99px;
-  background: linear-gradient(90deg, transparent, #10b981, transparent);
-  opacity: 0.9;
-  z-index: 1;
-}
-.lib-card-tool {
-  background: linear-gradient(165deg, #fbfcfe, #f3f6fa);
-}
-/* picked (in the loadout): teal-tinted */
-.lib-card-picked,
-.lib-card-tool.lib-card-picked {
-  background: linear-gradient(165deg, #e9f8f5, #d4f0ea);
-  border-color: #4cbcab;
-  box-shadow: 0 4px 18px rgba(13, 148, 136, 0.22);
-}
-
-.lib-hover-cta {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  padding: 12px 0 14px;
-  display: flex;
-  justify-content: center;
-  background: linear-gradient(transparent, rgba(255, 255, 255, 0.92) 55%);
-  opacity: 0;
-  transform: translateY(8px);
-  transition:
-    opacity 0.18s,
-    transform 0.18s;
-  pointer-events: none;
-  z-index: 2;
-}
-.lib-card:hover .lib-hover-cta {
-  opacity: 1;
-  transform: none;
-}
-.lib-card-picked .lib-hover-cta {
-  background: linear-gradient(transparent, rgba(222, 243, 238, 0.94) 55%);
-}
-.lib-hc-add {
-  font-size: 12px;
-  font-weight: 700;
-  border-radius: 99px;
-  padding: 5px 16px;
-  color: #0a8f60;
-  background: #e0f8ee;
-  box-shadow: inset 0 0 0 1px #a9e8cd;
-}
-.lib-hc-remove {
-  font-size: 12px;
-  font-weight: 700;
-  border-radius: 99px;
-  padding: 5px 16px;
-  color: #c53030;
-  background: #fdecec;
-  box-shadow: inset 0 0 0 1px #f3c4c4;
-}
-
-/* ── gear chrome on integration cards ── */
-.lib-gears {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  color: #5b6b81;
-  opacity: 0.09;
-  transition: opacity 0.2s;
-}
-.lib-gears svg {
-  position: absolute;
-  width: 52px;
-  height: 52px;
-  animation: lib-spin 16s linear infinite;
-  animation-play-state: paused;
-}
-.lib-gears svg:nth-child(1) {
-  top: -20px;
-  left: -20px;
-}
-.lib-gears svg:nth-child(2) {
-  top: -20px;
-  right: -20px;
-  animation-direction: reverse;
-}
-.lib-gears svg:nth-child(3) {
-  bottom: -20px;
-  left: -20px;
-  animation-direction: reverse;
-}
-.lib-gears svg:nth-child(4) {
-  bottom: -20px;
-  right: -20px;
-}
-.lib-gears svg:nth-child(5) {
-  top: 50%;
-  left: 50%;
-  margin: -26px 0 0 -26px;
-  animation-duration: 30s;
-}
-.lib-card-tool:hover .lib-gears svg {
-  animation-play-state: running;
-}
-.lib-card-tool:hover .lib-gears {
-  opacity: 0.14;
-}
-@keyframes lib-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-/* ── loadout slots ── */
+/* ── loadout slots ──
+   The list is not scrolled to when an item lands, so without the entrance the
+   add reads as "nothing happened". */
 .lib-slot {
   animation: lib-slot-in 0.28s cubic-bezier(0.2, 1.4, 0.4, 1) both;
 }
@@ -224,13 +40,13 @@
 }
 @keyframes lib-arrive {
   0% {
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5);
+    box-shadow: 0 0 0 0 var(--color-ok);
   }
   60% {
-    box-shadow: 0 0 0 7px rgba(16, 185, 129, 0);
+    box-shadow: 0 0 0 7px transparent;
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+    box-shadow: 0 0 0 0 transparent;
   }
 }
 .lib-slot-arrive {
@@ -238,7 +54,7 @@
     lib-slot-in 0.28s cubic-bezier(0.2, 1.4, 0.4, 1) both,
     lib-arrive 0.5s ease-out 0.3s;
 }
-/* hover swaps the gem for the remove button */
+/* hover swaps the status dot for the remove button */
 .lib-slot .lib-slot-gem {
   transition: opacity 0.15s;
 }
@@ -261,24 +77,6 @@
   }
 }
 
-/* ── particle flight (card → loadout row) ── */
-.lib-particle {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  pointer-events: none;
-  z-index: 70;
-  background: radial-gradient(circle at 35% 30%, #b8ffe8, #10b981);
-  box-shadow: 0 0 8px rgba(16, 185, 129, 0.85);
-}
-.lib-particle-tool {
-  background: radial-gradient(circle at 35% 30%, #b5f2ea, #0d9488);
-  box-shadow: 0 0 8px rgba(13, 148, 136, 0.85);
-}
-
 /* ── change-request dock (owners) ── */
 .lib-cr-dock {
   animation: lib-cr-in 0.25s cubic-bezier(0.2, 1.2, 0.35, 1);
@@ -294,27 +92,29 @@
   }
 }
 
-/* ── diff marks (compare + inline suggestions) ── */
+/* ── diff marks (compare + inline suggestions) ──
+   `mark-del` / `mark-ins` are alpha, so they tint whatever row they land on
+   instead of punching a solid block through it. */
 .lib-line-removed {
-  background: #fdecec;
-  color: #b91c1c;
+  background: var(--color-mark-del);
+  color: var(--color-danger);
 }
 .lib-line-added {
-  background: #e0f8ee;
-  color: #067a52;
+  background: var(--color-mark-ins);
+  color: var(--color-ok);
 }
 .lib-sug del {
-  color: #b91c1c;
-  background: #fdecec;
+  color: var(--color-danger);
+  background: var(--color-mark-del);
   text-decoration: line-through;
   padding: 0 3px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
 }
 .lib-sug ins {
-  color: #067a52;
-  background: #e0f8ee;
+  color: var(--color-ok);
+  background: var(--color-mark-ins);
   text-decoration: none;
   padding: 0 3px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   font-weight: 600;
 }

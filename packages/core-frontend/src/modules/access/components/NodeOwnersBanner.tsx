@@ -19,9 +19,9 @@ export function NodeOwnersBanner({ owners }: Props) {
   return (
     <div
       role="note"
-      className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border-b border-slate-200 text-xs text-slate-600 shrink-0"
+      className="flex items-center gap-2 px-3 py-1.5 bg-sunken border-b border-line text-xs text-ink-muted shrink-0"
     >
-      <Users size={13} className="shrink-0 text-slate-500" />
+      <Users size={13} className="shrink-0 text-ink-muted" />
       <span className="flex-1">
         Owners — contact for more information: <span className="font-medium">{summary}</span>
       </span>

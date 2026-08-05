@@ -179,8 +179,10 @@ describe('read-permission gates on human read routes', () => {
   it('keeps the structural root folders visible even when nothing is readable', async () => {
     // A user with no read grants: the access batch denies everything. The
     // structural top-level folders (KnowledgeBase, Data, Agents, Pipelines,
-    // Skills, Tools) must still resolve readable (so the explorer renders its
-    // section view), while their contents stay gated.
+    // Groups) must still resolve readable (so the explorer renders its
+    // section view), while their contents stay gated. The retired Skills/
+    // and Tools/ roots get NO structural treatment — they are ordinary
+    // (denied) folders now.
     h = await makeHarness({ allowFn: () => false });
     expect((await get('/files')).status).toBe(200);
     const filter = h.listFilesFilter();
@@ -189,23 +191,26 @@ describe('read-permission gates on human read routes', () => {
       `${KB}/Data`,
       `${KB}/Agents`,
       `${KB}/Pipelines`,
+      `${KB}/Groups`,
       `${KB}/Skills`,
       `${KB}/Tools`,
       `${KB}/KnowledgeBase/Open/a.md`,
       `${KB}/Data/Ops/Knowledge/item.md`,
-      `${KB}/Skills/rfi/SKILL.md`,
+      `${KB}/Groups/GTM/rfi/SKILL.md`,
     ]);
     // Folders themselves: forced visible.
     expect(verdict.get(`${KB}/KnowledgeBase`)).toBe(true);
     expect(verdict.get(`${KB}/Data`)).toBe(true);
     expect(verdict.get(`${KB}/Agents`)).toBe(true);
     expect(verdict.get(`${KB}/Pipelines`)).toBe(true);
-    expect(verdict.get(`${KB}/Skills`)).toBe(true);
-    expect(verdict.get(`${KB}/Tools`)).toBe(true);
+    expect(verdict.get(`${KB}/Groups`)).toBe(true);
+    // Retired roots: no override, the deny-all batch verdict stands.
+    expect(verdict.get(`${KB}/Skills`)).toBe(false);
+    expect(verdict.get(`${KB}/Tools`)).toBe(false);
     // Their contents: still gated (the override matches only the exact folder).
     expect(verdict.get(`${KB}/KnowledgeBase/Open/a.md`)).toBe(false);
     expect(verdict.get(`${KB}/Data/Ops/Knowledge/item.md`)).toBe(false);
-    expect(verdict.get(`${KB}/Skills/rfi/SKILL.md`)).toBe(false);
+    expect(verdict.get(`${KB}/Groups/GTM/rfi/SKILL.md`)).toBe(false);
   });
 
   it('resolves every entry with the FULL read batch (frontmatter grants AND denies honoured)', async () => {

@@ -20,6 +20,7 @@ import {
   type TargetKind,
 } from './access-mutation.service.js';
 import { canonicalRoleName, EVERYONE_CANONICAL, type Verb } from './access-control.service.js';
+import { listAccessDeclarationsUnder } from './access-declarations.js';
 import { RolesAdminService, RolesAdminError } from './roles-admin.service.js';
 import type { Principal } from './access-splice.js';
 import type { Database } from '../database/connection.js';
@@ -165,6 +166,66 @@ export function createAccessRoutes(
       const repoRelTarget = toRepoRelative(rawPath);
       assertRepoRelativeTarget(repoRelTarget, kind);
       res.json(await resolvedView(req.params.id, repoRelTarget, user.email, kind));
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * GET /api/workspace/:id/access/overrides?path=<folder>
+   *
+   * Every access declaration living INSIDE a folder — the descendant
+   * `access.md` files and the node frontmatter that override the folder's own
+   * rules for the principals they name. Display-only: the group access surface
+   * shows it so nobody reads a folder's share list as the whole story.
+   *
+   * Gating is stricter than the sibling `GET /access`, which hands its eligible
+   * lists to any authenticated caller: here the caller must RESOLVE read on the
+   * folder (403 otherwise), and every returned row is additionally filtered by
+   * `canReadBatch` on what it governs. So the endpoint can only ever tell you
+   * about rules on things you can already see. It writes nothing and resolves
+   * nothing — it reports declarations through the resolver's own parsers.
+   */
+  router.get('/workspace/:id/access/overrides', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+
+    const rawPath = req.query.path;
+    if (typeof rawPath !== 'string' || !rawPath) {
+      res.status(400).json({ error: 'path query parameter is required' });
+      return;
+    }
+
+    try {
+      const folder = toRepoRelative(rawPath);
+      assertRepoRelativeTarget(folder, 'folder');
+
+      if (!(await accessControl.canRead(req.params.id, user.email, folder))) {
+        res.status(403).json({ error: 'You do not have access to this folder.' });
+        return;
+      }
+
+      const { overrides, truncated } = await listAccessDeclarationsUnder(
+        workspaceService,
+        req.params.id,
+        kbDirName,
+        folder,
+      );
+
+      // Read-filter per ROW. Folder read does not imply read on everything
+      // underneath — a `deny read` on one skill is precisely the kind of rule
+      // this endpoint lists, and echoing that skill's name back to the person
+      // it was denied to would leak the thing the rule exists to hide.
+      const governs = [...new Set(overrides.map((o) => o.governs))];
+      const readable = governs.length
+        ? await accessControl.canReadBatch(req.params.id, user.email, governs)
+        : new Map<string, boolean>();
+
+      res.json({
+        overrides: overrides.filter((o) => readable.get(o.governs) === true),
+        truncated,
+      });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

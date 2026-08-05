@@ -127,12 +127,12 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
 
   return (
     <div className="absolute inset-0 z-20 flex flex-col bg-white">
-      <div className="min-h-10 border-b border-slate-200 flex flex-wrap items-center px-3 py-1.5 gap-2 shrink-0">
+      <div className="min-h-10 border-b border-line flex flex-wrap items-center px-3 py-1.5 gap-2 shrink-0">
         <Eye size={14} className="text-emerald-600 shrink-0" />
-        <span className="text-sm font-medium text-slate-900 shrink-0">
+        <span className="text-sm font-medium text-ink shrink-0">
           Review agent changes
         </span>
-        <span className="text-xs text-slate-600 shrink-0">
+        <span className="text-xs text-ink-muted shrink-0">
           {count} file{count === 1 ? '' : 's'} pending
         </span>
 
@@ -142,26 +142,26 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
             onClick={() => setPickerOpen((v) => !v)}
             aria-haspopup="listbox"
             aria-expanded={pickerOpen}
-            className="w-full flex items-center gap-2 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-50 text-left"
+            className="w-full flex items-center gap-2 px-2.5 py-1 rounded border border-line-strong bg-white hover:bg-hover text-left"
           >
-            <span className="text-xs text-slate-900 truncate flex-1" title={selected?.path}>
+            <span className="text-xs text-ink truncate flex-1" title={selected?.path}>
               {selectedLabel}
             </span>
             {selectedKind && (
-              <span className="text-[10px] uppercase tracking-wider text-slate-600 shrink-0">
+              <span className="text-[10px] uppercase tracking-wider text-ink-muted shrink-0">
                 {selectedKind}
               </span>
             )}
             <ChevronDown
               size={12}
-              className={`text-slate-600 shrink-0 transition-transform ${pickerOpen ? 'rotate-180' : ''}`}
+              className={`text-ink-muted shrink-0 transition-transform ${pickerOpen ? 'rotate-180' : ''}`}
             />
           </button>
 
           {pickerOpen && (
             <div
               role="listbox"
-              className="absolute left-0 right-0 top-full mt-1 max-h-[60vh] overflow-y-auto bg-white border border-slate-200 rounded-md shadow-xl z-30 p-1 space-y-1"
+              className="absolute left-0 right-0 top-full mt-1 max-h-[60vh] overflow-y-auto bg-white border border-line rounded-md shadow-xl z-30 p-1 space-y-1"
             >
               {session.changes.map((change) => (
                 <ReviewFileRow
@@ -189,7 +189,7 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
             )
           }
           title={applyToAll ? 'Delete every pending change — restore the originals' : 'Delete this change — restore the original'}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium text-slate-700 hover:text-red-700 hover:bg-red-100 disabled:opacity-40"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium text-ink hover:text-red-700 hover:bg-red-100 disabled:opacity-40"
         >
           <Trash2 size={12} />
           Delete
@@ -210,7 +210,7 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
           <Check size={12} />
           Accept
         </button>
-        <label className="flex items-center gap-1.5 text-xs text-slate-700 select-none shrink-0 cursor-pointer">
+        <label className="flex items-center gap-1.5 text-xs text-ink select-none shrink-0 cursor-pointer">
           <input
             type="checkbox"
             checked={applyToAll}
@@ -226,7 +226,7 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
             onClick={onClose}
             title="Close review — changes stay pending"
             aria-label="Close review"
-            className="ml-1 p-1 rounded text-slate-500 hover:text-slate-900 hover:bg-slate-100 shrink-0"
+            className="ml-1 p-1 rounded text-ink-muted hover:text-ink hover:bg-hover shrink-0"
           >
             <X size={16} />
           </button>
@@ -235,12 +235,12 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
 
       <div className="flex-1 min-w-0 min-h-0">
         {isLoadingDiff && (
-          <div className="h-full flex items-center justify-center text-xs text-slate-600">
+          <div className="h-full flex items-center justify-center text-xs text-ink-muted">
             Loading diff…
           </div>
         )}
         {!isLoadingDiff && !fileDiff && (
-          <div className="h-full flex items-center justify-center text-xs text-slate-600">
+          <div className="h-full flex items-center justify-center text-xs text-ink-muted">
             Select a file to see the diff.
           </div>
         )}

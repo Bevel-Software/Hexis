@@ -45,46 +45,46 @@ export function AccountPage() {
     <PageShell title="Account">
       <div className="space-y-6">
         {user && (
-          <div className="text-sm text-slate-700">
+          <div className="text-sm text-ink">
             Signed in as <span className="font-medium">{user.name}</span>{' '}
-            <span className="text-slate-500">({user.email})</span>
+            <span className="text-ink-muted">({user.email})</span>
           </div>
         )}
 
         <form onSubmit={handleSubmit} className="space-y-3 max-w-sm">
-          <h2 className="text-sm font-semibold text-slate-800">Change password</h2>
+          <h2 className="text-sm font-semibold text-ink">Change password</h2>
           <label className="block space-y-1">
-            <span className="text-xs text-slate-600">
-              Current password <span className="text-slate-400">(leave empty if you never set one)</span>
+            <span className="text-xs text-ink-muted">
+              Current password <span className="text-ink-faint">(leave empty if you never set one)</span>
             </span>
             <input
               type="password"
               autoComplete="current-password"
               value={currentPassword}
               onChange={(e) => setCurrentPassword(e.target.value)}
-              className="w-full rounded-md bg-slate-100 border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-slate-400"
+              className="w-full rounded-md bg-sunken border border-line-strong px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent"
             />
           </label>
           <label className="block space-y-1">
-            <span className="text-xs text-slate-600">New password</span>
+            <span className="text-xs text-ink-muted">New password</span>
             <input
               type="password"
               required
               autoComplete="new-password"
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
-              className="w-full rounded-md bg-slate-100 border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-slate-400"
+              className="w-full rounded-md bg-sunken border border-line-strong px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent"
             />
           </label>
           <label className="block space-y-1">
-            <span className="text-xs text-slate-600">Confirm new password</span>
+            <span className="text-xs text-ink-muted">Confirm new password</span>
             <input
               type="password"
               required
               autoComplete="new-password"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
-              className="w-full rounded-md bg-slate-100 border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-slate-400"
+              className="w-full rounded-md bg-sunken border border-line-strong px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent"
             />
           </label>
 

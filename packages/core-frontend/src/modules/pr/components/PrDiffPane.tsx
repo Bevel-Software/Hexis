@@ -122,7 +122,7 @@ export function PrDiffPane({
 
   if (!file) {
     return (
-      <div className="h-full flex items-center justify-center text-xs text-slate-600">
+      <div className="h-full flex items-center justify-center text-xs text-ink-muted">
         Select a file to see what changed.
       </div>
     );
@@ -130,8 +130,8 @@ export function PrDiffPane({
 
   if (file.isBinary) {
     return (
-      <div className="h-full flex flex-col items-center justify-center gap-2 text-slate-600 text-xs px-6 text-center">
-        <div className="font-medium text-slate-700">Binary file — preview not available</div>
+      <div className="h-full flex flex-col items-center justify-center gap-2 text-ink-muted text-xs px-6 text-center">
+        <div className="font-medium text-ink">Binary file — preview not available</div>
         <div className="font-mono truncate max-w-full" title={file.path}>{file.path}</div>
       </div>
     );
@@ -139,7 +139,7 @@ export function PrDiffPane({
 
   if (!file.patch) {
     return (
-      <div className="h-full flex items-center justify-center text-xs text-slate-600 px-6 text-center">
+      <div className="h-full flex items-center justify-center text-xs text-ink-muted px-6 text-center">
         Can't show what changed inline (file is too large).
       </div>
     );
@@ -147,7 +147,7 @@ export function PrDiffPane({
 
   if (totalLines > MAX_RENDERED_LINES) {
     return (
-      <div className="h-full flex items-center justify-center text-xs text-slate-600 px-6 text-center">
+      <div className="h-full flex items-center justify-center text-xs text-ink-muted px-6 text-center">
         Too many changes to show inline ({totalLines.toLocaleString()} lines).
       </div>
     );
@@ -225,8 +225,8 @@ function HunkRows({
 }) {
   return (
     <>
-      <tr className="bg-white border-y border-slate-200">
-        <td colSpan={4} className="px-3 py-1 text-[11px] text-slate-600 font-mono">
+      <tr className="bg-white border-y border-line">
+        <td colSpan={4} className="px-3 py-1 text-[11px] text-ink-muted font-mono">
           {group.header}
         </td>
       </tr>
@@ -299,16 +299,16 @@ function DiffLineAndThreads({
     ? 'text-emerald-700'
     : row.kind === 'removed'
       ? 'text-red-700'
-      : 'text-slate-900';
+      : 'text-ink';
   const marker = row.kind === 'added' ? '+' : row.kind === 'removed' ? '−' : ' ';
 
   return (
     <>
       <tr className={`group ${bg}`}>
-        <td className="w-12 text-right pr-2 text-slate-500 select-none border-r border-slate-200 relative">
+        <td className="w-12 text-right pr-2 text-ink-muted select-none border-r border-line relative">
           {row.oldLine ?? ''}
         </td>
-        <td className="w-12 text-right pr-2 text-slate-500 select-none border-r border-slate-200 relative">
+        <td className="w-12 text-right pr-2 text-ink-muted select-none border-r border-line relative">
           {/* Hover affordance for adding a line comment. Anchored to the new-
               line gutter so it only appears on rows the comment model supports. */}
           {canComment && (
@@ -333,7 +333,7 @@ function DiffLineAndThreads({
       {/* Existing threads on this line. One row per bucket — full table width. */}
       {threads.map((bucket) => (
         <tr key={bucket.root.id} className="bg-white">
-          <td colSpan={4} className="px-3 py-2 border-y border-slate-200">
+          <td colSpan={4} className="px-3 py-2 border-y border-line">
             <div className="text-[12px]">
               <PrCommentThread
                 root={bucket.root}
@@ -351,9 +351,9 @@ function DiffLineAndThreads({
 
       {composerOpen && (
         <tr className="bg-white">
-          <td colSpan={4} className="px-3 py-2 border-y border-slate-200">
+          <td colSpan={4} className="px-3 py-2 border-y border-line">
             <div className="text-[12px] flex flex-col gap-1.5">
-              <div className="text-[10px] uppercase tracking-wider text-slate-600">
+              <div className="text-[10px] uppercase tracking-wider text-ink-muted">
                 Comment on line {row.newLine}
               </div>
               <PrCommentComposer
@@ -394,7 +394,7 @@ function OrphanedInlineThreads({
 }) {
   const [expanded, setExpanded] = useState(false);
   return (
-    <div className="border-t border-slate-200 bg-white/40 px-3 py-2">
+    <div className="border-t border-line bg-white/40 px-3 py-2">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}

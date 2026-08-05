@@ -1,4 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { setLibrarySidebarCollapsed } from '../../../library/state/sidebar-collapse';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
@@ -64,6 +65,8 @@ function renderToolbar(overrides?: {
   layout?: Partial<LayoutController>;
   isAdmin?: boolean;
   toolbarItems?: ToolbarItemDef[];
+  /** Initial route — the Library sidebar toggle is path-gated. */
+  route?: string;
 }) {
   const toggleExplorer = vi.fn();
   const toggleChat = vi.fn();
@@ -150,7 +153,7 @@ function renderToolbar(overrides?: {
   };
 
   render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[overrides?.route ?? '/']}>
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={git}>
@@ -277,6 +280,28 @@ describe('Toolbar', () => {
     expect(btn).toBeInTheDocument();
     await userEvent.click(btn);
     expect(toggleChat).toHaveBeenCalledTimes(1);
+  });
+
+  // The Library's nav toggle sits first in the row, left of the brand. It is
+  // path-gated: it controls the Library's sidebar, so it exists exactly where
+  // that sidebar exists.
+  describe('library sidebar toggle', () => {
+    beforeEach(() => setLibrarySidebarCollapsed(false));
+
+    it('shows on Library routes and flips the shared collapse state', async () => {
+      renderToolbar({ route: '/skills-and-tools' });
+      const btn = screen.getByRole('button', { name: 'Hide sidebar' });
+      expect(btn).toHaveAttribute('aria-expanded', 'true');
+      await userEvent.click(btn);
+      expect(
+        screen.getByRole('button', { name: 'Show sidebar' }),
+      ).toHaveAttribute('aria-expanded', 'false');
+    });
+
+    it('does not render off the Library — there is no sidebar to control', () => {
+      renderToolbar({ route: '/secrets' });
+      expect(screen.queryByRole('button', { name: /(hide|show) sidebar/i })).toBeNull();
+    });
   });
 
   // The "Reconciling with the team…" status pill is gone with the

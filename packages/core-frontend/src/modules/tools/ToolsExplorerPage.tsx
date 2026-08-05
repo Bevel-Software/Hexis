@@ -138,7 +138,7 @@ function CopyButton({ text }: { text: string }) {
             scheduleReset();
           });
       }}
-      className="text-[10px] font-medium px-2 py-0.5 rounded border border-slate-200 text-slate-500 hover:bg-slate-50"
+      className="text-[10px] font-medium px-2 py-0.5 rounded border border-line text-ink-muted hover:bg-hover"
     >
       {status === 'copied' ? 'Copied' : status === 'failed' ? 'Copy failed' : 'Copy'}
     </button>
@@ -148,23 +148,23 @@ function CopyButton({ text }: { text: string }) {
 function SchemaView({ schema, depth = 0 }: { schema: JsonSchema; depth?: number }) {
   const props = schema.properties;
   if (!props || Object.keys(props).length === 0) {
-    return <div className="text-xs text-slate-400 italic">no fields</div>;
+    return <div className="text-xs text-ink-faint italic">no fields</div>;
   }
   const required = new Set(schema.required ?? []);
   return (
-    <div className={depth > 0 ? 'pl-3 border-l border-slate-200 space-y-1.5' : 'space-y-1.5'}>
+    <div className={depth > 0 ? 'pl-3 border-l border-line space-y-1.5' : 'space-y-1.5'}>
       {Object.entries(props).map(([name, sub]) => (
         <div key={name} className="text-xs">
           <div className="flex items-baseline gap-2 flex-wrap">
-            <code className="font-medium text-slate-800">{name}</code>
-            <span className="text-slate-400 font-mono">{typeLabel(sub)}</span>
+            <code className="font-medium text-ink">{name}</code>
+            <span className="text-ink-faint font-mono">{typeLabel(sub)}</span>
             {required.has(name) ? (
               <span className="text-[10px] uppercase tracking-wide text-amber-600">required</span>
             ) : (
-              <span className="text-[10px] uppercase tracking-wide text-slate-300">optional</span>
+              <span className="text-[10px] uppercase tracking-wide text-ink-faint">optional</span>
             )}
           </div>
-          {sub.description && <div className="text-slate-500 leading-snug mt-0.5">{sub.description}</div>}
+          {sub.description && <div className="text-ink-muted leading-snug mt-0.5">{sub.description}</div>}
           {sub.type === 'object' && sub.properties && <SchemaView schema={sub} depth={depth + 1} />}
           {sub.type === 'array' && itemSchema(sub)?.properties && (
             <SchemaView schema={itemSchema(sub)!} depth={depth + 1} />
@@ -180,56 +180,56 @@ function ToolCard({ tool }: { tool: UtcpTool }) {
   const http = httpPath(tool);
   const input = unwrapBody(tool.inputs);
   return (
-    <div className="border border-slate-200 rounded-lg bg-white">
+    <div className="border border-line rounded-lg bg-white">
       <button onClick={() => setOpen((v) => !v)} className="w-full text-left px-4 py-3 flex items-start gap-3">
-        <span className="text-slate-300 mt-0.5">{open ? '▾' : '▸'}</span>
+        <span className="text-ink-faint mt-0.5">{open ? '▾' : '▸'}</span>
         <span className="flex-1 min-w-0">
           <span className="flex items-center gap-2 flex-wrap">
-            <code className="text-sm font-semibold text-slate-800">{tool.name}</code>
-            <span className="text-[10px] font-mono uppercase tracking-wide text-slate-400">
+            <code className="text-sm font-semibold text-ink">{tool.name}</code>
+            <span className="text-[10px] font-mono uppercase tracking-wide text-ink-faint">
               {http ? `${http.method} ${http.path}` : tool.tool_call_template?.call_template_type ?? 'unknown'}
             </span>
             {tool.tags?.map((t) => (
-              <span key={t} className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">{t}</span>
+              <span key={t} className="text-[10px] px-1.5 py-0.5 rounded bg-sunken text-ink-muted">{t}</span>
             ))}
           </span>
-          <span className="block text-xs text-slate-500 leading-snug mt-1 line-clamp-2">{tool.description}</span>
+          <span className="block text-xs text-ink-muted leading-snug mt-1 line-clamp-2">{tool.description}</span>
         </span>
       </button>
       {open && (
-        <div className="px-4 pb-4 pt-1 space-y-4 border-t border-slate-100">
-          <p className="text-xs text-slate-600 leading-snug whitespace-pre-wrap">{tool.description}</p>
+        <div className="px-4 pb-4 pt-1 space-y-4 border-t border-line">
+          <p className="text-xs text-ink-muted leading-snug whitespace-pre-wrap">{tool.description}</p>
           <section>
-            <h4 className="text-xs font-semibold text-slate-700 mb-1.5">Input</h4>
+            <h4 className="text-xs font-semibold text-ink mb-1.5">Input</h4>
             <SchemaView schema={input} />
           </section>
           {tool.outputs && (
             <section>
-              <h4 className="text-xs font-semibold text-slate-700 mb-1.5">Output</h4>
+              <h4 className="text-xs font-semibold text-ink mb-1.5">Output</h4>
               <SchemaView schema={tool.outputs} />
             </section>
           )}
           <section>
-            <h4 className="text-xs font-semibold text-slate-700 mb-1.5">How to call</h4>
+            <h4 className="text-xs font-semibold text-ink mb-1.5">How to call</h4>
             {http ? (
               <div className="space-y-2">
-                <p className="text-xs text-slate-500 leading-snug">
+                <p className="text-xs text-ink-muted leading-snug">
                   <code className="text-emerald-700 font-semibold">{http.method}</code>{' '}
-                  <code className="text-slate-600">{http.path}</code> with{' '}
-                  <code className="text-slate-600">Authorization: Bearer &lt;key&gt;</code> and the input above as the JSON
+                  <code className="text-ink-muted">{http.path}</code> with{' '}
+                  <code className="text-ink-muted">Authorization: Bearer &lt;key&gt;</code> and the input above as the JSON
                   body. Or call it through any UTCP client / the MCP server at <code>/api/mcp</code>.
                 </p>
                 <div className="relative">
                   <div className="absolute top-1.5 right-1.5">
                     <CopyButton text={curlSnippet(http, input)} />
                   </div>
-                  <pre className="text-[11px] font-mono text-slate-700 bg-slate-50 border border-slate-200 rounded p-2.5 overflow-auto whitespace-pre">
+                  <pre className="text-[11px] font-mono text-ink bg-sunken border border-line rounded p-2.5 overflow-auto whitespace-pre">
                     {curlSnippet(http, input)}
                   </pre>
                 </div>
               </div>
             ) : (
-              <p className="text-xs text-slate-500 leading-snug">
+              <p className="text-xs text-ink-muted leading-snug">
                 Transport <code>{tool.tool_call_template?.call_template_type ?? 'unknown'}</code> — invoke it with a UTCP
                 client (or via the MCP server at <code>/api/mcp</code>), not a plain HTTP request.
               </p>
@@ -237,16 +237,16 @@ function ToolCard({ tool }: { tool: UtcpTool }) {
           </section>
           <section>
             <div className="flex items-center justify-between mb-1.5">
-              <h4 className="text-xs font-semibold text-slate-700">Raw UTCP schema</h4>
+              <h4 className="text-xs font-semibold text-ink">Raw UTCP schema</h4>
               <CopyButton text={JSON.stringify(tool, null, 2)} />
             </div>
-            <p className="text-[11px] text-slate-400 leading-snug mb-1.5">
+            <p className="text-[11px] text-ink-faint leading-snug mb-1.5">
               The full tool definition served by <code>/api/agent/utcp</code> — inputs, outputs and the{' '}
               <code>tool_call_template</code> (endpoint, method, headers, body wrapping). Resolve{' '}
               <code>${'{API_URL}'}</code> to this server&apos;s origin and <code>${'{CONNECTION_KEY}'}</code> to your{' '}
               <code>{'<tenant>_…'}</code> key to call it from a script.
             </p>
-            <pre className="text-[11px] font-mono text-slate-700 bg-slate-50 border border-slate-200 rounded p-2.5 overflow-auto whitespace-pre max-h-80">
+            <pre className="text-[11px] font-mono text-ink bg-sunken border border-line rounded p-2.5 overflow-auto whitespace-pre max-h-80">
               {JSON.stringify(tool, null, 2)}
             </pre>
           </section>
@@ -320,19 +320,19 @@ export function ToolsExplorerPage() {
   }, [tools, filter]);
 
   return (
-    <div className="h-full overflow-auto bg-slate-50">
+    <div className="h-full overflow-auto bg-sunken">
       <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
         <header className="space-y-1">
-          <h1 className="text-lg font-semibold text-slate-800">Bevel tools</h1>
-          <p className="text-sm text-slate-500">
+          <h1 className="text-lg font-semibold text-ink">Bevel tools</h1>
+          <p className="text-sm text-ink-muted">
             Every tool Bevel exposes to external agents — the same surface available over MCP at{' '}
-            <code className="text-slate-600">/api/mcp</code>. Loaded with your session below; or browse as a specific
+            <code className="text-ink-muted">/api/mcp</code>. Loaded with your session below; or browse as a specific
             external API key to see exactly what it can reach.
           </p>
         </header>
 
-        <div className="bg-white border border-slate-200 rounded-lg p-3 space-y-2">
-          <label className="block text-xs font-medium text-slate-700">
+        <div className="bg-white border border-line rounded-lg p-3 space-y-2">
+          <label className="block text-xs font-medium text-ink">
             Browse as a specific external API key (<code>{'<tenant>_…'}</code>) — optional
           </label>
           <div className="flex gap-2">
@@ -343,12 +343,12 @@ export function ToolsExplorerPage() {
               onKeyDown={(e) => e.key === 'Enter' && !loading && void load()}
               placeholder="<tenant>_…"
               spellCheck={false}
-              className="flex-1 text-xs font-mono border border-slate-200 rounded px-2 py-1.5 text-slate-800"
+              className="flex-1 text-xs font-mono border border-line rounded px-2 py-1.5 text-ink"
             />
             <button
               onClick={() => void load()}
               disabled={loading || !bearer.trim()}
-              className="text-xs font-medium px-3 py-1.5 rounded bg-slate-800 text-white disabled:opacity-40"
+              className="text-xs font-medium px-3 py-1.5 rounded bg-ink text-white disabled:opacity-40"
             >
               {loading ? 'Loading…' : 'Load'}
             </button>
@@ -363,9 +363,9 @@ export function ToolsExplorerPage() {
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
                 placeholder="Filter tools…"
-                className="text-xs border border-slate-200 rounded px-2 py-1.5 text-slate-800 w-56"
+                className="text-xs border border-line rounded px-2 py-1.5 text-ink w-56"
               />
-              <span className="text-xs text-slate-400">{shown.length} of {tools.length} tools</span>
+              <span className="text-xs text-ink-faint">{shown.length} of {tools.length} tools</span>
             </div>
             <div className="space-y-2">
               {shown.map((t) => (

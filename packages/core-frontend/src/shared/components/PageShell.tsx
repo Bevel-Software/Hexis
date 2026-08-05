@@ -32,14 +32,14 @@ export function PageShell({
   children: ReactNode;
 }) {
   return (
-    <div className="h-full overflow-y-auto bg-slate-50">
+    <div className="h-full overflow-y-auto bg-sunken">
       <div className={`${WIDTH_CLASS[width]} mx-auto px-6 py-8`}>
         <header className="mb-4 flex items-center justify-between gap-3">
-          <h1 className="text-lg font-semibold text-slate-800">{title}</h1>
+          <h1 className="text-lg font-semibold text-ink">{title}</h1>
           {actions && <div className="flex items-center gap-2">{actions}</div>}
         </header>
         <section
-          className={`bg-white border border-slate-200 rounded-lg ${
+          className={`bg-white border border-line rounded-lg ${
             padded ? 'p-4' : 'overflow-hidden'
           }`}
         >

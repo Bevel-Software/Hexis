@@ -106,8 +106,9 @@ describe('KbSeedService', () => {
         expect(await exists(path.join(dir, '.bevelignore'))).toBe(true);
         expect(await exists(path.join(dir, '.gitignore'))).toBe(true);
         // The well-known KB roots are seeded (kept present via their .gitkeep).
+        // `Groups/` replaced the old `Skills/` + `Tools/` pair.
         expect(await exists(path.join(dir, 'KnowledgeBase/.gitkeep'))).toBe(true);
-        expect(await exists(path.join(dir, 'Skills/.gitkeep'))).toBe(true);
+        expect(await exists(path.join(dir, 'Groups/.gitkeep'))).toBe(true);
 
         const roles = await fs.readFile(path.join(dir, 'roles.yaml'), 'utf8');
         for (const email of ADMINS) expect(roles).toContain(email);
@@ -134,7 +135,7 @@ describe('KbSeedService', () => {
         '.bevelignore': 'x',
         '.gitignore': 'x',
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
-        'Skills/.gitkeep': '',
+        'Groups/.gitkeep': '',
       });
 
       await makeSeeder(upstream).ensureRemoteSeeded();
@@ -150,7 +151,7 @@ describe('KbSeedService', () => {
         'access.md': 'CUSTOM ACCESS RULES',
         // CLAUDE.md / .bevelignore / .gitignore are absent → should be added.
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
-        'Skills/.gitkeep': '',
+        'Groups/.gitkeep': '',
       });
 
       // Simulate the app loading the branch: a fresh clone, then top-up on it.
@@ -175,7 +176,7 @@ describe('KbSeedService', () => {
       const upstream = await seededUpstream(PROTECTED, {
         'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
-        'Skills/.gitkeep': '',
+        'Groups/.gitkeep': '',
       });
 
       const first = await checkout(root, upstream, DEFAULT_BRANCH);
@@ -195,7 +196,7 @@ describe('KbSeedService', () => {
       const upstream = await seededUpstream(PROTECTED, {
         'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
-        'Skills/.gitkeep': '',
+        'Groups/.gitkeep': '',
       });
       // Branch a feature off the default and load it.
       const seed = await checkout(root, upstream, DEFAULT_BRANCH);

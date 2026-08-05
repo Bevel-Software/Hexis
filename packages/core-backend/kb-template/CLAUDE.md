@@ -16,8 +16,7 @@ knowledge-base/
 │   └── <AnotherOntology>/
 │       ├── NodeTypes/
 │       └── Knowledge/
-├── Skills/               ← optional reusable agent skills (not part of the graph)
-├── Tools/                ← optional tool manuals (*.tool files; not part of the graph)
+├── Groups/               ← one folder per group: its skills AND its tools (not part of the graph)
 ├── Data/                 ← agent-produced records, parsed like KnowledgeBase/ (dashboards read here)
 ├── Agents/               ← .agent files — agent role configurations (format TBD)
 ├── Pipelines/            ← .pipeline files — processes the execution layer runs (format TBD)
@@ -25,7 +24,7 @@ knowledge-base/
 └── access.md             ← repo-root access-control rules
 ```
 
-Ontologies live as **direct subfolders of `KnowledgeBase/`** (curated knowledge) or of `Data/` (agent-produced records). Any folder there that contains BOTH a `NodeTypes/` subfolder and a `Knowledge/` subfolder is automatically picked up as an ontology by the Bevel platform's graph parser, validator, and access-control. `Data/` may also itself be a single ontology: when `Data/` directly contains both `NodeTypes/` and `Knowledge/`, the parser treats `Data/` itself as one ontology. Folders outside those two roots (such as `Skills/` and `Tools/`) are never treated as ontologies. To add a new ontology, create the two subfolders under `KnowledgeBase/` (or `Data/`).
+Ontologies live as **direct subfolders of `KnowledgeBase/`** (curated knowledge) or of `Data/` (agent-produced records). Any folder there that contains BOTH a `NodeTypes/` subfolder and a `Knowledge/` subfolder is automatically picked up as an ontology by the Bevel platform's graph parser, validator, and access-control. `Data/` may also itself be a single ontology: when `Data/` directly contains both `NodeTypes/` and `Knowledge/`, the parser treats `Data/` itself as one ontology. Folders outside those two roots (such as `Groups/`) are never treated as ontologies. To add a new ontology, create the two subfolders under `KnowledgeBase/` (or `Data/`).
 
 ### Agentic execution layer base folders (`Data/`, `Agents/`, `Pipelines/`)
 
@@ -35,7 +34,7 @@ Three base folders scaffold the agentic execution layer (design notes: the Bevel
 - **`Agents/`** — `.agent` files: role definitions naming a target agent (e.g. Claude Code) and composing its configuration — skills, tools, model, permissions, hooks, identity and budget references. An `.agent` only **narrows** its identity's permissions, never widens them; secrets are referenced from the vault, never contained. MCP configs are minted per `.agent`.
 - **`Pipelines/`** — `.pipeline` files: the processes the execution layer runs. Nodes are an `.agent` reference, a UTCP tool call, or a wait node; plus transitions, failure policy, and triggers.
 
-The platform's parser scans `Data/` exactly like `KnowledgeBase/`: its subfolders that carry both `NodeTypes/` and `Knowledge/` are self-contained ontologies whose typed nodes are part of the graph — and `Data/` itself qualifies as a single ontology when it directly contains both folders. `Data/` paths are, however, exempt from the one-ontology-per-session boundary — pipeline agents read knowledge and write data records in the same session. The `.agent`/`.pipeline` file formats are still being designed. `Agents/` and `Pipelines/` are, like `Skills/` and `Tools/`, never parsed as ontologies. Each folder's `README.md` documents its structure and contents.
+The platform's parser scans `Data/` exactly like `KnowledgeBase/`: its subfolders that carry both `NodeTypes/` and `Knowledge/` are self-contained ontologies whose typed nodes are part of the graph — and `Data/` itself qualifies as a single ontology when it directly contains both folders. `Data/` paths are, however, exempt from the one-ontology-per-session boundary — pipeline agents read knowledge and write data records in the same session. The `.agent`/`.pipeline` file formats are still being designed. `Agents/` and `Pipelines/` are, like `Groups/`, never parsed as ontologies. Each folder's `README.md` documents its structure and contents.
 
 **Cross-ontology references are allowed.** A node in `Processes/Knowledge/...` may link to a node in `Product/Knowledge/...` (or vice versa) using a normal file-relative markdown link, e.g. `[Foo](../../Product/Knowledge/.../Foo.md)`. The parser resolves the link to a repo-root path and the validator checks the target exists across all ontologies.
 
@@ -177,9 +176,12 @@ Knowledge/
 
 All links in node files use **file-relative paths**, e.g. a file at `Knowledge/Foo.md` links to its child as `[Bar](Foo/Bar.md)`. Cross-ontology links walk up to the repo root and back down into the other ontology, e.g. from `Processes/Knowledge/Process Groups/Group/Foo.md` to `Product/Knowledge/Bar.md` use `[Bar](../../../../Product/Knowledge/Bar.md)`.
 
-## Tool Manuals (`Tools/`)
+## Tool Manuals (`Groups/<Group>/*.tool`)
 
-`Tools/` holds `*.tool` files — reusable **tool manuals** that let agents call external APIs. They are **not part of the knowledge graph** (never modelled as nodes) and are access-controlled like any other file via `access.md`. Any user who can *read* a `.tool` can use its tools; anyone who can *write* it sets its shared (admin) secrets (see below). Put each manual directly under `Tools/` (subfolders are allowed for grouping).
+Each group folder holds `*.tool` files — reusable **tool manuals** that let agents call external APIs. They are **not part of the knowledge graph** (never modelled as nodes) and are access-controlled like any other file via `access.md`. Any user who can *read* a `.tool` can use its tools; anyone who can *write* it sets its shared (admin) secrets (see below). Put each manual directly in the group folder whose skills use it. The same
+integration may exist in several groups as separate files (`Everyone/notion.tool`
+and `Finance/notion.tool`), each with its own credentials and access rule —
+a group is a folder, not a registry of unique names.
 
 A `.tool` file is JSON or YAML. Its `type` decides how tools are discovered:
 

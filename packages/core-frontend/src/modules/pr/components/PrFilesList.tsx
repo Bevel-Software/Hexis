@@ -24,7 +24,7 @@ export function PrFilesList({
 }: Props) {
   if (files.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center text-xs text-slate-600 px-3">
+      <div className="flex-1 flex items-center justify-center text-xs text-ink-muted px-3">
         No file changes.
       </div>
     );

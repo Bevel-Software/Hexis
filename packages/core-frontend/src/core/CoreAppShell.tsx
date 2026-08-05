@@ -45,7 +45,7 @@ import { ExternalAgentAccessPage } from '../modules/toolbar/components/ExternalA
 import { AdminRolesPage } from '../modules/admin/components/AdminRolesPage';
 import { UserAccountsPage } from '../modules/admin/components/UserAccountsPage';
 import { ToolsExplorerPage } from '../modules/tools/ToolsExplorerPage';
-import { LibraryPage } from '../modules/library/components/LibraryPage';
+import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
 import {
   activeAppId,
@@ -177,9 +177,9 @@ const CORE_PANES: PaneDef[] = [
 
 /**
  * The core apps behind the toolbar's app switcher. Each app is a full
- * surface below the always-mounted toolbar. "Skills & Tools" renders the
- * Library full-bleed for now and will move to the dedicated view when it
- * lands. Knowledge's path IS `KB_ROUTE_PREFIX` ('/workspace') — the KB file
+ * surface below the always-mounted toolbar. "Skills & Tools" mounts
+ * `LibraryRoutes`, which owns its own nested route table (gallery, groups,
+ * items) below this path. Knowledge's path IS `KB_ROUTE_PREFIX` ('/workspace') — the KB file
  * links `kbFileUrl()` produces are absolute `/workspace/<branch>/<path>`
  * URLs, so they land inside the Knowledge surface by construction.
  */
@@ -198,7 +198,7 @@ const CORE_APPS: AppDef[] = [
     path: '/skills-and-tools',
     description: 'What your assistant can do, and what it connects to',
     order: 20,
-    element: <LibraryPage />,
+    element: <LibraryRoutes />,
   },
 ];
 
@@ -384,7 +384,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   return (
     <AuthContext.Provider value={auth}>
       {auth.isLoading ? (
-        <div className="flex items-center justify-center h-full bg-white text-slate-600 text-sm">
+        <div className="flex items-center justify-center h-full bg-white text-ink-muted text-sm">
           Loading…
         </div>
       ) : auth.user ? (

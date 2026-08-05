@@ -68,7 +68,7 @@ export function TextRenderer({
   return (
     <div className="flex flex-col h-full min-h-0">
       <textarea
-        className="w-full flex-1 min-h-0 bg-transparent text-sm text-slate-700 font-mono whitespace-pre-wrap break-words leading-relaxed resize-none outline-none"
+        className="w-full flex-1 min-h-0 bg-transparent text-sm text-ink font-mono whitespace-pre-wrap break-words leading-relaxed resize-none outline-none"
         value={value}
         onChange={readOnly ? undefined : handleChange}
         onKeyDown={readOnly ? undefined : handleKeyDown}
@@ -77,7 +77,7 @@ export function TextRenderer({
       />
       {!readOnly && (
         <div className="pt-2 text-xs min-h-5">
-          {saveState === 'saving' && <span className="text-slate-600">Saving…</span>}
+          {saveState === 'saving' && <span className="text-ink-muted">Saving…</span>}
           {saveState === 'error' && saveError && <span className="text-red-600">{saveError}</span>}
         </div>
       )}

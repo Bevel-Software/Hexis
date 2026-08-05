@@ -100,7 +100,7 @@ export function PrRefreshFromTargetButton({ detail, onRefreshed }: Props) {
         onClick={() => void run()}
         disabled={busy}
         title={`Pull the latest ${baseLabel} into this draft so the diff reflects what the merge would produce now.`}
-        className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded whitespace-nowrap shrink-0 text-slate-700 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+        className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded whitespace-nowrap shrink-0 text-ink bg-sunken hover:bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
       >
         <RefreshCw size={12} className={busy ? 'animate-spin' : ''} />
         {busy ? 'Refreshing…' : `Update from ${baseLabel}`}

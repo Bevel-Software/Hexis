@@ -17,9 +17,9 @@ interface Props {
 
 export function PrHeader({ detail, onCloseViewer, onResolved, onRefreshed }: Props) {
   return (
-    <div className="h-10 border-b border-slate-200 flex items-center px-3 gap-2 shrink-0">
-      <GitPullRequest size={14} className="text-slate-600 shrink-0" />
-      <span className="text-sm font-medium text-slate-900 truncate min-w-0">
+    <div className="h-10 border-b border-line flex items-center px-3 gap-2 shrink-0">
+      <GitPullRequest size={14} className="text-ink-muted shrink-0" />
+      <span className="text-sm font-medium text-ink truncate min-w-0">
         #{detail.number} · {detail.title}
       </span>
       <div className="ml-auto flex items-center gap-2 shrink-0">
@@ -33,7 +33,7 @@ export function PrHeader({ detail, onCloseViewer, onResolved, onRefreshed }: Pro
         <button
           type="button"
           onClick={onCloseViewer}
-          className="p-1 rounded hover:bg-slate-100 text-slate-600 hover:text-slate-700 transition-colors"
+          className="p-1 rounded hover:bg-hover text-ink-muted hover:text-ink transition-colors"
           title="Close panel"
           aria-label="Close panel"
         >

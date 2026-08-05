@@ -13,7 +13,7 @@ import { useModalLayer } from './useModalLayer';
  * handler and header — so they drifted (three different backdrop tints, subtly
  * different a11y). Route everything through here instead.
  *
- * Backdrop is a dark 40%-opacity scrim (`bg-slate-950/40`) — the standard the
+ * Backdrop is a dark 40%-opacity scrim (`bg-scrim`) — the standard the
  * gear-menu dialogs share. The panel is capped at 90vh and lays out as a flex
  * column: `header` and `footer` stay pinned while `children` scroll, so a long
  * body never pushes the dialog past the top/bottom of the viewport.
@@ -146,7 +146,7 @@ export function Dialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-slate-950/40 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 bg-scrim flex items-center justify-center p-4"
       onClick={() => {
         if (busy || !isTopLayer()) return;
         onClose();
@@ -158,10 +158,10 @@ export function Dialog({
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className={`bg-white border border-slate-200 rounded-lg shadow-xl w-full ${SIZE_CLASS[size]} max-h-[90vh] flex flex-col`}
+        className={`bg-white border border-line rounded-lg shadow-xl w-full ${SIZE_CLASS[size]} max-h-[90vh] flex flex-col`}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-slate-200 shrink-0">
+        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-line shrink-0">
           <h2 id={titleId} className="text-sm font-semibold">
             {title}
           </h2>
@@ -173,7 +173,7 @@ export function Dialog({
                 onClose();
               }}
               disabled={busy}
-              className="p-1 rounded hover:bg-slate-100 text-slate-600 hover:text-slate-900 disabled:opacity-50"
+              className="p-1 rounded hover:bg-hover text-ink-muted hover:text-ink disabled:opacity-50"
               aria-label="Close"
             >
               <X size={16} />
@@ -188,7 +188,7 @@ export function Dialog({
         )}
 
         {footer && (
-          <div className="flex justify-end gap-2 px-4 py-3 border-t border-slate-200 shrink-0">
+          <div className="flex justify-end gap-2 px-4 py-3 border-t border-line shrink-0">
             {footer}
           </div>
         )}

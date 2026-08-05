@@ -63,7 +63,7 @@ export function AppSwitcher() {
         ref={buttonRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1 px-1.5 py-1 rounded hover:bg-slate-100 text-slate-900"
+        className="flex items-center gap-1 px-1.5 py-1 rounded hover:bg-hover text-ink"
         title="Switch app"
         aria-label="Switch app"
         aria-haspopup="menu"
@@ -71,15 +71,15 @@ export function AppSwitcher() {
         aria-controls={open ? MENU_ID : undefined}
       >
         <span className="text-sm font-semibold tracking-wide">Bevel</span>
-        <ChevronDown size={14} className="text-slate-500" />
+        <ChevronDown size={14} className="text-ink-muted" />
       </button>
       {open && (
         <div
           id={MENU_ID}
           role="menu"
-          className="absolute left-0 top-full mt-1 w-64 rounded-md border border-slate-200 bg-white py-1 shadow-lg z-50"
+          className="absolute left-0 top-full mt-1 w-64 rounded-md border border-line bg-white py-1 shadow-lg z-50"
         >
-          <div className="px-3 pt-1 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+          <div className="px-3 pt-1 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
             Apps
           </div>
           {apps.map((app) => (
@@ -88,15 +88,15 @@ export function AppSwitcher() {
               type="button"
               role="menuitem"
               onClick={() => select(app)}
-              className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-slate-100"
+              className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-hover"
             >
-              <span className="w-4 pt-0.5 shrink-0 text-slate-700">
+              <span className="w-4 pt-0.5 shrink-0 text-ink">
                 {app.id === activeId && <Check size={14} aria-label="Current app" />}
               </span>
               <span className="min-w-0">
-                <span className="block text-sm text-slate-800">{app.label}</span>
+                <span className="block text-sm text-ink">{app.label}</span>
                 {app.description && (
-                  <span className="block text-xs text-slate-500">{app.description}</span>
+                  <span className="block text-xs text-ink-muted">{app.description}</span>
                 )}
               </span>
             </button>

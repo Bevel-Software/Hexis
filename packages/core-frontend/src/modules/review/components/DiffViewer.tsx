@@ -16,7 +16,7 @@ export function DiffViewer({ payload }: { payload: FileDiffPayload }) {
 
   if (lines.length > MAX_RENDERED_LINES) {
     return (
-      <div className="h-full flex items-center justify-center text-xs text-slate-600 px-6 text-center">
+      <div className="h-full flex items-center justify-center text-xs text-ink-muted px-6 text-center">
         Diff is too large to render ({lines.length.toLocaleString()} lines).
         Accept or reject from the file list.
       </div>
@@ -35,7 +35,7 @@ export function DiffViewer({ payload }: { payload: FileDiffPayload }) {
           {lines.map((l, i) => {
             let marker = ' ';
             let bg = '';
-            let textColor = 'text-slate-900';
+            let textColor = 'text-ink';
             let left: number | '' = '';
             let right: number | '' = '';
             if (l.type === 'same') {
@@ -58,10 +58,10 @@ export function DiffViewer({ payload }: { payload: FileDiffPayload }) {
             }
             return (
               <tr key={i} className={bg}>
-                <td className="w-12 text-right pr-2 text-slate-500 select-none border-r border-slate-200">
+                <td className="w-12 text-right pr-2 text-ink-muted select-none border-r border-line">
                   {left}
                 </td>
-                <td className="w-12 text-right pr-2 text-slate-500 select-none border-r border-slate-200">
+                <td className="w-12 text-right pr-2 text-ink-muted select-none border-r border-line">
                   {right}
                 </td>
                 <td className={`w-4 text-center ${textColor} select-none`}>{marker}</td>

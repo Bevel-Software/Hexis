@@ -23,7 +23,7 @@ export interface LibrarySkillSummary {
   name: string;
   description: string;
   version?: string;
-  /** Repo-root-relative skill folder, e.g. `Skills/rfi`. */
+  /** Repo-root-relative skill folder, e.g. `Groups/Everyone/rfi`. */
   path: string;
 }
 

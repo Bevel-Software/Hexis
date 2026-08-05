@@ -41,7 +41,7 @@ export function PrHeaderOverflowMenu({ children }: Props) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center px-2 py-1 text-xs rounded text-slate-700 hover:bg-slate-100"
+        className="flex items-center px-2 py-1 text-xs rounded text-ink hover:bg-hover"
         aria-label="More actions"
         aria-expanded={open}
         title="More actions"
@@ -49,7 +49,7 @@ export function PrHeaderOverflowMenu({ children }: Props) {
         <MoreHorizontal size={14} />
       </button>
       {open && (
-        <div className="absolute right-0 top-full mt-1 z-40 bg-white border border-slate-200 rounded shadow-md py-1 flex flex-col items-stretch min-w-[14rem]">
+        <div className="absolute right-0 top-full mt-1 z-40 bg-white border border-line rounded shadow-md py-1 flex flex-col items-stretch min-w-[14rem]">
           {children}
         </div>
       )}

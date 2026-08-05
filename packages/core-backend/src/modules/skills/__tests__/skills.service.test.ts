@@ -50,14 +50,14 @@ describe('SkillService', () => {
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'skills-'));
-    const skills = join(root, wsId, KB_DIR, 'Skills');
+    const skills = join(root, wsId, KB_DIR, 'Groups');
     await mkdir(join(skills, 'rfi', 'scripts'), { recursive: true });
     await writeFile(join(skills, 'rfi', 'SKILL.md'), RFI_SKILL);
     await writeFile(join(skills, 'rfi', 'scripts', 'build_xlsx.py'), 'print("xlsx")\n');
     // A folder with no SKILL.md is not a skill.
     await mkdir(join(skills, 'not-a-skill'), { recursive: true });
     await writeFile(join(skills, 'not-a-skill', 'README.md'), '# nope\n');
-    // A skill nested in a category subfolder (Skills/Development/coding-guidelines).
+    // A skill nested in a category subfolder (Groups/Development/coding-guidelines).
     await mkdir(join(skills, 'Development', 'coding-guidelines'), { recursive: true });
     await writeFile(
       join(skills, 'Development', 'coding-guidelines', 'SKILL.md'),
@@ -72,7 +72,7 @@ describe('SkillService', () => {
     expect(skills).toHaveLength(2);
     const rfi = skills.find((s) => s.name === 'rfi')!;
     expect(rfi).toBeDefined();
-    expect(rfi.path).toBe('Skills/rfi');
+    expect(rfi.path).toBe('Groups/rfi');
     expect(rfi.version).toBe('1.4.0');
     expect(rfi.description).not.toBe('|');
     expect(rfi.description).toContain('Specialist RFI responder');
@@ -83,19 +83,19 @@ describe('SkillService', () => {
     const skills = await svc().listSkills();
     const cg = skills.find((s) => s.name === 'coding-guidelines')!;
     expect(cg).toBeDefined();
-    expect(cg.path).toBe('Skills/Development/coding-guidelines');
+    expect(cg.path).toBe('Groups/Development/coding-guidelines');
     expect(cg.description).toBe('Coding guidelines.');
 
     const res = await svc().getSkill('user@x.eu', 'coding-guidelines');
     expect(res.ok).toBe(true);
     if (res.ok && res.kind === 'skill') {
-      expect(res.skill.path).toBe('Skills/Development/coding-guidelines');
+      expect(res.skill.path).toBe('Groups/Development/coding-guidelines');
       expect(res.skill.body).toContain('# Guidelines');
     }
   });
 
   test('refuses a colliding id (no auto-suffix) — the shared dedup rule', async () => {
-    const skills = join(root, wsId, KB_DIR, 'Skills');
+    const skills = join(root, wsId, KB_DIR, 'Groups');
     // Two skills resolve to the same id `dup` (no frontmatter id/name → folder name).
     await mkdir(join(skills, 'Zeta', 'dup'), { recursive: true });
     await writeFile(join(skills, 'Zeta', 'dup', 'SKILL.md'), '---\ndescription: zeta dup\n---\n\n# Z\n');
@@ -104,28 +104,28 @@ describe('SkillService', () => {
 
     const list = await svc().listSkills();
     // Only the first (smallest path) survives; the duplicate is dropped, not suffixed.
-    expect(list.filter((s) => s.name === 'dup').map((s) => s.path)).toEqual(['Skills/Alpha/dup']);
+    expect(list.filter((s) => s.name === 'dup').map((s) => s.path)).toEqual(['Groups/Alpha/dup']);
     expect(list.find((s) => s.name === 'dup2')).toBeUndefined();
 
     const a = await svc().getSkill('user@x.eu', 'dup');
-    expect(a.ok && a.kind === 'skill' && a.skill.path).toBe('Skills/Alpha/dup');
+    expect(a.ok && a.kind === 'skill' && a.skill.path).toBe('Groups/Alpha/dup');
   });
 
   test('frontmatter `id`/`name` overrides the folder name for identity', async () => {
-    const skills = join(root, wsId, KB_DIR, 'Skills');
+    const skills = join(root, wsId, KB_DIR, 'Groups');
     await mkdir(join(skills, 'folderx'), { recursive: true });
     await writeFile(join(skills, 'folderx', 'SKILL.md'), '---\nid: my_skill\ndescription: d\n---\n\n# X\n');
     const list = await svc().listSkills();
-    expect(list.find((s) => s.name === 'my_skill')?.path).toBe('Skills/folderx');
+    expect(list.find((s) => s.name === 'my_skill')?.path).toBe('Groups/folderx');
   });
 
   test('getSkill returns body, folder path, files and allowed-tools', async () => {
     const res = await svc().getSkill('user@x.eu', 'rfi');
     expect(res.ok).toBe(true);
     if (res.ok && res.kind === 'skill') {
-      expect(res.skill.path).toBe('Skills/rfi');
+      expect(res.skill.path).toBe('Groups/rfi');
       expect(res.skill.body).toContain('# /rfi: Specialist RFI Responder');
-      expect(res.skill.files).toEqual(['Skills/rfi/scripts/build_xlsx.py']);
+      expect(res.skill.files).toEqual(['Groups/rfi/scripts/build_xlsx.py']);
       expect(res.skill.allowedTools).toEqual(['Bash', 'Read']);
     }
   });
@@ -134,7 +134,7 @@ describe('SkillService', () => {
     const res = await svc().getSkill('user@x.eu', 'rfi', 'scripts/build_xlsx.py');
     expect(res.ok).toBe(true);
     if (res.ok && res.kind === 'file') {
-      expect(res.file.path).toBe('Skills/rfi/scripts/build_xlsx.py');
+      expect(res.file.path).toBe('Groups/rfi/scripts/build_xlsx.py');
       expect(res.file.content).toContain('print("xlsx")');
     }
   });

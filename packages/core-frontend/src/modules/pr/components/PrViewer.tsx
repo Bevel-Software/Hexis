@@ -27,7 +27,7 @@ type CommentScope = 'file' | 'all';
 const PR_LAYOUT_ID = 'bevel-pr-viewer-v1';
 const PR_PANEL_IDS = ['files', 'diff', 'comments'];
 const SEPARATOR_CLASS =
-  'w-px bg-slate-100 hover:bg-bevel-deep/60 data-[dragging=true]:bg-bevel-deep transition-colors outline-none focus-visible:bg-bevel-deep cursor-col-resize';
+  'w-px bg-sunken hover:bg-bevel-deep/60 data-[dragging=true]:bg-bevel-deep transition-colors outline-none focus-visible:bg-bevel-deep cursor-col-resize';
 
 function getSafeLocalStorage(): Storage | undefined {
   if (typeof window === 'undefined') return undefined;
@@ -184,12 +184,12 @@ export function PrViewer() {
   if (isLoading && !detail) {
     return (
       <div className="absolute inset-0 z-30 flex flex-col bg-white overflow-hidden">
-        <div className="h-10 border-b border-slate-200 flex items-center px-3 gap-2 shrink-0">
-          <span className="text-sm text-slate-700">Loading change request…</span>
+        <div className="h-10 border-b border-line flex items-center px-3 gap-2 shrink-0">
+          <span className="text-sm text-ink">Loading change request…</span>
           <button
             type="button"
             onClick={closeViewer}
-            className="ml-auto text-xs text-slate-600 hover:text-slate-900 px-2 py-1 rounded hover:bg-slate-100"
+            className="ml-auto text-xs text-ink-muted hover:text-ink px-2 py-1 rounded hover:bg-hover"
           >
             Close
           </button>
@@ -204,22 +204,22 @@ export function PrViewer() {
   if (notFound) {
     return (
       <div className="absolute inset-0 z-30 flex flex-col bg-white overflow-hidden">
-        <div className="h-10 border-b border-slate-200 flex items-center px-3 gap-2 shrink-0">
-          <span className="text-sm text-slate-700">Change request #{openPrNumber}</span>
+        <div className="h-10 border-b border-line flex items-center px-3 gap-2 shrink-0">
+          <span className="text-sm text-ink">Change request #{openPrNumber}</span>
           <button
             type="button"
             onClick={closeViewer}
-            className="ml-auto text-xs text-slate-600 hover:text-slate-900 px-2 py-1 rounded hover:bg-slate-100"
+            className="ml-auto text-xs text-ink-muted hover:text-ink px-2 py-1 rounded hover:bg-hover"
           >
             Close
           </button>
         </div>
         <div className="flex-1 flex items-center justify-center px-6 text-center">
           <div className="max-w-md space-y-2">
-            <div className="text-sm text-slate-700">
+            <div className="text-sm text-ink">
               This change request is no longer available.
             </div>
-            <div className="text-xs text-slate-600">
+            <div className="text-xs text-ink-muted">
               It may have been merged and cleaned up, or removed. There's nothing left to review.
             </div>
           </div>
@@ -231,20 +231,20 @@ export function PrViewer() {
   if (lastError) {
     return (
       <div className="absolute inset-0 z-30 flex flex-col bg-white overflow-hidden">
-        <div className="h-10 border-b border-slate-200 flex items-center px-3 gap-2 shrink-0">
+        <div className="h-10 border-b border-line flex items-center px-3 gap-2 shrink-0">
           <span className="text-sm text-red-700">Couldn't load change request #{openPrNumber}</span>
           <button
             type="button"
             onClick={closeViewer}
-            className="ml-auto text-xs text-slate-600 hover:text-slate-900 px-2 py-1 rounded hover:bg-slate-100"
+            className="ml-auto text-xs text-ink-muted hover:text-ink px-2 py-1 rounded hover:bg-hover"
           >
             Close
           </button>
         </div>
         <div className="flex-1 flex items-center justify-center px-6 text-center">
           <div className="max-w-md space-y-2">
-            <div className="text-sm text-slate-700">Couldn't load this change request.</div>
-            <div className="text-xs text-slate-600">{lastError}</div>
+            <div className="text-sm text-ink">Couldn't load this change request.</div>
+            <div className="text-xs text-ink-muted">{lastError}</div>
           </div>
         </div>
       </div>
@@ -298,7 +298,7 @@ export function PrViewer() {
         <Separator className={SEPARATOR_CLASS} />
         <Panel id="comments" defaultSize="25%" minSize="14%" maxSize="50%">
           <div className="h-full flex flex-col">
-            <div className="flex items-center border-b border-slate-200 shrink-0">
+            <div className="flex items-center border-b border-line shrink-0">
               <ScopeButton
                 active={commentScope === 'file'}
                 disabled={!selectedPath}
@@ -348,14 +348,14 @@ function ScopeButton({
       disabled={disabled}
       className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-xs transition-colors ${
         active
-          ? 'bg-white text-slate-900'
-          : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+          ? 'bg-white text-ink'
+          : 'text-ink-muted hover:text-ink hover:bg-white/50'
       } disabled:opacity-40 disabled:cursor-not-allowed`}
     >
       {icon}
       {label}
       {count > 0 && (
-        <span className={`text-[10px] px-1 rounded ${active ? 'bg-slate-100 text-slate-700' : 'bg-slate-100/80 text-slate-600'}`}>
+        <span className={`text-[10px] px-1 rounded ${active ? 'bg-sunken text-ink' : 'bg-sunken text-ink-muted'}`}>
           {count}
         </span>
       )}

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { parseDocument } from 'yaml';
-import { DEFAULT_BRANCH, SKILLS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, GROUPS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -103,8 +103,8 @@ export class SkillService implements ISkillService {
   }
 
   private async scanDisk(): Promise<ParsedSkill[]> {
-    // Ensure the default-branch clone exists, then scan its Skills/ dir. Any
-    // failure (no workspace, no Skills/ dir) degrades to an empty catalog — the
+    // Ensure the default-branch clone exists, then scan its Groups/ dir. Any
+    // failure (no workspace, no Groups/ dir) degrades to an empty catalog — the
     // manual/tools must never break because skills can't be read.
     let wsId: string;
     try {
@@ -112,18 +112,14 @@ export class SkillService implements ISkillService {
     } catch {
       return [];
     }
-    const root = path.join(
-      await this.workspaceService.getWorkspacePath(wsId),
-      this.kbDirName,
-      SKILLS_DIR,
-    );
+    const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
     // Skills may be grouped in category subfolders (each carrying its own
-    // access.md), so a SKILL.md can live at any depth under Skills/. Walk the
+    // access.md), so a SKILL.md can live at any depth under the root. Walk the
     // tree and treat every folder that directly contains a SKILL.md as a skill;
     // don't descend past it — its inner files are bundled assets, not nested
     // skills. The skill name is the leaf folder name; its path is the full
-    // Skills-relative folder (e.g. `Skills/Development/coding-guidelines`).
+    // repo-relative folder (e.g. `Groups/Development/coding-guidelines`).
     const out: ParsedSkill[] = [];
     const walk = async (dir: string, relFolder: string): Promise<void> => {
       let entries: import('node:fs').Dirent[];
@@ -160,7 +156,7 @@ export class SkillService implements ISkillService {
         await walk(path.join(dir, entry.name), `${relFolder}/${entry.name}`);
       }
     };
-    await walk(root, SKILLS_DIR);
+    await walk(path.join(kbRoot, GROUPS_DIR), GROUPS_DIR);
     // A skill's id (frontmatter `id`/`name`, else folder name) is how getSkill()
     // resolves it, so it must be unique. Sort by (name, path) for a deterministic
     // winner, then REFUSE later duplicates via the shared dedup — the same rule

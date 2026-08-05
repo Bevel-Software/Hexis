@@ -62,13 +62,13 @@ export function PrCancelConfirmDialog({ busy, onConfirm, onCancel }: Props) {
     >
       <div
         ref={panelRef}
-        className="w-[28rem] max-w-[90vw] bg-white border border-slate-200 rounded-md shadow-xl"
+        className="w-[28rem] max-w-[90vw] bg-white border border-line rounded-md shadow-xl"
       >
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-200">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-line">
           <AlertTriangle size={14} className="text-red-600 shrink-0" aria-hidden="true" />
           <h2
             id="pr-cancel-confirm-title"
-            className="text-sm font-medium text-slate-900 flex-1"
+            className="text-sm font-medium text-ink flex-1"
           >
             Cancel this change request?
           </h2>
@@ -77,28 +77,28 @@ export function PrCancelConfirmDialog({ busy, onConfirm, onCancel }: Props) {
             onClick={onCancel}
             disabled={busy}
             aria-label="Keep change request open"
-            className="p-1 rounded text-slate-600 hover:text-slate-900 hover:bg-slate-100 disabled:opacity-40"
+            className="p-1 rounded text-ink-muted hover:text-ink hover:bg-hover disabled:opacity-40"
           >
             <X size={14} aria-hidden="true" />
           </button>
         </div>
 
         <div className="px-4 py-3 space-y-2">
-          <p className="text-xs text-slate-700">
+          <p className="text-xs text-ink">
             This won't delete your draft — you can still open a new change request
             from the same draft later.
           </p>
-          <p className="text-xs text-slate-600">
+          <p className="text-xs text-ink-muted">
             The cancellation is recorded in the change request history.
           </p>
         </div>
 
-        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-slate-200">
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-line">
           <button
             type="button"
             onClick={onCancel}
             disabled={busy}
-            className="px-3 py-1 text-xs rounded text-slate-700 hover:bg-slate-100 disabled:opacity-40"
+            className="px-3 py-1 text-xs rounded text-ink hover:bg-hover disabled:opacity-40"
           >
             Keep open
           </button>
@@ -107,7 +107,7 @@ export function PrCancelConfirmDialog({ busy, onConfirm, onCancel }: Props) {
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            className="flex items-center gap-1.5 px-3 py-1 text-xs rounded bg-red-600 hover:bg-red-500 text-white disabled:bg-slate-100 disabled:text-slate-600 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 px-3 py-1 text-xs rounded bg-red-600 hover:bg-red-500 text-white disabled:bg-sunken disabled:text-ink-muted disabled:cursor-not-allowed"
           >
             <XCircle size={12} aria-hidden="true" />
             {busy ? 'Cancelling…' : 'Cancel change request'}

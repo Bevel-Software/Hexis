@@ -123,7 +123,7 @@ export function UserAccountsPage() {
   if (!isAdmin) {
     return (
       <PageShell title="User accounts">
-        <div className="text-sm text-slate-600">
+        <div className="text-sm text-ink-muted">
           Admins only. Ask an admin if you need an account created or changed.
         </div>
       </PageShell>
@@ -131,13 +131,13 @@ export function UserAccountsPage() {
   }
 
   const inputClass =
-    'w-full rounded-md bg-slate-100 border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-slate-400';
+    'w-full rounded-md bg-sunken border border-line-strong px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent';
 
   return (
     <>
       <PageShell title="User accounts">
         <div className="space-y-4">
-          <p className="text-xs text-slate-600 leading-snug">
+          <p className="text-xs text-ink-muted leading-snug">
             Everyone with an account on this deployment. Deleting an account permanently removes
             the person&apos;s data and anonymizes their past review activity; their saves in the
             knowledge base keep their history. Setting a password lets someone sign in with
@@ -159,11 +159,11 @@ export function UserAccountsPage() {
           )}
 
           {accounts === null ? (
-            <div className="text-xs text-slate-600">Loading…</div>
+            <div className="text-xs text-ink-muted">Loading…</div>
           ) : accounts.length === 0 ? (
-            <div className="text-xs text-slate-600">No user accounts.</div>
+            <div className="text-xs text-ink-muted">No user accounts.</div>
           ) : (
-            <ul className="divide-y divide-slate-200 border border-slate-200 rounded">
+            <ul className="divide-y divide-line border border-line rounded">
               {accounts.map((account) => {
                 const isSelf = account.id === me?.id;
                 return (
@@ -172,10 +172,10 @@ export function UserAccountsPage() {
                       <div className="font-medium truncate">
                         {account.name}
                         {isSelf && (
-                          <span className="ml-1.5 text-[11px] font-normal text-slate-500">(you)</span>
+                          <span className="ml-1.5 text-[11px] font-normal text-ink-muted">(you)</span>
                         )}
                       </div>
-                      <div className="text-[11px] text-slate-600 truncate">
+                      <div className="text-[11px] text-ink-muted truncate">
                         {account.email} · Joined {new Date(account.createdAt).toLocaleDateString()} ·{' '}
                         {account.hasPassword ? 'Password sign-in' : 'Single sign-on only'}
                       </div>
@@ -183,7 +183,7 @@ export function UserAccountsPage() {
                     {!isSelf && (
                       <button
                         onClick={() => openPasswordDialog(account)}
-                        className="text-xs px-2 py-1 rounded text-slate-700 hover:bg-slate-100 border border-slate-200"
+                        className="text-xs px-2 py-1 rounded text-ink hover:bg-hover border border-line"
                         title="Set a new sign-in password for this account."
                         aria-label={`Set password for ${account.email}`}
                       >
@@ -206,13 +206,13 @@ export function UserAccountsPage() {
             </ul>
           )}
 
-          <form onSubmit={handleAdd} className="border-t border-slate-200 pt-3 space-y-2 max-w-md">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+          <form onSubmit={handleAdd} className="border-t border-line pt-3 space-y-2 max-w-md">
+            <div className="text-xs font-semibold uppercase tracking-wide text-ink-muted">
               Add account
             </div>
             <div className="grid grid-cols-2 gap-2">
               <label className="block space-y-1">
-                <span className="text-xs text-slate-600">Email</span>
+                <span className="text-xs text-ink-muted">Email</span>
                 <input
                   type="email"
                   required
@@ -222,8 +222,8 @@ export function UserAccountsPage() {
                 />
               </label>
               <label className="block space-y-1">
-                <span className="text-xs text-slate-600">
-                  Name <span className="text-slate-400">(optional)</span>
+                <span className="text-xs text-ink-muted">
+                  Name <span className="text-ink-faint">(optional)</span>
                 </span>
                 <input
                   type="text"
@@ -234,7 +234,7 @@ export function UserAccountsPage() {
               </label>
             </div>
             <label className="block space-y-1">
-              <span className="text-xs text-slate-600">Password</span>
+              <span className="text-xs text-ink-muted">Password</span>
               <input
                 type="password"
                 required
@@ -271,7 +271,7 @@ export function UserAccountsPage() {
             <button
               onClick={() => setPasswordTarget(null)}
               disabled={savingPassword}
-              className="px-3 py-1.5 text-sm rounded text-slate-700 hover:bg-slate-100 border border-slate-200 disabled:opacity-50"
+              className="px-3 py-1.5 text-sm rounded text-ink hover:bg-hover border border-line disabled:opacity-50"
             >
               Cancel
             </button>
@@ -286,7 +286,7 @@ export function UserAccountsPage() {
         }
       >
         <div className="space-y-2">
-          <p className="text-xs text-slate-700 leading-snug">
+          <p className="text-xs text-ink leading-snug">
             New sign-in password for{' '}
             <span className="font-medium">
               {passwordTarget?.name} ({passwordTarget?.email})
@@ -294,7 +294,7 @@ export function UserAccountsPage() {
             . Share it with them out-of-band; they can change it later on their Account page.
           </p>
           <label className="block space-y-1">
-            <span className="text-xs text-slate-600">New password</span>
+            <span className="text-xs text-ink-muted">New password</span>
             <input
               type="password"
               autoComplete="new-password"
@@ -322,7 +322,7 @@ export function UserAccountsPage() {
             <button
               onClick={() => setPendingDelete(null)}
               disabled={deleting}
-              className="px-3 py-1.5 text-sm rounded text-slate-700 hover:bg-slate-100 border border-slate-200 disabled:opacity-50"
+              className="px-3 py-1.5 text-sm rounded text-ink hover:bg-hover border border-line disabled:opacity-50"
             >
               Cancel
             </button>
@@ -336,7 +336,7 @@ export function UserAccountsPage() {
           </>
         }
       >
-        <p className="text-xs text-slate-700 leading-snug">
+        <p className="text-xs text-ink leading-snug">
           Permanently delete{' '}
           <span className="font-medium">
             {pendingDelete?.name} ({pendingDelete?.email})

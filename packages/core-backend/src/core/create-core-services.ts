@@ -1,6 +1,10 @@
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { DEFAULT_BRANCH, PROTECTED_BRANCHES, SKILLS_DIR, TOOLS_DIR } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_BRANCH,
+  PROTECTED_BRANCHES,
+  GROUPS_DIR,
+} from '@bevel-software/platform-shared';
 import { CoreConfig } from '../core-config.js';
 import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
@@ -18,6 +22,7 @@ import { AccessControlService } from '../modules/access/access-control.service.j
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
+import { GroupIndexService, JoinRequestsService } from '../modules/groups/index.js';
 import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
@@ -85,6 +90,8 @@ export interface CoreServices {
   routineWritePolicy: RoutineWritePolicyService;
   skillService: SkillService;
   toolManualService: ToolManualService;
+  groupIndexService: GroupIndexService;
+  joinRequestsService: JoinRequestsService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
@@ -178,10 +185,21 @@ export async function createCoreServices(
   const routineWritePolicy = new RoutineWritePolicyService();
   // Skills: discovered from the default-branch workspace only (global catalog).
   const skillService = new SkillService(workspaceService, accessControl, config.kbDirName);
-  // Tool manuals: user-authored `*.tool` files under `Tools/` in the default
+  // Tool manuals: user-authored `*.tool` files under `Groups/` in the default
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
   const toolManualService = new ToolManualService(workspaceService, accessControl, config.kbDirName);
+  // Groups: the folders under `Groups/` that carry a
+  // team's skills AND the tools they need. Enumerated for EVERY authenticated
+  // caller — a group they cannot read still exists for them, as a locked one —
+  // with the counts read off the two catalogs above rather than a second scan.
+  const groupIndexService = new GroupIndexService(
+    workspaceService,
+    accessControl,
+    skillService,
+    toolManualService,
+    config.kbDirName,
+  );
   // Auth service — resolves identities for login, PR author attribution, and
   // access lookups. (Change requests now store the author email directly, so
   // PullRequestService no longer depends on it for attribution.)
@@ -279,6 +297,12 @@ export async function createCoreServices(
     workflowHooks,
   );
 
+  // Join requests: derived entirely from two copies of a group's `access.md`
+  // (the request's branch vs the default branch), so it holds no state — it
+  // only needs to read files at refs and to close a request whose proposals
+  // have all landed.
+  const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
+
   // Subscriber A — catalog freshness: a committed change drops the affected
   // caches immediately instead of waiting out their TTLs. The tool/skill
   // catalogs are global but read the DEFAULT branch only, so only
@@ -288,8 +312,17 @@ export async function createCoreServices(
   // caches are independent, so the split preserves behavior.)
   fileChangeNotifier.onFilesChanged(({ branch, paths }) => {
     if (branch !== DEFAULT_BRANCH) return;
-    if (paths.some((p) => p.startsWith(`${config.kbDirName}/${TOOLS_DIR}/`))) toolManualService.invalidate();
-    if (paths.some((p) => p.startsWith(`${config.kbDirName}/${SKILLS_DIR}/`))) skillService.invalidate();
+    // Skills, tools and the group index all live under `Groups/`, so one
+    // touch check drives all three caches. An access grant lands as a
+    // default-branch change to `Groups/<group>/access.md`, so this is also
+    // what makes a newly-granted group unlock within one round-trip instead
+    // of one TTL.
+    const touched = paths.some((p) => p.startsWith(`${config.kbDirName}/${GROUPS_DIR}/`));
+    if (touched) {
+      toolManualService.invalidate();
+      skillService.invalidate();
+      groupIndexService.invalidate();
+    }
   });
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the
@@ -513,6 +546,8 @@ export async function createCoreServices(
     routineWritePolicy,
     skillService,
     toolManualService,
+    groupIndexService,
+    joinRequestsService,
     authService,
     authMiddleware,
     accountErasureService,

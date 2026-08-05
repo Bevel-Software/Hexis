@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import {
   filterLibraryItems,
+  groupCounts,
   neededToolsFor,
   skillStatus,
   toolStatus,
@@ -48,14 +49,16 @@ describe('toolStatus', () => {
     expect(toolStatus(expired).state).toBe('err');
   });
 
-  it('flags a missing shared value as off (not set up yet)', () => {
+  it('flags a missing shared value in AMBER, and says what it needs', () => {
     const t = tool({
       variables: [
         { name: 'API_KEY', scope: 'admin', label: null, key: 'k', adminConfigured: false, userConfigured: false },
       ],
     });
-    expect(toolStatus(t)).toEqual({ state: 'off', text: 'Not set up yet' });
-    expect(toolStatus(tool({ ...t, canWrite: true })).text).toContain('you maintain');
+    // Never grey. Grey read as "disabled" or "not your problem", when an
+    // unconfigured integration is the state that most needs somebody.
+    expect(toolStatus(t)).toEqual({ state: 'warn', text: 'Needs setup' });
+    expect(toolStatus(tool({ ...t, canWrite: true })).text).toBe('Needs setup — yours to set up');
   });
 });
 
@@ -77,41 +80,74 @@ describe('neededToolsFor / skillStatus', () => {
 
   it('skill is ready only when every needed integration is connected', () => {
     expect(skillStatus([slack]).state).toBe('ok');
-    expect(skillStatus([slack, notion])).toEqual({ state: 'warn', text: 'Needs setup' });
     expect(skillStatus([]).state).toBe('ok');
+  });
+
+  it('names the integration standing in the skill\'s way, not just that one is', () => {
+    // The first unhealthy one: fixing it either unblocks the skill or reveals
+    // the next name, and "Needs setup" told you neither.
+    expect(skillStatus([slack, notion])).toEqual({ state: 'warn', text: `Needs ${notion.name}` });
   });
 });
 
-describe('filterLibraryItems (category chips + search)', () => {
+describe('filterLibraryItems (sidebar selection + search)', () => {
   const items: LibraryFilterable[] = [
-    { kind: 'skill', name: 'Weekly newsletter', description: 'drafts the Friday newsletter', owned: true },
-    { kind: 'skill', name: 'RFI responder', description: 'answers requests', owned: false },
-    { kind: 'integration', name: 'Slack', description: 'messages', owned: false },
-    { kind: 'integration', name: 'GitHub', description: 'code and change requests', owned: true },
+    { kind: 'skill', name: 'Weekly newsletter', description: 'drafts the Friday newsletter', owned: true, group: 'Everyone' },
+    { kind: 'skill', name: 'RFI responder', description: 'answers requests', owned: false, group: 'GTM' },
+    { kind: 'integration', name: 'Slack', description: 'messages', owned: false, group: 'Everyone' },
+    { kind: 'integration', name: 'GitHub', description: 'code and change requests', owned: true, group: null },
   ];
 
-  it('narrows by category', () => {
-    expect(filterLibraryItems(items, 'skills', '').map((i) => i.name)).toEqual([
+  it('narrows to a group — skills and tools together, not split by kind', () => {
+    expect(filterLibraryItems(items, { kind: 'group', group: 'Everyone' }, '').map((i) => i.name)).toEqual([
       'Weekly newsletter',
-      'RFI responder',
-    ]);
-    expect(filterLibraryItems(items, 'integrations', '').map((i) => i.name)).toEqual([
       'Slack',
+    ]);
+  });
+
+  it('narrows to owned, and to the ungrouped bucket', () => {
+    expect(filterLibraryItems(items, { kind: 'owned' }, '').map((i) => i.name)).toEqual([
+      'Weekly newsletter',
       'GitHub',
     ]);
-    expect(filterLibraryItems(items, 'owned', '').map((i) => i.name)).toEqual([
-      'Weekly newsletter',
+    expect(filterLibraryItems(items, { kind: 'ungrouped' }, '').map((i) => i.name)).toEqual([
       'GitHub',
     ]);
   });
 
-  it('search matches name or description within the category, case-insensitively', () => {
-    expect(filterLibraryItems(items, 'skills', 'friday').map((i) => i.name)).toEqual([
+  it('"all" keeps everything, including ungrouped items', () => {
+    expect(filterLibraryItems(items, { kind: 'all' }, '')).toHaveLength(4);
+  });
+
+  it('search matches name or description within the selection, case-insensitively', () => {
+    expect(filterLibraryItems(items, { kind: 'all' }, 'friday').map((i) => i.name)).toEqual([
       'Weekly newsletter',
     ]);
-    expect(filterLibraryItems(items, 'integrations', 'CHANGE').map((i) => i.name)).toEqual([
+    expect(filterLibraryItems(items, { kind: 'all' }, 'CHANGE').map((i) => i.name)).toEqual([
       'GitHub',
     ]);
-    expect(filterLibraryItems(items, 'skills', 'slack')).toEqual([]);
+    // The query is applied INSIDE the selection, so a match outside it stays out.
+    expect(filterLibraryItems(items, { kind: 'group', group: 'GTM' }, 'slack')).toEqual([]);
+  });
+});
+
+describe('groupCounts', () => {
+  it('counts per group, skips ungrouped, and sorts by name not by count', () => {
+    const items: LibraryFilterable[] = [
+      { kind: 'skill', name: 'a', description: '', owned: false, group: 'Zeta' },
+      { kind: 'skill', name: 'b', description: '', owned: false, group: 'Alpha' },
+      { kind: 'integration', name: 'c', description: '', owned: false, group: 'Zeta' },
+      { kind: 'skill', name: 'd', description: '', owned: false, group: null },
+    ];
+    // Alpha first despite having fewer items — a nav that reorders itself when
+    // a group gains an item moves under the pointer.
+    expect(groupCounts(items)).toEqual([
+      { group: 'Alpha', count: 1 },
+      { group: 'Zeta', count: 2 },
+    ]);
+  });
+
+  it('is empty when nothing is grouped', () => {
+    expect(groupCounts([{ kind: 'skill', name: 'a', description: '', owned: true, group: null }])).toEqual([]);
   });
 });

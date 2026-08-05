@@ -142,16 +142,16 @@ export function PullRequestsForMe() {
   if (!available) return null;
 
   return (
-    <div className="border-t border-slate-200 shrink-0 max-h-60 flex flex-col">
+    <div className="border-t border-line shrink-0 max-h-60 flex flex-col">
       <button
         onClick={() => setExpanded((v) => !v)}
-        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-white/60"
+        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-ink-muted hover:text-ink hover:bg-white/60"
       >
         {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         <GitPullRequest size={12} />
         <span className="flex-1 text-left uppercase tracking-wide">Change requests for you</span>
         {!loading && prs.length > 0 && (
-          <span className="text-[10px] bg-slate-100 text-slate-700 rounded px-1.5 py-0.5">
+          <span className="text-[10px] bg-sunken text-ink rounded px-1.5 py-0.5">
             {prs.length}
           </span>
         )}
@@ -160,13 +160,13 @@ export function PullRequestsForMe() {
       {expanded && (
         <div className="flex-1 overflow-y-auto">
           {loading && (
-            <div className="px-3 py-2 text-xs text-slate-600">Loading…</div>
+            <div className="px-3 py-2 text-xs text-ink-muted">Loading…</div>
           )}
           {!loading && error && (
             <div className="px-3 py-2 text-xs text-red-600">{error}</div>
           )}
           {!loading && !error && prs.length === 0 && (
-            <div className="px-3 py-2 text-xs text-slate-600">Nothing waiting for your review.</div>
+            <div className="px-3 py-2 text-xs text-ink-muted">Nothing waiting for your review.</div>
           )}
           {!loading && !error && prs.map((pr) => (
             <PrRow key={pr.number} pr={pr} />
@@ -195,14 +195,14 @@ function PrRow({ pr }: { pr: PullRequestSummary }) {
           openPr(pr.number);
         }
       }}
-      className="block px-3 py-1.5 hover:bg-white/60 border-b border-slate-200 last:border-b-0 group cursor-pointer"
+      className="block px-3 py-1.5 hover:bg-white/60 border-b border-line last:border-b-0 group cursor-pointer"
       title={pr.title}
     >
-      <div className="flex items-center gap-1.5 text-xs text-slate-900">
-        <span className="text-slate-600 font-mono shrink-0">#{pr.number}</span>
+      <div className="flex items-center gap-1.5 text-xs text-ink">
+        <span className="text-ink-muted font-mono shrink-0">#{pr.number}</span>
         <span className="truncate flex-1">{pr.title}</span>
       </div>
-      <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-600">
+      <div className="flex items-center gap-2 mt-0.5 text-[10px] text-ink-muted">
         <span className="truncate">{pr.appAuthor?.name ?? pr.author.login}</span>
         <ReviewBadge review={pr.review} />
         {touched > 0 && (

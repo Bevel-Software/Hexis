@@ -288,21 +288,21 @@ export function FileRoute() {
     return (
       <div className="h-full w-full flex items-center justify-center bg-white px-6">
         <div className="max-w-md text-center space-y-3">
-          <h2 className="text-slate-900 text-base font-medium">
+          <h2 className="text-ink text-base font-medium">
             Save your changes before opening this link
           </h2>
-          <p className="text-slate-600 text-sm">
+          <p className="text-ink-muted text-sm">
             This link is on{' '}
-            <span className="font-mono text-slate-900">{error.target}</span>, but you have
+            <span className="font-mono text-ink">{error.target}</span>, but you have
             unsaved changes on{' '}
-            <span className="font-mono text-slate-900">{error.current}</span>. Save the
+            <span className="font-mono text-ink">{error.current}</span>. Save the
             files below first (Ctrl/Cmd+S, or click <span className="font-medium">Save</span>{' '}
             in the editor toolbar) — that releases the lock and auto-commits and auto-pushes
             your changes — then this link will open.
           </p>
           {error.dirtyFilenames.length > 0 && (
-            <div className="text-left bg-slate-50 border border-slate-200 rounded px-3 py-2 text-xs text-slate-700">
-              <div className="font-medium text-slate-900 mb-1">Unsaved files:</div>
+            <div className="text-left bg-sunken border border-line rounded px-3 py-2 text-xs text-ink">
+              <div className="font-medium text-ink mb-1">Unsaved files:</div>
               <ul className="list-disc pl-5 space-y-0.5">
                 {error.dirtyFilenames.map((name) => (
                   <li key={name} className="font-mono">{name}</li>
@@ -319,12 +319,12 @@ export function FileRoute() {
     return (
       <div className="h-full w-full flex items-center justify-center bg-white px-6">
         <div className="max-w-md text-center space-y-3">
-          <h2 className="text-slate-900 text-base font-medium">File not found</h2>
-          <p className="text-slate-600 text-sm">
-            <span className="font-mono text-slate-900">{error.path}</span> doesn't exist on{' '}
-            <span className="font-mono text-slate-900">{branchFromUrl}</span>.
+          <h2 className="text-ink text-base font-medium">File not found</h2>
+          <p className="text-ink-muted text-sm">
+            <span className="font-mono text-ink">{error.path}</span> doesn't exist on{' '}
+            <span className="font-mono text-ink">{branchFromUrl}</span>.
           </p>
-          <p className="text-slate-600 text-xs">
+          <p className="text-ink-muted text-xs">
             It may have been renamed or removed, or this link may be from a different branch.
           </p>
         </div>
@@ -337,11 +337,11 @@ export function FileRoute() {
     return (
       <div className="h-full w-full flex items-center justify-center bg-white px-6">
         <div role="alert" className="max-w-md text-center space-y-3">
-          <h2 className="text-slate-900 text-base font-medium">
+          <h2 className="text-ink text-base font-medium">
             You don&apos;t have access to this file
           </h2>
-          <p className="text-slate-600 text-sm">
-            <span className="font-mono text-slate-900">{denyName}</span> is restricted. Ask an
+          <p className="text-ink-muted text-sm">
+            <span className="font-mono text-ink">{denyName}</span> is restricted. Ask an
             owner to grant you read access.
           </p>
           {/* Retry re-runs addTab, which re-checks access server-side — a user
@@ -351,7 +351,7 @@ export function FileRoute() {
             type="button"
             onClick={() => retryLoad(error.path)}
             disabled={retrying}
-            className="inline-flex items-center justify-center rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="inline-flex items-center justify-center rounded border border-line-strong bg-white px-3 py-1.5 text-sm font-medium text-ink hover:bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {retrying ? 'Retrying…' : 'Retry'}
           </button>
@@ -364,12 +364,12 @@ export function FileRoute() {
     return (
       <div className="h-full w-full flex items-center justify-center bg-white px-6">
         <div className="max-w-md text-center space-y-3">
-          <h2 className="text-slate-900 text-base font-medium">Couldn't load this file</h2>
-          <p className="text-slate-600 text-sm">
+          <h2 className="text-ink text-base font-medium">Couldn't load this file</h2>
+          <p className="text-ink-muted text-sm">
             Something went wrong reading{' '}
-            <span className="font-mono text-slate-900">{error.path}</span>.
+            <span className="font-mono text-ink">{error.path}</span>.
           </p>
-          <p className="text-slate-600 text-xs font-mono">{error.message}</p>
+          <p className="text-ink-muted text-xs font-mono">{error.message}</p>
           {/* Only offer Retry when we have a concrete file to re-fetch. A hydrate
               failure with no deeplinked path leaves `error.path` empty, and
               `retryLoad('')` is a no-op — so the button would be dead. */}
@@ -378,7 +378,7 @@ export function FileRoute() {
               type="button"
               onClick={() => retryLoad(error.path)}
               disabled={retrying}
-              className="inline-flex items-center justify-center rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="inline-flex items-center justify-center rounded border border-line-strong bg-white px-3 py-1.5 text-sm font-medium text-ink hover:bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {retrying ? 'Retrying…' : 'Retry'}
             </button>

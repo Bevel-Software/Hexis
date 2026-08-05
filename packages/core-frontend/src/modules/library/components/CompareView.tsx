@@ -176,11 +176,11 @@ export function CompareView({
             ? 'border-[#0d9488] bg-[#e6f7f4]'
             : added
               ? 'border-[#a9e8cd] bg-[#f2fcf8] hover:border-[#7fd0c4]'
-              : 'border-slate-200 bg-[#fafbfd] hover:border-[#7fd0c4]'
+              : 'border-line bg-[#fafbfd] hover:border-[#7fd0c4]'
         }`}
         onClick={() => setSelected(rel)}
       >
-        <span className={`font-mono text-[11.5px] font-semibold ${active ? 'text-[#0f766e]' : 'text-slate-600'}`}>
+        <span className={`font-mono text-[11.5px] font-semibold ${active ? 'text-[#0f766e]' : 'text-ink-muted'}`}>
           {rel}
         </span>
         {rel === 'SKILL.md' && (
@@ -205,13 +205,13 @@ export function CompareView({
 
   const lineView = (lines: DiffLine[] | null, raw: string | null, hide: 'added' | 'removed') => {
     if (raw === null && lines === null) {
-      return <div className="p-3 text-xs text-slate-400">Loading…</div>;
+      return <div className="p-3 text-xs text-ink-faint">Loading…</div>;
     }
     const rendered = lines
       ? lines.filter((l) => l.kind !== hide)
       : (raw ?? '').split('\n').map((text) => ({ kind: 'same' as const, text }));
     return (
-      <pre className="whitespace-pre-wrap break-words rounded-[13px] border border-slate-200 bg-[#f7f9fb] p-3 font-mono text-[11.5px] leading-relaxed text-slate-600">
+      <pre className="whitespace-pre-wrap break-words rounded-[13px] border border-line bg-[#f7f9fb] p-3 font-mono text-[11.5px] leading-relaxed text-ink-muted">
         {rendered.map((l, i) => (
           <div
             key={i}
@@ -232,27 +232,27 @@ export function CompareView({
 
   return (
     <div className="fixed inset-0 z-[60]" role="dialog" aria-modal="true" aria-label={`Compare change request: ${cr.title}`}>
-      <div className="absolute inset-0 bg-slate-950/40" onClick={onClose} />
+      <div className="absolute inset-0 bg-scrim" onClick={onClose} />
       <div className="absolute inset-x-4 bottom-[5vh] top-[5vh] flex gap-3.5">
         {/* left: the default branch */}
-        <section className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-[0_30px_80px_rgba(22,35,58,0.30)]">
+        <section className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-[20px] border border-line bg-white shadow-[0_30px_80px_rgba(22,35,58,0.30)]">
           <div className="absolute left-6 right-6 top-0 h-[3px] rounded-full bg-gradient-to-r from-transparent via-[#10b981] to-transparent" />
           <div className="flex items-center gap-3 px-5 pb-3 pt-5">
             <div className="min-w-0">
-              <div className="truncate text-[17px] font-bold text-slate-800">{skill.name}</div>
-              <div className="text-[11px] uppercase tracking-[.08em] text-slate-400">
+              <div className="truncate text-[17px] font-bold text-ink">{skill.name}</div>
+              <div className="text-[11px] uppercase tracking-[.08em] text-ink-faint">
                 Skill · {protectedBranchDisplayName(DEFAULT_BRANCH)}
               </div>
             </div>
           </div>
           <div className="flex-1 overflow-y-auto px-5 pb-5">
-            <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-slate-400">
+            <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-ink-faint">
               Files on {protectedBranchDisplayName(DEFAULT_BRANCH)}
             </h4>
             <div className="mb-4 flex flex-col gap-1.5">{mainFiles.map((f) => fileRow(f, 'main'))}</div>
-            <h4 className="mb-2 font-mono text-[11px] text-slate-500">{selected}</h4>
+            <h4 className="mb-2 font-mono text-[11px] text-ink-muted">{selected}</h4>
             {isAdded ? (
-              <div className="rounded-[13px] border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">
+              <div className="rounded-[13px] border border-dashed border-line p-4 text-center text-xs text-ink-faint">
                 This file doesn't exist here yet
               </div>
             ) : (
@@ -262,12 +262,12 @@ export function CompareView({
         </section>
 
         {/* right: the change-request branch */}
-        <section className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-[0_30px_80px_rgba(22,35,58,0.30)]">
+        <section className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-[20px] border border-line bg-white shadow-[0_30px_80px_rgba(22,35,58,0.30)]">
           <div className="absolute left-6 right-6 top-0 h-[3px] rounded-full bg-gradient-to-r from-transparent via-[#0d9488] to-transparent" />
           <div className="flex items-center gap-3 px-5 pb-3 pt-5">
             <div className="min-w-0">
-              <div className="truncate text-[17px] font-bold text-slate-800">{cr.title}</div>
-              <div className="truncate text-[11px] text-slate-400">
+              <div className="truncate text-[17px] font-bold text-ink">{cr.title}</div>
+              <div className="truncate text-[11px] text-ink-faint">
                 <span className="font-mono">{cr.branch}</span>
                 {' · by '}
                 {cr.appAuthor?.name ?? cr.author.name ?? cr.author.login}
@@ -293,18 +293,18 @@ export function CompareView({
               <button
                 type="button"
                 aria-label="Close compare"
-                className="flex h-[30px] w-[30px] items-center justify-center rounded-full border border-slate-200 bg-white text-[13px] text-slate-500 hover:border-[#7fd0c4] hover:text-slate-800"
+                className="flex h-[30px] w-[30px] items-center justify-center rounded-full border border-line bg-white text-[13px] text-ink-muted hover:border-[#7fd0c4] hover:text-ink"
                 onClick={onClose}
               >
                 ✕
               </button>
               {sendBackOpen && (
-                <div className="absolute right-0 top-full z-10 mt-2 w-72 rounded-[14px] border border-slate-200 bg-white p-3.5 shadow-[0_16px_44px_rgba(22,35,58,0.24)]">
-                  <label className="block text-[10px] font-bold uppercase tracking-[.07em] text-slate-400">
+                <div className="absolute right-0 top-full z-10 mt-2 w-72 rounded-[14px] border border-line bg-white p-3.5 shadow-[0_16px_44px_rgba(22,35,58,0.24)]">
+                  <label className="block text-[10px] font-bold uppercase tracking-[.07em] text-ink-faint">
                     Note for the author (optional)
                     <textarea
                       rows={3}
-                      className="mt-1 w-full resize-y rounded-lg border border-slate-200 px-2 py-1.5 text-xs font-normal normal-case tracking-normal text-slate-800 outline-none focus:border-[#0d9488]"
+                      className="mt-1 w-full resize-y rounded-lg border border-line px-2 py-1.5 text-xs font-normal normal-case tracking-normal text-ink outline-none focus:border-[#0d9488]"
                       value={sendBackNote}
                       onChange={(e) => setSendBackNote(e.target.value)}
                     />
@@ -325,7 +325,7 @@ export function CompareView({
           </div>
           {error && <div className="mx-5 mb-2 rounded-lg bg-[#fdecec] px-3 py-2 text-xs text-[#c53030]">{error}</div>}
           <div className="flex-1 overflow-y-auto px-5 pb-5">
-            <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-slate-400">
+            <h4 className="mb-2 text-[10.5px] font-bold uppercase tracking-[.09em] text-ink-faint">
               Files on this draft
               {outsideCount > 0 && (
                 <span className="ml-2 normal-case tracking-normal text-[#6d28d9]">
@@ -335,7 +335,7 @@ export function CompareView({
             </h4>
             <div className="mb-4 flex flex-col gap-1.5">{branchFiles.map((f) => fileRow(f, 'branch'))}</div>
             <div className="mb-2 flex items-center justify-between">
-              <h4 className="font-mono text-[11px] text-slate-500">{selected}</h4>
+              <h4 className="font-mono text-[11px] text-ink-muted">{selected}</h4>
               <button
                 type="button"
                 className="rounded-lg bg-[#e0f8ee] px-3.5 py-1 text-[11.5px] font-bold text-[#0a8f60] shadow-[inset_0_0_0_1px_#a9e8cd] transition-transform hover:-translate-y-px"

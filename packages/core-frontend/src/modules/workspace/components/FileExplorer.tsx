@@ -23,8 +23,7 @@ import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
   validateFilename,
   KNOWLEDGE_BASE_DIR,
-  SKILLS_DIR,
-  TOOLS_DIR,
+  GROUPS_DIR,
   DATA_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
@@ -170,13 +169,13 @@ function ContextMenu({
   return (
     <div
       ref={ref}
-      className="fixed z-50 bg-slate-100 border border-slate-300 rounded-md shadow-xl py-1 min-w-[140px]"
+      className="fixed z-50 bg-sunken border border-line-strong rounded-md shadow-xl py-1 min-w-[140px]"
       style={{ left: x, top: y }}
       onMouseDown={(e) => e.stopPropagation()}
     >
       {onCreateFile && (
         <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200/80"
+          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-ink hover:bg-hover"
           onClick={() => { onCreateFile(); onClose(); }}
         >
           <FilePlus size={14} />
@@ -185,7 +184,7 @@ function ContextMenu({
       )}
       {onCreateFolder && (
         <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200/80"
+          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-ink hover:bg-hover"
           onClick={() => { onCreateFolder(); onClose(); }}
         >
           <FolderPlus size={14} />
@@ -194,7 +193,7 @@ function ContextMenu({
       )}
       {isZip && (
         <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200/80 disabled:opacity-60 disabled:cursor-not-allowed"
+          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-ink hover:bg-hover disabled:opacity-60 disabled:cursor-not-allowed"
           onClick={handleUnzip}
           disabled={unzipping}
         >
@@ -204,7 +203,7 @@ function ContextMenu({
       )}
       {onDownload && (
         <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200/80"
+          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-ink hover:bg-hover"
           onClick={() => { onDownload(); onClose(); }}
         >
           <Download size={14} />
@@ -213,9 +212,9 @@ function ContextMenu({
       )}
       {!isRoot && (
         <>
-          <div className="my-1 border-t border-slate-200/70" />
+          <div className="my-1 border-t border-line" />
           <button
-            className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-bevel-deep font-medium hover:bg-slate-200/80"
+            className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-bevel-deep font-medium hover:bg-hover"
             onClick={() => { openManageAccess(entry); onClose(); }}
           >
             <Users size={14} />
@@ -225,7 +224,7 @@ function ContextMenu({
       )}
       {entry.type === 'directory' && !isRoot && (
         <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200/80"
+          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-ink hover:bg-hover"
           onClick={() => { togglePin(entry.relativePath); onClose(); }}
         >
           {pinned ? <PinOff size={14} /> : <Pin size={14} />}
@@ -234,7 +233,7 @@ function ContextMenu({
       )}
       {!isRoot && onRename && (
         <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200/80"
+          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-ink hover:bg-hover"
           onClick={() => { onRename(); onClose(); }}
         >
           <Pencil size={14} />
@@ -243,7 +242,7 @@ function ContextMenu({
       )}
       {!isRoot && (
         <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-red-600 hover:bg-slate-200/80"
+          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-red-600 hover:bg-hover"
           onClick={handleDelete}
         >
           <Trash2 size={14} />
@@ -278,8 +277,8 @@ function InlineInput({
     <div className="w-full">
       <input
         autoFocus
-        className={`w-full bg-slate-100 text-slate-900 text-sm px-2 py-0.5 rounded border outline-none ${
-          error ? 'border-red-500' : 'border-slate-300 focus:border-slate-400'
+        className={`w-full bg-sunken text-ink text-sm px-2 py-0.5 rounded border outline-none ${
+          error ? 'border-red-500' : 'border-line-strong focus:border-accent'
         }`}
         placeholder={placeholder}
         value={value}
@@ -328,8 +327,8 @@ function RenameInput({
     <div className="w-full">
       <input
         autoFocus
-        className={`w-full bg-slate-100 text-slate-900 text-sm px-2 py-0.5 rounded border outline-none ${
-          error ? 'border-red-500' : 'border-slate-300 focus:border-slate-400'
+        className={`w-full bg-sunken text-ink text-sm px-2 py-0.5 rounded border outline-none ${
+          error ? 'border-red-500' : 'border-line-strong focus:border-accent'
         }`}
         value={value}
         onClick={(e) => e.stopPropagation()}
@@ -578,8 +577,8 @@ function FileTreeNode({
     return (
       <div>
         <div
-          className={`flex items-center gap-1 w-full text-left py-1 px-2 text-sm text-slate-700 hover:bg-slate-100/70 rounded group transition-colors duration-150 ${
-            dragOver ? 'bg-slate-200/60 ring-1 ring-bevel/50' : ''
+          className={`flex items-center gap-1 w-full text-left py-1 px-2 text-sm text-ink hover:bg-hover rounded group transition-colors duration-150 ${
+            dragOver ? 'bg-line-strong ring-1 ring-bevel/50' : ''
           }`}
           style={{ paddingLeft, opacity: dragging ? 0.5 : isPending ? 0.6 : 1 }}
           draggable={!isRoot && !renaming && !isPending}
@@ -595,14 +594,14 @@ function FileTreeNode({
             onClick={() => setUserIntent(!isExpanded)}
           >
             {isExpanded ? (
-              <ChevronDown size={14} className="text-slate-600 shrink-0" />
+              <ChevronDown size={14} className="text-ink-muted shrink-0" />
             ) : (
-              <ChevronRight size={14} className="text-slate-600 shrink-0" />
+              <ChevronRight size={14} className="text-ink-muted shrink-0" />
             )}
             {isExpanded ? (
-              <FolderOpen size={14} className={`shrink-0 ${accent ? 'text-emerald-600' : 'text-slate-600'}`} />
+              <FolderOpen size={14} className={`shrink-0 ${accent ? 'text-emerald-600' : 'text-ink-muted'}`} />
             ) : (
-              <Folder size={14} className={`shrink-0 ${accent ? 'text-emerald-600' : 'text-slate-600'}`} />
+              <Folder size={14} className={`shrink-0 ${accent ? 'text-emerald-600' : 'text-ink-muted'}`} />
             )}
             {renaming ? (
               <RenameInput
@@ -632,7 +631,7 @@ function FileTreeNode({
           </button>
           <div className="hidden group-hover:flex group-focus-within:flex items-center gap-0.5 shrink-0">
             <button
-              className="p-0.5 rounded hover:bg-slate-200 text-slate-600 hover:text-slate-700"
+              className="p-0.5 rounded hover:bg-hover text-ink-muted hover:text-ink"
               title="New file"
               onClick={(e) => {
                 e.stopPropagation();
@@ -643,7 +642,7 @@ function FileTreeNode({
               <FilePlus size={13} />
             </button>
             <button
-              className="p-0.5 rounded hover:bg-slate-200 text-slate-600 hover:text-slate-700"
+              className="p-0.5 rounded hover:bg-hover text-ink-muted hover:text-ink"
               title="New folder"
               onClick={(e) => {
                 e.stopPropagation();
@@ -658,7 +657,7 @@ function FileTreeNode({
             <>
               <button
                 type="button"
-                className="p-0.5 rounded hover:bg-slate-200 text-slate-600 hover:text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                className="p-0.5 rounded hover:bg-hover text-ink-muted hover:text-ink disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
                 title="Add files"
                 aria-label="Add files"
                 disabled={isUploading}
@@ -677,7 +676,7 @@ function FileTreeNode({
               />
               <button
                 type="button"
-                className="p-0.5 rounded hover:bg-slate-200 text-slate-600 hover:text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                className="p-0.5 rounded hover:bg-hover text-ink-muted hover:text-ink disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
                 title="Add folder"
                 aria-label="Add folder"
                 disabled={isUploading}
@@ -765,8 +764,8 @@ function FileTreeNode({
       <button
         className={`flex items-center gap-1.5 w-full text-left py-1 px-2 text-sm rounded transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-bevel/60 ${
           isActive
-            ? 'bg-slate-200/80 text-slate-900'
-            : 'text-slate-600 hover:bg-slate-100/70 hover:text-slate-900'
+            ? 'bg-line-strong text-ink'
+            : 'text-ink-muted hover:bg-hover hover:text-ink'
         } ${isPending ? 'cursor-progress' : ''}`}
         style={{ paddingLeft: paddingLeft + 18, opacity: dragging ? 0.5 : isPending ? 0.6 : 1 }}
         draggable={!renaming && !isPending}
@@ -777,7 +776,7 @@ function FileTreeNode({
         title={isPending ? 'Adding…' : undefined}
       >
         {isPending ? (
-          <Loader2 size={14} className="shrink-0 animate-spin text-slate-500" />
+          <Loader2 size={14} className="shrink-0 animate-spin text-ink-muted" />
         ) : (
           <Icon
             icon={`material-icon-theme:${iconName}`}
@@ -896,9 +895,9 @@ export function FileExplorer() {
   const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);
 
   // KB content splits Knowledge (`KnowledgeBase/`), Data (`Data/`), Agents
-  // (`Agents/`), Pipelines (`Pipelines/`), Skills (`Skills/`) and Tools
-  // (`Tools/`) into separate top-level folders; surface them as labelled sections
-  // rather than a single flat root. The Knowledge section hoists `KnowledgeBase/`'s
+  // (`Agents/`), Pipelines (`Pipelines/`) and Groups (`Groups/`) into separate
+  // top-level folders; surface them as labelled sections rather than a single
+  // flat root. The Knowledge section hoists `KnowledgeBase/`'s
   // children and folds in any other top-level content folder (e.g. a stray
   // `Legal/`); loose top-level files (access.md, roles.yaml) sit below a divider.
   // Clones that predate the split (none of the well-known root dirs) fall back
@@ -914,15 +913,14 @@ export function FileExplorer() {
     const data = findDir(DATA_DIR);
     const agents = findDir(AGENTS_DIR);
     const pipelines = findDir(PIPELINES_DIR);
-    const skills = findDir(SKILLS_DIR);
-    const tools = findDir(TOOLS_DIR);
-    if (!knowledgeBase && !data && !agents && !pipelines && !skills && !tools) return null;
+    const groups = findDir(GROUPS_DIR);
+    if (!knowledgeBase && !data && !agents && !pipelines && !groups) return null;
     // Any other top-level content folder (e.g. a stray `Legal/`) folds into Knowledge.
     const otherDirs = kids.filter(
       (c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name),
     );
-    // Present Knowledge, Data, Agents, Pipelines, Skills and Tools as named
-    // roots. Knowledge is synthetic so it can relabel `KnowledgeBase` and
+    // Present Knowledge, Data, Agents, Pipelines and Groups as named roots.
+    // Knowledge is synthetic so it can relabel `KnowledgeBase` and
     // absorb the stray content folders; it reuses KnowledgeBase's own path so
     // file ops on the row still resolve.
     const knowledge: FileTreeEntry | null = knowledgeBase
@@ -939,15 +937,13 @@ export function FileExplorer() {
     const pipelinesRoot: FileTreeEntry | null = pipelines
       ? { ...pipelines, name: PIPELINES_DIR }
       : null;
-    const skillsRoot: FileTreeEntry | null = skills ? { ...skills, name: SKILLS_DIR } : null;
-    const toolsRoot: FileTreeEntry | null = tools ? { ...tools, name: TOOLS_DIR } : null;
+    const groupsRoot: FileTreeEntry | null = groups ? { ...groups, name: GROUPS_DIR } : null;
     return {
       knowledge,
       data: dataRoot,
       agents: agentsRoot,
       pipelines: pipelinesRoot,
-      skills: skillsRoot,
-      tools: toolsRoot,
+      groups: groupsRoot,
       looseFiles: kids.filter((c) => c.type === 'file'),
     };
   }, [mergedTree]);
@@ -1007,7 +1003,7 @@ export function FileExplorer() {
       <PinnedContext.Provider value={pinnedController}>
       <ManageAccessContext.Provider value={setAccessTarget}>
       <div className="flex-1 overflow-y-auto py-1 min-h-0">
-        <div className="px-3 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+        <div className="px-3 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-faint">
           Pinned
         </div>
         {pinnedEntries.map((e) => (
@@ -1016,9 +1012,9 @@ export function FileExplorer() {
         {explorerItems.map(({ id, Component }) => (
           <Component key={id} tree={mergedTree} />
         ))}
-        <div className="mx-3 my-2 border-t border-slate-100" />
+        <div className="mx-3 my-2 border-t border-line" />
         {!mergedTree ? (
-          <div className="px-3 py-4 text-xs text-slate-600">Loading...</div>
+          <div className="px-3 py-4 text-xs text-ink-muted">Loading...</div>
         ) : sections ? (
           <>
             {sections.knowledge && (
@@ -1033,15 +1029,12 @@ export function FileExplorer() {
             {sections.pipelines && (
               <FileTreeNode entry={sections.pipelines} depth={0} accent collapseChildren />
             )}
-            {sections.skills && (
-              <FileTreeNode entry={sections.skills} depth={0} accent collapseChildren />
-            )}
-            {sections.tools && (
-              <FileTreeNode entry={sections.tools} depth={0} accent collapseChildren />
+            {sections.groups && (
+              <FileTreeNode entry={sections.groups} depth={0} accent collapseChildren />
             )}
             {sections.looseFiles.length > 0 && (
               <>
-                <div className="mx-3 my-2 border-t border-slate-100" />
+                <div className="mx-3 my-2 border-t border-line" />
                 {sections.looseFiles.map((c) => (
                   <FileTreeNode key={c.relativePath} entry={c} depth={0} />
                 ))}

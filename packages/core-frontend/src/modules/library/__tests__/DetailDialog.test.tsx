@@ -105,8 +105,6 @@ function renderDialog(owned: boolean) {
         allowedToolsBySkill={new Map([['newsletter', ['slack_post_message']]])}
         crs={[]}
         myCrNumbers={new Set()}
-        inLoadout={false}
-        onToggleLoadout={() => {}}
         onClose={() => {}}
         onDataChanged={() => {}}
       />,
@@ -121,6 +119,11 @@ beforeEach(() => {
   apiMock.suggestChange.mockReset();
 });
 
+/**
+ * Skills only. The integration half moved to its own route in WP4 and is
+ * covered by `ToolPage.test.tsx` — a dialog can't be an OAuth landing target,
+ * which is why it moved.
+ */
 describe('DetailDialog (skill)', () => {
   it('loads the skill detail and shows description, needed integrations and files', async () => {
     renderDialog(false);
@@ -153,48 +156,22 @@ describe('DetailDialog (skill)', () => {
     expect(await screen.findByText(/topic: AI/)).toBeInTheDocument();
   });
 
-  it('shows owner-only Edit and Manage access when the caller owns the skill', async () => {
+  it('shows owner-only Edit when the caller owns the skill — but never access', async () => {
     renderDialog(true);
     await screen.findByText('Drafts the Friday newsletter for review.');
 
-    expect(screen.getByRole('button', { name: 'Manage access' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
     expect(screen.getByText('OWNER')).toBeInTheDocument();
+    // A skill inherits its group folder's rules; the group's Share panel is
+    // the one place they are decided, for owner and non-owner alike.
+    expect(screen.queryByRole('button', { name: 'Manage access' })).toBeNull();
   });
 
-  it('hides Edit and Manage access for non-owners', async () => {
+  it('hides Edit for non-owners', async () => {
     renderDialog(false);
     await screen.findByText('Drafts the Friday newsletter for review.');
 
-    expect(screen.queryByRole('button', { name: 'Manage access' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
     expect(screen.queryByText('OWNER')).toBeNull();
-  });
-});
-
-describe('DetailDialog (integration)', () => {
-  it('shows per-connection status with a Connect action and the skills using it', async () => {
-    render(
-      wrap(
-        <DetailDialog
-          target={{ kind: 'integration', tool: slackTool }}
-          tools={[slackTool]}
-          skills={[skillSummary]}
-          allowedToolsBySkill={new Map([['newsletter', ['slack_post_message']]])}
-          crs={[]}
-          myCrNumbers={new Set()}
-          inLoadout={false}
-          onToggleLoadout={() => {}}
-          onClose={() => {}}
-          onDataChanged={() => {}}
-        />,
-      ),
-    );
-
-    expect(screen.getByText('Slack sign-in')).toBeInTheDocument();
-    expect(screen.getByText('Needs your sign-in')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Connect/ })).toBeInTheDocument();
-    // Used by: derived from the skills' allowed-tools.
-    expect(screen.getByText('newsletter')).toBeInTheDocument();
   });
 });

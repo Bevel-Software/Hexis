@@ -1,0 +1,12 @@
+/**
+ * The design system's stylesheet: tokens only, no app chrome.
+ *
+ * Import this to get the token vocabulary without the application's base
+ * styles (resets, scrollbars, prose theming) — those live in the package's
+ * top-level `src/index.css`, which imports this file.
+ *
+ * Consumers reach this as `@bevel-software/platform-core-frontend/theme.css`.
+ */
+
+@import './tokens.css';
+@import './shadows.css';

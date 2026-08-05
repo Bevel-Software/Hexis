@@ -1,0 +1,176 @@
+/**
+ * Design tokens — the single source of colour, radius and type for the app.
+ *
+ * Ported from the approved prototype (`skill-prototype-juan.html`, :root at
+ * lines 4-18). Names are SEMANTIC (role), not literal (hue), so a palette
+ * change is an edit here and nowhere else.
+ *
+ * Tailwind v4 compiles every one of these into a `var(--token)` reference
+ * inside `@layer utilities` — e.g. `.text-ink { color: var(--color-ink) }` —
+ * so overriding a token in a narrower scope retargets every utility that uses
+ * it. That is what keeps this file the only place colour lives.
+ *
+ *   NOTE: shadows do NOT work this way and live in `./shadows.css`.
+ *   A `@theme` shadow token bakes its literal into the utility at build time.
+ */
+
+@theme {
+  /* ── surfaces ─────────────────────────────────────────────────────────
+     canvas   the page behind everything
+     sidebar  the nav spine (warmer than canvas so the spine reads as chrome)
+     surface  a raised card/panel/row
+     surface-hover  the same surface under the pointer
+     sunken   an inset well: code blocks, avatars, file rows, chips        */
+  --color-canvas: #ffffff;
+  --color-sidebar: #f7f6f4;
+  --color-surface: #ffffff;
+  --color-surface-hover: #fafaf8;
+  --color-sunken: #f4f3f0;
+
+  /* ── ink ──────────────────────────────────────────────────────────────
+     A warm three-step ramp, NOT a cold grey. `ink` is the reading colour;
+     `muted` is secondary prose; `faint` is metadata that must not compete. */
+  --color-ink: #37352f;
+  --color-ink-muted: #73706a;
+  --color-ink-faint: #a3a099;
+
+  /* ── lines + tint ─────────────────────────────────────────────────────
+     Alpha, not solid, so a border darkens whatever it sits on rather than
+     fighting it. `hover` is the universal 5% pointer tint.                */
+  --color-line: rgba(55, 53, 47, 0.11);
+  --color-line-strong: rgba(55, 53, 47, 0.19);
+  --color-hover: rgba(55, 53, 47, 0.05);
+
+  /* ── interactive ──────────────────────────────────────────────────────
+     Exactly ONE interactive colour. If something is blue it is clickable
+     and primary; everything else earns attention through weight, not hue. */
+  --color-accent: #2383e2;
+  --color-accent-hover: #1b74cb;
+
+  /* ── status ───────────────────────────────────────────────────────────
+     `wait` is the text/icon colour; `wait-dot` is the saturated fill used
+     for dots and blobs, which needs more punch at 6px than text does.     */
+  --color-ok: #337b58;
+  --color-wait: #c79100;
+  --color-wait-dot: #f2c100;
+  --color-danger: #b3261e;
+
+  --color-ok-soft: #ebf5ee;
+  --color-wait-soft: #fef8dc;
+  --color-danger-soft: #fdedeb;
+
+  /* word-level diff marks inside a document */
+  --color-mark-del: rgba(179, 38, 30, 0.17);
+  --color-mark-ins: rgba(51, 123, 88, 0.19);
+
+  /* the modal backdrop. Tokenised because the app currently hand-rolls
+     seven of these at three different alphas. */
+  --color-scrim: rgba(55, 53, 47, 0.28);
+
+  /* ── radii ────────────────────────────────────────────────────────────
+     Six ROLES, collapsed from the prototype's 16 hand-tuned values:
+       xs  tags, inline code
+       sm  controls: nav items, icon buttons, menu items
+       md  inputs, strip rows, code blocks
+       lg  surfaces: rows, panels, menus
+       xl  cards
+       2xl overlays: modals, the version panel
+     Pills use `rounded-full`; there is no square button in this design.   */
+  --radius-xs: 5px;
+  --radius-sm: 7px;
+  --radius-md: 9px;
+  --radius-lg: 12px;
+  --radius-xl: 14px;
+  --radius-2xl: 16px;
+
+  /* ── type ─────────────────────────────────────────────────────────────
+     Ten named steps. Each carries its line-height, and tracking/weight
+     where the design pins them, so a size choice is never also a
+     leading choice made by hand at the call site.                         */
+  --text-micro: 9.5px;
+  --text-micro--line-height: 1.3;
+  --text-micro--letter-spacing: 0.04em;
+  --text-micro--font-weight: 600;
+
+  --text-label: 10.5px;
+  --text-label--line-height: 1.4;
+  --text-label--letter-spacing: 0.09em;
+  --text-label--font-weight: 600;
+
+  --text-meta: 11.5px;
+  --text-meta--line-height: 1.45;
+
+  --text-detail: 12.5px;
+  --text-detail--line-height: 1.45;
+
+  --text-ui: 13px;
+  --text-ui--line-height: 1.5;
+
+  --text-body: 13.5px;
+  --text-body--line-height: 1.7;
+
+  --text-strong: 14px;
+  --text-strong--line-height: 1.5;
+  --text-strong--letter-spacing: -0.006em;
+
+  --text-lede: 14.5px;
+  --text-lede--line-height: 1.55;
+  --text-lede--letter-spacing: -0.008em;
+
+  --text-title: 15px;
+  --text-title--line-height: 1.6;
+  --text-title--letter-spacing: -0.01em;
+
+  --text-head: 16px;
+  --text-head--line-height: 1.35;
+  --text-head--letter-spacing: -0.012em;
+
+  --text-display-sm: 24px;
+  --text-display-sm--line-height: 1.25;
+  --text-display-sm--letter-spacing: -0.015em;
+
+  --text-display: 26px;
+  --text-display--line-height: 1.15;
+  --text-display--letter-spacing: -0.018em;
+
+  /* ── re-pointed Tailwind steps ────────────────────────────────────────
+     Tailwind's own scale is 16px-centric and far too loose for this UI.
+     Re-pointing it onto the design scale migrates 391 existing call sites
+     (246 `text-xs`, 132 `text-sm`, 7 `text-base`, 5 `text-lg`) onto the
+     system with ZERO edits. Do not delete these: they are load-bearing
+     until every one of those call sites has moved to a named step.       */
+  --text-xs: 11.5px;
+  --text-xs--line-height: 1.45;
+  --text-sm: 13px;
+  --text-sm--line-height: 1.5;
+  --text-base: 14px;
+  --text-base--line-height: 1.5;
+  --text-lg: 15px;
+  --text-lg--line-height: 1.6;
+  --text-xl: 17px;
+  --text-xl--line-height: 1.35;
+  --text-2xl: 26px;
+  --text-2xl--line-height: 1.15;
+
+  /* ── families ─────────────────────────────────────────────────────────
+     Setting --font-sans also sets Tailwind's --default-font-family, so
+     preflight gives <body> the prototype stack with no extra rule.        */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --font-mono:
+    ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* ── retired palettes ─────────────────────────────────────────────────
+     Slate was the app's de-facto neutral ramp (1,006 call sites). It is a
+     COLD grey; the ink ramp above is warm, so the two cannot coexist on a
+     screen without the mix reading as dirty. `initial` deletes the whole
+     family from the generated stylesheet.
+
+     ⚠ This does NOT fail loudly. Tailwind emits no rule for a utility whose
+     token is `initial`, so a stray `text-slate-600` is a silent no-op that
+     renders at the inherited colour — it looks *almost* right, which is the
+     worst failure mode. `pnpm ds:check` is what actually catches it; keep
+     the raw-slate-palette baseline pinned at 0.                            */
+  --color-slate-*: initial;
+}

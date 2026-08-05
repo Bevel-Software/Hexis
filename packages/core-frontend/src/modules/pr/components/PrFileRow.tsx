@@ -24,7 +24,7 @@ function KindIcon({ status }: { status: PullRequestFile['status'] }) {
     case 'copied': return <ArrowRightLeft size={size} className="text-bevel" />;
     case 'modified':
     case 'changed': return <FileEdit size={size} className="text-amber-600" />;
-    default: return <FileQuestion size={size} className="text-slate-600" />;
+    default: return <FileQuestion size={size} className="text-ink-muted" />;
   }
 }
 
@@ -75,20 +75,20 @@ export function PrFileRow({
       }}
       className={`group flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors border ${
         active
-          ? 'bg-slate-100 border-slate-300'
-          : 'bg-white border-transparent hover:bg-slate-100 hover:border-slate-200'
+          ? 'bg-sunken border-line-strong'
+          : 'bg-white border-transparent hover:bg-hover hover:border-line'
       }`}
     >
       <KindIcon status={status} />
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5 text-xs text-slate-900 truncate">
+        <div className="flex items-center gap-1.5 text-xs text-ink truncate">
           <span className="truncate font-mono" title={path}>{path}</span>
-          <span className="text-[10px] uppercase tracking-wider text-slate-600 shrink-0">
+          <span className="text-[10px] uppercase tracking-wider text-ink-muted shrink-0">
             {status}
           </span>
           <PrApprovalBadge state={approval} />
         </div>
-        <div className="flex items-center gap-2 text-[10px] text-slate-600 mt-0.5">
+        <div className="flex items-center gap-2 text-[10px] text-ink-muted mt-0.5">
           {previousPath && (
             <span className="font-mono truncate" title={previousPath}>
               from {previousPath}
@@ -107,7 +107,7 @@ export function PrFileRow({
           )}
           {hasEligibleApprovers && !isEligible && (
             <span
-              className="truncate text-slate-500 shrink-0"
+              className="truncate text-ink-muted shrink-0"
               title={[
                 ...approval!.eligibleApprovers.roles,
                 ...approval!.eligibleApprovers.users.map((u) => u.email),
@@ -152,7 +152,7 @@ export function PrFileRow({
               }}
               title="Confirm this file"
               aria-label="Confirm this file"
-              className="p-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:bg-slate-100 disabled:text-slate-600 disabled:cursor-not-allowed"
+              className="p-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:bg-sunken disabled:text-ink-muted disabled:cursor-not-allowed"
             >
               <Check size={12} />
             </button>
