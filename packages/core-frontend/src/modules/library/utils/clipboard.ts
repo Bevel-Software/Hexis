@@ -30,4 +30,4 @@ export const COPY_FAILED_TOAST = "Couldn't copy — select the prompt text inste
  * open the row and copy from the address bar.
  */
 export const LINK_COPIED_TOAST = 'Link copied.';
-export const LINK_COPY_FAILED_TOAST = "Couldn't copy — open the group and copy its address.";
+export const LINK_COPY_FAILED_TOAST = "Couldn't copy — open the row and copy its address.";
