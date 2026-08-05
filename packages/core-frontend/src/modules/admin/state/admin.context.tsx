@@ -12,7 +12,10 @@ import { useAuth } from '../../auth/state/auth.context';
 import { fetchAdminAccess, fetchUnreadCount } from '../services/admin.api';
 import { getRolesHealth, recoverRoles } from '../services/roles.api';
 
-interface AdminContextValue {
+// Exported because it is already the return type of `useAdmin()`, so it was
+// public in everything but name — and a consumer providing this context (a
+// test, or a host app supplying its own admin state) has to be able to say so.
+export interface AdminContextValue {
   isAdmin: boolean;
   /** Number of feedback rows submitted after `lastSeen` (or total if null). */
   unreadCount: number;
