@@ -63,10 +63,12 @@ services:
       - GIT_TOKEN=${GIT_TOKEN}
       - GIT_USERNAME=${GIT_USERNAME:-}
       - JWT_SECRET=${JWT_SECRET}
-      # Bootstrap admin — the ONLY way into a deployment whose KB has no
-      # accounts yet. Checked against the environment at login time and never
-      # stored, so unsetting either variable revokes it immediately.
+      # The deployment owner. REQUIRED: always an admin whatever the sign-in
+      # method, and the initial Admin written into a freshly seeded KB.
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
+      # Bootstrap password credential — checked against the environment at login
+      # time and never stored, so unsetting it revokes the credential
+      # immediately. Required only while password login is enabled.
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       # Generic OIDC single sign-on; the method appears once all three are set.
       - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}
@@ -82,12 +84,11 @@ services:
       # keeps pre-existing keys/tokens valid — change it only for a fresh deploy.
       - TENANT_ID=${TENANT_ID:-bevel}
       - LOGIN_PASSWORD=${LOGIN_PASSWORD:-true}
+      # SSO allow-list (part of the OIDC config above). SSO auto-provisions, so
+      # against a multi-tenant issuer this is the only signup boundary.
       - ALLOWED_EMAIL_DOMAINS=${ALLOWED_EMAIL_DOMAINS:-}
       - KB_REPO_URL=${KB_REPO_URL}
       - KB_DIR_NAME=${KB_DIR_NAME}
-      # Initial Admin(s) for a freshly-seeded KB — REQUIRED to seed an empty
-      # repo, ignored once it's populated.
-      - SEED_ADMIN_EMAILS=${SEED_ADMIN_EMAILS:-}
       # Branch model (backend runtime). Must match the build args above.
       - DEFAULT_BRANCH=${DEFAULT_BRANCH}
       - PROTECTED_BRANCHES=${PROTECTED_BRANCHES}

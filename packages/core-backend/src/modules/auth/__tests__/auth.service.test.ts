@@ -215,3 +215,60 @@ describe('AuthService.listAccounts', () => {
     expect(JSON.stringify(accounts)).not.toContain('scrypt:');
   });
 });
+
+/**
+ * `ALLOWED_EMAIL_DOMAINS` is the SSO allow-list, and only that.
+ *
+ * It exists because SSO AUTO-PROVISIONS — `loginWithSso` upserts the account
+ * the first time the issuer authenticates someone, with nobody approving it.
+ * Against a multi-tenant issuer (Google, the Entra `common` endpoint) it is the
+ * only thing between "has an account somewhere" and "has an account here.
+ *
+ * The other two entry points do not have that property, which is why the guard
+ * was taken off them: an admin-created account is vetted by the act of creating
+ * it, and password login can only reach an account that already exists. The
+ * check gated nothing there — while being able to lock out a bootstrap admin
+ * whose own address sits outside the list, which the last test pins.
+ */
+describe('AuthService — the SSO domain allow-list', () => {
+  const config = makeConfig({ allowedEmailDomains: ['bevel.software'] });
+
+  it('refuses an SSO sign-in from outside the allow-list', async () => {
+    const { db } = makeFakeDb([[]]);
+    await expect(
+      new AuthService(db, config).loginWithSso('someone@gmail.com', 'Someone'),
+    ).rejects.toThrow(/domain is not allowed/i);
+  });
+
+  it('admits a subdomain of an allowed domain', async () => {
+    const { db } = makeFakeDb([[{ ...ROW, email: 'eu@eu.bevel.software', name: 'EU' }]]);
+    const out = await new AuthService(db, config).loginWithSso('eu@eu.bevel.software', 'EU');
+    expect(out.user.email).toBe('eu@eu.bevel.software');
+  });
+
+  it('does NOT gate an account an admin creates', async () => {
+    const { db } = makeFakeDb([[{ ...ROW, email: 'contractor@gmail.com', name: 'Contractor' }]]);
+    const account = await new AuthService(db, config).createAccount(
+      'contractor@gmail.com',
+      'Contractor',
+      'pw-longer-than-8',
+    );
+    expect(account.email).toBe('contractor@gmail.com');
+  });
+
+  it('does NOT lock the bootstrap admin out of their own deployment', async () => {
+    // The owner's address need not sit inside the SSO allow-list — the list is
+    // about who may provision themselves, not about who owns the deployment.
+    const outsideConfig = makeConfig({
+      allowedEmailDomains: ['bevel.software'],
+      adminEmail: 'root@gmail.com',
+      adminPassword: 'sup3r-secret',
+    });
+    const { db } = makeFakeDb([[{ ...ROW, email: 'root@gmail.com', name: 'root' }]]);
+    const out = await new AuthService(db, outsideConfig).loginWithPassword(
+      'root@gmail.com',
+      'sup3r-secret',
+    );
+    expect(out.user.email).toBe('root@gmail.com');
+  });
+});

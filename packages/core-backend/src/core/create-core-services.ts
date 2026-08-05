@@ -161,7 +161,9 @@ export async function createCoreServices(
     config.kbTemplateDir,
     [...PROTECTED_BRANCHES],
     DEFAULT_BRANCH,
-    config.seedAdminEmails,
+    // The deployment owner is the initial Admin of a freshly seeded KB — the
+    // same answer `SEED_ADMIN_EMAILS` used to ask for a second time.
+    [config.adminEmail],
     config.gitUsername,
   );
   workspaceService.setSeedService(kbSeedService);
@@ -331,9 +333,11 @@ export async function createCoreServices(
     accessControl,
     workspaceService,
     DEFAULT_BRANCH,
-    // The env bootstrap admin administers accounts/roles even before the KB's
-    // roles.yaml lists it (see AdminAccessService).
-    config.adminEmail ? [config.adminEmail] : [],
+    // The deployment owner administers accounts/roles even before the KB's
+    // roles.yaml lists them, and whatever the sign-in method — this list is
+    // consulted before any roles.yaml lookup, so it holds for SSO too.
+    // Required by CoreConfig, hence no empty case.
+    [config.adminEmail],
   );
 
   // Secrets Vault: the per-user store of credentials (static API keys + OAuth

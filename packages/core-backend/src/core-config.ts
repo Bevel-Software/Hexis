@@ -44,16 +44,30 @@ export class CoreConfig {
   readonly spillRoot: string;
   readonly jwtSecret: string;
   /**
-   * Bootstrap admin credential, checked directly against the environment at
-   * login time (never stored). Lets a fresh deployment sign in before any
-   * account exists; that admin (or any user with the Admin role in
-   * `roles.yaml`) then creates per-user accounts from Roles & Members.
-   * Remove EITHER variable and the credential stops working immediately —
-   * accounts created in the database are unaffected. The email is also
-   * always recognized as an admin (see AdminAccessService), so a fresh KB
-   * whose `roles.yaml` doesn't list it yet is still administrable.
+   * The deployment's owner. REQUIRED — three separate jobs rest on it, and a
+   * deployment without one has no way to be administered:
+   *
+   *  - always recognized as an admin (see AdminAccessService), whatever the
+   *    sign-in method, so a KB whose `roles.yaml` does not list them yet is
+   *    still administrable;
+   *  - written as the sole Admin into the `roles.yaml` generated when an EMPTY
+   *    KB remote is seeded (this replaced `SEED_ADMIN_EMAILS`, which asked for
+   *    the same answer a second time);
+   *  - half of the bootstrap password credential below.
    */
   readonly adminEmail: string;
+  /**
+   * Password half of the bootstrap credential, checked directly against the
+   * environment at login time (never stored) so a fresh deployment can sign in
+   * before any account exists. Unset it and the credential stops working
+   * immediately; accounts in the database are unaffected.
+   *
+   * Required only when password login is ENABLED. An SSO-only deployment
+   * (`LOGIN_PASSWORD=false`) would otherwise have to mint a shared password
+   * the server is configured to reject — an unused credential someone still
+   * has to store and rotate. The admin identity above is required either way,
+   * so "there is always an identifiable admin" holds regardless.
+   */
   readonly adminPassword: string;
   /**
    * Generic OIDC single sign-on (any spec-compliant provider: Entra, Okta,
@@ -90,13 +104,6 @@ export class CoreConfig {
    */
   readonly kbTemplateDir: string;
   /**
-   * Admin emails written into the generated `roles.yaml` when a fresh KB repo is
-   * seeded. Comma/whitespace-separated. A freshly-seeded repo with no Admin is
-   * unusable (access resolution requires ≥1 Admin), so seeding an EMPTY remote
-   * fails fast when this is empty. Not needed once the remote is already seeded.
-   */
-  readonly seedAdminEmails: string[];
-  /**
    * Ontology-session boundary kill-switch. When true (default), an agent run
    * that has read across more than one ontology can no longer write. A no-op on
    * a single-ontology KB. Set `ONTOLOGY_SESSION_BLOCK=false` to disable.
@@ -115,10 +122,24 @@ export class CoreConfig {
    */
   readonly loginPasswordEnabled: boolean;
   /**
-   * Optional allow-list of email domains. When non-empty, ONLY emails whose
-   * domain matches (exactly, or as a subdomain) may log in via ANY method
-   * (shared-password or SSO). Comma/whitespace-separated; empty (default)
-   * allows any email. A leading `@` or `.` on an entry is tolerated, so
+   * Optional allow-list of email domains for SSO — part of the OIDC
+   * configuration, and only meaningful alongside it.
+   *
+   * SSO AUTO-PROVISIONS: `loginWithSso` upserts the account on first sign-in,
+   * with no admin approval step. Against a single-tenant issuer the issuer is
+   * already the boundary and this is belt-and-braces; against a multi-tenant
+   * one (Google, the Entra `common` endpoint, Auth0 with social connections)
+   * it is the ONLY boundary — without it, anyone the issuer will authenticate
+   * provisions themselves into the deployment.
+   *
+   * Deliberately NOT applied to the other two entry points. An account an
+   * admin created is vetted by the act of creating it, and password login can
+   * only reach an account that already exists — so a check there would gate
+   * nothing while being able to lock out a bootstrap admin whose own address
+   * sits outside the list.
+   *
+   * Comma/whitespace-separated; empty (default) allows any email. Matches the
+   * domain exactly or as a subdomain, and a leading `@` or `.` is tolerated:
    * `ALLOWED_EMAIL_DOMAINS=bevel.software, example.com` works as expected.
    */
   readonly allowedEmailDomains: string[];
@@ -172,10 +193,30 @@ export class CoreConfig {
     this.backupsRoot = process.env.BACKUPS_ROOT || path.resolve(this.workspacesRoot, '..', 'backups');
     this.spillRoot = process.env.SPILL_ROOT || path.resolve(this.workspacesRoot, '..', 'tool-chain-spills');
     this.jwtSecret = process.env.JWT_SECRET || '';
+    // Parsed here rather than beside the other toggles below: whether the
+    // bootstrap PASSWORD is required depends on it.
+    this.loginPasswordEnabled =
+      (process.env.LOGIN_PASSWORD ?? 'true').trim().toLowerCase() !== 'false';
     this.adminEmail = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
     this.adminPassword = process.env.ADMIN_PASSWORD || '';
-    if (this.adminEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.adminEmail)) {
+    if (!this.adminEmail) {
+      throw new Error(
+        'ADMIN_EMAIL is required — the address that owns this deployment. It is ' +
+          'always treated as an admin (whatever the sign-in method) and is written ' +
+          'as the initial Admin when an empty knowledge-base repo is seeded.',
+      );
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.adminEmail)) {
       throw new Error(`ADMIN_EMAIL is not a valid email: "${this.adminEmail}"`);
+    }
+    // Only when password login can actually be used. An SSO-only deployment
+    // has no use for this value and should not have to hold one.
+    if (this.loginPasswordEnabled && !this.adminPassword) {
+      throw new Error(
+        'ADMIN_PASSWORD is required while password login is enabled — it is the ' +
+          'credential that signs in before any account exists. Set it, or set ' +
+          'LOGIN_PASSWORD=false if this deployment signs in through SSO only.',
+      );
     }
     this.oidcIssuerUrl = (process.env.OIDC_ISSUER_URL || '').trim().replace(/\/+$/, '');
     this.oidcClientId = (process.env.OIDC_CLIENT_ID || '').trim();
@@ -218,14 +259,8 @@ export class CoreConfig {
     // Default: the `kb-template/` folder shipped inside this package (works
     // both from src/ and compiled dist/ — see assets.ts).
     this.kbTemplateDir = process.env.KB_TEMPLATE_DIR || defaultKbTemplateDir();
-    this.seedAdminEmails = (process.env.SEED_ADMIN_EMAILS || '')
-      .split(/[\s,]+/)
-      .map((e) => e.trim().toLowerCase())
-      .filter((e) => e.length > 0);
     this.ontologySessionBlock =
       (process.env.ONTOLOGY_SESSION_BLOCK ?? 'true').trim().toLowerCase() !== 'false';
-    this.loginPasswordEnabled =
-      (process.env.LOGIN_PASSWORD ?? 'true').trim().toLowerCase() !== 'false';
     this.allowedEmailDomains = (process.env.ALLOWED_EMAIL_DOMAINS || '')
       .split(/[\s,]+/)
       .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
@@ -255,14 +290,6 @@ export class CoreConfig {
         new URL(value);
       } catch {
         throw new Error(`${name} is not a valid URL: "${value}"`);
-      }
-    }
-
-    // Validate format now so a typo surfaces at boot, not at first-seed time.
-    // Emptiness is NOT an error here: an already-seeded remote never needs it.
-    for (const email of this.seedAdminEmails) {
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        throw new Error(`SEED_ADMIN_EMAILS contains an invalid email: "${email}"`);
       }
     }
 
