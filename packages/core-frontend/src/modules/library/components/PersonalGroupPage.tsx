@@ -2,9 +2,8 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../auth/state/auth.context';
 import { useLibrary, type LibraryItem } from '../state/library-data';
-import { pathForTool } from '../routes/library-paths';
+import { pathForSkill, pathForTool } from '../routes/library-paths';
 import { personalGroupName } from '../utils/personal-group';
-import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { GroupBreadcrumb, GroupItemSections, PageNote } from './group-page-parts';
 import { PageActions } from './PageActions';
 import { PersonalAddDialog } from './PersonalAddDialog';
@@ -36,7 +35,6 @@ export function PersonalGroupPage() {
   const data = useLibrary();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const [detail, setDetail] = useState<DetailTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
   const name = personalGroupName(user?.name);
@@ -46,12 +44,7 @@ export function PersonalGroupPage() {
 
   /** Identical to the gallery's and the group page's — one behaviour per card. */
   function openItem(item: LibraryItem) {
-    if (item.kind === 'integration') {
-      navigate(pathForTool(item.id));
-      return;
-    }
-    const skill = data.skills.find((s) => s.name === item.id);
-    if (skill) setDetail({ kind: 'skill', skill, owned: item.owned });
+    navigate(item.kind === 'integration' ? pathForTool(item.id) : pathForSkill(item.id));
   }
 
   if (items.length === 0 && data.loading) {
@@ -90,19 +83,6 @@ export function PersonalGroupPage() {
       />
 
       {addOpen && <PersonalAddDialog name={name} onClose={() => setAddOpen(false)} />}
-
-      {detail && (
-        <DetailDialog
-          target={detail}
-          tools={data.tools}
-          skills={data.skills}
-          allowedToolsBySkill={data.allowedToolsBySkill}
-          crs={data.crs}
-          myCrNumbers={data.myCrNumbers}
-          onClose={() => setDetail(null)}
-          onDataChanged={data.reload}
-        />
-      )}
     </div>
   );
 }

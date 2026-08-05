@@ -4,19 +4,20 @@ import { Badge, Button, Surface } from '../../../shared/components';
 import { pathForGroupsIndex } from '../routes/library-paths';
 import { ownersTextOf, primaryFolderOf } from '../utils/group-summary';
 import { AlreadyReadableError, requestGroupAccess, type GroupSummary } from '../services/groups.api';
+import { firstNames, joinNames } from '../utils/names';
 import { useLibraryToast } from '../state/toast';
 import { LockGlyph } from './LockGlyph';
 
 /**
  * A group you cannot read, as a place you can still stand in.
  *
- * The whole point of the locked view is that a group nobody can SEE is a group
- * nobody can ask to join. So this page states four facts and offers one action:
- * the group exists, who runs it, how much is in it, and how to ask. It states
- * nothing else — no item names, no descriptions, no paths, no reader roster,
- * and never an email address. The backend already withholds those (`readers` is
- * null and every `email` is nulled when `canRead` is false); this component's
- * job is to not invent a way around that.
+ * Reaching this view means the caller could read the group's `access.md`
+ * file (the `read: everyone` discovery grant in its frontmatter) but not the
+ * folder — the same tier the backend used to include the summary at all. It
+ * states four facts and offers one action: the group exists, who runs it,
+ * how much is in it, and how to ask. Item names and descriptions stay
+ * members-only; asking opens a plain change request that the group's
+ * writers approve by merging.
  *
  * It is the SAME frame as the member view — breadcrumb, h1, run-by lede — so
  * the two never read as different products. Only the middle changes.
@@ -156,25 +157,3 @@ function adminNamesOf(group: Pick<GroupSummary, 'owners' | 'writers'>): string[]
   );
 }
 
-/**
- * `A`, `A and B`, `A, B and C` — the way a person lists people out loud.
- *
- * Exported for the tests, which pin the toast's exact wording; the run-by lede
- * uses `ownersTextOf`'s plainer comma join because that line is a label the
- * whole Library shares, and the toast is one sentence spoken once.
- */
-export function joinNames(names: string[]): string {
-  if (names.length <= 1) return names[0] ?? '';
-  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
-}
-
-/**
- * First whitespace token of each name — "Olga Ivanova" → "Olga".
- *
- * The toast is a confirmation, not a record: "Asked Olga" is how the person who
- * just clicked would say it. Role names ("GTM Team" → "GTM") survive this the
- * same way, which reads oddly but never wrongly.
- */
-export function firstNames(names: string[]): string[] {
-  return names.map((n) => n.trim().split(/\s+/)[0] ?? n).filter((n) => n.length > 0);
-}

@@ -22,7 +22,8 @@ vi.mock('../services/groups.api', () => ({
 }));
 
 import { LibraryToastProvider } from '../state/toast';
-import { LockedGroupView, joinNames, firstNames } from '../components/LockedGroupView';
+import { LockedGroupView } from '../components/LockedGroupView';
+import { joinNames, firstNames } from '../utils/names';
 
 const finance = (over: Partial<GroupSummary> = {}): GroupSummary => ({
   name: 'Finance',
@@ -31,10 +32,11 @@ const finance = (over: Partial<GroupSummary> = {}): GroupSummary => ({
   canWrite: false,
   skillCount: 2,
   toolCount: 1,
-  owners: { roles: [], users: [{ name: 'Olga Ivanova', email: null }] },
+  owners: { roles: [], users: [{ name: 'Olga Ivanova', email: 'olga@bevel.software' }] },
   writers: { roles: [], users: [] },
-  readers: null,
+  readers: { restricted: true, roles: [], users: [] },
   hasRequested: false,
+  requestNumber: null,
   ...over,
 });
 
@@ -150,7 +152,7 @@ describe('LockedGroupView', () => {
     renderLocked(
       finance({
         owners: { roles: [], users: [] },
-        writers: { roles: ['Admin'], users: [{ name: 'Juan Viera', email: null }] },
+        writers: { roles: ['Admin'], users: [{ name: 'Juan Viera', email: 'juan@bevel.software' }] },
       }),
     );
     expect(screen.getByText('Run by Juan Viera, Admin.')).toBeInTheDocument();
@@ -175,12 +177,8 @@ describe('LockedGroupView', () => {
   });
 
   it('gives a locked-out admin the self-service way in', () => {
-    const { onManage } = renderLocked(
-      finance({ canWrite: true, folders: ['Skills/Finance', 'Groups/Finance'] }),
-    );
+    const { onManage } = renderLocked(finance({ canWrite: true, folders: ['Groups/Finance'] }));
     fireEvent.click(screen.getByRole('button', { name: 'Manage access' }));
-    // The `Groups/`-rooted folder wins, so the page acts on the folder it talks
-    // about — the same primary-folder rule the backend resolves principals with.
     expect(onManage).toHaveBeenCalledWith('Groups/Finance');
   });
 

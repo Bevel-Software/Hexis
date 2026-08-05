@@ -9,7 +9,7 @@ import {
   DefaultVariableSubstitutor,
   type CallTemplate,
 } from '@utcp/sdk';
-import { DEFAULT_BRANCH, GROUPS_DIR, LEGACY_TOOLS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, GROUPS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -270,7 +270,7 @@ export class ToolManualService implements IToolManualService {
   async preview(content: string): Promise<ToolManualPreview> {
     let descriptor: ToolManualDescriptor;
     try {
-      descriptor = normalizeToolManual('draft', 'Tools/draft.tool', content);
+      descriptor = normalizeToolManual('draft', 'Groups/draft.tool', content);
     } catch (err) {
       return { ok: false, errors: [err instanceof Error ? err.message : String(err)] };
     }
@@ -487,15 +487,11 @@ export class ToolManualService implements IToolManualService {
     }
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
-    // `Groups/` is the merged layout, where a `.tool` sits beside the skills
-    // that use it. `Tools/` is read too so the catalog is not empty against a
-    // KB that has not migrated yet — delete it once the migration lands.
+    // A `.tool` sits under `Groups/`, beside the skills that use it.
     const files: { abs: string; rel: string }[] = [];
-    for (const dir of [GROUPS_DIR, LEGACY_TOOLS_DIR]) {
-      const root = path.join(kbRoot, dir);
-      for (const rel of await walkFiles(root, (n) => n.toLowerCase().endsWith('.tool'))) {
-        files.push({ abs: path.join(root, rel), rel: `${dir}/${rel}` });
-      }
+    const root = path.join(kbRoot, GROUPS_DIR);
+    for (const rel of await walkFiles(root, (n) => n.toLowerCase().endsWith('.tool'))) {
+      files.push({ abs: path.join(root, rel), rel: `${GROUPS_DIR}/${rel}` });
     }
 
     const parsed: ToolManualDescriptor[] = [];

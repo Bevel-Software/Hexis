@@ -19,15 +19,8 @@
     {
       "idx": 2,
       "version": "7",
-      "when": 1785577135101,
-      "tag": "0002_group_access_requests",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "7",
-      "when": 1785784686463,
-      "tag": "0003_user_onboarding_done",
+      "when": 1785934874039,
+      "tag": "0002_user_onboarding_done",
       "breakpoints": true
     }
   ]

@@ -2,18 +2,20 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
-import { decodeGroupSegment, pathForGroupsIndex, pathForTool } from '../routes/library-paths';
+import {
+  decodeGroupSegment,
+  pathForGroupsIndex,
+  pathForSkill,
+  pathForTool,
+} from '../routes/library-paths';
 import { primaryFolderOf } from '../utils/group-summary';
-import { useGroupAccessRequests } from '../hooks/useGroupAccessRequests';
+import { GroupJoinRequests } from './GroupJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { useLibraryToast } from '../state/toast';
-import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
 import { BandControls, GroupBreadcrumb, GroupItemSections, PageNote } from './group-page-parts';
 import { PageActions } from './PageActions';
 import { copyToClipboard } from '../utils/clipboard';
-import { AccessRequestsBanner } from './AccessRequestsBanner';
 import { LockedGroupView } from './LockedGroupView';
 
 /**
@@ -26,22 +28,19 @@ import { LockedGroupView } from './LockedGroupView';
  * handed to somebody. That is the whole difference this page makes.
  *
  * WHICH VIEW: the page decides member-vs-locked, not the router and not the
- * sidebar. The rule is deliberately generous — the member view renders when the
- * folder verdict says `canRead`, OR when the caller's catalog already contains
- * an item in the group. Access resolution is closeness-first, so a per-file
- * grant can hand somebody one skill inside a folder they cannot read; hiding an
- * item the platform already returned would be a lie in the other direction.
- * Locked therefore means: the summary says no AND the catalog agrees.
+ * sidebar. The member view renders when the folder verdict says `canRead`, OR
+ * when the caller's catalog already contains an item in the group (a per-file
+ * grant can hand somebody one skill inside a folder they cannot read). Locked
+ * means: the summary says no AND the catalog agrees — which can only happen
+ * for a DISCOVERABLE group, because an undiscoverable one never reaches this
+ * page's data at all and renders like one that does not exist.
  */
 export function GroupPage() {
   const params = useParams();
   const group = decodeGroupSegment(params.group ?? '');
   const data = useLibrary();
   const navigate = useNavigate();
-  const toast = useLibraryToast();
   const { kbDirName } = useWorkspace();
-  const requests = useGroupAccessRequests();
-  const [detail, setDetail] = useState<DetailTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   // The Skills band's two controls. `filterOn` narrows the band to what is
   // waiting on the reader; `refresh` re-reads the catalog and then says when it
@@ -52,6 +51,8 @@ export function GroupPage() {
   const [refreshState, setRefreshState] = useState<'idle' | 'spin' | 'done'>('idle');
   /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
   const [manageFolder, setManageFolder] = useState<string | null>(null);
+  /** Bumped when an access edit lands, so the join-request surface refetches. */
+  const [accessRevision, setAccessRevision] = useState(0);
 
   /**
    * "Last updated just now" has to be TRUE.
@@ -112,29 +113,21 @@ export function GroupPage() {
   const shownSkills = filterOn ? skillItems.filter((i) => i.status.state !== 'ok') : skillItems;
 
   /**
-   * Same split as the gallery: a tool opens its PAGE, a skill still opens the
-   * dialog. Kept identical to `LibraryPage.openItem` on purpose — a card must
-   * do the same thing wherever you clicked it.
-   *
-   * CONTRACT (Ali): when `skills/:name` lands, the second half becomes
-   * `navigate(pathForSkill(item.id))` and the dialog below goes away.
+   * Both kinds open a PAGE — `skills/:name` has landed, so the contract this
+   * function used to carry is discharged and the dialog is gone. Kept identical
+   * to `LibraryPage.openItem` on purpose: a card must do the same thing
+   * wherever you clicked it.
    */
   function openItem(item: LibraryItem) {
-    if (item.kind === 'integration') {
-      navigate(pathForTool(item.id));
-      return;
-    }
-    const skill = data.skills.find((s) => s.name === item.id);
-    if (skill) setDetail({ kind: 'skill', skill, owned: item.owned });
+    navigate(item.kind === 'integration' ? pathForTool(item.id) : pathForSkill(item.id));
   }
 
   /**
-   * THE access surface — one dialog, three openers: the title row's `Share`,
-   * the locked view's `Manage access` (a locked-out Admin unlocking
-   * themselves), and the request banner (an owner letting somebody else in).
-   * There is deliberately no read-only sibling: the dialog itself degrades to
-   * read-only when the resolved verdict says the caller cannot write, so a
-   * second "view access" panel would be the same information twice.
+   * THE access surface — one dialog, two openers: the title row's `Share` and
+   * the Manage-access affordances. There is deliberately no read-only sibling:
+   * the dialog itself degrades to read-only when the resolved verdict says the
+   * caller cannot write, so a second "view access" panel would be the same
+   * information twice.
    *
    * `kbDirName` gates it because the resolver addresses files repo-relative and
    * the dialog strips that prefix — without it the path we would hand over is
@@ -150,23 +143,14 @@ export function GroupPage() {
         }}
         onClose={() => {
           setManageFolder(null);
-          // Granting IS approving: the request retires itself server-side once
-          // the requester can read, so closing the dialog is the moment to ask
-          // again rather than a moment to mark anything approved here.
+          // Granting through the dialog can settle a pending join request —
+          // refresh the roster, the catalog and the request surface together.
           data.reloadGroups();
-          requests.reload();
+          data.reload();
+          setAccessRevision((r) => r + 1);
         }}
       />
     ) : null;
-
-  async function dismiss(id: string) {
-    try {
-      await requests.dismiss(id);
-    } catch {
-      toast("Couldn't dismiss that — try again.");
-      requests.reload();
-    }
-  }
 
   // Nothing has spoken yet: the catalog is still loading, the group index is
   // still loading, and no item has proven the group exists. Deciding now would
@@ -235,17 +219,18 @@ export function GroupPage() {
         </div>
       </div>
 
-      {/* Somebody is waiting on the person reading this. It goes ABOVE the
-          setup banner because a request is about a human, and the folder's
-          owners are the only people who can answer it. */}
-      <AccessRequestsBanner
-        group={group}
-        folders={summary?.folders ?? []}
-        requests={requests.requests.filter((r) => r.group === group)}
-        onManage={setManageFolder}
-        onDismiss={(id) => void dismiss(id)}
-        className="mt-4"
-      />
+      {/* Somebody is waiting on the person reading this. Rendered only for a
+          group manager (canWrite) — every member can see the CRs elsewhere,
+          but only the people who can act on a request get its banner. */}
+      {summary?.canWrite && (
+        <GroupJoinRequests
+          group={group}
+          folders={summary.folders}
+          onManage={setManageFolder}
+          reloadSignal={accessRevision}
+          className="mt-4"
+        />
+      )}
 
       {attention > 0 && (
         <Banner role="status" tone="wait" className="mt-4">
@@ -296,19 +281,6 @@ export function GroupPage() {
           primaryPath={primaryFolder}
           canWrite={summary.canWrite}
           onClose={() => setAddOpen(false)}
-        />
-      )}
-
-      {detail && (
-        <DetailDialog
-          target={detail}
-          tools={data.tools}
-          skills={data.skills}
-          allowedToolsBySkill={data.allowedToolsBySkill}
-          crs={data.crs}
-          myCrNumbers={data.myCrNumbers}
-          onClose={() => setDetail(null)}
-          onDataChanged={data.reload}
         />
       )}
 

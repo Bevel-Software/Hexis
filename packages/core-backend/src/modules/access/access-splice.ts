@@ -32,7 +32,21 @@ import {
   parseAccessEntry,
   canonicalEmail,
   canonicalRoleName,
+  accessMdDeclaresBodyRules,
 } from './access-control.service.js';
+
+/**
+ * Which rule block a mutation edits.
+ *
+ *  - `'node'` (default): the file's YAML frontmatter — node files, and every
+ *    call that predates the two-format `access.md` story.
+ *  - `'folder'`: the block that governs the CONTAINING FOLDER of an
+ *    `access.md` — the body when the file is in the new (body-governed)
+ *    format, the frontmatter otherwise. Callers mutating folder rules pass
+ *    this so a grant can never land in a new-format file's frontmatter
+ *    (which governs the FILE itself, not the folder).
+ */
+export type SpliceTarget = 'node' | 'folder';
 
 /** A principal to grant/revoke, in the resolver's canonical terms. */
 export type Principal =
@@ -181,6 +195,28 @@ function joinFrontmatter(f: Frontmatter): string {
   return [...f.pre, ...f.fm, ...f.post].join(f.eol);
 }
 
+/**
+ * The line region a mutation edits, per {@link SpliceTarget}. `lines` aliases
+ * the region's array (edited in place, like `f.fm` always was); `join()`
+ * reassembles the whole file around it.
+ */
+function pickRegion(
+  text: string,
+  f: Frontmatter & { hasFrontmatter: boolean },
+  target: SpliceTarget,
+): { lines: string[]; join(): string } {
+  if (target === 'folder' && f.hasFrontmatter && accessMdDeclaresBodyRules(text)) {
+    // New format: post = [closing '---', ...body]. Edit the body lines.
+    const closing = f.post[0];
+    const body = f.post.slice(1);
+    return {
+      lines: body,
+      join: () => [...f.pre, ...f.fm, closing, ...body].join(f.eol),
+    };
+  }
+  return { lines: f.fm, join: () => joinFrontmatter(f) };
+}
+
 /** Leading-space count of a line. */
 function indentOf(line: string): number {
   const m = line.match(/^( *)/);
@@ -311,7 +347,7 @@ export function spliceGrant(
   text: string,
   verb: Verb,
   rawPrincipal: Principal,
-  opts: { allowScalar?: boolean; deny?: boolean } = {},
+  opts: { allowScalar?: boolean; deny?: boolean; target?: SpliceTarget } = {},
 ): SpliceResult {
   const principal = validatePrincipal(rawPrincipal);
   const deny = opts.deny ?? false;
@@ -329,8 +365,9 @@ export function spliceGrant(
     return { text: text2, changed: true };
   }
 
-  const block = findVerbBlock(f.fm, verb);
-  const existing = blockEntries(f.fm, block);
+  const region = pickRegion(text, f, opts.target ?? 'node');
+  const block = findVerbBlock(region.lines, verb);
+  const existing = blockEntries(region.lines, block);
 
   // Idempotency: an entry for this principal with the same deny-ness is already
   // present (a grant when granting, a deny when denying).
@@ -341,17 +378,17 @@ export function spliceGrant(
   const itemValue = renderEntry(principal, deny);
 
   if (block.keyLine === -1) {
-    // Verb key absent — append a new block at the end of the frontmatter.
+    // Verb key absent — append a new block at the end of the region.
     const lines = opts.allowScalar ? [`${verb}: ${itemValue}`] : [`${verb}:`, `  - ${itemValue}`];
-    f.fm.push(...lines);
-    return { text: joinFrontmatter(f), changed: true };
+    region.lines.push(...lines);
+    return { text: region.join(), changed: true };
   }
 
   if (block.inlineScalarValue !== null) {
     // Scalar form — promote to a block list with both the old and new entry.
     const old = block.inlineScalarValue;
-    f.fm.splice(block.keyLine, 1, `${verb}:`, `  - ${old}`, `  - ${itemValue}`);
-    return { text: joinFrontmatter(f), changed: true };
+    region.lines.splice(block.keyLine, 1, `${verb}:`, `  - ${old}`, `  - ${itemValue}`);
+    return { text: region.join(), changed: true };
   }
 
   // Block-list (possibly inline `[]`). Insert after the last existing item, or
@@ -360,14 +397,14 @@ export function spliceGrant(
   const newLine = `${indent}- ${itemValue}`;
   if (block.inlineEmpty) {
     // `verb: []` -> `verb:` + one item.
-    f.fm[block.keyLine] = `${' '.repeat(block.keyIndent)}${verb}:`;
-    f.fm.splice(block.keyLine + 1, 0, newLine);
-    return { text: joinFrontmatter(f), changed: true };
+    region.lines[block.keyLine] = `${' '.repeat(block.keyIndent)}${verb}:`;
+    region.lines.splice(block.keyLine + 1, 0, newLine);
+    return { text: region.join(), changed: true };
   }
   const insertAt =
     block.itemLines.length > 0 ? block.itemLines[block.itemLines.length - 1] + 1 : block.keyLine + 1;
-  f.fm.splice(insertAt, 0, newLine);
-  return { text: joinFrontmatter(f), changed: true };
+  region.lines.splice(insertAt, 0, newLine);
+  return { text: region.join(), changed: true };
 }
 
 /**
@@ -377,37 +414,43 @@ export function spliceGrant(
  * file still parses cleanly (the resolver reads `[]` as an empty list).
  * Preserves everything else.
  */
-export function spliceRevoke(text: string, verb: Verb, rawPrincipal: Principal): SpliceResult {
+export function spliceRevoke(
+  text: string,
+  verb: Verb,
+  rawPrincipal: Principal,
+  opts: { target?: SpliceTarget } = {},
+): SpliceResult {
   const principal = validatePrincipal(rawPrincipal);
   const f = splitFrontmatter(text);
   if (!f.hasFrontmatter) return { text, changed: false };
 
-  const block = findVerbBlock(f.fm, verb);
+  const region = pickRegion(text, f, opts.target ?? 'node');
+  const block = findVerbBlock(region.lines, verb);
   if (block.keyLine === -1) return { text, changed: false };
 
   if (block.inlineScalarValue !== null) {
     const r = parseAccessEntry(block.inlineScalarValue);
     if (r.ok && entryMatches(r.entry, principal)) {
       // Lone scalar entry removed -> collapse to empty list.
-      f.fm[block.keyLine] = `${' '.repeat(block.keyIndent)}${verb}: []`;
-      return { text: joinFrontmatter(f), changed: true };
+      region.lines[block.keyLine] = `${' '.repeat(block.keyIndent)}${verb}: []`;
+      return { text: region.join(), changed: true };
     }
     return { text, changed: false };
   }
 
-  const entries = blockEntries(f.fm, block);
+  const entries = blockEntries(region.lines, block);
   const victims = entries.filter((e) => entryMatches(e.entry, principal)).map((e) => e.line);
   if (victims.length === 0) return { text, changed: false };
 
   // Delete from the bottom up so earlier indices stay valid.
   const remaining = block.itemLines.filter((l) => !victims.includes(l));
-  for (const line of [...victims].sort((a, b) => b - a)) f.fm.splice(line, 1);
+  for (const line of [...victims].sort((a, b) => b - a)) region.lines.splice(line, 1);
 
   if (remaining.length === 0) {
     // Verb block is now empty — collapse `verb:` to `verb: []`. The key line
     // index is unchanged because we only removed lines that came after it.
-    f.fm[block.keyLine] = `${' '.repeat(block.keyIndent)}${verb}: []`;
+    region.lines[block.keyLine] = `${' '.repeat(block.keyIndent)}${verb}: []`;
   }
-  return { text: joinFrontmatter(f), changed: true };
+  return { text: region.join(), changed: true };
 }
 

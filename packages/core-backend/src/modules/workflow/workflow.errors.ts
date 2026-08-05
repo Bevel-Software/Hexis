@@ -121,6 +121,47 @@ export class PushNeedsAgentResolutionError extends WorkflowDomainError {
 }
 
 /**
+ * Refreshing a workspace from origin (`GitService.pull`) hit a rebase
+ * conflict: the workspace carries local commits origin doesn't have, origin
+ * moved ahead with changes that touch the same files, and replaying the
+ * local commits conflicts. The rebase has already been aborted — the
+ * workspace is back in its pre-pull state (diverged, clean tree).
+ *
+ * This state does NOT resolve itself: every subsequent pull hits the same
+ * conflict, and the local commits (someone's saved content, under
+ * save=share) stay unshared until the divergence is reconciled. The service
+ * layer therefore reacts by queueing a background recovery run (see
+ * `WorkflowService.updateFromRemote`); this error tells the caller what
+ * happened and which paths are contested.
+ *
+ * 409 like the other conflict errors — the operation needs the divergence
+ * cleared before it can succeed. `detail` (the raw git failure, already
+ * credential-redacted by `GitService.git`) is kept OFF the payload; it's for
+ * server logs and the recovery pipeline, not the client.
+ */
+export class PullRebaseConflictError extends WorkflowDomainError {
+  readonly kind = 'pull-rebase-conflict' as const;
+  constructor(
+    readonly branch: string,
+    readonly conflictedPaths: string[],
+    readonly detail: string,
+  ) {
+    const list = conflictedPaths.join(', ');
+    super(
+      `Updating "${branch}" from origin hit conflicts in ${conflictedPaths.length} file(s): ${list}. ` +
+        `Automatic background recovery has been queued.`,
+      409,
+      {
+        kind: 'pull-rebase-conflict',
+        branch,
+        conflictedPaths,
+      },
+    );
+    this.name = 'PullRebaseConflictError';
+  }
+}
+
+/**
  * Generic 400 for workflow-input validation (malformed branch names, missing
  * fields, etc.). Carries an optional payload so callers can attach typed
  * discriminators (`kind: '...'`) when the frontend needs to switch on the

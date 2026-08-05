@@ -32,43 +32,6 @@ export async function fetchAdminAccess(): Promise<{ isAdmin: boolean }> {
   return res.json();
 }
 
-/** One user account, as the admin user-administration dialog lists them. */
-export interface AdminUser {
-  id: string;
-  email: string;
-  name: string;
-  /** Epoch ms of account creation. */
-  createdAt: number;
-}
-
-export async function fetchAdminUsers(): Promise<AdminUser[]> {
-  const res = await authFetch('/api/admin/users');
-  if (!res.ok) throw new Error('Failed to load user accounts');
-  const body = (await res.json()) as { users: AdminUser[] };
-  return body.users;
-}
-
-/**
- * Permanently erase a user account (GDPR erasure path). The backend deletes
- * the account and its personal data and anonymizes the user's past review
- * activity; it refuses self-deletion (400).
- */
-export async function deleteAdminUser(userId: string): Promise<void> {
-  const res = await authFetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
-    method: 'DELETE',
-  });
-  if (!res.ok) {
-    let serverError: string | undefined;
-    try {
-      const body = (await res.json()) as { error?: string };
-      if (typeof body.error === 'string' && body.error.length > 0) serverError = body.error;
-    } catch {
-      // Non-JSON error body — fall through to the fallback message.
-    }
-    throw new Error(serverError ?? 'Failed to delete this account');
-  }
-}
-
 export async function fetchFeedbackList(
   params: FeedbackListParams,
 ): Promise<FeedbackListItem[]> {

@@ -94,8 +94,13 @@ export interface IWorkflowService {
   countCommitsAhead(workspaceId: string, branch: string, baseBranch: string): Promise<number>;
   /** Fetch remote refs without modifying the working tree. */
   refreshRemotes(workspaceId: string): Promise<void>;
-  /** Pull the latest remote state into the current branch (rebase strategy). */
-  updateFromRemote(workspaceId: string): Promise<void>;
+  /**
+   * Pull the latest remote state into the current branch (rebase strategy).
+   * On a rebase CONFLICT (local commits vs origin), throws the typed
+   * pull-conflict error AND queues a background recovery run attributed to
+   * `user` when provided (falls back to the recovery bot).
+   */
+  updateFromRemote(workspaceId: string, user?: AuthUser): Promise<void>;
   /**
    * Hard-reset the workspace's checked-out branch to `origin/<branch>` (fetch
    * first), discarding any local divergence. Break-glass primitive for

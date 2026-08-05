@@ -1,37 +1,35 @@
 import { Banner, Button } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import type { GroupAccessRequestEntry } from '../services/groups.api';
-import { joinNames } from './LockedGroupView';
+import type { JoinProposal, JoinRequest } from '../services/groups.api';
 
 /**
- * The admin half of locked groups: somebody asked to get in.
+ * Somebody asked to join this group — the manager-side face of a join change
+ * request.
  *
- * There is no approve button here, and that is the design. Granting read IS
- * approving — the request row retires itself the moment the server sees the
- * requester can read the folder — so the only two actions are the ones that
- * change something: open the access dialog, or say no. A third button that
- * merely marked a row "approved" without granting anything would be a lie with
- * a green tick on it.
+ * It shows what the request PROPOSES, one row per grant, because that is what
+ * accepting acts on: each Accept writes exactly that one grant onto the
+ * default branch through the ordinary access path. The request's branch is
+ * never merged, so a request naming five people can be answered with two
+ * yeses and three ignores, and nothing the branch happens to carry besides
+ * the grants can ride in on a click.
  *
- * Who sees this is decided entirely server-side: `GET /api/groups/access-requests`
- * returns only rows for groups the caller can write the `access.md` of, and `[]`
- * (never a 403) for everyone else. So there is no role check in this file, and
- * there must never be one — the wire is the permission.
+ * Naming the verb is not pedantry: a request may propose `write` or `owner`
+ * rather than `read`, and "asked to join" would hide that. Whatever the
+ * branch asks for is what the row says.
  *
- * Names only, never the requesters' emails. The endpoint does hand them over —
- * an admin granting access needs one — but the banner is a notice, and the
- * dialog it opens is where an email belongs.
+ * Decline rejects the whole request. Manage access is the third path — a
+ * manager who wants to do something other than what was proposed opens the
+ * dialog, and the request settles itself if that covers it.
  */
 
 export interface AccessRequestsBannerProps {
   group: string;
-  /** The group's constituent folders — two on an unmigrated KB, one after. */
+  /** Repo-relative group folder for `Manage access` (single-element today). */
   folders: string[];
-  /** Pending requests for THIS group; the banner renders nothing when empty. */
-  requests: GroupAccessRequestEntry[];
+  requests: JoinRequest[];
   onManage(folder: string): void;
-  onDismiss(id: string): void;
-  /** Spacing from whatever it sits under — the page owns its own rhythm. */
+  onAccept(request: JoinRequest, proposal: JoinProposal): void;
+  onDecline(request: JoinRequest): void;
   className?: string;
 }
 
@@ -40,52 +38,64 @@ export function AccessRequestsBanner({
   folders,
   requests,
   onManage,
-  onDismiss,
+  onAccept,
+  onDecline,
   className,
 }: AccessRequestsBannerProps) {
   if (requests.length === 0) return null;
 
-  const names = requests.map((r) => r.requesterName);
-  const line =
-    requests.length === 1
-      ? `${names[0]} asked to join ${group} — grant read access to let them in.`
-      : `${requests.length} people asked to join ${group}: ${joinNames(names)}.`;
-
   return (
     <Banner role="status" tone="wait" className={cn('mb-4', className)}>
-      <p>{line}</p>
+      <p>
+        {requests.length === 1
+          ? `${requests[0].requesterName} asked to join ${group}.`
+          : `${requests.length} people asked to join ${group}.`}
+      </p>
 
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        {/* One button per constituent folder. An unmigrated KB splits a group
-            across `Skills/<G>` and `Tools/<G>`, and they carry SEPARATE
-            `access.md` files — one button would silently grant half the group.
-            After the migration the same code renders one unlabelled button. */}
-        {folders.map((folder) => (
-          <Button key={folder} variant="outline" size="sm" onClick={() => onManage(folder)}>
-            {folders.length === 1 ? 'Manage access' : `Manage access (${rootLabel(folder)})`}
-          </Button>
-        ))}
-
+      <div className="mt-2 flex flex-col gap-2">
         {requests.map((request) => (
-          <Button
-            key={request.id}
-            variant="quiet"
-            size="sm"
-            aria-label={`Dismiss request from ${request.requesterName}`}
-            onClick={() => onDismiss(request.id)}
-          >
-            Dismiss
-          </Button>
+          <div key={request.number} className="flex flex-col gap-1">
+            {requests.length > 1 && (
+              <span className="text-meta font-semibold text-ink">{request.requesterName}</span>
+            )}
+            {request.proposals.map((proposal) => (
+              <div
+                key={`${proposal.verb}:${proposal.id}`}
+                className="flex flex-wrap items-center gap-2"
+              >
+                <span className="min-w-0 flex-1 truncate">
+                  {proposal.label} — <span className="font-semibold">{proposal.verb}</span>
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  aria-label={`Grant ${proposal.verb} to ${proposal.label}`}
+                  onClick={() => onAccept(request, proposal)}
+                >
+                  Accept
+                </Button>
+              </div>
+            ))}
+            <div>
+              <Button
+                variant="quiet"
+                size="sm"
+                aria-label={`Decline the request from ${request.requesterName}`}
+                onClick={() => onDecline(request)}
+              >
+                Decline
+              </Button>
+            </div>
+          </div>
+        ))}
+        {folders.map((folder) => (
+          <div key={folder}>
+            <Button variant="quiet" size="sm" onClick={() => onManage(folder)}>
+              Manage access
+            </Button>
+          </div>
         ))}
       </div>
     </Banner>
   );
-}
-
-/**
- * `Skills/GTM` → `Skills`. The root a folder hangs off is the only thing that
- * distinguishes two buttons that would otherwise read identically.
- */
-function rootLabel(folder: string): string {
-  return folder.split('/')[0] ?? folder;
 }

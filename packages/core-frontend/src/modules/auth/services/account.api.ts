@@ -48,3 +48,15 @@ export async function createAccount(
   });
   if (!res.ok) throw new Error(await readError(res, 'Could not create account'));
 }
+
+/**
+ * Permanently erase an account (GDPR erasure path). The backend deletes the
+ * account and its personal data and anonymizes the user's past review
+ * activity; it refuses self-deletion (400).
+ */
+export async function deleteAccount(userId: string): Promise<void> {
+  const res = await authFetch(`/api/admin/accounts/${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(await readError(res, 'Could not delete this account'));
+}

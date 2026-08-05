@@ -98,6 +98,17 @@ const CORE_MENU_ITEMS: AdminMenuItem[] = [
       closeMenu();
     },
   },
+  {
+    id: 'user-accounts',
+    section: 'admin',
+    order: 20,
+    icon: <CircleUserRound size={15} />,
+    label: 'User accounts',
+    onSelect: ({ navigate, closeMenu }) => {
+      navigate('/user-accounts');
+      closeMenu();
+    },
+  },
 ];
 
 /** First letters of the first two words — the prototype's `initials` (proto:2315). */

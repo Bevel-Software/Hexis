@@ -1,5 +1,5 @@
 {
-  "id": "e7181272-9dc5-431e-a6ba-c999391e8869",
+  "id": "2fb788d3-6f7c-4590-938c-ca431b36e5e3",
   "prevId": "b7c1d5e2-3a48-4f16-9c02-8d5e4a1f7b93",
   "version": "7",
   "dialect": "postgresql",
@@ -378,140 +378,6 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.group_access_requests": {
-      "name": "group_access_requests",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "group_name": {
-          "name": "group_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "requester_email": {
-          "name": "requester_email",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "requester_name": {
-          "name": "requester_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'pending'"
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "resolved_at": {
-          "name": "resolved_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "resolved_by_email": {
-          "name": "resolved_by_email",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "group_access_requests_pending_unq": {
-          "name": "group_access_requests_pending_unq",
-          "columns": [
-            {
-              "expression": "group_name",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "requester_email",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"group_access_requests\".\"status\" = 'pending'",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "group_access_requests_by_group": {
-          "name": "group_access_requests_by_group",
-          "columns": [
-            {
-              "expression": "group_name",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "status",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "group_access_requests_by_requester": {
-          "name": "group_access_requests_by_requester",
-          "columns": [
-            {
-              "expression": "requester_email",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "status",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "group_access_requests_status": {
-          "name": "group_access_requests_status",
-          "value": "\"group_access_requests\".\"status\" IN ('pending', 'fulfilled', 'dismissed')"
-        }
-      },
       "isRLSEnabled": false
     },
     "public.oauth_auth_codes": {
@@ -1573,6 +1439,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "onboarding_done": {
+          "name": "onboarding_done",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "created_at": {
           "name": "created_at",

@@ -144,7 +144,7 @@ export class AccessMutationService {
     const current = await this.readOrEmpty(workspaceId, editPath, kind === 'folder');
     let result;
     try {
-      result = spliceGrant(current, verb, principal, { allowScalar });
+      result = spliceGrant(current, verb, principal, { allowScalar, target: kind === 'folder' ? 'folder' : 'node' });
     } catch (err) {
       throw this.toMutationError(err);
     }
@@ -196,7 +196,7 @@ export class AccessMutationService {
     try {
       const verbsToRevoke = verb ? [verb] : KNOWN_VERBS;
       for (const v of verbsToRevoke) {
-        const r = spliceRevoke(next, v, principal);
+        const r = spliceRevoke(next, v, principal, { target: kind === 'folder' ? 'folder' : 'node' });
         next = r.text;
         changed = changed || r.changed;
       }
@@ -259,9 +259,9 @@ export class AccessMutationService {
       for (const v of verbsToDeny) {
         // (1) Strip any same-scope GRANT for this principal so grant-beats-deny
         // can't silently swallow the deny we're about to add.
-        next = spliceRevoke(next, v, principal).text;
+        next = spliceRevoke(next, v, principal, { target: kind === 'folder' ? 'folder' : 'node' }).text;
         // (2) Add the deny under the same verb.
-        next = spliceGrant(next, v, principal, { allowScalar, deny: true }).text;
+        next = spliceGrant(next, v, principal, { allowScalar, deny: true, target: kind === 'folder' ? 'folder' : 'node' }).text;
       }
     } catch (err) {
       throw this.toMutationError(err);

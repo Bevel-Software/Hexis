@@ -6,7 +6,8 @@ import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
+import type { ChangeRequest, IWorkflowService } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -14,74 +15,37 @@ import type { ISkillService, SkillSummary } from '../../skills/skills.contract.j
 import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
 import { GroupIndexService } from '../groups.service.js';
 import { createGroupsRoutes } from '../groups.routes.js';
-import type {
-  AccessRequestRow,
-  AccessRequestsService,
-} from '../access-requests.service.js';
+import type { JoinRequestsService } from '../join-requests.service.js';
 import type { GroupSummary, IGroupIndexService } from '../groups.contract.js';
 
 /**
- * HTTP-level contract for the four `/api/groups*` endpoints: the auth gate, the
- * merged DTO's per-caller half (canRead / canWrite / withheld readers / stripped
- * emails / hasRequested), lazy fulfillment on both sides, and the admin filter
- * that turns a non-admin's request list into `[]` rather than a 403.
+ * HTTP-level contract for the group routes: the auth gate, the three-tier
+ * enumeration (member / manager / discoverable — all ordinary access
+ * verdicts), the fail-closed omission of groups with no verdict at all, and
+ * the join flow that rides on plain change requests.
  *
- * The group index is REAL over a temp KB (so the folder union and the counts are
- * exercised end to end); access control and the request store are stubs, because
- * what's under test here is the route's use of them.
+ * The group index is REAL over a temp KB; access control and the workflow are
+ * stubs, because what's under test here is the route's use of them.
  */
 
 const KB = 'knowledge-base';
 const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
 const OLGA = { name: 'Olga Ivanova', email: 'olga@bevel.software' };
 const ALI = 'ali@bevel.software';
+const ALI_USER = { id: 'u-1', email: ALI, name: 'Ali Baba' };
 
 const tmpDirs: string[] = [];
 
-/** In-memory stand-in for `AccessRequestsService` (the DB half is tested separately). */
-function makeRequests(seed: AccessRequestRow[] = []) {
-  const rows = seed.map((r) => ({ ...r, status: 'pending' }));
-  let seq = seed.length;
-  return {
-    _rows: rows,
-    create: vi.fn(async (group: string, email: string, name: string) => {
-      if (rows.some((r) => r.status === 'pending' && r.groupName === group && r.requesterEmail === email.toLowerCase())) {
-        return;
-      }
-      rows.push({
-        id: `req-${++seq}`,
-        groupName: group,
-        requesterEmail: email.toLowerCase(),
-        requesterName: name,
-        createdAt: new Date(1_700_000_000_000 + seq),
-        status: 'pending',
-      });
-    }),
-    pendingByRequester: vi.fn(async (email: string) =>
-      rows
-        .filter((r) => r.status === 'pending' && r.requesterEmail === email.toLowerCase())
-        .map((r) => ({ id: r.id, groupName: r.groupName })),
-    ),
-    pendingAll: vi.fn(async () => rows.filter((r) => r.status === 'pending').map((r) => ({ ...r }))),
-    getPending: vi.fn(async (id: string) => rows.find((r) => r.id === id && r.status === 'pending') ?? null),
-    markFulfilled: vi.fn(async (ids: string[]) => {
-      for (const r of rows) if (ids.includes(r.id) && r.status === 'pending') r.status = 'fulfilled';
-    }),
-    dismiss: vi.fn(async (id: string) => {
-      const row = rows.find((r) => r.id === id && r.status === 'pending');
-      if (!row) return false;
-      row.status = 'dismissed';
-      return true;
-    }),
-  };
-}
-
 interface HarnessOpts {
-  /** Folders (`Groups/GTM`) the given email may read. */
+  /**
+   * Paths (`Groups/GTM` for the folder/member verdict, `Groups/GTM/access.md`
+   * for the discover verdict) the given email may read.
+   */
   readable?: Record<string, string[]>;
-  /** Folders the given email may write `access.md` on. */
+  /** Paths the given email may write. */
   writable?: Record<string, string[]>;
-  requests?: ReturnType<typeof makeRequests>;
+  /** Open CRs `listChangeRequestsAuthoredBy` returns for any caller. */
+  authoredCrs?: ChangeRequest[];
   /** Override the whole index (used to force the 500 path). */
   index?: IGroupIndexService;
   email?: string | null;
@@ -89,24 +53,42 @@ interface HarnessOpts {
   tools?: ToolManualSummary[];
 }
 
+function cr(over: Partial<ChangeRequest>): ChangeRequest {
+  return {
+    number: 7,
+    title: 'Join request: GTM',
+    author: { login: 'svc' },
+    branch: joinBranchFor(ALI, 'GTM'),
+    base: DEFAULT_BRANCH,
+    state: 'open',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    touchedNodePaths: [],
+    review: { state: 'none' },
+    url: 'https://example.com/pr/7',
+    ...over,
+  } as ChangeRequest;
+}
+
 async function makeHarness(opts: HarnessOpts = {}) {
   const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-routes-'));
   tmpDirs.push(workspaceDir);
   const kbRoot = path.join(workspaceDir, KB);
-  // A migrated group (Groups/GTM) and a legacy one spanning both roots.
   await fs.mkdir(path.join(kbRoot, 'Groups', 'GTM'), { recursive: true });
-  await fs.mkdir(path.join(kbRoot, 'Skills', 'Finance'), { recursive: true });
-  await fs.mkdir(path.join(kbRoot, 'Tools', 'Finance'), { recursive: true });
+  await fs.mkdir(path.join(kbRoot, 'Groups', 'Finance'), { recursive: true });
+  await fs.writeFile(
+    path.join(kbRoot, 'Groups', 'Finance', 'access.md'),
+    '---\nread:\n  - everyone\n---\nread: []\n',
+  );
 
   const workspaceService = {
-    getOrCreateForBranch: async () => ({ id: wsId }),
+    getOrCreateForBranch: async (branch: string) => ({ id: workspaceIdForBranch(branch) }),
     getWorkspacePath: async () => workspaceDir,
+    readFile: vi.fn(async () => '---\nread:\n  - everyone\n---\nread: []\n'),
+    writeFile: vi.fn(async () => undefined),
   } as unknown as WorkspaceService;
 
   const verdictFor = (table: Record<string, string[]> | undefined, email: string, paths: string[]) =>
-    new Map(
-      paths.map((p) => [p, (table?.[email] ?? []).some((folder) => p === `${folder}/access.md`)]),
-    );
+    new Map(paths.map((p) => [p, (table?.[email] ?? []).includes(p)]));
 
   const accessControl = {
     canReadBatch: vi.fn(async (_w: string, email: string, paths: string[]) =>
@@ -120,6 +102,17 @@ async function makeHarness(opts: HarnessOpts = {}) {
     eligibleReaders: async () => ({ restricted: true, roles: ['GTM Team'], users: [OLGA] }),
   } as unknown as IAccessControl;
 
+  const workflow = {
+    listChangeRequestsAuthoredBy: vi.fn(async () => opts.authoredCrs ?? []),
+    listChangeRequests: vi.fn(async () => opts.authoredCrs ?? []),
+    getChangeRequest: vi.fn(
+      async (n: number) => (opts.authoredCrs ?? []).find((c) => c.number === n) ?? null,
+    ),
+    createBranch: vi.fn(async () => ({ name: 'x', isDefault: false, isProtected: false })),
+    commitChanges: vi.fn(async () => null),
+    openChangeRequest: vi.fn(async () => ({ number: 42 })),
+  } as unknown as IWorkflowService;
+
   const skillService = { listSkills: async () => opts.skills ?? [] } as unknown as ISkillService;
   const toolService = {
     listAllSummaries: async () => opts.tools ?? [],
@@ -128,7 +121,6 @@ async function makeHarness(opts: HarnessOpts = {}) {
   const index =
     opts.index ??
     new GroupIndexService(workspaceService, accessControl, skillService, toolService, KB);
-  const requests = opts.requests ?? makeRequests();
 
   const email = opts.email === undefined ? ALI : opts.email;
   const app = express();
@@ -140,13 +132,21 @@ async function makeHarness(opts: HarnessOpts = {}) {
     }
     next();
   });
+  const joinRequests = {
+    list: vi.fn(async () => []),
+    reconcile: vi.fn(async () => false),
+  } as unknown as JoinRequestsService;
+
   app.use(
     '/api',
     createGroupsRoutes(
       index,
-      requests as unknown as AccessRequestsService,
       accessControl,
-      async () => 'Ali Baba',
+      workflow,
+      workspaceService,
+      joinRequests,
+      KB,
+      async (req) => (req.userEmail ? { ...ALI_USER, email: req.userEmail } : null),
     ),
   );
 
@@ -154,12 +154,23 @@ async function makeHarness(opts: HarnessOpts = {}) {
     const s = app.listen(0, () => resolve(s));
   });
   const addr = server.address() as AddressInfo;
-  return { server, baseUrl: `http://127.0.0.1:${addr.port}`, requests, accessControl };
+  return {
+    server,
+    baseUrl: `http://127.0.0.1:${addr.port}`,
+    accessControl,
+    workflow,
+    workspaceService,
+    joinRequests,
+  };
 }
 
 function close(s: Server): Promise<void> {
   return new Promise((resolve, reject) => s.close((e) => (e ? reject(e) : resolve())));
 }
+
+const MEMBER_OF_BOTH = {
+  [ALI]: ['Groups/GTM', 'Groups/GTM/access.md', 'Groups/Finance', 'Groups/Finance/access.md'],
+};
 
 describe('/api/groups routes', () => {
   let server: Server | null = null;
@@ -172,110 +183,211 @@ describe('/api/groups routes', () => {
   const listGroups = async (baseUrl: string) => {
     const res = await fetch(`${baseUrl}/api/groups`);
     const body = (await res.json()) as { groups: GroupSummary[] };
-    return { status: res.status, groups: body.groups };
+    return { status: res.status, groups: body.groups, raw: JSON.stringify(body) };
   };
 
-  it('401s every endpoint when req.userEmail is absent', async () => {
+  it('401s both endpoints when req.userEmail is absent', async () => {
     const h = await makeHarness({ email: null });
     server = h.server;
     for (const [method, url] of [
       ['GET', '/api/groups'],
-      ['POST', '/api/groups/GTM/access-requests'],
-      ['GET', '/api/groups/access-requests'],
-      ['POST', '/api/groups/access-requests/req-1/dismiss'],
+      ['POST', '/api/groups/GTM/join-request'],
     ] as const) {
       const res = await fetch(`${h.baseUrl}${url}`, { method });
       expect(res.status, `${method} ${url}`).toBe(401);
-      expect(await res.json()).toEqual({ error: 'Unauthenticated' });
     }
   });
 
-  it('merges the legacy roots, sorts by name, and counts by groupOfPath', async () => {
+  it('lists member groups sorted, counting by groupOfPath', async () => {
     const h = await makeHarness({
+      readable: MEMBER_OF_BOTH,
       skills: [{ name: 'outreach', description: '', path: 'Groups/GTM/outreach' }],
       tools: [
-        { slug: 'ledger', name: 'ledger', path: 'Tools/Finance/ledger.tool', type: 'inline' },
-        { slug: 'slack', name: 'slack', path: 'Tools/slack.tool', type: 'inline' },
+        { slug: 'ledger', name: 'ledger', path: 'Groups/Finance/ledger.tool', type: 'inline' },
+        { slug: 'slack', name: 'slack', path: 'Groups/slack.tool', type: 'inline' },
       ],
     });
     server = h.server;
     const { status, groups } = await listGroups(h.baseUrl);
     expect(status).toBe(200);
     expect(groups.map((g) => g.name)).toEqual(['Finance', 'GTM']);
-    expect(groups[0].folders).toEqual(['Skills/Finance', 'Tools/Finance']);
-    expect(groups[0]).toMatchObject({ skillCount: 0, toolCount: 1 });
-    expect(groups[1]).toMatchObject({ folders: ['Groups/GTM'], skillCount: 1, toolCount: 0 });
+    expect(groups[0]).toMatchObject({ canRead: true, skillCount: 0, toolCount: 1 });
+    expect(groups[1]).toMatchObject({ canRead: true, skillCount: 1, toolCount: 0 });
   });
 
-  it('ORs canRead/canWrite across a group’s folders and withholds readers when locked', async () => {
+  it('a DISCOVERABLE group (access.md readable, folder not) lists locked with hasRequested from the join CR', async () => {
     const h = await makeHarness({
-      // Readable through the Tools half only — the OR still unlocks Finance.
-      readable: { [ALI]: ['Tools/Finance'] },
-      writable: { [ALI]: [] },
+      readable: { [ALI]: ['Groups/Finance/access.md'] },
+      authoredCrs: [cr({ branch: joinBranchFor(ALI, 'Finance'), number: 9 })],
     });
     server = h.server;
     const { groups } = await listGroups(h.baseUrl);
-    const finance = groups.find((g) => g.name === 'Finance')!;
-    const gtm = groups.find((g) => g.name === 'GTM')!;
-
-    expect(finance.canRead).toBe(true);
-    expect(finance.readers).toEqual({ restricted: true, roles: ['GTM Team'], users: [OLGA] });
-    expect(finance.owners.users).toEqual([OLGA]);
-
-    // Locked: counts and run-by survive, the share list and every email do not.
-    expect(gtm.canRead).toBe(false);
-    expect(gtm.readers).toBeNull();
-    expect(gtm.owners.users).toEqual([{ name: 'Olga Ivanova', email: null }]);
-    expect(gtm.writers.roles).toEqual(['Admin']);
-    expect(JSON.stringify(gtm)).not.toContain('@');
+    expect(groups.map((g) => g.name)).toEqual(['Finance']);
+    expect(groups[0]).toMatchObject({
+      canRead: false,
+      canWrite: false,
+      hasRequested: true,
+      requestNumber: 9,
+    });
   });
 
-  it('gives a locked-out folder-writer canWrite: true (the admin-rescue way back in)', async () => {
-    const h = await makeHarness({ readable: { [ALI]: [] }, writable: { [ALI]: ['Groups/GTM'] } });
+  it('OMITS a group with NO verdict at all — nothing about it leaves the backend', async () => {
+    const h = await makeHarness({ readable: { [ALI]: ['Groups/Finance/access.md'] } });
+    server = h.server;
+    const { groups, raw } = await listGroups(h.baseUrl);
+    expect(groups.map((g) => g.name)).toEqual(['Finance']);
+    expect(raw).not.toContain('"name":"GTM"');
+    expect(raw).not.toContain('Groups/GTM');
+  });
+
+  it("keeps a locked-out folder-writer's group listed with canWrite: true (admin-rescue)", async () => {
+    const h = await makeHarness({ writable: { [ALI]: ['Groups/GTM/access.md'] } });
     server = h.server;
     const { groups } = await listGroups(h.baseUrl);
-    const gtm = groups.find((g) => g.name === 'GTM')!;
-    expect(gtm).toMatchObject({ canRead: false, canWrite: true });
+    expect(groups.map((g) => g.name)).toEqual(['GTM']);
+    expect(groups[0]).toMatchObject({ canRead: false, canWrite: true });
   });
 
-  it('sets hasRequested for a pending request and lazily fulfills it once readable', async () => {
-    const requests = makeRequests([
-      {
-        id: 'req-1',
-        groupName: 'GTM',
-        requesterEmail: ALI,
-        requesterName: 'Ali Baba',
-        createdAt: new Date(1_700_000_000_000),
-      },
-    ]);
-    const locked = await makeHarness({ requests, readable: { [ALI]: [] } });
-    server = locked.server;
-    const first = await listGroups(locked.baseUrl);
-    expect(first.groups.find((g) => g.name === 'GTM')!.hasRequested).toBe(true);
-    expect(requests.markFulfilled).not.toHaveBeenCalled();
-    await close(locked.server);
-
-    // Access lands; the next load retires the row without an approve click.
-    const granted = await makeHarness({ requests, readable: { [ALI]: ['Groups/GTM'] } });
-    server = granted.server;
-    const second = await listGroups(granted.baseUrl);
-    const gtm = second.groups.find((g) => g.name === 'GTM')!;
-    expect(gtm).toMatchObject({ canRead: true, hasRequested: false });
-    expect(requests.markFulfilled).toHaveBeenCalledWith(['req-1']);
-    expect(requests._rows[0].status).toBe('fulfilled');
+  it('a member never reports hasRequested (their stale join CR is ignored)', async () => {
+    const h = await makeHarness({
+      readable: { [ALI]: ['Groups/GTM', 'Groups/GTM/access.md'] },
+      authoredCrs: [cr({})],
+    });
+    server = h.server;
+    const { groups } = await listGroups(h.baseUrl);
+    expect(groups[0]).toMatchObject({ name: 'GTM', canRead: true, hasRequested: false });
   });
 
-  it('degrades to hasRequested: false when the pending lookup throws', async () => {
-    const requests = makeRequests();
-    requests.pendingByRequester.mockRejectedValueOnce(new Error('db down'));
+  it('join-request: 404 for unknown AND for undiscoverable (identical, fail-closed)', async () => {
+    const h = await makeHarness({});
+    server = h.server;
+    for (const name of ['Nope', 'GTM']) {
+      const res = await fetch(`${h.baseUrl}/api/groups/${name}/join-request`, { method: 'POST' });
+      expect(res.status, name).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Unknown group', kind: 'unknown-group' });
+    }
+  });
+
+  it('join-request: 409 when the caller can already read the folder', async () => {
+    const h = await makeHarness({ readable: MEMBER_OF_BOTH });
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/groups/Finance/join-request`, { method: 'POST' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).kind).toBe('already-readable');
+  });
+
+  it('join-request: branch + splice + commit + CR, on the deterministic join branch', async () => {
+    const h = await makeHarness({ readable: { [ALI]: ['Groups/Finance/access.md'] } });
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/groups/Finance/join-request`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, number: 42 });
+
+    const branch = joinBranchFor(ALI, 'Finance');
+    expect(h.workflow.createBranch).toHaveBeenCalledWith(wsId, branch, DEFAULT_BRANCH);
+    // The write went to the group's access.md and added the caller to the
+    // BODY's read list (folder rules), leaving the discovery frontmatter alone.
+    const write = (h.workspaceService.writeFile as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(write[1]).toBe(`${KB}/Groups/Finance/access.md`);
+    expect(write[2]).toContain('Ali Baba <ali@bevel.software>');
+    expect((write[2] as string).indexOf('everyone')).toBeLessThan(
+      (write[2] as string).indexOf('Ali Baba'),
+    );
+    expect(h.workflow.commitChanges).toHaveBeenCalled();
+    expect(h.workflow.openChangeRequest).toHaveBeenCalledWith(
+      workspaceIdForBranch(branch),
+      expect.objectContaining({ email: ALI }),
+      expect.objectContaining({
+        sourceBranch: branch,
+        targetBranch: DEFAULT_BRANCH,
+        title: 'Join request: Finance',
+      }),
+    );
+  });
+
+  it('join-request is idempotent: an existing open join CR is returned, nothing new is created', async () => {
+    const h = await makeHarness({
+      readable: { [ALI]: ['Groups/Finance/access.md'] },
+      authoredCrs: [cr({ branch: joinBranchFor(ALI, 'Finance'), number: 9 })],
+    });
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/groups/Finance/join-request`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, number: 9 });
+    expect(h.workflow.createBranch).not.toHaveBeenCalled();
+    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it('degrades hasRequested to false when the CR lookup throws', async () => {
+    const h = await makeHarness({ readable: { [ALI]: ['Groups/Finance/access.md'] } });
+    (h.workflow.listChangeRequestsAuthoredBy as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('gh down'),
+    );
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const h = await makeHarness({ requests });
     server = h.server;
     const { status, groups } = await listGroups(h.baseUrl);
     expect(status).toBe(200);
-    expect(groups.every((g) => g.hasRequested === false)).toBe(true);
-    expect(warn).toHaveBeenCalled();
+    expect(groups[0]).toMatchObject({ hasRequested: false });
     warn.mockRestore();
+  });
+
+  it('join-requests: a MANAGER gets the service\'s list for the group', async () => {
+    const h = await makeHarness({ writable: { [ALI]: ['Groups/GTM/access.md'] } });
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ requests: [] });
+    expect(h.joinRequests.list).toHaveBeenCalledWith(
+      'GTM',
+      'Groups/GTM',
+      expect.anything(),
+      expect.objectContaining({ email: ALI }),
+    );
+  });
+
+  it('join-requests: a NON-manager gets [] rather than a 403, and the service is never asked', async () => {
+    // The frontend asks unconditionally; "am I a manager here" stays a
+    // question only the server answers.
+    const h = await makeHarness({ readable: MEMBER_OF_BOTH });
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ requests: [] });
+    expect(h.joinRequests.list).not.toHaveBeenCalled();
+  });
+
+  it('reconcile: 404 for a non-manager — indistinguishable from a missing request', async () => {
+    const h = await makeHarness({ readable: MEMBER_OF_BOTH, authoredCrs: [cr({ number: 7 })] });
+    server = h.server;
+    const denied = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests/7/reconcile`, {
+      method: 'POST',
+    });
+    expect(denied.status).toBe(404);
+    expect(h.joinRequests.reconcile).not.toHaveBeenCalled();
+  });
+
+  it('reconcile: 404 for a manager when the change request does not exist', async () => {
+    const h = await makeHarness({ writable: { [ALI]: ['Groups/GTM/access.md'] } });
+    server = h.server;
+    const missing = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests/999/reconcile`, {
+      method: 'POST',
+    });
+    expect(missing.status).toBe(404);
+    expect(h.joinRequests.reconcile).not.toHaveBeenCalled();
+  });
+
+  it('reconcile: a manager settles an open request through the service', async () => {
+    const h = await makeHarness({
+      writable: { [ALI]: ['Groups/GTM/access.md'] },
+      authoredCrs: [cr({ number: 7 })],
+    });
+    (h.joinRequests.reconcile as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests/7/reconcile`, {
+      method: 'POST',
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ closed: true });
   });
 
   it('500s with { error: "Failed to list groups" } when the index throws', async () => {
@@ -293,129 +405,5 @@ describe('/api/groups routes', () => {
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: 'Failed to list groups' });
     error.mockRestore();
-  });
-
-  it('POST access-requests: 404 unknown-group, 409 already-readable, 200 + idempotent repeat', async () => {
-    const requests = makeRequests();
-    const h = await makeHarness({ requests, readable: { [ALI]: ['Skills/Finance'] } });
-    server = h.server;
-
-    const unknown = await fetch(`${h.baseUrl}/api/groups/Nope/access-requests`, { method: 'POST' });
-    expect(unknown.status).toBe(404);
-    expect(await unknown.json()).toEqual({ error: 'Unknown group', kind: 'unknown-group' });
-
-    const already = await fetch(`${h.baseUrl}/api/groups/Finance/access-requests`, { method: 'POST' });
-    expect(already.status).toBe(409);
-    expect(await already.json()).toEqual({
-      error: 'You can already read this group',
-      kind: 'already-readable',
-    });
-
-    for (const attempt of [1, 2]) {
-      const ok = await fetch(`${h.baseUrl}/api/groups/GTM/access-requests`, { method: 'POST' });
-      expect(ok.status, `attempt ${attempt}`).toBe(200);
-      expect(await ok.json()).toEqual({ ok: true, hasRequested: true });
-    }
-    expect(requests._rows.filter((r) => r.status === 'pending')).toHaveLength(1);
-    expect(requests._rows[0].requesterName).toBe('Ali Baba');
-  });
-
-  it('access-requests list: [] for a non-admin, the administered rows for a folder admin', async () => {
-    const seed: AccessRequestRow[] = [
-      {
-        id: 'req-1',
-        groupName: 'GTM',
-        requesterEmail: ALI,
-        requesterName: 'Ali Baba',
-        createdAt: new Date(1_700_000_000_000),
-      },
-      {
-        id: 'req-2',
-        groupName: 'Finance',
-        requesterEmail: 'juan@bevel.software',
-        requesterName: 'Juan Viera',
-        createdAt: new Date(1_700_000_000_001),
-      },
-    ];
-
-    const outsider = await makeHarness({ requests: makeRequests(seed), email: 'nobody@bevel.software' });
-    server = outsider.server;
-    const none = await fetch(`${outsider.baseUrl}/api/groups/access-requests`);
-    expect(none.status).toBe(200); // never a 403 — the frontend may ask unconditionally
-    expect(await none.json()).toEqual({ requests: [] });
-    await close(outsider.server);
-
-    const admin = await makeHarness({
-      requests: makeRequests(seed),
-      email: OLGA.email,
-      writable: { [OLGA.email]: ['Groups/GTM'] },
-    });
-    server = admin.server;
-    const res = await fetch(`${admin.baseUrl}/api/groups/access-requests`);
-    const body = (await res.json()) as { requests: { id: string; group: string; requesterEmail: string }[] };
-    expect(body.requests).toHaveLength(1);
-    expect(body.requests[0]).toMatchObject({ id: 'req-1', group: 'GTM', requesterEmail: ALI });
-  });
-
-  it('access-requests list hides rows whose requester can already read (lazy fulfillment)', async () => {
-    const requests = makeRequests([
-      {
-        id: 'req-1',
-        groupName: 'GTM',
-        requesterEmail: ALI,
-        requesterName: 'Ali Baba',
-        createdAt: new Date(1_700_000_000_000),
-      },
-    ]);
-    const h = await makeHarness({
-      requests,
-      email: OLGA.email,
-      readable: { [ALI]: ['Groups/GTM'] },
-      writable: { [OLGA.email]: ['Groups/GTM'] },
-    });
-    server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/groups/access-requests`);
-    expect(await res.json()).toEqual({ requests: [] });
-    expect(requests._rows[0].status).toBe('fulfilled');
-  });
-
-  it('dismiss: 404 unknown/settled, 403 for a non-admin, 200 flips pending', async () => {
-    const seed: AccessRequestRow[] = [
-      {
-        id: 'req-1',
-        groupName: 'GTM',
-        requesterEmail: ALI,
-        requesterName: 'Ali Baba',
-        createdAt: new Date(1_700_000_000_000),
-      },
-    ];
-
-    const stranger = await makeHarness({ requests: makeRequests(seed), email: 'nobody@bevel.software' });
-    server = stranger.server;
-    const missing = await fetch(`${stranger.baseUrl}/api/groups/access-requests/nope/dismiss`, {
-      method: 'POST',
-    });
-    expect(missing.status).toBe(404);
-    const forbidden = await fetch(`${stranger.baseUrl}/api/groups/access-requests/req-1/dismiss`, {
-      method: 'POST',
-    });
-    expect(forbidden.status).toBe(403);
-    expect(await forbidden.json()).toEqual({ error: 'Not allowed' });
-    await close(stranger.server);
-
-    const requests = makeRequests(seed);
-    const admin = await makeHarness({
-      requests,
-      email: OLGA.email,
-      writable: { [OLGA.email]: ['Groups/GTM'] },
-    });
-    server = admin.server;
-    const ok = await fetch(`${admin.baseUrl}/api/groups/access-requests/req-1/dismiss`, { method: 'POST' });
-    expect(ok.status).toBe(200);
-    expect(await ok.json()).toEqual({ ok: true });
-    expect(requests._rows[0].status).toBe('dismissed');
-    // Settled now — a second dismiss is indistinguishable from never-pending.
-    const again = await fetch(`${admin.baseUrl}/api/groups/access-requests/req-1/dismiss`, { method: 'POST' });
-    expect(again.status).toBe(404);
   });
 });
