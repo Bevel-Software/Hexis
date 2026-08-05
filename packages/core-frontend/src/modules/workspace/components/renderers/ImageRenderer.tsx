@@ -43,7 +43,7 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
       <img
         src={objectUrl}
         alt={filePath}
-        className="max-w-full max-h-full object-contain rounded"
+        className="max-w-full max-h-full object-contain rounded-xs"
       />
     </div>
   );

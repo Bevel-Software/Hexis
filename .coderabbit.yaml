@@ -1,0 +1,8 @@
+language: en-US
+reviews:
+  request_changes_workflow: true
+  high_level_summary: true
+  auto_review:
+    enabled: true
+    base_branches:
+      - .*

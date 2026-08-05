@@ -1,52 +1,78 @@
 import express from 'express';
 import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
+import {
+  DEFAULT_BRANCH,
+  joinBranchFor,
+  type AuthUser,
+  type ChangeRequest,
+  type IWorkflowService,
+} from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import type { AccessRequestsService } from './access-requests.service.js';
+import { spliceGrant } from '../access/access-splice.js';
+import { WorkflowDomainError } from '../workflow/workflow.errors.js';
+import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { groupsWorkspaceId } from './groups.service.js';
+import type { JoinRequestsService } from './join-requests.service.js';
 import type {
-  GroupAccessRequestEntry,
   GroupCatalogEntry,
-  GroupPrincipals,
   GroupSummary,
   IGroupIndexService,
-  ResolvedPrincipals,
 } from './groups.contract.js';
 
 /**
- * Browser-facing (JWT) group routes, mounted behind `authMiddleware`. Four
- * endpoints, all of them enumeration or Postgres writes — none of them touches
- * the knowledge base:
+ * Browser-facing (JWT) group routes, mounted behind `authMiddleware`:
  *
- *   GET  /api/groups                              → { groups: GroupSummary[] }
- *   POST /api/groups/:name/access-requests        → { ok, hasRequested }
- *   GET  /api/groups/access-requests              → { requests: … }   (admin-filtered)
- *   POST /api/groups/access-requests/:id/dismiss  → { ok }
+ *   GET  /api/groups                            → { groups: GroupSummary[] }
+ *   POST /api/groups/:name/join-request         → { ok, number }  (opens a CR)
+ *   GET  /api/groups/:name/join-requests        → { requests }    (managers)
+ *   POST /api/groups/:name/join-requests/:n/reconcile → { closed }
+ *
+ * Enumeration is three verdicts per (caller, group), all of them ordinary
+ * access resolution — no special cases, no side tables:
+ *
+ *   member       canRead on the group FOLDER
+ *   manager      canWrite on the folder's access.md (admin-rescued)
+ *   discoverable canRead on the access.md FILE — in the body-governed format
+ *                its own `read: everyone` frontmatter grants this
+ *
+ * All three false ⇒ the group is absent from the response entirely.
+ *
+ * A join request is a plain change request whose branch edits the group's
+ * `access.md`. Managers do NOT merge it: they read its individual proposals
+ * (see `join-proposals.ts`), grant the ones they accept through the ordinary
+ * access path, and the request retires itself once its rules are a subset of
+ * the default branch's — reconciled here, lazily on listing and eagerly right
+ * after a grant. Nothing about the lifecycle is stored; it is derived from
+ * two copies of one file.
  *
  * Auth gating is explicit and uniform: `authMiddleware` at the mount, PLUS a
  * `req.userEmail` check in every handler (the skills-routes pattern) so a
- * middleware change can never silently un-gate one of them. Nothing here is
- * reachable with an agent connection key or a manual-auth bearer — locked-group
- * discovery is a browser surface.
- *
- * The per-caller verdicts (`canRead` / `canWrite`) come from ONE
- * `canReadBatch` + ONE `canWriteBatch` per request over `${folder}/access.md`
- * probes. That probe path is exactly the folder-chain readability every real
- * child inherits (root `access.md` → … → the folder's own), and it works
- * whether or not the file exists — a missing one reads as null own-entries and
- * the chain decides.
+ * middleware change can never silently un-gate one. Nothing here is reachable
+ * with an agent connection key or a manual-auth bearer.
  */
 export function createGroupsRoutes(
   groupIndex: IGroupIndexService,
-  requests: AccessRequestsService,
   accessControl: IAccessControl,
-  resolveUserName: (req: express.Request) => Promise<string>,
+  workflow: IWorkflowService,
+  workspaceService: WorkspaceService,
+  joinRequests: JoinRequestsService,
+  kbDirName: string,
+  resolveUser: (req: express.Request) => Promise<AuthUser | null>,
 ): express.Router {
   const router = express.Router();
 
-  /** Every constituent folder's access probe, deduped. */
+  /** The folder-chain probe for MEMBERSHIP — the folder itself. */
+  const memberProbe = (folder: string) => folder;
+  /** The FILE probe for discovery/management — the folder's access.md. */
+  const accessMdOf = (folder: string) => `${folder}/access.md`;
+
   const probesFor = (groups: GroupCatalogEntry[]): string[] => [
-    ...new Set(groups.flatMap((g) => g.folders.map(accessProbe))),
+    ...new Set(groups.flatMap((g) => g.folders.flatMap((f) => [memberProbe(f), accessMdOf(f)]))),
   ];
+
+  /** The caller's open join CR for `group`, or null. */
+  const openJoinCr = (mine: ChangeRequest[], email: string, group: string): ChangeRequest | null =>
+    mine.find((cr) => cr.state === 'open' && cr.branch === joinBranchFor(email, group)) ?? null;
 
   router.get('/groups', async (req, res) => {
     const email = req.userEmail;
@@ -66,49 +92,43 @@ export function createGroupsRoutes(
         accessControl.canReadBatch(wsId, email, probes),
         accessControl.canWriteBatch(wsId, email, probes),
       ]);
-      // Fail closed on both verdicts: a folder missing from the map is denied,
-      // matching the KB's default-deny read model.
-      const verdict = (map: Map<string, boolean>, g: GroupCatalogEntry) =>
-        g.folders.some((f) => map.get(accessProbe(f)) === true);
+      // Fail closed on every verdict: a path missing from the map is denied.
+      const any = (map: Map<string, boolean>, g: GroupCatalogEntry, probe: (f: string) => string) =>
+        g.folders.some((f) => map.get(probe(f)) === true);
 
-      // A DB outage must not take discovery down with it — the Library still
-      // enumerates, everyone just looks un-requested.
-      let pending: { id: string; groupName: string }[] = [];
+      // The caller's own open join CRs — drives `hasRequested`. A CR-listing
+      // hiccup must not take group enumeration down: degrade to "nothing
+      // requested" and let the next load repair it.
+      let mine: ChangeRequest[] = [];
       try {
-        pending = await requests.pendingByRequester(email);
+        mine = await workflow.listChangeRequestsAuthoredBy(email);
       } catch (err) {
         console.warn(
-          `[groups] pending-request lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+          `[groups] join-request lookup failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
 
-      // Lazy fulfillment, requester side: a request whose group the caller can
-      // now read has already been answered — granting read IS approving, so no
-      // separate approve step exists to leave the row behind.
-      const stillPending = new Set<string>();
-      const fulfilled: string[] = [];
-      for (const row of pending) {
-        const group = catalog.find((g) => g.name === row.groupName);
-        if (group && verdict(readable, group)) fulfilled.push(row.id);
-        else stillPending.add(row.groupName);
-      }
-      await retire(requests, fulfilled);
-
-      const groups: GroupSummary[] = catalog.map((g) => {
-        const canRead = verdict(readable, g);
-        return {
+      const groups: GroupSummary[] = [];
+      for (const g of catalog) {
+        const member = any(readable, g, memberProbe);
+        const manager = any(writable, g, accessMdOf);
+        const discoverable = member || any(readable, g, accessMdOf);
+        if (!member && !manager && !discoverable) continue; // absent — fail closed
+        const joinCr = member ? null : openJoinCr(mine, email, g.name);
+        groups.push({
           name: g.name,
           folders: g.folders,
-          canRead,
-          canWrite: verdict(writable, g),
+          canRead: member,
+          canWrite: manager,
           skillCount: g.skillCount,
           toolCount: g.toolCount,
-          owners: disclose(g.owners, canRead),
-          writers: disclose(g.writers, canRead),
-          readers: canRead ? { restricted: g.readers.restricted, ...disclose(g.readers, true) } : null,
-          hasRequested: !canRead && stillPending.has(g.name),
-        };
-      });
+          owners: g.owners,
+          writers: g.writers,
+          readers: g.readers,
+          hasRequested: joinCr !== null,
+          requestNumber: joinCr?.number ?? null,
+        });
+      }
       res.json({ groups });
     } catch (err) {
       console.error('[groups] failed to list groups:', err);
@@ -116,163 +136,188 @@ export function createGroupsRoutes(
     }
   });
 
-  router.post('/groups/:name/access-requests', async (req, res) => {
+  /**
+   * Open (or return the existing) join change request for the caller.
+   *
+   * Idempotent via the deterministic branch name: a second click finds the
+   * open CR and returns it. Every step is an existing primitive — branch,
+   * splice, commit-and-push, open CR — so the security story is exactly the
+   * workflow's: draft branches are ungated, and the merge gate requires an
+   * approver who can write the touched access.md.
+   */
+  router.post('/groups/:name/join-request', async (req, res) => {
     const email = req.userEmail;
     if (!email) {
       res.status(401).json({ error: 'Unauthenticated' });
       return;
     }
     try {
+      const user = await resolveUser(req);
+      if (!user) {
+        res.status(401).json({ error: 'Unauthenticated' });
+        return;
+      }
       const catalog = await groupIndex.catalog();
       // Case-sensitive, like `groupOfPath` — the group name IS the folder name.
       const group = catalog.find((g) => g.name === req.params.name);
-      if (!group) {
+      const wsId = groupsWorkspaceId();
+      // Same ANY-folder shape `GET /groups` resolves with, so a group can
+      // never be listed as discoverable there and rejected as unknown here.
+      const verdicts = group
+        ? await accessControl.canReadBatch(
+            wsId,
+            email,
+            group.folders.flatMap((f) => [memberProbe(f), accessMdOf(f)]),
+          )
+        : new Map<string, boolean>();
+      const any = (probe: (f: string) => string) =>
+        group?.folders.some((f) => verdicts.get(probe(f)) === true) ?? false;
+      // Discovery gate, fail-closed: an unknown group and a group the caller
+      // cannot discover answer IDENTICALLY, so probing can't confirm existence.
+      if (!group || !any(accessMdOf)) {
         res.status(404).json({ error: 'Unknown group', kind: 'unknown-group' });
         return;
       }
-      const probes = group.folders.map(accessProbe);
-      const readable = await accessControl.canReadBatch(groupsWorkspaceId(), email, probes);
-      if (probes.some((p) => readable.get(p) === true)) {
-        // Access landed between page load and click — the caller doesn't need
-        // to ask, they need to reload.
+      if (any(memberProbe)) {
+        // Access landed between page load and click — reload, don't ask.
         res.status(409).json({ error: 'You can already read this group', kind: 'already-readable' });
         return;
       }
-      await requests.create(group.name, email, await resolveUserName(req));
-      res.json({ ok: true, hasRequested: true });
+      // The grant is written to the group's primary folder — the one the
+      // summary's `folders[0]` names and the banner's touched-path check
+      // expects.
+      const folder = group.folders[0];
+
+      const branch = joinBranchFor(email, group.name);
+      const existing = openJoinCr(await workflow.listChangeRequestsAuthoredBy(email), email, group.name);
+      if (existing) {
+        res.json({ ok: true, number: existing.number });
+        return;
+      }
+
+      // A leftover branch from a rejected/withdrawn request is reused — the
+      // grant commit is already on it and the splice below no-ops.
+      try {
+        await workflow.createBranch(groupsWorkspaceId(), branch, DEFAULT_BRANCH);
+      } catch {
+        // exists (or raced) — proceed against it
+      }
+      const ws = await workspaceService.getOrCreateForBranch(branch);
+      const accessPath = `${kbDirName}/${accessMdOf(folder)}`;
+      const current = await workspaceService.readFile(ws.id, accessPath).catch(() => '');
+      const spliced = spliceGrant(
+        current,
+        'read',
+        { kind: 'user', email: user.email, displayName: user.name },
+        { target: 'folder' },
+      );
+      if (spliced.changed) {
+        await workspaceService.writeFile(ws.id, accessPath, spliced.text);
+        await workflow.commitChanges(ws.id, user, `Request access to ${group.name}`);
+      }
+      const detail = await workflow.openChangeRequest(ws.id, user, {
+        sourceBranch: branch,
+        targetBranch: DEFAULT_BRANCH,
+        title: `Join request: ${group.name}`,
+        description:
+          `${user.name} asked to join ${group.name}. A manager of the group accepts by ` +
+          `granting the access this branch proposes; the request closes itself once ` +
+          `every proposal has landed.`,
+      });
+      res.json({ ok: true, number: detail.number });
     } catch (err) {
-      console.error('[groups] failed to record an access request:', err);
+      if (err instanceof WorkflowDomainError) {
+        res.status(err.status).json({ error: err.message, ...(err.payload ?? {}) });
+        return;
+      }
+      console.error('[groups] failed to open a join request:', err);
       res.status(500).json({ error: 'Failed to request access' });
     }
   });
 
-  router.get('/groups/access-requests', async (req, res) => {
+  /**
+   * Resolve the caller as a MANAGER of `name` — the only role that may see or
+   * settle its join requests. Returns the group's primary folder, or null
+   * after answering the request.
+   *
+   * A non-manager gets an empty list rather than a 403 (the frontend asks
+   * unconditionally, exactly as it does for every other group surface), and
+   * an unknown group is indistinguishable from an unmanaged one.
+   */
+  async function requireManager(
+    req: express.Request,
+    res: express.Response,
+    onDenied: () => void,
+  ): Promise<{ group: GroupCatalogEntry; folder: string; user: AuthUser } | null> {
     const email = req.userEmail;
     if (!email) {
       res.status(401).json({ error: 'Unauthenticated' });
-      return;
+      return null;
     }
+    const group = (await groupIndex.catalog()).find((g) => g.name === req.params.name);
+    if (!group) {
+      onDenied();
+      return null;
+    }
+    const writable = await accessControl.canWriteBatch(
+      groupsWorkspaceId(),
+      email,
+      group.folders.map(accessMdOf),
+    );
+    if (!group.folders.some((f) => writable.get(accessMdOf(f)) === true)) {
+      onDenied();
+      return null;
+    }
+    const user = await resolveUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return null;
+    }
+    return { group, folder: group.folders[0], user };
+  }
+
+  router.get('/groups/:name/join-requests', async (req, res) => {
     try {
-      const [catalog, rows] = await Promise.all([groupIndex.catalog(), requests.pendingAll()]);
-      const byName = new Map(catalog.map((g) => [g.name, g]));
-      // A row whose group folder no longer exists is hidden, not 500'd — it
-      // stays pending in the DB, visible to an audit, invisible to the UI.
-      const live = rows.filter((r) => byName.has(r.groupName));
-
-      // Lazy fulfillment, admin side: one batch per DISTINCT requester (the
-      // verdict is per person, so it can't share the caller's batch).
-      const fulfilled: string[] = [];
-      const stale = new Set<string>();
-      const requesters = [...new Set(live.map((r) => r.requesterEmail))];
-      const verdicts = await Promise.all(
-        requesters.map(async (requester) => {
-          const groups = live.filter((r) => r.requesterEmail === requester).map((r) => byName.get(r.groupName)!);
-          return [
-            requester,
-            await accessControl.canReadBatch(groupsWorkspaceId(), requester, probesFor(groups)),
-          ] as const;
-        }),
-      );
-      const readableBy = new Map(verdicts);
-      for (const row of live) {
-        const group = byName.get(row.groupName)!;
-        if (group.folders.some((f) => readableBy.get(row.requesterEmail)?.get(accessProbe(f)) === true)) {
-          fulfilled.push(row.id);
-          stale.add(row.id);
-        }
-      }
-      await retire(requests, fulfilled);
-
-      // Admin filter: a row is visible to whoever can write its group's
-      // `access.md` — the same people who can act on it. Non-admins get an
-      // empty list, never a 403, so the frontend can ask unconditionally.
-      const open = live.filter((r) => !stale.has(r.id));
-      const writable = await accessControl.canWriteBatch(
-        groupsWorkspaceId(),
-        email,
-        probesFor(open.map((r) => byName.get(r.groupName)!)),
-      );
-      const visible: GroupAccessRequestEntry[] = open
-        .filter((r) => byName.get(r.groupName)!.folders.some((f) => writable.get(accessProbe(f)) === true))
-        .map((r) => ({
-          id: r.id,
-          group: r.groupName,
-          requesterName: r.requesterName,
-          requesterEmail: r.requesterEmail,
-          createdAt: r.createdAt.toISOString(),
-        }));
-      res.json({ requests: visible });
+      const ctx = await requireManager(req, res, () => res.json({ requests: [] }));
+      if (!ctx) return;
+      const crs = await workflow.listChangeRequests();
+      res.json({
+        requests: await joinRequests.list(ctx.group.name, ctx.folder, crs, ctx.user),
+      });
     } catch (err) {
-      console.error('[groups] failed to list access requests:', err);
-      res.status(500).json({ error: 'Failed to list access requests' });
+      console.error('[groups] failed to list join requests:', err);
+      res.status(500).json({ error: 'Failed to list join requests' });
     }
   });
 
-  router.post('/groups/access-requests/:id/dismiss', async (req, res) => {
-    const email = req.userEmail;
-    if (!email) {
-      res.status(401).json({ error: 'Unauthenticated' });
-      return;
-    }
+  /**
+   * Settle one request if its proposals have all landed on the default
+   * branch. Called right after a grant so the banner updates in the same
+   * round-trip; the listing does the same thing lazily, so skipping this (a
+   * dropped response, a closed tab) only delays it.
+   */
+  router.post('/groups/:name/join-requests/:number/reconcile', async (req, res) => {
     try {
-      const row = await requests.getPending(req.params.id);
-      if (!row) {
+      const ctx = await requireManager(req, res, () =>
+        res.status(404).json({ error: 'Not found' }),
+      );
+      if (!ctx) return;
+      const crNumber = Number(req.params.number);
+      if (!Number.isSafeInteger(crNumber) || crNumber <= 0) {
+        res.status(400).json({ error: 'Invalid change request number' });
+        return;
+      }
+      const cr = await workflow.getChangeRequest(crNumber);
+      if (!cr) {
         res.status(404).json({ error: 'Not found' });
         return;
       }
-      const group = (await groupIndex.catalog()).find((g) => g.name === row.groupName);
-      // No folder ⇒ nobody can write its `access.md` ⇒ nobody is its admin.
-      // Fail closed rather than letting a deleted group become dismissable by
-      // anyone who can guess the row id.
-      const writable = group
-        ? await accessControl.canWriteBatch(groupsWorkspaceId(), email, group.folders.map(accessProbe))
-        : new Map<string, boolean>();
-      if (!group?.folders.some((f) => writable.get(accessProbe(f)) === true)) {
-        res.status(403).json({ error: 'Not allowed' });
-        return;
-      }
-      // Raced with another dismiss or a lazy fulfillment — the row is settled,
-      // which is indistinguishable from never having been pending.
-      if (!(await requests.dismiss(row.id, email))) {
-        res.status(404).json({ error: 'Not found' });
-        return;
-      }
-      res.json({ ok: true });
+      res.json({ closed: await joinRequests.reconcile(ctx.group.name, ctx.folder, cr, ctx.user) });
     } catch (err) {
-      console.error('[groups] failed to dismiss an access request:', err);
-      res.status(500).json({ error: 'Failed to dismiss the request' });
+      console.error('[groups] failed to reconcile a join request:', err);
+      res.status(500).json({ error: 'Failed to update the request' });
     }
   });
 
   return router;
-}
-
-/** The folder-chain readability probe for a group folder. */
-function accessProbe(folder: string): string {
-  return `${folder}/access.md`;
-}
-
-/**
- * Emails ride out only to people who can already read the group — the same
- * disclosure posture as `GET /workspace/:id/access`. A non-reader still gets
- * the display names (they need to know who to ask); nulling the email keeps
- * the endpoint from becoming an address-book for every group in the workspace.
- */
-function disclose(principals: ResolvedPrincipals, canRead: boolean): GroupPrincipals {
-  return {
-    roles: [...principals.roles],
-    users: principals.users.map((u) => ({ name: u.name, email: canRead ? u.email : null })),
-  };
-}
-
-/** Retire fulfilled rows without letting a DB blip break the read that found them. */
-async function retire(requests: AccessRequestsService, ids: string[]): Promise<void> {
-  if (ids.length === 0) return;
-  try {
-    await requests.markFulfilled(ids);
-  } catch (err) {
-    console.warn(
-      `[groups] could not retire fulfilled requests: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
 }

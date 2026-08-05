@@ -217,6 +217,45 @@ export class PendingCommitsService {
   }
 
   /**
+   * Enqueue ONLY when no row — in ANY status — exists for
+   * `(workspaceId, branch, path)`. The pull-conflict recovery dispatch uses
+   * this instead of `enqueue` because that path can fire repeatedly (every
+   * branch focus / merge retries the pull) and `enqueue`'s refresh
+   * semantics would reset the existing row's retry counters each time —
+   * starving the worker's ladder so the recovery agent never spawns. A
+   * `needs_attention` row also blocks re-entry on purpose: the ladder
+   * already escalated that divergence to a human; spawning more agents on
+   * it would loop.
+   *
+   * Returns whether a row was inserted. Race window between the existence
+   * check and the insert is harmless — the schema allows duplicate rows and
+   * the worker's idempotent commit pass collapses them (same reasoning as
+   * `startupReconcile`'s bypass of the mutex).
+   */
+  async enqueueIfAbsent(input: EnqueueInput): Promise<boolean> {
+    const workspaceId = canonicalWorkspaceId(input.workspaceId);
+    const rows = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(pendingCommits)
+      .where(
+        and(
+          eq(pendingCommits.workspaceId, workspaceId),
+          eq(pendingCommits.branch, input.branch),
+          eq(pendingCommits.path, input.path),
+        ),
+      );
+    if ((rows[0]?.count ?? 0) > 0) return false;
+    await this.db.insert(pendingCommits).values({
+      workspaceId,
+      branch: input.branch,
+      path: input.path,
+      authorEmail: input.authorEmail.trim().toLowerCase(),
+      authorName: input.authorName,
+    });
+    return true;
+  }
+
+  /**
    * Atomically claim the next ready row for `workspaceId`. "Ready" means:
    *
    *   - `status = 'pending'`, AND

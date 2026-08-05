@@ -62,7 +62,7 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
 
   if (error) {
     return (
-      <div className="flex items-center justify-center h-full text-red-600 text-sm">
+      <div className="flex items-center justify-center min-h-40 text-danger text-sm">
         {error}
       </div>
     );
@@ -70,14 +70,16 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
 
   if (html === null) {
     return (
-      <div className="flex items-center justify-center h-full text-ink-muted text-sm">
+      <div className="flex items-center justify-center min-h-40 text-ink-muted text-sm">
         Loading Word document...
       </div>
     );
   }
 
   return (
-    <div className="h-full overflow-auto">
+    // No scroller of its own: a Word document is a document, so it sits in
+    // `KbDocumentShell`'s prose column and the column scrolls.
+    <div className="min-w-0">
       <div
         className="prose prose-sm max-w-none"
         dangerouslySetInnerHTML={{ __html: html }}

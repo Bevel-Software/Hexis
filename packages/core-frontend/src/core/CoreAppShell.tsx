@@ -25,6 +25,7 @@ import { Toolbar } from '../modules/toolbar/components/Toolbar';
 import { DemoBanner } from '../modules/layout/components/DemoBanner';
 import { FileExplorer } from '../modules/workspace/components/FileExplorer';
 import { FileViewer } from '../modules/workspace/components/FileViewer';
+import { OpenChangeRequestsProvider } from '../modules/workspace/state/open-change-requests';
 import { FileRoute } from '../modules/workspace/components/FileRoute';
 import { KB_ROUTE_PREFIX } from '../modules/workspace/routing/kb-routes';
 import { AppLayout } from '../modules/layout/components/AppLayout';
@@ -40,8 +41,10 @@ import { ReviewProvider } from '../modules/review/state/ReviewProvider';
 import { ReviewPanelSurface } from '../modules/review/components/ReviewPanelSurface';
 import { ConnectToolsPage } from '../modules/secrets-vault/components/ConnectToolsPage';
 import { SecretsPage } from '../modules/secrets-vault/components/SecretsPage';
+import { AccountPage } from '../modules/auth/components/AccountPage';
 import { ExternalAgentAccessPage } from '../modules/toolbar/components/ExternalAgentAccessPage';
 import { AdminRolesPage } from '../modules/admin/components/AdminRolesPage';
+import { UserAccountsPage } from '../modules/admin/components/UserAccountsPage';
 import { ToolsExplorerPage } from '../modules/tools/ToolsExplorerPage';
 import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
@@ -161,15 +164,11 @@ const CORE_BANNERS: BannerDef[] = [
 // hard-coded three-pane layout exactly. These are the KNOWLEDGE app's panes —
 // other apps render their own full surface (see CORE_APPS).
 const CORE_PANES: PaneDef[] = [
-  {
-    id: 'explorer',
-    order: 10,
-    node: <FileExplorer />,
-    defaultSize: '17%',
-    minSize: '10%',
-    maxSize: '35%',
-    collapsible: true,
-  },
+  // The file tree is the SIDEBAR, not a panel — the same frame, at the same
+  // width, that Skills & Tools puts its group list in. It left the resizable
+  // group when the two navs were unified; `SidebarFrame` owns its width and
+  // the shared store owns whether it is showing.
+  { id: 'explorer', order: 10, node: <FileExplorer />, sidebar: true, collapsible: true },
   { id: 'viewer', order: 20, node: <ViewerRoutes />, minSize: '30%' },
 ];
 
@@ -219,7 +218,14 @@ function KnowledgeSurface() {
       ),
     [registry],
   );
-  return <AppLayout panes={panes} onController={setController} />;
+  // Mounted here, once, because three separate subtrees ask the same question:
+  // the tree (per row), the tab strip (per tab) and the viewer's banner. A
+  // plain hook per consumer would give every tree row its own request.
+  return (
+    <OpenChangeRequestsProvider>
+      <AppLayout panes={panes} onController={setController} />
+    </OpenChangeRequestsProvider>
+  );
 }
 
 function AppChrome() {
@@ -298,8 +304,10 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
       ))}
       <Route path="/connect" element={<ConnectToolsPage />} />
       <Route path="/secrets" element={<SecretsPage />} />
+      <Route path="/account" element={<AccountPage />} />
       <Route path="/external-agent-access" element={<ExternalAgentAccessPage />} />
       <Route path="/roles-and-members" element={<AdminRolesPage />} />
+      <Route path="/user-accounts" element={<UserAccountsPage />} />
       <Route path="/tools" element={<ToolsExplorerPage />} />
       <Route path="/" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
       <Route path="*" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />

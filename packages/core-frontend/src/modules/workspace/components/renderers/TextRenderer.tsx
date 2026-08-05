@@ -1,4 +1,5 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
+import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
 import type { FileRendererProps, RendererSaveState } from './types';
 
 export function TextRenderer({
@@ -15,6 +16,8 @@ export function TextRenderer({
   const [savedValue, setSavedValue] = useState(savedContent ?? content);
   const [saveState, setSaveState] = useState<RendererSaveState>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useAutoGrowTextarea(textareaRef, value);
 
   const dirty = !readOnly && value !== savedValue;
 
@@ -66,9 +69,12 @@ export function TextRenderer({
   }, [save]);
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    // Auto-height: `KbDocumentShell` owns the scroll, and the textarea grows
+    // to its content so the page keeps exactly one scrollbar.
+    <div className="flex min-w-0 flex-col">
       <textarea
-        className="w-full flex-1 min-h-0 bg-transparent text-sm text-ink font-mono whitespace-pre-wrap break-words leading-relaxed resize-none outline-none"
+        ref={textareaRef}
+        className="w-full min-h-[50vh] resize-none overflow-hidden bg-transparent text-sm text-ink font-mono whitespace-pre-wrap break-words leading-relaxed outline-none"
         value={value}
         onChange={readOnly ? undefined : handleChange}
         onKeyDown={readOnly ? undefined : handleKeyDown}
@@ -78,7 +84,7 @@ export function TextRenderer({
       {!readOnly && (
         <div className="pt-2 text-xs min-h-5">
           {saveState === 'saving' && <span className="text-ink-muted">Saving…</span>}
-          {saveState === 'error' && saveError && <span className="text-red-600">{saveError}</span>}
+          {saveState === 'error' && saveError && <span className="text-danger">{saveError}</span>}
         </div>
       )}
     </div>

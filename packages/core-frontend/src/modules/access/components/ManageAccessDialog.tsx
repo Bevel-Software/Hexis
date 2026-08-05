@@ -40,6 +40,17 @@ interface Props {
    * into a draft nobody merges, silently doing nothing.
    */
   workspaceId?: string;
+  /**
+   * Retarget the sheet at an ancestor folder — the prototype's
+   * `Manage <Folder> →` (proto:3647).
+   *
+   * The dialog cannot do this itself: it takes a fixed `entry`, and the caller
+   * owns the state that chooses it. Every existing call site already holds
+   * exactly that state, so wiring it is one line each. Omitted ⇒ the link does
+   * not render, and an inherited grant stays read-only — which is the honest
+   * fallback, not a silent no-op.
+   */
+  onManageAncestor?: (entry: FileTreeEntry) => void;
 }
 
 type Role = 'Owner' | 'Can edit' | 'Can read' | 'Can download';
@@ -221,7 +232,12 @@ function summarizeVerbs(v: VerbSet): string {
  * the user can't write the access config, the add affordance is disabled and
  * names the owners to ask.
  */
-export function ManageAccessDialog({ entry, onClose, workspaceId: workspaceIdProp }: Props) {
+export function ManageAccessDialog({
+  entry,
+  onClose,
+  workspaceId: workspaceIdProp,
+  onManageAncestor,
+}: Props) {
   // `kbDirName` stays context-sourced: it names the clone directory, which is
   // the same on every branch.
   const { workspaceId: ctxWorkspaceId, kbDirName } = useWorkspace();
@@ -409,7 +425,56 @@ export function ManageAccessDialog({ entry, onClose, workspaceId: workspaceIdPro
     () => principals.filter((p) => p.manage !== 'direct'),
     [principals],
   );
-  const [showInherited, setShowInherited] = useState(false);
+
+  /**
+   * The inherited rows, ONE GROUP PER GRANTING FOLDER — the prototype's shape
+   * (proto:3637-3649) and, more to the point, its reasoning:
+   *
+   *   "Inheritance, said as a sentence instead of labelled as a concept.
+   *    'People invited to KnowledgeBase' needs no explaining — it names the
+   *    folder, and the folder is both what it means and where it changes. One
+   *    collapsed row per granting folder, because two folders granting
+   *    different people is the normal case and merging them would hide which
+   *    one to open."
+   *
+   * This used to be a single "Inherited access (N) — from parent folders &
+   * roles" disclosure. That heading names the CONCEPT, which the reader either
+   * already understands or is not helped by, and merging every ancestor into
+   * one list threw away the only fact that makes an inherited grant
+   * actionable: which folder to go and edit.
+   *
+   * A principal granted by two folders appears under BOTH, deliberately — that
+   * is the truth, and it is exactly the case a merged list hides.
+   *
+   * Rows with no ancestor at all (a role that grants at the workspace level,
+   * `manage: 'external'`) have no folder to file under, so they keep a group of
+   * their own at the end rather than being dropped.
+   */
+  const inheritedByFolder = useMemo(() => {
+    const byFolder = new Map<string, PrincipalRow[]>();
+    const external: PrincipalRow[] = [];
+    for (const row of inheritedRows) {
+      if (row.ancestors.length === 0) {
+        external.push(row);
+        continue;
+      }
+      for (const a of row.ancestors) {
+        const list = byFolder.get(a);
+        if (list) list.push(row);
+        else byFolder.set(a, [row]);
+      }
+    }
+    // Deepest folder first: the nearest ancestor is the one most likely to be
+    // the one you meant, and it is the one whose rule wins.
+    const folders = [...byFolder.entries()].sort(
+      (a, b) => b[0].split('/').length - a[0].split('/').length,
+    );
+    return { folders, external };
+  }, [inheritedRows]);
+
+  /** Which folder group is expanded, or `'roles'`, or null. One at a time —
+   *  as in the prototype, where `state.accOpen` holds a single value. */
+  const [openGroup, setOpenGroup] = useState<string | null>(null);
 
   const governed = repoRelative !== null;
   // The dialog can mutate only if the current user can write this path's access
@@ -1067,7 +1132,18 @@ export function ManageAccessDialog({ entry, onClose, workspaceId: workspaceIdPro
               </Banner>
             )}
 
-            <h3 className="mb-1 mt-4 text-label uppercase text-ink-faint">People with access</h3>
+            {/* Names WHICH RULE you are editing, and adapts to the target
+                (proto:3625: `On this ` + file|folder). The sheet mixes rules
+                set HERE with rules inherited from above, so a heading that
+                says only "People with access" leaves the reader to work out
+                which of the two lists below is which. The count rides it, as
+                on every band in the app. */}
+            <h3 className="mb-1 mt-4 flex items-baseline gap-2 text-label uppercase text-ink-faint">
+              On this {targetKind}
+              {directRows.length > 0 && (
+                <span className="text-meta normal-case tabular-nums">{directRows.length}</span>
+              )}
+            </h3>
 
             {data && !data.readers.restricted && (
               <div className="flex items-center gap-3 py-1.5">
@@ -1100,21 +1176,87 @@ export function ManageAccessDialog({ entry, onClose, workspaceId: workspaceIdPro
 
             {inheritedRows.length > 0 && (
               <div className="mt-3 border-t border-line pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowInherited((v) => !v)}
-                  className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail font-medium text-ink-muted hover:text-ink"
-                >
-                  <ChevronDown
-                    size={14}
-                    className={`transition-transform ${showInherited ? 'rotate-180' : ''}`}
-                  />
-                  Inherited access ({inheritedRows.length})
-                  <span className="font-normal text-ink-faint">
-                    — from parent folders &amp; roles
-                  </span>
-                </button>
-                {showInherited && <div className="mt-1">{inheritedRows.map(renderRow)}</div>}
+                {inheritedByFolder.folders.map(([ancestor, rows]) => {
+                  const open = openGroup === ancestor;
+                  return (
+                    <div key={ancestor}>
+                      <button
+                        type="button"
+                        aria-expanded={open}
+                        title={folderPath(ancestor)}
+                        onClick={() => setOpenGroup(open ? null : ancestor)}
+                        className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
+                      >
+                        <ChevronDown
+                          size={14}
+                          className={`shrink-0 transition-transform ${open ? 'rotate-180' : '-rotate-90'}`}
+                        />
+                        <span className="min-w-0 truncate">
+                          People invited to <b className="font-semibold">{folderLabel(ancestor)}</b>
+                        </span>
+                        <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
+                          {rows.length}
+                        </span>
+                      </button>
+                      {open && (
+                        <div className="mb-1">
+                          {rows.map(renderRow)}
+                          {/* The folder is both what the heading means and
+                              where it changes (proto:3647). Without this the
+                              only act available on an inherited grant is the
+                              destructive one behind Remove. */}
+                          {onManageAncestor && kbDirName && (
+                            <Button
+                              variant="quiet"
+                              size="tiny"
+                              className="mt-0.5"
+                              onClick={() => {
+                                const dir = ancestor.replace(/\/?access\.md$/, '');
+                                onManageAncestor({
+                                  // The same name the button just said. A
+                                  // root-level `access.md` leaves `dir` empty,
+                                  // and `''.split('/').pop()` is `''` — a
+                                  // dialog with no title.
+                                  name: folderLabel(ancestor),
+                                  relativePath: `${kbDirName}/${dir}`,
+                                  type: 'directory',
+                                });
+                              }}
+                            >
+                              {`Manage ${folderLabel(ancestor)} →`}
+                            </Button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {/* A role that grants at the workspace level belongs to no
+                    folder, so it cannot be filed under one. Named for what it
+                    is rather than swept into the folder groups. */}
+                {inheritedByFolder.external.length > 0 && (
+                  <div>
+                    <button
+                      type="button"
+                      aria-expanded={openGroup === 'roles'}
+                      onClick={() => setOpenGroup(openGroup === 'roles' ? null : 'roles')}
+                      className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
+                    >
+                      <ChevronDown
+                        size={14}
+                        className={`shrink-0 transition-transform ${openGroup === 'roles' ? 'rotate-180' : '-rotate-90'}`}
+                      />
+                      <span className="min-w-0 truncate">People with access through a role</span>
+                      <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
+                        {inheritedByFolder.external.length}
+                      </span>
+                    </button>
+                    {openGroup === 'roles' && (
+                      <div className="mb-1">{inheritedByFolder.external.map(renderRow)}</div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 

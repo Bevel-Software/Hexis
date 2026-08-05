@@ -28,6 +28,7 @@ import {
   createSecretsVaultPublicRoutes,
 } from '../modules/secrets-vault/index.js';
 import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js';
+import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -93,6 +94,17 @@ export async function createCoreServer(
   opts: { staticDir?: string } = {},
 ): Promise<ExpressApp> {
   const app = express();
+
+  // Honor forwarded client addresses ONLY when the deployment declares its
+  // proxy topology (TRUST_PROXY = hop count or CIDR list — see CoreConfig).
+  // Without it, `req.ip` is the socket peer: safe when directly exposed, but
+  // behind a proxy every client would share the proxy's address (pooling the
+  // per-IP login rate limit). A number is the hop count; anything else is
+  // passed through as Express's address/CIDR list form.
+  if (core.config.trustProxy) {
+    const raw = core.config.trustProxy;
+    app.set('trust proxy', /^\d+$/.test(raw) ? Number(raw) : raw);
+  }
 
   // `credentials: true` so EventSource (`withCredentials: true`) can carry
   // the `bevel_token` cookie set at login — the only auth path the
@@ -298,20 +310,29 @@ export async function createCoreServer(
     core.config.kbDirName,
   ));
   app.use('/api', core.authMiddleware, createSkillsRoutes(core.skillService));
-  // Group discovery + access requests. Browser-only (JWT): enumerating locked
-  // groups is a UI affordance, and the agent surfaces keep their fail-closed
-  // filtering with no knowledge of it. The display name is resolved from the
-  // users table, falling back to the email when the row is missing.
+  // Group enumeration + join requests. Browser-only (JWT), and fail-closed
+  // like every other read surface: groups the caller cannot access (member,
+  // manager, or discoverable via the access.md file's own read grant) are
+  // absent from the list. A join request is a plain change request.
   app.use('/api', core.authMiddleware, createGroupsRoutes(
     core.groupIndexService,
-    core.groupAccessRequests,
     core.accessControl,
-    async (req) => (req.userId ? (await core.authService.getUserById(req.userId))?.name : null)
-      ?? req.userEmail!,
+    core.workflowService,
+    core.workspaceService,
+    core.joinRequestsService,
+    core.config.kbDirName,
+    async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
   ));
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));
+  // Account management (list/create password accounts, GDPR erasure) —
+  // admin-gated inside.
+  app.use('/api', core.authMiddleware, createAccountRoutes(
+    core.authService,
+    core.adminAccess,
+    core.accountErasureService,
+  ));
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe

@@ -188,6 +188,45 @@ describe('DbSecretsVaultService — dead-grant detection on refresh', () => {
     expect(stored.tokens).toBeUndefined();
   });
 
+  it('a SUCCESSFUL refresh notifies mutation listeners with the row user (cache repair signal)', async () => {
+    const { db } = makeFakeDb([
+      [userRow()], // resolve row lookup
+      undefined, // refreshed-token persist
+    ]);
+    const svc = new DbSecretsVaultService(db, ENC_KEY, undefined, userScope);
+    const onMutation = vi.fn();
+    svc.onMutation(onMutation);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({ access_token: 'fresh-at', refresh_token: 'rt-2', expires_in: 3600 }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    await expect(svc.resolve('user-1', KEY)).resolves.toBe('fresh-at');
+    expect(onMutation).toHaveBeenCalledWith('user-1');
+  });
+
+  it('putSharedOAuthProvider notifies mutation listeners with null (shared → everyone)', async () => {
+    const { db } = makeFakeDb([undefined]); // provider upsert
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    const onMutation = vi.fn();
+    svc.onMutation(onMutation);
+    await svc.putSharedOAuthProvider({
+      key: KEY,
+      provider: {
+        clientId: 'client-1',
+        authorizationUrl: 'https://idp.example.com/authorize',
+        tokenUrl: 'https://idp.example.com/token',
+        scopes: ['mcp.read'],
+      },
+    });
+    expect(onMutation).toHaveBeenCalledWith(null);
+  });
+
   it('a transient failure (network / 5xx) keeps the tokens and returns the stale one', async () => {
     for (const impl of [
       async () => new Response('bad gateway', { status: 502 }),

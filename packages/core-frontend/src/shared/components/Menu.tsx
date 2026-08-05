@@ -19,7 +19,7 @@ import { cn } from '../../lib/utils';
  * relative parent, or fixed to the viewport edge).
  */
 
-export interface MenuPanelProps extends HTMLAttributes<HTMLDivElement> {}
+export type MenuPanelProps = HTMLAttributes<HTMLDivElement>;
 
 export function MenuPanel({ className, children, ...rest }: MenuPanelProps) {
   return (

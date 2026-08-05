@@ -8,6 +8,7 @@ export * from './chat/types.js';
 export * from './workspace/types.js';
 export * from './workspace/filename.js';
 export * from './workspace/kb-layout.js';
+export * from './workspace/join-request.js';
 export * from './workspace/frontmatter.js';
 
 // Git

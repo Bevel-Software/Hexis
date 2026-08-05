@@ -30,12 +30,6 @@ export interface GroupsSidebarProps {
   onFinishSetup(): void;
   /** Start a new group. The layout owns the dialog; this is only the intent. */
   onCreateGroup(): void;
-  /**
-   * Hidden. The sidebar only knows its own width — `SidebarToggle` and the
-   * state behind it belong to the layout, so the button can stay put while
-   * this slides out from under it.
-   */
-  collapsed: boolean;
 }
 
 /**
@@ -50,6 +44,11 @@ export interface GroupsSidebarProps {
  * It is a pure view of the URL: `filter` comes down, clicks go up as intents,
  * and the layout navigates. Nothing here is state, so the back button, a deep
  * link and the highlighted row can never drift apart.
+ *
+ * This is the CONTENTS only. Being a sidebar — the width, the background, the
+ * collapse animation, the drag handle — belongs to `SidebarFrame`, which
+ * Knowledge's file tree renders inside too. That is the whole reason the two
+ * navs cannot drift: there is one of them, holding a different list.
  */
 export function GroupsSidebar({
   filter,
@@ -63,7 +62,6 @@ export function GroupsSidebar({
   attentionCount,
   onFinishSetup,
   onCreateGroup,
-  collapsed,
 }: GroupsSidebarProps) {
   const rowClass = (selected: boolean) =>
     cn(
@@ -128,30 +126,7 @@ export function GroupsSidebar({
   );
 
   return (
-    <aside
-      id="library-sidebar"
-      // Collapsing is a WIDTH change on the frame, never a layout change on
-      // the contents: the inner column keeps its own `w-53` and is clipped, so
-      // the rows slide out intact instead of reflowing to nothing on the way.
-      // The border goes transparent rather than away — a border that stops
-      // existing would jump the main column by a pixel at the end of a
-      // 200ms animation.
-      //
-      // `inert` is what makes "hidden" true rather than merely narrow. Zero
-      // width still leaves every row focusable and still reads it out, so a
-      // keyboard user would tab into a nav nobody can see. Clipping is a
-      // picture; `inert` is the fact.
-      inert={collapsed}
-      className={cn(
-        'h-full shrink-0 overflow-hidden border-r bg-sidebar transition-[width] duration-200 ease-out',
-        collapsed ? 'w-0 border-r-transparent' : 'w-53 border-line',
-      )}
-    >
-      {/* `pt-6` matches the main column's `py-6`, so the first label and the
-          page heading start on the same line. (The old `pt-14` was a landing
-          strip for a toggle that floated here; the toggle lives in the top
-          bar now, so the strip went with it.) */}
-      <div className="flex h-full w-53 flex-col px-3.5 pb-4 pt-6">
+    <>
         <nav
           aria-label="Library groups"
           className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto"
@@ -212,8 +187,7 @@ export function GroupsSidebar({
             — finish now
           </button>
         )}
-      </div>
-    </aside>
+    </>
   );
 }
 

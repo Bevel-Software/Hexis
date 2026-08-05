@@ -10,8 +10,6 @@ import {
   KNOWLEDGE_DIR,
   PIPELINES_DIR,
   GROUPS_DIR,
-  LEGACY_SKILLS_DIR,
-  LEGACY_TOOLS_DIR,
 } from '@bevel-software/platform-shared';
 import { branchForWorkspaceId, FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import type { WorkspaceService } from './workspace.service.js';
@@ -465,21 +463,17 @@ export function createWorkspaceRoutes(
       // a user who can't read into them. Their existence isn't sensitive
       // (every KB has them), and keeping them visible lets the explorer render
       // its Knowledge/Groups section view instead of collapsing to an empty
-      // flat tree. `KnowledgeBase/`, `Data/`, `Agents/`, `Pipelines/` and
-      // `Groups/` are the current layout; `Skills/` + `Tools/` are the
-      // pre-merge pair, kept until the KB migrates. A ROOT-LEVEL `Knowledge/`
-      // is the legacy pre-split layout's knowledge root (kb-layout.ts calls it
-      // the neutral bucket) and gets the same treatment so legacy clones don't
-      // collapse. Only the folders themselves are forced visible — their
-      // contents stay gated by the verdict above.
+      // flat tree. A ROOT-LEVEL `Knowledge/` is the legacy pre-split layout's
+      // knowledge root (kb-layout.ts calls it the neutral bucket) and gets the
+      // same treatment so legacy clones don't collapse. Only the folders
+      // themselves are forced visible — their contents stay gated by the
+      // verdict above.
       const structuralRoots = new Set([
         KNOWLEDGE_BASE_DIR,
         DATA_DIR,
         AGENTS_DIR,
         PIPELINES_DIR,
         GROUPS_DIR,
-        LEGACY_SKILLS_DIR,
-        LEGACY_TOOLS_DIR,
         KNOWLEDGE_DIR,
       ]);
       for (const wp of wsRelPaths) {
@@ -568,16 +562,25 @@ export function createWorkspaceRoutes(
         '.xlsx':
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       };
-      // SVG is active web content (it can carry <script>). Inline view
-      // already trusts the source (the workspace owns its bytes), but a
-      // saved-to-disk SVG that's later re-opened in a browser tab would
-      // execute its scripts under the file:// origin — so when the user
-      // explicitly downloads, force octet-stream to defang it.
+      // SVG is active web content (it can carry <script>), and it is active in
+      // BOTH directions: a saved-to-disk SVG re-opened later runs its scripts
+      // under the file:// origin, so a download is forced to octet-stream.
       const downloadMime = ext === '.svg' ? 'application/octet-stream' : (mimeTypes[ext] || 'application/octet-stream');
       res.setHeader('Content-Type', wantsDownload ? downloadMime : (mimeTypes[ext] || 'application/octet-stream'));
       // Block MIME-sniffing so a misdeclared file can't be promoted to
       // active content by the browser.
       res.setHeader('X-Content-Type-Options', 'nosniff');
+      // …and inline is a DOCUMENT the moment somebody opens it in a tab
+      // ("⋯ → View raw file"), where those scripts would run under THIS
+      // origin with this user's session — stored XSS for anyone who can write
+      // a file into the workspace. `sandbox` drops the document into a unique
+      // origin with scripting off. It applies to documents only, so the
+      // renderers' fetch → blob → <img> path is untouched, and that path is
+      // why the type stays `image/svg+xml`: browsers do not sniff SVG, and an
+      // octet-stream blob would simply not render.
+      if (!wantsDownload && ext === '.svg') {
+        res.setHeader('Content-Security-Policy', 'sandbox');
+      }
       if (wantsDownload) {
         // RFC 5987 UTF-8 filename encoding so unicode + spaces round-trip;
         // CR/LF stripped to block header injection via a crafted path.

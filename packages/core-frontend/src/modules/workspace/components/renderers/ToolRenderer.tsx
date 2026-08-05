@@ -272,17 +272,17 @@ export function ToolRenderer({
       <div className="flex min-h-0 flex-1 flex-col border-r border-line">
         <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
           <span className="text-xs font-medium text-ink-muted">{filePath.split('/').pop()}</span>
-          {dirty && <span className="text-[10px] text-amber-600">● unsaved</span>}
-          {saveState === 'error' && <span className="text-[10px] text-red-600">{saveError}</span>}
+          {dirty && <span className="text-micro text-wait">● unsaved</span>}
+          {saveState === 'error' && <span className="text-micro text-danger">{saveError}</span>}
           {/* No Save button here — like the other renderers, the FileViewer's Save
               persists edits (tracked via onValueChange). We only own the view toggle. */}
-          <div className="ml-auto flex overflow-hidden rounded border border-line">
+          <div className="ml-auto flex overflow-hidden rounded-xs border border-line">
             {(['form', 'code'] as const).map((m) => (
               <button
                 key={m}
                 type="button"
                 onClick={() => setMode(m)}
-                className={`px-2 py-0.5 text-[11px] capitalize ${
+                className={`px-2 py-0.5 text-meta capitalize ${
                   mode === m ? 'bg-ink text-white' : 'bg-white text-ink-muted hover:bg-hover'
                 }`}
               >
@@ -296,7 +296,7 @@ export function ToolRenderer({
             <ToolForm value={value} onChange={updateValue} readOnly={readOnly} />
             {notesOf(value) && (
               <section className="mt-4 border-t border-line pt-3">
-                <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-faint">Notes</h3>
+                <h3 className="mb-1 text-meta font-semibold uppercase tracking-wide text-ink-faint">Notes</h3>
                 {/* The free-form markdown after the frontmatter fence — where a
                     tool's setup instructions live. Edited in the Code view. */}
                 <Markdown className="text-xs">{notesOf(value)}</Markdown>
@@ -320,7 +320,7 @@ export function ToolRenderer({
       <aside className="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto p-3">
         {!readOnly && (
           <section>
-            <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-faint">Scaffold</h3>
+            <h3 className="mb-1 text-meta font-semibold uppercase tracking-wide text-ink-faint">Scaffold</h3>
             <div className="flex gap-1">
               {(['inline', 'http', 'mcp'] as const).map((t) => (
                 <button
@@ -330,7 +330,7 @@ export function ToolRenderer({
                       updateValue(SCAFFOLDS[t]);
                     }
                   }}
-                  className="rounded bg-sunken px-2 py-1 text-[11px] text-ink-muted hover:bg-hover"
+                  className="rounded-xs bg-sunken px-2 py-1 text-meta text-ink-muted hover:bg-hover"
                 >
                   {t}
                 </button>
@@ -341,9 +341,9 @@ export function ToolRenderer({
 
         {!readOnly && (
           <section>
-            <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-faint">Secret variables</h3>
+            <h3 className="mb-1 text-meta font-semibold uppercase tracking-wide text-ink-faint">Secret variables</h3>
             {secretKeys.length === 0 ? (
-              <p className="text-[11px] text-ink-faint">
+              <p className="text-meta text-ink-faint">
                 No secrets yet. Add them on the Secrets page, then reference them here.
               </p>
             ) : (
@@ -352,7 +352,7 @@ export function ToolRenderer({
                   <button
                     key={k}
                     onClick={() => insertAtCursor(`\${${k}}`)}
-                    className="rounded bg-blue-50 px-1.5 py-0.5 font-mono text-[10px] text-blue-700 hover:bg-blue-100"
+                    className="rounded-xs bg-accent/10 px-1.5 py-0.5 font-mono text-micro text-accent hover:bg-accent/15"
                     title={`Insert \${${k}}`}
                   >
                     {`\${${k}}`}
@@ -364,12 +364,12 @@ export function ToolRenderer({
         )}
 
         <section>
-          <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-faint">Secrets for this tool</h3>
+          <h3 className="mb-1 text-meta font-semibold uppercase tracking-wide text-ink-faint">Secrets for this tool</h3>
           {toolSecrets ? (
             <ToolSecretsPanel tool={toolSecrets} onChanged={() => void loadToolSecrets()} />
           ) : (
-            <p className="text-[11px] text-ink-faint">
-              Declare a <code className="rounded bg-sunken px-1">variables</code> block and save this tool to the
+            <p className="text-meta text-ink-faint">
+              Declare a <code className="rounded-xs bg-sunken px-1">variables</code> block and save this tool to the
               default branch to configure its secrets here.
             </p>
           )}
@@ -377,19 +377,19 @@ export function ToolRenderer({
 
         <section>
           <div className="mb-1 flex items-center gap-2">
-            <h3 className="text-[11px] font-semibold uppercase tracking-wide text-ink-faint">Preview</h3>
+            <h3 className="text-meta font-semibold uppercase tracking-wide text-ink-faint">Preview</h3>
             <button
               onClick={() => void runPreview()}
               disabled={previewing}
-              className="ml-auto rounded bg-sunken px-2 py-0.5 text-[11px] text-ink-muted hover:bg-hover disabled:opacity-40"
+              className="ml-auto rounded-xs bg-sunken px-2 py-0.5 text-meta text-ink-muted hover:bg-hover disabled:opacity-40"
             >
               {previewing ? '…' : 'Run'}
             </button>
           </div>
           {preview && (
-            <div className="text-[11px]">
+            <div className="text-meta">
               {preview.errors?.length ? (
-                <ul className="space-y-1 text-red-600">
+                <ul className="space-y-1 text-danger">
                   {preview.errors.map((e, i) => (
                     <li key={i}>{e}</li>
                   ))}
@@ -397,7 +397,7 @@ export function ToolRenderer({
               ) : preview.tools && preview.tools.length > 0 ? (
                 <ul className="space-y-1">
                   {preview.tools.map((t) => (
-                    <li key={t.name} className="rounded bg-sunken px-1.5 py-1">
+                    <li key={t.name} className="rounded-xs bg-sunken px-1.5 py-1">
                       <code className="text-ink">{t.name}</code>
                       {t.description && <div className="text-ink-faint">{t.description}</div>}
                     </li>

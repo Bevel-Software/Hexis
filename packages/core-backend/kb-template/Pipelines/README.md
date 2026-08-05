@@ -19,7 +19,7 @@ Pipelines/
 A sequence of **nodes**, each one of:
 
 - an **`.agent` reference** — an agent session executes the step;
-- a **UTCP tool call** — a tool from `Tools/` (or defined in-file), invoked
+- a **UTCP tool call** — a tool from `Groups/` (or defined in-file), invoked
   deterministically with no LLM;
 - a **wait node** — parks the run until a condition holds; checked cheaply
   every tick, never by an agent polling.

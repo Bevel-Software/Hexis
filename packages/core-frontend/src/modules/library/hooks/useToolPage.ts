@@ -64,13 +64,26 @@ export function useToolPage(slug: string): ToolPageState {
   const [revision, setRevision] = useState(0);
   const requestRef = useRef(0);
 
-  useEffect(() => {
-    const request = ++requestRef.current;
-    const current = () => requestRef.current === request;
-
+  // Switching tools (or reloading) has to clear the PREVIOUS tool's spine and
+  // detail, or the page paints stale content under the new slug's heading. That
+  // reset is state derived from a changed input, so it happens during render
+  // against the previous key rather than in the effect body — an effect resets
+  // after paint, which is both a frame of the old tool showing through and the
+  // synchronous setState that `react-hooks/set-state-in-effect` flags.
+  // `useState(key)` seeds the key so a fresh mount, already holding LOADING,
+  // does not reset itself on the first render.
+  const key = `${slug}:${revision}`;
+  const [seenKey, setSeenKey] = useState(key);
+  if (key !== seenKey) {
+    setSeenKey(key);
     setSpine(LOADING);
     setDetail(null);
     setSkillsLoaded(false);
+  }
+
+  useEffect(() => {
+    const request = ++requestRef.current;
+    const current = () => requestRef.current === request;
 
     listToolSecrets()
       .then((tools) => {

@@ -60,9 +60,11 @@ import {
   ChangeRequestConflictsError,
   DuplicateChangeRequestError,
   RolesYamlPreservationError,
+  PullRebaseConflictError,
   PushNeedsAgentResolutionError,
   WorkflowValidationError,
 } from './workflow.errors.js';
+import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
 import { AccessDeniedError } from '../access/access-errors.js';
 
 const execFileAsync = promisify(execFile);
@@ -299,8 +301,67 @@ export class WorkflowService implements IWorkflowService {
     return this.git.fetch(workspaceId);
   }
 
-  updateFromRemote(workspaceId: string): Promise<void> {
-    return this.git.pull(workspaceId);
+  async updateFromRemote(workspaceId: string, user?: AuthUser): Promise<void> {
+    try {
+      await this.git.pull(workspaceId);
+    } catch (err) {
+      if (err instanceof PullRebaseConflictError) {
+        await this.queuePullConflictRecovery(workspaceId, err, user);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * A pull hit a rebase conflict — the workspace carries local commits that
+   * conflict with origin, a state that never resolves on its own (every
+   * retry pull re-hits it, and the local commits are saved-but-unshared
+   * content violating save=share). Queue ONE pending-commits row for it so
+   * the worker's existing retry → recovery-agent → escalate ladder takes
+   * over in the background.
+   *
+   * `enqueueIfAbsent` (not `enqueue`): sync attempts can fire repeatedly
+   * (every branch focus / merge), and a fresh `enqueue` would reset the
+   * existing row's retry counters each time — starving the ladder so the
+   * recovery agent never spawns. It also refuses to resurrect a
+   * `needs_attention` row: once the ladder has escalated to a human, more
+   * agent runs on the same divergence are just a loop.
+   *
+   * One row, smallest conflicted path as the representative: the recovery
+   * agent's job is "bring the BRANCH into a pushable state", so one ladder
+   * per divergence — not one per conflicted file, which would multiply
+   * agent runs for a single underlying conflict. Sorted so the choice is
+   * stable across retries regardless of how the caller ordered the paths —
+   * a shifting representative would slip past `enqueueIfAbsent`'s
+   * per-(workspace, branch, path) dedup and start a second ladder.
+   *
+   * Best-effort by design — the caller is already surfacing the conflict
+   * error; a queue hiccup must not mask it.
+   */
+  private async queuePullConflictRecovery(
+    workspaceId: string,
+    err: PullRebaseConflictError,
+    user?: AuthUser,
+  ): Promise<void> {
+    try {
+      const queued = await this.pendingCommits.enqueueIfAbsent({
+        workspaceId,
+        branch: err.branch,
+        path: [...err.conflictedPaths].sort()[0],
+        authorEmail: user?.email ?? RECOVERY_BOT_EMAIL,
+        authorName: user?.name ?? RECOVERY_BOT_NAME,
+      });
+      if (queued) {
+        console.warn(
+          `[workflow] pull conflict on ws=${workspaceId} branch=${err.branch} (${err.conflictedPaths.join(', ')}) — queued background recovery`,
+        );
+      }
+    } catch (queueErr) {
+      console.error(
+        `[workflow] failed to queue pull-conflict recovery for ws=${workspaceId}:`,
+        queueErr instanceof Error ? queueErr.message : queueErr,
+      );
+    }
   }
 
   resetToRemote(workspaceId: string, branch: string): Promise<void> {
@@ -680,9 +741,21 @@ export class WorkflowService implements IWorkflowService {
   ): Promise<void> {
     const change = await this.git.commitFile(workspaceId, user, targetPath);
     if (!change) {
-      // No-op commit (path was already clean — typical for a double-enqueue
-      // or a save of bytes identical to HEAD). Nothing to push; nothing to
-      // emit. The worker treats this as success and drops the row.
+      // No-op commit — the path was already clean. Usually a double-enqueue
+      // or a save of bytes identical to HEAD, BUT a clean tree does NOT
+      // prove there's nothing to share: the autosave path
+      // (`commitFileWhileLocked`) commits locally with a best-effort push,
+      // and when that push fails the commit stays stranded on the local
+      // branch with the tree clean. Treating that as success dropped the
+      // row without ever starting the retry → recovery-agent ladder —
+      // which is exactly how a diverged workspace ends up stuck forever.
+      // So: if the branch is ahead of its remote-tracking ref, push (with
+      // the same cooperative recovery, so a conflicting divergence throws
+      // and the worker's ladder takes over). Nothing to emit either way —
+      // there's no new sha.
+      if (await this.git.hasUnpushedCommits(workspaceId)) {
+        await this.pushWithRecovery(workspaceId, branch, targetPath, user);
+      }
       return;
     }
     await this.pushWithRecovery(workspaceId, branch, targetPath, user);
@@ -1348,10 +1421,21 @@ export class WorkflowService implements IWorkflowService {
     // this a read right after a merge misses the just-merged change. Best-effort:
     // the merge already succeeded on origin, so a pull hiccup must not fail the
     // response (a later fetch/pull reconciles).
+    let targetWorkspaceId: string | undefined;
     try {
       const targetWorkspace = await this.workspaceService.getOrCreateForBranch(baseBranch);
+      targetWorkspaceId = targetWorkspace.id;
       await this.git.pull(targetWorkspace.id);
     } catch (err) {
+      // Still best-effort for the merge response (the merge already landed
+      // on origin) — but a rebase CONFLICT here means the target workspace
+      // is stranded (local commits vs origin, never self-heals), so queue
+      // the background recovery ladder before shrugging. A conflict can
+      // only have come from the pull, so the workspace id is always set on
+      // this arm — the guard just satisfies the narrowing.
+      if (err instanceof PullRebaseConflictError && targetWorkspaceId) {
+        await this.queuePullConflictRecovery(targetWorkspaceId, err, user);
+      }
       console.warn(
         `[merge] post-merge pull of target "${baseBranch}" failed — its workspace may be momentarily behind origin`,
         err,

@@ -17,6 +17,8 @@ import {
   type PanelSize,
 } from 'react-resizable-panels';
 import { LayoutContext, type LayoutController } from '../state/layout.context';
+import { SidebarFrame } from './SidebarFrame';
+import { toggleSidebar, useSidebar } from '../state/sidebar';
 import type { PaneDef } from '../../../core/registry';
 
 const LAYOUT_ID = 'bevel-shell-v1';
@@ -60,20 +62,13 @@ export function ResizableThreePaneLayout({
   viewer,
   chat,
 }: ResizableThreePaneLayoutProps) {
-  const paneList = useMemo<PaneDef[]>(() => {
+  const allPanes = useMemo<PaneDef[]>(() => {
     if (panes && panes.length > 0) {
       return [...panes].sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
     }
     const legacy: PaneDef[] = [];
     if (explorer !== undefined) {
-      legacy.push({
-        id: 'explorer',
-        node: explorer,
-        defaultSize: '17%',
-        minSize: '10%',
-        maxSize: '35%',
-        collapsible: true,
-      });
+      legacy.push({ id: 'explorer', node: explorer, sidebar: true, collapsible: true });
     }
     if (viewer !== undefined) {
       legacy.push({ id: 'viewer', node: viewer, minSize: '30%' });
@@ -90,6 +85,12 @@ export function ResizableThreePaneLayout({
     }
     return legacy;
   }, [panes, explorer, viewer, chat]);
+
+  // The sidebar is pulled OUT of the group: its width is a shared preference
+  // that outlives this layout (Skills & Tools has no group at all and the same
+  // sidebar), so it cannot be a panel in a per-app persisted layout.
+  const sidebarPane = useMemo(() => allPanes.find((p) => p.sidebar), [allPanes]);
+  const paneList = useMemo(() => allPanes.filter((p) => !p.sidebar), [allPanes]);
 
   // The pane *ids* must be referentially stable across renders even though
   // the pane nodes (fresh JSX) are not — useDefaultLayout keys the persisted
@@ -123,12 +124,25 @@ export function ResizableThreePaneLayout({
     {},
   );
 
-  const togglePane = useCallback((id: string) => {
-    const panel = panelRefs.current.get(id)?.current;
-    if (!panel) return;
-    if (panel.isCollapsed()) panel.expand();
-    else panel.collapse();
-  }, []);
+  const sidebarId = sidebarPane?.id;
+  const { collapsed: sidebarCollapsed } = useSidebar();
+
+  const togglePane = useCallback(
+    (id: string) => {
+      // The sidebar is not a panel, so its toggle is the shared store rather
+      // than an imperative handle. Routing it through the same function keeps
+      // the toolbar's `togglePane('explorer')` working either way.
+      if (id === sidebarId) {
+        toggleSidebar();
+        return;
+      }
+      const panel = panelRefs.current.get(id)?.current;
+      if (!panel) return;
+      if (panel.isCollapsed()) panel.expand();
+      else panel.collapse();
+    },
+    [sidebarId],
+  );
 
   const handlePaneResize = useCallback((id: string, size: PanelSize) => {
     const isCollapsed = size.asPercentage === 0;
@@ -138,23 +152,30 @@ export function ResizableThreePaneLayout({
   }, []);
 
   const collapsibleIds = useMemo(
-    () => new Set(paneList.filter((p) => p.collapsible).map((p) => p.id)),
-    [paneList],
+    () => new Set(allPanes.filter((p) => p.collapsible).map((p) => p.id)),
+    [allPanes],
+  );
+
+  // One question, two possible answers depending on whether the pane is the
+  // sidebar or a panel — asked here so no consumer has to know which it is.
+  const isCollapsed = useCallback(
+    (id: string) => (id === sidebarId ? sidebarCollapsed : !!collapsedById[id]),
+    [collapsedById, sidebarCollapsed, sidebarId],
   );
 
   const controller = useMemo<LayoutController>(
     () => ({
-      isExplorerCollapsed: !!collapsedById['explorer'],
-      isChatCollapsed: !!collapsedById['chat'],
+      isExplorerCollapsed: isCollapsed('explorer'),
+      isChatCollapsed: isCollapsed('chat'),
       canToggleExplorer: collapsibleIds.has('explorer'),
       canToggleChat: collapsibleIds.has('chat'),
       toggleExplorer: () => togglePane('explorer'),
       toggleChat: () => togglePane('chat'),
-      isPaneCollapsed: (id: string) => !!collapsedById[id],
+      isPaneCollapsed: isCollapsed,
       canTogglePane: (id: string) => collapsibleIds.has(id),
       togglePane,
     }),
-    [collapsedById, collapsibleIds, togglePane],
+    [collapsibleIds, isCollapsed, togglePane],
   );
 
   // Mirror the controller to the shell (whose provider wraps the toolbar).
@@ -169,11 +190,15 @@ export function ResizableThreePaneLayout({
     <LayoutContext.Provider value={controller}>
       <div className="flex flex-col h-full bg-white text-ink">
         {header}
+        <div className="flex flex-1 min-h-0">
+        {sidebarPane && (
+          <SidebarFrame label="File explorer">{sidebarPane.node}</SidebarFrame>
+        )}
         <Group
           orientation="horizontal"
           defaultLayout={defaultLayout}
           onLayoutChanged={onLayoutChanged}
-          className="flex flex-1 min-h-0"
+          className="flex flex-1 min-w-0"
         >
           {paneList.map((pane, index) => (
             <Fragment key={pane.id}>
@@ -197,6 +222,7 @@ export function ResizableThreePaneLayout({
             </Fragment>
           ))}
         </Group>
+        </div>
       </div>
     </LayoutContext.Provider>
   );

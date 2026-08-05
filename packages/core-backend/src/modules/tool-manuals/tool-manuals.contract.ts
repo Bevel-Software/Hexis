@@ -1,7 +1,7 @@
 import type { CallTemplate } from '@utcp/sdk';
 
 /**
- * Tool manuals — user-authored `*.tool` files under `Tools/` in the DEFAULT
+ * Tool manuals — user-authored `*.tool` files under `Groups/` in the DEFAULT
  * branch KB. Each is a UTCP *manual* (a pointer to where tools come from), not a
  * flattened tool list. Access-controlled exactly like Skills (default-deny ACL
  * on the `.tool` file path). The MCP/UTCP endpoint serves every manual a user
@@ -95,7 +95,7 @@ export interface ToolManualDescriptor {
    * catalog; namespacing doubles underscores in vault keys (`utcpNamespacedKey`).
    */
   name: string;
-  /** Repo-root-relative path of the `.tool` file (e.g. `Tools/weather.tool`). */
+  /** Repo-root-relative path of the `.tool` file (e.g. `Groups/Everyone/weather.tool`). */
   path: string;
   type: ToolManualType;
   /**
