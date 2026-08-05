@@ -57,12 +57,13 @@ function readStoredWidth(): number {
 
 let collapsed = false;
 let instant = false;
+let narrow = false;
 let width = typeof window === 'undefined' ? SIDEBAR_DEFAULT_WIDTH : readStoredWidth();
 // One frozen object per state, so `useSyncExternalStore` can compare by
 // identity. Returning a fresh `{ collapsed, width }` from the snapshot would
 // re-render every subscriber on every unrelated store read, and React would
 // (rightly) warn about an unstable snapshot.
-let snapshot: SidebarState = { collapsed, width, instant };
+let snapshot: SidebarState = { collapsed, width, instant, narrow };
 
 export interface SidebarState {
   collapsed: boolean;
@@ -75,6 +76,15 @@ export interface SidebarState {
    * itself on the way out.
    */
   instant: boolean;
+  /**
+   * Whether the nav is currently presented as a modal drawer over the page
+   * rather than a column beside it.
+   *
+   * This is a viewport fact, but it lives in the store rather than being read
+   * off `matchMedia` at each use site because it must change in the SAME write
+   * as `collapsed` — see `setSidebarNarrow`.
+   */
+  narrow: boolean;
 }
 
 const listeners = new Set<() => void>();
@@ -86,7 +96,7 @@ const listeners = new Set<() => void>();
  * object, so a read never looks like a change.
  */
 function emit(): void {
-  snapshot = { collapsed, width, instant };
+  snapshot = { collapsed, width, instant, narrow };
   listeners.forEach((l) => l());
 }
 
@@ -118,6 +128,30 @@ export function setSidebarCollapsed(value: boolean, instantly = false): void {
   if (value === collapsed) return;
   collapsed = value;
   instant = instantly;
+  emit();
+}
+
+/**
+ * Report the viewport crossing the drawer breakpoint, and settle the nav to
+ * match: hidden on the way into a narrow layout, back beside the page on the
+ * way out.
+ *
+ * Crossings are the only thing this reacts to — repeating the current value is
+ * a no-op — so a nav the user reopened by hand at phone width stays open until
+ * the next crossing, and a desktop mount never has its collapsed state
+ * rewritten just because a frame mounted.
+ *
+ * Both fields move in ONE write on purpose. `narrow` is what tells a frame to
+ * present itself as a modal drawer, and `collapsed` is what decides whether it
+ * is showing; setting them separately would leave a render in between where a
+ * phone viewport still shows a full-width column shoving the page aside — and
+ * that render would open a focus trap on the way past.
+ */
+export function setSidebarNarrow(value: boolean): void {
+  if (value === narrow) return;
+  narrow = value;
+  collapsed = value;
+  instant = false;
   emit();
 }
 
@@ -162,4 +196,5 @@ const DEFAULT_SNAPSHOT: SidebarState = {
   collapsed: false,
   width: SIDEBAR_DEFAULT_WIDTH,
   instant: false,
+  narrow: false,
 };

@@ -9,7 +9,7 @@ import {
   SIDEBAR_DRAWER_MAX_WIDTH,
   SIDEBAR_DRAWER_WIDTH,
 } from '../SidebarFrame';
-import { setSidebarCollapsed } from '../../state/sidebar';
+import { setSidebarCollapsed, setSidebarNarrow } from '../../state/sidebar';
 
 function setViewportWidth(width: number): void {
   const testWindow = window as typeof window & {
@@ -46,6 +46,9 @@ function renderLayout(initialPath: string) {
 describe('MobileChatLayout', () => {
   beforeEach(() => {
     setViewportWidth(375);
+    // Module state: clear the breakpoint the previous test settled on so this
+    // mount reads as a fresh crossing into narrow rather than a no-op.
+    setSidebarNarrow(false);
     setSidebarCollapsed(false);
   });
 

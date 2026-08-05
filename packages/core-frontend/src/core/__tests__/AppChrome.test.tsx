@@ -5,6 +5,7 @@ import { AppChrome } from '../CoreAppShell';
 import { AppRegistryContext, makeRegistry, type AppDef } from '../registry';
 import {
   setSidebarCollapsed,
+  setSidebarNarrow,
   toggleSidebar,
   useSidebar,
 } from '../../modules/layout/state/sidebar';
@@ -70,6 +71,9 @@ function renderChrome(width: number) {
 
 beforeEach(() => {
   setViewportWidth(1400);
+  // Module state: clear the breakpoint the previous test settled on so this
+  // mount reads as a fresh crossing rather than a no-op.
+  setSidebarNarrow(false);
   setSidebarCollapsed(false);
 });
 

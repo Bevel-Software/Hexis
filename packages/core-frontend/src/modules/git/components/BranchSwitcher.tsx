@@ -32,16 +32,26 @@ function slugifyDraftName(email: string, text: string): string {
 /**
  * Place the branch dropdown just below its trigger. Coordinates are
  * viewport-fixed because the panel is portaled to <body> (so the toolbar's
- * mobile `overflow` row can't clip it). The left edge is clamped to keep the
- * 400px-wide panel fully on screen on narrow phones.
+ * mobile `overflow` row can't clip it).
+ *
+ * The width is returned alongside the coordinates rather than fixed in the
+ * class list: on a phone narrower than the preferred 400px, clamping `left`
+ * alone would still push the right edge off screen, so the panel shrinks to
+ * whatever the viewport leaves between the two margins and `left` is clamped
+ * against that same width.
  */
-function computePanelPosition(triggerRect: DOMRect): { top: number; left: number } {
-  const PANEL_WIDTH = 400; // matches Tailwind w-[400px]
+function computePanelPosition(triggerRect: DOMRect): {
+  top: number;
+  left: number;
+  width: number;
+} {
+  const PREFERRED_WIDTH = 400;
   const MARGIN = 8; // min gap kept from the viewport edge
   const GAP = 4; // vertical gap below the trigger (matches the old top-8)
-  const maxLeft = window.innerWidth - PANEL_WIDTH - MARGIN;
+  const width = Math.min(PREFERRED_WIDTH, window.innerWidth - MARGIN * 2);
+  const maxLeft = window.innerWidth - width - MARGIN;
   const left = Math.max(MARGIN, Math.min(triggerRect.left, maxLeft));
-  return { top: triggerRect.bottom + GAP, left };
+  return { top: triggerRect.bottom + GAP, left, width };
 }
 
 export function BranchSwitcher() {
@@ -87,7 +97,9 @@ export function BranchSwitcher() {
   // every open. The panel is portaled to `document.body` so the toolbar's mobile
   // second row (`overflow-x-auto`/`overflow-y-hidden`) can't clip it — an inline
   // absolutely-positioned child can't escape an `overflow-x-auto` ancestor.
-  const [panelPos, setPanelPos] = useState<{ top: number; left: number } | null>(null);
+  const [panelPos, setPanelPos] = useState<ReturnType<
+    typeof computePanelPosition
+  > | null>(null);
   // Derived from URL: branch the route is pointing at. Used to label the
   // picker "Switching to X…" while the per-branch workspace bootstrap is
   // resolving in the background. Under the per-branch workspace model the
@@ -316,8 +328,8 @@ export function BranchSwitcher() {
       {open && panelPos && createPortal(
         <div
           ref={panelRef}
-          className="fixed z-50 w-[400px] bg-sunken border border-line-strong rounded-lg shadow-xl overflow-hidden"
-          style={{ top: panelPos.top, left: panelPos.left }}
+          className="fixed z-50 bg-sunken border border-line-strong rounded-lg shadow-xl overflow-hidden"
+          style={{ top: panelPos.top, left: panelPos.left, width: panelPos.width }}
         >
           {!creating && !choosingTarget && (
             <>

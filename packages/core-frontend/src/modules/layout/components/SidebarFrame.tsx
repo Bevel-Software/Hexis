@@ -6,6 +6,7 @@ import {
   SIDEBAR_MIN_WIDTH,
   commitSidebarWidth,
   setSidebarCollapsed,
+  setSidebarNarrow,
   setSidebarWidth,
   useSidebar,
 } from '../state/sidebar';
@@ -70,24 +71,26 @@ export function SidebarFrame({
    */
   header?: ReactNode;
 }) {
-  const { collapsed, width, instant } = useSidebar();
-  const narrow = useMediaQuery(NARROW_QUERY);
+  // `narrow` comes off the store rather than straight off `viewportNarrow`
+  // below, because the store is where it lands in the same write as
+  // `collapsed` (see `setSidebarNarrow`). Reading the raw query here instead
+  // would reintroduce the render this frame is careful not to have: narrow
+  // viewport, sidebar not yet collapsed, drawer briefly open.
+  const { collapsed, width, instant, narrow } = useSidebar();
+  const viewportNarrow = useMediaQuery(NARROW_QUERY);
   const [dragging, setDragging] = useState(false);
   const asideRef = useRef<HTMLElement>(null);
-  const wasNarrowRef = useRef(false);
-  const drawerOpen = narrow && !collapsed && wasNarrowRef.current === narrow;
+  const drawerOpen = narrow && !collapsed;
   const isTopModalLayer = useModalLayer(drawerOpen);
 
   // This frame owns the breakpoint because there is only ever one sidebar
-  // mounted. Treat wide as the baseline and write only when the query crosses
-  // it: a user can reopen the sidebar while narrow and it stays open until
-  // navigation or another transition. A pre-collapsed desktop mount is also
-  // left alone rather than mistaken for a breakpoint change.
+  // mounted. The store ignores a repeat of the value it already holds, so a
+  // sidebar the user reopened at phone width stays open until the next
+  // crossing (or navigation), and a pre-collapsed desktop mount is left alone
+  // rather than mistaken for a crossing.
   useEffect(() => {
-    if (wasNarrowRef.current === narrow) return;
-    wasNarrowRef.current = narrow;
-    setSidebarCollapsed(narrow);
-  }, [narrow]);
+    setSidebarNarrow(viewportNarrow);
+  }, [viewportNarrow]);
 
   // A narrow sidebar covers the page rather than taking width from it. Treat
   // that presentation as a modal drawer: pull focus inside, keep Tab inside,
