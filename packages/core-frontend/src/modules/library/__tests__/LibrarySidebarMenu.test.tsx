@@ -270,9 +270,14 @@ describe('Library sidebar — right-click, end to end', () => {
     await openMenuOn(/^GTM/);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }));
 
-    expect(
-      await screen.findByText("Couldn't copy — open the group and copy its address."),
-    ).toBeInTheDocument();
+    // The pill itself, not `getByRole('status')` — the tree carries a second
+    // live region (the route announcer), so the role alone is ambiguous.
+    const pill = await screen.findByText("Couldn't copy — open the group and copy its address.");
+    expect(pill).toBeInTheDocument();
+    // And it has to LOOK like a failure. A refusal rendered on the same ink
+    // plate as a confirmation is the silent no-op this test exists to prevent,
+    // one step removed — the user reads "copied" from the colour and stops.
+    expect(pill).toHaveClass('bg-danger');
     vi.unstubAllGlobals();
   });
 

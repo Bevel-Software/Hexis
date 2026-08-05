@@ -9,7 +9,7 @@ import { libraryFilterForPath, pathForLibraryFilter } from '../routes/library-pa
 import { groupCounts, type LibraryFilter } from '../utils/status';
 import { primaryFolderOf } from '../utils/group-summary';
 import { LINK_COPIED_TOAST, LINK_COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
-import { useLibraryToast } from '../state/toast';
+import { useLibraryToast } from '../state/toast.context';
 import { useSidebar } from '../../layout/state/sidebar';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { useWorkspace } from '../../workspace/state/workspace.context';
@@ -152,7 +152,7 @@ export function LibraryLayout() {
   const copyLink = useCallback(
     async (target: LibraryFilter) => {
       const ok = await copyToClipboard(`${window.location.origin}${pathForLibraryFilter(target)}`);
-      toast(ok ? LINK_COPIED_TOAST : LINK_COPY_FAILED_TOAST);
+      toast(ok ? LINK_COPIED_TOAST : LINK_COPY_FAILED_TOAST, ok ? 'neutral' : 'danger');
     },
     [toast],
   );
