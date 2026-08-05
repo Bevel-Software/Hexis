@@ -426,7 +426,10 @@ describe('FileViewer', () => {
     // name. The informational strip that used to explain the protected branch
     // is gone; nothing narrates the branch to the reader here anymore.
     render(<ViewerHarness initialContent="official" branch="current-company-state" />);
-    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    // `toBeEnabled`, not `toBeInTheDocument`: the header disables Edit when
+    // someone else holds the lock, so presence alone would pass on a branch
+    // that had gone read-only — the opposite of what this test claims.
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled();
     expect(screen.queryByText(/current company state/i)).not.toBeInTheDocument();
   });
 
