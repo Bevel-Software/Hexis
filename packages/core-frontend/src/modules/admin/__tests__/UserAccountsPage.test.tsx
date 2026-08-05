@@ -153,4 +153,16 @@ describe('UserAccountsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Add account' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('at least 8 characters');
   });
+
+  // "We could not ask" is not "there is nobody". The failure used to store an
+  // empty list, so an admin whose backend was unreachable read "No user
+  // accounts." — a deployment they would have had every reason to believe.
+  it('a failed FIRST load reports the failure rather than an empty deployment', async () => {
+    vi.mocked(listAccounts).mockReset().mockRejectedValue(new Error('Backend unreachable'));
+    renderPage();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Backend unreachable');
+    expect(screen.queryByText('No user accounts.')).not.toBeInTheDocument();
+    // ...and no "Loading…" left sitting beside the banner forever, either.
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+  });
 });

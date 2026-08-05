@@ -53,8 +53,10 @@ export function UserAccountsPage() {
       })
       .catch((err) => {
         setError(err instanceof Error ? err.message : "Couldn't load accounts.");
-        // Leave no eternal "Loading…" next to the error banner.
-        setAccounts((prev) => prev ?? []);
+        // `accounts` is deliberately left alone. A RELOAD that fails keeps the
+        // rows it already had; a FIRST load that fails stays `null`, because
+        // storing `[]` would render "No user accounts." — an admin reading
+        // that would take a deployment they cannot reach for one nobody is on.
       });
   }, []);
 
@@ -145,7 +147,10 @@ export function UserAccountsPage() {
           </p>
 
           {error && (
-            <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-sm px-2 py-1.5">
+            <div
+              className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-sm px-2 py-1.5"
+              role="alert"
+            >
               {error}
             </div>
           )}
@@ -159,7 +164,10 @@ export function UserAccountsPage() {
           )}
 
           {accounts === null ? (
-            <div className="text-xs text-ink-muted">Loading…</div>
+            // Nothing to list and nothing to call empty: the banner above is
+            // the whole answer, so this renders nothing rather than a
+            // "Loading…" that would never resolve.
+            error ? null : <div className="text-xs text-ink-muted">Loading…</div>
           ) : accounts.length === 0 ? (
             <div className="text-xs text-ink-muted">No user accounts.</div>
           ) : (
