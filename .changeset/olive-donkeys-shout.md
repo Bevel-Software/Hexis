@@ -35,7 +35,10 @@ the second unproposable and writing any proposal on it into the first file's
 request. The digest is taken before sanitising, so the two stay apart. The
 readable slug is now also truncated to fit git's 255-character ceiling on a
 ref, which nothing upstream had bounded; the digest survives the truncation, so
-two long paths sharing a prefix still get their own branches.
+two long paths sharing a prefix still get their own branches. A skill name long
+enough to be truncated itself carries the same digest for the same reason —
+otherwise two skills alike for as far as the ref could hold them would share a
+branch, and so share a change request.
 
 The owner's change-request dock gets the two things that per-file requests made
 necessary: a `»` control that folds it to a slim tab on the viewport edge (it

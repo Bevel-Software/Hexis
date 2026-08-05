@@ -171,19 +171,32 @@ export function suggestionBranchFor(userEmail: string, skillName: string, file?:
   const base = `suggestions/${branchSegment(userEmail.split('@')[0])}/${branchSegment(skillName)}`;
   if (file === undefined) return base;
 
-  const digest = pathDigest(file);
+  const fileDigest = pathDigest(file);
   // The `--` joiner and the `-<digest>` are the parts that cannot be dropped;
   // whatever the cap leaves after them is the slug's to use.
-  const fixedCost = 2 + digest.length + 1;
+  const fileCost = 2 + fileDigest.length + 1;
+
   // A base long enough to crowd out the digest is pathological (a ~240-char
-  // skill name), but truncating it beats emitting a ref git will reject.
-  const head =
-    base.length + fixedCost <= MAX_BRANCH_LENGTH
-      ? base
-      : trimEnd(base.slice(0, MAX_BRANCH_LENGTH - fixedCost));
+  // skill name), but truncating it beats emitting a ref git will reject — and
+  // truncation loses the base's identity exactly as flattening loses the
+  // file's, so it earns a digest on the same reasoning: two skills alike for
+  // their first 235 characters would otherwise share one branch, and a shared
+  // branch is a shared change request. The digest is over the RAW inputs, not
+  // over `base`, so it survives BOTH lossy steps — `branchSegment` has already
+  // mapped every character git refuses onto '-' by the time `base` exists, so
+  // skills differing only in punctuation are indistinguishable there too.
+  const baseTruncated = base.length + fileCost > MAX_BRANCH_LENGTH;
+  const baseSuffix = baseTruncated ? `-${pathDigest(`${userEmail} ${skillName}`)}` : '';
+  const fixedCost = fileCost + baseSuffix.length;
+
+  const head = baseTruncated
+    ? trimEnd(base.slice(0, MAX_BRANCH_LENGTH - fixedCost))
+    : base;
   const slug = trimEnd(branchSegment(file).slice(0, MAX_BRANCH_LENGTH - head.length - fixedCost));
 
-  return slug ? `${head}--${slug}-${digest}` : `${head}--${digest}`;
+  return slug
+    ? `${head}--${slug}-${fileDigest}${baseSuffix}`
+    : `${head}--${fileDigest}${baseSuffix}`;
 }
 
 export interface ProposeChangeInput {

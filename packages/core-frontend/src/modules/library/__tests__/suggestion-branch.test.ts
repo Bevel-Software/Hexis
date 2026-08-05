@@ -124,6 +124,46 @@ describe('suggestionBranchFor', () => {
   });
 
   /**
+   * Truncating the base loses its identity the same way flattening loses the
+   * file's, so it carries a digest on the same reasoning. Two skills alike for
+   * as far as the ref can hold them would otherwise share one branch — and a
+   * shared branch is a shared change request, which is the very thing per-file
+   * branches exist to prevent.
+   */
+  it('keeps two skills apart when only the truncated tail distinguishes them', () => {
+    const a = suggestionBranchFor('juan@bevel.software', `${'x'.repeat(400)}a`, 'SKILL.md');
+    const b = suggestionBranchFor('juan@bevel.software', `${'x'.repeat(400)}b`, 'SKILL.md');
+
+    expect(a).not.toBe(b);
+    expect(a.length).toBeLessThanOrEqual(255);
+    expect(b.length).toBeLessThanOrEqual(255);
+    assertGitAccepts(a);
+    assertGitAccepts(b);
+  });
+
+  /**
+   * The digest is over the RAW inputs rather than over the assembled base,
+   * which matters because `branchSegment` has already run by then: these two
+   * skill names are identical once every character git refuses has become '-',
+   * so a digest taken after that step could not tell them apart either.
+   */
+  it('keeps two skills apart when sanitising alone would merge them', () => {
+    const a = suggestionBranchFor('juan@bevel.software', `${'x'.repeat(400)} (v1)`, 'SKILL.md');
+    const b = suggestionBranchFor('juan@bevel.software', `${'x'.repeat(400)} [v1]`, 'SKILL.md');
+
+    expect(a).not.toBe(b);
+    assertGitAccepts(a);
+    assertGitAccepts(b);
+  });
+
+  /** The ordinary case must not pick up a base digest it does not need. */
+  it('leaves a base that fits untouched', () => {
+    const b = suggestionBranchFor('juan@bevel.software', 'newsletter', 'SKILL.md');
+
+    expect(b).toBe('suggestions/juan/newsletter--skill.md-8124a561');
+  });
+
+  /**
    * The dot rules. Both reject the WHOLE branch backend-side, and both only
    * became reachable when file names started feeding the branch — dots are
    * rare in skill names and universal in filenames.
