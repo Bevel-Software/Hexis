@@ -163,6 +163,8 @@ export async function createCoreServices(
     DEFAULT_BRANCH,
     config.seedAdminEmails,
     config.gitUsername,
+    // Root folders this distribution reserves on top of core's two.
+    ports.kbExtraRootDirs ?? [],
   );
   workspaceService.setSeedService(kbSeedService);
   // Shared, workspace-independent store for oversized `call_tool_chain` results,

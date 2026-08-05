@@ -28,8 +28,20 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout.toString();
 }
 
-function makeSeeder(upstream: string, admins: readonly string[] = ADMINS): KbSeedService {
-  return new KbSeedService(upstream, TEMPLATE_DIR, PROTECTED, DEFAULT_BRANCH, admins);
+function makeSeeder(
+  upstream: string,
+  admins: readonly string[] = ADMINS,
+  extraDirs: readonly string[] = [],
+): KbSeedService {
+  return new KbSeedService(
+    upstream,
+    TEMPLATE_DIR,
+    PROTECTED,
+    DEFAULT_BRANCH,
+    admins,
+    'x-access-token',
+    extraDirs,
+  );
 }
 
 /** Clone a branch of the upstream into a fresh checkout for inspection. */
@@ -214,6 +226,32 @@ describe('KbSeedService', () => {
       const dir = await checkout(root, upstream, 'alice/feature');
       expect(await exists(path.join(dir, 'CLAUDE.md'))).toBe(true);
       expect(await exists(path.join(dir, 'access.md'))).toBe(true);
+    });
+  });
+
+  /**
+   * A distribution that owns folders core has no feature for — the agentic
+   * execution layer's `Data/`, `Agents/`, `Pipelines/` — claims them through
+   * `extraDirs` (wired from `CorePorts.kbExtraRootDirs`).
+   *
+   * The point is that claiming a root does NOT require forking the packaged
+   * template: `TEMPLATE_DIR` here is core's, which carries no entry for any of
+   * these, and the folders still arrive. Their `.gitkeep` is written rather
+   * than copied for exactly that reason.
+   */
+  describe('distribution-reserved roots', () => {
+    it('creates extra roots that the template knows nothing about', async () => {
+      const upstream = await emptyUpstream();
+      await makeSeeder(upstream, ADMINS, ['Data', 'Agents', 'Pipelines']).ensureRemoteSeeded();
+
+      const dir = await checkout(root, upstream, DEFAULT_BRANCH);
+      // Core's two, still there.
+      expect(await exists(path.join(dir, 'KnowledgeBase/.gitkeep'))).toBe(true);
+      expect(await exists(path.join(dir, 'Groups/.gitkeep'))).toBe(true);
+      // …and the three this distribution asked for.
+      for (const claimed of ['Data', 'Agents', 'Pipelines']) {
+        expect(await exists(path.join(dir, `${claimed}/.gitkeep`))).toBe(true);
+      }
     });
   });
 });

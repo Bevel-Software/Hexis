@@ -174,17 +174,7 @@ export class KbSeedService implements IKbSeedService {
           added.push(rel);
         }
       }
-      for (const rootDir of this.requiredDirs) {
-        if (!(await this.exists(path.join(repoDir, rootDir)))) {
-          const keep = `${rootDir}/.gitkeep`;
-          // WRITTEN, not copied from the template. A `.gitkeep` is empty by
-          // definition, and requiring a template entry per root would mean a
-          // distribution could not reserve one without forking the template.
-          await fs.mkdir(path.join(repoDir, rootDir), { recursive: true });
-          await fs.writeFile(path.join(repoDir, keep), '', 'utf8');
-          added.push(keep);
-        }
-      }
+      added.push(...(await this.ensureRequiredDirs(repoDir)));
       if (!(await this.exists(path.join(repoDir, 'roles.yaml')))) {
         if (this.seedAdminEmails.length > 0) {
           await fs.writeFile(
@@ -324,11 +314,39 @@ export class KbSeedService implements IKbSeedService {
     await fs.copyFile(from, to);
   }
 
+  /**
+   * Create any reserved root folder this repo is missing, as an empty
+   * `<dir>/.gitkeep`. Returns the paths added, for the commit message.
+   *
+   * WRITTEN, not copied from the template. A `.gitkeep` is empty by definition,
+   * and requiring a template entry per root would mean a distribution could not
+   * reserve one without forking the packaged template.
+   *
+   * Keyed on the DIRECTORY's existence, not the `.gitkeep` file — a branch that
+   * already has content under `KnowledgeBase/` never gets a pointless
+   * placeholder alongside it.
+   */
+  private async ensureRequiredDirs(repoDir: string): Promise<string[]> {
+    const added: string[] = [];
+    for (const rootDir of this.requiredDirs) {
+      if (await this.exists(path.join(repoDir, rootDir))) continue;
+      await fs.mkdir(path.join(repoDir, rootDir), { recursive: true });
+      await fs.writeFile(path.join(repoDir, `${rootDir}/.gitkeep`), '', 'utf8');
+      added.push(`${rootDir}/.gitkeep`);
+    }
+    return added;
+  }
+
   /** `git init` a temp repo, lay down the full template + generated roles.yaml, commit. */
   private async buildSeedCommit(dir: string): Promise<void> {
     await this.git(dir, ['init', '-b', this.defaultBranch]);
     await this.stampIdentity(dir);
     await this.copyTemplateTree(dir);
+    // Reserved roots the template does not carry. Without this the seed commit
+    // would hold only what the template has, and a distribution's own roots
+    // would appear a step later, when the first clone gets topped up — the same
+    // folders, arriving in a second commit for no reason.
+    await this.ensureRequiredDirs(dir);
     await fs.writeFile(path.join(dir, 'roles.yaml'), renderRolesYaml(this.seedAdminEmails), 'utf8');
     await this.git(dir, ['add', '-A']);
     await this.git(dir, ['commit', '-m', 'Seed knowledge base from Bevel template']);

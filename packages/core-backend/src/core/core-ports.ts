@@ -76,6 +76,21 @@ export interface CorePorts {
    * construction (participants are only iterated at erasure time).
    */
   erasureParticipants?: IErasureParticipant[];
+  /**
+   * Root folders THIS distribution reserves in the knowledge base, on top of
+   * core's `KnowledgeBase/` + `Groups/`. Core default: `[]`.
+   *
+   * A name here does two things: the seeder guarantees the folder exists on
+   * every branch it tops up, and — because the names are already reserved in
+   * `kb-layout.ts` — the file tree keeps rendering it as its own root instead
+   * of folding it into Knowledge as stray content.
+   *
+   * The folder is created as an empty `<dir>/.gitkeep`, written rather than
+   * copied, so reserving a root does not oblige a distribution to fork the
+   * packaged template. Ship a `KB_TEMPLATE_DIR` of your own when those folders
+   * should arrive carrying READMEs.
+   */
+  kbExtraRootDirs?: readonly string[];
 }
 
 /**
