@@ -3,7 +3,7 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Button, Dialog, Surface } from '../../../shared/components';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
-import { useLibraryToast } from '../state/toast';
+import { useLibraryToast } from '../state/toast.context';
 import { COPIED_TOAST, COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 
 export interface AddToGroupDialogProps {
@@ -57,7 +57,8 @@ export function AddToGroupDialog({ name, primaryPath, canWrite, onClose }: AddTo
   const prompt = `Help me build a new skill or tool and add it to the ${name} group at Bevel. ${landing}`;
 
   async function copyPrompt() {
-    toast((await copyToClipboard(prompt)) ? COPIED_TOAST : COPY_FAILED_TOAST);
+    const copied = await copyToClipboard(prompt);
+    toast(copied ? COPIED_TOAST : COPY_FAILED_TOAST, copied ? 'neutral' : 'danger');
   }
 
   return (
