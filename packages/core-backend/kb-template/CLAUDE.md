@@ -4,7 +4,7 @@ This is a git-backed knowledge graph. You are the primary agent responsible for 
 
 ## Directory Structure
 
-The repo holds multiple **ontologies** side-by-side under two roots — `KnowledgeBase/` (curated knowledge) and `Data/` (agent-produced records). Each ontology owns its own NodeType definitions and its own knowledge nodes:
+The repo holds multiple **ontologies** side-by-side under `KnowledgeBase/`. Each ontology owns its own NodeType definitions and its own knowledge nodes:
 
 ```
 knowledge-base/
@@ -17,30 +17,19 @@ knowledge-base/
 │       ├── NodeTypes/
 │       └── Knowledge/
 ├── Groups/               ← one folder per group: its skills AND its tools (not part of the graph)
-├── Data/                 ← agent-produced records, parsed like KnowledgeBase/ (dashboards read here)
-├── Agents/               ← .agent files — agent role configurations (format TBD)
-├── Pipelines/            ← .pipeline files — processes the execution layer runs (format TBD)
 ├── roles.yaml            ← identity → role mapping (Admin-only edits)
 └── access.md             ← repo-root access-control rules
 ```
 
-Ontologies live as **direct subfolders of `KnowledgeBase/`** (curated knowledge) or of `Data/` (agent-produced records). Any folder there that contains BOTH a `NodeTypes/` subfolder and a `Knowledge/` subfolder is automatically picked up as an ontology by the Bevel platform's graph parser, validator, and access-control. `Data/` may also itself be a single ontology: when `Data/` directly contains both `NodeTypes/` and `Knowledge/`, the parser treats `Data/` itself as one ontology. Folders outside those two roots (such as `Groups/`) are never treated as ontologies. To add a new ontology, create the two subfolders under `KnowledgeBase/` (or `Data/`).
+Ontologies live as **direct subfolders of `KnowledgeBase/`**. Any folder there that contains BOTH a `NodeTypes/` subfolder and a `Knowledge/` subfolder is automatically picked up as an ontology by the Bevel platform's graph parser, validator, and access-control. Folders outside that root (such as `Groups/`) are never treated as ontologies. To add a new ontology, create the two subfolders under `KnowledgeBase/`.
 
-### Agentic execution layer base folders (`Data/`, `Agents/`, `Pipelines/`)
-
-Three base folders scaffold the agentic execution layer (design notes: the Bevel platform repo's `docs/agentic-execution-layer.md`):
-
-- **`Data/`** — what agents produce and consume, split out of the curated `Knowledge/` folders: pipeline instances, work items/tickets, intermediate outputs. Dashboards and the fleet view read from here. **Parsed exactly like `KnowledgeBase/`** — its subfolders are self-contained ontologies (`NodeTypes/` + `Knowledge/`), so data records are real typed graph nodes. Instance nodes carry current state; full transcripts/logs stay plain files (no `nodeType:` frontmatter) so they never enter the graph payload.
-- **`Agents/`** — `.agent` files: role definitions naming a target agent (e.g. Claude Code) and composing its configuration — skills, tools, model, permissions, hooks, identity and budget references. An `.agent` only **narrows** its identity's permissions, never widens them; secrets are referenced from the vault, never contained. MCP configs are minted per `.agent`.
-- **`Pipelines/`** — `.pipeline` files: the processes the execution layer runs. Nodes are an `.agent` reference, a UTCP tool call, or a wait node; plus transitions, failure policy, and triggers.
-
-The platform's parser scans `Data/` exactly like `KnowledgeBase/`: its subfolders that carry both `NodeTypes/` and `Knowledge/` are self-contained ontologies whose typed nodes are part of the graph — and `Data/` itself qualifies as a single ontology when it directly contains both folders. `Data/` paths are, however, exempt from the one-ontology-per-session boundary — pipeline agents read knowledge and write data records in the same session. The `.agent`/`.pipeline` file formats are still being designed. `Agents/` and `Pipelines/` are, like `Groups/`, never parsed as ontologies. Each folder's `README.md` documents its structure and contents.
+A deployment may reserve further root folders of its own — `Data/`, `Agents/` and `Pipelines/` scaffold an agentic execution layer in some installations. They are not part of this template and are not created here; where they exist, each carries its own `README.md` describing what belongs in it.
 
 **Cross-ontology references are allowed.** A node in `Processes/Knowledge/...` may link to a node in `Product/Knowledge/...` (or vice versa) using a normal file-relative markdown link, e.g. `[Foo](../../Product/Knowledge/.../Foo.md)`. The parser resolves the link to a repo-root path and the validator checks the target exists across all ontologies.
 
 ### Creating a new ontology
 
-To add a new ontology, create a folder under `KnowledgeBase/` (curated knowledge) or `Data/` (agent-produced records) with two subfolders — `NodeTypes/` and `Knowledge/` — and seed its `NodeTypes/NodeType.md`:
+To add a new ontology, create a folder under `KnowledgeBase/` with two subfolders — `NodeTypes/` and `Knowledge/` — and seed its `NodeTypes/NodeType.md`:
 
 1. **Give the new ontology its own `NodeTypes/NodeType.md`.** Every ontology is **self-contained** and must carry its own copy of the meta `NodeType.md` (the type that defines all other NodeTypes). Do **not** point a new ontology's NodeTypes at another ontology's `NodeType.md` — and do not read another ontology to obtain the content. Copy the **canonical meta type below, verbatim**, into `<NewOntology>/NodeTypes/NodeType.md`. It is identical in every ontology, so it is reproduced here in full so you never have to reach into another ontology for it.
 

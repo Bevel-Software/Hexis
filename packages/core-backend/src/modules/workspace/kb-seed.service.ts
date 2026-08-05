@@ -3,13 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import {
-  AGENTS_DIR,
-  DATA_DIR,
-  KNOWLEDGE_BASE_DIR,
-  PIPELINES_DIR,
-  GROUPS_DIR,
-} from '@bevel-software/platform-shared';
+import { KNOWLEDGE_BASE_DIR, GROUPS_DIR } from '@bevel-software/platform-shared';
 import type { IKbSeedService } from './kb-seed.interface.js';
 
 const execFileAsync = promisify(execFile);
@@ -28,23 +22,31 @@ const BOT_EMAIL = 'bevel-workflow@bevel.software';
  *
  * Two kinds:
  *  - {@link REQUIRED_FILES}: repo-root files added when the file is missing.
- *  - {@link REQUIRED_DIRS}: well-known root dirs the app expects to exist; when a
- *    dir is entirely absent it's created by adding its `<dir>/.gitkeep`. Keyed on
- *    the *directory's* existence, not the `.gitkeep` file — so a branch that
- *    already has content under `KnowledgeBase/` never gets a pointless placeholder.
+ *  - {@link CORE_REQUIRED_DIRS} (plus any `extraDirs`): well-known root dirs the
+ *    app expects to exist; when a dir is entirely absent it's created by adding
+ *    its `<dir>/.gitkeep`. Keyed on the *directory's* existence, not the
+ *    `.gitkeep` file — so a branch that already has content under
+ *    `KnowledgeBase/` never gets a pointless placeholder.
  *
  * `roles.yaml` is in neither, and is not part of the template at all: it is
  * generated from `SEED_ADMIN_EMAILS` (see {@link renderRolesYaml}) and written
  * directly, so a repo can't be seeded with a stale hard-coded Admin list.
  */
 const REQUIRED_FILES: readonly string[] = ['access.md', 'CLAUDE.md', '.bevelignore', '.gitignore'];
-const REQUIRED_DIRS: readonly string[] = [
-  KNOWLEDGE_BASE_DIR,
-  DATA_DIR,
-  AGENTS_DIR,
-  PIPELINES_DIR,
-  GROUPS_DIR,
-];
+
+/**
+ * The two roots CORE gives a knowledge base: the ontologies, and the groups
+ * that hold skills and tools.
+ *
+ * `Data/`, `Agents/` and `Pipelines/` are deliberately absent. They scaffold
+ * the agentic execution layer, which is not part of this platform — a core
+ * deployment that created them would be handing every operator three empty
+ * folders it has no feature to fill. A distribution that DOES own that layer
+ * passes them as `extraDirs` (and ships a template carrying their READMEs);
+ * the names stay reserved in `kb-layout.ts` either way, so a KB that has them
+ * still renders them as roots rather than folding them into Knowledge.
+ */
+export const CORE_REQUIRED_DIRS: readonly string[] = [KNOWLEDGE_BASE_DIR, GROUPS_DIR];
 
 /** Redact the token from any string that might surface in a log or error. */
 function redact(s: string): string {
@@ -94,6 +96,11 @@ export class KbSeedService implements IKbSeedService {
    *                         base when creating a missing protected branch.
    * @param seedAdminEmails  Admins written into the generated `roles.yaml`.
    * @param gitUsername      Basic-auth username for git-over-HTTPS (provider-specific).
+   * @param extraDirs        Additional root folders this distribution reserves,
+   *                         on top of {@link CORE_REQUIRED_DIRS}. Their
+   *                         `.gitkeep` is written directly rather than copied,
+   *                         so a distribution can claim a root without also
+   *                         shipping a template entry for it.
    */
   constructor(
     private readonly kbRepoUrl: string,
@@ -102,7 +109,13 @@ export class KbSeedService implements IKbSeedService {
     private readonly defaultBranch: string,
     private readonly seedAdminEmails: readonly string[],
     private readonly gitUsername: string = 'x-access-token',
-  ) {}
+    extraDirs: readonly string[] = [],
+  ) {
+    this.requiredDirs = [...CORE_REQUIRED_DIRS, ...extraDirs];
+  }
+
+  /** Root folders this deployment guarantees — core's two plus any extras. */
+  private readonly requiredDirs: readonly string[];
 
   ensureRemoteSeeded(): Promise<void> {
     // Cache the promise, not just a boolean, so concurrent first-callers share
@@ -161,10 +174,14 @@ export class KbSeedService implements IKbSeedService {
           added.push(rel);
         }
       }
-      for (const rootDir of REQUIRED_DIRS) {
+      for (const rootDir of this.requiredDirs) {
         if (!(await this.exists(path.join(repoDir, rootDir)))) {
           const keep = `${rootDir}/.gitkeep`;
-          await this.copyTemplateFile(keep, repoDir);
+          // WRITTEN, not copied from the template. A `.gitkeep` is empty by
+          // definition, and requiring a template entry per root would mean a
+          // distribution could not reserve one without forking the template.
+          await fs.mkdir(path.join(repoDir, rootDir), { recursive: true });
+          await fs.writeFile(path.join(repoDir, keep), '', 'utf8');
           added.push(keep);
         }
       }

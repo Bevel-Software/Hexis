@@ -34,4 +34,5 @@ Conventions (naming, child-node folders, Source of Information blocks,
 cross-ontology links) are documented in the repo-root `CLAUDE.md`.
 
 **Not for agent output**: records produced by agents and pipelines (work
-items, instances, transcripts) belong in the `Data/` base folder, not here.
+items, instances, transcripts) do not belong here — a deployment that runs
+agent pipelines keeps them in a separate root folder of its own.

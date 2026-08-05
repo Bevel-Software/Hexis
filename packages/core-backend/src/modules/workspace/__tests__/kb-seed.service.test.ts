@@ -105,10 +105,15 @@ describe('KbSeedService', () => {
         expect(await exists(path.join(dir, 'CLAUDE.md'))).toBe(true);
         expect(await exists(path.join(dir, '.bevelignore'))).toBe(true);
         expect(await exists(path.join(dir, '.gitignore'))).toBe(true);
-        // The well-known KB roots are seeded (kept present via their .gitkeep).
-        // `Groups/` replaced the old `Skills/` + `Tools/` pair.
+        // Core's two roots are seeded (kept present via their .gitkeep).
         expect(await exists(path.join(dir, 'KnowledgeBase/.gitkeep'))).toBe(true);
         expect(await exists(path.join(dir, 'Groups/.gitkeep'))).toBe(true);
+        // …and only those two. `Data/`, `Agents/` and `Pipelines/` scaffold an
+        // agentic execution layer this platform does not have, so seeding them
+        // would hand every operator three empty folders nothing can fill.
+        for (const enterpriseOnly of ['Data', 'Agents', 'Pipelines']) {
+          expect(await exists(path.join(dir, enterpriseOnly))).toBe(false);
+        }
 
         const roles = await fs.readFile(path.join(dir, 'roles.yaml'), 'utf8');
         for (const email of ADMINS) expect(roles).toContain(email);
