@@ -4,7 +4,21 @@
 
 /* Tailwind v4 must SCAN the core-frontend sources (a raw-TS package under
    node_modules, which the automatic source detection skips) so the utility
-   classes used by its components are emitted into this app's CSS. Path is
-   relative to this stylesheet; the workspace/package symlink resolves to the
-   package's src/. */
+   classes used by its components are emitted into this app's CSS.
+
+   TWO paths to the same files, and the duplication is load-bearing:
+
+   - the node_modules path is the portable one. It is how the package is
+     addressed anywhere it is installed rather than linked, so it must stay.
+   - the direct path is what makes DEVELOPMENT work. In this workspace the
+     first path is a symlink, and Tailwind's watcher does not see edits
+     through it — so a utility class written mid-session is never compiled and
+     lands in the DOM matching no rule at all. That failure is silent and
+     reads as a design bug: it deleted a name (`not-sr-only`), and it hid an
+     entrance animation through three rounds of debugging because the class
+     holding the page invisible was never generated. Outside the monorepo the
+     directory simply does not exist and Tailwind ignores it.
+
+   Scanning the same files twice is free; not scanning them is expensive. */
 @source "../node_modules/@bevel-software/platform-core-frontend/src";
+@source "../../../packages/core-frontend/src";

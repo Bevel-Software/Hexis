@@ -1,0 +1,18 @@
+# Local convenience, merged automatically by `docker compose up` when no `-f`
+# is given. It exists so the standalone quickstart still lands the app on
+# http://localhost:3001 while `docker-compose.yml` itself publishes nothing.
+#
+# WHY THE SPLIT: a published host port is a resource exactly one container can
+# hold. Orchestrators (Coolify, Portainer, Swarm, plain `docker compose up -d`
+# on a redeploy) start the replacement container before retiring the outgoing
+# one, so a fixed host port in the base file makes every redeploy fail with
+# "Bind for 0.0.0.0:3001 failed: port is already allocated". Those callers pass
+# an explicit `-f docker-compose.yml`, which tells Compose to skip this file —
+# they get the container reachable over the network by their proxy, and no host
+# port to collide on.
+#
+# To publish a different host port locally: APP_PORT=8080 docker compose up
+services:
+  app:
+    ports:
+      - "${APP_PORT:-3001}:3001"

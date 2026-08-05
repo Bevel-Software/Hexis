@@ -181,7 +181,7 @@ export function ExternalAgentAccessPage() {
               onClick={() => setTab(id)}
               className={`px-3 py-2 text-xs font-medium border-b-2 -mb-px ${
                 tab === id
-                  ? 'border-bevel text-ink'
+                  ? 'border-accent text-ink'
                   : 'border-transparent text-ink-muted hover:text-ink'
               }`}
             >
@@ -285,7 +285,7 @@ export function ExternalAgentAccessPage() {
                 <button
                   onClick={handleCreate}
                   disabled={!canSubmit}
-                  className="px-3 py-1.5 text-sm rounded bg-bevel hover:bg-bevel-deep text-white disabled:opacity-50 disabled:hover:bg-bevel"
+                  className="px-3 py-1.5 text-sm rounded bg-accent hover:bg-accent-hover text-white disabled:opacity-50 disabled:hover:bg-accent"
                 >
                   {creating ? 'Creating…' : 'Create key'}
                 </button>
@@ -344,7 +344,7 @@ export function ExternalAgentAccessPage() {
                               </div>
                               <div className="mt-0.5 h-1 rounded bg-sunken overflow-hidden">
                                 <div
-                                  className={`h-full ${overCap ? 'bg-red-500' : 'bg-bevel'}`}
+                                  className={`h-full ${overCap ? 'bg-red-500' : 'bg-accent'}`}
                                   style={{ width: `${pct}%` }}
                                 />
                               </div>
@@ -507,7 +507,7 @@ export function ExternalAgentAccessPage() {
             <div className="flex justify-end px-4 py-3 border-t border-line">
               <button
                 onClick={() => setReveal(null)}
-                className="px-3 py-1.5 text-sm rounded bg-bevel hover:bg-bevel-deep text-white"
+                className="px-3 py-1.5 text-sm rounded bg-accent hover:bg-accent-hover text-white"
               >
                 Done — I've saved it
               </button>

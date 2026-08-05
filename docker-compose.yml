@@ -40,8 +40,19 @@ services:
         # checks match the bundled frontend.
         DEFAULT_BRANCH: ${DEFAULT_BRANCH:-}
         PROTECTED_BRANCHES: ${PROTECTED_BRANCHES:-}
-    ports:
-      - "3001:3001"
+    # NO host port is published here, deliberately. A reverse proxy (Coolify,
+    # Traefik, nginx) reaches the container on this port over the compose
+    # network, and publishing a FIXED host port alongside that breaks every
+    # redeploy: the replacement container starts while the outgoing one still
+    # holds the port, and Docker refuses it with "port is already allocated".
+    #
+    # `docker compose up` with no `-f` still publishes it — that is what
+    # `docker-compose.override.yml` is for, and Compose merges it
+    # automatically. Passing `-f docker-compose.yml` (as orchestrators do)
+    # skips the override and leaves the container unpublished, which is
+    # exactly the split we want.
+    expose:
+      - "3001"
     environment:
       - NODE_ENV=production
       - PORT=3001
@@ -52,7 +63,21 @@ services:
       - GIT_TOKEN=${GIT_TOKEN}
       - GIT_USERNAME=${GIT_USERNAME:-}
       - JWT_SECRET=${JWT_SECRET}
-      - TEST_PASSWORD=${TEST_PASSWORD}
+      # Bootstrap admin — the ONLY way into a deployment whose KB has no
+      # accounts yet. Checked against the environment at login time and never
+      # stored, so unsetting either variable revokes it immediately.
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # Generic OIDC single sign-on; the method appears once all three are set.
+      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
+      - OIDC_SCOPES=${OIDC_SCOPES:-}
+      - OIDC_PROVIDER_LABEL=${OIDC_PROVIDER_LABEL:-}
+      # Reverse-proxy hop count. Required behind a proxy (Coolify, Traefik,
+      # nginx) or every request looks like it came from the proxy — which
+      # collapses the per-IP login rate limit onto one bucket.
+      - TRUST_PROXY=${TRUST_PROXY:-}
       # Tenant slug branded into every credential prefix. Default `bevel`
       # keeps pre-existing keys/tokens valid — change it only for a fresh deploy.
       - TENANT_ID=${TENANT_ID:-bevel}

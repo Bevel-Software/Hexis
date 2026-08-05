@@ -7,6 +7,8 @@ import { GroupPage } from '../components/GroupPage';
 import { GroupsIndexPage } from '../components/GroupsIndexPage';
 import { PersonalGroupPage } from '../components/PersonalGroupPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
+import { SkillPage } from '../components/skill-page/SkillPage';
+import { WelcomePage } from '../../onboarding/components/WelcomePage';
 import { LIBRARY_ROOT } from './library-paths';
 
 /**
@@ -31,6 +33,13 @@ export function LibraryRoutes() {
         <Routes>
           <Route element={<LibraryLayout />}>
             <Route index element={<LibraryPage filter={{ kind: 'all' }} />} />
+
+            {/* The connect-your-agent welcome — inside the layout, so the
+                sidebar (and the pill's selected state) is on screen with it.
+                Auto-reached once, on first sign-in (see `RootLanding`);
+                reachable forever through the pill and by URL. */}
+            <Route path="welcome" element={<WelcomePage />} />
+
             <Route path="owned" element={<LibraryPage filter={{ kind: 'owned' }} />} />
 
             {/* `yours` is a GROUP page, not a gallery filter — the items in no
@@ -50,10 +59,11 @@ export function LibraryRoutes() {
                 (`…/tools/:slug#authorized`). */}
             <Route path="tools/:slug" element={<ToolPage />} />
 
-            {/* CONTRACT (Ali): the skill page mounts at `skills/:name`
-                (`:name` = `encodeURIComponent(skill name)`), HERE, above the
-                fallback. Insert the route; change nothing else. Until it
-                exists that URL redirects to the gallery, which is harmless. */}
+            {/* The skill page, per the contract this file reserved: `:name` is
+                `encodeURIComponent(skill name)`, and it sits above the `*`
+                fallback so the URL resolves instead of bouncing to the
+                gallery. It replaces the detail dialog for skills. */}
+            <Route path="skills/:name" element={<SkillPage />} />
           </Route>
 
           {/* An unknown subpath is a stale or mistyped link, not an error page —

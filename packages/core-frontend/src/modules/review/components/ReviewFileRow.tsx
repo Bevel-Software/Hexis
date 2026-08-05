@@ -24,7 +24,7 @@ function KindIcon({ kind }: { kind: PendingChange['kind'] }) {
   switch (kind) {
     case 'added': return <FilePlus2 size={size} className="text-emerald-600" />;
     case 'deleted': return <FileX2 size={size} className="text-red-600" />;
-    case 'renamed': return <ArrowRightLeft size={size} className="text-bevel" />;
+    case 'renamed': return <ArrowRightLeft size={size} className="text-accent" />;
     case 'modified': return <FileEdit size={size} className="text-amber-600" />;
   }
 }

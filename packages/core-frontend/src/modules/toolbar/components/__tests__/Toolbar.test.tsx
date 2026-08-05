@@ -320,8 +320,9 @@ describe('Toolbar', () => {
     // This used to assert the opposite, at this same route — which was the bug
     // written down as a test: /secrets had no nav, so it had nothing to
     // toggle. There is no nav-less surface below the toolbar any more, so
-    // there is no negative case left to pin (`/` only redirects to
-    // /workspace).
+    // there is no negative case left to pin — `/` only ever redirects, and
+    // both places it can land (Knowledge, or onboarding's welcome page, which
+    // lives inside the Library surface) carry a sidebar.
     //
     // `/secrets/` is the same page: React Router matches the trailing slash to
     // the route declared without one, so the nav is mounted and the toggle

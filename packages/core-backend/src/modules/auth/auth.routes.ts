@@ -65,8 +65,19 @@ export function createAuthRoutes(
       return;
     }
     const ip = clientIp(req);
+    // IP budget FIRST, and it returns before the pair key exists. Order is the
+    // whole guard here: `consume` inserts an entry for any key it has not seen,
+    // and that entry lives for the full 15-minute window. Consuming the pair
+    // budget first therefore let an address that was ALREADY over its IP limit
+    // keep minting `ip|email` entries, one per attacker-chosen email — and
+    // since `consume` scans the whole map on every call, that growth is also a
+    // latency tax on every legitimate login for the rest of the window.
+    if (!loginIpLimiter.consume(ip)) {
+      res.status(429).json({ error: 'Too many attempts. Try again later.' });
+      return;
+    }
     const pairKey = `${ip}|${email.trim().toLowerCase()}`;
-    if (!loginPairLimiter.consume(pairKey) || !loginIpLimiter.consume(ip)) {
+    if (!loginPairLimiter.consume(pairKey)) {
       res.status(429).json({ error: 'Too many attempts. Try again later.' });
       return;
     }
@@ -133,6 +144,44 @@ export function createAuthRoutes(
       // Policy violations and a wrong current password are caller errors, not
       // server faults — and the message is safe to show verbatim.
       res.status(400).json({ error: msg });
+    }
+  });
+
+  // POST /api/auth/onboarding-done — conclude the connect-your-agent
+  // onboarding for the caller (protected). One-way and idempotent; the
+  // welcome page's Done and the reminder pill's × are its two callers.
+  router.post('/auth/onboarding-done', authMiddleware, async (req, res) => {
+    try {
+      // The caller must state WHICH account it believes it is concluding, and
+      // anything but an exact match is refused rather than applied to the
+      // token's owner.
+      //
+      // The bearer token lives in one shared localStorage key, so two accounts
+      // in two tabs share it: a stale tab still rendering A, after B signs in
+      // elsewhere, would otherwise send A's intent with B's token and
+      // irreversibly conclude B's onboarding — an account B has no way to
+      // reopen. `userId` is an assertion about intent, never an authorization:
+      // the write still targets `req.userId` alone.
+      //
+      // REQUIRED, not merely checked-when-present. Treating an absent claim as
+      // consent reopens the same hole from the other side: a stale or malformed
+      // client that posts `{}` while rendering A would conclude B's onboarding
+      // unopposed. A caller that cannot name the account it means has not
+      // expressed the intent this route needs.
+      const claimed = (req.body as { userId?: unknown } | undefined)?.userId;
+      if (typeof claimed !== 'string' || claimed !== req.userId) {
+        res.status(409).json({ error: 'Session changed — sign in again' });
+        return;
+      }
+      await authService.markOnboardingDone(req.userId!);
+      res.json({ ok: true });
+    } catch (error) {
+      // Logged in full, returned generic — same rule as `/auth/login` above.
+      // A raw driver message here would hand an unauthenticated-adjacent
+      // caller the schema, the host, or the connection string.
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      console.error('Onboarding-done error:', msg);
+      res.status(500).json({ error: 'Could not save that' });
     }
   });
 

@@ -48,6 +48,8 @@ import { AdminRolesPage } from '../modules/admin/components/AdminRolesPage';
 import { UserAccountsPage } from '../modules/admin/components/UserAccountsPage';
 import { ToolsExplorerPage } from '../modules/tools/ToolsExplorerPage';
 import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
+import { RootLanding } from '../modules/onboarding/components/RootLanding';
+import { ConnectAgentPill } from '../modules/onboarding/components/ConnectAgentPill';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
 import {
   activeAppId,
@@ -224,7 +226,17 @@ function KnowledgeSurface() {
   // plain hook per consumer would give every tree row its own request.
   return (
     <OpenChangeRequestsProvider>
-      <AppLayout panes={panes} onController={setController} />
+      {/* The connect-your-agent reminder rides Knowledge's sidebar too, and
+          the shell is where that is decided: `layout` is the app's generic
+          consistency layer and must not name a domain component, so the pill
+          is passed IN from the composition root. The Library passes the same
+          one from `LibraryLayout` — one pill, both surfaces, so a person who
+          skipped the welcome page and stayed in Knowledge still sees it. */}
+      <AppLayout
+        panes={panes}
+        onController={setController}
+        sidebarHeader={<ConnectAgentPill />}
+      />
     </OpenChangeRequestsProvider>
   );
 }
@@ -330,7 +342,29 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
         <Route path="/user-accounts" element={<UserAccountsPage />} />
         <Route path="/tools" element={<ToolsExplorerPage />} />
       </Route>
-      <Route path="/" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
+      {/* `/` consults the onboarding: a brand-new account's FIRST visit lands
+          on the welcome page, everyone else (and every later visit) goes to
+          Knowledge as always.
+
+          `/auth/*` lands the same way, and that is not decoration. The SSO
+          callback scrubs its own URL with a RAW `history.replaceState`
+          (`microsoft-oauth.ts`), which BrowserRouter never observes — react
+          -router only re-reads location on its own navigations and on
+          popstate. So after a Microsoft sign-in the address bar says `/`
+          while the router still matches `/auth/microsoft/callback`. Before
+          this feature that was invisible, because `/` and `*` both redirected
+          to Knowledge; the moment they differ, the first SSO sign-in — the
+          exact case onboarding exists for — would fall through the catch-all
+          and never be greeted. Routing the callback path here fixes it
+          without moving the token-scrub out of the service that owns it.
+
+          The `*` catch-all stays a plain redirect: a mistyped URL is not a
+          reason to be onboarded.
+
+          OUTSIDE the settings layout, like `/connect` above: these are landing
+          and redirect targets, not settings destinations. */}
+      <Route path="/" element={<RootLanding />} />
+      <Route path="/auth/*" element={<RootLanding />} />
       <Route path="*" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
     </Routes>
   );

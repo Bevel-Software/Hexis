@@ -10,6 +10,24 @@ Knowledge surface — `#app=kb`. Every line reference below of the form `(proto:
 verified line in that file at the commit this plan was written against (`ec62b6b`).
 Every `path.tsx:NN` reference was likewise verified to exist.
 
+> **Status: shipped. Read this as a record of how the UI was built, not as a live
+> procedure.** The Knowledge UI described here was built and merged, and
+> `skill-prototype-juan.html` was deleted afterwards (`cf1a3cb`) — once the UI shipped, the
+> file's only remaining job was to accrue edits nothing read.
+>
+> Every claim below stays true, and every `(proto:NNN)` still resolves, because the
+> prototype is in git at the commit this plan names:
+>
+> ```sh
+> git show ec62b6b:skill-prototype-juan.html > /tmp/skill-prototype-juan.html
+> ```
+>
+> **Use `ec62b6b`, not the tip of any later branch.** The line numbers are only valid at
+> that commit; the prototype kept being edited afterwards (the onboarding work alone added
+> 289 lines), so a later copy shifts every reference — `proto:137` is `.wrap{max-width:880px…}`
+> at `ec62b6b` and something else entirely later. Recover it to a scratch path when you need
+> the §2.4 visual check; do not restore it to the tree.
+
 > **Revision 2 — after a full fact-check.** Every claim in revision 1 was audited against
 > both the prototype and the platform source, in both directions (is each claim true; and
 > what did the plan miss). 33 defects were confirmed. Three were structural and are the
@@ -195,8 +213,10 @@ pnpm ds:check            # must not increase any counter
 ```
 
 Plus a visual check against the prototype at the same viewport. The prototype is a static
-file: open `skill-prototype-juan.html#app=kb` beside the running app and compare. A WP whose
-diff cannot be justified against a specific prototype line is out of scope.
+file, no longer in the tree: recover it from `ec62b6b` per the status note at the top of
+this plan, then open the recovered `skill-prototype-juan.html#app=kb` beside the running app
+and compare. A WP whose diff cannot be justified against a specific prototype line is out of
+scope.
 
 ### 2.5 Environment facts you must not rediscover wrong
 

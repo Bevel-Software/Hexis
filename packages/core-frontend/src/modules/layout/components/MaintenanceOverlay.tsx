@@ -89,7 +89,7 @@ export function MaintenanceOverlay() {
 
   return (
     <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-4 bg-white/95 backdrop-blur-sm text-center px-6">
-      <Loader2 size={32} className="animate-spin text-bevel" />
+      <Loader2 size={32} className="animate-spin text-accent" />
       <div>
         <p className="text-lg font-medium text-ink">
           We&rsquo;re installing an update

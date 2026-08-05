@@ -2,14 +2,13 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import '../library.css';
 import { useLibrary, type LibraryItem } from '../state/library-data';
-import { pathForTool } from '../routes/library-paths';
-import { filterLibraryItems, type LibraryFilter } from '../utils/status';
+import { pathForSkill, pathForTool } from '../routes/library-paths';
+import { emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { GroupJoinRequests } from './GroupJoinRequests';
 import { GroupItemSections } from './group-page-parts';
-import { DetailDialog, type DetailTarget } from './DetailDialog';
 
 /**
  * The Library gallery — the card grid at `/skills-and-tools` and its three
@@ -50,7 +49,6 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
   const [query, setQuery] = useState('');
-  const [detail, setDetail] = useState<DetailTarget | null>(null);
   /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
   const [manageFolder, setManageFolder] = useState<string | null>(null);
   /** Bumped when an access edit lands, so the join-request surfaces refetch. */
@@ -78,19 +76,9 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [filter, data.groupSummaries]);
 
-  /**
-   * Integrations open a PAGE, skills still open the dialog. The asymmetry is
-   * temporary and deliberate: the tool page has landed, the skill page is
-   * Ali's and hasn't. A card that opens a URL is also the only way the OAuth
-   * round-trip has somewhere to come back to.
-   */
+  /** Both kinds open a PAGE now — the skill page landed alongside the tool one. */
   function openItem(item: LibraryItem) {
-    if (item.kind === 'integration') {
-      navigate(pathForTool(item.id));
-      return;
-    }
-    const skill = data.skills.find((s) => s.name === item.id);
-    if (skill) setDetail({ kind: 'skill', skill, owned: item.owned });
+    navigate(item.kind === 'integration' ? pathForTool(item.id) : pathForSkill(item.id));
   }
 
   return (
@@ -133,7 +121,9 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
       ) : data.loading ? (
         <div className="py-16 text-center text-ui text-ink-faint">Loading the library…</div>
       ) : visible.length === 0 ? (
-        <div className="py-16 text-center text-ui text-ink-faint">Nothing here matches yet.</div>
+        <div className="py-16 text-center text-ui text-ink-faint">
+          {emptyMessageFor(filter, query)}
+        </div>
       ) : (
         // Skills and tools, split — the same two bands a group page has.
         // One undifferentiated grid made you read every card's body to learn
@@ -149,19 +139,6 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
             emptySkills=""
           />
         </div>
-      )}
-
-      {detail && (
-        <DetailDialog
-          target={detail}
-          tools={data.tools}
-          skills={data.skills}
-          allowedToolsBySkill={data.allowedToolsBySkill}
-          crs={data.crs}
-          myCrNumbers={data.myCrNumbers}
-          onClose={() => setDetail(null)}
-          onDataChanged={data.reload}
-        />
       )}
 
       {/* `kbDirName` gates it — the resolver addresses files repo-relative

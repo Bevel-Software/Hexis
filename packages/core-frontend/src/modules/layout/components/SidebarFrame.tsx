@@ -10,6 +10,13 @@ import {
 } from '../state/sidebar';
 
 /**
+ * The `aria-controls` target for the top bar's toggle, which renders in a
+ * different subtree. One id because there is only ever one sidebar mounted —
+ * the two surfaces never appear at once.
+ */
+export const SIDEBAR_DOM_ID = 'app-sidebar';
+
+/**
  * The app's nav spine — the prototype's `.side` + `.resizer` + `.side-inner`
  * (proto:85-104, proto:4328-4370).
  *
@@ -31,22 +38,27 @@ import {
  * would tab into a nav nobody can see. Clipping is a picture; `inert` is the
  * fact.
  */
-/**
- * The `aria-controls` target for the top bar's toggle, which renders in a
- * different subtree. One id because there is only ever one sidebar mounted —
- * the two surfaces never appear at once.
- */
-export const SIDEBAR_DOM_ID = 'app-sidebar';
-
 export function SidebarFrame({
   children,
   label,
+  header,
 }: {
   children: ReactNode;
   /** Names the region and its resize handle, e.g. `Library groups`. */
   label: string;
+  /**
+   * Pinned above `children`, outside whatever list the surface is holding.
+   *
+   * A SLOT rather than a component this frame names, because the frame is the
+   * app's consistency layer and must stay domain-agnostic: what belongs at the
+   * top of the nav is the composing surface's decision, not the sidebar's.
+   * Both surfaces pass the connect-your-agent reminder — which is what makes
+   * it one pill in one place across Knowledge and Skills — but the frame does
+   * not know that, and the next thing to go there costs no edit here.
+   */
+  header?: ReactNode;
 }) {
-  const { collapsed, width } = useSidebar();
+  const { collapsed, width, instant } = useSidebar();
   const [dragging, setDragging] = useState(false);
   const asideRef = useRef<HTMLElement>(null);
 
@@ -150,8 +162,10 @@ export function SidebarFrame({
           'h-full shrink-0 overflow-hidden border-r bg-sidebar',
           collapsed ? 'border-r-transparent' : 'border-line',
           // An easing curve would lag the cursor, so the transition is off for
-          // the duration of the drag (proto:89).
-          dragging
+          // the duration of the drag (proto:89) — and off again for a change
+          // nobody gestured at (`instant`), where a 240ms slide would be the
+          // nav appearing to move on its own.
+          dragging || instant
             ? 'transition-none'
             : 'transition-[width] duration-[240ms] ease-[cubic-bezier(.2,.8,.2,1)]',
         )}
@@ -160,6 +174,7 @@ export function SidebarFrame({
         {/* proto:104 — `padding:16px 14px 18px`, and an explicit width so the
             column does not reflow while the frame animates to zero. */}
         <div className="flex h-full flex-col px-3.5 pt-4 pb-[18px]" style={{ width }}>
+          {header}
           {children}
         </div>
       </aside>

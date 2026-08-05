@@ -23,7 +23,7 @@ import type { PaneDef } from '../../../core/registry';
 
 const LAYOUT_ID = 'bevel-shell-v1';
 const SEPARATOR_CLASS =
-  'w-px bg-sunken hover:bg-bevel-deep/60 data-[dragging=true]:bg-bevel-deep transition-colors outline-none focus-visible:bg-bevel-deep cursor-col-resize';
+  'w-px bg-sunken hover:bg-accent-hover/60 data-[dragging=true]:bg-accent-hover transition-colors outline-none focus-visible:bg-accent-hover cursor-col-resize';
 
 function getSafeLocalStorage(): Storage | undefined {
   if (typeof window === 'undefined') return undefined;
@@ -47,6 +47,12 @@ interface ResizableThreePaneLayoutProps {
   panes?: PaneDef[];
   /** Reports the pane controller upward (null on unmount) — see AppLayout. */
   onController?: (controller: LayoutController | null) => void;
+  /**
+   * Pinned above the sidebar pane's own content. Passed through from the
+   * shell rather than named here, so this module stays domain-agnostic —
+   * see `SidebarFrame`'s `header`.
+   */
+  sidebarHeader?: ReactNode;
   // Legacy named slots, kept as a convenience/compat signature (converted to
   // the same pane list internally with the historical sizing defaults).
   explorer?: ReactNode;
@@ -58,6 +64,7 @@ export function ResizableThreePaneLayout({
   header,
   panes,
   onController,
+  sidebarHeader,
   explorer,
   viewer,
   chat,
@@ -192,7 +199,9 @@ export function ResizableThreePaneLayout({
         {header}
         <div className="flex flex-1 min-h-0">
         {sidebarPane && (
-          <SidebarFrame label="File explorer">{sidebarPane.node}</SidebarFrame>
+          <SidebarFrame label="File explorer" header={sidebarHeader}>
+            {sidebarPane.node}
+          </SidebarFrame>
         )}
         <Group
           orientation="horizontal"
