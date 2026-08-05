@@ -4,8 +4,6 @@ import {
   DEFAULT_BRANCH,
   PROTECTED_BRANCHES,
   GROUPS_DIR,
-  LEGACY_SKILLS_DIR,
-  LEGACY_TOOLS_DIR,
 } from '@bevel-software/platform-shared';
 import { CoreConfig } from '../core-config.js';
 import { getDb, type Database } from '../modules/database/connection.js';
@@ -24,7 +22,7 @@ import { AccessControlService } from '../modules/access/access-control.service.j
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
-import { GroupIndexService, AccessRequestsService } from '../modules/groups/index.js';
+import { GroupIndexService, JoinRequestsService } from '../modules/groups/index.js';
 import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
@@ -93,7 +91,7 @@ export interface CoreServices {
   skillService: SkillService;
   toolManualService: ToolManualService;
   groupIndexService: GroupIndexService;
-  groupAccessRequests: AccessRequestsService;
+  joinRequestsService: JoinRequestsService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
@@ -187,11 +185,11 @@ export async function createCoreServices(
   const routineWritePolicy = new RoutineWritePolicyService();
   // Skills: discovered from the default-branch workspace only (global catalog).
   const skillService = new SkillService(workspaceService, accessControl, config.kbDirName);
-  // Tool manuals: user-authored `*.tool` files under `Tools/` in the default
+  // Tool manuals: user-authored `*.tool` files under `Groups/` in the default
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
   const toolManualService = new ToolManualService(workspaceService, accessControl, config.kbDirName);
-  // Groups: the folders under `Groups/` (plus the legacy roots) that carry a
+  // Groups: the folders under `Groups/` that carry a
   // team's skills AND the tools they need. Enumerated for EVERY authenticated
   // caller — a group they cannot read still exists for them, as a locked one —
   // with the counts read off the two catalogs above rather than a second scan.
@@ -202,9 +200,6 @@ export async function createCoreServices(
     toolManualService,
     config.kbDirName,
   );
-  // "Let me in" requests against those groups. Postgres-backed, so a request
-  // survives a reload and a restart; retired lazily when the requester can read.
-  const groupAccessRequests = new AccessRequestsService(db);
   // Auth service — resolves identities for login, PR author attribution, and
   // access lookups. (Change requests now store the author email directly, so
   // PullRequestService no longer depends on it for attribution.)
@@ -302,6 +297,12 @@ export async function createCoreServices(
     workflowHooks,
   );
 
+  // Join requests: derived entirely from two copies of a group's `access.md`
+  // (the request's branch vs the default branch), so it holds no state — it
+  // only needs to read files at refs and to close a request whose proposals
+  // have all landed.
+  const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
+
   // Subscriber A — catalog freshness: a committed change drops the affected
   // caches immediately instead of waiting out their TTLs. The tool/skill
   // catalogs are global but read the DEFAULT branch only, so only
@@ -311,16 +312,15 @@ export async function createCoreServices(
   // caches are independent, so the split preserves behavior.)
   fileChangeNotifier.onFilesChanged(({ branch, paths }) => {
     if (branch !== DEFAULT_BRANCH) return;
-    // Both catalogs now live under `Groups/`, so a change there invalidates
-    // both; the legacy roots stay watched until the KB migration lands.
-    const touched = (dir: string) =>
-      paths.some((p) => p.startsWith(`${config.kbDirName}/${dir}/`));
-    if (touched(GROUPS_DIR) || touched(LEGACY_TOOLS_DIR)) toolManualService.invalidate();
-    if (touched(GROUPS_DIR) || touched(LEGACY_SKILLS_DIR)) skillService.invalidate();
-    // The group index spans all three roots — and an access grant lands as a
-    // default-branch change to `<root>/<group>/access.md`, so this is also what
-    // makes a newly-granted group unlock within one round-trip instead of one TTL.
-    if (touched(GROUPS_DIR) || touched(LEGACY_SKILLS_DIR) || touched(LEGACY_TOOLS_DIR)) {
+    // Skills, tools and the group index all live under `Groups/`, so one
+    // touch check drives all three caches. An access grant lands as a
+    // default-branch change to `Groups/<group>/access.md`, so this is also
+    // what makes a newly-granted group unlock within one round-trip instead
+    // of one TTL.
+    const touched = paths.some((p) => p.startsWith(`${config.kbDirName}/${GROUPS_DIR}/`));
+    if (touched) {
+      toolManualService.invalidate();
+      skillService.invalidate();
       groupIndexService.invalidate();
     }
   });
@@ -420,6 +420,11 @@ export async function createCoreServices(
     // the binding is only dereferenced at call time, long after boot).
     (bearer) => mcpOAuthProvider.revokeByAccessToken(bearer),
   );
+  // A changed secret invalidates the proxy's remembered manual failures for
+  // that user (null = shared secret → everyone), so a just-repaired
+  // credential is retried on the very next session build instead of waiting
+  // out the failure memo's TTL.
+  secretsVaultService.onMutation((changedUserId) => mcpService.clearManualFailures(changedUserId));
   // MCP OAuth 2.1 authorization server (our own AS): lets MCP clients with no
   // pre-shared connection key connect via the standard 401 → discovery → DCR →
   // authorize (PKCE) flow. The authorize step routes the browser to /connect
@@ -542,7 +547,7 @@ export async function createCoreServices(
     skillService,
     toolManualService,
     groupIndexService,
-    groupAccessRequests,
+    joinRequestsService,
     authService,
     authMiddleware,
     accountErasureService,

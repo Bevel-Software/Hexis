@@ -12,6 +12,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowService } from '../workflow.service.js';
+import { PullRebaseConflictError } from '../workflow.errors.js';
 import type { Database } from '../../database/connection.js';
 
 // The facade tests never exercise `openChangeRequest` (the only method that
@@ -50,6 +51,7 @@ function makePendingCommits(): PendingCommitsService {
   // behavior is covered by `pending-commits.service.test.ts`.
   return {
     enqueue: vi.fn().mockResolvedValue(undefined),
+    enqueueIfAbsent: vi.fn().mockResolvedValue(true),
     claimNext: vi.fn().mockResolvedValue(null),
     markSucceeded: vi.fn().mockResolvedValue(undefined),
     markTransientFailure: vi.fn().mockResolvedValue(undefined),
@@ -326,6 +328,48 @@ describe('WorkflowService — change request delegation + cache invalidation', (
       { bypass: true },
     );
     expect(prs.invalidateDetailCache).toHaveBeenCalledWith(4);
+  });
+
+  it('mergeChangeRequest still merges when the post-merge pull conflicts, and queues recovery on the TARGET workspace', async () => {
+    const prs = makePrs();
+    const reviewWorkflow = makeReviewWorkflow();
+    const mergeResult = { prNumber: 4, sha: 'abc', mergedAt: 't' };
+    (reviewWorkflow.mergePr as ReturnType<typeof vi.fn>).mockResolvedValue(mergeResult);
+    (prs.getPr as ReturnType<typeof vi.fn>).mockResolvedValue({ branch: 'alice/feat', base: 'main' });
+
+    const git = makeGit();
+    const conflict = new PullRebaseConflictError(
+      'main',
+      // Deliberately unsorted — the representative row must be the smallest.
+      ['b-second.md', 'a-first.md'],
+      'git rebase failed: could not apply deadbee',
+    );
+    (git.pull as ReturnType<typeof vi.fn>).mockRejectedValue(conflict);
+    const workspaceService = makeWorkspaceService();
+    // Return an id that ISN'T derivable from the branch name, pinning that
+    // the dispatch uses the id `getOrCreateForBranch` returned rather than
+    // re-deriving it.
+    (workspaceService.getOrCreateForBranch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'resolved-target-ws',
+    });
+    const pending = makePendingCommits();
+    const svc = new WorkflowService(makeDb(), git, prs, reviewWorkflow, workspaceService, makeAccessControl(), makeFileLockService(), pending, 'knowledge-base');
+
+    const outcome = await svc.mergeChangeRequest(
+      4, makeUser(), 'sha', [], 'open', 'PR title', 'main', 'w1', { bypass: true },
+    );
+
+    // The merge already landed on origin — a stuck target workspace must not
+    // fail the response.
+    expect(outcome).toEqual({ kind: 'merged', result: mergeResult });
+    expect(pending.enqueueIfAbsent).toHaveBeenCalledTimes(1);
+    expect(pending.enqueueIfAbsent).toHaveBeenCalledWith({
+      workspaceId: 'resolved-target-ws',
+      branch: 'main',
+      path: 'a-first.md',
+      authorEmail: 'alice@example.com',
+      authorName: 'Alice',
+    });
   });
 });
 

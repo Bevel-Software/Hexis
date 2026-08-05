@@ -5,11 +5,9 @@ import { useLibrary, type LibraryItem } from '../state/library-data';
 import { pathForTool } from '../routes/library-paths';
 import { filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
-import { useGroupAccessRequests } from '../hooks/useGroupAccessRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { useLibraryToast } from '../state/toast';
-import { AccessRequestsBanner } from './AccessRequestsBanner';
+import { GroupJoinRequests } from './GroupJoinRequests';
 import { GroupItemSections } from './group-page-parts';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 
@@ -50,13 +48,13 @@ function headingFor(filter: LibraryFilter): string {
 export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const data = useLibrary();
   const navigate = useNavigate();
-  const toast = useLibraryToast();
   const { kbDirName } = useWorkspace();
-  const requests = useGroupAccessRequests();
   const [query, setQuery] = useState('');
   const [detail, setDetail] = useState<DetailTarget | null>(null);
   /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
   const [manageFolder, setManageFolder] = useState<string | null>(null);
+  /** Bumped when an access edit lands, so the join-request surfaces refetch. */
+  const [accessRevision, setAccessRevision] = useState(0);
 
   const visible = useMemo(
     () => filterLibraryItems(data.items, filter, query),
@@ -64,34 +62,21 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   );
 
   /**
-   * Pending requests, one banner per group, on the Everything view only.
+   * The groups whose join requests the CALLER can answer, on the Everything
+   * view only. Everything is where an admin lands, so it is the one place a
+   * request is guaranteed to be SEEN — the group's own page carries the same
+   * surface, but nobody visits a group to find out that somebody wants in.
    *
-   * Everything is where an admin lands, so it is the one place a request is
-   * guaranteed to be SEEN — the group's own page also carries its banner, but
-   * nobody visits a group to find out that somebody wants into it. The other
-   * two gallery views ("Owned by me", "Yours alone") are about your own things,
-   * and a request is not one of them.
+   * Each renders its own banner and fetches its own requests; a banner with
+   * nothing pending renders nothing.
    */
-  const pendingByGroup = useMemo(() => {
+  const managedGroups = useMemo(() => {
     if (filter.kind !== 'all') return [];
-    const groups = [...new Set(requests.requests.map((r) => r.group))].sort((a, b) =>
-      a.localeCompare(b),
-    );
-    return groups.map((group) => ({
-      group,
-      folders: data.groupSummaries.find((g) => g.name === group)?.folders ?? [],
-      rows: requests.requests.filter((r) => r.group === group),
-    }));
-  }, [filter, requests.requests, data.groupSummaries]);
-
-  async function dismiss(id: string) {
-    try {
-      await requests.dismiss(id);
-    } catch {
-      toast("Couldn't dismiss that — try again.");
-      requests.reload();
-    }
-  }
+    return data.groupSummaries
+      .filter((g) => g.canWrite)
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [filter, data.groupSummaries]);
 
   /**
    * Integrations open a PAGE, skills still open the dialog. The asymmetry is
@@ -128,14 +113,13 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
 
       <div className="mt-5" />
 
-      {pendingByGroup.map(({ group, folders, rows }) => (
-        <AccessRequestsBanner
-          key={group}
-          group={group}
-          folders={folders}
-          requests={rows}
+      {managedGroups.map((g) => (
+        <GroupJoinRequests
+          key={g.name}
+          group={g.name}
+          folders={g.folders}
           onManage={setManageFolder}
-          onDismiss={(id) => void dismiss(id)}
+          reloadSignal={accessRevision}
         />
       ))}
 
@@ -180,12 +164,9 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
         />
       )}
 
-      {/* Granting read here IS approving the request: the row retires itself
-          server-side once the requester can read the folder, which is why
-          closing the dialog refetches instead of marking anything approved.
-          `kbDirName` gates it — the resolver addresses files repo-relative and
-          the dialog strips that prefix, so without it the path we hand over is
-          not the path we mean. */}
+      {/* `kbDirName` gates it — the resolver addresses files repo-relative
+          and the dialog strips that prefix, so without it the path we hand
+          over is not the path we mean. */}
       {manageFolder && kbDirName && (
         <ManageAccessDialog
           entry={{
@@ -196,7 +177,8 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
           onClose={() => {
             setManageFolder(null);
             data.reloadGroups();
-            requests.reload();
+            data.reload();
+            setAccessRevision((r) => r + 1);
           }}
         />
       )}

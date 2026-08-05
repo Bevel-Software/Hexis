@@ -310,22 +310,29 @@ export async function createCoreServer(
     core.config.kbDirName,
   ));
   app.use('/api', core.authMiddleware, createSkillsRoutes(core.skillService));
-  // Group discovery + access requests. Browser-only (JWT): enumerating locked
-  // groups is a UI affordance, and the agent surfaces keep their fail-closed
-  // filtering with no knowledge of it. The display name is resolved from the
-  // users table, falling back to the email when the row is missing.
+  // Group enumeration + join requests. Browser-only (JWT), and fail-closed
+  // like every other read surface: groups the caller cannot access (member,
+  // manager, or discoverable via the access.md file's own read grant) are
+  // absent from the list. A join request is a plain change request.
   app.use('/api', core.authMiddleware, createGroupsRoutes(
     core.groupIndexService,
-    core.groupAccessRequests,
     core.accessControl,
-    async (req) => (req.userId ? (await core.authService.getUserById(req.userId))?.name : null)
-      ?? req.userEmail!,
+    core.workflowService,
+    core.workspaceService,
+    core.joinRequestsService,
+    core.config.kbDirName,
+    async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
   ));
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));
-  // Account management (list/create password accounts) — admin-gated inside.
-  app.use('/api', core.authMiddleware, createAccountRoutes(core.authService, core.adminAccess));
+  // Account management (list/create password accounts, GDPR erasure) —
+  // admin-gated inside.
+  app.use('/api', core.authMiddleware, createAccountRoutes(
+    core.authService,
+    core.adminAccess,
+    core.accountErasureService,
+  ));
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe

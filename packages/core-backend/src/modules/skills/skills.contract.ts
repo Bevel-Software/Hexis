@@ -1,5 +1,5 @@
 /**
- * Skills are reusable specialist instructions living under `Skills/<name>/SKILL.md`
+ * Skills are reusable specialist instructions living under `Groups/<group>/<name>/SKILL.md`
  * in the KB repo. Discovery/loading is pinned to the DEFAULT branch — the catalog
  * is a single global, released set (a skill on a draft isn't discoverable until
  * merged). Progressive disclosure: `listSkills` = name + description (level 1),
@@ -12,7 +12,7 @@ export interface SkillSummary {
   name: string;
   description: string;
   version?: string;
-  /** Repo-root-relative skill folder, e.g. `Skills/rfi`. */
+  /** Repo-root-relative skill folder, e.g. `Groups/Everyone/rfi`. */
   path: string;
 }
 
@@ -21,7 +21,7 @@ export interface Skill extends SkillSummary {
   body: string;
   /** Pre-approved tools from the `allowed-tools` frontmatter, if declared. */
   allowedTools?: string[];
-  /** Repo-root-relative bundled file paths, e.g. `Skills/rfi/scripts/build_xlsx.py`. */
+  /** Repo-root-relative bundled file paths, e.g. `Groups/Everyone/rfi/scripts/build_xlsx.py`. */
   files: string[];
 }
 

@@ -20,8 +20,7 @@ One file per role or per pipeline agent. (Exact file format: TBD.)
 ## What an `.agent` defines
 
 - The **target harness** (e.g. Claude Code) and model / reasoning settings.
-- The **skills** and **tools** composed in — selections from `Skills/` and
-  `Tools/`. The execution layer compiles these into the harness's native
+- The **skills** and **tools** composed in — selections from `Groups/`. The execution layer compiles these into the harness's native
   plugin format and installs it.
 - Permissions/allowlists, hooks, MCP servers, env vars, session defaults,
   and injected instructions (the agent's charter).

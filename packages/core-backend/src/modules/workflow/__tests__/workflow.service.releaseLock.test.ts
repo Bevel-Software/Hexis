@@ -11,6 +11,7 @@ import { WorkflowEventBus } from '../event-bus.js';
 import { WorkflowService } from '../workflow.service.js';
 import type { Database } from '../../database/connection.js';
 import {
+  PullRebaseConflictError,
   PushNeedsAgentResolutionError,
   WorkflowValidationError,
 } from '../workflow.errors.js';
@@ -66,6 +67,7 @@ function makeFileLocks(holderUserId: string): FileLockService {
 function makePending(): PendingCommitsService {
   return {
     enqueue: vi.fn().mockResolvedValue(undefined),
+    enqueueIfAbsent: vi.fn().mockResolvedValue(true),
     claimNext: vi.fn().mockResolvedValue(null),
     markSucceeded: vi.fn().mockResolvedValue(undefined),
     markTransientFailure: vi.fn().mockResolvedValue(undefined),
@@ -82,6 +84,7 @@ function makeGit(overrides: Partial<{
   pushBehavior: 'ok' | 'nff' | 'auth-fail';
   pullBehavior: 'ok' | 'fail';
   pushAfterPullBehavior: 'ok' | 'fail';
+  hasUnpushedCommits: boolean;
 }> = {}): GitService {
   const commitFileResult = overrides.commitFile === undefined ? CHANGE : overrides.commitFile;
   const pushBehavior = overrides.pushBehavior ?? 'ok';
@@ -90,6 +93,7 @@ function makeGit(overrides: Partial<{
   let pushCalls = 0;
   return {
     commitFile: vi.fn().mockResolvedValue(commitFileResult),
+    hasUnpushedCommits: vi.fn().mockResolvedValue(overrides.hasUnpushedCommits ?? false),
     push: vi.fn().mockImplementation(async () => {
       pushCalls++;
       const phase = pushCalls === 1 ? pushBehavior : pushAfterPullBehavior;
@@ -265,16 +269,51 @@ describe('WorkflowService.runPendingCommit — worker entry point', () => {
     });
   });
 
-  it('skips push + file-changed when commitFile reports nothing dirty (double-enqueue, identical bytes)', async () => {
+  it('skips push + file-changed on a no-op commit with nothing unpushed (double-enqueue, identical bytes)', async () => {
     // The worker treats a no-op commit as success and drops the row.
     // No push, no SSE event — there's no new sha for clients to see.
-    const git = makeGit({ commitFile: null });
+    const git = makeGit({ commitFile: null, hasUnpushedCommits: false });
     const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
 
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
 
     expect(git.commitFile).toHaveBeenCalledTimes(1);
     expect(git.push).not.toHaveBeenCalled();
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  it('STILL pushes on a no-op commit when the branch is ahead of origin (stranded autosave commit)', async () => {
+    // Regression: the autosave path commits locally with a best-effort
+    // push. When that push fails, the eventual queue row finds a CLEAN
+    // tree — and the old early-return treated it as success, dropping the
+    // row without ever pushing. The local commit stayed stranded forever
+    // and the recovery ladder never started.
+    const git = makeGit({ commitFile: null, hasUnpushedCommits: true });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(git.push).toHaveBeenCalledTimes(1);
+    // No new commit → still no file-changed (there's no new sha).
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  it('no-op commit + unpushed + conflicting divergence throws so the worker ladder takes over', async () => {
+    // The stranded-commit case where origin ALSO moved with a conflicting
+    // change (the production stuck-workspace state): push rejects non-FF,
+    // the cooperative pull conflicts — the typed error must reach the
+    // worker so its retry → recovery-agent ladder runs.
+    const git = makeGit({
+      commitFile: null,
+      hasUnpushedCommits: true,
+      pushBehavior: 'nff',
+      pullBehavior: 'fail',
+    });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await expect(svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
+      PushNeedsAgentResolutionError,
+    );
     expect(emitSpy).not.toHaveBeenCalled();
   });
 
@@ -336,5 +375,75 @@ describe('WorkflowService.runPendingCommit — worker entry point', () => {
     expect(git.pull).toHaveBeenCalledTimes(1);
     expect(git.push).toHaveBeenCalledTimes(2);
     expect(emitSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkflowService.updateFromRemote — pull-conflict recovery dispatch', () => {
+  const CONFLICT = new PullRebaseConflictError(
+    'main',
+    ['PR-Overviews/PR-7.html', 'other.md'],
+    'git rebase failed: could not apply 0d7b463',
+  );
+
+  function makeConflictingGit(err: unknown): GitService {
+    return {
+      pull: vi.fn().mockRejectedValue(err),
+    } as unknown as GitService;
+  }
+
+  it('queues ONE recovery row (first conflicted path, triggering user) and rethrows', async () => {
+    const pending = makePending();
+    const svc = makeFacade(
+      makeConflictingGit(CONFLICT), makeFileLocks(USER.id), pending, new WorkflowEventBus(),
+    );
+
+    await expect(svc.updateFromRemote('main', USER)).rejects.toBe(CONFLICT);
+
+    expect(pending.enqueueIfAbsent).toHaveBeenCalledTimes(1);
+    expect(pending.enqueueIfAbsent).toHaveBeenCalledWith({
+      workspaceId: 'main',
+      branch: 'main',
+      path: 'PR-Overviews/PR-7.html',
+      authorEmail: USER.email,
+      authorName: USER.name,
+    });
+    // `enqueue` (counter-resetting refresh) must NOT be used here — repeated
+    // sync attempts would starve the worker's ladder.
+    expect(pending.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the recovery-bot identity when no user is available', async () => {
+    const pending = makePending();
+    const svc = makeFacade(
+      makeConflictingGit(CONFLICT), makeFileLocks(USER.id), pending, new WorkflowEventBus(),
+    );
+
+    await expect(svc.updateFromRemote('main')).rejects.toBe(CONFLICT);
+
+    const input = (pending.enqueueIfAbsent as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(input.authorEmail).toContain('recovery-bot@');
+  });
+
+  it('does NOT queue recovery for a non-conflict pull failure (transient fetch error)', async () => {
+    const pending = makePending();
+    const transient = new Error('git fetch failed: could not resolve host');
+    const svc = makeFacade(
+      makeConflictingGit(transient), makeFileLocks(USER.id), pending, new WorkflowEventBus(),
+    );
+
+    await expect(svc.updateFromRemote('main', USER)).rejects.toBe(transient);
+    expect(pending.enqueueIfAbsent).not.toHaveBeenCalled();
+  });
+
+  it('a queue hiccup does not mask the conflict error', async () => {
+    const pending = makePending();
+    (pending.enqueueIfAbsent as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('db down'),
+    );
+    const svc = makeFacade(
+      makeConflictingGit(CONFLICT), makeFileLocks(USER.id), pending, new WorkflowEventBus(),
+    );
+
+    await expect(svc.updateFromRemote('main', USER)).rejects.toBe(CONFLICT);
   });
 });

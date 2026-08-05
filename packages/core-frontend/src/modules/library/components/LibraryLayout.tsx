@@ -54,7 +54,9 @@ export function LibraryLayout() {
   const lockedGroups = useMemo(() => {
     const visible = new Set(items.map((i) => i.group).filter((g): g is string => g !== null));
     return groupSummaries
-      .filter((g) => !g.canRead && !visible.has(g.name))
+      // A manager (canWrite via admin-rescue) is not locked out — their group
+      // belongs with the ones they run, not below the gap.
+      .filter((g) => !g.canRead && !g.canWrite && !visible.has(g.name))
       .map((g) => g.name)
       .sort((a, b) => a.localeCompare(b));
   }, [groupSummaries, items]);

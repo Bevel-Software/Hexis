@@ -13,11 +13,10 @@ import { LockGlyph } from './LockGlyph';
 /**
  * The all-groups index — `/skills-and-tools/groups`.
  *
- * The sidebar can only show groups you are IN. This page shows the ones you are
- * not, which is the point of it: a group nobody can see is a group nobody can
- * ask to join. Locked entries carry their name, who runs them and their totals,
- * and nothing else — the backend withholds the rest, and this page never asks
- * for more.
+ * The sidebar can only show groups you are IN. This page also shows the ones
+ * you may DISCOVER — the endpoint returns a group exactly when the caller is
+ * a member, manages it, or can read its `access.md` (the discovery grant), so
+ * a group with none of those is absent here too, not merely unlabelled.
  *
  * Two sources, one list. The `GET /api/groups` summaries are authoritative
  * about existence and access; the caller's own catalog is authoritative about
@@ -33,7 +32,7 @@ interface IndexEntry {
   skillCount: number;
   toolCount: number;
   attention: number;
-  /** The caller can see inside: folder read, or item-level grants. */
+  /** The caller can see inside: folder read, manage rights, or item grants. */
   member: boolean;
 }
 
@@ -66,7 +65,7 @@ export function GroupsIndexPage() {
           skillCount: summary ? summary.skillCount : derivedSkills,
           toolCount: summary ? summary.toolCount : derivedTools,
           attention: attentionOf(items, name),
-          member: summary ? summary.canRead || hasItems : hasItems,
+          member: summary ? summary.canRead || summary.canWrite || hasItems : hasItems,
         };
       });
   }, [groupSummaries, items]);
@@ -144,7 +143,7 @@ export function GroupsIndexPage() {
                     /* The row has to SAY it is locked, not just look it — the
                        glyph is decorative (`aria-hidden`) and the word beside
                        it is what a screen reader and the tests both read.
-                       Once a request is pending the chip states that instead:
+                       Once a join CR is open the chip states that instead:
                        the one thing this row can tell you that you did not
                        already know is whether you have already asked. */
                     trailing={
