@@ -191,7 +191,7 @@ export function SkillPage() {
       // leaves the failed button live and clickable.
       if (refusal.conflicts) {
         setBlockedCrs((s) => (s.has(number) ? s : new Set(s).add(number)));
-        toast('Blocked — the file changed after this was written.');
+        toast('Blocked — the file changed after this was written.', 'danger');
       }
     },
   });
@@ -254,7 +254,7 @@ export function SkillPage() {
       toast('Declined. Nothing was changed.');
       data.reload();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Couldn't decline this change.");
+      toast(err instanceof Error ? err.message : "Couldn't decline this change.", 'danger');
     } finally {
       setBusyCr(null);
     }
@@ -267,7 +267,7 @@ export function SkillPage() {
       toast('Withdrawn.');
       data.reload();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Couldn't withdraw this change.");
+      toast(err instanceof Error ? err.message : "Couldn't withdraw this change.", 'danger');
     } finally {
       setBusyCr(null);
     }

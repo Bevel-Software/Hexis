@@ -62,7 +62,7 @@ export function NewGroupDialog({ existing, onClose, onCreated }: NewGroupDialogP
       onClose();
       navigate(pathForGroup(trimmed));
     } catch {
-      toast("Couldn't create that group — try again.");
+      toast("Couldn't create that group — try again.", 'danger');
       setBusy(false);
     }
   }

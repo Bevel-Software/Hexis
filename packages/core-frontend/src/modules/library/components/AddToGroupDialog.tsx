@@ -57,7 +57,8 @@ export function AddToGroupDialog({ name, primaryPath, canWrite, onClose }: AddTo
   const prompt = `Help me build a new skill or tool and add it to the ${name} group at Bevel. ${landing}`;
 
   async function copyPrompt() {
-    toast((await copyToClipboard(prompt)) ? COPIED_TOAST : COPY_FAILED_TOAST);
+    const copied = await copyToClipboard(prompt);
+    toast(copied ? COPIED_TOAST : COPY_FAILED_TOAST, copied ? 'neutral' : 'danger');
   }
 
   return (

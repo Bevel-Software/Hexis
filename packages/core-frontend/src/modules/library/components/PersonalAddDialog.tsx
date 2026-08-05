@@ -27,7 +27,8 @@ export function PersonalAddDialog({ name, onClose }: PersonalAddDialogProps) {
   const prompt = `Help me build a new skill or tool at Bevel. Keep it to myself for now — it goes in my own list, not a group.`;
 
   async function copyPrompt() {
-    toast((await copyToClipboard(prompt)) ? COPIED_TOAST : COPY_FAILED_TOAST);
+    const copied = await copyToClipboard(prompt);
+    toast(copied ? COPIED_TOAST : COPY_FAILED_TOAST, copied ? 'neutral' : 'danger');
   }
 
   return (

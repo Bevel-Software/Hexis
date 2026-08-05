@@ -72,7 +72,7 @@ export function LockedGroupView({ group, onRequested, onUnlocked, onManage }: Lo
         onUnlocked();
         return;
       }
-      toast("Couldn't send that — try again.");
+      toast("Couldn't send that — try again.", 'danger');
       setRequesting(false);
     }
   }
