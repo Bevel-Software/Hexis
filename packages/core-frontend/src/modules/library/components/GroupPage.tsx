@@ -1,20 +1,17 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
-import {
-  decodeGroupSegment,
-  pathForGroupsIndex,
-  pathForPropose,
-  pathForTool,
-} from '../routes/library-paths';
+import { decodeGroupSegment, pathForGroupsIndex, pathForTool } from '../routes/library-paths';
 import { primaryFolderOf } from '../utils/group-summary';
 import { GroupJoinRequests } from './GroupJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { DetailDialog, type DetailTarget } from './DetailDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
-import { GroupBreadcrumb, GroupItemSections, PageNote, ShareGlyph } from './group-page-parts';
+import { BandControls, GroupBreadcrumb, GroupItemSections, PageNote } from './group-page-parts';
+import { PageActions } from './PageActions';
+import { copyToClipboard } from '../utils/clipboard';
 import { LockedGroupView } from './LockedGroupView';
 
 /**
@@ -42,10 +39,59 @@ export function GroupPage() {
   const { kbDirName } = useWorkspace();
   const [detail, setDetail] = useState<DetailTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  // The Skills band's two controls. `filterOn` narrows the band to what is
+  // waiting on the reader; `refresh` re-reads the catalog and then says when it
+  // last did, because "nothing changed" and "nothing was checked" otherwise
+  // look identical. Both are page state — neither belongs in the URL, since
+  // neither is a place you would link someone to.
+  const [filterOn, setFilterOn] = useState(false);
+  const [refreshState, setRefreshState] = useState<'idle' | 'spin' | 'done'>('idle');
   /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
   const [manageFolder, setManageFolder] = useState<string | null>(null);
   /** Bumped when an access edit lands, so the join-request surface refetches. */
   const [accessRevision, setAccessRevision] = useState(0);
+
+  /**
+   * "Last updated just now" has to be TRUE.
+   *
+   * Both refetches behind the refresh button are revision bumps that return
+   * `void` — there is no promise to await, so a timer was standing in for
+   * completion and would claim success while the catalog was still in flight,
+   * or after it had failed outright. The loads report themselves instead:
+   * `spin` ends the moment both have settled, and a failure returns the button
+   * rather than printing a freshness claim the page cannot back up (the error
+   * itself is surfaced by the gallery banner, which owns it).
+   *
+   * `sawLoading` is the part that is easy to leave out and wrong without: "both
+   * loads are settled" is also true of the instant BEFORE the refetch starts,
+   * and of an unrelated load that was already in flight settling first. So the
+   * spin only ends on a settle that FOLLOWS a loading phase this click caused.
+   * `reloadGroups()` raises `groupsLoading` synchronously, so that phase is
+   * guaranteed to be observed — and if it somehow were not, the button keeps
+   * spinning, which is the failure worth having.
+   */
+  const sawLoading = useRef(false);
+  const spinning = refreshState === 'spin';
+  const loadsSettled = !data.loading && !data.groupsLoading;
+  useEffect(() => {
+    if (!spinning) return;
+    if (!loadsSettled) {
+      sawLoading.current = true;
+      return;
+    }
+    if (!sawLoading.current) return;
+    sawLoading.current = false;
+    setRefreshState(data.error || data.groupsError ? 'idle' : 'done');
+  }, [spinning, loadsSettled, data.error, data.groupsError]);
+
+  // The freshness line decays on its own — that one IS a clock, and it is the
+  // only timer left. Cleared on unmount rather than left to fire into a
+  // component that is gone.
+  useEffect(() => {
+    if (refreshState !== 'done') return;
+    const timer = window.setTimeout(() => setRefreshState('idle'), 4000);
+    return () => window.clearTimeout(timer);
+  }, [refreshState]);
 
   const summary = useMemo(
     () => data.groupSummaries.find((g) => g.name === group) ?? null,
@@ -59,6 +105,9 @@ export function GroupPage() {
   const skillItems = groupItems.filter((i) => i.kind === 'skill');
   const toolItems = groupItems.filter((i) => i.kind === 'integration');
   const attention = attentionOf(data.items, group);
+  // What the Skills band actually renders. The filter is a VIEW over the band,
+  // not a different query — flipping it back must show exactly what was there.
+  const shownSkills = filterOn ? skillItems.filter((i) => i.status.state !== 'ok') : skillItems;
 
   /**
    * Same split as the gallery: a tool opens its PAGE, a skill still opens the
@@ -159,19 +208,19 @@ export function GroupPage() {
           for a non-writer the dialog renders read-only (its own `canWrite`
           verdict decides), which is exactly what "who is this shared with?"
           should answer. Hidden only when no folder is known to manage. */}
+      {/* Three actions, beside the title, for everyone (proto:3012-3025).
+          Share stays un-gated: for a non-writer the dialog renders read-only,
+          which is exactly what "who is this shared with?" should answer. */}
       <div className="flex items-start justify-between gap-4">
         <h1 className="mt-1.5 text-display font-semibold">{group}</h1>
-        {primaryFolder && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-1.5 shrink-0"
-            onClick={() => setManageFolder(primaryFolder)}
-          >
-            <ShareGlyph className="size-3.5" />
-            Share
-          </Button>
-        )}
+        <div className="mt-1.5">
+          <PageActions
+            onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
+            onAdd={() => setAddOpen(true)}
+            onCopyLink={() => copyToClipboard(window.location.href)}
+            addLabel={`Add a skill or tool to ${group}`}
+          />
+        </div>
       </div>
 
       {/* Somebody is waiting on the person reading this. Rendered only for a
@@ -200,32 +249,41 @@ export function GroupPage() {
         </Banner>
       )}
 
-      {/* Exactly one action, and it is the honest one. `canWrite` unknown (no
-          summary) falls to Propose: claiming write access we could not verify
-          would send somebody into a dialog whose button 403s. */}
-      <div className="mt-4">
-        {summary?.canWrite ? (
-          <Button variant="primary" size="sm" onClick={() => setAddOpen(true)}>
-            Add skills or tools
-          </Button>
-        ) : (
-          <Button variant="outline" size="sm" onClick={() => navigate(pathForPropose(group))}>
-            Propose a skill or tool
-          </Button>
-        )}
-      </div>
-
       <GroupItemSections
-        skillItems={skillItems}
+        skillItems={shownSkills}
         toolItems={toolItems}
         onOpen={openItem}
-        emptySkills={`No skills yet. Add one, or ask your agent to write one for ${group}.`}
+        emptySkills={
+          filterOn
+            ? 'Nothing in this band needs you right now.'
+            : `No skills yet. Add one, or ask your agent to write one for ${group}.`
+        }
+        // The band fades its controls until you hover it, and `opacity`
+        // composites — so "the filter stays lit when it is on" has to be said
+        // to the wrapper, not to the button inside it. Same for the spinner:
+        // a refresh you cannot see is one people click twice.
+        skillControlsActive={filterOn || refreshState !== 'idle'}
+        skillControls={
+          <BandControls
+            attention={attention}
+            filterOn={filterOn}
+            onToggleFilter={() => setFilterOn((v) => !v)}
+            refreshState={refreshState}
+            onRefresh={() => {
+              sawLoading.current = false;
+              setRefreshState('spin');
+              data.reload();
+              data.reloadGroups();
+            }}
+          />
+        }
       />
 
       {addOpen && summary && primaryFolder && (
         <AddToGroupDialog
           name={group}
           primaryPath={primaryFolder}
+          canWrite={summary.canWrite}
           onClose={() => setAddOpen(false)}
         />
       )}

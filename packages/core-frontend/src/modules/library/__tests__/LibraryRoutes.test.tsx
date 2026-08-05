@@ -239,11 +239,11 @@ describe('LibraryRoutes', () => {
     expect(screen.queryByTestId('library-card-skill-roadmap')).not.toBeInTheDocument();
   });
 
-  it('the propose seam reads its group out of the query', async () => {
+  // `/propose` was retired with the role fork it served. An unknown path under
+  // the Library falls back to the gallery, which is what this now asserts.
+  it('sends the retired propose path back to the gallery', async () => {
     renderAt('/skills-and-tools/propose?group=GTM');
-    expect(
-      await screen.findByRole('heading', { name: 'Propose a skill or tool for GTM', level: 1 }),
-    ).toBeInTheDocument();
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
   });
 
   it('reaches the index from a group page breadcrumb, which is the only route to it now', async () => {
@@ -256,11 +256,10 @@ describe('LibraryRoutes', () => {
   });
 
   it('carries no All groups row in the sidebar', async () => {
-    renderAt('/skills-and-tools/propose?group=GTM');
+    renderAt('/skills-and-tools/groups/GTM');
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: /^All groups/ })).not.toBeInTheDocument(),
     );
-    expect(pathname()).toBe('/skills-and-tools/propose');
   });
 
   it('a group deep link with a URL-hostile name round-trips', async () => {

@@ -76,7 +76,7 @@ export function ToolForm({
   const { model, notes } = parsed;
   if (!model) {
     return (
-      <p className="text-meta text-amber-600">
+      <p className="text-meta text-wait">
         This file isn’t valid JSON/YAML — switch to Code to {readOnly ? 'view' : 'fix'} it.
       </p>
     );
@@ -373,7 +373,7 @@ function InlineToolsEditor({
         rows={8}
         className="w-full resize-y rounded-md border border-line-strong bg-sunken p-2 font-mono text-meta focus:border-accent focus:outline-none"
       />
-      {!readOnly && error && <p className="mt-0.5 text-meta text-red-600">Inline tools: {error}</p>}
+      {!readOnly && error && <p className="mt-0.5 text-micro text-danger">Inline tools: {error}</p>}
     </div>
   );
 }
@@ -395,7 +395,7 @@ function RemoveButton({ onClick }: { onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      className="rounded-sm p-1 text-ink-faint hover:bg-red-50 hover:text-red-600"
+      className="rounded-sm p-1 text-ink-faint hover:bg-danger-soft hover:text-danger"
       aria-label="Remove"
     >
       <X size={12} />

@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes } from 'react';
+import type { ButtonHTMLAttributes, Ref } from 'react';
 import { cn } from '../../lib/utils';
 
 /**
@@ -31,6 +31,14 @@ export interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement>
   active?: boolean;
   /** REQUIRED: an icon-only control is invisible to assistive tech without it. */
   'aria-label': string;
+  /**
+   * Declared explicitly because `ButtonHTMLAttributes` does not carry `ref`.
+   * A menu TRIGGER has to be referenceable: dismissing on Escape means handing
+   * focus back to the control that opened the menu, and an outside-click
+   * handler has to be able to tell "clicked the trigger" from "clicked away"
+   * or a single click closes and reopens.
+   */
+  ref?: Ref<HTMLButtonElement>;
 }
 
 export function IconButton({
@@ -40,10 +48,12 @@ export function IconButton({
   className,
   children,
   type = 'button',
+  ref,
   ...rest
 }: IconButtonProps) {
   return (
     <button
+      ref={ref}
       type={type}
       className={cn(
         'inline-flex flex-none items-center justify-center transition-colors',

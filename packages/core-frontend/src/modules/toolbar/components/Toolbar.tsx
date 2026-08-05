@@ -1,34 +1,36 @@
 import { Fragment, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
-import { LogOut, PanelLeft, PanelRight } from 'lucide-react';
-import { useAuth } from '../../auth/state/auth.context';
-import { AdminMenu } from './AdminMenu';
+import { PanelRight } from 'lucide-react';
+import { ProfileMenu } from './ProfileMenu';
 import { AppSwitcher } from './AppSwitcher';
 import { useLayout } from '../../layout/state/layout.context';
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
 import { useAppRegistry } from '../../../core/registry';
-import { SidebarToggle } from '../../library/components/SidebarToggle';
-import { useLibrarySidebar } from '../../library/state/sidebar-collapse';
+import { SidebarToggle } from '../../layout/components/SidebarToggle';
+import { toggleSidebar, useSidebar } from '../../layout/state/sidebar';
 import { LIBRARY_ROOT } from '../../library/routes/library-paths';
 
 export function Toolbar() {
-  const { user, logout } = useAuth();
   const registry = useAppRegistry();
   const location = useLocation();
-  // The Library's nav toggle, in the top bar left of the brand. Path-gated
-  // rather than registry-gated: the button controls the Library's sidebar,
-  // so it appears exactly where that sidebar exists and nowhere else.
+  /**
+   * ONE nav toggle, for the app's ONE sidebar.
+   *
+   * There used to be two buttons here — a path-gated `SidebarToggle` for the
+   * Library and a registry-gated one for Knowledge's explorer — with the same
+   * glyph, in the same spot, driving two different pieces of state. They read
+   * as one control to anyone using the app, so now they are one.
+   *
+   * Which surfaces HAVE a sidebar is still asked two ways, because the two
+   * apps answer it differently: Knowledge declares a `sidebar` pane (so the
+   * layout controller can say `canToggleExplorer`), while Skills & Tools has
+   * no pane group at all and is identified by its path.
+   */
   const onLibrary =
     location.pathname === LIBRARY_ROOT || location.pathname.startsWith(`${LIBRARY_ROOT}/`);
-  const librarySidebar = useLibrarySidebar();
-  const {
-    isExplorerCollapsed,
-    isChatCollapsed,
-    canToggleExplorer,
-    canToggleChat,
-    toggleExplorer,
-    toggleChat,
-  } = useLayout();
+  const { collapsed: sidebarCollapsed } = useSidebar();
+  const { isChatCollapsed, canToggleExplorer, canToggleChat, toggleChat } = useLayout();
+  const hasSidebar = onLibrary || canToggleExplorer;
   // Below the `md` breakpoint the registry item cluster (the enterprise
   // branch switcher, for one) does not fit alongside the toolbar essentials,
   // so it drops onto a second row instead of overflowing offscreen.
@@ -52,25 +54,8 @@ export function Toolbar() {
   return (
     <header className="border-b border-line shrink-0 bg-white">
       <div className="h-12 flex items-center px-4 gap-2">
-        {onLibrary && (
-          <SidebarToggle
-            collapsed={librarySidebar.collapsed}
-            onToggle={librarySidebar.toggle}
-          />
-        )}
-
-        {canToggleExplorer && (
-          <button
-            onClick={toggleExplorer}
-            className={`p-1.5 rounded hover:bg-hover transition-colors ${
-              isExplorerCollapsed ? 'text-ink-muted' : 'text-ink'
-            }`}
-            title={isExplorerCollapsed ? 'Show file explorer' : 'Hide file explorer'}
-            aria-label={isExplorerCollapsed ? 'Show file explorer' : 'Hide file explorer'}
-            aria-pressed={!isExplorerCollapsed}
-          >
-            <PanelLeft size={16} />
-          </button>
+        {hasSidebar && (
+          <SidebarToggle collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
         )}
 
         <AppSwitcher />
@@ -80,22 +65,6 @@ export function Toolbar() {
         )}
 
         <div className="flex-1" />
-
-        {user && (
-          <div className="flex items-center gap-2">
-            {user.avatarUrl && (
-              <img
-                src={user.avatarUrl}
-                alt={user.name}
-                className="w-6 h-6 rounded-full"
-                referrerPolicy="no-referrer"
-              />
-            )}
-            <span className="text-xs text-ink-muted hidden sm:inline">{user.name}</span>
-          </div>
-        )}
-
-        <AdminMenu />
 
         {canToggleChat && (
           <button
@@ -111,14 +80,11 @@ export function Toolbar() {
           </button>
         )}
 
-        <button
-          onClick={logout}
-          className="p-1.5 rounded hover:bg-hover text-ink-muted hover:text-ink"
-          title="Sign out"
-          aria-label="Sign out"
-        >
-          <LogOut size={16} />
-        </button>
+        {/* One button for who you are and everything that follows you around.
+            It used to be three things in a row here — a name that was not a
+            control, a gear, and a sign-out arrow — all answering the same
+            question. See ProfileMenu's docblock. */}
+        <ProfileMenu />
       </div>
 
       {isCompact && itemCluster.length > 0 && (

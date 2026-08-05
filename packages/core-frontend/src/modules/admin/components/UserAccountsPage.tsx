@@ -53,8 +53,10 @@ export function UserAccountsPage() {
       })
       .catch((err) => {
         setError(err instanceof Error ? err.message : "Couldn't load accounts.");
-        // Leave no eternal "Loading…" next to the error banner.
-        setAccounts((prev) => prev ?? []);
+        // `accounts` is deliberately left alone. A RELOAD that fails keeps the
+        // rows it already had; a FIRST load that fails stays `null`, because
+        // storing `[]` would render "No user accounts." — an admin reading
+        // that would take a deployment they cannot reach for one nobody is on.
       });
   }, []);
 
@@ -145,13 +147,16 @@ export function UserAccountsPage() {
           </p>
 
           {error && (
-            <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">
+            <div
+              className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-sm px-2 py-1.5"
+              role="alert"
+            >
               {error}
             </div>
           )}
           {passwordSetFor && (
             <div
-              className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5"
+              className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-sm px-2 py-1.5"
               role="status"
             >
               Password set for {passwordSetFor}.
@@ -159,11 +164,14 @@ export function UserAccountsPage() {
           )}
 
           {accounts === null ? (
-            <div className="text-xs text-ink-muted">Loading…</div>
+            // Nothing to list and nothing to call empty: the banner above is
+            // the whole answer, so this renders nothing rather than a
+            // "Loading…" that would never resolve.
+            error ? null : <div className="text-xs text-ink-muted">Loading…</div>
           ) : accounts.length === 0 ? (
             <div className="text-xs text-ink-muted">No user accounts.</div>
           ) : (
-            <ul className="divide-y divide-line border border-line rounded">
+            <ul className="divide-y divide-line border border-line rounded-sm">
               {accounts.map((account) => {
                 const isSelf = account.id === me?.id;
                 return (
@@ -172,10 +180,10 @@ export function UserAccountsPage() {
                       <div className="font-medium truncate">
                         {account.name}
                         {isSelf && (
-                          <span className="ml-1.5 text-[11px] font-normal text-ink-muted">(you)</span>
+                          <span className="ml-1.5 text-meta font-normal text-ink-muted">(you)</span>
                         )}
                       </div>
-                      <div className="text-[11px] text-ink-muted truncate">
+                      <div className="text-meta text-ink-muted truncate">
                         {account.email} · Joined {new Date(account.createdAt).toLocaleDateString()} ·{' '}
                         {account.hasPassword ? 'Password sign-in' : 'Single sign-on only'}
                       </div>
@@ -183,7 +191,7 @@ export function UserAccountsPage() {
                     {!isSelf && (
                       <button
                         onClick={() => openPasswordDialog(account)}
-                        className="text-xs px-2 py-1 rounded text-ink hover:bg-hover border border-line"
+                        className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line"
                         title="Set a new sign-in password for this account."
                         aria-label={`Set password for ${account.email}`}
                       >
@@ -193,7 +201,7 @@ export function UserAccountsPage() {
                     {!isSelf && (
                       <button
                         onClick={() => setPendingDelete(account)}
-                        className="text-xs px-2 py-1 rounded text-red-700 hover:bg-red-50 border border-red-200"
+                        className="text-xs px-2 py-1 rounded-sm text-red-700 hover:bg-red-50 border border-red-200"
                         title="Permanently delete this account and its personal data."
                         aria-label={`Delete account ${account.email}`}
                       >
@@ -271,14 +279,14 @@ export function UserAccountsPage() {
             <button
               onClick={() => setPasswordTarget(null)}
               disabled={savingPassword}
-              className="px-3 py-1.5 text-sm rounded text-ink hover:bg-hover border border-line disabled:opacity-50"
+              className="px-3 py-1.5 text-sm rounded-sm text-ink hover:bg-hover border border-line disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               onClick={confirmSetPassword}
               disabled={savingPassword || newPassword.length === 0}
-              className="px-3 py-1.5 text-sm rounded bg-bevel hover:bg-bevel-deep text-white disabled:opacity-50"
+              className="px-3 py-1.5 text-sm rounded-sm bg-bevel hover:bg-bevel-deep text-white disabled:opacity-50"
             >
               {savingPassword ? 'Saving…' : 'Set password'}
             </button>
@@ -322,14 +330,14 @@ export function UserAccountsPage() {
             <button
               onClick={() => setPendingDelete(null)}
               disabled={deleting}
-              className="px-3 py-1.5 text-sm rounded text-ink hover:bg-hover border border-line disabled:opacity-50"
+              className="px-3 py-1.5 text-sm rounded-sm text-ink hover:bg-hover border border-line disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               onClick={confirmDelete}
               disabled={deleting}
-              className="px-3 py-1.5 text-sm rounded bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 disabled:hover:bg-red-600"
+              className="px-3 py-1.5 text-sm rounded-sm bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 disabled:hover:bg-red-600"
             >
               {deleting ? 'Deleting…' : 'Delete account'}
             </button>

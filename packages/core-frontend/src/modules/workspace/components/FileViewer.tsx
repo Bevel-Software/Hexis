@@ -1,15 +1,25 @@
-import { useMemo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Check, XCircle, FileText, History, Clock4, GitCompare, Link2, Lock, Pencil, AlertTriangle } from 'lucide-react';
+import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { Check, XCircle, Lock, AlertTriangle, ArrowLeft } from 'lucide-react';
+import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { EditorTabs } from './EditorTabs';
+import { KbPageHeader } from './KbPageHeader';
+import { KbFileRail, KB_FILE_RAIL_HEADING_ID } from './KbFileRail';
+import { useLinksOut } from '../hooks/useLinksOut';
+import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
+import { usePrViewer } from '../../pr/state/pr-viewer.context';
+import { useLastCommit } from '../hooks/useLastCommit';
+import { openRawFile } from '../utils/openRawFile';
+import { Banner, Button, Surface } from '../../../shared/components';
+import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
-import { useCanonicalFileUrl } from '../routing/kb-routes';
+import { LayoutContext } from '../../layout/state/layout.context';
+import { useCanonicalFileUrl, useFileNav, resolveRelativePath } from '../routing/kb-routes';
 import { useReview } from '../../review/state/review.context';
 import { ProtectedBranchBanner } from '../../git/components/ProtectedBranchBanner';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { useFileAccess } from '../../access/hooks/useFileAccess';
 import { AccessRestrictedBanner } from '../../access/components/AccessRestrictedBanner';
-import { NodeOwnersBanner } from '../../access/components/NodeOwnersBanner';
 import { FileHistoryPanel } from '../../git/components/FileHistoryPanel';
 import { FileComparisonPanel } from '../../git/components/FileComparisonPanel';
 import {
@@ -24,8 +34,9 @@ import { PrViewer } from '../../pr/components/PrViewer';
 import { useFileLock } from '../../workflow/hooks/useFileLock';
 import { LockApiError } from '../../workflow/services/lock.api';
 import { useAuth } from '../../auth/state/auth.context';
-import { getFileRenderer } from './renderers';
+import { getFileRenderer, getRendererLayout, isBinaryFile } from './renderers';
 import type { RendererSaveState } from './renderers';
+import { KbDocumentShell } from './KbDocumentShell';
 
 const SUGGESTED_PROMPTS = [
   'Give me an overview of the process landscape.',
@@ -51,13 +62,23 @@ export function FileViewer() {
     bumpFsRevision,
     reloadTabFromDisk,
   } = useWorkspace();
-  const [linkCopied, setLinkCopied] = useState(false);
   // Chat decoupling: the suggested-prompt seed is an optional registry port
   // (null when no chat surface is registered → the prompt buttons hide).
   const seedSuggestedPrompt = useSuggestedPromptSeed();
   const { fileViewerPanels, renderers } = useAppRegistry();
   const git = useGit();
   const review = useReview();
+  // Hiding the tree buys margin, not line length (proto:709), and the pane
+  // controller is the only thing that knows whether it is hidden.
+  //
+  // Read straight off the context rather than through `useLayout`, which
+  // THROWS when there is no provider. A gutter is cosmetic; it must not be
+  // able to take the whole viewer down. There are two live cases with no
+  // controller — a registry app mounted outside the pane layout, and every
+  // unit test that renders FileViewer on its own — and in both the honest
+  // answer is "the tree is not hidden".
+  const layout = useContext(LayoutContext);
+  const explorerHidden = layout?.isExplorerCollapsed ?? false;
 
   // File-lock integration (PLAN §2). One useFileLock per (branch, file)
   // the user has open. Acquired on first dirty edit, released when the
@@ -277,7 +298,8 @@ export function FileViewer() {
 
   // **Edit mode is explicit** (the lock spec, simplified). Viewing a file
   // never claims the lock — the user clicks "Edit" to enter edit mode,
-  // which acquires. Idle for 30s? `useFileLock` auto-releases and
+  // which acquires. Idle for `IDLE_RELEASE_MS` (two minutes)?
+  // `useFileLock` auto-releases and
   // `holdingLock` flips false; the effect below mirrors that into
   // `editMode` so the UI flips back to view. To resume editing, the
   // user clicks Edit again (which tries to acquire — may fail if
@@ -478,7 +500,7 @@ export function FileViewer() {
   //     guarantees it). Save = checkpoint commit, lock stays held so
   //     subsequent keystrokes don't have to re-acquire.
   //   - Final commit + release happens on exit-edit, unmount, file switch,
-  //     or 30s idle (the hook's idle timer).
+  //     or `IDLE_RELEASE_MS` of inactivity (the hook's idle timer).
   const handleSave = useCallback(async (content: string) => {
     if (!openFilePath) return;
     openFileContentRef.current = content;
@@ -551,16 +573,84 @@ export function FileViewer() {
   // Canonical link for the open file: the node's id URL when it's a node, else
   // its path URL (resolved in the background, falls back to the path meanwhile).
   const canonicalFileUrl = useCanonicalFileUrl(openFilePath);
+  // Each copy resolves to whether it actually landed. `navigator.clipboard`
+  // rejects outright on a non-secure origin, and the header says so on the
+  // control that was clicked rather than swallowing it.
   const handleCopyLink = useCallback(async () => {
     try {
       const base = canonicalFileUrl ?? `${window.location.origin}${window.location.pathname}`;
       await navigator.clipboard.writeText(base + window.location.hash);
-      setLinkCopied(true);
-      window.setTimeout(() => setLinkCopied(false), 1500);
+      return true;
     } catch (err) {
       console.error('Failed to copy link:', err);
+      return false;
     }
   }, [canonicalFileUrl]);
+
+  // "Copy page as Markdown" is the document's own source. It is offered only
+  // when there IS markdown to copy — a PDF or an image has none, and copying
+  // a blob's bytes as text is nonsense rather than a feature.
+  const canCopyPage = !!openFilePath && /\.(md|markdown)$/i.test(openFilePath);
+  const handleCopyPage = useCallback(async () => {
+    if (openFileContent === null) return false;
+    try {
+      await navigator.clipboard.writeText(openFileContent);
+      return true;
+    } catch (err) {
+      console.error('Failed to copy page:', err);
+      return false;
+    }
+  }, [openFileContent]);
+
+  // `⋯ → View raw file`. Wrapped in a helper rather than assigning
+  // `window.location.href` inline so a test can spy on the intent without the
+  // navigation (§2.3 forbids assigning location.href in a test).
+  const handleViewRaw = useCallback(() => {
+    if (!workspaceId || !openFilePath) return;
+    openRawFile(workspaceId, openFilePath);
+  }, [workspaceId, openFilePath]);
+
+  // Manage access on the open file, reached from the page's Share button.
+  //
+  // This page shares ONE thing: the file you are reading. It used to also
+  // offer "Share the whole folder", and that went — from a file's page it was
+  // a single click away from handing over everything in the folder, with
+  // nothing on screen showing what "everything" was. Sharing a folder now
+  // starts where the folder is: its row in the tree, right-click → Manage
+  // access, next to the children it governs.
+  const [shareTarget, setShareTarget] = useState<FileTreeEntry | null>(null);
+  const handleShare = useCallback(() => {
+    if (!openFilePath) return;
+    setShareTarget({
+      name: openFilePath.slice(openFilePath.lastIndexOf('/') + 1),
+      relativePath: openFilePath,
+      type: 'file',
+    });
+  }, [openFilePath]);
+
+  // Session state, defaulting closed. Open ⇒ the shell switches to the wide
+  // measure and opens the rail's track. Closed costs nothing: `useLastCommit`
+  // is gated on it, so a reader who never opens the rail never pays for the
+  // history request behind its "Edited" row.
+  const [railOpen, setRailOpen] = useState(false);
+  const linksOut = useLinksOut(openFilePath, openFileContent);
+  // ALL open requests, not just the ones scoped to you — a colleague's request
+  // on a file you can read but not write still belongs on this page.
+  const openChangeRequests = useOpenChangeRequests();
+  const requestsOnThisFile = openFilePath ? openChangeRequests.forPath(openFilePath) : [];
+  const { openPr } = usePrViewer();
+  const lastCommit = useLastCommit(openFilePath, railOpen);
+  // Compare owns the whole column; the rail steps aside for the duration and
+  // comes back with the document.
+  const railVisible = railOpen && activeTab === 'content';
+  const { openFile: navigateToFile } = useFileNav();
+  const handleOpenLink = useCallback(
+    (href: string) => {
+      if (!openFilePath) return;
+      navigateToFile(resolveRelativePath(openFilePath, href));
+    },
+    [openFilePath, navigateToFile],
+  );
 
 
   if (!openFilePath || openFileContent === null || !Renderer) {
@@ -571,10 +661,10 @@ export function FileViewer() {
         <EditorTabs />
         <div className="flex-1 flex items-center justify-center px-6">
           <div className="max-w-md text-center">
-            <h2 className="text-ink text-base font-medium tracking-tight mb-2">
+            <h2 className="mb-2 text-head text-ink">
               Open a file, or ask the process assistant a question.
             </h2>
-            <p className="text-ink-muted text-sm mb-6">
+            <p className="mb-6 text-ui text-ink-muted">
               Pick anything from the file tree, or start with a suggestion.
             </p>
             {/* Suggested prompts seed the chat composer — only rendered when a
@@ -582,14 +672,19 @@ export function FileViewer() {
             {seedSuggestedPrompt && (
               <div className="flex flex-col gap-2">
                 {SUGGESTED_PROMPTS.map((prompt) => (
-                  <button
+                  <Surface
                     key={prompt}
+                    as="button"
+                    tone="sunken"
+                    radius="lg"
+                    elevation="none"
+                    interactive
                     type="button"
                     onClick={() => seedSuggestedPrompt(prompt)}
-                    className="text-left text-sm text-ink bg-sunken hover:bg-hover border border-line hover:border-line-strong rounded-lg px-3 py-2 transition-colors duration-150"
+                    className="px-3 py-2 text-left text-ui text-ink"
                   >
                     {prompt}
-                  </button>
+                  </Surface>
                 ))}
               </div>
             )}
@@ -601,9 +696,12 @@ export function FileViewer() {
     );
   }
 
-  const lastSlash = openFilePath.lastIndexOf('/');
-  const fileName = lastSlash >= 0 ? openFilePath.slice(lastSlash + 1) : openFilePath;
-  const parentDir = lastSlash >= 0 ? openFilePath.slice(0, lastSlash) : '';
+  // Which shape the document column takes. A history / comparison panel is a
+  // fixed-height viewport with its own scroller (both roots are
+  // `flex-1 flex flex-col min-h-0`), so it gets the full-bleed contract for
+  // the same reason a PDF does — an auto-height column would collapse it.
+  const shellVariant =
+    activeTab === 'content' ? getRendererLayout(openFilePath) : 'full-bleed';
 
   return (
     <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
@@ -612,174 +710,185 @@ export function FileViewer() {
       {accessRestricted && openFilePath && (
         <AccessRestrictedBanner path={openFilePath} eligible={access.eligible} />
       )}
-      {openFilePath && <NodeOwnersBanner owners={access.owners} />}
+      {/* ONE column holds the tabs, the title and the text at the same width,
+          so they share an edge and the page reads as a single centred block
+          (proto:700-705). `editorContainerRef` goes to `scrollRef` because the
+          shell is now the element that scrolls — the capture-phase listener
+          bound to it is the file lock's only activity signal for a reader. */}
+      <KbDocumentShell
+              roomy={explorerHidden}
+        variant={shellVariant}
+        scrollRef={editorContainerRef}
+        railLabelledBy={KB_FILE_RAIL_HEADING_ID}
+        rail={
+          railVisible ? (
+            <KbFileRail
+              path={openFilePath}
+              // Null for a binary file. The workspace loads every open file's
+              // content as a string, so `.length` is a number for a PDF too —
+              // it just is not a number that means anything.
+              charCount={isBinaryFile(openFilePath) ? null : openFileContent?.length ?? null}
+              lastCommit={lastCommit}
+              owners={access.owners}
+              linksOut={linksOut}
+              onOpen={handleOpenLink}
+            />
+          ) : undefined
+        }
+      >
       <EditorTabs />
-      {/* Active-file metadata + sub-tabs (Content / History / Compare) */}
-      <div className="h-10 border-b border-line flex items-center px-3 gap-2 shrink-0">
-        <span className="text-sm font-medium tracking-tight text-ink truncate shrink-0">
-          {fileName}
-        </span>
-        {parentDir && (
-          <span className="text-xs text-ink-muted truncate min-w-0">
-            {parentDir}
-          </span>
-        )}
-        {isManualDirty && (
-          <span className="ml-1 inline-flex items-center gap-1 text-xs text-amber-700 font-medium">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-            Unsaved
-          </span>
-        )}
-        {waitingOnAgentUpdate && (
-          <span className="ml-1 inline-flex items-center gap-1 text-xs text-amber-700 font-medium">
-            <Clock4 size={12} />
-            Agent update waiting
-          </span>
-        )}
-        {isReviewingPending && (
-          <span className="ml-1 inline-flex items-center gap-1 text-xs text-emerald-600 font-medium">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            Reviewing agent update
-          </span>
-        )}
-        <div className="ml-auto flex items-center gap-1">
-          <TabButton
-            active={activeTab === 'content'}
-            onClick={() => setActiveTab('content')}
-            icon={<FileText size={12} />}
-            label="Content"
-          />
-          {historyAvailable && (
-            <TabButton
-              active={activeTab === 'history'}
-              onClick={() => setActiveTab('history')}
-              icon={<History size={12} />}
-              label="History"
-            />
-          )}
-          {historyAvailable && (
-            <TabButton
-              active={activeTab === 'compare'}
-              onClick={() => setActiveTab('compare')}
-              icon={<GitCompare size={12} />}
-              label="Compare"
-            />
-          )}
-          <button
-            onClick={handleCopyLink}
-            className="ml-1 p-1 rounded hover:bg-hover text-ink-muted hover:text-ink transition-colors duration-150 relative"
-            title={linkCopied ? 'Link copied' : 'Copy link to this file'}
-            aria-label="Copy link to this file"
-          >
-            <Link2 size={14} />
-            {linkCopied && (
-              <span className="absolute top-full right-0 mt-1 px-1.5 py-0.5 rounded bg-ink text-[10px] text-emerald-300 whitespace-nowrap pointer-events-none">
-                Link copied
-              </span>
-            )}
-          </button>
-          {/* Edit / Save toggle. Hidden on protected branches (read-only)
-              and while reviewing a pending agent update (the Accept/Reject
-              banner owns the workflow there). Disabled when someone else
-              holds the lock — the existing lock banner explains who. Both
-              states use the same emerald palette so the toolbar reads as
-              "one action button changing its label" rather than two
-              competing controls. */}
-          {!onProtectedBranch && !isReviewingPending && activeTab === 'content' && (
-            editMode ? (
-              <button
-                onClick={handleExitEditMode}
-                className="ml-1 flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-emerald-700 text-white hover:bg-emerald-600 transition-colors"
-                title="Save changes and return to view mode"
-              >
-                <Check size={12} />
-                Save
-              </button>
-            ) : (
-              <button
-                onClick={handleEnterEditMode}
-                disabled={!!fileLock.externalLock || isEnteringEdit}
-                className="ml-1 flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-emerald-700 text-white hover:bg-emerald-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                title={
-                  fileLock.externalLock
-                    ? `Locked by ${fileLock.externalLock.holderName}`
-                    : isEnteringEdit
-                      ? 'Acquiring lock and fetching latest content…'
-                      : 'Click to edit this file'
-                }
-              >
-                <Pencil size={12} />
-                {isEnteringEdit ? 'Loading…' : 'Edit'}
-              </button>
-            )
-          )}
-        </div>
-      </div>
+      {/* The document names itself, and its actions sit beside its name.
+          Everything the deleted 40px strip carried is here — the three chips
+          as Badges, Edit with the same handlers and the same lock semantics,
+          the copy-link that used to be an icon in the corner — plus Share and
+          the overflow the prototype puts on the page. */}
+      <KbPageHeader
+        path={openFilePath}
+        canWrite={access.canWrite}
+        editMode={editMode}
+        entering={isEnteringEdit}
+        lockedBy={fileLock.externalLock?.holderName ?? null}
+        railOpen={railOpen}
+        historyAvailable={historyAvailable}
+        isDirty={isManualDirty}
+        waitingOnAgentUpdate={waitingOnAgentUpdate}
+        isReviewingPending={isReviewingPending}
+        activeTab={activeTab}
+        onEdit={handleEnterEditMode}
+        onDone={handleExitEditMode}
+        onToggleRail={() => setRailOpen((v) => !v)}
+        onOpenHistory={() => setActiveTab('history')}
+        onOpenCompare={() => setActiveTab('compare')}
+        onShare={handleShare}
+        onCopyPage={canCopyPage ? handleCopyPage : undefined}
+        onCopyLink={handleCopyLink}
+        onViewRaw={handleViewRaw}
+      />
 
+      {/* Content stopped being a tab: the document IS the page, and history
+          and comparison are two things you can go and look at. Each renders in
+          place of the body with an explicit way back — without it the only
+          route home would be reopening the file. */}
       {activeTab === 'history' && historyAvailable ? (
-        <FileHistoryPanel
-          filePath={openFilePath}
-          onRevertCompleted={handleRevertCompleted}
-        />
+        <>
+          <BackToDocument onBack={() => setActiveTab('content')} label="Version history" />
+          <FileHistoryPanel
+            filePath={openFilePath}
+            onRevertCompleted={handleRevertCompleted}
+          />
+        </>
       ) : activeTab === 'compare' && historyAvailable ? (
-        <FileComparisonPanel
-          filePath={openFilePath}
-          initialFrom={comparisonOverride?.fromBranch ?? null}
-          initialTo={comparisonOverride?.toBranch ?? null}
-          refreshKey={fsRevision}
-        />
+        <>
+          <BackToDocument onBack={() => setActiveTab('content')} label="Compare versions" />
+          <FileComparisonPanel
+            filePath={openFilePath}
+            initialFrom={comparisonOverride?.fromBranch ?? null}
+            initialTo={comparisonOverride?.toBranch ?? null}
+            refreshKey={fsRevision}
+          />
+        </>
       ) : (
         <>
+          {/* Somebody has proposed a change to this file. It says so here
+              whoever opened it — the signal comes from the broad endpoint, not
+              from the dock's you-scoped queue, so a colleague's request on a
+              file you can read but not write still shows. */}
+          {requestsOnThisFile.length > 0 && (
+            <Banner role="note" tone="wait" className="mb-4 flex-none">
+              <div className="font-semibold">
+                {requestsOnThisFile.length === 1
+                  ? 'Open change request'
+                  : `${requestsOnThisFile.length} open change requests`}
+              </div>
+              <div className="mt-0.5 text-detail text-ink-muted">
+                {requestsOnThisFile[0].appAuthor?.name ?? requestsOnThisFile[0].author.login}{' '}
+                proposed “{requestsOnThisFile[0].title}”. Nothing here changes until someone
+                with write access applies it.
+              </div>
+              <div className="mt-3">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => openPr(requestsOnThisFile[0].number)}
+                >
+                  Review the change
+                </Button>
+              </div>
+            </Banner>
+          )}
           {waitingOnAgentUpdate && (
-            <div role="status" aria-live="polite" aria-atomic="true" className="flex items-center gap-2 px-3 py-2 bg-amber-50 border-b border-amber-200 shrink-0">
-              <span className="text-xs text-amber-800 flex-1">
-                Agent update is waiting. Save or undo your unsaved edits before reviewing it.
-              </span>
-              <button
-                onClick={handleReviewAgentUpdate}
-                disabled={isManualDirty}
-                className="px-2.5 py-1 rounded text-xs font-medium bg-amber-700 hover:bg-amber-600 text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                title={isManualDirty ? 'Finish local edits first' : 'Open the agent update preview'}
-              >
-                Review agent update
-              </button>
-            </div>
+            <Banner
+              role="status"
+              tone="wait"
+              aria-live="polite"
+              aria-atomic="true"
+              className="mb-4 flex-none items-center"
+            >
+              <div className="flex items-center gap-2">
+                <span className="flex-1">
+                  Agent update is waiting. Save or undo your unsaved edits before reviewing it.
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleReviewAgentUpdate}
+                  disabled={isManualDirty}
+                  title={isManualDirty ? 'Finish local edits first' : 'Open the agent update preview'}
+                >
+                  Review agent update
+                </Button>
+              </div>
+            </Banner>
           )}
           {/* Accept / Reject banner — hidden whenever a multi-file review
               session exists, so the two review UIs never compete (regardless
               of whether the multi-file panel is currently open). */}
           {isReviewingPending && !hasPendingReview && (
-        <div role="status" aria-live="polite" aria-atomic="true" className="flex items-center gap-2 px-3 py-2 bg-sunken border-b border-line-strong shrink-0">
-          <span className="text-xs text-ink flex-1">
-            Previewing agent's changes — accept to keep, reject to undo
-          </span>
-          <button
-            onClick={handleReject}
-            disabled={isSubmitting}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium text-ink-muted hover:text-ink hover:bg-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <XCircle size={13} />
-            Reject
-          </button>
-          <button
-            onClick={handleAccept}
-            disabled={isSubmitting}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium bg-emerald-700 hover:bg-emerald-600 text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <Check size={13} />
-            Accept
-          </button>
-        </div>
+            <Banner
+              role="status"
+              tone="neutral"
+              aria-live="polite"
+              aria-atomic="true"
+              className="mb-4 flex-none"
+            >
+              <div className="flex items-center gap-2">
+                <span className="flex-1">
+                  Previewing agent's changes — accept to keep, reject to undo
+                </span>
+                <Button
+                  variant="quiet"
+                  size="sm"
+                  leadingIcon={<XCircle size={13} />}
+                  onClick={handleReject}
+                  disabled={isSubmitting}
+                >
+                  Reject
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  leadingIcon={<Check size={13} />}
+                  onClick={handleAccept}
+                  disabled={isSubmitting}
+                >
+                  Accept
+                </Button>
+              </div>
+            </Banner>
           )}
 
           {/* Lock-by-someone-else banner — read-only state until the holder releases. */}
           {fileLock.externalLock && !fileLock.holdingLock && !isReviewingPending && !onProtectedBranch && (
-            <div role="status" aria-live="polite" aria-atomic="true" className="flex items-center gap-2 px-3 py-2 bg-amber-50 border-b border-amber-200 shrink-0">
-              <Lock size={14} className="text-amber-700 shrink-0" />
-              <span className="text-xs text-amber-800 flex-1">
-                Locked by <span className="font-medium">{fileLock.externalLock.holderName}</span>. The editor is read-only until they finish.
-              </span>
-            </div>
+            <Banner
+              role="status"
+              tone="wait"
+              icon={<Lock size={14} />}
+              aria-live="polite"
+              aria-atomic="true"
+              className="mb-4 flex-none"
+            >
+              Locked by <span className="font-medium">{fileLock.externalLock.holderName}</span>. The editor is read-only until they finish.
+            </Banner>
           )}
 
           {/* Save-failure banner. Validator failures carry a structured
@@ -788,21 +897,25 @@ export function FileViewer() {
               commits, even unrelated edits — without this UI the failure
               looks silent and the user keeps clicking Save). */}
           {saveError && (
-            <div role="alert" aria-live="assertive" className="flex flex-col gap-2 px-3 py-2 bg-red-50 border-b border-red-200 shrink-0">
+            <Banner
+              role="alert"
+              tone="danger"
+              icon={<AlertTriangle size={14} />}
+              aria-live="assertive"
+              className="mb-4 flex-none"
+            >
               <div className="flex items-center gap-2">
-                <AlertTriangle size={14} className="text-red-700 shrink-0" />
-                <span className="text-xs text-red-800 flex-1 font-medium">{saveError.message}</span>
-                <button
-                  type="button"
-                  onClick={() => setSaveError(null)}
-                  className="text-red-700 hover:text-red-900 text-xs underline"
-                  title="Dismiss"
-                >
+                <span className="flex-1 font-medium">{saveError.message}</span>
+                <Button variant="quiet" size="sm" title="Dismiss" onClick={() => setSaveError(null)}>
                   Dismiss
-                </button>
+                </Button>
               </div>
+              {/* The validator gates EVERY commit, even an unrelated edit, so
+                  the structured issue list is the only way the user learns
+                  which KB problem is blocking their save. The 20-item cap and
+                  its "…and N more" tail stay. */}
               {saveError.kind === 'validation' && saveError.mustFix.length > 0 && (
-                <ul className="text-xs text-red-800 ml-6 list-disc space-y-0.5 max-h-32 overflow-y-auto">
+                <ul className="mt-1.5 max-h-32 list-disc space-y-0.5 overflow-y-auto pl-4 text-detail">
                   {saveError.mustFix.slice(0, 20).map((issue, i) => (
                     <li key={i}>
                       {issue.path && <span className="font-mono">{issue.path}</span>}
@@ -815,7 +928,7 @@ export function FileViewer() {
                   )}
                 </ul>
               )}
-            </div>
+            </Banner>
           )}
 
           {/* Review-action failure banner. Rejecting an agent change is
@@ -824,27 +937,29 @@ export function FileViewer() {
               surfaces it (and survives the review panel optimistically
               unmounting on a failed "Reject all"). */}
           {review.lastError && (
-            <div role="alert" aria-live="assertive" className="flex items-center gap-2 px-3 py-2 bg-red-50 border-b border-red-200 shrink-0">
-              <AlertTriangle size={14} className="text-red-700 shrink-0" />
-              <span className="text-xs text-red-800 flex-1 font-medium">{review.lastError}</span>
-              <button
-                type="button"
-                onClick={() => review.clearError()}
-                className="text-red-700 hover:text-red-900 text-xs underline"
-                title="Dismiss"
-              >
-                Dismiss
-              </button>
-            </div>
+            <Banner
+              role="alert"
+              tone="danger"
+              icon={<AlertTriangle size={14} />}
+              aria-live="assertive"
+              className="mb-4 flex-none"
+            >
+              <div className="flex items-center gap-2">
+                <span className="flex-1 font-medium">{review.lastError}</span>
+                <Button variant="quiet" size="sm" title="Dismiss" onClick={() => review.clearError()}>
+                  Dismiss
+                </Button>
+              </div>
+            </Banner>
           )}
 
           {/* File content — show pending (new) content when reviewing, accepted content otherwise.
               Lock semantics: the editor is read-only whenever we're not in
               explicit Edit mode. Edit mode is gated by the lock, so this
               also covers "someone else holds it" without a separate check.
-              `editorContainerRef` is the scroll-activity source for the
-              idle-release timer. */}
-          <div ref={editorContainerRef} className="flex-1 overflow-hidden p-4">
+              The scroll-activity source for the idle-release timer is the
+              shell above, not this wrapper — see `KbDocumentShell.scrollRef`. */}
+          <div className={shellVariant === 'full-bleed' ? 'flex min-h-0 flex-1 flex-col' : 'min-w-0'}>
             <Renderer
               // **Why we key on `openFileSavedContent` (read-only mode only).**
               // When a teammate's save lands, the workspace state updates the
@@ -875,32 +990,36 @@ export function FileViewer() {
           </div>
         </>
       )}
+      </KbDocumentShell>
       {registeredPanels}
       <PrViewer />
+      {shareTarget && (
+        <ManageAccessDialog
+          key={shareTarget.relativePath}
+          entry={shareTarget}
+          // Keyed on the path, so retargeting at a parent remounts the sheet
+          // against that folder — the whole thing is this one setter.
+          onManageAncestor={setShareTarget}
+          onClose={() => setShareTarget(null)}
+        />
+      )}
     </div>
   );
 }
 
-interface TabButtonProps {
-  active: boolean;
-  onClick(): void;
-  icon: ReactNode;
-  label: string;
-}
-
-function TabButton({ active, onClick, icon, label }: TabButtonProps) {
+/**
+ * The way back from a panel that took the document's place.
+ *
+ * `Content` is no longer a tab, so there is no tab to click to return. Without
+ * this row the only route home from Version history is reopening the file.
+ */
+function BackToDocument({ onBack, label }: { onBack(): void; label: string }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
-        active
-          ? 'bg-sunken text-ink'
-          : 'text-ink-muted hover:text-ink hover:bg-hover'
-      }`}
-    >
-      {icon}
-      {label}
-    </button>
+    <div className="mb-3 flex shrink-0 items-center gap-2">
+      <Button variant="quiet" size="sm" leadingIcon={<ArrowLeft size={13} />} onClick={onBack}>
+        Back to the document
+      </Button>
+      <span className="text-detail text-ink-faint">{label}</span>
+    </div>
   );
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { History, Undo2, AlertTriangle, Loader2 } from 'lucide-react';
 import type { CommitAttribution } from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
+import { formatRelativeTime } from '../../../lib/utils';
 import { UnifiedDiffView } from './UnifiedDiffView';
 import { friendlyGitError } from '../services/error-messages';
 import { useFileAccess } from '../../access/hooks/useFileAccess';
@@ -10,28 +11,6 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 
 function shortSha(sha: string): string {
   return sha.slice(0, 7);
-}
-
-/**
- * Human-readable relative time for the timeline ("2 hours ago", "3d ago"). Falls back to
- * an absolute date once we cross ~a month so the label doesn't become meaningless.
- */
-function formatRelativeTime(iso: string): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  const diffMs = Date.now() - d.getTime();
-  if (diffMs < 0) return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-  const mins = Math.floor(diffMs / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w ago`;
-  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 function formatAbsoluteTime(iso: string): string {

@@ -77,7 +77,7 @@ export function XlsxRenderer({ filePath }: FileRendererProps) {
 
   if (error) {
     return (
-      <div className="flex items-center justify-center h-full text-red-600 text-sm">
+      <div className="flex items-center justify-center h-full text-danger text-sm">
         {error}
       </div>
     );
@@ -110,7 +110,7 @@ export function XlsxRenderer({ filePath }: FileRendererProps) {
               key={s.name}
               type="button"
               onClick={() => setActiveSheet(i)}
-              className={`px-2 py-1 rounded text-xs font-medium whitespace-nowrap transition-colors ${
+              className={`px-2 py-1 rounded-xs text-xs font-medium whitespace-nowrap transition-colors ${
                 i === activeSheet
                   ? 'bg-sunken text-ink'
                   : 'text-ink-muted hover:text-ink hover:bg-hover'

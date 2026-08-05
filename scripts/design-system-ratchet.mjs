@@ -21,7 +21,7 @@
  */
 
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -70,7 +70,13 @@ const counts = Object.fromEntries(Object.keys(RULES).map((k) => [k, 0]));
 
 for (const dir of SCAN_DIRS) {
   for (const file of walk(join(ROOT, dir))) {
-    const rel = file.slice(ROOT.length + 1);
+    // Separators normalised before the EXEMPT test: `join()` builds a
+    // backslashed path on Windows, while EXEMPT is written with `/`, so
+    // `includes` matched NOTHING there — every design-system primitive got
+    // counted and the same tree reported different numbers per platform
+    // (here: +4 bare-rounded from Menu/Surface alone, enough to fail a gate
+    // that passes in CI).
+    const rel = file.slice(ROOT.length + 1).split(sep).join('/');
     if (EXEMPT.some((e) => rel.includes(e))) continue;
     const src = readFileSync(file, 'utf8');
     for (const [name, re] of Object.entries(RULES)) {

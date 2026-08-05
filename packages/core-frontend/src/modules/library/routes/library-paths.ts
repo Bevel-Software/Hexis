@@ -15,8 +15,8 @@ export const LIBRARY_ROOT = '/skills-and-tools';
 
 /**
  * What the sidebar should show as selected for a path. `null` on the pages that
- * are not a filtered view of the catalog — the all-groups index, propose, and
- * the item pages — where the gallery rows are all inactive.
+ * are not a filtered view of the catalog — the all-groups index and the item
+ * pages — where the gallery rows are all inactive.
  *
  * `matchPath` hands params back RAW (react-router decodes neither here nor in
  * `useParams`), so a group named `Sales & Ops` arrives as `Sales%20%26%20Ops`
@@ -57,17 +57,6 @@ export function pathForGroupsIndex(): string {
 }
 
 /**
- * The propose seam. Both the path and the `group` query key are FROZEN by the
- * master plan (§1): the change-request flow replaces the page's internals
- * wholesale, and this is the one URL it has to keep answering. Built here so
- * the contract has exactly one constructor rather than a template literal at
- * every link site.
- */
-export function pathForPropose(group?: string | null): string {
-  return group ? `${LIBRARY_ROOT}/propose?group=${encodeURIComponent(group)}` : `${LIBRARY_ROOT}/propose`;
-}
-
-/**
  * Read a `:group` route param. React-router 7 hands params back RAW from both
  * `matchPath` and `useParams`, so every reader owes this decode — and a
  * malformed escape (`%zz`, from a hand-edited or truncated link) THROWS, which
@@ -91,16 +80,9 @@ export function pathForTool(slug: string): string {
   return `${LIBRARY_ROOT}/tools/${encodeURIComponent(slug)}`;
 }
 
-/**
- * Whether a path is the all-groups index or the propose page. Both light the
- * "All groups" row: you reached propose from the index, and the place you came
- * from should stay lit while you're there.
- */
+/** Whether a path is the all-groups index — the one path that lights the "All groups" row. */
 export function isGroupsIndexPath(pathname: string): boolean {
-  return (
-    matchPath({ path: `${LIBRARY_ROOT}/groups`, end: true }, pathname) !== null ||
-    matchPath({ path: `${LIBRARY_ROOT}/propose`, end: true }, pathname) !== null
-  );
+  return matchPath({ path: `${LIBRARY_ROOT}/groups`, end: true }, pathname) !== null;
 }
 
 /** A malformed escape is a bad link, not a crash — fall back to the raw segment. */

@@ -61,6 +61,41 @@ vi.mock('../../../workflow/services/lock.api', () => ({
   },
 }));
 
+// The access sheet is a 1200-line dialog with its own suite and its own
+// endpoints. Here it only has to prove WHICH entry the page handed it — a file
+// and its parent folder are the two share scopes, and picking the wrong one is
+// the only mistake this wiring can make.
+vi.mock('../../../access/components/ManageAccessDialog', () => ({
+  ManageAccessDialog: ({ entry }: { entry: { relativePath: string; type: string } }) => (
+    <div role="dialog" aria-label={`Manage access: ${entry.type} ${entry.relativePath}`} />
+  ),
+}));
+
+// Wrap `useFileLock` rather than replacing it: every other case in this file
+// depends on the real acquire/release lifecycle. The wrapper only observes
+// `recordActivity`, which has no other visible effect (it resets a timer), so
+// there is no way to assert the scroll→lock wiring without a spy on it.
+const lockActivity = vi.hoisted(() => ({ recordActivity: vi.fn() }));
+vi.mock('../../../workflow/hooks/useFileLock', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../workflow/hooks/useFileLock')>();
+  const { useCallback } = await import('react');
+  return {
+    ...actual,
+    useFileLock: (args: Parameters<typeof actual.useFileLock>[0]) => {
+      const real = actual.useFileLock(args);
+      const realRecord = real.recordActivity;
+      // Stable identity: FileViewer's scroll effect lists `recordActivity` in
+      // its deps, and a fresh function each render would re-bind the listener
+      // on every render — changing exactly the behaviour under test.
+      const recordActivity = useCallback(() => {
+        lockActivity.recordActivity();
+        realRecord();
+      }, [realRecord]);
+      return { ...real, recordActivity };
+    },
+  };
+});
+
 import { FileViewer } from '../FileViewer';
 // The lock API is mocked above; import the mocked fns so individual tests can
 // override the acquire outcome (e.g. a 403 on enter-edit).
@@ -70,8 +105,10 @@ import { GitContext, type GitContextValue } from '../../../git/state/git.context
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { PrViewerContext, type PrViewerContextValue } from '../../../pr/state/pr-viewer.context';
+import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 
 let injectPendingFromTest: ((value?: string) => void) | null = null;
+const openPrSpy = vi.fn();
 
 function makeStatus(branch = 'alice/draft'): WorkingTreeStatus {
   return {
@@ -80,6 +117,16 @@ function makeStatus(branch = 'alice/draft'): WorkingTreeStatus {
     unmergedFromUpstream: false,
   };
 }
+
+const fetchFileHistoryMock = vi.fn(async () => [
+  {
+    sha: 'abc1234',
+    authorName: 'Ali Raza',
+    authorEmail: 'ali@example.com',
+    subject: 'Tighten the wording',
+    committedAt: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString(),
+  },
+]);
 
 function makeGit(status: WorkingTreeStatus): GitContextValue {
   const branches: BranchInfo[] = [];
@@ -101,7 +148,7 @@ function makeGit(status: WorkingTreeStatus): GitContextValue {
       subject: 's',
       committedAt: '2026-04-20T00:00:00.000Z',
     }),
-    fetchFileHistory: async () => [],
+    fetchFileHistory: fetchFileHistoryMock,
     fetchFileDiff: async () => '',
     fetchFileComparison: async () => '',
   };
@@ -114,6 +161,7 @@ function ViewerHarness({
   filePath = 'knowledge-base/Knowledge/Foo.md',
   kbDirName = 'knowledge-base',
   addTab,
+  changeRequests = [],
 }: {
   initialContent?: string;
   pendingValue?: string;
@@ -121,6 +169,8 @@ function ViewerHarness({
   filePath?: string;
   kbDirName?: string | null;
   addTab?: WorkspaceContextValue['addTab'];
+  /** Open change requests touching `filePath`. */
+  changeRequests?: { number: number; title: string; who: string }[];
 }) {
   const [openFileContent, setOpenFileContent] = useState(initialContent);
   const [pendingFileContent, setPendingFileContent] = useState<string | null>(null);
@@ -220,7 +270,7 @@ function ViewerHarness({
     selectedPath: null,
     isLoading: false,
     lastError: null,
-    openPr: () => {},
+    openPr: openPrSpy,
     closeViewer: () => {},
     selectPath: () => {},
     refresh: async () => {},
@@ -233,10 +283,26 @@ function ViewerHarness({
           <GitContext.Provider value={makeGit(makeStatus(branch))}>
             <ReviewContext.Provider value={review}>
               <PrViewerContext.Provider value={prViewer}>
-                <button type="button" onClick={() => setPendingFileContent(pendingValue)}>
-                  Inject pending
-                </button>
-                <FileViewer />
+                <OpenChangeRequestsContext.Provider
+                  value={{
+                    paths: new Set(changeRequests.length ? [filePath] : []),
+                    forPath: (p) =>
+                      p === filePath
+                        ? (changeRequests.map((c) => ({
+                            number: c.number,
+                            title: c.title,
+                            appAuthor: { name: c.who },
+                            author: { login: 'bevel-bot' },
+                            touchedNodePaths: ['Knowledge/Foo.md'],
+                          })) as never)
+                        : [],
+                  }}
+                >
+                  <button type="button" onClick={() => setPendingFileContent(pendingValue)}>
+                    Inject pending
+                  </button>
+                  <FileViewer />
+                </OpenChangeRequestsContext.Provider>
               </PrViewerContext.Provider>
             </ReviewContext.Provider>
           </GitContext.Provider>
@@ -488,5 +554,140 @@ describe('FileViewer', () => {
     expect(screen.getByText(/Eligible: Admin/i)).toBeInTheDocument();
     // And we did NOT flip into edit mode — no editable textbox appeared.
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  // WP1 regression. The document column moved: the viewer pane used to be
+  // `overflow-hidden` with a per-renderer scroller, and `editorContainerRef`
+  // sat on that pane. It now sits on `KbDocumentShell`, which is what actually
+  // scrolls. Scroll events do NOT bubble, so if the ref ever lands on a
+  // wrapper nested inside the scroller the capture listener stops firing,
+  // nothing type-errors, and a reader's lock silently auto-releases after two
+  // minutes. This suite had zero scroll / recordActivity coverage before.
+  it('resets the lock idle timer when the document is scrolled in edit mode', async () => {
+    const user = userEvent.setup();
+    lockActivity.recordActivity.mockClear();
+    render(<ViewerHarness initialContent="a long document" />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    // Edit mode is what arms the scroll listener.
+    await screen.findByRole('textbox');
+    lockActivity.recordActivity.mockClear();
+
+    const shell = screen.getByTestId('kb-document-shell');
+    await act(async () => {
+      shell.dispatchEvent(new Event('scroll'));
+    });
+
+    expect(lockActivity.recordActivity).toHaveBeenCalled();
+  });
+
+  it('leads the page with the document column, not a full-bleed pane', () => {
+    render(<ViewerHarness initialContent="measured" />);
+    const shell = screen.getByTestId('kb-document-shell');
+    // A markdown file is a document, so it gets the prose measure.
+    expect(shell.getAttribute('data-variant')).toBe('prose');
+    // …and the tab strip lives inside it, so tabs and text share one edge.
+    expect(shell.querySelector('[role="tablist"]')).not.toBeNull();
+  });
+
+  // ── WP4: the document names itself ──
+
+  it('names the file in an h1 and keeps no 40px chrome strip', () => {
+    render(<ViewerHarness initialContent="titled" />);
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Foo');
+    // The trio of sub-tabs went behind ⋯; Content is the page now.
+    expect(screen.queryByRole('button', { name: 'Content' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'History' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Compare' })).not.toBeInTheDocument();
+  });
+
+  it('opens Version history from ⋯ and offers a way back to the document', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="historic" />);
+
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: /Version history/ }));
+
+    const back = await screen.findByRole('button', { name: /Back to the document/ });
+    await user.click(back);
+    // The document is back, and so is its Edit affordance.
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+  });
+
+  it('shares the file itself from Share, and the parent folder from the chevron', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="shared" />);
+
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access: file knowledge-base/Knowledge/Foo.md',
+      }),
+    ).toBeInTheDocument();
+    // And there is no second scope: sharing the whole folder starts at the
+    // folder's own row in the tree, beside the children it governs.
+    await user.click(screen.getByRole('button', { name: 'More sharing options' }));
+    expect(screen.queryByRole('menuitem', { name: /whole folder/i })).not.toBeInTheDocument();
+  });
+
+  // ── WP5: the rail ──
+
+  // A closed rail must cost nothing. `fetchFileHistory` is not cached and
+  // `FileHistoryPanel` refetches the same history anyway, so an ungated call
+  // would be one wasted request per file opened, for every reader, forever.
+  it('opens the rail from ⋯ and issues no history request until it is open', async () => {
+    const user = userEvent.setup();
+    fetchFileHistoryMock.mockClear();
+    render(<ViewerHarness initialContent="railed" />);
+
+    expect(screen.queryByText('About this file')).not.toBeInTheDocument();
+    expect(fetchFileHistoryMock).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: /File details/ }));
+
+    expect(await screen.findByText('About this file')).toBeInTheDocument();
+    expect(screen.getByText('knowledge-base/Knowledge/Foo.md')).toBeInTheDocument();
+    await waitFor(() => expect(fetchFileHistoryMock).toHaveBeenCalledWith(
+      'knowledge-base/Knowledge/Foo.md',
+      1,
+    ));
+    expect(await screen.findByText(/by Ali/)).toBeInTheDocument();
+  });
+
+  // ── WP6: the third place ──
+
+  // The D3 asymmetry, made visible: this signal comes from the BROAD endpoint,
+  // so a request opened by somebody else on a file you can read but not write
+  // still says so here — while the dock, which is scoped to you, stays empty.
+  it('says so on the page when a file has an open change request', async () => {
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="contested"
+        changeRequests={[{ number: 32, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+
+    expect(await screen.findByText('Open change request')).toBeInTheDocument();
+    expect(screen.getByText(/Ali Raza proposed/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Review the change' }));
+    expect(openPrSpy).toHaveBeenCalledWith(32);
+  });
+
+  it('says nothing on a file nobody has proposed a change to', () => {
+    render(<ViewerHarness initialContent="quiet" />);
+    expect(screen.queryByText('Open change request')).not.toBeInTheDocument();
+  });
+
+  it('widens the column when the rail is open', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="railed" />);
+    const wrap = () => screen.getByTestId('kb-document-shell').firstElementChild as HTMLElement;
+    expect(wrap().className).toContain('max-w-[880px]');
+
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: /File details/ }));
+    expect(wrap().className).toContain('max-w-[980px]');
   });
 });

@@ -125,7 +125,11 @@ describe('UserAccountsPage', () => {
     const dialog = within(screen.getByRole('dialog'));
     await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    expect(screen.getByText('Failed to erase user')).toBeInTheDocument();
+    // Announced, not merely coloured — same guarantee the load failure gets.
+    expect(screen.getByRole('alert')).toHaveTextContent('Failed to erase user');
+    // And the rows survive: keeping what was already fetched is the half of
+    // the old `[]` coercion that was worth keeping, so it is pinned here.
+    expect(screen.getByText('Alice')).toBeInTheDocument();
     expect(listAccounts).toHaveBeenCalledTimes(1);
   });
 
@@ -152,5 +156,17 @@ describe('UserAccountsPage', () => {
     await userEvent.type(screen.getByLabelText('Password'), 'short');
     await userEvent.click(screen.getByRole('button', { name: 'Add account' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('at least 8 characters');
+  });
+
+  // "We could not ask" is not "there is nobody". The failure used to store an
+  // empty list, so an admin whose backend was unreachable read "No user
+  // accounts." — a deployment they would have had every reason to believe.
+  it('a failed FIRST load reports the failure rather than an empty deployment', async () => {
+    vi.mocked(listAccounts).mockReset().mockRejectedValue(new Error('Backend unreachable'));
+    renderPage();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Backend unreachable');
+    expect(screen.queryByText('No user accounts.')).not.toBeInTheDocument();
+    // ...and no "Loading…" left sitting beside the banner forever, either.
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import {
@@ -184,20 +184,34 @@ describe('GroupPage', () => {
     expect(screen.queryByText(/shared with/)).not.toBeInTheDocument();
   });
 
-  it('offers a writer the Add dialog, with the group in its title', async () => {
+  // ONE door, for every role. The page used to fork on `canWrite` into "Add
+  // skills or tools" (a dialog) and "Propose a skill or tool" (a whole other
+  // page) — the same button, in the same spot, opening a different flow with
+  // different words depending on who pressed it. Who reviews what is a property
+  // of the group, not of the door.
+  it('opens the same add dialog for a writer', async () => {
     groupsMock.listGroups.mockResolvedValue([gtm({ canWrite: true })]);
     renderGroup('GTM');
-    fireEvent.click(await screen.findByRole('button', { name: 'Add skills or tools' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add a skill or tool to GTM' }));
     expect(
       await screen.findByRole('heading', { name: 'Add a skill or tool to GTM' }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Propose a skill or tool' })).not.toBeInTheDocument();
+    expect(screen.getByText(/no review step/)).toBeInTheDocument();
   });
 
-  it('sends everyone else to the propose seam with the group in the query', async () => {
+  it('opens the same add dialog for everyone else, and says review is coming', async () => {
     renderGroup('GTM');
-    fireEvent.click(await screen.findByRole('button', { name: 'Propose a skill or tool' }));
-    await waitFor(() => expect(href()).toBe('/skills-and-tools/propose?group=GTM'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add a skill or tool to GTM' }));
+    expect(
+      await screen.findByRole('heading', { name: 'Add a skill or tool to GTM' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/an owner reviews it before it joins/)).toBeInTheDocument();
+  });
+
+  it('offers no separate propose door to anybody', async () => {
+    renderGroup('GTM');
+    await screen.findByRole('button', { name: 'Add a skill or tool to GTM' });
+    expect(screen.queryByRole('button', { name: /Propose/i })).not.toBeInTheDocument();
   });
 
   it('warns about integrations that need setup and sends them to Connect', async () => {
@@ -289,6 +303,8 @@ describe('GroupPage', () => {
       await screen.findByRole('button', { name: 'Subscribe to its skills and tools' }),
     ).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Skills' })).not.toBeInTheDocument();
+    // A locked group offers no way in at all — not an add door, not a propose one.
+    expect(screen.queryByRole('button', { name: /Add a skill or tool/ })).not.toBeInTheDocument();
   });
 
   it('a locked-out admin (canWrite via admin-rescue) gets the locked view with Manage access', async () => {
@@ -327,9 +343,10 @@ describe('GroupPage', () => {
     groupsMock.listGroups.mockRejectedValue(new Error("Couldn't load groups."));
     renderGroup('GTM');
     expect(await screen.findByTestId('library-card-skill-outreach')).toBeInTheDocument();
-    // No verified principals, so no claim about them — and never the write action.
+    // No verified principals, so no claim about them. The add door still opens
+    // — it writes nothing, so there is no permission to be wrong about.
     expect(screen.queryByText(/^Run by/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Propose a skill or tool' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add a skill or tool to GTM' })).toBeInTheDocument();
   });
 
   it('does not claim a missing group is gone while the endpoint is still failing', async () => {
@@ -360,5 +377,51 @@ describe('GroupPage', () => {
     renderGroup('GTM');
     expect(screen.getByText('Loading the library…')).toBeInTheDocument();
     expect(screen.queryByText("This group doesn't exist yet.")).not.toBeInTheDocument();
+  });
+
+  /**
+   * "Last updated just now" is a CLAIM, and the page has to be able to back it.
+   * Both refetches behind the button return `void`, so the only honest end of
+   * the spin is the loads settling — which is what these two pin. The spinner
+   * is read off `animate-spin` because that class is the only thing in the DOM
+   * that distinguishes "checking" from "idle": both states render the same
+   * button with the same name.
+   */
+  describe('checking for updates', () => {
+    const refreshButton = () => screen.getByRole('button', { name: 'Check for updates' });
+    const spinning = () => refreshButton().querySelector('.animate-spin') !== null;
+
+    it('claims freshness only once the refetch has actually landed', async () => {
+      renderGroup('GTM');
+      await screen.findByRole('heading', { name: 'GTM', level: 1 });
+
+      let land!: (groups: GroupSummary[]) => void;
+      groupsMock.listGroups.mockReturnValueOnce(
+        new Promise<GroupSummary[]>((resolve) => {
+          land = resolve;
+        }),
+      );
+
+      fireEvent.click(refreshButton());
+      await waitFor(() => expect(spinning()).toBe(true));
+      // Still in flight — the page says nothing about being up to date.
+      expect(screen.queryByText('Last updated just now')).not.toBeInTheDocument();
+
+      await act(async () => {
+        land([gtm()]);
+      });
+      expect(await screen.findByText('Last updated just now')).toBeInTheDocument();
+    });
+
+    it('does not report success when the refetch fails', async () => {
+      renderGroup('GTM');
+      await screen.findByRole('heading', { name: 'GTM', level: 1 });
+
+      groupsMock.listGroups.mockRejectedValueOnce(new Error("Couldn't load groups."));
+      fireEvent.click(refreshButton());
+
+      await waitFor(() => expect(spinning()).toBe(false));
+      expect(screen.queryByText('Last updated just now')).not.toBeInTheDocument();
+    });
   });
 });

@@ -1,11 +1,14 @@
 import { useMemo, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { cn } from '../../../lib/utils';
+import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { useAuth } from '../../auth/state/auth.context';
 import { attentionOf, useLibrary } from '../state/library-data';
 import { personalGroupName } from '../utils/personal-group';
 import { libraryFilterForPath, pathForLibraryFilter } from '../routes/library-paths';
 import { groupCounts } from '../utils/status';
-import { useLibrarySidebar } from '../state/sidebar-collapse';
+import { useSidebar } from '../../layout/state/sidebar';
+import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { GroupsSidebar } from './GroupsSidebar';
 import { NewGroupDialog } from './NewGroupDialog';
 
@@ -26,11 +29,11 @@ export function LibraryLayout() {
   const [newGroupOpen, setNewGroupOpen] = useState(false);
   /**
    * Whether the nav is hidden. The state lives in a module store because the
-   * button that flips it sits in the top bar (left of the brand), outside
-   * this layout's tree — see `sidebar-collapse.ts` for why it is a store and
-   * why it is session-scoped.
+   * button that flips it sits in the top bar, outside this layout's tree —
+   * and because Knowledge's copy of this sidebar is the same object, not a
+   * second one. See `layout/state/sidebar.ts`.
    */
-  const { collapsed } = useLibrarySidebar();
+  const { collapsed } = useSidebar();
 
   const filter = libraryFilterForPath(location.pathname);
 
@@ -76,20 +79,21 @@ export function LibraryLayout() {
 
   return (
     <div className="flex h-full min-h-0 bg-canvas text-ink">
-      <GroupsSidebar
-        filter={filter}
-        onSelect={(next) => navigate(pathForLibraryFilter(next))}
-        groups={groups}
-        lockedGroups={lockedGroups}
-        ownedCount={ownedCount}
-        ownedAttention={ownedAttention}
-        personalGroupLabel={personalGroupName(user?.name)}
-        ungroupedCount={ungroupedCount}
-        attentionCount={attentionCount}
-        onFinishSetup={() => navigate('/connect')}
-        onCreateGroup={() => setNewGroupOpen(true)}
-        collapsed={collapsed}
-      />
+      <SidebarFrame label="Library groups">
+        <GroupsSidebar
+          filter={filter}
+          onSelect={(next) => navigate(pathForLibraryFilter(next))}
+          groups={groups}
+          lockedGroups={lockedGroups}
+          ownedCount={ownedCount}
+          ownedAttention={ownedAttention}
+          personalGroupLabel={personalGroupName(user?.name)}
+          ungroupedCount={ungroupedCount}
+          attentionCount={attentionCount}
+          onFinishSetup={() => navigate('/connect')}
+          onCreateGroup={() => setNewGroupOpen(true)}
+        />
+      </SidebarFrame>
 
       {newGroupOpen && (
         <NewGroupDialog
@@ -105,8 +109,17 @@ export function LibraryLayout() {
         />
       )}
 
-      <main className="min-w-0 flex-1 overflow-y-auto px-8 py-6">
-        <Outlet />
+      {/* The shared measure (`plans/05-knowledge-ui.md` D6). The pane stays the
+          scroller so the scrollbar keeps sitting at its edge; the column
+          inside it is the same 880px and the same side gutters Knowledge
+          uses, so the two surfaces cannot report different widths at the same
+          window width. Top padding is the one measure they deliberately do
+          NOT share: Skills opens on a heading (34px), Knowledge on a tab
+          strip (12px). */}
+      <main className="min-w-0 flex-1 overflow-y-auto">
+        <div className={cn(DOCUMENT_COLUMN, documentGutters(collapsed), 'pt-[34px]')}>
+          <Outlet />
+        </div>
       </main>
     </div>
   );

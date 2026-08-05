@@ -6,7 +6,6 @@ import { LibraryPage } from '../components/LibraryPage';
 import { GroupPage } from '../components/GroupPage';
 import { GroupsIndexPage } from '../components/GroupsIndexPage';
 import { PersonalGroupPage } from '../components/PersonalGroupPage';
-import { ProposeSkillPage } from '../components/ProposeSkillPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
 import { LIBRARY_ROOT } from './library-paths';
 
@@ -42,11 +41,9 @@ export function LibraryRoutes() {
 
             {/* A group is a PLACE: `groups/:group` is a real page with a real
                 URL, and `GroupPage` — not the router — decides whether the
-                caller gets the member view or the locked one. `propose` is
-                Ali's seam; its `?group=` query is frozen by the plan. */}
+                caller gets the member view or the locked one. */}
             <Route path="groups" element={<GroupsIndexPage />} />
             <Route path="groups/:group" element={<GroupPage />} />
-            <Route path="propose" element={<ProposeSkillPage />} />
 
             {/* The routed replacement for the dialog's tool half, and the
                 landing target of the OAuth round-trip

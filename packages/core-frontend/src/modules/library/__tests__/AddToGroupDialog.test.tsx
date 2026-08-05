@@ -27,7 +27,7 @@ function LocationProbe() {
   return <div aria-label="href">{location.pathname}</div>;
 }
 
-function renderDialog(kbDirName: string | null = 'knowledge-base') {
+function renderDialog(kbDirName: string | null = 'knowledge-base', canWrite = true) {
   const onClose = vi.fn();
   render(
     <MemoryRouter initialEntries={['/skills-and-tools/groups/GTM']}>
@@ -37,7 +37,12 @@ function renderDialog(kbDirName: string | null = 'knowledge-base') {
             <Route
               path="*"
               element={
-                <AddToGroupDialog name="GTM" primaryPath="Groups/GTM" onClose={onClose} />
+                <AddToGroupDialog
+                  name="GTM"
+                  primaryPath="Groups/GTM"
+                  canWrite={canWrite}
+                  onClose={onClose}
+                />
               }
             />
           </Routes>
@@ -121,5 +126,26 @@ describe('AddToGroupDialog', () => {
     const closes = screen.getAllByRole('button', { name: 'Close' });
     fireEvent.click(closes[closes.length - 1]);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── one door, one varying clause ──
+// The group page used to fork on `canWrite` into two different flows. It does
+// not any more: everybody gets THIS dialog, and the only thing role changes is
+// what the prompt says happens next.
+describe('AddToGroupDialog for a non-writer', () => {
+  it('offers the same dialog, and tells the truth about review', () => {
+    renderDialog('knowledge-base', false);
+    expect(
+      screen.getByText(/goes to GTM as a change request, and an owner reviews it/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/send it to the group as a change request/)).toBeInTheDocument();
+    expect(screen.queryByText(/no review step/)).not.toBeInTheDocument();
+  });
+
+  it('still offers the workspace link and the copy button', () => {
+    renderDialog('knowledge-base', false);
+    expect(screen.getByRole('button', { name: /Open GTM in the workspace/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
   });
 });
