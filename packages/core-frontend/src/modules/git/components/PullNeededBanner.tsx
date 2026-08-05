@@ -7,6 +7,7 @@ import { useCrCreationPort } from '../../../core/registry';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { sanitizeErrorText } from '../services/error-messages';
+import { Button } from '../../../shared/components';
 
 /**
  * Classify a pull failure into a short, user-safe phrase. Returned strings
@@ -172,7 +173,7 @@ export function PullNeededBanner() {
   return (
     <div
       role="status"
-      className="px-3 py-1.5 bg-sky-50 border-b border-sky-200 text-xs text-sky-800 shrink-0"
+      className="px-3 py-1.5 bg-sunken border-b border-line text-xs text-ink shrink-0"
     >
       <div className="flex items-center gap-2">
         <GitMerge size={13} className="shrink-0" />
@@ -180,22 +181,14 @@ export function PullNeededBanner() {
           {message} (<span className="font-mono font-semibold">{status.branch}</span>).
         </span>
         {showAction && (
-          <button
-            onClick={handleClick}
-            disabled={pending}
-            className="px-2 py-0.5 rounded bg-sky-600 hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium"
-          >
+          <Button variant="primary" size="tiny" onClick={handleClick} disabled={pending}>
             {buttonLabel}
-          </button>
+          </Button>
         )}
       </div>
-      {guidance && (
-        <div className="mt-1 ml-5 text-sky-700">
-          {guidance}
-        </div>
-      )}
+      {guidance && <div className="mt-1 ml-5 text-ink-muted">{guidance}</div>}
       {error && (
-        <div role="alert" className="mt-1 ml-5 text-rose-700">
+        <div role="alert" className="mt-1 ml-5 text-danger">
           {error}
         </div>
       )}

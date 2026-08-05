@@ -8,7 +8,7 @@ import {
   type JoinProposal,
   type JoinRequest,
 } from '../services/groups.api';
-import { useLibraryToast } from '../state/toast';
+import { useLibraryToast } from '../state/toast.context';
 
 /**
  * The join requests one group's managers can answer, and the two ways to
@@ -73,7 +73,7 @@ export function useJoinRequests(group: string, folder: string | null): JoinReque
           principal: proposal.principal,
         });
       } catch (err) {
-        toast(err instanceof Error ? err.message : "Couldn't grant that — try again.");
+        toast(err instanceof Error ? err.message : "Couldn't grant that — try again.", 'danger');
         setRevision((r) => r + 1);
         return;
       }
@@ -103,7 +103,7 @@ export function useJoinRequests(group: string, folder: string | null): JoinReque
       try {
         await cancelPullRequest(request.number);
       } catch {
-        toast("Couldn't dismiss that — try again.");
+        toast("Couldn't dismiss that — try again.", 'danger');
       }
       setRevision((r) => r + 1);
     },

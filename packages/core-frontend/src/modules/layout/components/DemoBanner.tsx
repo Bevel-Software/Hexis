@@ -1,4 +1,5 @@
 import { Clock } from 'lucide-react';
+import { cn } from '../../../lib/utils';
 
 /**
  * App-wide demo notice. Renders for every authenticated user to make clear the
@@ -35,10 +36,18 @@ export function DemoBanner() {
   const daysLeft = Math.ceil(msLeft / (1000 * 60 * 60 * 24));
   const expired = msLeft <= 0;
 
+  // An unexpired demo is a caution (`wait`); an expired one is a failed state
+  // the user has to act on, so it takes the `danger` tone rather than shouting
+  // the same note louder.
+  const tone = expired ? 'bg-danger-soft text-danger' : 'bg-wait-soft text-ink';
+
   return (
     <div
       role="status"
-      className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm shrink-0"
+      className={cn(
+        'flex items-center gap-2 px-4 py-2 border-b border-line text-sm shrink-0',
+        tone,
+      )}
     >
       <Clock size={16} className="shrink-0" />
       <span className="flex-1">

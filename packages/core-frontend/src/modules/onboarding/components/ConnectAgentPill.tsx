@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useInRouterContext, useLocation, useNavigate } from 'react-router-dom';
 import { X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
-import { useLibraryToast } from '../../library/state/toast';
+import { useLibraryToast } from '../../library/state/toast.context';
 import { useOnboarding } from '../state/onboarding';
 import { WELCOME_PATH } from '../paths';
 

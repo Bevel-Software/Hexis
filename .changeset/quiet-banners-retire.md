@@ -17,3 +17,8 @@ skipped too.
 Nothing else changes: those two banners still render in the same slot, and the
 `isProtectedBranch` / `protectedBranchDisplayName` helpers stay — the branch
 switcher, comparison panel, and change-request dialogs are still their callers.
+
+One overlap worth naming: the notification design-system pass moved four
+strips onto token tones, this one among them. Deleting the component retires
+that share of it — the token tones land on the three strips that survive
+(pull-needed, demo, roles-corrupted), not four.

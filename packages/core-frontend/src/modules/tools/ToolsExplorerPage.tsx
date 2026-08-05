@@ -323,7 +323,12 @@ export function ToolsExplorerPage() {
     <div className="h-full overflow-auto bg-sunken">
       <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
         <header className="space-y-1">
-          <h1 className="text-lg font-semibold text-ink">Bevel tools</h1>
+          {/* Matches the nav row that reaches it. Nothing used to put the two
+              on screen together, so the mismatch was invisible; with a
+              persistent nav, a row marked `aria-current` beside a heading with
+              a different name reads as a broken link — and a screen reader
+              hears the nav assert one name and the page answer with another. */}
+          <h1 className="text-lg font-semibold text-ink">Browse available tools</h1>
           <p className="text-sm text-ink-muted">
             Every tool Bevel exposes to external agents — the same surface available over MCP at{' '}
             <code className="text-ink-muted">/api/mcp</code>. Loaded with your session below; or browse as a specific
