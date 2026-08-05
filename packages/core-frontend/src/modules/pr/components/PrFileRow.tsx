@@ -21,7 +21,7 @@ function KindIcon({ status }: { status: PullRequestFile['status'] }) {
     case 'added': return <FilePlus2 size={size} className="text-emerald-600" />;
     case 'removed': return <FileX2 size={size} className="text-red-600" />;
     case 'renamed':
-    case 'copied': return <ArrowRightLeft size={size} className="text-bevel" />;
+    case 'copied': return <ArrowRightLeft size={size} className="text-accent" />;
     case 'modified':
     case 'changed': return <FileEdit size={size} className="text-amber-600" />;
     default: return <FileQuestion size={size} className="text-ink-muted" />;

@@ -23,7 +23,7 @@ import type { PaneDef } from '../../../core/registry';
 
 const LAYOUT_ID = 'bevel-shell-v1';
 const SEPARATOR_CLASS =
-  'w-px bg-sunken hover:bg-bevel-deep/60 data-[dragging=true]:bg-bevel-deep transition-colors outline-none focus-visible:bg-bevel-deep cursor-col-resize';
+  'w-px bg-sunken hover:bg-accent-hover/60 data-[dragging=true]:bg-accent-hover transition-colors outline-none focus-visible:bg-accent-hover cursor-col-resize';
 
 function getSafeLocalStorage(): Storage | undefined {
   if (typeof window === 'undefined') return undefined;

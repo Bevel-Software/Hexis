@@ -60,10 +60,6 @@ const twMerge = extendTailwindMerge({
         'mark-del',
         'mark-ins',
         'scrim',
-        // brand purple — outside the design system, fate pending (T21)
-        'bevel',
-        'bevel-deep',
-        'bevel-soft',
       ],
       shadow: ['overlay', 'card'],
     },
