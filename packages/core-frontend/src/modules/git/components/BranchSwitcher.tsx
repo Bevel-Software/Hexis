@@ -33,7 +33,7 @@ function slugifyDraftName(email: string, text: string): string {
  * Place the branch dropdown just below its trigger. Coordinates are
  * viewport-fixed because the panel is portaled to <body> (so the toolbar's
  * mobile `overflow` row can't clip it). The left edge is clamped to keep the
- * 288px-wide panel fully on screen on narrow phones.
+ * 400px-wide panel fully on screen on narrow phones.
  */
 function computePanelPosition(triggerRect: DOMRect): { top: number; left: number } {
   const PANEL_WIDTH = 400; // matches Tailwind w-[400px]

@@ -5,9 +5,13 @@ import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
   commitSidebarWidth,
+  setSidebarCollapsed,
   setSidebarWidth,
   useSidebar,
 } from '../state/sidebar';
+import { useMediaQuery } from '../hooks/useMediaQuery';
+import { NARROW_QUERY } from '../breakpoints';
+import { useModalLayer } from '../../../shared/components/useModalLayer';
 
 /**
  * The `aria-controls` target for the top bar's toggle, which renders in a
@@ -15,6 +19,14 @@ import {
  * the two surfaces never appear at once.
  */
 export const SIDEBAR_DOM_ID = 'app-sidebar';
+
+/** The old Knowledge drawer's phone measure: most of the screen, with a
+ * visible strip of backdrop left as an obvious tap target. */
+export const SIDEBAR_DRAWER_WIDTH = '85vw';
+export const SIDEBAR_DRAWER_MAX_WIDTH = '24rem';
+
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
  * The app's nav spine — the prototype's `.side` + `.resizer` + `.side-inner`
@@ -59,8 +71,68 @@ export function SidebarFrame({
   header?: ReactNode;
 }) {
   const { collapsed, width, instant } = useSidebar();
+  const narrow = useMediaQuery(NARROW_QUERY);
   const [dragging, setDragging] = useState(false);
   const asideRef = useRef<HTMLElement>(null);
+  const wasNarrowRef = useRef(false);
+  const drawerOpen = narrow && !collapsed && wasNarrowRef.current === narrow;
+  const isTopModalLayer = useModalLayer(drawerOpen);
+
+  // This frame owns the breakpoint because there is only ever one sidebar
+  // mounted. Treat wide as the baseline and write only when the query crosses
+  // it: a user can reopen the sidebar while narrow and it stays open until
+  // navigation or another transition. A pre-collapsed desktop mount is also
+  // left alone rather than mistaken for a breakpoint change.
+  useEffect(() => {
+    if (wasNarrowRef.current === narrow) return;
+    wasNarrowRef.current = narrow;
+    setSidebarCollapsed(narrow);
+  }, [narrow]);
+
+  // A narrow sidebar covers the page rather than taking width from it. Treat
+  // that presentation as a modal drawer: pull focus inside, keep Tab inside,
+  // let Escape dismiss only the topmost modal layer, then return focus to the
+  // toolbar toggle that opened it. Desktop remains a plain complementary nav.
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const aside = asideRef.current;
+    (aside?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR) ?? aside)?.focus?.();
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        if (!isTopModalLayer()) return;
+        e.stopPropagation();
+        setSidebarCollapsed(true);
+        return;
+      }
+      if (e.key !== 'Tab' || !aside) return;
+      const focusable = Array.from(
+        aside.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+      );
+      if (focusable.length === 0) {
+        e.preventDefault();
+        aside.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || active === aside)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      previouslyFocused?.focus?.();
+    };
+  }, [drawerOpen, isTopModalLayer]);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -153,13 +225,27 @@ export function SidebarFrame({
 
   return (
     <>
+      {drawerOpen && (
+        <div
+          data-sidebar-backdrop
+          aria-hidden="true"
+          className="fixed inset-0 z-40 bg-scrim"
+          onClick={() => {
+            if (isTopModalLayer()) setSidebarCollapsed(true);
+          }}
+        />
+      )}
       <aside
         ref={asideRef}
         id={SIDEBAR_DOM_ID}
         aria-label={label}
+        role={drawerOpen ? 'dialog' : undefined}
+        aria-modal={drawerOpen ? true : undefined}
+        tabIndex={drawerOpen ? -1 : undefined}
         inert={collapsed}
         className={cn(
           'h-full shrink-0 overflow-hidden border-r bg-sidebar',
+          narrow ? 'fixed inset-y-0 left-0 z-50 shadow-2xl' : 'relative',
           collapsed ? 'border-r-transparent' : 'border-line',
           // An easing curve would lag the cursor, so the transition is off for
           // the duration of the drag (proto:89) — and off again for a change
@@ -169,11 +255,20 @@ export function SidebarFrame({
             ? 'transition-none'
             : 'transition-[width] duration-[240ms] ease-[cubic-bezier(.2,.8,.2,1)]',
         )}
-        style={{ width: collapsed ? 0 : width }}
+        style={{
+          width: collapsed ? 0 : narrow ? SIDEBAR_DRAWER_WIDTH : width,
+          maxWidth: narrow ? SIDEBAR_DRAWER_MAX_WIDTH : undefined,
+        }}
       >
         {/* proto:104 — `padding:16px 14px 18px`, and an explicit width so the
             column does not reflow while the frame animates to zero. */}
-        <div className="flex h-full flex-col px-3.5 pt-4 pb-[18px]" style={{ width }}>
+        <div
+          className="flex h-full flex-col px-3.5 pt-4 pb-[18px]"
+          style={{
+            width: narrow ? SIDEBAR_DRAWER_WIDTH : width,
+            maxWidth: narrow ? SIDEBAR_DRAWER_MAX_WIDTH : undefined,
+          }}
+        >
           {header}
           {children}
         </div>
@@ -182,7 +277,7 @@ export function SidebarFrame({
       {/* The handle straddles the border without occupying layout: its own
           width is cancelled by the negative margins, so nothing shifts when
           the sidebar collapses and it goes away (proto:92-97). */}
-      {!collapsed && (
+      {!narrow && !collapsed && (
         <div
           role="separator"
           aria-orientation="vertical"

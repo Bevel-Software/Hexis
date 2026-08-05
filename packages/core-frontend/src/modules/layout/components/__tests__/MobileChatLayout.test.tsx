@@ -1,9 +1,22 @@
-import { describe, it, expect } from 'vitest';
+import { beforeEach, describe, it, expect } from 'vitest';
 import { render, screen, waitForElementToBeRemoved } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { MobileChatLayout } from '../MobileChatLayout';
 import { useLayout } from '../../state/layout.context';
+import {
+  SIDEBAR_DOM_ID,
+  SIDEBAR_DRAWER_MAX_WIDTH,
+  SIDEBAR_DRAWER_WIDTH,
+} from '../SidebarFrame';
+import { setSidebarCollapsed } from '../../state/sidebar';
+
+function setViewportWidth(width: number): void {
+  const testWindow = window as typeof window & {
+    happyDOM: { setInnerWidth(value: number): void };
+  };
+  testWindow.happyDOM.setInnerWidth(width);
+}
 
 function HeaderToggle() {
   const { toggleExplorer, canToggleChat } = useLayout();
@@ -31,10 +44,15 @@ function renderLayout(initialPath: string) {
 }
 
 describe('MobileChatLayout', () => {
+  beforeEach(() => {
+    setViewportWidth(375);
+    setSidebarCollapsed(false);
+  });
+
   it('always renders the chat slot and hides the explorer until opened', () => {
     renderLayout('/');
     expect(screen.getByText('CHAT_PANEL')).toBeInTheDocument();
-    expect(screen.queryByText('FILE_EXPLORER')).toBeNull();
+    expect(document.getElementById(SIDEBAR_DOM_ID)).toHaveAttribute('inert');
   });
 
   it('exposes canToggleChat=false because chat is pinned full-screen', () => {
@@ -46,6 +64,9 @@ describe('MobileChatLayout', () => {
     const user = userEvent.setup();
     renderLayout('/');
     await user.click(screen.getByRole('button', { name: 'open-explorer' }));
+    const drawer = screen.getByRole('dialog', { name: 'File explorer' });
+    expect(drawer.style.width).toBe(SIDEBAR_DRAWER_WIDTH);
+    expect(drawer.style.maxWidth).toBe(SIDEBAR_DRAWER_MAX_WIDTH);
     expect(screen.getByText('FILE_EXPLORER')).toBeInTheDocument();
   });
 

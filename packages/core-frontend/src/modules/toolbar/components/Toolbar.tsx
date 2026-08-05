@@ -9,6 +9,7 @@ import { useAppRegistry } from '../../../core/registry';
 import { SidebarToggle } from '../../layout/components/SidebarToggle';
 import { toggleSidebar, useSidebar } from '../../layout/state/sidebar';
 import { LIBRARY_ROOT } from '../../library/routes/library-paths';
+import { TOOLBAR_STACK_QUERY } from '../../layout/breakpoints';
 
 export function Toolbar() {
   const registry = useAppRegistry();
@@ -34,7 +35,7 @@ export function Toolbar() {
   // Below the `md` breakpoint the registry item cluster (the enterprise
   // branch switcher, for one) does not fit alongside the toolbar essentials,
   // so it drops onto a second row instead of overflowing offscreen.
-  const isCompact = useMediaQuery('(max-width: 767px)');
+  const isCompact = useMediaQuery(TOOLBAR_STACK_QUERY);
 
   // Registry-contributed left-cluster items. The CORE toolbar has none of its
   // own: the branch switcher is an enterprise contribution scoped (by the

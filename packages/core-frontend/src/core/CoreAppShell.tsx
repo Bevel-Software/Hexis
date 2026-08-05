@@ -50,6 +50,9 @@ import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
 import { RootLanding } from '../modules/onboarding/components/RootLanding';
 import { ConnectAgentPill } from '../modules/onboarding/components/ConnectAgentPill';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
+import { useMediaQuery } from '../modules/layout/hooks/useMediaQuery';
+import { NARROW_QUERY } from '../modules/layout/breakpoints';
+import { setSidebarCollapsed } from '../modules/layout/state/sidebar';
 import {
   activeAppId,
   ActiveAppIdContext,
@@ -240,9 +243,10 @@ function KnowledgeSurface() {
   );
 }
 
-function AppChrome() {
+export function AppChrome() {
   const registry = useAppRegistry();
   const location = useLocation();
+  const narrow = useMediaQuery(NARROW_QUERY);
   const banners = useMemo(
     () =>
       [...CORE_BANNERS, ...registry.banners].sort(
@@ -257,6 +261,12 @@ function AppChrome() {
   );
   const activeId = activeAppId(apps, location.pathname);
 
+  // A narrow sidebar can be opened from the toolbar, but it must not cover
+  // the destination after the user chooses a group or file inside it.
+  useEffect(() => {
+    if (narrow) setSidebarCollapsed(true);
+  }, [location.pathname, narrow]);
+
   // Pane controller bridge: the toolbar sits OUTSIDE the active app's surface,
   // so the Knowledge pane layout reports its controller up here and the shell
   // provides it around toolbar + surface. While a pane-less app (Skills &
@@ -270,7 +280,7 @@ function AppChrome() {
         <PaneControllerContext.Provider value={setPaneController}>
           {/* Flex-col wrapper so the (conditional) banner strip takes its own
               height and the toolbar + active surface flex into the rest. */}
-          <div className="flex flex-col h-screen">
+          <div className="flex flex-col h-full">
             {banners.map((banner) => (
               <Fragment key={banner.id}>{banner.node}</Fragment>
             ))}

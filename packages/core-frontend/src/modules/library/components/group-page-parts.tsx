@@ -106,7 +106,12 @@ export function CardGrid({
   onOpen(item: LibraryItem): void;
 }) {
   return (
-    <div className={cn('grid gap-2.5', 'grid-cols-[repeat(auto-fill,minmax(236px,1fr))]')}>
+    <div
+      className={cn(
+        'grid gap-2.5',
+        'grid-cols-[repeat(auto-fill,minmax(min(236px,100%),1fr))]',
+      )}
+    >
       {items.map((item) => (
         <LibraryCard
           key={`${item.kind}:${item.id}`}
