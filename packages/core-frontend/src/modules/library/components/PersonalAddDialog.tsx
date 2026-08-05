@@ -1,5 +1,5 @@
 import { Button, Dialog, Surface } from '../../../shared/components';
-import { useLibraryToast } from '../state/toast';
+import { useLibraryToast } from '../state/toast.context';
 import { COPIED_TOAST, COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 
 export interface PersonalAddDialogProps {

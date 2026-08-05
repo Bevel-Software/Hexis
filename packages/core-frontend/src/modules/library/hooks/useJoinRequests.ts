@@ -8,7 +8,7 @@ import {
   type JoinProposal,
   type JoinRequest,
 } from '../services/groups.api';
-import { useLibraryToast } from '../state/toast';
+import { useLibraryToast } from '../state/toast.context';
 
 /**
  * The join requests one group's managers can answer, and the two ways to

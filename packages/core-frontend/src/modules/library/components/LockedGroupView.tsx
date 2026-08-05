@@ -5,7 +5,7 @@ import { pathForGroupsIndex } from '../routes/library-paths';
 import { ownersTextOf, primaryFolderOf } from '../utils/group-summary';
 import { AlreadyReadableError, requestGroupAccess, type GroupSummary } from '../services/groups.api';
 import { firstNames, joinNames } from '../utils/names';
-import { useLibraryToast } from '../state/toast';
+import { useLibraryToast } from '../state/toast.context';
 import { LockGlyph } from './LockGlyph';
 
 /**

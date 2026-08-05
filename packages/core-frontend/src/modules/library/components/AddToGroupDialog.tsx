@@ -3,7 +3,7 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Button, Dialog, Surface } from '../../../shared/components';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
-import { useLibraryToast } from '../state/toast';
+import { useLibraryToast } from '../state/toast.context';
 import { COPIED_TOAST, COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 
 export interface AddToGroupDialogProps {

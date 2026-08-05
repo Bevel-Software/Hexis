@@ -17,7 +17,7 @@ import { useApplyChangeRequest } from '../../hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../../hooks/useCrFileDiffs';
 import { useDefaultBranchFile } from '../../hooks/useDefaultBranchFile';
 import { useLibrary } from '../../state/library-data';
-import { useLibraryToast } from '../../state/toast';
+import { useLibraryToast } from '../../state/toast.context';
 import { LIBRARY_ROOT } from '../../routes/library-paths';
 import { changeAuthorName } from '../../utils/cr-author';
 import { ownersTextOf } from '../../utils/group-summary';

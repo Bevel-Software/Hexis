@@ -1,12 +1,6 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react';
+import { useCallback, useRef, useState, type ReactNode } from 'react';
 import { Surface } from '../../../shared/components';
+import { ToastContext, type ShowToast, type ToastTone } from './toast.context';
 
 /**
  * Bottom-center toast from the approved mock — one line, auto-dismissing.
@@ -21,26 +15,19 @@ import { Surface } from '../../../shared/components';
  * which is exactly what `--color-ok` / `--color-danger` are specified for
  * ("the text/icon colour", `tokens.css`). It also keeps the app's rule that
  * attention comes from weight, not hue.
+ *
+ * The channel itself — `ToastContext` and `useLibraryToast` — lives in
+ * `./toast.context.ts` so this module exports nothing but the component.
  */
 
-/** Neutral is the default: the message already says what happened. `danger`
- *  exists because half of these are failures, and a failure that renders
- *  identically to a confirmation is worse than no colour at all. */
-export type ToastTone = 'neutral' | 'ok' | 'danger';
-
+/** Tone maps to a text colour only; the surface stays neutral. Kept next to
+ *  the markup that consumes it rather than in the context module, because it
+ *  is a rendering detail of this component. */
 const TONE: Record<ToastTone, string> = {
   neutral: 'text-ink',
   ok: 'text-ok',
   danger: 'text-danger',
 };
-
-type ShowToast = (msg: string, tone?: ToastTone) => void;
-
-const ToastContext = createContext<ShowToast>(() => {});
-
-export function useLibraryToast(): ShowToast {
-  return useContext(ToastContext);
-}
 
 export function LibraryToastProvider({ children }: { children: ReactNode }) {
   const [toast, setToast] = useState<{ message: string; tone: ToastTone } | null>(null);
