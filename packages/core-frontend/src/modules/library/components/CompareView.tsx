@@ -379,7 +379,7 @@ export function CompareView({
             disabled={busy || applyBusy}
             onClick={() => setSendBackOpen(true)}
           >
-            Send back with a note
+            Reject Change Request
           </Button>
           {!blocked && (
             <Button
@@ -409,7 +409,7 @@ export function CompareView({
                 Cancel
               </Button>
               <Button variant="danger" size="sm" onClick={() => void sendBack()} disabled={busy}>
-                {busy ? 'Working…' : 'Send back'}
+                {busy ? 'Working…' : 'Reject'}
               </Button>
             </div>
           </div>

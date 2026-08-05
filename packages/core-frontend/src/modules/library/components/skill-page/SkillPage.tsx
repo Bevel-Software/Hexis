@@ -314,7 +314,7 @@ export function SkillPage() {
         cr={compareCr}
         onClose={() => setCompareCr(null)}
         onResolved={(kind) => {
-          toast(kind === 'applied' ? 'Change request is being applied' : 'Sent back to the author');
+          toast(kind === 'applied' ? 'Change request is being applied' : 'Change request rejected');
           setCompareCr(null);
           data.reload();
         }}
