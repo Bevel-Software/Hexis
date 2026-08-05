@@ -6,7 +6,8 @@ import {
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
 import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
-import type { PullRequestSummary } from '@bevel-software/platform-shared';
+import type { PullRequestSummary, WorkflowEvent } from '@bevel-software/platform-shared';
+import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { LibraryContextValue } from '../state/library-data';
 
@@ -19,6 +20,8 @@ const apiMock = vi.hoisted(() => ({
   proposeChange: vi.fn(),
   mergePullRequest: vi.fn(),
   cancelPullRequest: vi.fn(),
+  fetchPrDetail: vi.fn(),
+  approvePrFile: vi.fn(),
 }));
 vi.mock('../services/library.api', () => ({
   DEFAULT_WORKSPACE_ID: 'target-company-state',
@@ -39,6 +42,10 @@ vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: apiMock.mer
 vi.mock('../../pr/services/pr-cancel.api', () => ({
   cancelPullRequest: apiMock.cancelPullRequest,
 }));
+// Approving is a step of its own before the merge — the gate refuses to merge a
+// markdown file with owners until an eligible approver has approved this head.
+vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: apiMock.fetchPrDetail }));
+vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: apiMock.approvePrFile }));
 
 // Keep the markdown pipeline (mermaid etc.) out of this test — the stub renders
 // the raw source so assertions can see the body text.
@@ -55,6 +62,7 @@ vi.mock('../state/library-data', () => ({
 }));
 
 import { SkillPage } from '../components/skill-page/SkillPage';
+import { LibraryToastProvider } from '../state/toast';
 
 const workspace = {
   workspaceId: 'target-company-state',
@@ -148,15 +156,50 @@ function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: numb
   } as unknown as LibraryContextValue;
 }
 
-function renderPage(owned: boolean, crs: PullRequestSummary[] = [], mine: number[] = []) {
+/**
+ * A test double for the event bus. The merge outcome only reaches the page this
+ * way — the POST that starts it acks 202 and returns long before git has run —
+ * so a test that never emits is a test of an apply that never finished, which
+ * is itself worth asserting.
+ */
+function makeFakeBus() {
+  const handlers: Record<string, ((e: WorkflowEvent) => void)[]> = {};
+  const bus: EventBusContextValue & { emit(e: WorkflowEvent): void } = {
+    subscribe(kind, handler) {
+      (handlers[kind] ??= []).push(handler as (e: WorkflowEvent) => void);
+      return () => {
+        handlers[kind] = (handlers[kind] ?? []).filter((h) => h !== handler);
+      };
+    },
+    setFocus() {},
+    emit(e) {
+      (handlers[e.kind] ?? []).forEach((h) => h(e));
+    },
+  };
+  return bus;
+}
+
+function renderPage(
+  owned: boolean,
+  crs: PullRequestSummary[] = [],
+  mine: number[] = [],
+  bus: EventBusContextValue = makeFakeBus(),
+) {
   libraryMock.value = libraryValue(owned, crs, mine);
   return render(
     <MemoryRouter initialEntries={['/skills-and-tools/skills/newsletter']}>
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
-          <Routes>
-            <Route path="/skills-and-tools/skills/:name" element={<SkillPage />} />
-          </Routes>
+          <EventBusContext.Provider value={bus}>
+            {/* The real toast provider: the success message IS the page's
+                report that the merge landed, so a stubbed-out toast would
+                leave the one assertion that matters unmakeable. */}
+            <LibraryToastProvider>
+              <Routes>
+                <Route path="/skills-and-tools/skills/:name" element={<SkillPage />} />
+              </Routes>
+            </LibraryToastProvider>
+          </EventBusContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
     </MemoryRouter>,
@@ -185,8 +228,25 @@ beforeEach(() => {
       Promise.resolve(branch.startsWith('suggestions/') ? RAW_BRANCH : RAW_MAIN),
     );
   apiMock.proposeChange.mockReset().mockResolvedValue({ branch: 'b' });
-  apiMock.mergePullRequest.mockReset().mockResolvedValue(undefined);
+  // 202 ack, which is all the endpoint ever returns — the merge itself runs
+  // server-side afterwards and reports over the bus.
+  apiMock.mergePullRequest.mockReset().mockResolvedValue({ status: 'merging', number: 7 });
   apiMock.cancelPullRequest.mockReset().mockResolvedValue(undefined);
+  // SKILL.md is markdown with owners, so the gate counts it: unapproved, it
+  // blocks the merge. This is the shape the real detail endpoint returns.
+  apiMock.fetchPrDetail.mockReset().mockResolvedValue({
+    number: 7,
+    state: 'open',
+    approvals: [
+      {
+        path: 'Skills/newsletter/SKILL.md',
+        isApproved: false,
+        approvedBy: [],
+        eligibleApprovers: { roles: ['Newsroom'], users: [] },
+      },
+    ],
+  });
+  apiMock.approvePrFile.mockReset().mockResolvedValue([]);
 });
 
 describe('SkillPage', () => {
@@ -514,27 +574,141 @@ describe('SkillPage — deciding on a change', () => {
     expect(document.body.textContent).not.toContain('user-');
   });
 
-  it('lets the owner approve, and merges the change request', async () => {
+  /**
+   * Approving RECORDS an approval, then merges.
+   *
+   * The merge gate requires a non-stale approval from an eligible approver for
+   * every markdown file that has owners — which is every SKILL.md governed by a
+   * group's `access.md`, i.e. exactly what this page exists for. Going straight
+   * to the merge is refused with "Waiting on approval for …", so a page that
+   * only merged had an Approve button that could not approve anything.
+   */
+  it('records the approval before merging', async () => {
     renderPage(true, [foreignCr]);
 
     const approve = await screen.findByRole('button', { name: 'Approve' });
     expect(screen.getByText('You decide — you own this.')).toBeInTheDocument();
 
     fireEvent.click(approve);
+
+    await waitFor(() =>
+      expect(apiMock.approvePrFile).toHaveBeenCalledWith(7, 'Skills/newsletter/SKILL.md'),
+    );
     await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
+    // Fresh detail, because an approval pins to the current head: approving off
+    // a cached one records consent to a revision nobody read.
+    expect(apiMock.fetchPrDetail).toHaveBeenCalledWith(7, { fresh: true });
   });
 
-  it('marks the box blocked when the merge comes back conflicted', async () => {
-    apiMock.mergePullRequest.mockRejectedValueOnce(new Error('merge conflict in SKILL.md'));
+  /**
+   * A file the gate ignores (no eligible approvers) must not be approved on the
+   * way past — that would be a 403 for every caller and, worse, would read as
+   * consent to a file this UI never showed anyone.
+   */
+  it('skips files the merge gate does not care about', async () => {
+    apiMock.fetchPrDetail.mockResolvedValue({
+      number: 7,
+      state: 'open',
+      approvals: [
+        {
+          path: 'Skills/newsletter/SKILL.md',
+          isApproved: false,
+          approvedBy: [],
+          eligibleApprovers: { roles: ['Newsroom'], users: [] },
+        },
+        {
+          path: 'Skills/newsletter/sources.yaml',
+          isApproved: false,
+          approvedBy: [],
+          eligibleApprovers: { roles: [], users: [] },
+        },
+      ],
+    });
     renderPage(true, [foreignCr]);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
+    expect(apiMock.approvePrFile).toHaveBeenCalledTimes(1);
+    expect(apiMock.approvePrFile).toHaveBeenCalledWith(7, 'Skills/newsletter/SKILL.md');
+  });
+
+  /**
+   * The POST acks 202 and the merge runs afterwards. Reporting success there is
+   * a claim about something that has not happened — and when the merge then
+   * fails, the page has already said it worked.
+   */
+  it('does not claim success on the 202 ack alone', async () => {
+    renderPage(true, [foreignCr]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
+    // The merge is away but no outcome has landed: still working, no verdict.
+    expect(await screen.findByText('Applying the change…')).toBeInTheDocument();
+    expect(screen.queryByText(/the skill now reads with that change/)).toBeNull();
+  });
+
+  it('reports success only once the merge event lands', async () => {
+    const bus = makeFakeBus();
+    renderPage(true, [foreignCr], [], bus);
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
+
+    bus.emit({ kind: 'change-request-merged', number: 7, id: 1, ts: '' } as WorkflowEvent);
+
+    expect(await screen.findByText(/the skill now reads with that change/)).toBeInTheDocument();
+  });
+
+  it('marks the box blocked when the merge comes back conflicted', async () => {
+    const bus = makeFakeBus();
+    renderPage(true, [foreignCr], [], bus);
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
+
+    // Conflicts arrive HERE, never as a rejection of the call above.
+    bus.emit({
+      kind: 'change-request-merge-failed',
+      number: 7,
+      forUserId: 'u1',
+      reason: 'This draft conflicts with the target and needs resolving first.',
+      conflicts: true,
+      id: 2,
+      ts: '',
+    } as WorkflowEvent);
 
     expect(
       await screen.findByText(/these lines changed after this was written/),
     ).toBeInTheDocument();
     // A change that cannot land must not keep offering the button that fails.
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+  });
+
+  /**
+   * A gate refusal is not a conflict. "Waiting on approval for X from Design"
+   * names something that can change under the reader, so the button stays and
+   * the server's sentence is shown verbatim — paraphrasing it to "couldn't
+   * approve" would strip the only part the owner can act on.
+   */
+  it('shows a gate refusal verbatim and keeps Approve available', async () => {
+    const bus = makeFakeBus();
+    renderPage(true, [foreignCr], [], bus);
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
+
+    bus.emit({
+      kind: 'change-request-merge-failed',
+      number: 7,
+      forUserId: 'u1',
+      reason: 'Waiting on approval for Skills/newsletter/sources.yaml from Design.',
+      conflicts: false,
+      id: 3,
+      ts: '',
+    } as WorkflowEvent);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Waiting on approval for Skills/newsletter/sources.yaml from Design.',
+    );
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
   });
 
   /**

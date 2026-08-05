@@ -11,9 +11,9 @@ import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
 import { kbFileUrl, resolveRelativePath } from '../../../workspace/routing/kb-routes';
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
-import { mergePullRequest } from '../../../pr/services/pr-merge.api';
 import { proposeChange, suggestionBranchFor } from '../../services/library.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
+import { useApplyChangeRequest } from '../../hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../../hooks/useCrFileDiffs';
 import { useDefaultBranchFile } from '../../hooks/useDefaultBranchFile';
 import { useLibrary } from '../../state/library-data';
@@ -160,11 +160,39 @@ export function SkillPage() {
   const [editing, setEditing] = useState(false);
   const [busyCr, setBusyCr] = useState<number | null>(null);
   /**
-   * Change requests a merge attempt has REFUSED. Git is the only thing that can
-   * answer "does this still apply?", and it answers when asked to merge — so
-   * this fills in from failures rather than from a guess made up front.
+   * Change requests a merge attempt has REFUSED as unmergeable. Git is the only
+   * thing that can answer "does this still apply?", and it answers when asked
+   * to merge — so this fills in from failures rather than from a guess made up
+   * front. Only CONFLICTS land here; a gate refusal ("waiting on approval
+   * from …") is a state that can change under the reader, so it is reported
+   * without withdrawing the button.
    */
   const [blockedCrs, setBlockedCrs] = useState<Set<number>>(new Set());
+
+  /**
+   * Approve = record the approvals, then merge, then wait for the merge to
+   * actually happen. All three matter and none of them are the POST returning:
+   * see `useApplyChangeRequest`.
+   */
+  const applying = useApplyChangeRequest({
+    onApplied() {
+      toast('Approved — the skill now reads with that change.');
+      setRevision((r) => r + 1);
+      data.reload();
+    },
+    onFailed(refusal) {
+      if (refusal.conflicts) {
+        toast('Blocked — the file changed after this was written.');
+      }
+    },
+  });
+
+  useEffect(() => {
+    // A conflict is the one refusal that makes Approve pointless to retry.
+    for (const [number, refusal] of applying.refusals) {
+      if (refusal.conflicts) setBlockedCrs((s) => (s.has(number) ? s : new Set(s).add(number)));
+    }
+  }, [applying.refusals]);
 
   /**
    * The file's raw bytes on the default branch. `raw` above is what gets
@@ -215,29 +243,6 @@ export function SkillPage() {
     setRevision((r) => r + 1);
     toast(`Sent to ${ownerName} — nothing changes until they approve it.`);
     data.reload();
-  }
-
-  async function approve(cr: PullRequestSummary) {
-    setBusyCr(cr.number);
-    try {
-      await mergePullRequest(cr.number);
-      toast('Approved — the skill now reads with that change.');
-      setRevision((r) => r + 1);
-      data.reload();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : '';
-      // A refusal to merge is the answer to "does this still apply?" — record
-      // it against this request so the box stops offering Approve, rather than
-      // reporting a generic failure the owner can only retry.
-      if (/conflict|not mergeable|cannot be merged|needs? resolution/i.test(message)) {
-        setBlockedCrs((s) => new Set(s).add(cr.number));
-        toast('Blocked — the file changed after this was written.');
-      } else {
-        toast(message || "Couldn't approve this change.");
-      }
-    } finally {
-      setBusyCr(null);
-    }
   }
 
   async function decline(cr: PullRequestSummary) {
@@ -423,9 +428,17 @@ export function SkillPage() {
               diff={fileDiff}
               upToDate={fileDiff !== null && fileDiff.length === 0}
               blocked={blockedCrs.has(cr.number)}
+              // A conflict already speaks through `blocked`; repeating it as a
+              // refusal line would say the same thing twice in one box.
+              refusal={
+                applying.refusals.get(cr.number)?.conflicts === false
+                  ? (applying.refusals.get(cr.number)?.reason ?? null)
+                  : null
+              }
               owner={ownerName}
-              busy={busyCr === cr.number}
-              onApprove={() => void approve(cr)}
+              busy={busyCr === cr.number || applying.activeCr === cr.number}
+              phase={applying.activeCr === cr.number ? applying.phase : 'idle'}
+              onApprove={() => applying.apply(cr)}
               onDecline={() => void decline(cr)}
               onWithdraw={() => void withdraw(cr)}
               onOpenFull={owned ? () => setCompareCr(cr) : undefined}

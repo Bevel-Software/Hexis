@@ -28,9 +28,22 @@ export interface SkillChangeBoxProps {
    * question honestly.
    */
   blocked?: boolean;
+  /**
+   * Why the last apply did not land, in the words the server used. Distinct
+   * from `blocked`: a conflict withdraws Approve because retrying cannot help,
+   * whereas "waiting on approval from Design" is a state that can change under
+   * the reader, so the button stays.
+   */
+  refusal?: string | null;
   /** Who the decision is waiting on, for the non-owner's footer. */
   owner?: string;
   busy?: boolean;
+  /**
+   * What the apply is doing right now, so the label names the step instead of
+   * a generic wait. Recording approvals and merging are separately slow — the
+   * merge alone runs to tens of seconds server-side.
+   */
+  phase?: 'idle' | 'approving' | 'applying';
   onApprove?(): void;
   onDecline?(): void;
   onWithdraw?(): void;
@@ -69,8 +82,10 @@ export function SkillChangeBox({
   diff,
   upToDate = false,
   blocked = false,
+  refusal = null,
   owner,
   busy,
+  phase = 'idle',
   onApprove,
   onDecline,
   onWithdraw,
@@ -78,6 +93,11 @@ export function SkillChangeBox({
 }: SkillChangeBoxProps) {
   const who = mine ? 'You' : author;
   const first = author.split(' ')[0];
+  // Name the step. "Approving…" and "Applying…" are different waits with
+  // different lengths, and a single "Working…" over both makes the slower one
+  // look hung.
+  const busyLabel =
+    phase === 'approving' ? 'Approving…' : phase === 'applying' ? 'Applying…' : 'Working…';
 
   return (
     <Surface
@@ -126,6 +146,19 @@ export function SkillChangeBox({
                 : `${first} has to redo it against the current text and propose again. It cannot be approved as it stands.`}
             </span>
           </>
+        ) : busy ? (
+          /* The apply is running. It is announced rather than only spelled on
+             the button, because the merge happens on the server after the
+             request returns and can take tens of seconds — long enough that a
+             silent button reads as a click that did nothing. */
+          <span
+            role="status"
+            aria-live="polite"
+            className="flex items-center gap-1.5 text-detail font-semibold text-wait"
+          >
+            <span className="size-1.5 animate-pulse rounded-full bg-wait-dot" />
+            {phase === 'approving' ? 'Recording your approval…' : 'Applying the change…'}
+          </span>
         ) : (
           <>
             <span className="flex items-center gap-1.5 text-detail font-semibold text-wait">
@@ -135,6 +168,15 @@ export function SkillChangeBox({
             <span className="text-meta text-ink-faint">
               {canDecide ? 'You decide — you own this.' : `Waiting on ${owner ?? 'the owner'}`}
             </span>
+            {/* What the server said, verbatim. The gate names the files and the
+                people it is still waiting on, and that sentence is the whole
+                value — paraphrasing it to "couldn't approve" would strip the
+                one part the owner can act on. */}
+            {refusal && (
+              <span role="alert" className="w-full text-meta text-danger">
+                {refusal}
+              </span>
+            )}
           </>
         )}
 
@@ -161,7 +203,7 @@ export function SkillChangeBox({
           )}
           {canDecide && !upToDate && !blocked && onApprove && (
             <Button variant="primary" size="tiny" onClick={onApprove} disabled={busy}>
-              {busy ? 'Working…' : 'Approve'}
+              {busy ? busyLabel : 'Approve'}
             </Button>
           )}
         </span>

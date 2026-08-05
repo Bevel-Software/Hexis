@@ -7,7 +7,7 @@ import { cn } from '../../../lib/utils';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
-import { mergePullRequest } from '../../pr/services/pr-merge.api';
+import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
 import { postPrComment } from '../../pr/services/pr-comments.api';
 import { readFileOnBranch, type LibrarySkill } from '../services/library.api';
@@ -170,24 +170,27 @@ export function CompareView({
     : null;
   const touchesSelected = changedFiles.has(selected);
 
-  async function applyChanges() {
-    setBusy(true);
-    setError(null);
-    try {
-      await mergePullRequest(cr.number);
-      onResolved('applied');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : '';
+  /**
+   * Apply = record the approvals the gate requires, then merge, then wait for
+   * the merge to land. The POST only acks — see `useApplyChangeRequest` for
+   * why awaiting it is not an answer.
+   */
+  const applying = useApplyChangeRequest({
+    onApplied: () => onResolved('applied'),
+    onFailed: (refusal) => {
       // Git refusing the merge IS the conflict answer — say what happened and
-      // what fixes it, instead of leaving a button that will fail again.
-      if (/conflict|not mergeable|cannot be merged|needs? resolution/i.test(message)) {
-        setBlocked(true);
-      } else {
-        setError(message || "Couldn't apply this change request.");
-      }
-      setBusy(false);
-    }
-  }
+      // what fixes it, instead of leaving a button that will fail again. Any
+      // other refusal (an approval the gate is still waiting on, a transient
+      // git error) can change under the reader, so it is reported with the
+      // button intact.
+      if (refusal.conflicts) setBlocked(true);
+      else setError(refusal.reason);
+    },
+  });
+  const applyBusy = applying.activeCr === cr.number;
+  // Name the step: recording approvals and merging are separately slow, and one
+  // label over both makes the longer half look stalled.
+  const applyLabel = applying.phase === 'approving' ? 'Approving…' : 'Applying…';
 
   async function sendBack() {
     setBusy(true);
@@ -370,12 +373,22 @@ export function CompareView({
               ? `Nothing changes for anyone until ${firstName} proposes it again against the current text.`
               : 'Every agent that connects after this picks it up. There is no staged rollout.'}
           </p>
-          <Button variant="outline" size="sm" disabled={busy} onClick={() => setSendBackOpen(true)}>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy || applyBusy}
+            onClick={() => setSendBackOpen(true)}
+          >
             Send back with a note
           </Button>
           {!blocked && (
-            <Button variant="primary" size="sm" disabled={busy} onClick={() => void applyChanges()}>
-              {busy ? 'Working…' : 'Apply changes'}
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={busy || applyBusy}
+              onClick={() => applying.apply(cr)}
+            >
+              {applyBusy ? applyLabel : 'Apply changes'}
             </Button>
           )}
         </div>
