@@ -4,7 +4,11 @@ import { AdminContext } from '../../admin/state/admin.context';
 import type { AdminMenuItem } from '../../../core/registry';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
-import { isSettingsNavPath, useMenuSections } from '../settings-nav-items';
+import {
+  isSettingsNavPath,
+  normalizeSettingsPath,
+  useMenuSections,
+} from '../settings-nav-items';
 import { SettingsNav, type LinkableItem } from './SettingsNav';
 
 /**
@@ -59,15 +63,23 @@ import { SettingsNav, type LinkableItem } from './SettingsNav';
  * Module scope, not a closure inside the component: it captures nothing, and
  * as a closure it was a dependency the memos below had to either list (and
  * rebuild on every render) or lie about.
+ *
+ * The surviving rows come out NORMALIZED, so both halves of the current-row
+ * comparison are spelled the same way — the pathname is normalized on its way
+ * in, and a registry row that happened to declare `/secrets/` would otherwise
+ * render a link that never matches the page it is on.
  */
 function linkable(items: AdminMenuItem[]): LinkableItem[] {
-  return items.filter(
-    (item): item is LinkableItem => !!item.path && isSettingsNavPath(item.path),
-  );
+  return items
+    .filter((item): item is LinkableItem => !!item.path && isSettingsNavPath(item.path))
+    .map((item) => ({ ...item, path: normalizeSettingsPath(item.path) }));
 }
 
 export function SettingsLayout() {
-  const { pathname } = useLocation();
+  // Normalized, because the row paths are — see `normalizeSettingsPath`. The
+  // page renders at `/secrets/` either way; without this its row is the only
+  // one in the nav that is never marked current.
+  const currentPath = normalizeSettingsPath(useLocation().pathname);
   // Not `useAdmin()` — see (2) above.
   const isAdmin = useContext(AdminContext)?.isAdmin ?? false;
   const { defaultItems, adminItems } = useMenuSections();
@@ -95,7 +107,7 @@ export function SettingsLayout() {
           <SettingsNav
             defaultItems={navDefault}
             adminItems={navAdmin}
-            currentPath={pathname}
+            currentPath={currentPath}
             orientation="strip"
           />
         </div>
@@ -112,7 +124,7 @@ export function SettingsLayout() {
         <SettingsNav
           defaultItems={navDefault}
           adminItems={navAdmin}
-          currentPath={pathname}
+          currentPath={currentPath}
         />
       </SidebarFrame>
       <main className="min-w-0 flex-1">

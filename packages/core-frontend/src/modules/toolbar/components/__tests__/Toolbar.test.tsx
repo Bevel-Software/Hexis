@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { setSidebarCollapsed } from '../../../layout/state/sidebar';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -322,11 +322,57 @@ describe('Toolbar', () => {
     // toggle. There is no nav-less surface below the toolbar any more, so
     // there is no negative case left to pin (`/` only redirects to
     // /workspace).
-    it('renders on a settings page, which has a nav now', () => {
-      renderToolbar({ route: '/secrets', layout: { canToggleExplorer: false } });
-      expect(
-        screen.getByRole('button', { name: /(hide|show) sidebar/i }),
-      ).toBeInTheDocument();
+    //
+    // `/secrets/` is the same page: React Router matches the trailing slash to
+    // the route declared without one, so the nav is mounted and the toggle
+    // must appear. Comparing the raw pathname against the settings paths said
+    // otherwise, and a settings page with a sidebar and no way to reopen it is
+    // the original bug wearing one extra character.
+    it.each(['/secrets', '/secrets/'])(
+      'renders on a settings page at %s, which has a nav now',
+      (route) => {
+        renderToolbar({ route, layout: { canToggleExplorer: false } });
+        expect(
+          screen.getByRole('button', { name: /(hide|show) sidebar/i }),
+        ).toBeInTheDocument();
+      },
+    );
+
+    // The other half of that pair. Below `md` the settings layout mounts no
+    // SidebarFrame at all — the nav is a strip inside the page — so a toggle
+    // here would point `aria-controls` at an element that does not exist.
+    // Nothing else in this file controls the media query, so without this the
+    // `&& !isCompact` clause is only ever exercised in its false branch.
+    describe('below the md breakpoint', () => {
+      afterEach(() => vi.unstubAllGlobals());
+
+      const stubCompact = () =>
+        vi.stubGlobal(
+          'matchMedia',
+          vi.fn().mockImplementation((query: string) => ({
+            matches: true,
+            media: query,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          })),
+        );
+
+      it('does not render on a settings page, which has no frame to control', () => {
+        stubCompact();
+        renderToolbar({ route: '/secrets', layout: { canToggleExplorer: false } });
+        expect(screen.queryByRole('button', { name: /(hide|show) sidebar/i })).toBeNull();
+      });
+
+      // Only the settings clause is compact-gated. Knowledge keeps its frame
+      // at every width, so suppressing its toggle here would be a regression
+      // in the other direction.
+      it('still renders where the surface declares a sidebar pane', () => {
+        stubCompact();
+        renderToolbar({ route: '/workspace/main', layout: { canToggleExplorer: true } });
+        expect(
+          screen.getByRole('button', { name: /(hide|show) sidebar/i }),
+        ).toBeInTheDocument();
+      });
     });
   });
 

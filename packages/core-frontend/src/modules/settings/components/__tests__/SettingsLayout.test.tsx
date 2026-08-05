@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -46,11 +47,20 @@ function LocationProbe() {
   return <div data-testid="pathname">{useLocation().pathname}</div>;
 }
 
-function renderAt(
-  route: string,
-  { isAdmin, withAdminContext = true }: { isAdmin?: boolean; withAdminContext?: boolean } = {},
-) {
-  const tree = (
+/**
+ * The router subtree, built ONCE and shared by `renderAt` and the rerender
+ * below.
+ *
+ * React reconciles children by position and type, so a rerender that omits any
+ * of this — `LocationProbe`, a sibling route — replaces the subtree instead of
+ * updating it, and `SettingsLayout` remounts with the new props already baked
+ * in. A remounted component cannot be caught holding stale memoized state,
+ * which is the one thing the update test exists to catch. Sharing the builder
+ * is what makes "identical except for the AdminContext value" true by
+ * construction rather than by everyone remembering.
+ */
+function routerTree(route: string) {
+  return (
     <AppRegistryContext.Provider value={makeRegistry({ adminMenuItems: stubRows })}>
       <MemoryRouter initialEntries={[route]}>
         <LocationProbe />
@@ -67,13 +77,21 @@ function renderAt(
       </MemoryRouter>
     </AppRegistryContext.Provider>
   );
+}
 
-  if (!withAdminContext) return render(tree);
-  return render(
-    <AdminContext.Provider value={{ isAdmin: !!isAdmin } as AdminContextValue}>
-      {tree}
-    </AdminContext.Provider>,
+function withAdmin(isAdmin: boolean, tree: ReactNode) {
+  return (
+    <AdminContext.Provider value={{ isAdmin } as AdminContextValue}>{tree}</AdminContext.Provider>
   );
+}
+
+function renderAt(
+  route: string,
+  { isAdmin, withAdminContext = true }: { isAdmin?: boolean; withAdminContext?: boolean } = {},
+) {
+  const tree = routerTree(route);
+  if (!withAdminContext) return render(tree);
+  return render(withAdmin(!!isAdmin, tree));
 }
 
 const nav = () => screen.getByRole('navigation', { name: 'Settings' });
@@ -129,6 +147,18 @@ describe('SettingsLayout', () => {
     );
   });
 
+  // React Router matches `/secrets/` to the route declared `/secrets`, so the
+  // page renders — but `useLocation().pathname` keeps the slash. Comparing it
+  // raw against the row paths marked NOTHING as current, on a page that is
+  // plainly one of the six.
+  it('marks the current destination when the URL carries a trailing slash', () => {
+    renderAt('/secrets/');
+    expect(within(nav()).getByRole('link', { name: 'Secrets' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+  });
+
   it('excludes a registry row that only opens a dialog', () => {
     renderAt('/secrets');
     expect(within(nav()).queryByRole('link', { name: 'Stub dialog row' })).toBeNull();
@@ -165,23 +195,21 @@ describe('SettingsLayout', () => {
 
   // isAdmin resolves asynchronously — the nav must not have baked in the
   // starting `false`.
+  //
+  // Rerendered through the SAME `routerTree`, with only the AdminContext value
+  // changed, so the layout is UPDATED rather than replaced. The identity check
+  // below is what enforces that: a remount would build a new <nav> node, and
+  // the assertion after it would then be passing for the wrong reason — a
+  // fresh component reading `isAdmin: true` on its first render proves nothing
+  // about a memo going stale.
   it('grows the admin section when isAdmin flips true after mount', () => {
     const { rerender } = renderAt('/secrets', { isAdmin: false });
-    expect(within(nav()).queryByRole('link', { name: 'Roles & Members' })).toBeNull();
+    const navBefore = nav();
+    expect(within(navBefore).queryByRole('link', { name: 'Roles & Members' })).toBeNull();
 
-    rerender(
-      <AdminContext.Provider value={{ isAdmin: true } as AdminContextValue}>
-        <AppRegistryContext.Provider value={makeRegistry({ adminMenuItems: stubRows })}>
-          <MemoryRouter initialEntries={['/secrets']}>
-            <Routes>
-              <Route element={<SettingsLayout />}>
-                <Route path="/secrets" element={<div>Secrets stub</div>} />
-              </Route>
-            </Routes>
-          </MemoryRouter>
-        </AppRegistryContext.Provider>
-      </AdminContext.Provider>,
-    );
+    rerender(withAdmin(true, routerTree('/secrets')));
+
+    expect(nav()).toBe(navBefore);
     expect(within(nav()).getByRole('link', { name: 'Roles & Members' })).toBeInTheDocument();
   });
 

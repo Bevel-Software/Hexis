@@ -102,12 +102,34 @@ export const SETTINGS_NAV_PATHS: readonly string[] = CORE_MENU_ITEMS.map(
 ).filter((path): path is string => !!path);
 
 /**
+ * `/secrets/` and `/secrets` are the SAME destination, so they must compare
+ * equal here.
+ *
+ * React Router already treats them as one: `compilePath` ends an `end: true`
+ * pattern with `\/*$`, so the route declared `/secrets` matches both and the
+ * page renders either way. But `useLocation().pathname` reports the URL as it
+ * actually is, trailing slash included — and everything below compares that
+ * string against the paths above. Untreated, arriving at `/secrets/` (a typed
+ * URL, an old bookmark, an OAuth redirect that appended one) gives you the
+ * settings page with no sidebar toggle in the toolbar and no row marked
+ * current: the page renders, its navigation does not.
+ *
+ * Root keeps its slash. Stripping `/` leaves the empty string, which is not a
+ * path — and no settings row is at the root anyway.
+ */
+export function normalizeSettingsPath(pathname: string): string {
+  return pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname;
+}
+
+/**
  * Exact match, never a prefix. These are exact routes, and the nav marks the
  * current row by comparing the whole pathname — a prefix test would light up
- * `/account` for a hypothetical `/accounts-of-other-people`.
+ * `/account` for a hypothetical `/accounts-of-other-people`. Exact AFTER
+ * normalizing the trailing slash, which is a spelling of the same path rather
+ * than a different one.
  */
 export function isSettingsNavPath(pathname: string): boolean {
-  return SETTINGS_NAV_PATHS.includes(pathname);
+  return SETTINGS_NAV_PATHS.includes(normalizeSettingsPath(pathname));
 }
 
 export interface MenuSections {
