@@ -125,7 +125,11 @@ describe('UserAccountsPage', () => {
     const dialog = within(screen.getByRole('dialog'));
     await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    expect(screen.getByText('Failed to erase user')).toBeInTheDocument();
+    // Announced, not merely coloured — same guarantee the load failure gets.
+    expect(screen.getByRole('alert')).toHaveTextContent('Failed to erase user');
+    // And the rows survive: keeping what was already fetched is the half of
+    // the old `[]` coercion that was worth keeping, so it is pinned here.
+    expect(screen.getByText('Alice')).toBeInTheDocument();
     expect(listAccounts).toHaveBeenCalledTimes(1);
   });
 
