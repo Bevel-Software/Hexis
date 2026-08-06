@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { setSidebarCollapsed } from '../../../layout/state/sidebar';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -15,7 +15,6 @@ import { WorkspaceContext, type WorkspaceContextValue } from '../../../workspace
 import { makeWorkspaceFixture } from '../../../workspace/__tests__/testFixtures';
 import { LayoutContext, type LayoutController } from '../../../layout/state/layout.context';
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
-import { PrViewerContext, type PrViewerContextValue } from '../../../pr/state/pr-viewer.context';
 import { AdminContext } from '../../../admin/state/admin.context';
 // The gear menu's extension rows (in the enterprise build: Connectors,
 // Watchlist, Routines, Connected apps, feedback, LLM config, user accounts)
@@ -123,18 +122,6 @@ function renderToolbar(overrides?: {
     ...overrides?.layout,
   };
 
-  const prViewer: PrViewerContextValue = {
-    openPrNumber: null,
-    detail: null,
-    notFound: false,
-    selectedPath: null,
-    isLoading: false,
-    lastError: null,
-    openPr: () => {},
-    closeViewer: () => {},
-    selectPath: () => {},
-    refresh: async () => {},
-  };
 
   const review: ReviewContextValue = {
     session: null,
@@ -159,7 +146,6 @@ function renderToolbar(overrides?: {
           <GitContext.Provider value={git}>
             <AutoUpdateContext.Provider value={overrides?.autoUpdate ?? IDLE_AUTO_UPDATE}>
               <ReviewContext.Provider value={review}>
-                <PrViewerContext.Provider value={prViewer}>
                   <LayoutContext.Provider value={layout}>
                     <AdminContext.Provider
                       value={{
@@ -184,7 +170,6 @@ function renderToolbar(overrides?: {
                       </AppRegistryContext.Provider>
                     </AdminContext.Provider>
                   </LayoutContext.Provider>
-                </PrViewerContext.Provider>
               </ReviewContext.Provider>
             </AutoUpdateContext.Provider>
           </GitContext.Provider>
@@ -300,13 +285,16 @@ describe('Toolbar', () => {
       ).toHaveAttribute('aria-expanded', 'false');
     });
 
-    // Two surfaces answer "do I have a sidebar?" two ways — Knowledge declares
-    // a `sidebar` pane, the Library is known by its path — but there is only
-    // ever ONE button, never one per surface.
+    // Three surfaces answer "do I have a sidebar?" two ways — Knowledge
+    // declares a `sidebar` pane, the Library and the settings pages are known
+    // by their paths — but there is only ever ONE button, never one per
+    // surface. The settings case is what catches anyone adding a second,
+    // settings-specific toggle instead of reusing SidebarToggle.
     it.each([
       ['the Library, by path', '/skills-and-tools', false],
       ['Knowledge, by its sidebar pane', '/workspace/main', true],
       ['both at once, without doubling up', '/skills-and-tools', true],
+      ['a settings page, by its route table', '/secrets', false],
     ])('renders exactly one toggle on %s', (_name, route, canToggleExplorer) => {
       renderToolbar({ route, layout: { canToggleExplorer } });
       expect(screen.getAllByRole('button', { name: /(hide|show) sidebar/i })).toHaveLength(1);
@@ -314,9 +302,63 @@ describe('Toolbar', () => {
       expect(screen.queryByRole('button', { name: /file explorer/i })).toBeNull();
     });
 
-    it('does not render where there is no sidebar to control', () => {
-      renderToolbar({ route: '/secrets', layout: { canToggleExplorer: false } });
-      expect(screen.queryByRole('button', { name: /(hide|show) sidebar/i })).toBeNull();
+    // This used to assert the opposite, at this same route — which was the bug
+    // written down as a test: /secrets had no nav, so it had nothing to
+    // toggle. There is no nav-less surface below the toolbar any more, so
+    // there is no negative case left to pin — `/` only ever redirects, and
+    // both places it can land (Knowledge, or onboarding's welcome page, which
+    // lives inside the Library surface) carry a sidebar.
+    //
+    // `/secrets/` is the same page: React Router matches the trailing slash to
+    // the route declared without one, so the nav is mounted and the toggle
+    // must appear. Comparing the raw pathname against the settings paths said
+    // otherwise, and a settings page with a sidebar and no way to reopen it is
+    // the original bug wearing one extra character.
+    it.each(['/secrets', '/secrets/'])(
+      'renders on a settings page at %s, which has a nav now',
+      (route) => {
+        renderToolbar({ route, layout: { canToggleExplorer: false } });
+        expect(
+          screen.getByRole('button', { name: /(hide|show) sidebar/i }),
+        ).toBeInTheDocument();
+      },
+    );
+
+    // The other half of that pair. Below `md` the settings layout mounts no
+    // SidebarFrame at all — the nav is a strip inside the page — so a toggle
+    // here would point `aria-controls` at an element that does not exist.
+    // Nothing else in this file controls the media query, so without this the
+    // `&& !isCompact` clause is only ever exercised in its false branch.
+    describe('below the md breakpoint', () => {
+      afterEach(() => vi.unstubAllGlobals());
+
+      const stubCompact = () =>
+        vi.stubGlobal(
+          'matchMedia',
+          vi.fn().mockImplementation((query: string) => ({
+            matches: true,
+            media: query,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          })),
+        );
+
+      it('does not render on a settings page, which has no frame to control', () => {
+        stubCompact();
+        renderToolbar({ route: '/secrets', layout: { canToggleExplorer: false } });
+        expect(screen.queryByRole('button', { name: /(hide|show) sidebar/i })).toBeNull();
+      });
+
+      // Only the settings clause is compact-gated. Knowledge keeps its frame
+      // at every width, so suppressing its toggle here would be a regression
+      // in the other direction.
+      it('still renders where the surface declares a sidebar pane', () => {
+        stubCompact();
+        renderToolbar({ route: '/workspace/main', layout: { canToggleExplorer: true } });
+        expect(
+          screen.getByRole('button', { name: /(hide|show) sidebar/i }),
+        ).toBeInTheDocument();
+      });
     });
   });
 
@@ -403,20 +445,33 @@ describe('Toolbar', () => {
       await openMenu();
       // Registry-contributed row merged with the core rows.
       expect(row('Stub extension')).toBeInTheDocument();
-      expect(row('Skills & Tools')).toBeInTheDocument();
       expect(row('External agent access')).toBeInTheDocument();
       expect(row('Secrets')).toBeInTheDocument();
       expect(row('Browse available tools')).toBeInTheDocument();
       // Admin only section + its rows are hidden for non-admins.
-      expect(screen.queryByText('Admin only')).toBeNull();
+      // Scoped to the panel: the settings nav renders this same string, and
+      // an unscoped query would throw on multiple matches the day a test
+      // mounts both. This harness never does — that is why it passes today —
+      // but the trap is now real enough to be worth closing.
+      expect(within(panel()).queryByText('Admin only')).toBeNull();
       expect(noRow(/Roles/)).toBeNull();
       expect(noRow('Stub admin row')).toBeNull();
+    });
+
+    // Skills & Tools is an APP, and apps live in the app switcher — which
+    // already lists it AND marks it as current. Carrying it here too gave one
+    // destination two front doors, only one of which could tell you that you
+    // were already standing behind it.
+    it('does not offer Skills & Tools, which belongs to the app switcher', async () => {
+      renderToolbar();
+      await openMenu();
+      expect(noRow(/Skills & Tools/)).toBeNull();
     });
 
     it('shows the Admin only section with its rows to an admin', async () => {
       renderToolbar({ isAdmin: true });
       await openMenu();
-      expect(screen.getByText('Admin only')).toBeInTheDocument();
+      expect(within(panel()).getByText('Admin only')).toBeInTheDocument();
       expect(row(/Roles/)).toBeInTheDocument();
       expect(row('Stub admin row')).toBeInTheDocument();
       // All-user rows are still present alongside the admin ones.
@@ -431,7 +486,6 @@ describe('Toolbar', () => {
         ['External agent access', '/external-agent-access'],
         ['Secrets', '/secrets'],
         ['Browse available tools', '/tools'],
-        ['Skills & Tools', '/skills-and-tools'],
       ] as const) {
         await openMenu();
         await userEvent.click(row(label));

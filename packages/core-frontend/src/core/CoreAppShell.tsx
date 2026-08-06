@@ -11,14 +11,13 @@ import { BrowserRouter, Navigate, Routes, Route, useLocation } from 'react-route
 import { AuthContext } from '../modules/auth/state/auth.context';
 import { useAuthState } from '../modules/auth/hooks/useAuthState';
 import { LoginScreen } from '../modules/auth/components/LoginScreen';
+import { SetupGate } from '../modules/setup/components/SetupGate';
 import { WorkspaceContext } from '../modules/workspace/state/workspace.context';
 import { useWorkspaceState } from '../modules/workspace/hooks/useWorkspaceState';
 import { GitContext } from '../modules/git/state/git.context';
 import { AutoUpdateContext } from '../modules/git/state/auto-update.context';
 import { useGitState } from '../modules/git/hooks/useGitState';
 import { useAutoPullUpdates } from '../modules/git/hooks/useAutoPullUpdates';
-import { PrViewerContext } from '../modules/pr/state/pr-viewer.context';
-import { usePrViewerState } from '../modules/pr/hooks/usePrViewerState';
 import { EventBusProvider } from '../modules/workflow/state/EventBusProvider';
 import { EventBusFocusBinder } from '../modules/workflow/state/EventBusFocusBinder';
 import { Toolbar } from '../modules/toolbar/components/Toolbar';
@@ -40,6 +39,7 @@ import { RolesCorruptedBanner } from '../modules/admin/components/RolesCorrupted
 import { ReviewProvider } from '../modules/review/state/ReviewProvider';
 import { ReviewPanelSurface } from '../modules/review/components/ReviewPanelSurface';
 import { ConnectToolsPage } from '../modules/secrets-vault/components/ConnectToolsPage';
+import { SettingsLayout } from '../modules/settings/components/SettingsLayout';
 import { SecretsPage } from '../modules/secrets-vault/components/SecretsPage';
 import { AccountPage } from '../modules/auth/components/AccountPage';
 import { ExternalAgentAccessPage } from '../modules/toolbar/components/ExternalAgentAccessPage';
@@ -115,7 +115,6 @@ function AuthenticatedAppInner() {
   const workspaceState = useWorkspaceState();
   const gitState = useGitState(workspaceState.workspaceId);
   const autoUpdateState = useAutoPullUpdates(gitState, workspaceState);
-  const prViewerState = usePrViewerState();
 
   // Refresh git status whenever the user accepts/rejects pending content, since that
   // is the moment new bytes hit the working tree.
@@ -153,11 +152,9 @@ function AuthenticatedAppInner() {
       <EventBusFocusBinder />
       <GitContext.Provider value={gitState}>
         <AutoUpdateContext.Provider value={autoUpdateState}>
-          <PrViewerContext.Provider value={prViewerState}>
-            <AdminProvider>
-              <CrCreationHost>{chrome}</CrCreationHost>
-            </AdminProvider>
-          </PrViewerContext.Provider>
+          <AdminProvider>
+            <CrCreationHost>{chrome}</CrCreationHost>
+          </AdminProvider>
         </AutoUpdateContext.Provider>
       </GitContext.Provider>
     </WorkspaceContext.Provider>
@@ -325,6 +322,16 @@ export function AppChrome() {
  *    no checkmark and the pane toggles hide via NO_PANES_LAYOUT). `/connect`
  *    and `/secrets` are OAuth return targets: external redirects land on
  *    these exact URLs, so they must stay routes with these exact paths.
+ *
+ *    They now share a persistent nav via a PATHLESS `SettingsLayout` route,
+ *    so moving between them no longer means re-opening the profile menu. They
+ *    remain outside the app model — a settings page still claims no app, so
+ *    the switcher shows no checkmark and the pane toggles stay hidden.
+ *
+ *    Admin gating stays COMPONENT-level: both admin routes are deliberately
+ *    reachable, so a non-admin who follows a link gets the explanatory
+ *    "Admins only" page rather than a silent redirect to somewhere they did
+ *    not ask for. The nav merely declines to advertise the rows.
  *  - Redirects: `/` → `/workspace`, and a final catch-all for anything
  *    unknown (including the retired `/library` path).
  *
@@ -341,13 +348,23 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
           element={app.element}
         />
       ))}
+      {/* OUTSIDE the settings layout, deliberately. `/connect` is a flow page,
+          not a settings destination: it has no row in the profile menu, it is
+          an OAuth landing target, and in its agent-connect mode somebody else
+          is blocked waiting on a Finish button. Do not "complete the set". */}
       <Route path="/connect" element={<ConnectToolsPage />} />
-      <Route path="/secrets" element={<SecretsPage />} />
-      <Route path="/account" element={<AccountPage />} />
-      <Route path="/external-agent-access" element={<ExternalAgentAccessPage />} />
-      <Route path="/roles-and-members" element={<AdminRolesPage />} />
-      <Route path="/user-accounts" element={<UserAccountsPage />} />
-      <Route path="/tools" element={<ToolsExplorerPage />} />
+      {/* A PATHLESS layout route: the child paths below stay byte-identical,
+          which is what keeps `/secrets` the exact URL external OAuth redirects
+          land on. Its only job is to keep the settings nav mounted across
+          them. */}
+      <Route element={<SettingsLayout />}>
+        <Route path="/secrets" element={<SecretsPage />} />
+        <Route path="/account" element={<AccountPage />} />
+        <Route path="/external-agent-access" element={<ExternalAgentAccessPage />} />
+        <Route path="/roles-and-members" element={<AdminRolesPage />} />
+        <Route path="/user-accounts" element={<UserAccountsPage />} />
+        <Route path="/tools" element={<ToolsExplorerPage />} />
+      </Route>
       {/* `/` consults the onboarding: a brand-new account's FIRST visit lands
           on the welcome page, everyone else (and every later visit) goes to
           Knowledge as always.
@@ -365,7 +382,10 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
           without moving the token-scrub out of the service that owns it.
 
           The `*` catch-all stays a plain redirect: a mistyped URL is not a
-          reason to be onboarded. */}
+          reason to be onboarded.
+
+          OUTSIDE the settings layout, like `/connect` above: these are landing
+          and redirect targets, not settings destinations. */}
       <Route path="/" element={<RootLanding />} />
       <Route path="/auth/*" element={<RootLanding />} />
       <Route path="*" element={<Navigate to={KB_ROUTE_PREFIX} replace />} />
@@ -465,7 +485,13 @@ export function AuthGate({ children }: { children: ReactNode }) {
 function AppShell() {
   return (
     <AuthGate>
-      <AuthenticatedApp />
+      {/* Inside the auth gate, outside everything else: setup asks for a
+          repository URL and an access token, so it is not public — and the
+          surfaces behind it all read from a workspace that cannot exist until
+          it is finished. */}
+      <SetupGate>
+        <AuthenticatedApp />
+      </SetupGate>
     </AuthGate>
   );
 }

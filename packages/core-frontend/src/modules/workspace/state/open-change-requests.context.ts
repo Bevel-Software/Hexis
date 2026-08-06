@@ -6,6 +6,16 @@ export interface OpenChangeRequests {
   paths: ReadonlySet<string>;
   /** The requests touching one workspace-relative path, for the page banner. */
   forPath(path: string): PullRequestSummary[];
+  /**
+   * The CALLER'S OWN open requests' touched files: workspace-relative path →
+   * change-request number. This is what lets the tree show a file you have
+   * proposed but that does not exist on this branch yet — the row is
+   * synthesized from this map, and clicking it opens the change request
+   * (there is no content on this branch to show).
+   */
+  minePaths: ReadonlyMap<string, number>;
+  /** The caller's own open request NUMBERS — "is this one mine?" for the boxes. */
+  mineNumbers: ReadonlySet<number>;
 }
 
 /**
@@ -16,6 +26,8 @@ export interface OpenChangeRequests {
 export const NO_CHANGE_REQUESTS: OpenChangeRequests = {
   paths: new Set<string>(),
   forPath: () => [],
+  minePaths: new Map<string, number>(),
+  mineNumbers: new Set<number>(),
 };
 
 /** The provider lives in `./open-change-requests.tsx`. */

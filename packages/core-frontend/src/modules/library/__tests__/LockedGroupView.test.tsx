@@ -75,7 +75,7 @@ describe('LockedGroupView', () => {
     expect(screen.getByText('2 skills · 1 tool — visible to members only.')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'All groups' })).toHaveAttribute(
       'href',
-      '/skills-and-tools/groups',
+      '/skills-and-tools',
     );
   });
 

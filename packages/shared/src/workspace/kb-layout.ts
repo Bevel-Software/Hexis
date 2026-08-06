@@ -6,12 +6,19 @@
  *
  *   <kbDirName>/
  *   ├── KnowledgeBase/   ← all team ontologies live here (the knowledge graph)
+ *   ├── Groups/          ← one folder per group; each holds BOTH skills and tools
  *   ├── Data/            ← agent-produced records; parsed like KnowledgeBase/
  *   ├── Agents/          ← .agent files — agent role configurations (not the graph)
  *   ├── Pipelines/       ← .pipeline files — execution-layer processes (not the graph)
- *   ├── Groups/          ← one folder per group; each holds BOTH skills and tools
  *   ├── roles.yaml       ← identity → role mapping
  *   └── access.md        ← repo-root access-control rules
+ *
+ * RESERVED IS NOT THE SAME AS CREATED. Core seeds the first two only
+ * (`CORE_REQUIRED_DIRS`); `Data/`, `Agents/` and `Pipelines/` scaffold an
+ * agentic execution layer that a distribution layers on. Their names stay here
+ * regardless, because reserving a name is what stops a KB that HAS the folder
+ * from having it treated as ordinary content — the file tree would otherwise
+ * fold it into Knowledge as a stray directory.
  *
  * These names are the single source of truth for both sides of the app:
  *  - Backend: the graph parser discovers ontologies under the

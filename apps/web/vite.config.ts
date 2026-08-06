@@ -16,8 +16,11 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      'process.env.DEFAULT_BRANCH': JSON.stringify(env.DEFAULT_BRANCH ?? ''),
-      'process.env.PROTECTED_BRANCHES': JSON.stringify(env.PROTECTED_BRANCHES ?? ''),
+      // The branch model is NOT here any more. It used to be substituted into
+      // the bundle at build time, which meant one artifact per deployment and a
+      // rebuild to rename a branch; it now arrives from `GET /api/config`
+      // before the app renders (see `core/bootstrap.ts`).
+      //
       // Per-tenant demo expiry. Unset → the demo banner never renders.
       'process.env.DEMO_EXPIRY': JSON.stringify(env.DEMO_EXPIRY ?? ''),
     },

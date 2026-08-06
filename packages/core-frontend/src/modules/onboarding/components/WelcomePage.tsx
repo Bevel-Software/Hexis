@@ -4,7 +4,7 @@ import { Check, Copy, X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { Button, IconButton } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
-import { useLibraryToast } from '../../library/state/toast';
+import { useLibraryToast } from '../../library/state/toast.context';
 import { copyToClipboard, COPY_FAILED_TOAST } from '../../library/utils/clipboard';
 import { pathForLibraryFilter } from '../../library/routes/library-paths';
 import { displayFirstName } from '../../library/utils/personal-group';
@@ -195,7 +195,7 @@ export function WelcomePage() {
    */
   async function copySnippet() {
     const ok = await copyToClipboard(snippet);
-    if (!ok) toast(COPY_FAILED_TOAST);
+    if (!ok) toast(COPY_FAILED_TOAST, 'danger');
     window.clearTimeout(resetTimer.current);
     // Back to idle FIRST, so a repeat copy is a real state change and the
     // live region announces it again — setting 'ok' over 'ok' is a no-op that
@@ -217,7 +217,7 @@ export function WelcomePage() {
    */
   function done() {
     onboarding.markDone();
-    toast('Done — reopen the setup any time from your profile menu → External agent access.');
+    toast('Done. Reopen the setup any time from your profile menu → External agent access.');
     navigate(yourGroup);
   }
 
@@ -246,9 +246,9 @@ export function WelcomePage() {
       </h1>
       <div className={cn(arriving && 'motion-safe:animate-onboarding-body')} style={hold}>
         <p className="mt-3 text-lede text-ink-muted">
-          This is your company’s shared library — the skills, tools and knowledge your AI agents
-          work from. Connect your agent once and access the skills and tools you need in one
-          place.
+          This is your company’s shared library of the skills, tools and knowledge your AI
+          agents work from. Connect your agent once and access the skills and tools you need in
+          one place.
         </p>
 
         <div className="mt-9 text-label uppercase text-ink-faint">Connect your agent</div>

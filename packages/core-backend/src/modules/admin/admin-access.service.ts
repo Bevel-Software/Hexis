@@ -17,7 +17,7 @@ export class AdminAccessService implements IAdminAccessService {
     private readonly accessControl: IAccessControl,
     private readonly workspaceService: WorkspaceService,
     /** Branch whose `roles.yaml` defines admins (the authoritative default branch). */
-    private readonly branch: string,
+    private readonly branch: string | (() => string),
     /**
      * Emails treated as admin WITHOUT consulting `roles.yaml` — the env
      * bootstrap admin (`ADMIN_EMAIL`). A fresh deployment's KB may not list
@@ -36,8 +36,9 @@ export class AdminAccessService implements IAdminAccessService {
       // Ensure the authoritative clone is on disk, then resolve Admin-role
       // membership via the access model. Any failure (missing/invalid
       // roles.yaml, clone error) resolves to "not admin" — the safe default.
-      await this.workspaceService.getOrCreateForBranch(this.branch);
-      return await this.accessControl.canWrite(workspaceIdForBranch(this.branch), email, 'roles.yaml');
+      const branch = typeof this.branch === 'function' ? this.branch() : this.branch;
+      await this.workspaceService.getOrCreateForBranch(branch);
+      return await this.accessControl.canWrite(workspaceIdForBranch(branch), email, 'roles.yaml');
     } catch (err) {
       // Log so an admin lockout caused by a clone / roles.yaml failure is
       // diagnosable rather than a silent denial.

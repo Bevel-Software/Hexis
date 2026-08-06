@@ -9,27 +9,30 @@ import '../../library.css';
 import { Badge, Button } from '../../../../shared/components';
 import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
-import { kbFileUrl, resolveRelativePath } from '../../../workspace/routing/kb-routes';
+import { kbFileUrl, resolveRelativePath, useNodeIdNav } from '../../../workspace/routing/kb-routes';
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
+import { useFileAccess } from '../../../access/hooks/useFileAccess';
 import { proposeChange, suggestionBranchFor } from '../../services/library.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
-import { useApplyChangeRequest } from '../../hooks/useApplyChangeRequest';
-import { useCrFileDiffs } from '../../hooks/useCrFileDiffs';
-import { useDefaultBranchFile } from '../../hooks/useDefaultBranchFile';
+import { useApplyChangeRequest } from '../../../change-requests/hooks/useApplyChangeRequest';
+import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
+import { useDefaultBranchFile, useFileOnBranch } from '../../../change-requests/hooks/useFileOnBranch';
 import { useLibrary } from '../../state/library-data';
-import { useLibraryToast } from '../../state/toast';
+import { useLibraryToast } from '../../state/toast.context';
 import { LIBRARY_ROOT } from '../../routes/library-paths';
-import { changeAuthorName } from '../../utils/cr-author';
+import { changeAuthorName, formatWhen } from '../../../change-requests/utils/author';
 import { ownersTextOf } from '../../utils/group-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
 import { StatusDot } from '../StatusDot';
 import { ChangeRequestDock } from '../ChangeRequestDock';
-import { CompareView } from '../CompareView';
+import { ChangeRequestDialog } from '../../../change-requests/components/ChangeRequestDialog';
 import { SkillFileTabs } from './SkillFileTabs';
 import { skillPanelId, skillTabId } from './tab-ids';
 import { SkillFilePane } from './SkillFilePane';
 import { SkillFileEditor } from './SkillFileEditor';
-import { SkillChangeBox } from './SkillChangeBox';
+import { ChangeBox } from '../../../change-requests/components/ChangeBox';
+import { conflictResolutionPrompt } from '../../../change-requests/utils/conflict';
+import { isBinaryFile } from '../../../workspace/components/renderers';
 
 /**
  * One skill, as a page — the prototype's skill item (line 1964), which says of
@@ -41,10 +44,13 @@ import { SkillChangeBox } from './SkillChangeBox';
  * library, find the card, click it" — and the change-request flow that lands on
  * top of this page needs somewhere for a review link to point.
  *
- * Two things the prototype's page does NOT have are kept here, because dropping
- * them would remove function rather than chrome: the description (the one
- * sentence saying what the skill is for) and the integrations it needs (the
- * only place a skill states what has to be connected before it will run).
+ * One thing the prototype's page does NOT have is kept here, because dropping
+ * it would remove function rather than chrome: the integrations the skill
+ * needs (the only place a skill states what has to be connected before it
+ * will run). The description is NOT repeated above the content anymore — the
+ * file pane renders the RAW file, so the frontmatter panel already carries
+ * `description` (and everything else the YAML says), exactly as the Knowledge
+ * view would render the same file.
  */
 export function SkillPage() {
   const { name: rawName = '' } = useParams<{ name: string }>();
@@ -55,6 +61,9 @@ export function SkillPage() {
   const { user } = useAuth();
   const data = useLibrary();
   const detail = useSkillDetail(name);
+  // The same id-link resolver the Knowledge renderer uses — a `[text](node-id)`
+  // link inside a skill file navigates to that node, not to a dead span.
+  const { openNodeId } = useNodeIdNav();
 
   const [selected, setSelected] = useState('SKILL.md');
   const [compareCr, setCompareCr] = useState<PullRequestSummary | null>(null);
@@ -105,8 +114,6 @@ export function SkillPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, skill]);
 
-  const raw = active === 'SKILL.md' ? (skill?.body ?? null) : detail.fileContent(active);
-
   const needed = useMemo(
     () => (skill ? neededToolsFor(skill, data.tools) : []),
     [skill, data.tools],
@@ -155,6 +162,18 @@ export function SkillPage() {
 
   const fileRepoPath = `${skillPath}/${active}`;
 
+  /**
+   * May the caller WRITE this file — the real per-file ACL answer, resolved
+   * against the default branch (where skills live), not a guess from the
+   * catalog's `owned` flag. This is what decides which button the file bar
+   * carries: `Edit` for a hard-or-optimistic yes (null = lookup in flight,
+   * same rule as the Knowledge viewer), `Propose changes` for a hard no.
+   */
+  const fileAccess = useFileAccess(
+    kbDirName && skillPath ? `${kbDirName}/${fileRepoPath}` : null,
+    DEFAULT_BRANCH,
+  );
+
   /** Bumped after every write so the branch reads re-run against fresh content. */
   const [revision, setRevision] = useState(0);
   const [editing, setEditing] = useState(false);
@@ -191,7 +210,7 @@ export function SkillPage() {
       // leaves the failed button live and clickable.
       if (refusal.conflicts) {
         setBlockedCrs((s) => (s.has(number) ? s : new Set(s).add(number)));
-        toast('Blocked — the file changed after this was written.');
+        toast('Blocked — the file changed after this was written.', 'danger');
       }
     },
   });
@@ -204,6 +223,17 @@ export function SkillPage() {
    */
   const rawOnMain = useDefaultBranchFile(skillPath ? fileRepoPath : null, revision);
 
+  /**
+   * What the reading pane renders: the file's RAW bytes for every tab —
+   * including SKILL.md, whose `skill.body` copy has had the frontmatter parsed
+   * off by the skills API. The raw bytes are what make this pane render
+   * IDENTICALLY to the Knowledge view of the same file: `KbMarkdownView`
+   * parses the frontmatter itself and shows it as the panel above the body,
+   * which is where the skill's description now lives (rather than being
+   * repeated in the page header).
+   */
+  const raw = active === 'SKILL.md' ? rawOnMain : detail.fileContent(active);
+
   /** Every open change request's version of the file on screen. */
   const crDiffs = useCrFileDiffs(skillCrs, fileRepoPath, rawOnMain, revision);
 
@@ -214,21 +244,44 @@ export function SkillPage() {
   );
 
   /**
-   * Whether to offer the editor. Keyed off `ownCr` — which knows the caller's
-   * request by branch — rather than off `boxes`, which cannot see a request
-   * whose touched paths have not been computed yet and would hand out a second
-   * editor over the top of one.
+   * The editor's BASE — the text the proposal is typed over and diffed
+   * against. With no open request of your own it is the default branch's
+   * file; with one, it is the file as it reads on YOUR suggestions branch,
+   * fetched only once the editor opens. That branch read is what makes a
+   * second round of edits INCREMENTAL: it stacks on what you already
+   * proposed instead of silently starting over from the published text and
+   * overwriting your own pending change.
    *
-   * Consequence worth knowing: one open proposal per person per SKILL, not per
-   * file. Adding a second file to a request you already have open now means
-   * withdrawing it (or asking your agent), which is the cost of never being
-   * able to fork your own pending change in two.
+   * Resolved through `ownCr` (recognised by BRANCH — see above) so the
+   * submit path reuses the existing request; a proposal on top of a request
+   * the page failed to recognise would open a second one against the same
+   * branch.
    */
-  const iAlreadyProposedHere = ownCr !== null;
+  const ownBranchBase = useFileOnBranch(
+    editing && ownCr ? ownCr.branch : null,
+    skillPath ? fileRepoPath : null,
+    revision,
+  );
+  const editorBase = ownCr ? ownBranchBase : rawOnMain;
 
   const openInEditor = useCallback(
     (wsRelative: string) => navigate(kbFileUrl(DEFAULT_BRANCH, wsRelative)),
     [navigate],
+  );
+
+  /**
+   * A heading's citation deep-link — the file's KNOWLEDGE URL plus `#slug`,
+   * because that is the surface that scrolls to a heading fragment. Same
+   * affordance, same destination as copying the link from the Knowledge view
+   * of this file; the two views must not hand out different URLs for the same
+   * heading.
+   */
+  const headingLink = useCallback(
+    (slug: string) =>
+      kbDirName && skillPath
+        ? `${window.location.origin}${kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${skillPath}/${active}`)}#${slug}`
+        : `${window.location.origin}${window.location.pathname}#${slug}`,
+    [kbDirName, skillPath, active],
   );
 
   async function submitProposal(content: string) {
@@ -254,7 +307,7 @@ export function SkillPage() {
       toast('Declined. Nothing was changed.');
       data.reload();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Couldn't decline this change.");
+      toast(err instanceof Error ? err.message : "Couldn't decline this change.", 'danger');
     } finally {
       setBusyCr(null);
     }
@@ -267,7 +320,7 @@ export function SkillPage() {
       toast('Withdrawn.');
       data.reload();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Couldn't withdraw this change.");
+      toast(err instanceof Error ? err.message : "Couldn't withdraw this change.", 'danger');
     } finally {
       setBusyCr(null);
     }
@@ -305,16 +358,19 @@ export function SkillPage() {
 
   const group = groupOfPath(skill.path);
 
-  // The compare view is a full-screen surface, not a layer over this page —
-  // rendering both would leave the page's dock and tabs live underneath it.
+  // The change-request dialog is a full-screen surface, not a layer over this
+  // page — rendering both would leave the page's dock and tabs live
+  // underneath it. It is the SHARED dialog, scoped to this skill: its folder
+  // frames the file list, and the skill's own files always show so an owner
+  // can read the untouched parts too.
   if (compareCr) {
     return (
-      <CompareView
-        skill={skill}
+      <ChangeRequestDialog
         cr={compareCr}
+        scope={{ prefix: skill.path, baseFiles: files }}
         onClose={() => setCompareCr(null)}
-        onResolved={(kind) => {
-          toast(kind === 'applied' ? 'Change request is being applied' : 'Sent back to the author');
+        onResolved={() => {
+          toast('Change request is being applied');
           setCompareCr(null);
           data.reload();
         }}
@@ -338,9 +394,10 @@ export function SkillPage() {
             </Badge>
           )}
         </div>
-        {skill.description && (
-          <p className="mt-1.5 max-w-[56ch] text-lede text-ink-muted">{skill.description}</p>
-        )}
+        {/* No description line here — the file pane renders the raw SKILL.md,
+            and its frontmatter panel already says what the skill is for.
+            Repeating it above the pane said the same sentence twice on the
+            first screenful. */}
         {/* No `Manage access` here, deliberately — a skill inherits its group
             folder's `access.md`, and the group's Share panel is the one place
             those rules are decided. Same call the tool page made. */}
@@ -367,10 +424,10 @@ export function SkillPage() {
         id={skillPanelId(tabsId)}
         aria-labelledby={skillTabId(tabsId, active)}
       >
-      {editing && rawOnMain !== null ? (
+      {editing && editorBase !== null ? (
         <SkillFileEditor
           file={active}
-          base={rawOnMain}
+          base={editorBase}
           owner={ownerName}
           onCancel={() => setEditing(false)}
           onSubmit={submitProposal}
@@ -384,28 +441,51 @@ export function SkillPage() {
             if (!kbDirName) return;
             openInEditor(resolveRelativePath(`${kbDirName}/${skill.path}/${active}`, href));
           }}
+          onOpenNodeId={openNodeId}
+          headingLink={headingLink}
           /*
-           * ONE action, deliberately. There used to be an `Edit` beside this
-           * that jumped to the Knowledge app's editor on the default branch —
-           * a direct commit, no review. Two adjacent buttons that both mean
-           * "change this file" but differ on whether anyone gets to say no is
-           * a trap, and it usually sprang: `main` is protected, so for everyone
-           * without a write grant on the path that route ends in an
-           * AccessDenied AFTER they have navigated away and typed the change.
-           * Editing straight into the KB still exists in the Knowledge app; it
-           * just stops being offered here as if it were the same thing.
+           * ONE action, decided by the ACL. An `Edit` used to sit beside
+           * `Propose changes` for EVERYONE and jump to the Knowledge editor —
+           * where, for anyone without a write grant, it ended in AccessDenied
+           * after they had navigated away and typed the change. The trap was
+           * never the button; it was offering it to people it would refuse.
+           * So now the file bar asks the per-file access resolver and shows
+           * exactly one of the two: `Edit` (to the Knowledge editor, which
+           * this pane now visually matches) when the caller may write the
+           * file, `Propose changes` when they may not.
            *
-           * One open proposal per person per file, too — a second would fork
-           * your own pending change into two decisions the owner must
-           * reconcile.
+           * One open proposal per person per SKILL, still — but proposing
+           * again while yours is open is not refused anymore: it opens the
+           * editor over the file AS YOU PROPOSED IT (see `editorBase`), and
+           * submitting updates the same change request. Incremental, never a
+           * fork, never a silent restart from the published text.
            */
           actions={
-            rawOnMain !== null &&
-            !iAlreadyProposedHere && (
-              <Button variant="outline" size="tiny" onClick={() => setEditing(true)}>
-                Propose changes
-              </Button>
-            )
+            fileAccess.canWrite !== false
+              ? kbDirName && (
+                  <Button
+                    variant="outline"
+                    size="tiny"
+                    onClick={() => openInEditor(`${kbDirName}/${fileRepoPath}`)}
+                    title="Open this file in the Knowledge editor"
+                  >
+                    Edit
+                  </Button>
+                )
+              : rawOnMain !== null && (
+                  <Button
+                    variant="outline"
+                    size="tiny"
+                    onClick={() => setEditing(true)}
+                    title={
+                      ownCr
+                        ? 'Continue your open proposal — edits update the same change request'
+                        : "You can't edit this file directly — propose a change for its owners to approve"
+                    }
+                  >
+                    Propose changes
+                  </Button>
+                )
           }
         />
       )}
@@ -420,7 +500,7 @@ export function SkillPage() {
           // means a side has not arrived yet.
           const fileDiff = crDiffs.get(cr.number) ?? null;
           return (
-            <SkillChangeBox
+            <ChangeBox
               key={cr.number}
               file={active}
               author={changeAuthorName(cr)}
@@ -428,8 +508,10 @@ export function SkillPage() {
               mine={mine}
               canDecide={owned && !mine}
               diff={fileDiff}
+              binary={isBinaryFile(active)}
               upToDate={fileDiff !== null && fileDiff.length === 0}
               blocked={blockedCrs.has(cr.number)}
+              conflictPrompt={conflictResolutionPrompt(cr)}
               // A conflict already speaks through `blocked`; repeating it as a
               // refusal line would say the same thing twice in one box.
               refusal={
@@ -464,25 +546,14 @@ function touchesSkill(cr: PullRequestSummary, skillPath: string): boolean {
 }
 
 /**
- * "today", "yesterday", or a plain date. A change box is read by someone
- * deciding whether to act now, and "3 Aug" answers that worse than "today"
- * does — but an exact timestamp answers it no better, so it stops there.
- */
-function formatWhen(iso: string): string {
-  const then = new Date(iso);
-  if (Number.isNaN(then.getTime())) return 'recently';
-  const days = Math.floor((Date.now() - then.getTime()) / 86_400_000);
-  if (days <= 0) return 'today';
-  if (days === 1) return 'yesterday';
-  return then.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
-}
-
-/**
  * The reading column. Horizontal and vertical padding come from the Library
- * layout's `<main>`, which already wraps every page under `/skills-and-tools`.
+ * layout's `<main>`, which already wraps every page in the shared
+ * `DOCUMENT_COLUMN` measure — the SAME 880px the Knowledge viewer uses. No
+ * extra `max-w` here: narrowing this page below the measure made the same
+ * document render at two widths depending on which surface opened it.
  */
 function Article({ children }: { children: ReactNode }) {
-  return <article className="mx-auto w-full max-w-3xl pb-14">{children}</article>;
+  return <article className="w-full pb-14">{children}</article>;
 }
 
 /**

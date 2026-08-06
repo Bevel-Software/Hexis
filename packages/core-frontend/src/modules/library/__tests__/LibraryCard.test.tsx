@@ -78,6 +78,42 @@ describe('LibraryCard', () => {
     card({ owned: true });
     expect(screen.getByText('Owner')).toBeInTheDocument();
   });
+
+  /**
+   * A proposed skill — one that exists only on an open change request.
+   *
+   * Before this, a skill an agent proposed was in the product nowhere at all
+   * until somebody merged it: the catalog reads the default branch, and the
+   * request had not landed there. The card is the fix, and what it has to say
+   * differs by who is reading it — the author is waiting on somebody, the
+   * approver IS the somebody.
+   */
+  it('says a proposed skill is in review, and who it is between', () => {
+    card({ pending: { authorName: 'Ali Raza', mine: false } });
+    expect(screen.getByText('In review')).toBeInTheDocument();
+    expect(screen.getByText(/From Ali Raza — waiting on you/)).toBeInTheDocument();
+
+    cleanup();
+    card({ pending: { authorName: 'Ali Raza', mine: true } });
+    expect(screen.getByText('Waiting on approval')).toBeInTheDocument();
+    expect(screen.queryByText(/waiting on you/)).not.toBeInTheDocument();
+  });
+
+  it('does not report integration status on something nobody has approved', () => {
+    // The status line is about a skill's integrations. On a proposal it would
+    // answer a question nobody is asking yet, over the one thing to know: that
+    // it is not usable.
+    card({ status: { state: 'warn', text: 'Needs slack' }, pending: { authorName: 'Ali', mine: true } });
+    expect(screen.queryByText('Needs slack')).not.toBeInTheDocument();
+  });
+
+  it('does not call a proposal yours to own', () => {
+    // `Owner` means you can change the released skill. There is no released
+    // skill, so the two badges would contradict each other in one row.
+    card({ owned: true, pending: { authorName: 'Ali', mine: true } });
+    expect(screen.queryByText('Owner')).not.toBeInTheDocument();
+    expect(screen.getByText('In review')).toBeInTheDocument();
+  });
 });
 
 describe('personalGroupName', () => {

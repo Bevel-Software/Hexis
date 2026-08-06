@@ -6,7 +6,7 @@ import { Badge } from '../../../shared/components';
 import { listPullRequestsForMe } from '../services/pr.api';
 import { friendlyGitError } from '../services/error-messages';
 import { useGit } from '../state/git.context';
-import { usePrViewer } from '../../pr/state/pr-viewer.context';
+import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { PR_STALE_EVENT } from '../../../core/events';
 
 const POLL_INTERVAL_MS = 60_000;
@@ -17,6 +17,8 @@ export function PullRequestsForMe() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(true);
+  /** The request opened full-screen in the shared change-request dialog. */
+  const [openCr, setOpenCr] = useState<PullRequestSummary | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(false);
   // Snapshot of branches from the previous PR list so we can detect which
@@ -182,33 +184,48 @@ export function PullRequestsForMe() {
       {expanded && (
         <div className="flex flex-col gap-px overflow-y-auto pb-1.5">
           {error && <div className="px-1.5 py-2 text-meta text-danger">{error}</div>}
-          {!error && prs.map((pr) => <PrRow key={pr.number} pr={pr} />)}
+          {!error &&
+            prs.map((pr) => <PrRow key={pr.number} pr={pr} onOpen={() => setOpenCr(pr)} />)}
         </div>
+      )}
+
+      {/* The SHARED change-request dialog — the same surface a change box's
+          "Read the whole change" opens, unscoped: this queue spans the whole
+          repo. Resolving refreshes every listener via the stale event; this
+          list is one of them. */}
+      {openCr && (
+        <ChangeRequestDialog
+          cr={openCr}
+          onClose={() => setOpenCr(null)}
+          onResolved={() => {
+            setOpenCr(null);
+            window.dispatchEvent(new Event(PR_STALE_EVENT));
+          }}
+        />
       )}
     </div>
   );
 }
 
-function PrRow({ pr }: { pr: PullRequestSummary }) {
+function PrRow({ pr, onOpen }: { pr: PullRequestSummary; onOpen(): void }) {
   const touched = pr.touchedNodePaths.length;
-  const { openPr } = usePrViewer();
   // `appAuthor` is optional — it is absent for a request opened outside this
   // backend, or after the app user was removed. `author.login` is always
   // there; never render "undefined" at somebody.
   const who = pr.appAuthor?.name ?? pr.author.login;
   // The summary endpoint doesn't carry app-level approval state (that only
   // comes from the detail endpoint, which is per-PR). We show the GitHub
-  // review badge as-is until the user opens the PR and sees the real
-  // Bevel-side progress. The header bar inside the viewer is authoritative.
+  // review badge as-is until the user opens the request and sees the real
+  // approval progress — the dialog is authoritative.
   return (
     <div
       role="button"
       tabIndex={0}
-      onClick={() => openPr(pr.number)}
+      onClick={onOpen}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          openPr(pr.number);
+          onOpen();
         }
       }}
       className="group block cursor-pointer rounded-sm px-[7px] py-1.5 transition-colors hover:bg-hover"

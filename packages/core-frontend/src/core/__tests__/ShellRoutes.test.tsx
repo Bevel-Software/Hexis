@@ -1,12 +1,15 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { ShellRoutes } from '../CoreAppShell';
 import type { AppDef } from '../registry';
 
 // The /secrets standalone page fetches on mount — stub its data layer so the
 // route can render without a network. (The other standalone pages are not
-// visited by these tests.)
+// visited by these tests. Any future test that visits /account, /tools,
+// /user-accounts or /roles-and-members needs that page's data layer mocked
+// here too — they all now share the SettingsLayout route, but each still
+// fetches its own.)
 vi.mock('../../modules/secrets-vault/services/secrets.api', () => ({
   listSecrets: vi.fn(async () => []),
   createOAuthSecret: vi.fn(async () => {}),
@@ -102,5 +105,26 @@ describe('ShellRoutes', () => {
     expect(screen.getByTestId('pathname')).toHaveTextContent(/^\/secrets$/);
     expect(await screen.findByRole('heading', { name: 'Secrets' })).toBeInTheDocument();
     expect(screen.queryByTestId('knowledge-surface')).not.toBeInTheDocument();
+  });
+
+  // The pathless SettingsLayout wraps the settings routes only. Both cases
+  // below deliberately need NO providers: the layout reads AdminContext
+  // directly rather than through useAdmin(), which would throw here.
+  it('keeps the settings nav on screen at /secrets', async () => {
+    renderAt('/secrets');
+    const nav = await screen.findByRole('navigation', { name: 'Settings' });
+    expect(within(nav).getByRole('link', { name: 'Secrets' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+  });
+
+  // Guards the one-sidebar invariant where it is actually enforced — the route
+  // table. Settings and the app surfaces are exclusive siblings, so they can
+  // never both mount a frame carrying the same DOM id.
+  it('does not wrap an app surface in the settings layout', () => {
+    renderAt('/workspace/main');
+    expect(screen.queryByRole('navigation', { name: 'Settings' })).toBeNull();
+    expect(screen.getByTestId('knowledge-surface')).toBeInTheDocument();
   });
 });

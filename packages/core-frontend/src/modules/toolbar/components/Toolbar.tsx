@@ -10,6 +10,7 @@ import { SidebarToggle } from '../../layout/components/SidebarToggle';
 import { toggleSidebar, useSidebar } from '../../layout/state/sidebar';
 import { LIBRARY_ROOT } from '../../library/routes/library-paths';
 import { TOOLBAR_STACK_QUERY } from '../../layout/breakpoints';
+import { isSettingsNavPath } from '../../settings/settings-nav-items';
 
 /**
  * The app's top bar: the nav toggle, the app switcher, and whatever the
@@ -30,20 +31,26 @@ export function Toolbar() {
    * glyph, in the same spot, driving two different pieces of state. They read
    * as one control to anyone using the app, so now they are one.
    *
-   * Which surfaces HAVE a sidebar is still asked two ways, because the two
-   * apps answer it differently: Knowledge declares a `sidebar` pane (so the
-   * layout controller can say `canToggleExplorer`), while Skills & Tools has
-   * no pane group at all and is identified by its path.
+   * Which surfaces HAVE a sidebar is asked three ways, because they answer it
+   * differently: Knowledge declares a `sidebar` pane (so the layout controller
+   * can say `canToggleExplorer`), while Skills & Tools and the settings pages
+   * have no pane group at all and are identified by their paths.
+   *
+   * The settings clause is `&& !isCompact` because below `md` the settings
+   * layout mounts no `SidebarFrame` at all — the nav is a strip inside the
+   * page — and a toggle there would point `aria-controls` at an element that
+   * does not exist.
    */
   const onLibrary =
     location.pathname === LIBRARY_ROOT || location.pathname.startsWith(`${LIBRARY_ROOT}/`);
   const { collapsed: sidebarCollapsed } = useSidebar();
   const { isChatCollapsed, canToggleExplorer, canToggleChat, toggleChat } = useLayout();
-  const hasSidebar = onLibrary || canToggleExplorer;
   // Below the `md` breakpoint the registry item cluster (the enterprise
   // branch switcher, for one) does not fit alongside the toolbar essentials,
   // so it drops onto a second row instead of overflowing offscreen.
   const isCompact = useMediaQuery(TOOLBAR_STACK_QUERY);
+  const hasSidebar =
+    onLibrary || canToggleExplorer || (isSettingsNavPath(location.pathname) && !isCompact);
 
   // Registry-contributed left-cluster items. The CORE toolbar has none of its
   // own: the branch switcher is an enterprise contribution scoped (by the

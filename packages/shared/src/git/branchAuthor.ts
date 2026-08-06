@@ -44,3 +44,40 @@ export function isBranchAuthoredBy(
   if (!localpart) return false;
   return branchName.startsWith(`${localpart}/`);
 }
+
+/** Keep only characters git branch segments accept; collapse the rest to '-'. */
+export function branchSegment(raw: string): string {
+  const cleaned = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^[-.]+/, '')
+    .replace(/[.]+$/, '');
+  return cleaned || 'user';
+}
+
+/**
+ * The `suggestions/<who>-<id8>/` prefix every one of this user's suggestion
+ * branches carries (`…/knowledge` for the Knowledge bundle, a skill segment
+ * for skill proposals). SHARED so the client that names the branch and the
+ * server that judges "may this caller delete it" can never disagree. The
+ * user-id slice is what makes the identity collision-proof — `branchSegment`
+ * alone is lossy (`alex+ops@…` and `alex-ops@…` both clean to `alex-ops`).
+ */
+export function suggestionsBranchPrefixFor(user: { email: string; id: string }): string {
+  const who = branchSegment(user.email.split('@')[0]);
+  const id = branchSegment(user.id).slice(0, 8) || 'user';
+  return `suggestions/${who}-${id}/`;
+}
+
+/**
+ * True when `branchName` is one of THIS user's suggestion branches — the
+ * authorship rule for the `suggestions/…` namespace, where the plain
+ * `<localpart>/` convention of {@link isBranchAuthoredBy} does not apply.
+ */
+export function isOwnSuggestionsBranch(
+  branchName: string,
+  user: { email: string | null | undefined; id: string | null | undefined },
+): boolean {
+  if (!user.email || !user.id) return false;
+  return branchName.startsWith(suggestionsBranchPrefixFor({ email: user.email, id: user.id }));
+}

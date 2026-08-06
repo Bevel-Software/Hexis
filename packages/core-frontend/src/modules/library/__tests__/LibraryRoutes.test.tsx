@@ -82,6 +82,7 @@ const CATALOG: LibraryData = {
     { name: 'roadmap', description: 'Keeps the roadmap.', path: 'Groups/Product/roadmap' },
     { name: 'scratch', description: 'A skill in no group.', path: 'Skills/scratch' },
   ],
+  pendingSkills: [],
   tools: [
     tool({}),
     // Ungrouped tool (`Tools/slack.tool` is two segments) — "Yours alone".
@@ -181,16 +182,34 @@ describe('LibraryRoutes', () => {
     groupsMock.listJoinRequests.mockResolvedValue([]);
   });
 
-  it('renders the gallery at /skills-and-tools with heading Library', async () => {
+  it('opens on the all-groups index at /skills-and-tools', async () => {
     renderAt('/skills-and-tools');
-    expect(await screen.findByRole('heading', { name: 'Library' })).toBeInTheDocument();
-    // Everything has no sidebar row any more — the Library LANDS on
-    // everything, so arriving here lights nothing in the nav.
-    expect(screen.queryByRole('button', { name: /^Everything/ })).toBeNull();
+    expect(
+      await screen.findByRole('heading', { name: 'All groups', level: 1 }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^All groups/ })).toHaveAttribute(
+      'aria-current',
+      'true',
+    );
+    // The lenses are lenses: landing home selects neither.
+    expect(screen.getByRole('button', { name: /^Everything/ })).toHaveAttribute(
+      'aria-current',
+      'false',
+    );
     expect(screen.getByRole('button', { name: /^Owned by me/ })).toHaveAttribute(
       'aria-current',
       'false',
     );
+  });
+
+  it('/skills-and-tools/everything is the whole catalog as cards', async () => {
+    renderAt('/skills-and-tools/everything');
+    expect(await screen.findByRole('heading', { name: 'Everything', level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Everything/ })).toHaveAttribute(
+      'aria-current',
+      'true',
+    );
+    expect(screen.getByTestId('library-card-skill-outreach')).toBeInTheDocument();
   });
 
   it('/skills-and-tools/owned selects Owned by me', async () => {
@@ -221,11 +240,12 @@ describe('LibraryRoutes', () => {
     // The group page itself lands in a later work package; the ROUTE resolves
     // now, which is why the sidebar can already point at it.
     expect(screen.getByRole('button', { name: /^GTM/ })).toHaveAttribute('aria-current', 'true');
-    expect(screen.queryByRole('heading', { name: 'Library' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'All groups', level: 1 })).not.toBeInTheDocument();
   });
 
-  it('/skills-and-tools/groups renders the all-groups index', async () => {
+  it('sends the old /groups index path home, where the index lives now', async () => {
     renderAt('/skills-and-tools/groups');
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
     expect(
       await screen.findByRole('heading', { name: 'All groups', level: 1 }),
     ).toBeInTheDocument();
@@ -240,25 +260,30 @@ describe('LibraryRoutes', () => {
   });
 
   // `/propose` was retired with the role fork it served. An unknown path under
-  // the Library falls back to the gallery, which is what this now asserts.
-  it('sends the retired propose path back to the gallery', async () => {
+  // the Library falls back to the root, which is what this now asserts.
+  it('sends the retired propose path back home', async () => {
     renderAt('/skills-and-tools/propose?group=GTM');
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
   });
 
-  it('reaches the index from a group page breadcrumb, which is the only route to it now', async () => {
+  it("reaches the index from a group page breadcrumb, at the root it lives at", async () => {
     renderAt('/skills-and-tools/groups/GTM');
     fireEvent.click(await screen.findByRole('link', { name: 'All groups' }));
-    await waitFor(() => expect(pathname()).toBe('/skills-and-tools/groups'));
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
     expect(
       await screen.findByRole('heading', { name: 'All groups', level: 1 }),
     ).toBeInTheDocument();
   });
 
-  it('carries no All groups row in the sidebar', async () => {
+  it('leads the sidebar with All groups, from anywhere in the Library', async () => {
     renderAt('/skills-and-tools/groups/GTM');
-    await waitFor(() =>
-      expect(screen.queryByRole('button', { name: /^All groups/ })).not.toBeInTheDocument(),
+    const allGroups = await screen.findByRole('button', { name: /^All groups/ });
+    expect(allGroups).toHaveAttribute('aria-current', 'false');
+    fireEvent.click(allGroups);
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
+    expect(screen.getByRole('button', { name: /^All groups/ })).toHaveAttribute(
+      'aria-current',
+      'true',
     );
   });
 
@@ -286,7 +311,7 @@ describe('LibraryRoutes', () => {
   });
 
   it('an integration card opens the tool page instead of the dialog', async () => {
-    renderAt('/skills-and-tools');
+    renderAt('/skills-and-tools/everything');
     fireEvent.click(await screen.findByRole('button', { name: /^heyreach/ }));
 
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools/tools/heyreach'));
@@ -294,16 +319,18 @@ describe('LibraryRoutes', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
-  it('an unknown subpath redirects to the gallery', async () => {
+  it('an unknown subpath redirects home', async () => {
     renderAt('/skills-and-tools/nope');
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
-    expect(await screen.findByRole('heading', { name: 'Library' })).toBeInTheDocument();
+    expect(
+      await screen.findByRole('heading', { name: 'All groups', level: 1 }),
+    ).toBeInTheDocument();
   });
 
   it('renders the gallery even when the groups endpoint fails', async () => {
     groupsMock.listGroups.mockRejectedValue(new Error("Couldn't load groups."));
-    renderAt('/skills-and-tools');
-    expect(await screen.findByRole('heading', { name: 'Library' })).toBeInTheDocument();
+    renderAt('/skills-and-tools/everything');
+    expect(await screen.findByRole('heading', { name: 'Everything', level: 1 })).toBeInTheDocument();
     // Sidebar groups are catalog-derived, so they survive the endpoint being down.
     expect(screen.getByRole('button', { name: /^GTM/ })).toBeInTheDocument();
   });
