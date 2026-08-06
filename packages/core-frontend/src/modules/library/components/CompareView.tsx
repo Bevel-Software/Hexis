@@ -1,11 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { type PullRequestDetail, type PullRequestSummary } from '@bevel-software/platform-shared';
 import { Badge, Banner, Button, Surface } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch, type LibrarySkill } from '../services/library.api';
@@ -41,8 +38,6 @@ export function CompareView({
   onClose,
   onResolved,
 }: CompareViewProps) {
-  const navigate = useNavigate();
-  const { kbDirName } = useWorkspace();
   const [detail, setDetail] = useState<PullRequestDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [branchContents, setBranchContents] = useState<Record<string, string | null>>({});
@@ -322,18 +317,6 @@ export function CompareView({
                     ? ' · what changes is marked'
                     : ' · not touched by this request'}
               </span>
-              {kbDirName && (
-                <Button
-                  variant="quiet"
-                  size="tiny"
-                  className="ml-auto"
-                  onClick={() =>
-                    navigate(kbFileUrl(cr.branch, `${kbDirName}/${skill.path}/${selected}`))
-                  }
-                >
-                  Open in editor
-                </Button>
-              )}
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto">
               {/* The diff only needs the two file contents, so it renders as
