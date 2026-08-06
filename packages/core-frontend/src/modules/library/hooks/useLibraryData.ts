@@ -5,13 +5,15 @@ import { listToolSecrets, type ToolSecrets } from '../../secrets-vault/services/
 import {
   defaultWorkspaceId,
   getSkill,
-  listMyChangeRequests,
-  listOpenChangeRequests,
   listPendingSkills,
   listSkills,
   type LibrarySkillSummary,
   type PendingSkillSummary,
 } from '../services/library.api';
+import {
+  listMyChangeRequests,
+  listOpenChangeRequests,
+} from '../../change-requests/services/change-requests.api';
 
 /**
  * All the list-level data the Library gallery needs, loaded in parallel:

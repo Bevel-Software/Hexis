@@ -92,9 +92,12 @@
   }
 }
 
-/* ── diff marks (compare + inline suggestions) ──
-   `mark-del` / `mark-ins` are alpha, so they tint whatever row they land on
-   instead of punching a solid block through it. */
+/* ── diff marks ──
+   `.lib-sug` moved to `../change-requests/change-requests.css` with the
+   change-request surfaces that use it (the components import it directly).
+   The per-line marks below are still Library-only. `mark-del` / `mark-ins`
+   are alpha, so they tint whatever row they land on instead of punching a
+   solid block through it. */
 .lib-line-removed {
   background: var(--color-mark-del);
   color: var(--color-danger);
@@ -102,19 +105,4 @@
 .lib-line-added {
   background: var(--color-mark-ins);
   color: var(--color-ok);
-}
-.lib-sug del {
-  color: var(--color-danger);
-  background: var(--color-mark-del);
-  text-decoration: line-through;
-  padding: 0 3px;
-  border-radius: var(--radius-xs);
-}
-.lib-sug ins {
-  color: var(--color-ok);
-  background: var(--color-mark-ins);
-  text-decoration: none;
-  padding: 0 3px;
-  border-radius: var(--radius-xs);
-  font-weight: 600;
 }

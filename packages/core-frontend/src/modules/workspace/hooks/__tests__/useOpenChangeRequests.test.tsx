@@ -1,14 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { renderHook, waitFor, act } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 
 const api = vi.hoisted(() => ({
   listOpenChangeRequests: vi.fn(),
+  listMyChangeRequests: vi.fn(),
   listPullRequestsForMe: vi.fn(),
 }));
-vi.mock('../../../library/services/library.api', () => ({
+vi.mock('../../../change-requests/services/change-requests.api', () => ({
   listOpenChangeRequests: api.listOpenChangeRequests,
+  listMyChangeRequests: api.listMyChangeRequests,
+  readFileOnBranch: vi.fn(),
 }));
 vi.mock('../../../git/services/pr.api', () => ({
   listPullRequestsForMe: api.listPullRequestsForMe,
@@ -52,8 +55,10 @@ const renderIt = (kbDirName: string | null = 'knowledge-base') =>
 describe('useOpenChangeRequests', () => {
   beforeEach(() => {
     api.listOpenChangeRequests.mockReset();
+    api.listMyChangeRequests.mockReset();
     api.listPullRequestsForMe.mockReset();
     api.listOpenChangeRequests.mockResolvedValue([pr()]);
+    api.listMyChangeRequests.mockResolvedValue([]);
   });
 
   /**
@@ -127,6 +132,98 @@ describe('useOpenChangeRequests', () => {
     await waitFor(() => expect(result.current.paths.size).toBe(1));
     expect(api.listOpenChangeRequests).toHaveBeenCalled();
     expect(api.listPullRequestsForMe).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The suggestion overlay's data. `/mine` is the one endpoint that can
+   * answer "is this request YOURS" (the identity filter is an email-hash
+   * match, server-side), and the map joins the same two path spaces as the
+   * broad set — a raw repo-relative key would match zero tree rows.
+   */
+  it('maps my own open requests to workspace-relative paths with their number', async () => {
+    api.listMyChangeRequests.mockResolvedValue([
+      pr({ number: 12, touchedNodePaths: ['Knowledge/New idea.md'] }),
+      pr({ number: 13, state: 'merged', touchedNodePaths: ['Knowledge/Done.md'] }),
+    ]);
+    const { result } = renderIt();
+    await waitFor(() =>
+      expect(result.current.minePaths.get('knowledge-base/Knowledge/New idea.md')).toBe(12),
+    );
+    // A merged request is history, not a suggestion — it must not resurrect a row.
+    expect(result.current.minePaths.has('knowledge-base/Knowledge/Done.md')).toBe(false);
+    expect(result.current.minePaths.has('Knowledge/New idea.md')).toBe(false);
+  });
+
+  it('degrades to no suggestion rows when /mine cannot load', async () => {
+    api.listMyChangeRequests.mockRejectedValue(new Error('network down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { result } = renderIt();
+    await waitFor(() => expect(result.current.paths.size).toBe(1));
+    expect(result.current.minePaths.size).toBe(0);
+    warn.mockRestore();
+  });
+
+  /**
+   * The stale event fires because its sender KNOWS the list changed (a
+   * proposal sent, a suggestion-routed upload landed). The refetch must
+   * bypass the backend's 30s list cache, or the suggestion rows for the
+   * just-uploaded file sit invisible until the TTL — the initial load, with
+   * no such knowledge, takes the cache.
+   */
+  it('refetches FRESH on the stale event, cached on initial load', async () => {
+    const { result } = renderIt();
+    await waitFor(() => expect(result.current.paths.size).toBe(1));
+    expect(api.listMyChangeRequests).toHaveBeenCalledWith({});
+    expect(api.listOpenChangeRequests).toHaveBeenCalledWith({});
+
+    window.dispatchEvent(new Event('bevel:pr-stale'));
+    await waitFor(() =>
+      expect(api.listMyChangeRequests).toHaveBeenCalledWith({ fresh: true }),
+    );
+    expect(api.listOpenChangeRequests).toHaveBeenCalledWith({ fresh: true });
+  });
+
+  /**
+   * The optimistic path: a suggestion-routed upload announces the request it
+   * just made true, and the rows must derive from it IMMEDIATELY — the
+   * server's own touched-path diff can trail the background commit worker by
+   * many seconds. A later real fetch that covers the paths takes over and the
+   * announcement is dropped.
+   */
+  it('derives rows from an announced request until a real fetch covers it', async () => {
+    api.listMyChangeRequests.mockResolvedValue([]);
+    const { result } = renderIt();
+    await waitFor(() => expect(api.listMyChangeRequests).toHaveBeenCalled());
+
+    const announced = pr({
+      number: 12,
+      branch: 'suggestions/razvan/knowledge',
+      touchedNodePaths: ['KnowledgeBase/Ops/dropped.md'],
+    });
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('bevel:suggestions-optimistic', { detail: announced }),
+      );
+    });
+    // Rows NOW — path-space joined, number known, clickable via forPath.
+    expect(result.current.minePaths.get('knowledge-base/KnowledgeBase/Ops/dropped.md')).toBe(12);
+    expect(result.current.mineNumbers.has(12)).toBe(true);
+    expect(
+      result.current.forPath('knowledge-base/KnowledgeBase/Ops/dropped.md').map((c) => c.number),
+    ).toEqual([12]);
+
+    // The server catches up: a FRESH fetch carries the path → the real entry
+    // takes over, and the derived values stay identical.
+    api.listMyChangeRequests.mockResolvedValue([announced]);
+    act(() => {
+      window.dispatchEvent(new Event('bevel:pr-stale'));
+    });
+    await waitFor(() =>
+      expect(api.listMyChangeRequests).toHaveBeenCalledWith({ fresh: true }),
+    );
+    await waitFor(() =>
+      expect(result.current.minePaths.get('knowledge-base/KnowledgeBase/Ops/dropped.md')).toBe(12),
+    );
   });
 
   it('issues ONE request however many consumers read it', async () => {

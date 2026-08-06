@@ -1,9 +1,11 @@
 import { useState } from 'react';
-import { Button, Surface } from '../../../../shared/components';
-import { cn } from '../../../../lib/utils';
-import { collapseUnchanged, type DiffLine } from '../../utils/diff';
+import '../change-requests.css';
+import { Button, Surface } from '../../../shared/components';
+import { cn } from '../../../lib/utils';
+import { collapseUnchanged, type DiffLine } from '../utils/diff';
+import { ConflictHelp } from './ConflictHelp';
 
-export interface SkillChangeBoxProps {
+export interface ChangeBoxProps {
   /** File the proposal is against, relative to the skill folder. */
   file: string;
   /** Display name of whoever proposed it. */
@@ -17,6 +19,12 @@ export interface SkillChangeBoxProps {
   /** The proposal diffed against the file as it stands NOW; null while loading. */
   diff: DiffLine[] | null;
   /**
+   * The file is binary (an image, a document…): there is no text to diff,
+   * and the box says so instead of loading forever. The verdict buttons keep
+   * working — approving still applies the whole request.
+   */
+  binary?: boolean;
+  /**
    * This file already reads the way the proposal wants it to — someone landed
    * the same edit first, or the author reverted it. There is nothing here to
    * decide, though the change request may still touch other files.
@@ -28,6 +36,11 @@ export interface SkillChangeBoxProps {
    * question honestly.
    */
   blocked?: boolean;
+  /**
+   * The ready-to-paste prompt that asks the user's agent to resolve the
+   * conflict (see `conflictResolutionPrompt`). Rendered only while `blocked`.
+   */
+  conflictPrompt?: string | null;
   /**
    * Why the last apply did not land, in the words the server used. Distinct
    * from `blocked`: a conflict withdraws Approve because retrying cannot help,
@@ -73,15 +86,17 @@ export interface SkillChangeBoxProps {
  *    whoever landed first. The box names the fix instead of offering a button
  *    that would do the wrong thing.
  */
-export function SkillChangeBox({
+export function ChangeBox({
   file,
   author,
   when,
   mine,
   canDecide,
   diff,
+  binary = false,
   upToDate = false,
   blocked = false,
+  conflictPrompt = null,
   refusal = null,
   owner,
   busy,
@@ -90,9 +105,8 @@ export function SkillChangeBox({
   onDecline,
   onWithdraw,
   onOpenFull,
-}: SkillChangeBoxProps) {
+}: ChangeBoxProps) {
   const who = mine ? 'You' : author;
-  const first = author.split(' ')[0];
   // Name the step. "Approving…" and "Applying…" are different waits with
   // different lengths, and a single "Working…" over both makes the slower one
   // look hung.
@@ -115,7 +129,12 @@ export function SkillChangeBox({
 
       {/* No diff area when there is no difference — an empty pane under a
           "what changed?" heading reads as a rendering failure. */}
-      {upToDate ? null : diff === null ? (
+      {upToDate ? null : binary ? (
+        <p className="px-3.5 py-4 text-center text-detail text-ink-faint">
+          A binary file (an image, a document…) — there is no text to compare. Read the whole
+          change to decide.
+        </p>
+      ) : diff === null ? (
         <p className="px-3.5 py-4 text-center text-detail text-ink-faint">Loading the change…</p>
       ) : (
         <CollapsedDiffView lines={diff} />
@@ -142,9 +161,10 @@ export function SkillChangeBox({
             </span>
             <span className="w-full text-meta text-ink-muted">
               {mine
-                ? 'Redo it against the current text and propose again.'
-                : `${first} has to redo it against the current text and propose again. It cannot be approved as it stands.`}
+                ? 'It has to be redone against the current text before it can land.'
+                : `It cannot be approved as it stands — it has to be redone against the current text.`}
             </span>
+            {conflictPrompt && <ConflictHelp prompt={conflictPrompt} />}
           </>
         ) : (
           <>

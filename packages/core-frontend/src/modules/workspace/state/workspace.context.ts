@@ -110,6 +110,15 @@ export interface WorkspaceContextValue {
    * or via `clearUploadError`.
    */
   uploadError: UploadError | null;
+  /**
+   * Non-error news about the last upload — currently one message: the upload
+   * went to the caller's suggestions branch because they cannot write the
+   * target folder, and the files are now a change request, not tree content.
+   * Without this the outcome is indistinguishable from a silently failed
+   * upload: nothing appears where the user dropped the files.
+   */
+  uploadNotice: string | null;
+  clearUploadNotice: () => void;
   /** True while a `dispatchUpload` call is in flight; gates the toolbar button. */
   isUploading: boolean;
   /**

@@ -26,3 +26,22 @@ import type { PullRequestSummary } from '@bevel-software/platform-shared';
 export function changeAuthorName(cr: PullRequestSummary): string {
   return cr.appAuthor?.name?.trim() || 'Someone';
 }
+
+/**
+ * "today", "yesterday", or a plain date. A change box is read by someone
+ * deciding whether to act now, and "3 Aug" answers that worse than "today"
+ * does — but an exact timestamp answers it no better, so it stops there.
+ * Shared by the skill page's boxes and the Knowledge viewer's.
+ */
+export function formatWhen(iso: string): string {
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) return 'recently';
+  // LOCAL calendar days, not elapsed milliseconds: a request from 23:59
+  // yesterday is "yesterday" at 00:01, not "today". Future timestamps (clock
+  // skew) collapse to "today" rather than a nonsense negative.
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOfDay(new Date()) - startOfDay(then)) / 86_400_000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  return then.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}

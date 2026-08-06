@@ -1,18 +1,36 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { type PullRequestDetail, type PullRequestSummary } from '@bevel-software/platform-shared';
+import '../change-requests.css';
 import { Badge, Banner, Button, Surface } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
-import { readFileOnBranch, type LibrarySkill } from '../services/library.api';
-import { changeAuthorName } from '../utils/cr-author';
-import { useDefaultBranchFile } from '../hooks/useDefaultBranchFile';
+import { readFileOnBranch } from '../services/change-requests.api';
+import { changeAuthorName } from '../utils/author';
+import { conflictResolutionPrompt } from '../utils/conflict';
+import { ConflictHelp } from './ConflictHelp';
+import { useDefaultBranchFile } from '../hooks/useFileOnBranch';
 import { diffLines, type DiffLine } from '../utils/diff';
+import { isBinaryFile } from '../../workspace/components/renderers';
 
-interface CompareViewProps {
-  skill: LibrarySkill;
+/**
+ * Extra context for the file list — NOT a filter. The dialog always shows
+ * EVERY file the request touches, repo-relative, whatever surface opened it:
+ * a decision about the whole request must not hide part of it behind a badge.
+ * A scope only ADDS the surface's own files (a skill's SKILL.md and bundle)
+ * so the owner can read the untouched parts of the thing under review too.
+ */
+export interface ChangeRequestScope {
+  /** Repo-root-relative folder, no trailing slash (e.g. `Groups/gtm/rfi`). */
+  prefix: string;
+  /** Files that ALWAYS list, relative to `prefix`, whether touched or not. */
+  baseFiles: string[];
+}
+
+interface ChangeRequestDialogProps {
   cr: PullRequestSummary;
+  scope?: ChangeRequestScope;
   onClose(): void;
   /** Applying is the only verdict this view reaches. Declining a change
    *  request lives on the skill page, beside the request's own row. */
@@ -20,24 +38,26 @@ interface CompareViewProps {
 }
 
 /**
- * The whole change request, as one decision — Juan's change-request view.
+ * The whole change request, as one decision — Juan's change-request view,
+ * and THE change-request view for every surface (the skill page opens it
+ * over a skill scope; the Knowledge viewer opens it unscoped).
  *
- * The per-file boxes on the skill page answer "what does this do to the file I
- * am reading?". This answers the different question an owner has to answer
- * before applying anything: what does this change do to the SKILL? So it reads
- * top-down as an argument — what is being asked, why, how big it is, and only
- * then the files — rather than as two panels to compare word by word.
+ * The per-file boxes answer "what does this do to the file I am reading?".
+ * This answers the different question an owner has to answer before applying
+ * anything: what does this change do as a WHOLE? So it reads top-down as an
+ * argument — what is being asked, why, how big it is, and only then the
+ * files — rather than as two panels to compare word by word.
  *
  * The layout is deliberately fixed to the viewport: the buttons never move and
  * the document scrolls to meet them. A decision surface where the verdict
  * scrolls off screen invites the reader to act before reaching the bottom.
  */
-export function CompareView({
-  skill,
+export function ChangeRequestDialog({
   cr,
+  scope,
   onClose,
   onResolved,
-}: CompareViewProps) {
+}: ChangeRequestDialogProps) {
   const [detail, setDetail] = useState<PullRequestDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [branchContents, setBranchContents] = useState<Record<string, string | null>>({});
@@ -73,52 +93,47 @@ export function CompareView({
     };
   }, [cr.number]);
 
-  const prefix = `${skill.path}/`;
+  // EVERYTHING is repo-relative, scoped or not — the scope's baseFiles are
+  // lifted to full paths, and every touched file lists whatever folder it is
+  // in. The dialog is a decision about the WHOLE request; a file it touches
+  // outside the surface that opened it is part of the decision, not a badge.
   const mainFiles = useMemo(
-    () => ['SKILL.md', ...skill.files.map((f) => f.slice(prefix.length))],
-    [skill.files, prefix],
+    () => (scope ? scope.baseFiles.map((f) => `${scope.prefix}/${f}`) : []),
+    [scope],
   );
   const changedFiles = useMemo(() => {
     const set = new Set<string>();
-    for (const f of detail?.files ?? []) {
-      if (f.path.startsWith(prefix)) set.add(f.path.slice(prefix.length));
-    }
+    for (const f of detail?.files ?? []) set.add(f.path);
     return set;
-  }, [detail, prefix]);
+  }, [detail]);
   const addedFiles = useMemo(
-    () =>
-      (detail?.files ?? [])
-        .filter((f) => f.status === 'added' && f.path.startsWith(prefix))
-        .map((f) => f.path.slice(prefix.length)),
-    [detail, prefix],
+    () => (detail?.files ?? []).filter((f) => f.status === 'added').map((f) => f.path),
+    [detail],
   );
-  const outsideCount = useMemo(
-    () => (detail?.files ?? []).filter((f) => !f.path.startsWith(prefix)).length,
-    [detail, prefix],
-  );
-  const allFiles = useMemo(
-    () => [...mainFiles, ...addedFiles.filter((f) => !mainFiles.includes(f))],
-    [mainFiles, addedFiles],
-  );
+  const allFiles = useMemo(() => {
+    const touched = [...changedFiles].filter((f) => !mainFiles.includes(f));
+    return [...mainFiles, ...touched];
+  }, [mainFiles, changedFiles]);
 
-  /** The scale line: how much of the skill this touches, in the KB's own terms. */
+  /** The scale line: how much this touches, in the KB's own terms. */
   const scale = useMemo(() => {
-    const files = (detail?.files ?? []).filter((f) => f.path.startsWith(prefix));
+    const files = detail?.files ?? [];
     return {
       files: files.length,
       plus: files.reduce((n, f) => n + f.additions, 0),
       minus: files.reduce((n, f) => n + f.deletions, 0),
     };
-  }, [detail, prefix]);
+  }, [detail]);
 
   /**
    * Land on the first changed file, until the reader picks one — DERIVED, so
    * the landing happens on the render the detail arrives rather than one render
    * later. `picked` staying null is what keeps "I haven't chosen yet" distinct
-   * from "I chose SKILL.md".
+   * from "I chose the first file".
    */
   const [picked, setPicked] = useState<string | null>(null);
-  const selected = picked ?? allFiles.find((f) => changedFiles.has(f)) ?? 'SKILL.md';
+  const selected =
+    picked ?? allFiles.find((f) => changedFiles.has(f)) ?? allFiles[0] ?? '';
   const setSelected = setPicked;
 
   /**
@@ -127,23 +142,34 @@ export function CompareView({
    * costs a cascading render on every file click. The ref answers "already
    * asked?" without a render, and only the arriving content is state.
    */
+  // A binary file (image, pdf, spreadsheet…) has no honest TEXT before and
+  // after. Reading its bytes as a string and line-diffing them used to hang
+  // the tab — the LCS differ is quadratic, and a binary blob decodes into
+  // pathological "lines" — so a binary selection never fetches and never
+  // diffs; it states what happened to the file instead.
+  const selectedIsBinary = selected !== '' && isBinaryFile(selected);
+
   const asked = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!asked.current.has(selected)) {
+    // `selected` is '' until the detail names any file in an unscoped dialog —
+    // nothing to read yet. Binary files are never read at all (above).
+    if (selected && !selectedIsBinary && !asked.current.has(selected)) {
       asked.current.add(selected);
-      readFileOnBranch(cr.branch, `${skill.path}/${selected}`)
+      readFileOnBranch(cr.branch, selected)
         .then((content) => setBranchContents((c) => ({ ...c, [selected]: content })))
         // NOT `''`. An unreadable branch copy stored as empty would diff as
         // "every line deleted" — a change request that erases the file.
         .catch(() => setUnreadable((s) => new Set(s).add(selected)));
     }
-  }, [selected, cr.branch, skill.path]);
+  }, [selected, selectedIsBinary, cr.branch]);
 
   const isAdded = addedFiles.includes(selected);
   // Raw-vs-raw: the skills API hands back SKILL.md's PARSED body (frontmatter
   // stripped), and diffing that against a raw branch read renders the
   // frontmatter as a deletion and the whole file as changed.
-  const mainRaw = useDefaultBranchFile(isAdded ? null : `${skill.path}/${selected}`);
+  const mainRaw = useDefaultBranchFile(
+    isAdded || !selected || selectedIsBinary ? null : selected,
+  );
   const branchRaw = branchContents[selected] ?? null;
 
   /**
@@ -211,11 +237,6 @@ export function CompareView({
               <span>{author}</span>
               <span aria-hidden="true" className="text-ink-faint">·</span>
               <span className="font-mono">{cr.branch}</span>
-              {outsideCount > 0 && (
-                <Badge tone="wait" size="xs">
-                  +{outsideCount} file{outsideCount === 1 ? '' : 's'} outside this skill
-                </Badge>
-              )}
             </p>
           </div>
           <Button variant="quiet" size="sm" onClick={onClose} aria-label="Close change request">
@@ -256,8 +277,11 @@ export function CompareView({
         {blocked && (
           <Banner tone="wait" role="alert" className="mx-8 mt-4">
             <b className="font-semibold">Can't apply</b> — files changed after {firstName} wrote
-            this, so there is no honest before and after to apply. It has to be proposed again
-            against the current text.
+            this, so there is no honest before and after to apply. It has to be redone against
+            the current text.
+            <div className="mt-2.5">
+              <ConflictHelp prompt={conflictResolutionPrompt(cr)} />
+            </div>
           </Banner>
         )}
 
@@ -322,11 +346,21 @@ export function CompareView({
               {/* The diff only needs the two file contents, so it renders as
                   soon as those arrive rather than waiting on the (slow) detail
                   fetch that tells us which files were touched. */}
+              {selectedIsBinary ? (
+                <p className="py-6 text-center text-detail text-ink-faint">
+                  {isAdded
+                    ? 'A new binary file (an image, a document…). There is no text to compare — apply the request to take it as proposed.'
+                    : touchesSelected
+                      ? 'A binary file (an image, a document…) changed in this request. There is no text to compare.'
+                      : 'A binary file — no text to show, and this request does not touch it.'}
+                </p>
+              ) : (
               <MarkedFile
                 diff={diff}
                 raw={detail !== null && !touchesSelected ? (mainRaw ?? branchRaw) : null}
                 unreadable={unreadable.has(selected)}
               />
+              )}
             </div>
           </div>
         </div>
