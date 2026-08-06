@@ -114,7 +114,7 @@ describe('KbSeedService', () => {
       for (const branch of PROTECTED) {
         const dir = await checkout(root, upstream, branch);
         expect(await exists(path.join(dir, 'access.md'))).toBe(true);
-        expect(await exists(path.join(dir, 'CLAUDE.md'))).toBe(true);
+        expect(await exists(path.join(dir, 'AGENTS.md'))).toBe(true);
         expect(await exists(path.join(dir, '.bevelignore'))).toBe(true);
         expect(await exists(path.join(dir, '.gitignore'))).toBe(true);
         // Core's two roots are seeded (kept present via their .gitkeep).
@@ -152,7 +152,7 @@ describe('KbSeedService', () => {
       const upstream = await seededUpstream([DEFAULT_BRANCH], {
         'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
         'access.md': 'existing',
-        'CLAUDE.md': 'existing',
+        'AGENTS.md': 'existing',
         '.bevelignore': 'x',
         '.gitignore': 'x',
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
@@ -170,7 +170,7 @@ describe('KbSeedService', () => {
         // roles.yaml + access.md already exist with custom content — must survive.
         'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
         'access.md': 'CUSTOM ACCESS RULES',
-        // CLAUDE.md / .bevelignore / .gitignore are absent → should be added.
+        // AGENTS.md / .bevelignore / .gitignore are absent → should be added.
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
         'Groups/.gitkeep': '',
       });
@@ -185,7 +185,7 @@ describe('KbSeedService', () => {
       expect(await fs.readFile(path.join(dir, 'access.md'), 'utf8')).toBe('CUSTOM ACCESS RULES');
       expect(await fs.readFile(path.join(dir, 'roles.yaml'), 'utf8')).toContain('keep@example.com');
       // Missing scaffolding added.
-      expect(await exists(path.join(dir, 'CLAUDE.md'))).toBe(true);
+      expect(await exists(path.join(dir, 'AGENTS.md'))).toBe(true);
       expect(await exists(path.join(dir, '.bevelignore'))).toBe(true);
       // Sample content is NOT restored — the real KnowledgeBase already had content,
       // so no placeholder .gitkeep is dropped into it, and no ExampleOntology appears.
@@ -228,7 +228,7 @@ describe('KbSeedService', () => {
       await makeSeeder(upstream).topUpWorkspace(repoDir, 'alice/feature');
 
       const dir = await checkout(root, upstream, 'alice/feature');
-      expect(await exists(path.join(dir, 'CLAUDE.md'))).toBe(true);
+      expect(await exists(path.join(dir, 'AGENTS.md'))).toBe(true);
       expect(await exists(path.join(dir, 'access.md'))).toBe(true);
     });
   });
@@ -293,7 +293,7 @@ describe('KbSeedService', () => {
      */
     it('refuses a required root that exists as a file, instead of skipping it', async () => {
       const upstream = await seededUpstream([DEFAULT_BRANCH], {
-        'CLAUDE.md': '# x',
+        'AGENTS.md': '# x',
         'access.md': 'read:\n  - everyone\n',
         '.bevelignore': '',
         '.gitignore': '',

@@ -32,7 +32,7 @@ const BOT_EMAIL = 'bevel-workflow@bevel.software';
  * generated from `ADMIN_EMAIL` (see {@link renderRolesYaml}) and written
  * directly, so a repo can't be seeded with a stale hard-coded Admin list.
  */
-const REQUIRED_FILES: readonly string[] = ['access.md', 'CLAUDE.md', '.bevelignore', '.gitignore'];
+const REQUIRED_FILES: readonly string[] = ['access.md', 'AGENTS.md', '.bevelignore', '.gitignore'];
 
 /**
  * The two roots CORE gives a knowledge base: the ontologies, and the groups

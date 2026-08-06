@@ -17,7 +17,7 @@ run in the Bevel platform.
 
 ## Adding a folder-level rule
 
-Drop an `access.md` into any folder under an ontology's `Knowledge/`. Frontmatter
+Drop an `access.md` into any folder, at any depth. Frontmatter
 only — the body is ignored. Example:
 
 ```yaml
