@@ -20,10 +20,9 @@ export interface FilePaneCardProps {
   /** What the bar names — the file, e.g. `SKILL.md` or `How to get started.md`. */
   file: string;
   /**
-   * The bar's LEADING slot — the pane's write action (`Edit` / `Propose
-   * changes` / `Done`…). Top-left, before the filename, so the one thing you
-   * can DO to the file is where reading starts; the filename follows as its
-   * object.
+   * The bar's TRAILING slot — the pane's write action (`Edit` / `Propose
+   * changes` / `Done`…), flush right. The filename leads: the bar names the
+   * thing first, then offers what you can do to it.
    */
   actions?: ReactNode;
   /** Sits between the bar and the body: the "your suggestions are inline" strip. */
@@ -42,8 +41,8 @@ export function FilePaneCard({ file, actions, notice, className, children }: Fil
       className={cn('overflow-hidden', className)}
     >
       <div className="flex min-h-11 items-center gap-3 border-b border-line px-3.5 py-2">
+        <span className="mr-auto truncate font-mono text-meta text-ink-muted">{file}</span>
         {actions}
-        <span className="min-w-0 truncate font-mono text-meta text-ink-muted">{file}</span>
       </div>
 
       {notice}
