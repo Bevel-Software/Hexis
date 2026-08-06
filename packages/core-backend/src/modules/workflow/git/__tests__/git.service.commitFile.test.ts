@@ -44,6 +44,12 @@ async function seedWorkspace(
   await runGit(repo, ['init', '-b', 'feature-test']);
   await runGit(repo, ['config', 'user.email', 'test@bevel.local']);
   await runGit(repo, ['config', 'user.name', 'Test Runner']);
+  // Pin the line-ending and path behaviour the assertions depend on, so a
+  // host-level git config (Windows installs default to `core.autocrlf=true`,
+  // and cap paths at 260 chars without `core.longpaths`) can't rewrite the
+  // bytes on checkout or refuse the deep-path `git add` this file exercises.
+  await runGit(repo, ['config', 'core.autocrlf', 'false']);
+  await runGit(repo, ['config', 'core.longpaths', 'true']);
   // An initial commit so HEAD exists.
   await fs.writeFile(path.join(repo, 'seed.md'), 'seed\n');
   await runGit(repo, ['add', 'seed.md']);
