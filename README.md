@@ -56,7 +56,7 @@ outgoing one still holds it.
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | yes* | Postgres connection string. Wins over the `POSTGRES_*` knobs — set it to use a database you already have |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` / `POSTGRES_HOST` / `POSTGRES_PORT` | when no `DATABASE_URL` | Parts the connection string is built from when `DATABASE_URL` is unset. URL-encoded, so special characters in the password are safe. The `POSTGRES_*` trio also creates the bundled database, applied only when its volume is first initialised |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | when no `DATABASE_URL` | Credentials the connection string is built from when `DATABASE_URL` is unset, and the ones the bundled database is created with. URL-encoded, so special characters in the password are safe. Applied to the database only when its volume is first initialised |
 | `JWT_SECRET` | yes | Signs login sessions + OAuth state |
 | `ADMIN_EMAIL` | yes | The deployment owner: always an admin (whatever the sign-in method), and the initial Admin of a freshly seeded KB |
 | `ADMIN_PASSWORD` | with password login | Password half of the bootstrap credential — checked against the env, never stored. Not needed when `LOGIN_PASSWORD=false` |
