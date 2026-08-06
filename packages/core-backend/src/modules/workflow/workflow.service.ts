@@ -56,6 +56,7 @@ import { PendingCommitsService } from './pending-commits.service.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import type { FileChangeNotifier } from './file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
+import { WorkspaceMutex } from './git/mutex.js';
 import { hashEmail } from '../../shared/hash-email.js';
 import {
   ChangeRequestConflictsError,
@@ -268,7 +269,50 @@ export class WorkflowService implements IWorkflowService {
     return this.git.createBranch(workspaceId, name, fromBase);
   }
 
+  /**
+   * Serialises everything that decides a branch's fate — opening a change
+   * request from it, deleting it, retiring it after a merge — by branch
+   * name. Without it, `retireMergedSourceBranch`'s check-then-delete could
+   * interleave with `openChangeRequest`'s check-then-insert (which spans a
+   * multi-second auto-merge and push) and delete a branch a request was
+   * being opened from. In-process only, which matches the deployment model:
+   * one server process owns the workspaces directory.
+   */
+  private readonly branchLifecycle = new WorkspaceMutex();
+
   async deleteBranch(
+    workspaceId: string,
+    name: string,
+    user: AuthUser,
+    opts?: { onlyIfNoRemote?: boolean; systemCleanup?: boolean },
+  ): Promise<void> {
+    return this.branchLifecycle.run(`branch:${name}`, async () => {
+      // A branch backing an OPEN change request is load-bearing: deleting it
+      // strands the request (and, in the propose flow's reset-on-reuse, would
+      // let one tab wipe the branch another tab just proposed from). The
+      // request has to be withdrawn or declined first. `systemCleanup` does
+      // its own open-request check under this same lock, and the legacy
+      // `onlyIfNoRemote` prune only fires when origin no longer has the ref.
+      if (!opts?.systemCleanup && !opts?.onlyIfNoRemote) {
+        const open = await this.db
+          .select({ number: changeRequests.number })
+          .from(changeRequests)
+          .where(
+            and(eq(changeRequests.sourceBranch, name), eq(changeRequests.state, 'open')),
+          )
+          .limit(1);
+        if (open.length > 0) {
+          throw new WorkflowValidationError(
+            `Branch "${name}" has an open change request (#${open[0].number}) — withdraw or decline it before deleting the branch.`,
+          );
+        }
+      }
+      await this.deleteBranchUnlocked(workspaceId, name, user, opts);
+    });
+  }
+
+  /** The deletion itself — callers must hold the branch-lifecycle lock. */
+  private async deleteBranchUnlocked(
     workspaceId: string,
     name: string,
     user: AuthUser,
@@ -984,6 +1028,13 @@ export class WorkflowService implements IWorkflowService {
       );
     }
 
+    // The whole open sequence — uniqueness check through row insert — runs
+    // under the source branch's lifecycle lock. `retireMergedSourceBranch`
+    // takes the same lock around its own check-then-delete, so a merge
+    // cleanup can never race into the multi-second gap between this
+    // method's "no open request" answer and its row landing, and delete the
+    // branch out from under a request being opened.
+    return this.branchLifecycle.run(`branch:${input.sourceBranch}`, async () => {
     // Uniqueness rule — A→B blocks A→B (the spec is explicit that B→A in
     // parallel is still allowed). `listOpenPrs` is cached for 30s so we
     // force-fresh to catch a CR that opened just now.
@@ -1128,6 +1179,7 @@ export class WorkflowService implements IWorkflowService {
       title: input.title,
     });
     return detail;
+    });
   }
 
   /**
@@ -1497,24 +1549,32 @@ export class WorkflowService implements IWorkflowService {
         .limit(1);
       const sourceBranch = rows[0]?.sourceBranch;
       if (!sourceBranch || isProtectedBranch(sourceBranch)) return;
-      const stillOpen = await this.db
-        .select({ number: changeRequests.number })
-        .from(changeRequests)
-        .where(
-          and(
-            eq(changeRequests.sourceBranch, sourceBranch),
-            eq(changeRequests.state, 'open'),
-          ),
-        )
-        .limit(1);
-      if (stillOpen.length > 0) return;
+      // The open-check and the deletion hold the branch's lifecycle lock
+      // TOGETHER — `openChangeRequest` holds the same lock across its own
+      // check-then-insert, so a request being opened from this branch either
+      // lands its row before the check below (retirement backs off) or waits
+      // until retirement finishes (and fails loudly on the missing branch,
+      // retryable, instead of losing the branch mid-open).
+      await this.branchLifecycle.run(`branch:${sourceBranch}`, async () => {
+        const stillOpen = await this.db
+          .select({ number: changeRequests.number })
+          .from(changeRequests)
+          .where(
+            and(
+              eq(changeRequests.sourceBranch, sourceBranch),
+              eq(changeRequests.state, 'open'),
+            ),
+          )
+          .limit(1);
+        if (stillOpen.length > 0) return;
 
-      const targetWs = await this.workspaceService.getOrCreateForBranch(baseBranch);
-      // The remote-tracking ref must be current, or deleteBranch's
-      // "does origin still have it?" probe skips the remote delete.
-      await this.workspaceService.ensureRemotesFetched(targetWs.id).catch(() => {});
-      await this.deleteBranch(targetWs.id, sourceBranch, user, { systemCleanup: true });
-      console.log(`[merge] retired merged source branch "${sourceBranch}"`);
+        const targetWs = await this.workspaceService.getOrCreateForBranch(baseBranch);
+        // The remote-tracking ref must be current, or deleteBranch's
+        // "does origin still have it?" probe skips the remote delete.
+        await this.workspaceService.ensureRemotesFetched(targetWs.id).catch(() => {});
+        await this.deleteBranchUnlocked(targetWs.id, sourceBranch, user, { systemCleanup: true });
+        console.log(`[merge] retired merged source branch "${sourceBranch}"`);
+      });
     } catch (err) {
       console.warn(
         `[merge] could not retire the merged source branch of change request #${number} (non-fatal):`,

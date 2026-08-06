@@ -107,21 +107,30 @@ export async function ensureKnowledgeSuggestionWorkspace(
   if (!existingCr) {
     try {
       await createBranch(defaultWorkspaceId(), branch, DEFAULT_BRANCH);
-    } catch {
-      // The branch already exists — a leftover from a withdrawn round, or a
-      // merge whose retirement failed. Its old commits would ride into the
-      // next request, so TRY a reset: delete the branch (the server also
-      // retires its stale workspace clone) and recreate it fresh from the
-      // default branch. The server recognises `suggestions/<who>-<id>/…` as
-      // the caller's own, so this needs no admin role.
-      try {
-        await deleteBranch(defaultWorkspaceId(), branch);
-        await createBranch(defaultWorkspaceId(), branch, DEFAULT_BRANCH);
-      } catch {
-        // Strictly best-effort: on any refusal (authorship, network, a race
-        // with a concurrent proposal) fall back to plain reuse — the change
-        // request is what makes the branch reviewable either way.
+    } catch (err) {
+      // ONLY an already-exists refusal is evidence of a leftover branch (a
+      // withdrawn round, a merge whose retirement failed) worth resetting —
+      // a transient failure is not, and "delete on any error" could tear
+      // down a branch the failure said nothing about. The server refuses the
+      // delete outright while the branch carries an open request, so a race
+      // with a concurrent proposal cannot wipe an active branch either.
+      const alreadyExists =
+        err instanceof Error && /already exists/i.test(err.message);
+      if (alreadyExists) {
+        // TRY a reset: delete the leftover (the server also retires its
+        // stale workspace clone) and recreate fresh from the default branch.
+        // The server recognises `suggestions/<who>-<id>/…` as the caller's
+        // own, so this needs no admin role.
+        try {
+          await deleteBranch(defaultWorkspaceId(), branch);
+          await createBranch(defaultWorkspaceId(), branch, DEFAULT_BRANCH);
+        } catch {
+          // Strictly best-effort: on any refusal fall back to plain reuse —
+          // the change request is what makes the branch reviewable either way.
+        }
       }
+      // Non-exists failures fall through to the write below, which surfaces
+      // anything real with its own error.
     }
   }
 

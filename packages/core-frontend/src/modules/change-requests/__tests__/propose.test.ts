@@ -43,7 +43,7 @@ describe('ensureKnowledgeSuggestionWorkspace — branch reuse', () => {
    */
   it('resets a leftover branch: delete, then recreate fresh', async () => {
     gitApi.createBranch
-      .mockRejectedValueOnce(new Error('branch exists'))
+      .mockRejectedValueOnce(new Error("a branch named 'x' already exists"))
       .mockResolvedValueOnce(undefined);
     gitApi.deleteBranch.mockResolvedValue(undefined);
 
@@ -58,12 +58,26 @@ describe('ensureKnowledgeSuggestionWorkspace — branch reuse', () => {
   });
 
   it('falls back to plain reuse when the reset itself is refused', async () => {
-    gitApi.createBranch.mockRejectedValue(new Error('branch exists'));
+    gitApi.createBranch.mockRejectedValue(new Error("a branch named 'x' already exists"));
     gitApi.deleteBranch.mockRejectedValue(new Error('403'));
 
     // No throw: the change request is what makes the branch reviewable, so a
     // refused reset degrades to the pre-existing reuse behaviour.
     const target = await ensureKnowledgeSuggestionWorkspace(rae);
+    expect(target.workspaceId).toBe('sugg-ws');
+  });
+
+  /**
+   * Only an already-exists refusal is evidence of a leftover worth
+   * resetting. A transient failure says nothing about the branch, and
+   * "delete on any error" could tear down a branch the error never
+   * implicated.
+   */
+  it('does not attempt a reset on a transient createBranch failure', async () => {
+    gitApi.createBranch.mockRejectedValue(new Error('network down'));
+    const target = await ensureKnowledgeSuggestionWorkspace(rae);
+    expect(gitApi.deleteBranch).not.toHaveBeenCalled();
+    // The flow still proceeds — the write path surfaces anything real.
     expect(target.workspaceId).toBe('sugg-ws');
   });
 
