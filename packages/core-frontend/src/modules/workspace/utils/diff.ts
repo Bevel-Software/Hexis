@@ -13,6 +13,10 @@ export type DiffLine =
   | { type: 'added'; text: string }
   | { type: 'removed'; text: string };
 
+/** Above either cap, the middle degrades to one whole-block replace. */
+const MAX_LCS_CELLS = 4_000_000;
+const MAX_LCS_SIDE = 100_000;
+
 /**
  * Split keeping no trailing phantom line for a trailing newline.
  *
@@ -56,11 +60,22 @@ export function computeDiff(oldText: string, newText: string): DiffLine[] {
   const midB = b.slice(start, endB);
   const out: DiffLine[] = a.slice(0, start).map((text) => ({ type: 'same' as const, text }));
 
-  if (midA.length * midB.length > 4_000_000) {
+  // The cell product alone is not enough: the DP table allocates one row per
+  // `midA` line, so a huge side against a tiny (or empty) one passes a
+  // product-only check while still allocating millions of rows. Each side is
+  // therefore capped independently as well.
+  const tooLarge =
+    midA.length > MAX_LCS_SIDE ||
+    midB.length > MAX_LCS_SIDE ||
+    midA.length * midB.length > MAX_LCS_CELLS;
+  if (tooLarge) {
     for (const text of midA) out.push({ type: 'removed', text });
     for (const text of midB) out.push({ type: 'added', text });
   } else {
-    out.push(...lcsDiff(midA, midB));
+    // Explicit loop, not `out.push(...lines)` — a spread passes every line as
+    // a call argument, and engines cap argument counts far below the line
+    // counts the guard admits.
+    for (const line of lcsDiff(midA, midB)) out.push(line);
   }
 
   for (const text of a.slice(endA)) out.push({ type: 'same', text });

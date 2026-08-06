@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { type PullRequestDetail, type PullRequestSummary } from '@bevel-software/platform-shared';
+import {
+  type FileDiffPayload,
+  type PullRequestDetail,
+  type PullRequestSummary,
+} from '@bevel-software/platform-shared';
 import '../change-requests.css';
 import { Badge, Banner, Button, Surface } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
@@ -189,9 +193,29 @@ export function ChangeRequestDialog({
    * case where an empty other side is real, and `isAdded` is how we know.
    */
   const bothSidesIn = branchRaw !== null && (isAdded || mainRaw !== null);
-  const diff: DiffLine[] | null = bothSidesIn
-    ? diffLines(isAdded ? '' : (mainRaw as string), branchRaw as string)
-    : null;
+  // Only for the marked-source view: the markdown viewer diffs internally, so
+  // computing this for an .md selection would run the same LCS twice.
+  const diff: DiffLine[] | null =
+    bothSidesIn && !selectedIsMarkdown
+      ? diffLines(isAdded ? '' : (mainRaw as string), branchRaw as string)
+      : null;
+  // Memoised as a VALUE: `MarkdownDiffViewer` keys its diff computation on
+  // payload identity, so an object literal built in render would make every
+  // dialog state change (an apply phase tick, another file's content
+  // arriving) re-run the LCS and frontmatter parse.
+  const mdPayload = useMemo<FileDiffPayload | null>(
+    () =>
+      selectedIsMarkdown && bothSidesIn
+        ? {
+            path: selected,
+            kind: isAdded ? 'added' : 'modified',
+            baseline: isAdded ? null : mainRaw,
+            current: branchRaw,
+            isBinary: false,
+          }
+        : null,
+    [selectedIsMarkdown, bothSidesIn, selected, isAdded, mainRaw, branchRaw],
+  );
   const touchesSelected = changedFiles.has(selected);
 
   /**
@@ -360,22 +384,14 @@ export function ChangeRequestDialog({
                       ? 'A binary file (an image, a document…) changed in this request. There is no text to compare.'
                       : 'A binary file — no text to show, and this request does not touch it.'}
                 </p>
-              ) : selectedIsMarkdown && bothSidesIn && !unreadable.has(selected) ? (
+              ) : mdPayload !== null && !unreadable.has(selected) ? (
                 // An untouched file arrives here too and simply renders as a
                 // clean document — identical sides diff to all-same blocks —
                 // so the reader gets prose everywhere, marked or not.
-                <MarkdownDiffViewer
-                  payload={{
-                    path: selected,
-                    kind: isAdded ? 'added' : 'modified',
-                    baseline: isAdded ? null : mainRaw,
-                    current: branchRaw,
-                    isBinary: false,
-                  }}
-                />
+                <MarkdownDiffViewer payload={mdPayload} />
               ) : (
               <MarkedFile
-                diff={selectedIsMarkdown ? null : diff}
+                diff={diff}
                 raw={
                   !selectedIsMarkdown && detail !== null && !touchesSelected
                     ? (mainRaw ?? branchRaw)
