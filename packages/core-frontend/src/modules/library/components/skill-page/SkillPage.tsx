@@ -32,6 +32,7 @@ import { SkillFilePane } from './SkillFilePane';
 import { SkillFileEditor } from './SkillFileEditor';
 import { ChangeBox } from '../../../change-requests/components/ChangeBox';
 import { conflictResolutionPrompt } from '../../../change-requests/utils/conflict';
+import { isBinaryFile } from '../../../workspace/components/renderers';
 
 /**
  * One skill, as a page — the prototype's skill item (line 1964), which says of
@@ -507,6 +508,7 @@ export function SkillPage() {
               mine={mine}
               canDecide={owned && !mine}
               diff={fileDiff}
+              binary={isBinaryFile(active)}
               upToDate={fileDiff !== null && fileDiff.length === 0}
               blocked={blockedCrs.has(cr.number)}
               conflictPrompt={conflictResolutionPrompt(cr)}

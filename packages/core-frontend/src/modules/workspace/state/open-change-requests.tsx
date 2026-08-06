@@ -5,7 +5,7 @@ import {
   listOpenChangeRequests,
 } from '../../change-requests/services/change-requests.api';
 import { useWorkspace } from './workspace.context';
-import { PR_STALE_EVENT } from '../../../core/events';
+import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../core/events';
 import {
   NO_CHANGE_REQUESTS,
   OpenChangeRequestsContext,
@@ -52,6 +52,16 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
    * list deliberately exposes no email to compare against.
    */
   const [mine, setMine] = useState<PullRequestSummary[]>([]);
+  /**
+   * Requests the CLIENT just made true — a suggestion-routed upload announces
+   * its files here the moment the bytes land, because the server's own
+   * touched-path diff can trail the background commit worker by many seconds
+   * and the fetched list would show nothing where the user just dropped a
+   * folder. Each entry is merged into the derived values below and dropped as
+   * soon as a REAL fetch covers all its paths — the server's answer wins the
+   * moment it exists.
+   */
+  const [announced, setAnnounced] = useState<PullRequestSummary[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,7 +78,21 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
         });
       listMyChangeRequests(opts)
         .then((data) => {
-          if (!cancelled) setMine(data.filter((c) => c.state === 'open'));
+          if (cancelled) return;
+          const open = data.filter((c) => c.state === 'open');
+          setMine(open);
+          // Reconcile: an announced entry whose every path the real list now
+          // carries has been overtaken; one whose request is GONE (declined,
+          // merged, withdrawn elsewhere) must not haunt the tree either — but
+          // only a FRESH answer may say "gone": a stale or already-in-flight
+          // fetch predates the announcement and would drop it by race.
+          setAnnounced((prev) =>
+            prev.filter((a) => {
+              const real = open.find((c) => c.number === a.number);
+              if (!real) return !opts.fresh;
+              return !a.touchedNodePaths.every((p) => real.touchedNodePaths.includes(p));
+            }),
+          );
         })
         .catch((err) => {
           // Same degradation contract: no suggestion rows, not an error page.
@@ -85,9 +109,16 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     // rows for a just-uploaded file would sit invisible until the TTL).
     const onStale = () => load({ fresh: true });
     window.addEventListener(PR_STALE_EVENT, onStale);
+    const onAnnounce = (e: Event) => {
+      const cr = (e as CustomEvent<PullRequestSummary>).detail;
+      if (!cr || typeof cr.number !== 'number') return;
+      setAnnounced((prev) => [...prev.filter((p) => p.number !== cr.number), cr]);
+    };
+    window.addEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
     return () => {
       cancelled = true;
       window.removeEventListener(PR_STALE_EVENT, onStale);
+      window.removeEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
     };
   }, []);
 
@@ -102,12 +133,22 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
         else byPath.set(workspaceRelative, [pr]);
       }
     }
+    // Announced (optimistic) entries join every derived view, without ever
+    // duplicating a request the broad list already shows on a path.
+    for (const pr of announced) {
+      for (const repoRelative of pr.touchedNodePaths) {
+        const workspaceRelative = `${kbDirName}/${repoRelative}`;
+        const list = byPath.get(workspaceRelative);
+        if (!list) byPath.set(workspaceRelative, [pr]);
+        else if (!list.some((c) => c.number === pr.number)) list.push(pr);
+      }
+    }
     // Same path-space conversion as above — `touchedNodePaths` is
     // KB-repo-relative here too. First open request wins a contested path;
     // one file in two of your own bundles is already a state the UI cannot
     // untangle, so the row just links to the older one.
     const minePaths = new Map<string, number>();
-    for (const pr of mine) {
+    for (const pr of [...mine, ...announced]) {
       for (const repoRelative of pr.touchedNodePaths) {
         const workspaceRelative = `${kbDirName}/${repoRelative}`;
         if (!minePaths.has(workspaceRelative)) minePaths.set(workspaceRelative, pr.number);
@@ -117,9 +158,9 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       paths: new Set(byPath.keys()),
       forPath: (path: string) => byPath.get(path) ?? [],
       minePaths,
-      mineNumbers: new Set(mine.map((pr) => pr.number)),
+      mineNumbers: new Set([...mine, ...announced].map((pr) => pr.number)),
     };
-  }, [requests, mine, kbDirName]);
+  }, [requests, mine, announced, kbDirName]);
 
   return (
     <OpenChangeRequestsContext.Provider value={value}>

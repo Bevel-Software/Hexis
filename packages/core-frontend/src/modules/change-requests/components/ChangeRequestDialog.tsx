@@ -12,6 +12,7 @@ import { conflictResolutionPrompt } from '../utils/conflict';
 import { ConflictHelp } from './ConflictHelp';
 import { useDefaultBranchFile } from '../hooks/useFileOnBranch';
 import { diffLines, type DiffLine } from '../utils/diff';
+import { isBinaryFile } from '../../workspace/components/renderers';
 
 /**
  * The folder the dialog reads the request WITHIN. The skill page scopes to
@@ -145,11 +146,18 @@ export function ChangeRequestDialog({
    * costs a cascading render on every file click. The ref answers "already
    * asked?" without a render, and only the arriving content is state.
    */
+  // A binary file (image, pdf, spreadsheet…) has no honest TEXT before and
+  // after. Reading its bytes as a string and line-diffing them used to hang
+  // the tab — the LCS differ is quadratic, and a binary blob decodes into
+  // pathological "lines" — so a binary selection never fetches and never
+  // diffs; it states what happened to the file instead.
+  const selectedIsBinary = selected !== '' && isBinaryFile(selected);
+
   const asked = useRef<Set<string>>(new Set());
   useEffect(() => {
     // `selected` is '' until the detail names any file in an unscoped dialog —
-    // nothing to read yet.
-    if (selected && !asked.current.has(selected)) {
+    // nothing to read yet. Binary files are never read at all (above).
+    if (selected && !selectedIsBinary && !asked.current.has(selected)) {
       asked.current.add(selected);
       readFileOnBranch(cr.branch, `${prefix}${selected}`)
         .then((content) => setBranchContents((c) => ({ ...c, [selected]: content })))
@@ -157,13 +165,15 @@ export function ChangeRequestDialog({
         // "every line deleted" — a change request that erases the file.
         .catch(() => setUnreadable((s) => new Set(s).add(selected)));
     }
-  }, [selected, cr.branch, prefix]);
+  }, [selected, selectedIsBinary, cr.branch, prefix]);
 
   const isAdded = addedFiles.includes(selected);
   // Raw-vs-raw: the skills API hands back SKILL.md's PARSED body (frontmatter
   // stripped), and diffing that against a raw branch read renders the
   // frontmatter as a deletion and the whole file as changed.
-  const mainRaw = useDefaultBranchFile(isAdded || !selected ? null : `${prefix}${selected}`);
+  const mainRaw = useDefaultBranchFile(
+    isAdded || !selected || selectedIsBinary ? null : `${prefix}${selected}`,
+  );
   const branchRaw = branchContents[selected] ?? null;
 
   /**
@@ -345,11 +355,21 @@ export function ChangeRequestDialog({
               {/* The diff only needs the two file contents, so it renders as
                   soon as those arrive rather than waiting on the (slow) detail
                   fetch that tells us which files were touched. */}
+              {selectedIsBinary ? (
+                <p className="py-6 text-center text-detail text-ink-faint">
+                  {isAdded
+                    ? 'A new binary file (an image, a document…). There is no text to compare — apply the request to take it as proposed.'
+                    : touchesSelected
+                      ? 'A binary file (an image, a document…) changed in this request. There is no text to compare.'
+                      : 'A binary file — no text to show, and this request does not touch it.'}
+                </p>
+              ) : (
               <MarkedFile
                 diff={diff}
                 raw={detail !== null && !touchesSelected ? (mainRaw ?? branchRaw) : null}
                 unreadable={unreadable.has(selected)}
               />
+              )}
             </div>
           </div>
         </div>

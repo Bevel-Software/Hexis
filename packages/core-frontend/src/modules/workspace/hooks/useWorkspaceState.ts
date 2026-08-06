@@ -8,7 +8,7 @@ import {
   ensureKnowledgeChangeRequest,
   type KnowledgeSuggestionTarget,
 } from '../../change-requests/services/propose.api';
-import { PR_STALE_EVENT } from '../../../core/events';
+import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../core/events';
 import type {
   OpenTab,
   PendingEntry,
@@ -558,8 +558,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const uploadWorkspaceId = suggestion?.workspaceId ?? workspaceId;
     // No optimistic tree overlay for a suggestion-routed upload: the files
     // will never appear in THIS branch's tree — they surface as suggestion
-    // rows once the change request lists them.
+    // rows instead (announced optimistically below, so they show the moment
+    // the bytes land rather than when the server's diff catches up).
     const optimistic = suggestion === null;
+    const suggestionPrefix = suggestion ? `${suggestion.kbDirName}/` : null;
+    /** Repo-relative paths of the files that LANDED on the suggestions branch. */
+    const suggestedRepoPaths: string[] = [];
     // Pin the workspace at dispatch time. A folder upload can take seconds;
     // if the user switches branches mid-flight, the trailing state
     // mutations (setUploadError / setIsUploading / setFileTree via
@@ -643,6 +647,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       try {
         await uploadFile(uploadWorkspaceId, path, file, { defer: isBatch });
         uploaded += 1;
+        if (suggestion) {
+          suggestedRepoPaths.push(
+            suggestionPrefix && path.startsWith(suggestionPrefix)
+              ? path.slice(suggestionPrefix.length)
+              : path,
+          );
+        }
         setProgress();
         // Don't remove the pending entry here — the server commit has
         // landed but the file tree hasn't been refreshed yet, so removing
@@ -764,7 +775,19 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // a failed upload: nothing appears where the user dropped them.
       if (suggestion && !firstError && (uploaded > 0 || deferredDirsQueued)) {
         try {
-          await ensureKnowledgeChangeRequest(suggestion, authUser?.name ?? 'Someone');
+          const cr = await ensureKnowledgeChangeRequest(suggestion, authUser?.name ?? 'Someone');
+          // Announce the rows OPTIMISTICALLY: the client just committed these
+          // files, and the server's touched-path diff can trail the background
+          // commit worker by many seconds. The provider merges this until a
+          // real fetch covers the paths.
+          if (cr && suggestedRepoPaths.length > 0) {
+            const touched = new Set([...cr.touchedNodePaths, ...suggestedRepoPaths]);
+            window.dispatchEvent(
+              new CustomEvent(SUGGESTIONS_OPTIMISTIC_EVENT, {
+                detail: { ...cr, touchedNodePaths: [...touched] },
+              }),
+            );
+          }
           window.dispatchEvent(new Event(PR_STALE_EVENT));
           if (isCurrent()) {
             setUploadNotice(

@@ -38,13 +38,13 @@ vi.mock('../../../access/api', () => ({
 }));
 const proposeMocks = vi.hoisted(() => ({
   ensureKnowledgeSuggestionWorkspace: vi.fn(),
-  ensureKnowledgeChangeRequest: vi.fn(async () => {}),
+  ensureKnowledgeChangeRequest: vi.fn(async (): Promise<unknown> => null),
 }));
 vi.mock('../../../change-requests/services/propose.api', () => proposeMocks);
 
 import type { ReactNode } from 'react';
 import { AuthContext } from '../../../auth/state/auth.context';
-import { PR_STALE_EVENT } from '../../../../core/events';
+import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../../core/events';
 import { useWorkspaceState } from '../useWorkspaceState';
 const WorkspaceApiError = apiMocks.WorkspaceApiError;
 
@@ -362,7 +362,18 @@ describe('dispatchUpload — suggestion routing', () => {
       kbDirName: 'knowledge-base',
       existingCr: null,
     });
-    proposeMocks.ensureKnowledgeChangeRequest.mockReset().mockResolvedValue(undefined);
+    proposeMocks.ensureKnowledgeChangeRequest.mockReset().mockResolvedValue({
+      number: 12,
+      title: 'Changes from Rae Reader — Knowledge',
+      branch: 'suggestions/reader/knowledge',
+      base: 'target-company-state',
+      state: 'open',
+      createdAt: '2026-08-06T00:00:00.000Z',
+      touchedNodePaths: [],
+      author: { login: 'user-x' },
+      review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
+      url: '',
+    });
   });
 
   async function mountProtected() {
@@ -380,6 +391,8 @@ describe('dispatchUpload — suggestion routing', () => {
     const result = await mountProtected();
     const onStale = vi.fn();
     window.addEventListener(PR_STALE_EVENT, onStale);
+    const onAnnounce = vi.fn();
+    window.addEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
     try {
       const file = new File(['hello'], 'note.md', { type: 'text/markdown' });
       await act(async () => {
@@ -405,10 +418,17 @@ describe('dispatchUpload — suggestion routing', () => {
       // told where the files went — silence would read as a failed upload.
       expect(proposeMocks.ensureKnowledgeChangeRequest).toHaveBeenCalled();
       expect(onStale).toHaveBeenCalled();
+      // The rows are announced OPTIMISTICALLY, with the uploaded paths — the
+      // server's touched-path diff may trail the commit worker for seconds.
+      expect(onAnnounce).toHaveBeenCalledTimes(1);
+      const detail = (onAnnounce.mock.calls[0][0] as CustomEvent).detail;
+      expect(detail.number).toBe(12);
+      expect(detail.touchedNodePaths).toContain('KnowledgeBase/Ops/note.md');
       expect(result.current.uploadNotice).toMatch(/became a suggestion/);
       expect(result.current.uploadError).toBeNull();
     } finally {
       window.removeEventListener(PR_STALE_EVENT, onStale);
+      window.removeEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
     }
   });
 

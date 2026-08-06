@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { renderHook, waitFor, act } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 
@@ -181,6 +181,49 @@ describe('useOpenChangeRequests', () => {
       expect(api.listMyChangeRequests).toHaveBeenCalledWith({ fresh: true }),
     );
     expect(api.listOpenChangeRequests).toHaveBeenCalledWith({ fresh: true });
+  });
+
+  /**
+   * The optimistic path: a suggestion-routed upload announces the request it
+   * just made true, and the rows must derive from it IMMEDIATELY — the
+   * server's own touched-path diff can trail the background commit worker by
+   * many seconds. A later real fetch that covers the paths takes over and the
+   * announcement is dropped.
+   */
+  it('derives rows from an announced request until a real fetch covers it', async () => {
+    api.listMyChangeRequests.mockResolvedValue([]);
+    const { result } = renderIt();
+    await waitFor(() => expect(api.listMyChangeRequests).toHaveBeenCalled());
+
+    const announced = pr({
+      number: 12,
+      branch: 'suggestions/razvan/knowledge',
+      touchedNodePaths: ['KnowledgeBase/Ops/dropped.md'],
+    });
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('bevel:suggestions-optimistic', { detail: announced }),
+      );
+    });
+    // Rows NOW — path-space joined, number known, clickable via forPath.
+    expect(result.current.minePaths.get('knowledge-base/KnowledgeBase/Ops/dropped.md')).toBe(12);
+    expect(result.current.mineNumbers.has(12)).toBe(true);
+    expect(
+      result.current.forPath('knowledge-base/KnowledgeBase/Ops/dropped.md').map((c) => c.number),
+    ).toEqual([12]);
+
+    // The server catches up: a FRESH fetch carries the path → the real entry
+    // takes over, and the derived values stay identical.
+    api.listMyChangeRequests.mockResolvedValue([announced]);
+    act(() => {
+      window.dispatchEvent(new Event('bevel:pr-stale'));
+    });
+    await waitFor(() =>
+      expect(api.listMyChangeRequests).toHaveBeenCalledWith({ fresh: true }),
+    );
+    await waitFor(() =>
+      expect(result.current.minePaths.get('knowledge-base/KnowledgeBase/Ops/dropped.md')).toBe(12),
+    );
   });
 
   it('issues ONE request however many consumers read it', async () => {

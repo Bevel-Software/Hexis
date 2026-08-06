@@ -100,15 +100,25 @@ export async function ensureKnowledgeSuggestionWorkspace(
   return { branch, workspaceId: workspace.id, kbDirName: workspace.kbDirName, existingCr };
 }
 
-/** Open the caller's one Knowledge change request, unless it already exists. */
+/**
+ * Open the caller's one Knowledge change request, unless it already exists.
+ * Returns the request either way (the server's created row, or the existing
+ * one) so callers can announce it — the optimistic suggestion rows need its
+ * number and branch the moment the write lands.
+ */
 export async function ensureKnowledgeChangeRequest(
   target: KnowledgeSuggestionTarget,
   userName: string,
-): Promise<void> {
-  if (target.existingCr) return;
-  await openChangeRequest({
+): Promise<PullRequestSummary | null> {
+  if (target.existingCr) return target.existingCr;
+  const created = await openChangeRequest({
     sourceBranch: target.branch,
     targetBranch: DEFAULT_BRANCH,
     title: `Changes from ${userName} — Knowledge`,
   });
+  // The endpoint returns the created request; treat an unexpected shape as
+  // "no summary to announce" rather than a failure — the request exists.
+  return created && typeof (created as PullRequestSummary).number === 'number'
+    ? (created as PullRequestSummary)
+    : null;
 }

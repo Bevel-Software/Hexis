@@ -9,6 +9,7 @@ import { useCrFileDiffs } from '../hooks/useCrFileDiffs';
 import { useDefaultBranchFile } from '../hooks/useFileOnBranch';
 import { changeAuthorName, formatWhen } from '../utils/author';
 import { conflictResolutionPrompt } from '../utils/conflict';
+import { isBinaryFile } from '../../workspace/components/renderers';
 import { ChangeBox } from './ChangeBox';
 import { ChangeRequestDialog } from './ChangeRequestDialog';
 
@@ -125,6 +126,7 @@ export function FileChangeBoxes({
             mine={mine}
             canDecide={canDecide && !mine}
             diff={fileDiff}
+            binary={isBinaryFile(repoRelativePath)}
             upToDate={fileDiff !== null && fileDiff.length === 0}
             blocked={blockedCrs.has(cr.number)}
             conflictPrompt={conflictResolutionPrompt(cr)}
