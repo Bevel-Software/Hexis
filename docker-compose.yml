@@ -147,8 +147,14 @@ services:
       # DATABASE_URL whose value is a truncated fragment. Doing it in code
       # also lets the parts be URL-encoded, which shell interpolation cannot:
       # a password containing `@` or `/` used to produce an unparseable URL.
-      - DATABASE_URL
-      - POSTGRES_HOST=db
+      # An empty DEFAULT, not a bare name. A name on its own has no value for a
+      # deployment UI to fall back on, so it reads as "required" and gets
+      # demanded — and then refuses to be deleted. `:-` gives it something to
+      # resolve to, which is what keeps the other optional variables quiet.
+      # Blank is safe: `resolveDatabaseUrl` trims and treats it as absent, and
+      # a test pins that.
+      - DATABASE_URL=${DATABASE_URL:-}
+      - POSTGRES_HOST=${POSTGRES_HOST:-db}
       - POSTGRES_USER=${POSTGRES_USER:-bevel}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-bevel}
       - POSTGRES_DB=${POSTGRES_DB:-bevel}
