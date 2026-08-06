@@ -13,9 +13,15 @@
 .gitattributes
 # README.md files are the base folders' own documentation — keep them visible.
 AGENTS.md
+# The pre-rename name. Top-up git-mv's a lone CLAUDE.md onto the new name, but
+# it declines when the author already keeps an AGENTS.md of their own — so a
+# knowledge base can hold both, and both stay hidden.
+CLAUDE.md
 
 # Empty-folder placeholders used only for committing empty dirs.
 **/.gitkeep
 
 **/access.md
 roles.yaml
+
+Groups/

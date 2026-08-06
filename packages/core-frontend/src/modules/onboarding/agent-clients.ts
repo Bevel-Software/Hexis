@@ -34,7 +34,7 @@ export const AGENT_CLIENTS: AgentClient[] = [
   {
     id: 'other',
     label: 'Cursor & Others',
-    hint: 'For clients that read their servers from a JSON config — Cursor, Windsurf, Cline.',
+    hint: 'For clients that read their servers from a JSON config, like Cursor, Windsurf and Cline.',
     snip: (url) =>
       JSON.stringify({ mcpServers: { 'knowledge-base': { type: 'http', url } } }, null, 2),
   },

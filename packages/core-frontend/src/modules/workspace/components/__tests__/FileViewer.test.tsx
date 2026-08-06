@@ -632,27 +632,15 @@ describe('FileViewer', () => {
 
   // ── WP5: the rail ──
 
-  // A closed rail must cost nothing. `fetchFileHistory` is not cached and
-  // `FileHistoryPanel` refetches the same history anyway, so an ungated call
-  // would be one wasted request per file opened, for every reader, forever.
-  it('opens the rail from ⋯ and issues no history request until it is open', async () => {
-    const user = userEvent.setup();
+  // The rail lost its only trigger with the ⋯ menu's File details entry, so
+  // the page never mounts it — and never pays for the history request that
+  // used to sit behind its "Edited" row.
+  it('mounts no rail, and issues no history request for one', () => {
     fetchFileHistoryMock.mockClear();
     render(<ViewerHarness initialContent="railed" />);
 
     expect(screen.queryByText('About this file')).not.toBeInTheDocument();
     expect(fetchFileHistoryMock).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole('button', { name: 'More actions' }));
-    await user.click(screen.getByRole('menuitem', { name: /File details/ }));
-
-    expect(await screen.findByText('About this file')).toBeInTheDocument();
-    expect(screen.getByText('knowledge-base/Knowledge/Foo.md')).toBeInTheDocument();
-    await waitFor(() => expect(fetchFileHistoryMock).toHaveBeenCalledWith(
-      'knowledge-base/Knowledge/Foo.md',
-      1,
-    ));
-    expect(await screen.findByText(/by Ali/)).toBeInTheDocument();
   });
 
   // ── WP6: the third place ──
@@ -680,14 +668,10 @@ describe('FileViewer', () => {
     expect(screen.queryByText('Open change request')).not.toBeInTheDocument();
   });
 
-  it('widens the column when the rail is open', async () => {
-    const user = userEvent.setup();
+  // With no rail to make room for, the column stays on the base measure.
+  it('keeps the base measure', () => {
     render(<ViewerHarness initialContent="railed" />);
-    const wrap = () => screen.getByTestId('kb-document-shell').firstElementChild as HTMLElement;
-    expect(wrap().className).toContain('max-w-[880px]');
-
-    await user.click(screen.getByRole('button', { name: 'More actions' }));
-    await user.click(screen.getByRole('menuitem', { name: /File details/ }));
-    expect(wrap().className).toContain('max-w-[980px]');
+    const wrap = screen.getByTestId('kb-document-shell').firstElementChild as HTMLElement;
+    expect(wrap.className).toContain('max-w-[880px]');
   });
 });

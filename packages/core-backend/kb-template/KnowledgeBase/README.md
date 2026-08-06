@@ -1,37 +1,45 @@
 # KnowledgeBase/
 
-Curated knowledge, organized as **ontologies** — one per team or domain.
+The knowledge itself. Organise it however suits the material.
 
 ## Structure
 
+There isn't one. Folders, file names, how finely a subject is split — all of it
+is a judgement call about what the next reader needs, not a rule the platform
+enforces. A sensible starting point is one folder per team or domain:
+
 ```text
 KnowledgeBase/
-├── <Ontology>/           ← e.g. "Product", "Engineering"
-│   ├── NodeTypes/        ← node type definitions for this ontology
-│   │   └── NodeType.md   ← the meta type (every ontology carries its own copy)
-│   ├── Knowledge/        ← the knowledge nodes
-│   └── access.md         ← optional ontology-root access rules
-└── <AnotherOntology>/
+├── Product/
+│   ├── Roadmap.md
+│   └── Pricing/
+│       └── Enterprise-Tiers.md
+├── Engineering/
+└── access.md             ← optional: who may write in here
 ```
-
-Any direct subfolder containing BOTH `NodeTypes/` and `Knowledge/` is picked up
-as an ontology by the platform's parser, validator, and access control.
-Ontologies are **self-contained**: each carries its own `NodeTypes/NodeType.md`
-and its own concrete types.
 
 ## What goes here
 
-- **Typed knowledge nodes** in `Knowledge/`: markdown files opening with a
-  frontmatter block declaring `nodeType:` (a quoted markdown link to the type)
-  and a unique lowercase-kebab `id:`. Fields are headers matching the type
-  definition; references to other nodes are file-relative markdown links.
-- **Node type definitions** in `NodeTypes/`: one file per type, following the
-  meta `NodeType.md` format.
-- Markdown files *without* a `nodeType:` frontmatter are ignored by the parser
-  (notes, scratch docs) — allowed, but invisible to the graph.
+Markdown, written the way the subject wants to be written — prose, tables,
+checklists, diagrams. Nothing parses these files into a schema or rejects one
+for having the wrong shape.
 
-Conventions (naming, child-node folders, Source of Information blocks,
-cross-ontology links) are documented in the repo-root `AGENTS.md`.
+Two conventions are worth keeping, because they are what make a pile of
+documents navigable:
 
-**Not for agent output**: records produced by agents and pipelines (work
-items, instances, transcripts) belong in the `Data/` base folder, not here.
+- **Link between documents** with `[Page Name](relative/path/to/Page.md)`,
+  relative to the linking file's own directory, so links resolve both in the
+  app and on the git host.
+- **Say where a claim came from** — a person, a ticket, a document, a URL —
+  near the claim, with the date it was true.
+
+An `access.md` at any depth narrows or widens who may write below it; see the
+repo-root `AGENTS.md`.
+
+## Deployments that add structure
+
+Some installations layer a typed knowledge graph over this folder, where a
+document declares a type in its frontmatter and the platform validates it
+against a definition. That is not part of this platform: where it exists it
+arrives with its own tooling and its own conventions, and the files it adds are
+still ordinary markdown to everything here.

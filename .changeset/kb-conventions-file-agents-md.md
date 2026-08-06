@@ -28,4 +28,7 @@ time.
 
 The migration declines to touch anything it cannot move safely: a KB that
 already has an `AGENTS.md` keeps both files untouched, and a branch already
-migrated makes no second commit.
+migrated makes no second commit. Because of those declines — and because the
+top-up is best-effort and rolls back a commit it cannot push — the tool-description
+note still names `CLAUDE.md` as a fallback, so an agent finds the conventions
+either way rather than reading none.

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import type { LocalFilesystem } from '@mastra/core/workspace';
-import { KB_CONVENTIONS_FILE } from '@bevel-software/platform-shared';
+import { KB_CONVENTIONS_FILE, LEGACY_KB_CONVENTIONS_FILE } from '@bevel-software/platform-shared';
 import type { IToolRegistry, JsonSchema } from '../tool-registry/tool.contract.js';
 import { ToolError, type ToolContext, type ToolHandler } from '../tool-helpers/tool.contract.js';
 import { BRANCH_INPUT, toolDef } from '../tool-helpers/tool-def.js';
@@ -95,11 +95,18 @@ async function filterReadableEntries(
  * touching files. It rides on every entrypoint — reads (grep/list_files/
  * file_stat) included — because any of them can be a session's first touch.
  *
- * The filename comes from the shared constant rather than being spelled out
- * here, so this note can't drift from the file the seeder actually writes.
+ * Both names come from shared constants rather than being spelled out here, so
+ * this note can't drift from the file the seeder actually writes.
+ *
+ * The legacy name is still named as a fallback. The top-up renames a pre-rename
+ * `CLAUDE.md` on branch load, but that migration is best-effort — it declines
+ * when the author already keeps an `AGENTS.md` of their own, and it rolls back
+ * when the push fails — so a knowledge base can still be carrying the old name
+ * when a tool runs. Naming both means an agent finds the conventions either
+ * way, instead of reading none because it looked for the newer name and stopped.
  */
 const KB_CONVENTIONS_NOTE =
-  ` Before your first read or change in a workspace, read \`${KB_CONVENTIONS_FILE}\` at the KB root (if it exists) — it holds the author's conventions for this knowledge base, and you should follow them.`;
+  ` Before your first read or change in a workspace, read \`${KB_CONVENTIONS_FILE}\` at the KB root — or \`${LEGACY_KB_CONVENTIONS_FILE}\` on a knowledge base seeded before it was renamed — if either exists: it holds the author's conventions for this knowledge base, and you should follow them.`;
 
 const int = (description: string): JsonSchema => ({ type: 'integer', description });
 

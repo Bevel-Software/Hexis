@@ -302,6 +302,7 @@ export async function createCoreServer(
     core.accessControl,
     core.kbDirName,
     core.creatorAccess,
+    core.adminAccess,
   ));
   // Workflow is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes

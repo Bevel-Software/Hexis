@@ -605,8 +605,7 @@ describe('FileExplorer chevron collapse — userIntent vs autoExpanded', () => {
 });
 
 // The KB level splits the well-known root folders into labelled top-level
-// sections. `Data/`, `Agents/` and `Pipelines/` get their own sections like
-// Skills/Tools — they must not fold into the Knowledge section.
+// sections — with one deliberate exception, `Groups/`.
 describe('FileExplorer sections — root folders', () => {
   beforeEach(() => {
     cleanup();
@@ -619,27 +618,59 @@ describe('FileExplorer sections — root folders', () => {
     children: [],
   });
 
-  it('renders Data, Agents and Pipelines as their own top-level sections', () => {
+  /**
+   * `Data/`, `Agents/` and `Pipelines/` are never created by core — a
+   * deployment that owns the agentic execution layer seeds them. When they ARE
+   * there they get their own sections, and in particular must not fold into
+   * Knowledge the way a stray content folder does.
+   */
+  it('renders Data, Agents and Pipelines as their own sections when present', () => {
     const tree: FileTreeEntry = {
       name: '.',
       relativePath: '.',
       type: 'directory',
-      children: [
-        dir('KnowledgeBase'),
-        dir('Data'),
-        dir('Agents'),
-        dir('Pipelines'),
-        dir('Skills'),
-        dir('Tools'),
-      ],
+      children: [dir('KnowledgeBase'), dir('Data'), dir('Agents'), dir('Pipelines')],
     };
     renderExplorer({ fileTree: tree });
     expect(screen.getByText('Knowledge')).toBeInTheDocument();
     expect(screen.getByText('Data')).toBeInTheDocument();
     expect(screen.getByText('Agents')).toBeInTheDocument();
     expect(screen.getByText('Pipelines')).toBeInTheDocument();
-    expect(screen.getByText('Skills')).toBeInTheDocument();
-    expect(screen.getByText('Tools')).toBeInTheDocument();
+  });
+
+  /**
+   * `Groups/` is the Skills & Tools app's storage, and that app presents it as
+   * groups, skills and tools. Listing it here offered a second, worse way in —
+   * raw markdown editing of a SKILL.md, on a folder whose access is managed
+   * from the group page.
+   *
+   * Not shown, and NOT folded into Knowledge either: it is a reserved root, so
+   * the "stray content folder" path must not pick it up. Both halves are
+   * asserted, because dropping it from the reserved set would still hide the
+   * section while quietly moving the whole folder under Knowledge.
+   */
+  it('never shows Groups in the knowledge view', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('KnowledgeBase'), dir('Groups')],
+    };
+    renderExplorer({ fileTree: tree });
+    expect(screen.getByText('Knowledge')).toBeInTheDocument();
+    expect(screen.queryByText('Groups')).not.toBeInTheDocument();
+  });
+
+  /** A KB whose only root is Groups still has a knowledge view — an empty one. */
+  it('does not fall back to the flat tree when Groups is the only root', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('Groups')],
+    };
+    renderExplorer({ fileTree: tree });
+    expect(screen.queryByText('Groups')).not.toBeInTheDocument();
   });
 });
 
