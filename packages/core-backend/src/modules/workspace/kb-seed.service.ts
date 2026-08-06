@@ -362,12 +362,37 @@ export class KbSeedService implements IKbSeedService {
   private async ensureRequiredDirs(repoDir: string): Promise<string[]> {
     const added: string[] = [];
     for (const rootDir of this.requiredDirs) {
-      if (await this.exists(path.join(repoDir, rootDir))) continue;
-      await fs.mkdir(path.join(repoDir, rootDir), { recursive: true });
-      await fs.writeFile(path.join(repoDir, `${rootDir}/.gitkeep`), '', 'utf8');
+      const abs = path.join(repoDir, rootDir);
+      // `lstat`, not `exists`: `fs.access` answers "is there something here?",
+      // which is true of a FILE named `Groups` — and the old skip-if-present
+      // check then did nothing and reported success, leaving a knowledge base
+      // permanently missing a root it claims to guarantee. `lstat` rather than
+      // `stat` so a SYMLINK is rejected too: a link named `Groups` is not a KB
+      // layout, and one pointing outside the repo would make every later write
+      // into it land somewhere nobody asked for.
+      const found = await this.lstatOrNull(abs);
+      if (found) {
+        if (found.isDirectory()) continue;
+        throw new Error(
+          `KB root "${rootDir}" exists but is not a directory ` +
+            `(${found.isSymbolicLink() ? 'symlink' : 'file'}). Remove or rename it — ` +
+            'the platform requires this name to be a folder.',
+        );
+      }
+      await fs.mkdir(abs, { recursive: true });
+      await fs.writeFile(path.join(abs, '.gitkeep'), '', 'utf8');
       added.push(`${rootDir}/.gitkeep`);
     }
     return added;
+  }
+
+  /** `lstat` without the throw — null when nothing is at `p`. */
+  private async lstatOrNull(p: string): Promise<import('node:fs').Stats | null> {
+    try {
+      return await fs.lstat(p);
+    } catch {
+      return null;
+    }
   }
 
   /** `git init` a temp repo, lay down the full template + generated roles.yaml, commit. */

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -275,6 +275,38 @@ describe('KbSeedService', () => {
      */
     it('accepts the reserved names a distribution actually claims', () => {
       expect(() => makeSeeder('unused', ADMINS, ['Data', 'Agents', 'Pipelines'])).not.toThrow();
+    });
+
+    /**
+     * A FILE named `Groups` used to satisfy the presence check — `fs.access`
+     * answers "is there something here?" — so the seeder skipped it, said
+     * nothing, and left a knowledge base permanently missing a root it claims
+     * to guarantee. Now it says so.
+     *
+     * Surfaces as a warning rather than a crash on this path: `topUpWorkspace`
+     * is documented best-effort and must never block a user from loading a
+     * branch. The point is that the condition is REPORTED at all.
+     */
+    it('refuses a required root that exists as a file, instead of skipping it', async () => {
+      const upstream = await seededUpstream([DEFAULT_BRANCH], {
+        'CLAUDE.md': '# x',
+        'access.md': 'read:\n  - everyone\n',
+        '.bevelignore': '',
+        '.gitignore': '',
+        'KnowledgeBase/.gitkeep': '',
+        // Not a folder.
+        Groups: 'this is a file, not the groups root',
+      });
+      const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await makeSeeder(upstream).topUpWorkspace(repoDir, DEFAULT_BRANCH);
+        expect(warn.mock.calls.flat().join(' ')).toMatch(/Groups.*not a directory/);
+      } finally {
+        warn.mockRestore();
+      }
+      // …and it did not quietly replace the file either.
+      expect((await fs.lstat(path.join(repoDir, 'Groups'))).isFile()).toBe(true);
     });
   });
 });
