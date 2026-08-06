@@ -54,8 +54,8 @@ function makeGit(availability: GitContextValue['availability'] = 'ready'): GitCo
 }
 
 function renderDock() {
-  // Router + workspace: the shared change-request dialog the rows open reads
-  // `kbDirName` and navigates from its "Open in editor" affordance.
+  // Router + workspace providers, for the shared change-request dialog the
+  // rows open.
   return render(
     <MemoryRouter>
       <WorkspaceContext.Provider
