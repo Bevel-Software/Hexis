@@ -2,9 +2,10 @@ import { DEFAULT_BRANCH, type PullRequestSummary } from '@bevel-software/platfor
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
 import { createBranch } from '../../git/services/git.api';
-import { getOrCreateWorkspace, readFile, writeFile } from '../../workspace/services/workspace.api';
+import { getOrCreateWorkspace, writeFile } from '../../workspace/services/workspace.api';
 import { openChangeRequest } from '../../pr/services/pr-open.api';
 import { postPrComment } from '../../pr/services/pr-comments.api';
+import { branchSegment } from '../../change-requests/services/propose.api';
 
 /**
  * Library data access. Skills come from the browser skill routes
@@ -77,35 +78,10 @@ export async function getSkillFile(name: string, file: string): Promise<string> 
   return data.file.content;
 }
 
-/** All open change requests (the Library filters them to a skill's folder). */
-export async function listOpenChangeRequests(): Promise<PullRequestSummary[]> {
-  return handleApiResponse<PullRequestSummary[]>(
-    await authFetch('/api/workflow/change-requests'),
-  );
-}
-
-/** The caller's own change requests (any state; callers filter to open). */
-export async function listMyChangeRequests(): Promise<PullRequestSummary[]> {
-  return handleApiResponse<PullRequestSummary[]>(
-    await authFetch('/api/workflow/change-requests/mine'),
-  );
-}
-
-/** Read a file from a branch's shared workspace (bootstraps the clone if needed). */
-export async function readFileOnBranch(branch: string, repoRelativePath: string): Promise<string> {
-  const { workspace } = await getOrCreateWorkspace(branch);
-  return readFile(workspace.id, `${workspace.kbDirName}/${repoRelativePath}`);
-}
-
-/** Keep only characters git branch segments accept; collapse the rest to '-'. */
-function branchSegment(raw: string): string {
-  const cleaned = raw
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^[-.]+/, '')
-    .replace(/[.]+$/, '');
-  return cleaned || 'user';
-}
+// The cross-surface change-request reads (listOpenChangeRequests,
+// listMyChangeRequests, readFileOnBranch) and the Knowledge propose flow
+// live in `modules/change-requests/services/` now — this file keeps only
+// what is specific to the Library's catalog and the per-skill propose flow.
 
 /** The one suggestion branch per user per skill (see mocks/README.md — suggestions are git). */
 export function suggestionBranchFor(userEmail: string, skillName: string): string {

@@ -15,10 +15,17 @@ import { WorkflowService } from '../workflow.service.js';
 import { PullRebaseConflictError } from '../workflow.errors.js';
 import type { Database } from '../../database/connection.js';
 
-// The facade tests never exercise `openChangeRequest` (the only method that
-// touches the DB), so a bare stub is enough to satisfy the constructor.
-function makeDb(): Database {
-  return {} as unknown as Database;
+// `deleteBranch`'s open-request guard is the only DB touch these tests
+// exercise: a chainable select→from→where→limit stub resolving `rows` covers
+// it (rows default to "no open request").
+function makeDb(rows: unknown[] = []): Database {
+  const chain = {
+    select: vi.fn(() => chain),
+    from: vi.fn(() => chain),
+    where: vi.fn(() => chain),
+    limit: vi.fn(async () => rows),
+  };
+  return chain as unknown as Database;
 }
 
 function makeWorkspaceService(): WorkspaceService {
@@ -29,6 +36,8 @@ function makeWorkspaceService(): WorkspaceService {
     getWorkspacePath: vi.fn().mockResolvedValue('/tmp/ws'),
     sweepOrphanedWorkspaces: vi.fn().mockResolvedValue({ removed: [] }),
     getOrCreateForBranch: vi.fn(async (branch: string) => ({ id: encodeURIComponent(branch) })),
+    hasBootstrappedWorkspace: vi.fn().mockResolvedValue(false),
+    deleteWorkspace: vi.fn().mockResolvedValue(undefined),
   } as unknown as WorkspaceService;
 }
 
@@ -410,6 +419,48 @@ describe('WorkflowService — file lock delegation', () => {
       authorName: 'Alice',
     });
     expect(fileLocks.release).toHaveBeenCalledWith('w1', 'feat', 'Foo.md', expect.any(Object));
+  });
+
+  it('deleteBranch refuses while the branch carries an open change request', async () => {
+    const git = makeGit();
+    // One open request rides the branch — deleting it would strand the request.
+    const svc = new WorkflowService(makeDb([{ number: 7 }]), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    await expect(svc.deleteBranch('w1', 'feat/x', makeUser())).rejects.toThrow(/open change request \(#7\)/);
+    expect(git.deleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('deleteBranch deletes when the branch has no open change request', async () => {
+    const git = makeGit();
+    const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    await expect(svc.deleteBranch('w1', 'feat/x', makeUser())).resolves.toBeUndefined();
+    expect(git.deleteBranch).toHaveBeenCalledWith('w1', 'feat/x', expect.objectContaining({ email: 'alice@example.com' }), undefined);
+  });
+
+  /**
+   * The lifecycle lock is what keeps merge-time retirement from deleting a
+   * branch mid-`openChangeRequest`. The full interleaving needs a real git
+   * repo + DB; what IS unit-testable is the lock's contract — two operations
+   * keyed on the same branch never overlap, the second fully waiting out the
+   * first.
+   */
+  it('serialises same-branch lifecycle operations', async () => {
+    const order: string[] = [];
+    const git = makeGit();
+    let releaseFirst!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    vi.mocked(git.deleteBranch)
+      .mockImplementationOnce(async () => { order.push('first:start'); await gate; order.push('first:end'); })
+      .mockImplementationOnce(async () => { order.push('second'); });
+    const svc = new WorkflowService(makeDb(), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    const first = svc.deleteBranch('w1', 'feat/x', makeUser());
+    const second = svc.deleteBranch('w1', 'feat/x', makeUser());
+    // Only release the gate once the first operation is provably inside its
+    // critical section — otherwise a non-serialised second could sneak
+    // through before 'first:start' and the assertion would not distinguish.
+    await vi.waitFor(() => { expect(order).toContain('first:start'); });
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(order).toEqual(['first:start', 'first:end', 'second']);
   });
 
   it('releaseLock refuses when the caller does not hold the lock', async () => {

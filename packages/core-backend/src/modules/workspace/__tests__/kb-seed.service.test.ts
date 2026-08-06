@@ -213,24 +213,6 @@ describe('KbSeedService', () => {
       expect(after2).toBe(after1);
     });
 
-    it('topUpWorkspace fills scaffolding on a non-protected feature branch too', async () => {
-      const upstream = await seededUpstream(PROTECTED, {
-        'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
-        'KnowledgeBase/Real/Knowledge/.gitkeep': '',
-        'Groups/.gitkeep': '',
-      });
-      // Branch a feature off the default and load it.
-      const seed = await checkout(root, upstream, DEFAULT_BRANCH);
-      await git(seed, ['checkout', '-b', 'alice/feature']);
-      await git(seed, ['push', 'origin', 'alice/feature']);
-
-      const repoDir = await checkout(root, upstream, 'alice/feature');
-      await makeSeeder(upstream).topUpWorkspace(repoDir, 'alice/feature');
-
-      const dir = await checkout(root, upstream, 'alice/feature');
-      expect(await exists(path.join(dir, 'AGENTS.md'))).toBe(true);
-      expect(await exists(path.join(dir, 'access.md'))).toBe(true);
-    });
   });
 
   /**
@@ -369,6 +351,37 @@ describe('KbSeedService', () => {
       }
       // …and it did not quietly replace the file either.
       expect((await fs.lstat(path.join(repoDir, 'Groups'))).isFile()).toBe(true);
+    });
+
+    /**
+     * A non-protected branch is somebody's change-in-waiting — a suggestions
+     * branch behind an open change request, a personal draft — and a
+     * scaffolding commit landing on it shows up as noise in their diff
+     * against the default branch (a stray scaffolding file riding along in a
+     * skill proposal was the observed symptom). Whatever the protected
+     * branches lack, they get when THEY load; drafts fork from them.
+     */
+    it('topUpWorkspace leaves non-protected branches alone', async () => {
+      const upstream = await seededUpstream(PROTECTED, {
+        'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
+        'KnowledgeBase/Real/Knowledge/.gitkeep': '',
+        'Groups/.gitkeep': '',
+      });
+      // Branch a suggestion off the default and load it.
+      const seed = await checkout(root, upstream, DEFAULT_BRANCH);
+      await git(seed, ['checkout', '-b', 'suggestions/alice/knowledge']);
+      await git(seed, ['push', 'origin', 'suggestions/alice/knowledge']);
+
+      const before = await headCommitCount(root, upstream, 'suggestions/alice/knowledge');
+      const repoDir = await checkout(root, upstream, 'suggestions/alice/knowledge');
+      await makeSeeder(upstream).topUpWorkspace(repoDir, 'suggestions/alice/knowledge');
+
+      // No scaffolding commit: the branch's diff against the default branch
+      // stays exactly what its author put there.
+      const after = await headCommitCount(root, upstream, 'suggestions/alice/knowledge');
+      expect(after).toBe(before);
+      const dir = await checkout(root, upstream, 'suggestions/alice/knowledge');
+      expect(await exists(path.join(dir, 'AGENTS.md'))).toBe(false);
     });
   });
 });
