@@ -70,6 +70,13 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
+      # The commit this build came from, reported by `GET /api/health`.
+      # Coolify injects SOURCE_COMMIT for git-based deploys — but only into the
+      # environment it hands compose, so without a pass-through here it never
+      # reached the container and health reported 'unknown' on every hosted
+      # deploy. `version.ts` has named this fallback all along; this is what
+      # makes it true. Nothing to fill in: absent, health still says 'unknown'.
+      - SOURCE_COMMIT
       # Git host credential. The KB can live on any git server (GitHub, GitLab,
       # Bitbucket, Azure DevOps, self-hosted): GIT_TOKEN is the Basic-auth
       # password and GIT_USERNAME the Basic username (host-specific — see
