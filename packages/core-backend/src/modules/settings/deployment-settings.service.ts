@@ -15,7 +15,7 @@ export interface SettingDef {
   key: string;
   envVar: string;
   /** Which block of the setup screen it belongs to. */
-  section: 'knowledge-base' | 'branches' | 'sign-in';
+  section: 'knowledge-base' | 'sign-in';
   secret?: boolean;
   /** Applied on save; the message is shown against the field. */
   validate?(value: string): string | null;
@@ -98,14 +98,14 @@ export const CORE_SETTINGS: SettingDef[] = [
   {
     key: 'defaultBranch',
     envVar: 'DEFAULT_BRANCH',
-    section: 'branches',
+    section: 'knowledge-base',
     validate: (v) => (v.includes(',') ? 'One branch name, not a list.' : null),
     restartToApply: true,
   },
   {
     key: 'protectedBranches',
     envVar: 'PROTECTED_BRANCHES',
-    section: 'branches',
+    section: 'knowledge-base',
     restartToApply: true,
   },
 

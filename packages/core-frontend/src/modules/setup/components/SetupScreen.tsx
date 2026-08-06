@@ -42,13 +42,15 @@ const FIELDS: Record<
   },
   defaultBranch: {
     label: 'Main branch',
-    help: 'The version everyone sees. Filled in from your repository once it is connected.',
+    help: 'The version everyone sees. Filled in from your repository when you test the connection.',
     placeholder: 'main',
+    advanced: true,
   },
   protectedBranches: {
     label: 'Branches that need approval',
     help: 'Nobody can change these directly — edits arrive as a request someone approves. Separate several with commas. The main branch has to be one of them.',
     placeholder: 'main',
+    advanced: true,
   },
   oidcIssuerUrl: {
     label: 'Provider address',
@@ -88,13 +90,7 @@ const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[]
     id: 'knowledge-base',
     title: 'Knowledge base',
     blurb:
-      'Where everything is stored. Connect a git repository — an empty one is fine, it will be set up for you.',
-  },
-  {
-    id: 'branches',
-    title: 'Versions',
-    blurb:
-      'Which versions of the knowledge base count as the shared record. Connect the repository above first and these fill themselves in.',
+      'Where everything is stored. Connect a git repository — an empty one is fine, it will be set up for you — and test it; the rest fills itself in.',
   },
   {
     id: 'sign-in',
@@ -217,7 +213,7 @@ export function SetupScreen({ settings, onSaved }: Props) {
   function renderField(setting: SettingStatus) {
     const copy = FIELDS[setting.key];
     if (!copy) return null;
-    const isBranchField = setting.section === 'branches';
+    const isBranchField = setting.key === 'defaultBranch' || setting.key === 'protectedBranches';
     const listId = isBranchField && remoteBranches.length > 0 ? `${setting.key}-options` : undefined;
     return (
       <div key={setting.key}>
@@ -255,14 +251,19 @@ export function SetupScreen({ settings, onSaved }: Props) {
     );
   }
 
+  // `h-full`, NOT `min-h-full`. `#root` is `height: 100%; overflow: hidden`, so
+  // a MINIMUM height lets this box grow past the viewport and be clipped there
+  // — `overflow-y-auto` then scrolls nothing, because nothing bounds the height
+  // it would scroll within. Being exactly the height of the root is what makes
+  // the overflow this element's own to handle.
   return (
-    <div className="min-h-full overflow-y-auto bg-sunken px-6 py-12">
+    <div className="h-full overflow-y-auto bg-sunken px-6 py-12">
       <div className="mx-auto w-full max-w-2xl">
         <h1 className="text-display font-semibold text-ink">Set up this deployment</h1>
         <p className="mt-2 max-w-[62ch] text-lede text-ink-muted">
           One thing is needed before anyone can use it: somewhere to keep the knowledge base.
-          Connect a repository below and the rest fills itself in. Single sign-on is optional and
-          can wait.
+          Connect a repository below, test it, and the rest fills itself in. Single sign-on is
+          optional and can wait.
         </p>
 
         {error && (
@@ -320,11 +321,19 @@ export function SetupScreen({ settings, onSaved }: Props) {
                     those. Closed by default, because leaving them open makes a
                     two-field form look like a seven-field one. */}
                 {fields.some((f) => FIELDS[f.key]?.advanced) && (
-                  <details className="group rounded-md border border-line bg-sunken px-3.5 py-2.5">
+                  <details
+                    // Forced open when something inside it is wrong. The branch
+                    // pair lives here and the server validates it as a pair, so
+                    // a message about it could otherwise land in a box the
+                    // reader has no reason to open — a form that refuses to
+                    // save and will not say why.
+                    open={fields.some((f) => FIELDS[f.key]?.advanced && problems[f.key])}
+                    className="group rounded-md border border-line bg-sunken px-3.5 py-2.5"
+                  >
                     <summary className="cursor-pointer list-none text-detail font-medium text-ink-muted marker:hidden hover:text-ink">
                       Advanced
                       <span className="ml-1.5 text-meta text-ink-faint">
-                        — filled in for you; change only if something above did not work
+                        — sensible defaults; open only if you need to change one
                       </span>
                     </summary>
                     <div className="mt-4 space-y-6">

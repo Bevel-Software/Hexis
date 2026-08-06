@@ -25,8 +25,8 @@ const SETTINGS: SettingStatus[] = [
   { key: 'gitToken', envVar: 'GIT_TOKEN', section: KB, source: 'unset', configured: false, secret: true, restartToApply: false },
   { key: 'gitUsername', envVar: 'GIT_USERNAME', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: false },
   { key: 'kbDirName', envVar: 'KB_DIR_NAME', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
-  { key: 'defaultBranch', envVar: 'DEFAULT_BRANCH', section: 'branches', source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
-  { key: 'protectedBranches', envVar: 'PROTECTED_BRANCHES', section: 'branches', source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'defaultBranch', envVar: 'DEFAULT_BRANCH', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'protectedBranches', envVar: 'PROTECTED_BRANCHES', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'oidcClientSecret', envVar: 'OIDC_CLIENT_SECRET', section: 'sign-in', source: 'unset', configured: false, secret: true, restartToApply: true },
 ];
 
@@ -297,6 +297,26 @@ describe('SetupScreen', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
     await waitFor(() => expect(api.testConnection).toHaveBeenCalled());
     expect(screen.getByLabelText('Main branch')).toHaveValue('release');
+  });
+
+  /**
+   * The branch pair lives under Advanced now, and the server validates it as a
+   * pair. A message about it landing inside a closed box is a form that refuses
+   * to save and will not say why, so the box opens itself.
+   */
+  it('opens Advanced when the problem is inside it', async () => {
+    await renderScreen();
+    const advanced = document.querySelector('details');
+    expect(advanced).not.toHaveAttribute('open');
+
+    api.saveSettings.mockRejectedValue(
+      new SettingsProblems({ protectedBranches: 'The default branch must be one of them.' }),
+    );
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    await waitFor(() => expect(document.querySelector('details')).toHaveAttribute('open'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('must be one of them');
   });
 
   /** Single sign-on is skippable, and the screen has to say so. */
