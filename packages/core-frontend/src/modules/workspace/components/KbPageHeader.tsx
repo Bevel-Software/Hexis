@@ -3,11 +3,9 @@ import {
   Check,
   ChevronDown,
   Clock4,
-  Code2,
   Copy,
   GitCompare,
   History,
-  Info,
   Link2,
   Pencil,
   Users,
@@ -55,7 +53,6 @@ export interface KbPageHeaderProps {
   entering: boolean;
   /** Disables Edit and explains why via `title`. */
   lockedBy: string | null;
-  railOpen: boolean;
   historyAvailable: boolean;
   /** → "Unsaved" badge. */
   isDirty: boolean;
@@ -70,7 +67,6 @@ export interface KbPageHeaderProps {
   activeTab: 'content' | 'history' | 'compare';
   onEdit(): void;
   onDone(): void;
-  onToggleRail(): void;
   onOpenHistory(): void;
   onOpenCompare(): void;
   /**
@@ -84,7 +80,6 @@ export interface KbPageHeaderProps {
   /** The canonical URL, via `useCanonicalFileUrl`. The only copy-a-reference
    *  action on this page — see the note where the `⋯` menu is built. */
   onCopyLink(): Promise<boolean>;
-  onViewRaw(): void;
 }
 
 /**
@@ -111,7 +106,6 @@ export function KbPageHeader({
   editMode,
   entering,
   lockedBy,
-  railOpen,
   historyAvailable,
   isDirty,
   waitingOnAgentUpdate,
@@ -119,13 +113,11 @@ export function KbPageHeader({
   activeTab,
   onEdit,
   onDone,
-  onToggleRail,
   onOpenHistory,
   onOpenCompare,
   onShare,
   onCopyPage,
   onCopyLink,
-  onViewRaw,
 }: KbPageHeaderProps) {
   const [shareOpen, setShareOpen] = useState(false);
   const [dotsOpen, setDotsOpen] = useState(false);
@@ -299,53 +291,44 @@ export function KbPageHeader({
             </IconButton>
           ))}
 
-        <div className="relative">
-          <IconButton
-            ref={dotsTriggerRef}
-            aria-label="More actions"
-            aria-haspopup="menu"
-            aria-expanded={dotsOpen}
-            active={dotsOpen}
-            onClick={() => setDotsOpen((v) => !v)}
-          >
-            <span aria-hidden className="text-strong leading-none">⋯</span>
-          </IconButton>
-          {dotsOpen && (
-            <div ref={dotsRef} className="absolute right-0 top-[calc(100%+5px)] z-40">
-              <MenuPanel role="menu" aria-label="More actions" className="min-w-[212px]">
-                <MenuItem role="menuitem" onClick={() => { closeDots(); onToggleRail(); }}>
-                  <span className="flex items-center gap-2.5">
-                    <Info size={14} />
-                    {railOpen ? 'Hide file details' : 'File details'}
-                  </span>
-                </MenuItem>
-                {/* Both history entries vanish when git is not ready — and the
-                    menu must not be left with an empty separator behind them. */}
-                {historyAvailable && (
-                  <>
-                    <MenuItem role="menuitem" onClick={() => { closeDots(); onOpenHistory(); }}>
-                      <span className="flex items-center gap-2.5"><History size={14} />Version history</span>
-                    </MenuItem>
-                    <MenuItem role="menuitem" onClick={() => { closeDots(); onOpenCompare(); }}>
-                      <span className="flex items-center gap-2.5">
-                        <GitCompare size={14} />Compare versions
-                      </span>
-                    </MenuItem>
-                  </>
-                )}
-                <MenuItem role="menuitem" onClick={() => { closeDots(); onViewRaw(); }}>
-                  <span className="flex items-center gap-2.5"><Code2 size={14} />View raw file</span>
-                </MenuItem>
-                {/* "Copy path" is NOT here. Copying a reference to this page is
-                    one errand, and Share already owns it ("Copy link to this
-                    page"); two menus offering near-identical copies is how a
-                    user ends up pasting the wrong one. The tree's right-click
-                    menu keeps its own Copy path, because there it reaches rows
-                    that are not open — a different job. */}
-              </MenuPanel>
-            </div>
-          )}
-        </div>
+        {/* The two history entries are the whole menu, so the trigger goes
+            where they go: git not ready means there is nothing behind ⋯, and
+            an overflow that opens onto an empty panel is worse than no
+            overflow at all. */}
+        {historyAvailable && (
+          <div className="relative">
+            <IconButton
+              ref={dotsTriggerRef}
+              aria-label="More actions"
+              aria-haspopup="menu"
+              aria-expanded={dotsOpen}
+              active={dotsOpen}
+              onClick={() => setDotsOpen((v) => !v)}
+            >
+              <span aria-hidden className="text-strong leading-none">⋯</span>
+            </IconButton>
+            {dotsOpen && (
+              <div ref={dotsRef} className="absolute right-0 top-[calc(100%+5px)] z-40">
+                <MenuPanel role="menu" aria-label="More actions" className="min-w-[212px]">
+                  <MenuItem role="menuitem" onClick={() => { closeDots(); onOpenHistory(); }}>
+                    <span className="flex items-center gap-2.5"><History size={14} />Version history</span>
+                  </MenuItem>
+                  <MenuItem role="menuitem" onClick={() => { closeDots(); onOpenCompare(); }}>
+                    <span className="flex items-center gap-2.5">
+                      <GitCompare size={14} />Compare versions
+                    </span>
+                  </MenuItem>
+                  {/* "Copy path" is NOT here. Copying a reference to this page is
+                      one errand, and Share already owns it ("Copy link to this
+                      page"); two menus offering near-identical copies is how a
+                      user ends up pasting the wrong one. The tree's right-click
+                      menu keeps its own Copy path, because there it reaches rows
+                      that are not open — a different job. */}
+                </MenuPanel>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

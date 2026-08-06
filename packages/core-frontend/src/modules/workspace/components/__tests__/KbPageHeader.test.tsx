@@ -10,7 +10,6 @@ function renderHeader(overrides: Partial<KbPageHeaderProps> = {}) {
     editMode: false,
     entering: false,
     lockedBy: null,
-    railOpen: false,
     historyAvailable: true,
     isDirty: false,
     waitingOnAgentUpdate: false,
@@ -18,13 +17,11 @@ function renderHeader(overrides: Partial<KbPageHeaderProps> = {}) {
     activeTab: 'content',
     onEdit: vi.fn(),
     onDone: vi.fn(),
-    onToggleRail: vi.fn(),
     onOpenHistory: vi.fn(),
     onOpenCompare: vi.fn(),
     onShare: vi.fn(),
     onCopyPage: vi.fn(async () => true),
     onCopyLink: vi.fn(async () => true),
-    onViewRaw: vi.fn(),
     ...overrides,
   };
   return { props, ...render(<KbPageHeader {...props} />) };
@@ -114,12 +111,7 @@ describe('KbPageHeader', () => {
     const user = userEvent.setup();
     renderHeader();
     await user.click(screen.getByRole('button', { name: 'More actions' }));
-    for (const label of [
-      /File details/,
-      /Version history/,
-      /Compare versions/,
-      /View raw file/,
-    ]) {
+    for (const label of [/Version history/, /Compare versions/]) {
       expect(screen.getByRole('menuitem', { name: label })).toBeInTheDocument();
     }
   });
@@ -133,22 +125,12 @@ describe('KbPageHeader', () => {
     expect(screen.queryByRole('menuitem', { name: /Copy path/i })).not.toBeInTheDocument();
   });
 
-  it('hides both history entries when git is not ready', async () => {
-    const user = userEvent.setup();
+  // The two history entries are the whole menu now, so git not being ready
+  // leaves nothing behind ⋯ — and the trigger goes with them rather than
+  // opening onto an empty panel.
+  it('drops the ⋯ trigger entirely when git is not ready', () => {
     renderHeader({ historyAvailable: false });
-    await user.click(screen.getByRole('button', { name: 'More actions' }));
-    expect(screen.queryByRole('menuitem', { name: /Version history/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: /Compare versions/ })).not.toBeInTheDocument();
-    // …and the rest of the menu is intact.
-    expect(screen.getByRole('menuitem', { name: /View raw file/ })).toBeInTheDocument();
-  });
-
-  it('names the rail toggle by what clicking it will do', async () => {
-    const user = userEvent.setup();
-    const { props } = renderHeader({ railOpen: true });
-    await user.click(screen.getByRole('button', { name: 'More actions' }));
-    await user.click(screen.getByRole('menuitem', { name: /Hide file details/ }));
-    expect(props.onToggleRail).toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument();
   });
 
   // A copy that fails must say so — `navigator.clipboard` rejects outright on
