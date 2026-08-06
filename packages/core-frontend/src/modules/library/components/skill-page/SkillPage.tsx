@@ -9,7 +9,7 @@ import '../../library.css';
 import { Badge, Button } from '../../../../shared/components';
 import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
-import { kbFileUrl, resolveRelativePath } from '../../../workspace/routing/kb-routes';
+import { kbFileUrl, resolveRelativePath, useNodeIdNav } from '../../../workspace/routing/kb-routes';
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { proposeChange, suggestionBranchFor } from '../../services/library.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
@@ -41,10 +41,13 @@ import { SkillChangeBox } from './SkillChangeBox';
  * library, find the card, click it" — and the change-request flow that lands on
  * top of this page needs somewhere for a review link to point.
  *
- * Two things the prototype's page does NOT have are kept here, because dropping
- * them would remove function rather than chrome: the description (the one
- * sentence saying what the skill is for) and the integrations it needs (the
- * only place a skill states what has to be connected before it will run).
+ * One thing the prototype's page does NOT have is kept here, because dropping
+ * it would remove function rather than chrome: the integrations the skill
+ * needs (the only place a skill states what has to be connected before it
+ * will run). The description is NOT repeated above the content anymore — the
+ * file pane renders the RAW file, so the frontmatter panel already carries
+ * `description` (and everything else the YAML says), exactly as the Knowledge
+ * view would render the same file.
  */
 export function SkillPage() {
   const { name: rawName = '' } = useParams<{ name: string }>();
@@ -55,6 +58,9 @@ export function SkillPage() {
   const { user } = useAuth();
   const data = useLibrary();
   const detail = useSkillDetail(name);
+  // The same id-link resolver the Knowledge renderer uses — a `[text](node-id)`
+  // link inside a skill file navigates to that node, not to a dead span.
+  const { openNodeId } = useNodeIdNav();
 
   const [selected, setSelected] = useState('SKILL.md');
   const [compareCr, setCompareCr] = useState<PullRequestSummary | null>(null);
@@ -104,8 +110,6 @@ export function SkillPage() {
     // these deps re-runs it on every content arrival for no gain.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, skill]);
-
-  const raw = active === 'SKILL.md' ? (skill?.body ?? null) : detail.fileContent(active);
 
   const needed = useMemo(
     () => (skill ? neededToolsFor(skill, data.tools) : []),
@@ -204,6 +208,17 @@ export function SkillPage() {
    */
   const rawOnMain = useDefaultBranchFile(skillPath ? fileRepoPath : null, revision);
 
+  /**
+   * What the reading pane renders: the file's RAW bytes for every tab —
+   * including SKILL.md, whose `skill.body` copy has had the frontmatter parsed
+   * off by the skills API. The raw bytes are what make this pane render
+   * IDENTICALLY to the Knowledge view of the same file: `KbMarkdownView`
+   * parses the frontmatter itself and shows it as the panel above the body,
+   * which is where the skill's description now lives (rather than being
+   * repeated in the page header).
+   */
+  const raw = active === 'SKILL.md' ? rawOnMain : detail.fileContent(active);
+
   /** Every open change request's version of the file on screen. */
   const crDiffs = useCrFileDiffs(skillCrs, fileRepoPath, rawOnMain, revision);
 
@@ -229,6 +244,21 @@ export function SkillPage() {
   const openInEditor = useCallback(
     (wsRelative: string) => navigate(kbFileUrl(DEFAULT_BRANCH, wsRelative)),
     [navigate],
+  );
+
+  /**
+   * A heading's citation deep-link — the file's KNOWLEDGE URL plus `#slug`,
+   * because that is the surface that scrolls to a heading fragment. Same
+   * affordance, same destination as copying the link from the Knowledge view
+   * of this file; the two views must not hand out different URLs for the same
+   * heading.
+   */
+  const headingLink = useCallback(
+    (slug: string) =>
+      kbDirName && skillPath
+        ? `${window.location.origin}${kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${skillPath}/${active}`)}#${slug}`
+        : `${window.location.origin}${window.location.pathname}#${slug}`,
+    [kbDirName, skillPath, active],
   );
 
   async function submitProposal(content: string) {
@@ -338,9 +368,10 @@ export function SkillPage() {
             </Badge>
           )}
         </div>
-        {skill.description && (
-          <p className="mt-1.5 max-w-[56ch] text-lede text-ink-muted">{skill.description}</p>
-        )}
+        {/* No description line here — the file pane renders the raw SKILL.md,
+            and its frontmatter panel already says what the skill is for.
+            Repeating it above the pane said the same sentence twice on the
+            first screenful. */}
         {/* No `Manage access` here, deliberately — a skill inherits its group
             folder's `access.md`, and the group's Share panel is the one place
             those rules are decided. Same call the tool page made. */}
@@ -384,6 +415,8 @@ export function SkillPage() {
             if (!kbDirName) return;
             openInEditor(resolveRelativePath(`${kbDirName}/${skill.path}/${active}`, href));
           }}
+          onOpenNodeId={openNodeId}
+          headingLink={headingLink}
           /*
            * ONE action, deliberately. There used to be an `Edit` beside this
            * that jumped to the Knowledge app's editor on the default branch —

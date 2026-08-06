@@ -20,6 +20,10 @@ interface SkillFilePaneProps {
   notice?: ReactNode;
   /** Follow a relative link out of rendered markdown. */
   onOpenLink?(href: string): void;
+  /** Resolve a bare `[text](node-id)` link — same contract as `KbMarkdownView`. */
+  onOpenNodeId?(id: string): void;
+  /** Heading deep-link builder; present ⇒ headings get the copy-anchor button. */
+  headingLink?(slug: string): string;
 }
 
 /**
@@ -37,6 +41,8 @@ export function SkillFilePane({
   actions,
   notice,
   onOpenLink,
+  onOpenNodeId,
+  headingLink,
 }: SkillFilePaneProps) {
   return (
     <Surface
@@ -58,7 +64,18 @@ export function SkillFilePane({
         ) : suggestion ? (
           <SuggestionDiff lines={suggestion} />
         ) : file.endsWith('.md') ? (
-          <KbMarkdownView source={raw} onOpenFile={(href) => onOpenLink?.(href)} />
+          // The SAME renderer, in the same configuration, as the Knowledge
+          // view of this file: raw source (so the frontmatter panel shows),
+          // id-link resolution, heading copy-anchors. `scroll={false}`
+          // because the library page is the scroller — a nested scrollbox
+          // here would trap the wheel inside the pane.
+          <KbMarkdownView
+            source={raw}
+            onOpenFile={(href) => onOpenLink?.(href)}
+            onOpenNodeId={onOpenNodeId}
+            headingLink={headingLink}
+            scroll={false}
+          />
         ) : (
           <pre className="whitespace-pre-wrap break-words font-mono text-detail leading-relaxed text-ink-muted">
             {raw}

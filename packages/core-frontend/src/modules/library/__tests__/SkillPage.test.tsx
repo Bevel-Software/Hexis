@@ -6,6 +6,7 @@ import {
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
 import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
+import { GitContext, type GitContextValue } from '../../git/state/git.context';
 import type { PullRequestSummary, WorkflowEvent } from '@bevel-software/platform-shared';
 import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
@@ -76,6 +77,28 @@ const auth = {
   login: async () => {},
   logout: () => {},
 } as AuthContextValue;
+
+// The page's id-link resolver (`useNodeIdNav`) reads the current branch off
+// this context; the tests never follow an id-link, so a minimal stub is all
+// the provider needs to be.
+const git = {
+  status: { branch: 'main', hasUpstream: true, unmergedFromUpstream: false },
+  branches: [],
+  availability: 'ready',
+  lastError: null,
+  refreshStatus: async () => null,
+  refreshBranches: async () => {},
+  createBranch: async () => {},
+  deleteBranch: async () => {},
+  pull: async () => {},
+  fetchForkBase: async () => null,
+  revert: async () => ({
+    sha: 'a', authorName: 'n', authorEmail: 'e', subject: 's', committedAt: '2026-01-01T00:00:00Z',
+  }),
+  fetchFileHistory: async () => [],
+  fetchFileDiff: async () => '',
+  fetchFileComparison: async () => '',
+} as GitContextValue;
 
 const skillSummary = {
   name: 'newsletter',
@@ -190,6 +213,7 @@ function renderPage(
     <MemoryRouter initialEntries={['/skills-and-tools/skills/newsletter']}>
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
+          <GitContext.Provider value={git}>
           <EventBusContext.Provider value={bus}>
             {/* The real toast provider: the success message IS the page's
                 report that the merge landed, so a stubbed-out toast would
@@ -200,6 +224,7 @@ function renderPage(
               </Routes>
             </LibraryToastProvider>
           </EventBusContext.Provider>
+          </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
     </MemoryRouter>,
@@ -250,11 +275,10 @@ beforeEach(() => {
 });
 
 describe('SkillPage', () => {
-  it('loads the skill and shows its name, description, needed integrations and files', async () => {
+  it('loads the skill and shows its name, needed integrations and files', async () => {
     renderPage(false);
 
     expect(await screen.findByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
-    expect(screen.getByText('Drafts the Friday newsletter for review.')).toBeInTheDocument();
     expect(apiMock.getSkill).toHaveBeenCalledWith('newsletter');
 
     // Needed integration derived from allowed-tools, with its connection state.
@@ -266,8 +290,16 @@ describe('SkillPage', () => {
     expect(screen.getByRole('tab', { name: /SKILL\.md/ })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /sources\.yaml/ })).toBeInTheDocument();
 
-    // SKILL.md body renders through the markdown view.
-    expect(screen.getByTestId('md-view').textContent).toContain('Collect the news');
+    // SKILL.md renders through the markdown view from its RAW default-branch
+    // bytes — frontmatter included, so the renderer's frontmatter panel (not a
+    // header paragraph) is what says what the skill is for. The stripped
+    // `skill.body` copy must NOT be the source anymore.
+    await waitFor(() =>
+      expect(screen.getByTestId('md-view').textContent).toContain('Collect the news'),
+    );
+    expect(screen.getByTestId('md-view').textContent).toContain('name: newsletter');
+    // The description is no longer repeated above the pane.
+    expect(screen.queryByText('Drafts the Friday newsletter for review.')).toBeNull();
   });
 
   it('marks the open tab selected and loads a bundled file on click', async () => {
@@ -662,21 +694,18 @@ describe('SkillPage — deciding on a change', () => {
   /**
    * "The skill now reads with that change" has to be TRUE of what is on screen.
    *
-   * The reading pane renders `skill.body` from `useSkillDetail`, which fetches
-   * once per skill — so a merge changed the file on the server while the pane
-   * kept rendering the text from before it, directly under a message saying it
-   * had changed. Re-reading the skill is what makes the sentence honest.
+   * The reading pane renders the RAW default-branch file, keyed by a revision
+   * the apply bumps — so a merge that changed the file on the server must
+   * re-read it, or the pane keeps rendering the text from before the merge
+   * directly under a message saying it had changed.
    */
   it('re-reads the skill so the pane shows the merged text', async () => {
     const bus = makeFakeBus();
     renderPage(true, [foreignCr], [], bus);
     expect((await screen.findByTestId('md-view')).textContent).toContain('draft the letter');
 
-    // What the server returns once the change request has landed.
-    apiMock.getSkill.mockResolvedValue({
-      ...skillDetail,
-      body: '# Newsletter drafter\nCollect the news and ship the letter.',
-    });
+    // What the default branch returns once the change request has landed.
+    apiMock.readFileOnBranch.mockImplementation(() => Promise.resolve(RAW_BRANCH));
 
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
