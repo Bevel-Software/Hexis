@@ -1517,6 +1517,25 @@ export class AccessControlService implements IAccessControl {
     return result;
   }
 
+  async existsAtRef(workspaceId: string, ref: string, relativePath: string): Promise<boolean> {
+    if (!relativePath) return true; // the repo root is always there
+    try {
+      const repoDir = await this.repoDir(workspaceId);
+      // `-e` answers for trees as well as blobs, which is the point: the
+      // caller is usually asking about a FOLDER. Exit status is the whole
+      // answer, so nothing is read into memory.
+      await execFileAsync('git', ['-C', repoDir, 'cat-file', '-e', `${ref}:${relativePath}`]);
+      return true;
+    } catch {
+      // Missing path, unresolvable ref, or no repo at all — indistinguishable
+      // from the exit status, and deliberately not teased apart here. The one
+      // caller that treats `false` as permission (the new-folder carve-out)
+      // guards itself by ALSO requiring the parent to exist, so a bogus ref
+      // fails that check first and grants nothing.
+      return false;
+    }
+  }
+
   async eligibleWritersAtRef(
     workspaceId: string,
     ref: string,

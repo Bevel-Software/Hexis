@@ -16,6 +16,10 @@ export interface NewSkillPanelProps {
    * Whether the caller may write `parentPath`. `null` (verdict not in yet) is
    * treated as "not a writer", same rule the surrounding dialogs use: the
    * cautious path is correct either way, the confident one is not.
+   *
+   * Pass `true` for a destination the creation makes yours — see
+   * `PersonalAddDialog`, where the new folder is a brand-new one under
+   * `Groups/` and the write seeds its own ownership.
    */
   canWrite: boolean | null;
   /** Every skill name already in the catalog — see the collision check below. */

@@ -1,9 +1,6 @@
-import { useEffect, useState } from 'react';
 import { GROUPS_DIR } from '@bevel-software/platform-shared';
 import { Button, Dialog, Surface } from '../../../shared/components';
-import { fetchFileAccess } from '../../access/api';
 import { NewSkillPanel } from './NewSkillPanel';
-import { defaultWorkspaceId } from '../services/library.api';
 import { useLibraryToast } from '../state/toast.context';
 import { COPIED_TOAST, COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 
@@ -31,10 +28,17 @@ export interface PersonalAddDialogProps {
  * definite home on disk — `Groups/<name>/SKILL.md`, one level above where a
  * group's skills sit (see `groupOfPath`) — so there has always been somewhere
  * to WRITE, only nowhere to open.
+ *
+ * A skill made here is YOURS, and that is not wishful phrasing about a review
+ * queue: the folder is brand new, so `CreatorAccessService` seeds its
+ * `access.md` naming you under read, write AND owner before the file lands
+ * (`creator-access.ts`, the `isGroupRoot` branch). Hence `canWrite` is passed
+ * as `true` rather than looked up. Asking the access tree first would get the
+ * wrong answer for the right reason — nobody can write `Groups/` itself, and
+ * this write is what creates the rules that govern everything after it.
  */
 export function PersonalAddDialog({ name, existingSkills, onClose }: PersonalAddDialogProps) {
   const toast = useLibraryToast();
-  const canWrite = useCanWriteGroupsRoot();
   const prompt = `Help me build a new skill or tool at Bevel. Keep it to myself for now — it goes in my own list, not a group.`;
 
   async function copyPrompt() {
@@ -64,21 +68,10 @@ export function PersonalAddDialog({ name, existingSkills, onClose }: PersonalAdd
 
       <NewSkillPanel
         parentPath={GROUPS_DIR}
-        canWrite={canWrite}
+        canWrite
         existingSkills={existingSkills}
         onCreated={onClose}
       />
-
-      {/* Said before they press, not after. An ungrouped skill lives at the
-          `Groups/` root, which the default access tree hands to Admin alone —
-          so for most people this door opens onto a review step, and a dialog
-          that only mentioned that in the success toast would have been
-          promising something it could not deliver. */}
-      {canWrite === false && (
-        <p className="mt-1.5 text-detail text-ink-muted">
-          You can't write outside a group directly, so it goes for review first.
-        </p>
-      )}
 
       <div className="my-3.5 flex items-center gap-3">
         <span aria-hidden="true" className="h-px flex-1 bg-line" />
@@ -95,37 +88,4 @@ export function PersonalAddDialog({ name, existingSkills, onClose }: PersonalAdd
       </Surface>
     </Dialog>
   );
-}
-
-/**
- * Whether the caller may write the `Groups/` root on the default branch — the
- * folder an ungrouped skill goes into. `null` until the answer lands, which
- * `NewSkillPanel` reads as "not a writer": the cautious route (a change
- * request) is correct either way, the confident one is not.
- *
- * A group page gets this verdict for free off its group summary; this page has
- * no summary to read, so it asks. `useFileAccess` is the wrong instrument here
- * — it resolves against the branch the user happens to be on, and drafts
- * short-circuit to `true`, whereas the destination is always the default
- * branch.
- */
-function useCanWriteGroupsRoot(): boolean | null {
-  const [canWrite, setCanWrite] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchFileAccess(defaultWorkspaceId(), GROUPS_DIR, 'folder')
-      .then((res) => {
-        if (!cancelled) setCanWrite(res.canWrite);
-      })
-      .catch(() => {
-        // Leave it null. The backend is the authoritative gate at write time,
-        // and a failed lookup should not upgrade anyone to writer.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  return canWrite;
 }
