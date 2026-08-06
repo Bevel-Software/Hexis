@@ -2,9 +2,10 @@ import { DEFAULT_BRANCH, type PullRequestSummary } from '@bevel-software/platfor
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
 import { createBranch } from '../../git/services/git.api';
-import { getOrCreateWorkspace, readFile, writeFile } from '../../workspace/services/workspace.api';
+import { getOrCreateWorkspace, writeFile } from '../../workspace/services/workspace.api';
 import { openChangeRequest } from '../../pr/services/pr-open.api';
 import { postPrComment } from '../../pr/services/pr-comments.api';
+import { branchSegment } from '../../change-requests/services/propose.api';
 
 /**
  * Library data access. Skills come from the browser skill routes
@@ -41,6 +42,21 @@ export interface LibrarySkill extends LibrarySkillSummary {
   files: string[];
 }
 
+/**
+ * A skill that exists only on an open change request's branch — proposed, and
+ * waiting on somebody to approve it. Separate from `LibrarySkillSummary`
+ * because it is not in the catalog: nothing loads it, nothing runs it, and it
+ * is visible only to its author and to whoever could approve it.
+ */
+export interface PendingSkillSummary extends LibrarySkillSummary {
+  changeRequestNumber: number;
+  branch: string;
+  authorName: string;
+  createdAt: string;
+  /** True when the caller proposed it themselves. */
+  isAuthor: boolean;
+}
+
 interface SkillFilePayload {
   name: string;
   file: string;
@@ -68,6 +84,21 @@ export async function getSkill(name: string): Promise<LibrarySkill> {
   return data.skill;
 }
 
+/**
+ * Skills awaiting approval that the caller may see. The backend does the
+ * filtering — author or possible approver — so this is a plain read.
+ */
+export async function listPendingSkills(): Promise<PendingSkillSummary[]> {
+  const data = await handleApiResponse<{ skills: PendingSkillSummary[] }>(
+    await authFetch('/api/skills/pending'),
+  );
+  // Guarded, not trusted: a backend BUILT BEFORE this route existed answers
+  // through `/skills/:name` with `{ok:false}` — a 200 whose shape is not this
+  // one. The review shelf degrading to empty is the right failure; `undefined`
+  // reaching the item mapper took the whole library down (blank page).
+  return Array.isArray(data.skills) ? data.skills : [];
+}
+
 /** Content of a bundled skill file. `file` is relative to the skill folder. */
 export async function getSkillFile(name: string, file: string): Promise<string> {
   const data = await handleApiResponse<GetSkillPayload>(
@@ -77,35 +108,10 @@ export async function getSkillFile(name: string, file: string): Promise<string> 
   return data.file.content;
 }
 
-/** All open change requests (the Library filters them to a skill's folder). */
-export async function listOpenChangeRequests(): Promise<PullRequestSummary[]> {
-  return handleApiResponse<PullRequestSummary[]>(
-    await authFetch('/api/workflow/change-requests'),
-  );
-}
-
-/** The caller's own change requests (any state; callers filter to open). */
-export async function listMyChangeRequests(): Promise<PullRequestSummary[]> {
-  return handleApiResponse<PullRequestSummary[]>(
-    await authFetch('/api/workflow/change-requests/mine'),
-  );
-}
-
-/** Read a file from a branch's shared workspace (bootstraps the clone if needed). */
-export async function readFileOnBranch(branch: string, repoRelativePath: string): Promise<string> {
-  const { workspace } = await getOrCreateWorkspace(branch);
-  return readFile(workspace.id, `${workspace.kbDirName}/${repoRelativePath}`);
-}
-
-/** Keep only characters git branch segments accept; collapse the rest to '-'. */
-function branchSegment(raw: string): string {
-  const cleaned = raw
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^[-.]+/, '')
-    .replace(/[.]+$/, '');
-  return cleaned || 'user';
-}
+// The cross-surface change-request reads (listOpenChangeRequests,
+// listMyChangeRequests, readFileOnBranch) and the Knowledge propose flow
+// live in `modules/change-requests/services/` now — this file keeps only
+// what is specific to the Library's catalog and the per-skill propose flow.
 
 /** The one suggestion branch per user per skill (see mocks/README.md — suggestions are git). */
 export function suggestionBranchFor(userEmail: string, skillName: string): string {

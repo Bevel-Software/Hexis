@@ -3,13 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import {
-  AGENTS_DIR,
-  DATA_DIR,
-  KNOWLEDGE_BASE_DIR,
-  PIPELINES_DIR,
-  GROUPS_DIR,
-} from '@bevel-software/platform-shared';
+import { KNOWLEDGE_BASE_DIR, GROUPS_DIR } from '@bevel-software/platform-shared';
+import { IGNORE_FILENAME } from './bevel-ignore.js';
 import type { IKbSeedService } from './kb-seed.interface.js';
 
 const execFileAsync = promisify(execFile);
@@ -28,23 +23,57 @@ const BOT_EMAIL = 'bevel-workflow@bevel.software';
  *
  * Two kinds:
  *  - {@link REQUIRED_FILES}: repo-root files added when the file is missing.
- *  - {@link REQUIRED_DIRS}: well-known root dirs the app expects to exist; when a
- *    dir is entirely absent it's created by adding its `<dir>/.gitkeep`. Keyed on
- *    the *directory's* existence, not the `.gitkeep` file — so a branch that
- *    already has content under `KnowledgeBase/` never gets a pointless placeholder.
+ *  - {@link CORE_REQUIRED_DIRS} (plus any `extraDirs`): well-known root dirs the
+ *    app expects to exist; when a dir is entirely absent it's created by adding
+ *    its `<dir>/.gitkeep`. Keyed on the *directory's* existence, not the
+ *    `.gitkeep` file — so a branch that already has content under
+ *    `KnowledgeBase/` never gets a pointless placeholder.
  *
  * `roles.yaml` is in neither, and is not part of the template at all: it is
  * generated from `ADMIN_EMAIL` (see {@link renderRolesYaml}) and written
  * directly, so a repo can't be seeded with a stale hard-coded Admin list.
  */
-const REQUIRED_FILES: readonly string[] = ['access.md', 'CLAUDE.md', '.bevelignore', '.gitignore'];
-const REQUIRED_DIRS: readonly string[] = [
-  KNOWLEDGE_BASE_DIR,
-  DATA_DIR,
-  AGENTS_DIR,
-  PIPELINES_DIR,
-  GROUPS_DIR,
-];
+const REQUIRED_FILES: readonly string[] = ['access.md', 'AGENTS.md', '.bevelignore', '.gitignore'];
+
+/**
+ * The two roots CORE gives a knowledge base: the ontologies, and the groups
+ * that hold skills and tools.
+ *
+ * `Data/`, `Agents/` and `Pipelines/` are deliberately absent. They scaffold
+ * the agentic execution layer, which is not part of this platform — a core
+ * deployment that created them would be handing every operator three empty
+ * folders it has no feature to fill. A distribution that DOES own that layer
+ * passes them as `extraDirs` (and ships a template carrying their READMEs);
+ * the names stay reserved in `kb-layout.ts` either way, so a KB that has them
+ * still renders them as roots rather than folding them into Knowledge.
+ */
+export const CORE_REQUIRED_DIRS: readonly string[] = [KNOWLEDGE_BASE_DIR, GROUPS_DIR];
+
+/**
+ * A reserved root must be ONE path segment — `Data`, not `Data/x`, `../x` or
+ * `/x`. The name is joined onto the repo root, so anything else writes outside
+ * the repo being seeded.
+ *
+ * Deliberately NOT a check against the reserved-root set in `kb-layout.ts`:
+ * `Data`, `Agents` and `Pipelines` are all in that set, and they are precisely
+ * what a distribution passes here. Being reserved is what makes a name worth
+ * claiming — the file tree renders it as its own root instead of folding it
+ * into Knowledge — so rejecting reserved names would reject the only real use.
+ */
+function assertRootSegment(dir: string): void {
+  if (
+    !dir ||
+    dir === '.' ||
+    dir === '..' ||
+    dir.includes('/') ||
+    dir.includes('\\') ||
+    path.isAbsolute(dir)
+  ) {
+    throw new Error(
+      `Reserved KB root must be a single path segment (no separators, no ".."); got "${dir}"`,
+    );
+  }
+}
 
 /** Redact the token from any string that might surface in a log or error. */
 function redact(s: string): string {
@@ -94,6 +123,11 @@ export class KbSeedService implements IKbSeedService {
    *                         base when creating a missing protected branch.
    * @param seedAdminEmails  Admins written into the generated `roles.yaml`.
    * @param gitUsername      Basic-auth username for git-over-HTTPS (provider-specific).
+   * @param extraDirs        Additional root folders this distribution reserves,
+   *                         on top of {@link CORE_REQUIRED_DIRS}. Their
+   *                         `.gitkeep` is written directly rather than copied,
+   *                         so a distribution can claim a root without also
+   *                         shipping a template entry for it.
    */
   constructor(
     kbRepoUrl: string | (() => string),
@@ -102,6 +136,7 @@ export class KbSeedService implements IKbSeedService {
     defaultBranch: string | (() => string),
     private readonly seedAdminEmails: readonly string[],
     gitUsername: string | (() => string) = 'x-access-token',
+    extraDirs: readonly string[] = [],
   ) {
     // A getter is read per-operation, so a remote supplied through the setup
     // screen is seeded against without restarting; a string is still accepted.
@@ -112,12 +147,32 @@ export class KbSeedService implements IKbSeedService {
       typeof protectedBranches === 'function' ? protectedBranches : () => protectedBranches;
     this.defaultBranch = typeof defaultBranch === 'function' ? defaultBranch : () => defaultBranch;
     this.gitUsername = typeof gitUsername === 'function' ? gitUsername : () => gitUsername;
+    // NOT a getter, unlike its neighbours above: the reserved roots are named
+    // by the composition root in code, not collected on the setup screen, so
+    // there is nothing to re-read. Validated once, here — every entry is joined
+    // onto the repo root and onto `<dir>/.gitkeep`, so a separator or a `..`
+    // would write outside the repo being seeded, and a bad value should fail at
+    // boot beside the rest of the wiring rather than part-way through seeding
+    // somebody's knowledge base. Same contract as `KB_DIR_NAME` in `CoreConfig`.
+    for (const dir of extraDirs) {
+      assertRootSegment(dir);
+      // A root named after a required FILE is a typo with a silent outcome:
+      // the file is laid down first in both seed paths, so `ensureRequiredDirs`
+      // finds the path taken and skips it, and the directory the caller asked
+      // for never appears with nothing said about why.
+      if (REQUIRED_FILES.includes(dir)) {
+        throw new Error(`Reserved KB root "${dir}" collides with a required file of the same name`);
+      }
+    }
+    this.requiredDirs = [...CORE_REQUIRED_DIRS, ...extraDirs];
   }
 
   private readonly kbRepoUrl: () => string;
   private readonly protectedBranches: () => readonly string[];
   private readonly defaultBranch: () => string;
   private readonly gitUsername: () => string;
+  /** Root folders this deployment guarantees — core's two plus any extras. */
+  private readonly requiredDirs: readonly string[];
 
   ensureRemoteSeeded(): Promise<void> {
     // Cache the promise, not just a boolean, so concurrent first-callers share
@@ -170,21 +225,28 @@ export class KbSeedService implements IKbSeedService {
    * stays consistent with origin, and the top-up is retried on a future clone.
    */
   async topUpWorkspace(repoDir: string, branch: string): Promise<void> {
+    // Scaffolding lands on PROTECTED branches only. A draft or suggestions
+    // branch is somebody's change-in-waiting, and a seeder commit there
+    // surfaces as noise in their change request's diff against the default
+    // branch (a stray scaffolding file riding along in a skill proposal was
+    // exactly this). Whatever the protected branches are missing, they get
+    // when THEY load — and drafts fork from them.
+    if (!this.protectedBranches().includes(branch)) return;
     try {
       const added: string[] = [];
       for (const rel of REQUIRED_FILES) {
         if (!(await this.exists(path.join(repoDir, rel)))) {
           await this.copyTemplateFile(rel, repoDir);
           added.push(rel);
+          // Adding AGENTS.md to a knowledge base seeded before the rename
+          // leaves it VISIBLE: that repo's `.bevelignore` lists CLAUDE.md and
+          // knows nothing of the new name, so the conventions doc starts
+          // showing up in the file tree and the agent view. We created the
+          // mismatch by adding the file, so we close it here.
+          if (rel === 'AGENTS.md') added.push(...(await this.mergeIgnorePattern(repoDir, rel)));
         }
       }
-      for (const rootDir of REQUIRED_DIRS) {
-        if (!(await this.exists(path.join(repoDir, rootDir)))) {
-          const keep = `${rootDir}/.gitkeep`;
-          await this.copyTemplateFile(keep, repoDir);
-          added.push(keep);
-        }
-      }
+      added.push(...(await this.ensureRequiredDirs(repoDir)));
       if (!(await this.exists(path.join(repoDir, 'roles.yaml')))) {
         if (this.seedAdminEmails.length > 0) {
           await fs.writeFile(
@@ -324,11 +386,96 @@ export class KbSeedService implements IKbSeedService {
     await fs.copyFile(from, to);
   }
 
+  /**
+   * Ensure `.bevelignore` carries `pattern`, appending it when absent. Returns
+   * the paths changed, for the commit.
+   *
+   * APPENDS — never rewrites. The file is the operator's, and every rule
+   * already in it is theirs to keep; this adds one line under a comment saying
+   * where it came from. Absent file, or a file that already lists the pattern,
+   * is a no-op, so running it on every clone changes nothing after the first.
+   *
+   * Matched line-wise rather than by substring: a rule for `Groups/AGENTS.md`
+   * is not a rule for the root `AGENTS.md`, and treating it as one would leave
+   * the mismatch this exists to close.
+   */
+  private async mergeIgnorePattern(repoDir: string, pattern: string): Promise<string[]> {
+    const ignorePath = path.join(repoDir, IGNORE_FILENAME);
+    let current: string;
+    try {
+      current = await fs.readFile(ignorePath, 'utf8');
+    } catch {
+      return []; // No ignore file — the template's copy arrives with the pattern in it.
+    }
+    const lines = current.split('\n').map((l) => l.trim());
+    if (lines.includes(pattern)) return [];
+    const separator = current.endsWith('\n') ? '' : '\n';
+    await fs.appendFile(
+      ignorePath,
+      `${separator}\n# Added by the platform: the conventions doc is not node content.\n${pattern}\n`,
+      'utf8',
+    );
+    return [IGNORE_FILENAME];
+  }
+
+  /**
+   * Create any reserved root folder this repo is missing, as an empty
+   * `<dir>/.gitkeep`. Returns the paths added, for the commit message.
+   *
+   * WRITTEN, not copied from the template. A `.gitkeep` is empty by definition,
+   * and requiring a template entry per root would mean a distribution could not
+   * reserve one without forking the packaged template.
+   *
+   * Keyed on the DIRECTORY's existence, not the `.gitkeep` file — a branch that
+   * already has content under `KnowledgeBase/` never gets a pointless
+   * placeholder alongside it.
+   */
+  private async ensureRequiredDirs(repoDir: string): Promise<string[]> {
+    const added: string[] = [];
+    for (const rootDir of this.requiredDirs) {
+      const abs = path.join(repoDir, rootDir);
+      // `lstat`, not `exists`: `fs.access` answers "is there something here?",
+      // which is true of a FILE named `Groups` — and the old skip-if-present
+      // check then did nothing and reported success, leaving a knowledge base
+      // permanently missing a root it claims to guarantee. `lstat` rather than
+      // `stat` so a SYMLINK is rejected too: a link named `Groups` is not a KB
+      // layout, and one pointing outside the repo would make every later write
+      // into it land somewhere nobody asked for.
+      const found = await this.lstatOrNull(abs);
+      if (found) {
+        if (found.isDirectory()) continue;
+        throw new Error(
+          `KB root "${rootDir}" exists but is not a directory ` +
+            `(${found.isSymbolicLink() ? 'symlink' : 'file'}). Remove or rename it — ` +
+            'the platform requires this name to be a folder.',
+        );
+      }
+      await fs.mkdir(abs, { recursive: true });
+      await fs.writeFile(path.join(abs, '.gitkeep'), '', 'utf8');
+      added.push(`${rootDir}/.gitkeep`);
+    }
+    return added;
+  }
+
+  /** `lstat` without the throw — null when nothing is at `p`. */
+  private async lstatOrNull(p: string): Promise<import('node:fs').Stats | null> {
+    try {
+      return await fs.lstat(p);
+    } catch {
+      return null;
+    }
+  }
+
   /** `git init` a temp repo, lay down the full template + generated roles.yaml, commit. */
   private async buildSeedCommit(dir: string): Promise<void> {
     await this.git(dir, ['init', '-b', this.defaultBranch()]);
     await this.stampIdentity(dir);
     await this.copyTemplateTree(dir);
+    // Reserved roots the template does not carry. Without this the seed commit
+    // would hold only what the template has, and a distribution's own roots
+    // would appear a step later, when the first clone gets topped up — the same
+    // folders, arriving in a second commit for no reason.
+    await this.ensureRequiredDirs(dir);
     await fs.writeFile(path.join(dir, 'roles.yaml'), renderRolesYaml(this.seedAdminEmails), 'utf8');
     await this.git(dir, ['add', '-A']);
     await this.git(dir, ['commit', '-m', 'Seed knowledge base from Bevel template']);

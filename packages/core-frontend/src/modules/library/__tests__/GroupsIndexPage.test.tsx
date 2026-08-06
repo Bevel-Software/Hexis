@@ -49,6 +49,7 @@ const CATALOG: LibraryData = {
     { name: 'outreach', description: '', path: 'Groups/GTM/outreach' },
     { name: 'scratch', description: '', path: 'Skills/scratch' },
   ],
+  pendingSkills: [],
   tools: [
     tool(),
     // An ungrouped sign-in — `Tools/slack.tool` is two segments, so no group.

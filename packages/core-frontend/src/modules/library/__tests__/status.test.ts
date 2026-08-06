@@ -188,7 +188,7 @@ describe('toastDuration', () => {
    * of a toast, so how long it stays has to follow how long it takes to read.
    */
   it('gives a long message time to be read', () => {
-    const done = 'Done — reopen the setup any time from your profile menu → External agent access.';
+    const done = 'Done. Reopen the setup any time from your profile menu → External agent access.';
     expect(toastDuration(done)).toBeGreaterThan(4500);
   });
 

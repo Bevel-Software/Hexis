@@ -82,6 +82,7 @@ const CATALOG: LibraryData = {
     { name: 'roadmap', description: 'Keeps the roadmap.', path: 'Groups/Product/roadmap' },
     { name: 'scratch', description: 'A skill in no group.', path: 'Skills/scratch' },
   ],
+  pendingSkills: [],
   tools: [
     tool({}),
     // Ungrouped tool (`Tools/slack.tool` is two segments) — "Yours alone".

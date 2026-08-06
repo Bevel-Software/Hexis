@@ -6,6 +6,7 @@ import { pathForSkill, pathForTool } from '../routes/library-paths';
 import { emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
 import { GroupItemSections } from './group-page-parts';
+import { PendingSkillReview } from './PendingSkillReview';
 
 /**
  * The Library gallery — the card grid at `/skills-and-tools/everything` and its
@@ -45,14 +46,25 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const data = useLibrary();
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
+  /** The proposed skill being reviewed, if the reader opened one. */
+  const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
 
   const visible = useMemo(
     () => filterLibraryItems(data.items, filter, query),
     [data.items, filter, query],
   );
 
-  /** Both kinds open a PAGE now — the skill page landed alongside the tool one. */
+  /**
+   * Both kinds open a PAGE now — the skill page landed alongside the tool one.
+   * A PROPOSED skill is the exception: it has no page, because the skill page
+   * reads the default branch and the skill is not on it yet. Its card opens the
+   * change request instead, which is the only thing there is to read.
+   */
   function openItem(item: LibraryItem) {
+    if (item.pending) {
+      setReviewing(item);
+      return;
+    }
     navigate(item.kind === 'integration' ? pathForTool(item.id) : pathForSkill(item.id));
   }
 
@@ -104,6 +116,20 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
             emptySkills=""
           />
         </div>
+      )}
+
+      {reviewing && (
+        <PendingSkillReview
+          item={reviewing}
+          onClose={() => setReviewing(null)}
+          onResolved={() => {
+            setReviewing(null);
+            // The skill leaves the review shelf and joins the catalog by the
+            // same reload — one load answers both, so the card cannot appear
+            // twice in the frame between them.
+            data.reload();
+          }}
+        />
       )}
     </>
   );

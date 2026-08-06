@@ -44,10 +44,10 @@ async function seedWorkspace(
   await runGit(repo, ['init', '-b', 'feature-test']);
   await runGit(repo, ['config', 'user.email', 'test@bevel.local']);
   await runGit(repo, ['config', 'user.name', 'Test Runner']);
-  // Pin the line-ending and path behaviour the assertions depend on, so a
-  // host-level git config (Windows installs default to `core.autocrlf=true`,
-  // and cap paths at 260 chars without `core.longpaths`) can't rewrite the
-  // bytes on checkout or refuse the deep-path `git add` this file exercises.
+  // Windows dev machines: a global `core.autocrlf=true` would rewrite the
+  // LF fixtures to CRLF on checkout (so byte-for-byte assertions fail), and
+  // the deep-path test blows MAX_PATH without `longpaths`. Both are no-ops
+  // on Linux/CI — they pin the repo to the behaviour the assertions assume.
   await runGit(repo, ['config', 'core.autocrlf', 'false']);
   await runGit(repo, ['config', 'core.longpaths', 'true']);
   // An initial commit so HEAD exists.

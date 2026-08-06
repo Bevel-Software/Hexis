@@ -71,7 +71,14 @@ export function isSafeReturnPath(returnTo: unknown): returnTo is string {
 export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.Router {
   const { secretsVault, toolManualService, accessControl } = deps;
   const router = express.Router();
-  const defaultWs = workspaceIdForBranch(DEFAULT_BRANCH);
+  // A FUNCTION, not a constant. Routers are constructed at boot, and on a
+  // deployment configured through the setup screen the branch model does not
+  // exist yet at that moment — `DEFAULT_BRANCH` is still ''. The live binding
+  // updates when setup applies the model, but only reads INSIDE a function
+  // body see it; a construction-time capture would keep handing an empty
+  // workspace id to the access resolver until the next restart ("Invalid
+  // workspace ID" on every /secrets/tools call).
+  const defaultWs = () => workspaceIdForBranch(DEFAULT_BRANCH);
 
   // The vault key = the exact key UTCP looks the var up under (doubles underscores
   // in the manual namespace), so storage and resolution agree for snake_case ids.
@@ -196,7 +203,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
           path: m.path,
           type: m.type,
           setup: m.setup ?? null,
-          canWrite: await accessControl.canWrite(defaultWs, email, m.path),
+          canWrite: await accessControl.canWrite(defaultWs(), email, m.path),
           variables: (m.variables ?? []).map((v) => {
             const key = varKey(m.name, v.name);
             const st = statusByKey.get(key);
@@ -321,7 +328,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       if (found.variable.scope !== 'admin') {
         return void res.status(422).json({ error: 'This variable is set by each user, not the tool owner.' });
       }
-      if (!(await accessControl.canWrite(defaultWs, email, found.manual.path))) {
+      if (!(await accessControl.canWrite(defaultWs(), email, found.manual.path))) {
         return void res.status(403).json({ error: 'You need write access to this tool to set its shared secrets.' });
       }
       const body = req.body ?? {};
@@ -374,7 +381,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       if (!found.variable.oauth) {
         return void res.status(422).json({ error: 'This variable is not an OAuth sign-in.' });
       }
-      if (!(await accessControl.canWrite(defaultWs, email, found.manual.path))) {
+      if (!(await accessControl.canWrite(defaultWs(), email, found.manual.path))) {
         return void res.status(403).json({ error: 'You need write access to this tool to set its client secret.' });
       }
       const clientSecret = (req.body ?? {}).clientSecret;
@@ -455,7 +462,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
     try {
       const found = await findManualVar(email, req.params.slug, req.params.var);
       if (!found) return void res.status(404).json({ error: 'Tool or variable not found' });
-      if (!(await accessControl.canWrite(defaultWs, email, found.manual.path))) {
+      if (!(await accessControl.canWrite(defaultWs(), email, found.manual.path))) {
         return void res.status(403).json({ error: 'You need write access to this tool to remove its shared secrets.' });
       }
       await secretsVault.removeShared(varKey(found.manual.name, found.variable.name));

@@ -34,9 +34,9 @@ async function seedWorkspace(root: string, workspaceId: string): Promise<{
   // identity must live in the repo, not just in this test's runGit env.
   await runGit(repo, ['config', 'user.email', 'workspace@bevel.test']);
   await runGit(repo, ['config', 'user.name', 'bevel Workspace']);
-  // Byte-exact assertions below (`dash.html` must come back as 'v1\n') break
-  // when a host-level `core.autocrlf=true` (the Windows git default) rewrites
-  // line endings as the autostash reapplies the dirty edit — pin it off.
+  // Windows dev machines: a global `core.autocrlf=true` rewrites the LF
+  // fixtures to CRLF whenever a checkout/stash-pop touches them, so the
+  // byte-for-byte assertions below fail on `\r\n`. A no-op on Linux/CI.
   await runGit(repo, ['config', 'core.autocrlf', 'false']);
   return { upstream, repo };
 }
