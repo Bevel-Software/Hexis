@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
+import { tokenUsernameForHost } from '../utils/git-host';
 import {
   saveSettings,
   testConnection,
@@ -9,60 +10,74 @@ import {
 } from '../services/setup.api';
 
 /** Copy for each setting: what it is, in the words of someone who has to fill it in. */
-const FIELDS: Record<string, { label: string; help: string; placeholder?: string }> = {
+const FIELDS: Record<
+  string,
+  { label: string; help: string; placeholder?: string; advanced?: boolean }
+> = {
   kbRepoUrl: {
-    label: 'Repository URL',
-    help: 'The git repository that stores your knowledge base. Any host works — GitHub, GitLab, Bitbucket, Azure DevOps, or your own.',
+    label: 'Repository address',
+    help: 'Where your knowledge base is stored. Copy the address from your repository page — GitHub, GitLab, Bitbucket and Azure DevOps all work. A brand-new empty repository is fine.',
     placeholder: 'https://github.com/acme/knowledge-base.git',
   },
   gitToken: {
     label: 'Access token',
-    help: 'A token that can read and write that repository. Stored encrypted, and never shown again once saved.',
-    placeholder: 'ghp_…',
+    help: 'Lets this deployment read and write that repository. Create one in your git provider with read and write access to it. Stored encrypted, and never shown again.',
+    placeholder: 'Paste the token',
   },
   gitUsername: {
+    // NOT a person's username — the previous label said "Token username" and
+    // people read it as their own account. It is a fixed string each host
+    // expects beside a token, so it is filled in automatically and only
+    // surfaces under Advanced for hosts we cannot recognise.
     label: 'Token username',
-    help: 'Which username the host expects alongside the token. GitHub uses x-access-token, GitLab oauth2, Bitbucket x-token-auth; Azure DevOps accepts anything.',
+    help: 'A fixed value the git host expects next to the token — not your account name. Filled in automatically for known hosts; only change it for a self-hosted server.',
     placeholder: 'x-access-token',
+    advanced: true,
   },
   kbDirName: {
     label: 'Folder name',
-    help: 'What the knowledge base is called inside each workspace. Cosmetic — leave it alone unless you have a reason.',
+    help: 'What the knowledge base folder is called. Cosmetic — leave it as it is.',
     placeholder: 'knowledge-base',
+    advanced: true,
   },
   defaultBranch: {
-    label: 'Default branch',
-    help: 'Where people land, and where change requests go by default. It must also appear in the protected list below.',
+    label: 'Main branch',
+    help: 'The version everyone sees. Filled in from your repository once it is connected.',
     placeholder: 'main',
   },
   protectedBranches: {
-    label: 'Protected branches',
-    help: 'Comma-separated. These cannot be written to directly — changes reach them by approval. Branches that do not exist yet are created for you.',
+    label: 'Branches that need approval',
+    help: 'Nobody can change these directly — edits arrive as a request someone approves. Separate several with commas. The main branch has to be one of them.',
     placeholder: 'main',
   },
   oidcIssuerUrl: {
-    label: 'Issuer URL',
-    help: 'Your identity provider. Its /.well-known/openid-configuration is read when someone first signs in.',
+    label: 'Provider address',
+    help: 'From your identity provider — Entra, Okta, Google Workspace, Auth0 and others all publish one.',
     placeholder: 'https://login.microsoftonline.com/<tenant>/v2.0',
   },
-  oidcClientId: { label: 'Client ID', help: 'From the application you registered with the provider.' },
+  oidcClientId: {
+    label: 'Application ID',
+    help: 'From the application you registered with the provider.',
+  },
   oidcClientSecret: {
-    label: 'Client secret',
-    help: 'Stored encrypted, and never shown again once saved.',
+    label: 'Application secret',
+    help: 'Issued alongside the application ID. Stored encrypted, and never shown again.',
   },
   oidcScopes: {
     label: 'Scopes',
-    help: 'Leave blank unless your provider needs more.',
+    help: 'Leave blank unless your provider asked for something specific.',
     placeholder: 'openid profile email',
+    advanced: true,
   },
   oidcProviderLabel: {
-    label: 'Button label',
-    help: 'What the sign-in button says.',
+    label: 'Sign-in button text',
+    help: 'What the button on the sign-in page says.',
     placeholder: 'Single sign-on',
+    advanced: true,
   },
   allowedEmailDomains: {
     label: 'Allowed email domains',
-    help: 'Comma-separated. Single sign-on creates an account the first time someone signs in, so against a provider that is not limited to your organisation this list is what stops anyone signing themselves up. Blank allows any address.',
+    help: 'Only people with an address at these domains can sign in this way. Separate several with commas. Leave blank to allow any address — safe with a provider that only serves your organisation, risky with one that does not.',
     placeholder: 'example.com',
   },
 };
@@ -73,19 +88,19 @@ const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[]
     id: 'knowledge-base',
     title: 'Knowledge base',
     blurb:
-      'The git repository this deployment keeps its knowledge base in. It can be empty — it will be set up for you.',
+      'Where everything is stored. Connect a git repository — an empty one is fine, it will be set up for you.',
   },
   {
     id: 'branches',
-    title: 'Branches',
+    title: 'Versions',
     blurb:
-      'Which branches this deployment treats as the shared record. Both are read when the server starts, so changing them later takes a restart.',
+      'Which versions of the knowledge base count as the shared record. Connect the repository above first and these fill themselves in.',
   },
   {
     id: 'sign-in',
     title: 'Single sign-on',
     blurb:
-      'Optional — the deployment works without it. Register this address with your provider as the redirect URI, then fill in the application it belongs to.',
+      'Optional, and you can add it later. Lets people sign in with the account they already have instead of a password.',
   },
 ];
 
@@ -124,7 +139,18 @@ export function SetupScreen({ settings, onSaved }: Props) {
   const fromEnv = settings.filter((s) => s.source === 'env');
 
   function set(key: string, value: string) {
-    setDraft((d) => ({ ...d, [key]: value }));
+    setDraft((d) => {
+      const next = { ...d, [key]: value };
+      // Typing the repository address answers the token-username question, so
+      // it is not asked. Only filled while the operator has not set one
+      // themselves — a self-hosted server they typed a value for must not be
+      // overwritten by a guess from its domain.
+      if (key === 'kbRepoUrl' && !d.gitUsername) {
+        const known = tokenUsernameForHost(value);
+        if (known) next.gitUsername = known.username;
+      }
+      return next;
+    });
     // The message described the old value; keeping it beside a new one would
     // be a complaint about something the reader already fixed.
     setProblems((current) => {
@@ -140,7 +166,19 @@ export function SetupScreen({ settings, onSaved }: Props) {
     setTesting(true);
     setError(null);
     try {
-      setTest(await testConnection(draft));
+      const result = await testConnection(draft);
+      setTest(result);
+      // The repository has just said what it calls its trunk and which
+      // branches it has. Filling those in beats asking someone to remember —
+      // and beats the silent failure of a name that is one character off.
+      // Only into fields nobody has typed in.
+      if (result.ok && result.defaultBranch) {
+        setDraft((d) => ({
+          ...d,
+          defaultBranch: d.defaultBranch || result.defaultBranch!,
+          protectedBranches: d.protectedBranches || result.defaultBranch!,
+        }));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not test the connection.');
     } finally {
@@ -221,10 +259,10 @@ export function SetupScreen({ settings, onSaved }: Props) {
     <div className="min-h-full overflow-y-auto bg-sunken px-6 py-12">
       <div className="mx-auto w-full max-w-2xl">
         <h1 className="text-display font-semibold text-ink">Set up this deployment</h1>
-        <p className="mt-2 max-w-[60ch] text-lede text-ink-muted">
-          Two things are needed before anyone can use it: a git repository to keep the knowledge
-          base in, and which branches count as the shared record. Single sign-on is optional and can
-          wait.
+        <p className="mt-2 max-w-[62ch] text-lede text-ink-muted">
+          One thing is needed before anyone can use it: somewhere to keep the knowledge base.
+          Connect a repository below and the rest fills itself in. Single sign-on is optional and
+          can wait.
         </p>
 
         {error && (
@@ -248,9 +286,25 @@ export function SetupScreen({ settings, onSaved }: Props) {
             // them, and an empty heading would read as something missing.
             if (fields.length === 0) return null;
             return (
-              <section key={section.id} className="space-y-6">
+              <Surface
+                key={section.id}
+                as="section"
+                tone="surface"
+                radius="lg"
+                elevation="card"
+                className="p-6 space-y-6"
+              >
                 <div>
-                  <h2 className="text-title font-semibold text-ink">{section.title}</h2>
+                  <div className="flex items-baseline gap-2.5">
+                    <h2 className="text-title font-semibold text-ink">{section.title}</h2>
+                    {/* Says outright that a whole section can be skipped. The
+                        gate only blocks on the knowledge base and the
+                        versions, and someone who does not know that will fill
+                        in an identity provider they do not have. */}
+                    {section.id === 'sign-in' && (
+                      <span className="text-meta text-ink-faint">Optional</span>
+                    )}
+                  </div>
                   <p className="mt-1 max-w-[60ch] text-detail text-ink-muted">{section.blurb}</p>
                   {section.id === 'sign-in' && (
                     <p className="mt-1.5 text-meta text-ink-faint">
@@ -259,8 +313,26 @@ export function SetupScreen({ settings, onSaved }: Props) {
                     </p>
                   )}
                 </div>
-                {fields.map((setting) => renderField(setting))}
-              </section>
+                {fields.filter((f) => !FIELDS[f.key]?.advanced).map((f) => renderField(f))}
+                {/* Everything a normal setup never touches, out of the way but
+                    not hidden: a self-hosted git server does need the token
+                    username, and a provider with unusual scopes does need
+                    those. Closed by default, because leaving them open makes a
+                    two-field form look like a seven-field one. */}
+                {fields.some((f) => FIELDS[f.key]?.advanced) && (
+                  <details className="group rounded-md border border-line bg-sunken px-3.5 py-2.5">
+                    <summary className="cursor-pointer list-none text-detail font-medium text-ink-muted marker:hidden hover:text-ink">
+                      Advanced
+                      <span className="ml-1.5 text-meta text-ink-faint">
+                        — filled in for you; change only if something above did not work
+                      </span>
+                    </summary>
+                    <div className="mt-4 space-y-6">
+                      {fields.filter((f) => FIELDS[f.key]?.advanced).map((f) => renderField(f))}
+                    </div>
+                  </details>
+                )}
+              </Surface>
             );
           })}
 

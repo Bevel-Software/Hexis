@@ -182,10 +182,21 @@ export function createSetupRoutes(
           GIT_ASKPASS: 'echo',
         },
       });
-      const branches = stdout
-        .split('\n')
-        .map((line) => line.split('refs/heads/')[1]?.trim())
-        .filter((b): b is string => !!b);
+      const lines = stdout.split('\n');
+      // `<sha>\trefs/heads/<name>` — tag refs and the bare HEAD row are not
+      // branches, so they are filtered rather than sliced blindly.
+      const branches = lines
+        .filter((line) => !line.startsWith('ref:'))
+        .map((line) => line.split('\t')[1]?.trim())
+        .filter((ref): ref is string => !!ref && ref.startsWith('refs/heads/'))
+        .map((ref) => ref.slice('refs/heads/'.length));
+      // `ref: refs/heads/<name>\tHEAD` — what the remote calls its own trunk.
+      const defaultBranch =
+        lines
+          .find((line) => line.startsWith('ref:') && line.trimEnd().endsWith('HEAD'))
+          ?.slice('ref: refs/heads/'.length)
+          .split('\t')[0]
+          ?.trim() || null;
       res.json({
         ok: true,
         // An EMPTY repository is a success, not a failure — seeding one is a
@@ -193,6 +204,7 @@ export function createSetupRoutes(
         // reads like the credentials are wrong.
         empty: branches.length === 0,
         branches,
+        defaultBranch,
       });
     } catch (err) {
       res.status(200).json({ ok: false, error: explainGitFailure(err, token) });

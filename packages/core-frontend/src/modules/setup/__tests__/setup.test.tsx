@@ -97,7 +97,7 @@ describe('SetupScreen', () => {
     // The second status read is what the gate acts on.
     api.fetchSetupStatus.mockResolvedValue({ complete: true, isAdmin: true });
 
-    await userEvent.type(screen.getByLabelText('Repository URL'), 'https://example.com/kb.git');
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://example.com/kb.git');
     await userEvent.type(screen.getByLabelText('Access token'), 'ghp_secret');
     await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
 
@@ -138,11 +138,11 @@ describe('SetupScreen', () => {
     api.saveSettings.mockRejectedValue(
       new SettingsProblems({ kbRepoUrl: 'The URL must start with https://' }),
     );
-    await userEvent.type(screen.getByLabelText('Repository URL'), 'git@example.com:kb.git');
+    await userEvent.type(screen.getByLabelText('Repository address'), 'git@example.com:kb.git');
     await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('must start with https://');
-    expect(screen.getByLabelText('Repository URL')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText('Repository address')).toHaveAttribute('aria-invalid', 'true');
   });
 
   /**
@@ -169,7 +169,7 @@ describe('SetupScreen', () => {
       { ...SETTINGS[0]!, source: 'env', value: 'https://env.example/kb.git', configured: true },
       ...SETTINGS.slice(1),
     ]);
-    expect(screen.queryByLabelText('Repository URL')).toBeNull();
+    expect(screen.queryByLabelText('Repository address')).toBeNull();
     expect(screen.getByText('KB_REPO_URL')).toBeInTheDocument();
   });
 
@@ -188,7 +188,7 @@ describe('SetupScreen', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
     await screen.findByText(/Found 2 branches/);
 
-    const list = screen.getByLabelText('Default branch').getAttribute('list');
+    const list = screen.getByLabelText('Main branch').getAttribute('list');
     expect(list).toBeTruthy();
     const options = [...document.querySelectorAll(`#${list} option`)].map((o) =>
       o.getAttribute('value'),
@@ -199,7 +199,7 @@ describe('SetupScreen', () => {
   /** Nothing to suggest before a test has run — an empty list is not an answer. */
   it('offers nothing until the remote has been asked', async () => {
     await renderScreen();
-    expect(screen.getByLabelText('Default branch')).not.toHaveAttribute('list');
+    expect(screen.getByLabelText('Main branch')).not.toHaveAttribute('list');
   });
 
   /**
@@ -214,8 +214,8 @@ describe('SetupScreen', () => {
         protectedBranches: 'The default branch ("main") must be one of the protected branches (release).',
       }),
     );
-    await userEvent.type(screen.getByLabelText('Default branch'), 'main');
-    await userEvent.type(screen.getByLabelText('Protected branches'), 'release');
+    await userEvent.type(screen.getByLabelText('Main branch'), 'main');
+    await userEvent.type(screen.getByLabelText('Branches that need approval'), 'release');
     await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('must be one of the protected');
   });
@@ -235,6 +235,74 @@ describe('SetupScreen', () => {
     );
     expect(screen.queryByRole('heading', { name: 'Single sign-on' })).toBeNull();
     expect(screen.getByRole('heading', { name: 'Knowledge base' })).toBeInTheDocument();
+  });
+
+  /**
+   * "Token username" is not a username. People read it as their own account,
+   * and it is in fact a fixed string each host expects beside a token — so it
+   * is answered from the repository address rather than asked for, and lives
+   * under Advanced for the self-hosted cases that address cannot settle.
+   */
+  it('answers the token-username question from the repository address', async () => {
+    await renderScreen();
+    await userEvent.type(
+      screen.getByLabelText('Repository address'),
+      'https://gitlab.com/acme/kb.git',
+    );
+    expect(screen.getByLabelText('Token username')).toHaveValue('oauth2');
+  });
+
+  it('does not overwrite a token username somebody typed', async () => {
+    await renderScreen();
+    await userEvent.type(screen.getByLabelText('Token username'), 'custom-user');
+    await userEvent.type(
+      screen.getByLabelText('Repository address'),
+      'https://github.com/acme/kb.git',
+    );
+    expect(screen.getByLabelText('Token username')).toHaveValue('custom-user');
+  });
+
+  /** An unrecognised host gets no guess — a wrong credential is worse than none. */
+  it('guesses nothing for a self-hosted address', async () => {
+    await renderScreen();
+    await userEvent.type(
+      screen.getByLabelText('Repository address'),
+      'https://git.internal.example/acme/kb.git',
+    );
+    expect(screen.getByLabelText('Token username')).toHaveValue('');
+  });
+
+  /**
+   * The branch names must match the repository exactly. Asking someone to
+   * remember them is how a deployment ends up pointing at a branch nobody has,
+   * so the repository is asked instead.
+   */
+  it('fills the version fields from what the repository calls its trunk', async () => {
+    await renderScreen();
+    api.testConnection.mockResolvedValue({
+      ok: true,
+      empty: false,
+      branches: ['develop', 'trunk'],
+      defaultBranch: 'trunk',
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() => expect(screen.getByLabelText('Main branch')).toHaveValue('trunk'));
+    expect(screen.getByLabelText('Branches that need approval')).toHaveValue('trunk');
+  });
+
+  it('leaves version fields somebody already filled in alone', async () => {
+    await renderScreen();
+    await userEvent.type(screen.getByLabelText('Main branch'), 'release');
+    api.testConnection.mockResolvedValue({ ok: true, branches: ['main'], defaultBranch: 'main' });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() => expect(api.testConnection).toHaveBeenCalled());
+    expect(screen.getByLabelText('Main branch')).toHaveValue('release');
+  });
+
+  /** Single sign-on is skippable, and the screen has to say so. */
+  it('marks the optional section optional', async () => {
+    await renderScreen();
+    expect(screen.getByText('Optional')).toBeInTheDocument();
   });
 
   it('says so when a saved setting needs a restart', async () => {

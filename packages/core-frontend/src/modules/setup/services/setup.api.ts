@@ -75,6 +75,12 @@ export interface ConnectionTest {
   /** The remote answered but has no branches yet — a supported starting point. */
   empty?: boolean;
   branches?: string[];
+  /**
+   * What the remote calls its own trunk, when it says. The screen pre-fills
+   * the version fields from it — the names have to match the repository
+   * exactly, and being one character off is a failure nobody can see.
+   */
+  defaultBranch?: string | null;
   error?: string;
 }
 
