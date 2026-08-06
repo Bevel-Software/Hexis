@@ -19,11 +19,15 @@ vi.mock('../services/setup.api', async () => {
 import { SetupGate } from '../components/SetupGate';
 import { SettingsProblems, type SettingStatus } from '../services/setup.api';
 
+const KB = 'knowledge-base' as const;
 const SETTINGS: SettingStatus[] = [
-  { key: 'kbRepoUrl', envVar: 'KB_REPO_URL', source: 'unset', value: '', configured: false, secret: false, restartToApply: false },
-  { key: 'gitToken', envVar: 'GIT_TOKEN', source: 'unset', configured: false, secret: true, restartToApply: false },
-  { key: 'gitUsername', envVar: 'GIT_USERNAME', source: 'unset', value: '', configured: false, secret: false, restartToApply: false },
-  { key: 'kbDirName', envVar: 'KB_DIR_NAME', source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'kbRepoUrl', envVar: 'KB_REPO_URL', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: false },
+  { key: 'gitToken', envVar: 'GIT_TOKEN', section: KB, source: 'unset', configured: false, secret: true, restartToApply: false },
+  { key: 'gitUsername', envVar: 'GIT_USERNAME', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: false },
+  { key: 'kbDirName', envVar: 'KB_DIR_NAME', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'defaultBranch', envVar: 'DEFAULT_BRANCH', section: 'branches', source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'protectedBranches', envVar: 'PROTECTED_BRANCHES', section: 'branches', source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'oidcClientSecret', envVar: 'OIDC_CLIENT_SECRET', section: 'sign-in', source: 'unset', configured: false, secret: true, restartToApply: true },
 ];
 
 beforeEach(() => {
@@ -84,7 +88,7 @@ describe('SetupScreen', () => {
   async function renderScreen(settings: SettingStatus[] = SETTINGS) {
     api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings });
     render(<SetupGate>{APP}</SetupGate>);
-    await screen.findByRole('heading', { name: /Connect your knowledge base/ });
+    await screen.findByRole('heading', { name: /Set up this deployment/ });
   }
 
   it('saves what was typed and lets the app through once complete', async () => {
@@ -167,6 +171,70 @@ describe('SetupScreen', () => {
     ]);
     expect(screen.queryByLabelText('Repository URL')).toBeNull();
     expect(screen.getByText('KB_REPO_URL')).toBeInTheDocument();
+  });
+
+  /**
+   * Branch names must match the repository exactly, and a typo produces a
+   * deployment pointing at a branch nobody has. The connection test already
+   * knows what is there, so it offers them rather than leaving it to memory.
+   */
+  it('offers the branches the connection test found', async () => {
+    await renderScreen();
+    api.testConnection.mockResolvedValue({
+      ok: true,
+      empty: false,
+      branches: ['main', 'release'],
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByText(/Found 2 branches/);
+
+    const list = screen.getByLabelText('Default branch').getAttribute('list');
+    expect(list).toBeTruthy();
+    const options = [...document.querySelectorAll(`#${list} option`)].map((o) =>
+      o.getAttribute('value'),
+    );
+    expect(options).toEqual(['main', 'release']);
+  });
+
+  /** Nothing to suggest before a test has run — an empty list is not an answer. */
+  it('offers nothing until the remote has been asked', async () => {
+    await renderScreen();
+    expect(screen.getByLabelText('Default branch')).not.toHaveAttribute('list');
+  });
+
+  /**
+   * Neither branch field is valid on its own — the default has to appear in the
+   * protected list — so the server checks the pair and the screen marks the
+   * field with room to hold the answer.
+   */
+  it('surfaces the pair problem the server reports', async () => {
+    await renderScreen();
+    api.saveSettings.mockRejectedValue(
+      new SettingsProblems({
+        protectedBranches: 'The default branch ("main") must be one of the protected branches (release).',
+      }),
+    );
+    await userEvent.type(screen.getByLabelText('Default branch'), 'main');
+    await userEvent.type(screen.getByLabelText('Protected branches'), 'release');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('must be one of the protected');
+  });
+
+  /** SSO is optional, so the screen shows the one thing the provider needs. */
+  it('shows the redirect URI to register with the provider', async () => {
+    await renderScreen();
+    expect(screen.getByText(`${window.location.origin}/api/auth/oidc/callback`)).toBeInTheDocument();
+  });
+
+  /** A section whose fields all come from the environment is not rendered at all. */
+  it('omits a section the environment fully owns', async () => {
+    await renderScreen(
+      SETTINGS.map((s) =>
+        s.section === 'sign-in' ? { ...s, source: 'env' as const, configured: true } : s,
+      ),
+    );
+    expect(screen.queryByRole('heading', { name: 'Single sign-on' })).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Knowledge base' })).toBeInTheDocument();
   });
 
   it('says so when a saved setting needs a restart', async () => {

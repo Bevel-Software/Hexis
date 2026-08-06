@@ -1,6 +1,7 @@
 import { eq, inArray } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { deploymentSettings } from '../database/core-schema.js';
+import { validateBranchModel } from '@bevel-software/platform-shared';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 
 /**
@@ -13,6 +14,8 @@ import { TokenCrypto } from '../../shared/token-crypto.js';
 export interface SettingDef {
   key: string;
   envVar: string;
+  /** Which block of the setup screen it belongs to. */
+  section: 'knowledge-base' | 'branches' | 'sign-in';
   secret?: boolean;
   /** Applied on save; the message is shown against the field. */
   validate?(value: string): string | null;
@@ -48,17 +51,20 @@ export const CORE_SETTINGS: SettingDef[] = [
   {
     key: 'kbRepoUrl',
     envVar: 'KB_REPO_URL',
+    section: 'knowledge-base',
     validate: validateHttpsRemote,
   },
   {
     key: 'gitToken',
     envVar: 'GIT_TOKEN',
+    section: 'knowledge-base',
     secret: true,
     validate: (v) => (v.trim() ? null : 'A token is required to read and write the repository.'),
   },
   {
     key: 'gitUsername',
     envVar: 'GIT_USERNAME',
+    section: 'knowledge-base',
     // Interpolated into the credential-helper shell snippet, so anything that
     // is not a plain token is rejected rather than escaped.
     validate: (v) =>
@@ -67,6 +73,7 @@ export const CORE_SETTINGS: SettingDef[] = [
   {
     key: 'kbDirName',
     envVar: 'KB_DIR_NAME',
+    section: 'knowledge-base',
     // Joined with workspace paths, so a separator or `..` would let it escape
     // the workspace directory.
     validate: (v) =>
@@ -77,6 +84,82 @@ export const CORE_SETTINGS: SettingDef[] = [
     // keeps the name it started with.
     restartToApply: true,
   },
+
+  /**
+   * The branch model. Both are restart-to-apply and could not be otherwise:
+   * the backend hands `DEFAULT_BRANCH` to services at construction, and the
+   * browser is served the pair once at boot — a live swap would leave half the
+   * app on the old model and half on the new one.
+   *
+   * The pair is ALSO checked together in `save`, because neither field is
+   * valid or invalid on its own: the default branch must appear in the
+   * protected list, and a per-field rule cannot see the other side.
+   */
+  {
+    key: 'defaultBranch',
+    envVar: 'DEFAULT_BRANCH',
+    section: 'branches',
+    validate: (v) => (v.includes(',') ? 'One branch name, not a list.' : null),
+    restartToApply: true,
+  },
+  {
+    key: 'protectedBranches',
+    envVar: 'PROTECTED_BRANCHES',
+    section: 'branches',
+    restartToApply: true,
+  },
+
+  /**
+   * Single sign-on. Restart-to-apply because the provider is built once at boot
+   * and pushed into the auth plugin array the server mounts from.
+   */
+  {
+    key: 'oidcIssuerUrl',
+    envVar: 'OIDC_ISSUER_URL',
+    section: 'sign-in',
+    validate: (v) => {
+      try {
+        return new URL(v).protocol === 'https:' ? null : 'The issuer URL must start with https://';
+      } catch {
+        return 'Enter the issuer URL, e.g. https://login.microsoftonline.com/<tenant>/v2.0';
+      }
+    },
+    restartToApply: true,
+  },
+  {
+    key: 'oidcClientId',
+    envVar: 'OIDC_CLIENT_ID',
+    section: 'sign-in',
+    restartToApply: true,
+  },
+  {
+    key: 'oidcClientSecret',
+    envVar: 'OIDC_CLIENT_SECRET',
+    section: 'sign-in',
+    secret: true,
+    restartToApply: true,
+  },
+  {
+    key: 'oidcScopes',
+    envVar: 'OIDC_SCOPES',
+    section: 'sign-in',
+    restartToApply: true,
+  },
+  {
+    key: 'oidcProviderLabel',
+    envVar: 'OIDC_PROVIDER_LABEL',
+    section: 'sign-in',
+    restartToApply: true,
+  },
+  {
+    // Belongs with SSO because SSO is what makes it load-bearing: sign-in
+    // auto-provisions, so against a multi-tenant issuer this list is the only
+    // thing between "has an account somewhere" and "has an account here".
+    key: 'allowedEmailDomains',
+    envVar: 'ALLOWED_EMAIL_DOMAINS',
+    section: 'sign-in',
+    restartToApply: true,
+  },
 ];
 
 /** Where a resolved value came from, which is what the UI renders as its status. */
@@ -85,6 +168,7 @@ export type SettingSource = 'env' | 'stored' | 'unset';
 export interface ResolvedSetting {
   key: string;
   envVar: string;
+  section: SettingDef['section'];
   source: SettingSource;
   /** Omitted entirely for secrets — `configured` is all a client ever learns. */
   value?: string;
@@ -201,6 +285,7 @@ export class DeploymentSettingsService {
       const base = {
         key: def.key,
         envVar: def.envVar,
+        section: def.section,
         source,
         configured: source !== 'unset',
         secret: def.secret === true,
@@ -251,6 +336,24 @@ export class DeploymentSettingsService {
         continue;
       }
       toWrite.push({ key, value, def });
+    }
+
+    // The branch pair is the one cross-field rule: neither name is valid or
+    // invalid alone, since the default must appear in the protected list. Check
+    // the model this save WOULD produce — the written value where there is one,
+    // the value already in effect where there is not — so setting one half
+    // against an existing other half is judged on the result, not the input.
+    const branchKeys = ['defaultBranch', 'protectedBranches'];
+    if (toWrite.some((w) => branchKeys.includes(w.key))) {
+      const effective = (key: string) =>
+        toWrite.find((w) => w.key === key)?.value ?? this.resolve(key);
+      const problem = validateBranchModel({
+        defaultBranch: effective('defaultBranch'),
+        protectedBranches: effective('protectedBranches'),
+      });
+      // Reported against the protected list: it is the field with room to hold
+      // the answer, and "add it to this list" is the usual fix.
+      if (problem) problems.protectedBranches = problem;
     }
 
     if (Object.keys(problems).length > 0) throw new SettingsValidationError(problems);

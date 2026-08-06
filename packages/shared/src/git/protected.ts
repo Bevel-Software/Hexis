@@ -64,28 +64,43 @@ export interface BranchModel {
  * here rather than at either call site so the two cannot disagree about what
  * counts as a valid pair.
  */
-export function configureBranchModel(model: BranchModel): void {
-  const defaultBranch = (model.defaultBranch ?? '').trim();
-  const list = Array.isArray(model.protectedBranches)
+export function branchListOf(model: BranchModel): string[] {
+  return Array.isArray(model.protectedBranches)
     ? model.protectedBranches.map((s) => s.trim()).filter(Boolean)
     : parseBranchList(model.protectedBranches);
+}
 
-  if (!defaultBranch) {
-    throw new Error('A default branch is required — the branch users land on.');
-  }
-  if (list.length === 0) {
-    throw new Error('At least one protected branch is required.');
-  }
+/**
+ * What is wrong with a pair, or null when nothing is — the same rule
+ * {@link configureBranchModel} enforces, without applying anything.
+ *
+ * Separate because the setup screen has to VALIDATE a proposed pair before it
+ * is saved, and applying a model as a side effect of checking it would swap the
+ * running app onto branches nobody has confirmed yet.
+ */
+export function validateBranchModel(model: BranchModel): string | null {
+  const defaultBranch = (model.defaultBranch ?? '').trim();
+  const list = branchListOf(model);
+  if (!defaultBranch) return 'A default branch is required — the branch users land on.';
+  if (list.length === 0) return 'At least one protected branch is required.';
   // The default branch is where users land and the default propose target — it
   // must itself be protected, or `isProtectedBranch(DEFAULT_BRANCH)` is false
   // and the protected-branch guards silently do not apply to it. Refuse the
   // pair rather than ship that inconsistency.
   if (!list.includes(defaultBranch)) {
-    throw new Error(
+    return (
       `The default branch ("${defaultBranch}") must be one of the protected branches ` +
-        `(${list.join(', ')}).`,
+      `(${list.join(', ')}).`
     );
   }
+  return null;
+}
+
+export function configureBranchModel(model: BranchModel): void {
+  const problem = validateBranchModel(model);
+  if (problem) throw new Error(problem);
+  const defaultBranch = model.defaultBranch.trim();
+  const list = branchListOf(model);
 
   DEFAULT_BRANCH = defaultBranch;
   PROTECTED_BRANCH_DISPLAY_NAMES = Object.freeze(

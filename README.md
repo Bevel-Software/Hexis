@@ -62,13 +62,13 @@ outgoing one still holds it.
 | `GIT_TOKEN` / `GIT_USERNAME` | setup screen | Git credential (Basic password / host-specific username). Also settable on first sign-in, where it can be tested against the host |
 | `SECRETS_ENC_KEY` | yes | 32-byte key (base64/hex) encrypting vault secrets + MCP OAuth tokens |
 | `KB_DIR_NAME` | no | Directory name of the KB clone inside each workspace |
-| `DEFAULT_BRANCH` / `PROTECTED_BRANCHES` | no | Branch model. Runtime only — the frontend fetches it from `/api/config`, so one build serves any deployment |
+| `DEFAULT_BRANCH` / `PROTECTED_BRANCHES` | setup screen | Branch model. Runtime only — the frontend fetches it from `/api/config`, so one build serves any deployment. Settable on first sign-in, where the repository's real branches are offered |
 | `PORT` | no | Backend port (default 3001) |
 | `PUBLIC_BACKEND_URL` / `PUBLIC_FRONTEND_URL` | prod | Public origins for OAuth redirects + bounces |
 | `TENANT_ID` | no | Slug branding every credential prefix (default `bevel`) |
-| `ALLOWED_EMAIL_DOMAINS` | no | SSO allow-list. SSO auto-provisions, so against a multi-tenant issuer this is the only thing limiting who can sign themselves up. Not applied to admin-created accounts or password login |
+| `ALLOWED_EMAIL_DOMAINS` | no | SSO allow-list, settable on the setup screen beside the SSO settings it guards. SSO auto-provisions, so against a multi-tenant issuer this is the only thing limiting who can sign themselves up. Not applied to admin-created accounts or password login |
 | `LOGIN_PASSWORD` | no | `false` hides password login and rejects `/api/auth/login` |
-| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | no | Generic OIDC single sign-on; the method appears once all three are set |
+| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | no | Generic OIDC single sign-on; the method appears once all three are set. Also settable on the setup screen, which shows the redirect URI to register |
 | `TRUST_PROXY` | behind a proxy | Reverse-proxy hop count, so `req.ip` and the per-IP login rate limit see the real client |
 | `KB_TEMPLATE_DIR` | no | Overrides the packaged KB seed template |
 | `ONTOLOGY_SESSION_BLOCK` | no | Ontology-session touch tracking toggle (default on) |

@@ -198,6 +198,53 @@ describe('DeploymentSettingsService — validation', () => {
     expect(settings.resolve('gitToken')).toBe('ghp_keepme');
   });
 
+  /**
+   * The branch pair is the one rule no per-field check can express: the default
+   * has to appear in the protected list, so each name is only valid in the
+   * other's company. If it were not checked, the pair would be rejected far
+   * later — by `configureBranchModel` at the NEXT BOOT, which is a deployment
+   * that saved successfully and then would not start.
+   */
+  it('refuses a default branch that is not in the protected list', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await expect(
+      settings.save({ defaultBranch: 'main', protectedBranches: 'release' }, null),
+    ).rejects.toBeInstanceOf(SettingsValidationError);
+  });
+
+  it('accepts a pair that agrees', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.save({ defaultBranch: 'main', protectedBranches: 'main, release' }, null);
+    expect(settings.resolve('defaultBranch')).toBe('main');
+  });
+
+  /**
+   * Judged on the model the save WOULD produce, not on the input: setting one
+   * half against an existing other half has to be checked against the result.
+   */
+  it('checks a half-save against what is already in effect', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.save({ defaultBranch: 'main', protectedBranches: 'main' }, null);
+    // Narrowing the protected list to one that excludes the standing default.
+    await expect(settings.save({ protectedBranches: 'release' }, null)).rejects.toBeInstanceOf(
+      SettingsValidationError,
+    );
+    // …and the other way: a default that the standing list does cover.
+    await settings.save({ protectedBranches: 'main, release' }, null);
+    await expect(settings.save({ defaultBranch: 'release' }, null)).resolves.toBeTruthy();
+  });
+
+  it('seals the SSO client secret like the git token', async () => {
+    const { db, rows } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.save({ oidcClientSecret: 'sso-very-secret' }, null);
+    expect(rows.find((r) => r.key === 'oidcClientSecret')?.encrypted).toBe(true);
+    expect(JSON.stringify(settings.describe())).not.toContain('sso-very-secret');
+  });
+
   it('reports a restart only for a setting a running server cannot pick up', async () => {
     const { db } = makeDb();
     const settings = new DeploymentSettingsService(db, ENC_KEY);

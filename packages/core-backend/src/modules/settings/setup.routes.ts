@@ -7,6 +7,7 @@ import {
   SettingsValidationError,
   validateHttpsRemote,
 } from './deployment-settings.service.js';
+import { validateBranchModel } from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 const execFileAsync = promisify(execFile);
@@ -202,12 +203,27 @@ export function createSetupRoutes(
 }
 
 /**
- * Setup is complete when the KB can actually be reached: a URL and a token.
- * The username has a working default and the directory name has a default
- * too, so neither can block a deployment from starting.
+ * Setup is complete when the deployment can do its job: reach the knowledge
+ * base, and know which branches are which.
+ *
+ * The KB needs a URL and a token — the username and the directory name both
+ * have working defaults, so neither can block a start. The branch model has no
+ * default ON PURPOSE: guessing `main` would silently point a deployment at the
+ * wrong branch and let the protected-branch guards apply to nothing, which is
+ * worse than asking.
+ *
+ * SSO is deliberately absent. It is configuration, not a prerequisite — a
+ * deployment signs in perfectly well without it, and gating on it would lock
+ * an admin out of the screen where they would set it up.
  */
 export function isComplete(settings: DeploymentSettingsService): boolean {
-  return Boolean(settings.resolve('kbRepoUrl') && settings.resolve('gitToken'));
+  const kb = Boolean(settings.resolve('kbRepoUrl') && settings.resolve('gitToken'));
+  const branches =
+    validateBranchModel({
+      defaultBranch: settings.resolve('defaultBranch'),
+      protectedBranches: settings.resolve('protectedBranches'),
+    }) === null;
+  return kb && branches;
 }
 
 /**

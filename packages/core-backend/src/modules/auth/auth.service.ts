@@ -49,10 +49,24 @@ function toAuthUser(user: {
   };
 }
 
+/**
+ * What this service needs from the deployment's configuration, and nothing
+ * more. Narrowed from `CoreConfig` so the caller can supply a value that is
+ * RESOLVED rather than read straight off the environment — the SSO domain
+ * allow-list is settable from the setup screen, and taking the whole config
+ * object would have quietly pinned it to the env-only half.
+ */
+export interface AuthConfig {
+  jwtSecret: string;
+  adminEmail: string;
+  adminPassword: string;
+  allowedEmailDomains: string[];
+}
+
 export class AuthService {
   constructor(
     private readonly db: Database,
-    private readonly config: CoreConfig,
+    private readonly config: AuthConfig,
   ) {}
 
   /**

@@ -5,6 +5,7 @@ export interface SettingStatus {
   key: string;
   /** The environment variable that still wins if it is set. */
   envVar: string;
+  section: 'knowledge-base' | 'branches' | 'sign-in';
   source: 'env' | 'stored' | 'unset';
   /** Absent for secrets — the server never sends a stored secret back. */
   value?: string;

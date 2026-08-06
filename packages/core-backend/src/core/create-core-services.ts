@@ -2,8 +2,8 @@ import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import {
   DEFAULT_BRANCH,
-  branchModelFromEnv,
   configureBranchModel,
+  validateBranchModel,
   PROTECTED_BRANCHES,
   GROUPS_DIR,
 } from '@bevel-software/platform-shared';
@@ -15,6 +15,14 @@ import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
 import { KbSeedService } from '../modules/workspace/kb-seed.service.js';
 import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
+
+/** `a.com, b.com` → `['a.com','b.com']`, tolerating a leading `@` or `.`. */
+function parseDomainList(raw: string): string[] {
+  return raw
+    .split(/[\s,]+/)
+    .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
+    .filter((d) => d.length > 0);
+}
 import { SpillStore } from '../modules/workspace/spill-store.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
@@ -146,11 +154,6 @@ export async function createCoreServices(
   // Fail fast on a runtime whose git is too old for `--no-write-fetch-head`
   // (see `git-version.ts`): every clone, fetch and refresh below depends on it,
   // so an unsupported binary is better surfaced here than at the first merge.
-  // The branch model, before anything reads it. The backend takes it from the
-  // environment; the browser is served the same shape by `GET /api/config`.
-  // This used to happen at import time inside the shared module, which is what
-  // forced the frontend to bake it into its bundle.
-  configureBranchModel(branchModelFromEnv());
   await assertGitVersion();
   const db = getDb(config.databaseUrl);
   // Migrations must run BEFORE any service that reads or writes a managed
@@ -171,6 +174,26 @@ export async function createCoreServices(
   // what it saw before — a stored row only answers where a variable is silent.
   const settings = new DeploymentSettingsService(db, config.secretsEncKey);
   await settings.load();
+
+  /**
+   * The branch model, before anything reads it. It used to be applied at import
+   * time from the environment, which is what forced the frontend to bake it
+   * into its bundle; it now comes through the settings store like the rest of
+   * the deployment's configuration (environment first, as always).
+   *
+   * UNCONFIGURED IS ALLOWED, and that is the point: a fresh deployment has no
+   * branch model, and refusing to boot would take away the setup screen where
+   * one gets entered. What reads it before then is the setup path itself, which
+   * does not need it — the bootstrap admin is recognised without a workspace.
+   * `isComplete` keeps the rest of the app behind the gate until it is set, and
+   * the setting is restart-to-apply because services take the value at
+   * construction.
+   */
+  const branchModel = {
+    defaultBranch: settings.resolve('defaultBranch'),
+    protectedBranches: settings.resolve('protectedBranches'),
+  };
+  if (!validateBranchModel(branchModel)) configureBranchModel(branchModel);
   // A token supplied through the setup screen has to reach the credential
   // helper, which reads `$GITHUB_TOKEN` at call time.
   settings.syncGitTokenEnv();
@@ -239,7 +262,14 @@ export async function createCoreServices(
   // Auth service — resolves identities for login, PR author attribution, and
   // access lookups. (Change requests now store the author email directly, so
   // PullRequestService no longer depends on it for attribution.)
-  const authService = new AuthService(db, config);
+  // The allow-list is resolved, not read off the environment: it is settable
+  // from the setup screen alongside the SSO configuration it guards.
+  const authService = new AuthService(db, {
+    jwtSecret: config.jwtSecret,
+    adminEmail: config.adminEmail,
+    adminPassword: config.adminPassword,
+    allowedEmailDomains: parseDomainList(settings.resolve('allowedEmailDomains')),
+  });
   const authMiddleware = createAuthMiddleware(authService);
 
   // Shared mutex so git and diff operations on the same workspace serialize
@@ -557,14 +587,20 @@ export async function createCoreServices(
   // the server is built, later). Core contributes the generic OIDC provider
   // when the env configures one.
   const authProviders = ports.authProviders ?? [];
-  if (config.oidcIssuerUrl && config.oidcClientId && config.oidcClientSecret) {
+  // Resolved through settings, so an admin can configure SSO from the setup
+  // screen instead of the environment. Env still wins, so a deployment that
+  // sets these keeps behaving exactly as it did.
+  const oidcIssuerUrl = settings.resolve('oidcIssuerUrl');
+  const oidcClientId = settings.resolve('oidcClientId');
+  const oidcClientSecret = settings.resolve('oidcClientSecret');
+  if (oidcIssuerUrl && oidcClientId && oidcClientSecret) {
     authProviders.push(
       new OidcAuthProvider({
-        issuerUrl: config.oidcIssuerUrl,
-        clientId: config.oidcClientId,
-        clientSecret: config.oidcClientSecret,
-        scopes: config.oidcScopes,
-        label: config.oidcProviderLabel,
+        issuerUrl: oidcIssuerUrl,
+        clientId: oidcClientId,
+        clientSecret: oidcClientSecret,
+        scopes: settings.resolve('oidcScopes') || 'openid profile email',
+        label: settings.resolve('oidcProviderLabel') || 'Single sign-on',
         publicBackendUrl: config.publicBackendUrl,
         publicFrontendUrl: config.publicFrontendUrl,
         cookieSecure: config.publicBackendUrl.startsWith('https'),
