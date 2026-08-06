@@ -299,8 +299,11 @@ describe('.bevelignore is admin-only in the file tree', () => {
   let h: Harness | null = null;
   afterEach(async () => { if (h) await close(h.server); h = null; });
 
+  // The harness's default `allow` — none of the paths below contain "Secret",
+  // so every one of them is READABLE. That is the point: the read verdict is
+  // held constant and admin-ness alone moves the outcome.
   const treeFilter = async (isAdmin: boolean) => {
-    h = await makeHarness({ isAdmin, allowFn: () => true });
+    h = await makeHarness({ isAdmin });
     await fetch(`${h.baseUrl}/api/workspace/${WS}/files`);
     return h.listFilesFilter()!;
   };

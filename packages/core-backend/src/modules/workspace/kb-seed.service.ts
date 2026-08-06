@@ -154,7 +154,16 @@ export class KbSeedService implements IKbSeedService {
     // would write outside the repo being seeded, and a bad value should fail at
     // boot beside the rest of the wiring rather than part-way through seeding
     // somebody's knowledge base. Same contract as `KB_DIR_NAME` in `CoreConfig`.
-    for (const dir of extraDirs) assertRootSegment(dir);
+    for (const dir of extraDirs) {
+      assertRootSegment(dir);
+      // A root named after a required FILE is a typo with a silent outcome:
+      // the file is laid down first in both seed paths, so `ensureRequiredDirs`
+      // finds the path taken and skips it, and the directory the caller asked
+      // for never appears with nothing said about why.
+      if (REQUIRED_FILES.includes(dir)) {
+        throw new Error(`Reserved KB root "${dir}" collides with a required file of the same name`);
+      }
+    }
     this.requiredDirs = [...CORE_REQUIRED_DIRS, ...extraDirs];
   }
 

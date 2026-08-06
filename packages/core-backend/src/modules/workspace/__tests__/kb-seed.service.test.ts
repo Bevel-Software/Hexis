@@ -322,6 +322,19 @@ describe('KbSeedService', () => {
      * names in `kb-layout.ts` must stay ACCEPTED here. A guard that rejected
      * them would reject the only real use of this argument.
      */
+    /**
+     * A root named after a required FILE is a typo whose outcome is silence:
+     * the file is laid down first in both seed paths, so `ensureRequiredDirs`
+     * finds the path taken and skips it, and the directory never appears with
+     * nothing said about why. Refused at construction instead.
+     */
+    it.each(['access.md', 'AGENTS.md', '.bevelignore', '.gitignore'])(
+      'refuses %j, which is a required file rather than a root',
+      (collide) => {
+        expect(() => makeSeeder('unused', ADMINS, [collide])).toThrow(/collides with a required file/);
+      },
+    );
+
     it('accepts the reserved names a distribution actually claims', () => {
       expect(() => makeSeeder('unused', ADMINS, ['Data', 'Agents', 'Pipelines'])).not.toThrow();
     });
