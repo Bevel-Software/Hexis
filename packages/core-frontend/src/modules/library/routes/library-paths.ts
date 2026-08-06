@@ -15,8 +15,9 @@ export const LIBRARY_ROOT = '/skills-and-tools';
 
 /**
  * What the sidebar should show as selected for a path. `null` on the pages that
- * are not a filtered view of the catalog — the all-groups index and the item
- * pages — where the gallery rows are all inactive.
+ * are not a filtered view of the catalog — the all-groups index (the root, see
+ * `isGroupsIndexPath`) and the item pages — where the gallery rows are all
+ * inactive.
  *
  * `matchPath` hands params back RAW (react-router decodes neither here nor in
  * `useParams`), so a group named `Sales & Ops` arrives as `Sales%20%26%20Ops`
@@ -24,7 +25,7 @@ export const LIBRARY_ROOT = '/skills-and-tools';
  * the same decode on `useParams().group`.
  */
 export function libraryFilterForPath(pathname: string): LibraryFilter | null {
-  if (matchPath({ path: LIBRARY_ROOT, end: true }, pathname)) return { kind: 'all' };
+  if (matchPath({ path: `${LIBRARY_ROOT}/everything`, end: true }, pathname)) return { kind: 'all' };
   if (matchPath({ path: `${LIBRARY_ROOT}/owned`, end: true }, pathname)) return { kind: 'owned' };
   if (matchPath({ path: `${LIBRARY_ROOT}/yours`, end: true }, pathname)) return { kind: 'ungrouped' };
   const group = matchPath({ path: `${LIBRARY_ROOT}/groups/:group`, end: true }, pathname);
@@ -36,7 +37,7 @@ export function libraryFilterForPath(pathname: string): LibraryFilter | null {
 export function pathForLibraryFilter(filter: LibraryFilter): string {
   switch (filter.kind) {
     case 'all':
-      return LIBRARY_ROOT;
+      return `${LIBRARY_ROOT}/everything`;
     case 'owned':
       return `${LIBRARY_ROOT}/owned`;
     case 'ungrouped':
@@ -51,9 +52,13 @@ export function pathForGroup(group: string): string {
   return `${LIBRARY_ROOT}/groups/${encodeURIComponent(group)}`;
 }
 
-/** The all-groups index. */
+/**
+ * The all-groups index — the Library's HOME. Groups are the structure of this
+ * surface, so the index of them is what the root shows; `groups` is kept as a
+ * redirect so the links that used to name it still land.
+ */
 export function pathForGroupsIndex(): string {
-  return `${LIBRARY_ROOT}/groups`;
+  return LIBRARY_ROOT;
 }
 
 /**
@@ -92,9 +97,20 @@ export function pathForSkill(name: string): string {
   return `${LIBRARY_ROOT}/skills/${encodeURIComponent(name)}`;
 }
 
-/** Whether a path is the all-groups index — the one path that lights the "All groups" row. */
+/**
+ * Whether a path is the all-groups index — the one path that lights the "All
+ * groups" row. It is not a `LibraryFilter`: the index lists PLACES, not a
+ * filtered slice of the catalog, which is why selection for it travels beside
+ * the filter rather than inside it.
+ *
+ * `groups` answers true as well even though it only ever redirects, so the row
+ * is already lit while the redirect resolves.
+ */
 export function isGroupsIndexPath(pathname: string): boolean {
-  return matchPath({ path: `${LIBRARY_ROOT}/groups`, end: true }, pathname) !== null;
+  return (
+    matchPath({ path: LIBRARY_ROOT, end: true }, pathname) !== null ||
+    matchPath({ path: `${LIBRARY_ROOT}/groups`, end: true }, pathname) !== null
+  );
 }
 
 /** A malformed escape is a bad link, not a crash — fall back to the raw segment. */

@@ -5,7 +5,12 @@ import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure'
 import { useAuth } from '../../auth/state/auth.context';
 import { attentionOf, useLibrary } from '../state/library-data';
 import { personalGroupName } from '../utils/personal-group';
-import { libraryFilterForPath, pathForLibraryFilter } from '../routes/library-paths';
+import {
+  isGroupsIndexPath,
+  libraryFilterForPath,
+  pathForGroupsIndex,
+  pathForLibraryFilter,
+} from '../routes/library-paths';
 import { groupCounts, type LibraryFilter } from '../utils/status';
 import { primaryFolderOf } from '../utils/group-summary';
 import { LINK_COPIED_TOAST, LINK_COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
@@ -181,6 +186,8 @@ export function LibraryLayout() {
           attentionCount={attentionCount}
           onFinishSetup={() => navigate('/connect')}
           onCreateGroup={() => setNewGroupOpen(true)}
+          groupsIndexActive={isGroupsIndexPath(location.pathname)}
+          onOpenGroupsIndex={() => navigate(pathForGroupsIndex())}
           onContextMenu={openContextMenu}
         />
       </SidebarFrame>

@@ -142,9 +142,16 @@ const menuItems = () =>
     .getAllByRole('menuitem')
     .map((i) => i.textContent);
 
+/**
+ * A row in the NAV, by name. Scoped rather than global because the Library
+ * opens on the all-groups index, whose rows name the same groups the nav does —
+ * `GTM` is two buttons on this screen, and only one of them is the nav's.
+ */
+const navRow = (name: RegExp | string) => within(nav()).findByRole('button', { name });
+
 /** Right-click a row and wait for the menu the layout renders in response. */
 async function openMenuOn(name: RegExp | string) {
-  const row = await screen.findByRole('button', { name });
+  const row = await navRow(name);
   fireEvent.contextMenu(row, { clientX: 60, clientY: 180 });
   await screen.findByRole('menu');
   return row;
@@ -201,7 +208,7 @@ describe('Library sidebar — right-click, end to end', () => {
 
   it('gives the empty nav space the one verb that belongs to the nav itself', async () => {
     renderLibrary();
-    await screen.findByRole('button', { name: /^GTM/ });
+    await navRow(/^GTM/);
     fireEvent.contextMenu(nav(), { clientX: 40, clientY: 400 });
     await screen.findByRole('menu');
     expect(menuItems()).toEqual(['New group']);
@@ -288,7 +295,7 @@ describe('Library sidebar — right-click, end to end', () => {
     fireEvent.mouseDown(document.body);
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
 
-    fireEvent.click(screen.getByRole('button', { name: /^GTM/ }));
+    fireEvent.click(await navRow(/^GTM/));
     expect(await screen.findByRole('heading', { name: 'GTM', level: 1 })).toBeInTheDocument();
   });
 

@@ -32,7 +32,14 @@ export function LibraryRoutes() {
       <LibraryProvider>
         <Routes>
           <Route element={<LibraryLayout />}>
-            <Route index element={<LibraryPage filter={{ kind: 'all' }} />} />
+            {/* The Library OPENS on its groups. A group is where skills and
+                tools live and who they are for, so the index of them is the
+                orienting view; the undifferentiated card grid is a lens on
+                the same catalog and keeps its own row and URL below. */}
+            <Route index element={<GroupsIndexPage />} />
+
+            {/* The whole catalog as cards, with the library-wide search. */}
+            <Route path="everything" element={<LibraryPage filter={{ kind: 'all' }} />} />
 
             {/* The connect-your-agent welcome — inside the layout, so the
                 sidebar (and the pill's selected state) is on screen with it.
@@ -51,7 +58,10 @@ export function LibraryRoutes() {
             {/* A group is a PLACE: `groups/:group` is a real page with a real
                 URL, and `GroupPage` — not the router — decides whether the
                 caller gets the member view or the locked one. */}
-            <Route path="groups" element={<GroupsIndexPage />} />
+            {/* The index moved to the root. This path is where every older
+                link points, so it redirects rather than 404s or duplicates
+                the page at a second URL. */}
+            <Route path="groups" element={<Navigate to={LIBRARY_ROOT} replace />} />
             <Route path="groups/:group" element={<GroupPage />} />
 
             {/* The routed replacement for the dialog's tool half, and the
@@ -67,8 +77,8 @@ export function LibraryRoutes() {
           </Route>
 
           {/* An unknown subpath is a stale or mistyped link, not an error page —
-              send it to the gallery. Outside the layout route so a redirect
-              never paints a sidebar on its way through. */}
+              send it home. Outside the layout route so a redirect never paints
+              a sidebar on its way through. */}
           <Route path="*" element={<Navigate to={LIBRARY_ROOT} replace />} />
         </Routes>
       </LibraryProvider>

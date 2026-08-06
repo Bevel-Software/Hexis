@@ -32,6 +32,8 @@ function renderSidebar(over: Partial<GroupsSidebarProps> = {}) {
     attentionCount: 2,
     onFinishSetup: vi.fn(),
     onCreateGroup: vi.fn(),
+    groupsIndexActive: false,
+    onOpenGroupsIndex: vi.fn(),
     onContextMenu,
     ...over,
   };
@@ -87,6 +89,23 @@ describe('GroupsSidebar — right-click', () => {
     expect(onContextMenu.mock.calls[0][0]).toMatchObject({
       filter: { kind: 'group', group: 'Finance' },
       label: 'Finance',
+    });
+  });
+
+  /**
+   * The home row has no `LibraryFilter` behind it — the index lists places, not
+   * a slice of the catalog — so it reports `null` and gets the nav's own menu:
+   * create a group, and none of the verbs that need a folder to point at.
+   */
+  it('reports the All groups row with no filter, but with its own row and name', () => {
+    const { onContextMenu } = renderSidebar();
+    const home = screen.getByRole('button', { name: 'All groups' });
+    rightClick(home);
+    expect(onContextMenu).toHaveBeenCalledTimes(1);
+    expect(onContextMenu.mock.calls[0][0]).toMatchObject({
+      filter: null,
+      label: 'All groups',
+      row: home,
     });
   });
 
