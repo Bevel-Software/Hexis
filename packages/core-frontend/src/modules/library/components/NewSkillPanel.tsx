@@ -71,7 +71,7 @@ export function NewSkillPanel({
   const error = taken
     ? 'A skill with that name already exists.'
     : illegal
-      ? "A skill name can't contain / or \\."
+      ? 'A skill name can\'t contain / or \\, or be "." or "..".'
       : null;
   const canCreate = trimmed.length > 0 && !error && !busy && Boolean(user);
 

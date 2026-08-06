@@ -249,6 +249,10 @@ export async function createEmptySkill(input: CreateSkillInput): Promise<Created
 
   const { workspace } = await getOrCreateWorkspace(DEFAULT_BRANCH);
   const workspacePath = `${workspace.kbDirName}/${repoRelativePath}`;
-  await writeFile(workspace.id, workspacePath, EMPTY_SKILL_MD);
+  // Exclusive create: the panel's collision check runs against a skill list
+  // that can be stale, so the backend must be the one to refuse a name that
+  // was claimed since — a plain write here would silently empty the existing
+  // SKILL.md. The 409 surfaces through the panel's normal error toast.
+  await writeFile(workspace.id, workspacePath, EMPTY_SKILL_MD, { ifAbsent: true });
   return { repoRelativePath, workspacePath, branch: DEFAULT_BRANCH, direct: true };
 }

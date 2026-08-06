@@ -846,7 +846,7 @@ export function createWorkspaceRoutes(
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
-    const { content } = req.body as { content?: string };
+    const { content, ifAbsent } = req.body as { content?: string; ifAbsent?: boolean };
     if (content === undefined) {
       res.status(400).json({ error: 'content is required in body' });
       return;
@@ -867,7 +867,13 @@ export function createWorkspaceRoutes(
       const plan = await creatorAccess.planForCreate(id, user, filePath, 'file');
       if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
       const toWrite = plan?.kind === 'frontmatter' ? plan.apply(content) : content;
-      await withLock(id, user, filePath, () => workspaceService.writeFile(id, filePath, toWrite));
+      // `ifAbsent` = exclusive create: the service's `wx` write turns a
+      // concurrent or stale create against an existing file into a 409
+      // instead of a silent replace. `withLock`'s failure arm releases
+      // without committing, so the refusal leaves no trace.
+      await withLock(id, user, filePath, () =>
+        workspaceService.writeFile(id, filePath, toWrite, { failIfExists: ifAbsent === true }),
+      );
       res.json({ status: 'written' });
     } catch (err) {
       sendError(res, err);

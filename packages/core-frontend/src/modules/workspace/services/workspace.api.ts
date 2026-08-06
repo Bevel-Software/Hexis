@@ -62,11 +62,18 @@ export async function readFile(workspaceId: string, relativePath: string): Promi
   return data.content;
 }
 
-export async function writeFile(workspaceId: string, relativePath: string, content: string): Promise<void> {
+export async function writeFile(
+  workspaceId: string,
+  relativePath: string,
+  content: string,
+  options?: { ifAbsent?: boolean },
+): Promise<void> {
   const res = await authFetch(`/api/workspace/${workspaceId}/file?path=${encodeURIComponent(relativePath)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
+    // `ifAbsent` asks the backend for an exclusive create — a 409 instead of
+    // a silent replace when the target already exists.
+    body: JSON.stringify(options?.ifAbsent ? { content, ifAbsent: true } : { content }),
   });
   if (!res.ok) throw await toApiError(res);
 }
