@@ -11,7 +11,6 @@ import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
 import { useCanonicalFileUrl } from '../routing/kb-routes';
 import { useReview } from '../../review/state/review.context';
-import { ProtectedBranchBanner } from '../../git/components/ProtectedBranchBanner';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { useFileAccess } from '../../access/hooks/useFileAccess';
 import { AccessRestrictedBanner } from '../../access/components/AccessRestrictedBanner';
@@ -820,7 +819,6 @@ export function FileViewer() {
   if (!openFilePath || openFileContent === null || !Renderer) {
     return (
       <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
-        <ProtectedBranchBanner />
         <PullNeededBanner />
         <EditorTabs />
         <div className="flex-1 flex items-center justify-center px-6">
@@ -1009,7 +1007,6 @@ export function FileViewer() {
 
   return (
     <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
-      <ProtectedBranchBanner />
       <PullNeededBanner />
       {/* Hidden while proposing: "you don't have permission to edit" over an
           open editor reads as a contradiction — the propose surface's own
