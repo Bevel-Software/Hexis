@@ -709,7 +709,6 @@ export function FileViewer() {
         onEdit={handleEnterEditMode}
         onDone={handleExitEditMode}
         onOpenHistory={() => setActiveTab('history')}
-        onOpenCompare={() => setActiveTab('compare')}
         onShare={handleShare}
         onCopyPage={canCopyPage ? handleCopyPage : undefined}
         onCopyLink={handleCopyLink}

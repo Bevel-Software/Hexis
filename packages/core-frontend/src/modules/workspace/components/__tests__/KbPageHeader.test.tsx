@@ -18,7 +18,6 @@ function renderHeader(overrides: Partial<KbPageHeaderProps> = {}) {
     onEdit: vi.fn(),
     onDone: vi.fn(),
     onOpenHistory: vi.fn(),
-    onOpenCompare: vi.fn(),
     onShare: vi.fn(),
     onCopyPage: vi.fn(async () => true),
     onCopyLink: vi.fn(async () => true),
@@ -111,9 +110,7 @@ describe('KbPageHeader', () => {
     const user = userEvent.setup();
     renderHeader();
     await user.click(screen.getByRole('button', { name: 'More actions' }));
-    for (const label of [/Version history/, /Compare versions/]) {
-      expect(screen.getByRole('menuitem', { name: label })).toBeInTheDocument();
-    }
+    expect(screen.getByRole('menuitem', { name: /Version history/ })).toBeInTheDocument();
   });
 
   // Copying a reference to this page is one errand, and Share owns it. Two
@@ -125,9 +122,9 @@ describe('KbPageHeader', () => {
     expect(screen.queryByRole('menuitem', { name: /Copy path/i })).not.toBeInTheDocument();
   });
 
-  // The two history entries are the whole menu now, so git not being ready
-  // leaves nothing behind ⋯ — and the trigger goes with them rather than
-  // opening onto an empty panel.
+  // Version history is the whole menu now, so git not being ready leaves
+  // nothing behind ⋯ — and the trigger goes with it rather than opening onto
+  // an empty panel.
   it('drops the ⋯ trigger entirely when git is not ready', () => {
     renderHeader({ historyAvailable: false });
     expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument();

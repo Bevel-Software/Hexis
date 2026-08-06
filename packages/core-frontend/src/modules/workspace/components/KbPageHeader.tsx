@@ -4,7 +4,6 @@ import {
   ChevronDown,
   Clock4,
   Copy,
-  GitCompare,
   History,
   Link2,
   Pencil,
@@ -68,7 +67,6 @@ export interface KbPageHeaderProps {
   onEdit(): void;
   onDone(): void;
   onOpenHistory(): void;
-  onOpenCompare(): void;
   /**
    * Opens Manage access on THIS FILE. There is no folder target: sharing a
    * whole folder from a file's page was one click away from handing over
@@ -114,7 +112,6 @@ export function KbPageHeader({
   onEdit,
   onDone,
   onOpenHistory,
-  onOpenCompare,
   onShare,
   onCopyPage,
   onCopyLink,
@@ -291,10 +288,9 @@ export function KbPageHeader({
             </IconButton>
           ))}
 
-        {/* The two history entries are the whole menu, so the trigger goes
-            where they go: git not ready means there is nothing behind ⋯, and
-            an overflow that opens onto an empty panel is worse than no
-            overflow at all. */}
+        {/* Version history is the whole menu now, so the trigger goes where it
+            goes: git not ready means there is nothing behind ⋯, and an overflow
+            that opens onto an empty panel is worse than no overflow at all. */}
         {historyAvailable && (
           <div className="relative">
             <IconButton
@@ -312,11 +308,6 @@ export function KbPageHeader({
                 <MenuPanel role="menu" aria-label="More actions" className="min-w-[212px]">
                   <MenuItem role="menuitem" onClick={() => { closeDots(); onOpenHistory(); }}>
                     <span className="flex items-center gap-2.5"><History size={14} />Version history</span>
-                  </MenuItem>
-                  <MenuItem role="menuitem" onClick={() => { closeDots(); onOpenCompare(); }}>
-                    <span className="flex items-center gap-2.5">
-                      <GitCompare size={14} />Compare versions
-                    </span>
                   </MenuItem>
                   {/* "Copy path" is NOT here. Copying a reference to this page is
                       one errand, and Share already owns it ("Copy link to this
