@@ -1,4 +1,4 @@
-import { configureBranchModel, isBranchModelConfigured } from '@bevel-software/platform-shared';
+import { configureBranchModel, validateBranchModel } from '@bevel-software/platform-shared';
 
 /** What `GET /api/config` serves. Unauthenticated — see the route's comment. */
 interface ServerConfig {
@@ -20,13 +20,27 @@ interface ServerConfig {
  * near side of having a session.
  */
 export async function loadServerConfig(): Promise<void> {
-  // Idempotent, so a hot reload or a double-invoked entry point does not throw
-  // on re-applying the same model.
-  if (isBranchModelConfigured()) return;
+  // No "already configured?" short-circuit: applying the same model twice is a
+  // no-op, `configureBranchModel` only rejects an INVALID one, and the guard
+  // made this function unobservable once anything had configured the module —
+  // including its own tests.
   const res = await fetch('/api/config');
   if (!res.ok) throw new Error(`Could not load configuration (${res.status})`);
   const config = (await res.json()) as ServerConfig;
-  configureBranchModel(config.branchModel);
+  /**
+   * An UNCONFIGURED deployment is not a failure — it is the state the setup
+   * screen exists for. A fresh install has no branch model yet, and
+   * `configureBranchModel` throws on an empty one, so applying it blindly
+   * turned first-run into "this deployment is not responding" and put the
+   * screen that fixes it on the far side of the error.
+   *
+   * Leaving the model unset is safe because nothing that reads it renders
+   * until `SetupGate` opens: the login screen does not use it, and everything
+   * that does is behind the gate, which stays shut until the branch model is
+   * among the settings that make setup complete.
+   */
+  const problem = validateBranchModel(config.branchModel);
+  if (!problem) configureBranchModel(config.branchModel);
 }
 
 /**
