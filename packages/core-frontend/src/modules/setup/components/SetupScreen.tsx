@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
 import { tokenUsernameForHost } from '../utils/git-host';
 import {
@@ -84,6 +84,14 @@ const FIELDS: Record<
   },
 };
 
+/**
+ * What the deployment cannot start without — the same four the server's
+ * `isComplete` checks. Named here so a save that lands but leaves setup
+ * unfinished can say WHICH answer is still missing, rather than returning a
+ * blank form and letting the reader guess.
+ */
+const REQUIRED_KEYS = ['kbRepoUrl', 'gitToken', 'defaultBranch', 'protectedBranches'];
+
 /** The blocks, in the order they are worked through. */
 const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[] = [
   {
@@ -130,6 +138,9 @@ export function SetupScreen({ settings, onSaved }: Props) {
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [restartRequired, setRestartRequired] = useState(false);
+  /** Required answers still missing after a save that otherwise succeeded. */
+  const [stillMissing, setStillMissing] = useState<string[]>([]);
+  const noticeRef = useRef<HTMLDivElement>(null);
 
   const editable = settings.filter((s) => s.source !== 'env');
   const fromEnv = settings.filter((s) => s.source === 'env');
@@ -168,11 +179,21 @@ export function SetupScreen({ settings, onSaved }: Props) {
       // branches it has. Filling those in beats asking someone to remember —
       // and beats the silent failure of a name that is one character off.
       // Only into fields nobody has typed in.
-      if (result.ok && result.defaultBranch) {
+      // Prefer what the remote calls its trunk. Not every host advertises it —
+      // older servers answer `ls-remote` without the symref line — so fall back
+      // to the conventional names before the first branch it did list. Leaving
+      // these blank is the one way a save can succeed and still not finish
+      // setup, which is worth a guess the reader can see and correct.
+      const suggested =
+        result.defaultBranch ||
+        ['main', 'master', 'trunk'].find((name) => result.branches?.includes(name)) ||
+        result.branches?.[0] ||
+        null;
+      if (result.ok && suggested) {
         setDraft((d) => ({
           ...d,
-          defaultBranch: d.defaultBranch || result.defaultBranch!,
-          protectedBranches: d.protectedBranches || result.defaultBranch!,
+          defaultBranch: d.defaultBranch || suggested,
+          protectedBranches: d.protectedBranches || suggested,
         }));
       }
     } catch (err) {
@@ -192,12 +213,25 @@ export function SetupScreen({ settings, onSaved }: Props) {
       const result = await saveSettings(draft);
       setRestartRequired(result.restartRequired);
       setDraft({});
+      // A save can succeed and STILL leave the deployment unusable: a blank
+      // field means "leave it alone", not "this is wrong", so the server
+      // accepts a batch that answers only some of what it needs. Saying so is
+      // the difference between a form that looks broken and one that tells you
+      // what is left.
+      const missing = result.settings
+        .filter((setting) => REQUIRED_KEYS.includes(setting.key) && !setting.configured)
+        .map((setting) => FIELDS[setting.key]?.label ?? setting.key);
+      setStillMissing(result.complete ? [] : missing);
       onSaved();
     } catch (err) {
       if (err instanceof SettingsProblems) setProblems(err.problems);
       else setError(err instanceof Error ? err.message : 'Could not save these settings.');
     } finally {
       setSaving(false);
+      // The page scrolls now, and every message lands at the top of it while
+      // the button that produced them is at the bottom. Without this, pressing
+      // Save on a long form looks like pressing Save did nothing.
+      requestAnimationFrame(() => noticeRef.current?.scrollIntoView({ block: 'nearest' }));
     }
   }
 
@@ -266,11 +300,24 @@ export function SetupScreen({ settings, onSaved }: Props) {
           optional and can wait.
         </p>
 
-        {error && (
-          <Banner tone="danger" role="alert" className="mt-6">
-            {error}
-          </Banner>
-        )}
+        <div ref={noticeRef}>
+          {error && (
+            <Banner tone="danger" role="alert" className="mt-6">
+              {error}
+            </Banner>
+          )}
+
+          {/* Saved, and still not usable. Without this the form empties itself
+              and comes back looking untouched — indistinguishable from a save
+              that silently failed. */}
+          {stillMissing.length > 0 && (
+            <Banner tone="wait" role="status" className="mt-6">
+              Saved what you filled in — but this deployment still needs{' '}
+              <b className="font-semibold">{stillMissing.join(', ')}</b> before anyone can use it.
+              Test the connection and the version fields fill themselves in.
+            </Banner>
+          )}
+        </div>
 
         {restartRequired && (
           <Banner tone="wait" role="status" className="mt-6">
@@ -327,7 +374,11 @@ export function SetupScreen({ settings, onSaved }: Props) {
                     // a message about it could otherwise land in a box the
                     // reader has no reason to open — a form that refuses to
                     // save and will not say why.
-                    open={fields.some((f) => FIELDS[f.key]?.advanced && problems[f.key])}
+                    open={fields.some(
+                      (f) =>
+                        FIELDS[f.key]?.advanced &&
+                        (problems[f.key] || stillMissing.includes(FIELDS[f.key]?.label ?? '')),
+                    )}
                     className="group rounded-md border border-line bg-sunken px-3.5 py-2.5"
                   >
                     <summary className="cursor-pointer list-none text-detail font-medium text-ink-muted marker:hidden hover:text-ink">

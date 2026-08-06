@@ -319,6 +319,69 @@ describe('SetupScreen', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('must be one of them');
   });
 
+  /**
+   * A blank field means "leave it alone", so the server accepts a batch that
+   * answers only part of what it needs. The screen then cleared the form and
+   * re-rendered — indistinguishable from a save that silently failed, which is
+   * exactly what it looked like.
+   */
+  it('says what is still missing when a save lands but does not finish setup', async () => {
+    await renderScreen();
+    api.saveSettings.mockResolvedValue({
+      restartRequired: false,
+      complete: false,
+      settings: SETTINGS.map((s) =>
+        s.key === 'kbRepoUrl' || s.key === 'gitToken' ? { ...s, configured: true } : s,
+      ),
+    });
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS });
+
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    const notice = await screen.findByRole('status');
+    expect(notice).toHaveTextContent(/still needs/);
+    expect(notice).toHaveTextContent('Main branch');
+    // And the box holding them opens, or the advice points somewhere invisible.
+    await waitFor(() => expect(document.querySelector('details')).toHaveAttribute('open'));
+  });
+
+  it('says nothing of the sort when the save does finish setup', async () => {
+    await renderScreen();
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+    api.fetchSetupStatus.mockResolvedValue({ complete: true, isAdmin: true });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+    expect(await screen.findByText('The application')).toBeInTheDocument();
+  });
+
+  /**
+   * Not every host advertises its HEAD, and a blank version field is the one
+   * way a save can succeed without finishing setup — so a visible, correctable
+   * guess beats leaving it empty.
+   */
+  it('falls back to a conventional branch when the remote does not name one', async () => {
+    await renderScreen();
+    api.testConnection.mockResolvedValue({
+      ok: true,
+      branches: ['develop', 'main', 'release'],
+      defaultBranch: null,
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() => expect(screen.getByLabelText('Main branch')).toHaveValue('main'));
+  });
+
+  it('falls back to the first branch when even that is absent', async () => {
+    await renderScreen();
+    api.testConnection.mockResolvedValue({
+      ok: true,
+      branches: ['production', 'staging'],
+      defaultBranch: null,
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() => expect(screen.getByLabelText('Main branch')).toHaveValue('production'));
+  });
+
   /** Single sign-on is skippable, and the screen has to say so. */
   it('marks the optional section optional', async () => {
     await renderScreen();
