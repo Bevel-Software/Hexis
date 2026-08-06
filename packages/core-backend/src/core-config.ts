@@ -7,6 +7,35 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 /**
+ * The Postgres connection string: `DATABASE_URL` if given, otherwise built
+ * from the `POSTGRES_*` parts.
+ *
+ * The composition lives HERE rather than in docker-compose because expressing
+ * it there needed a nested default — `${DATABASE_URL:-postgresql://${POSTGRES_USER:-…}…}`
+ * — and deployment UIs that scan compose with a regex rather than a YAML
+ * parser truncate that at the first closing brace, offering the operator a
+ * variable whose value is the fragment `postgresql://${POSTGRES_USER:-bevel`.
+ * A malformed connection string presented as configuration is worse than no
+ * configuration at all.
+ *
+ * It is also the better home for it: the parts are URL-ENCODED, which shell
+ * interpolation cannot do — a password containing `@`, `/` or `:` silently
+ * produced an unparseable URL, and "check your password" is not the error
+ * anyone got.
+ */
+export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  const explicit = (env.DATABASE_URL || '').trim();
+  if (explicit) return explicit;
+  const user = encodeURIComponent(env.POSTGRES_USER || 'bevel');
+  const password = encodeURIComponent(env.POSTGRES_PASSWORD || 'bevel');
+  // `localhost` suits a local `pnpm dev`; compose passes the service name.
+  const host = (env.POSTGRES_HOST || 'localhost').trim();
+  const port = (env.POSTGRES_PORT || '5432').trim();
+  const database = encodeURIComponent(env.POSTGRES_DB || 'bevel');
+  return `postgresql://${user}:${password}@${host}:${port}/${database}`;
+}
+
+/**
  * Configuration for the CORE platform: the git-backed workspace/workflow,
  * skills, tools, secrets vault, access control, and the MCP surface. Contains
  * NO LLM, connector, or SSO-provider settings — those live on the enterprise
@@ -186,7 +215,7 @@ export class CoreConfig {
 
   constructor() {
     this.port = parseInt(process.env.PORT || '3001', 10);
-    this.databaseUrl = process.env.DATABASE_URL || 'postgresql://bevel:bevel@localhost:5432/bevel';
+    this.databaseUrl = resolveDatabaseUrl();
     this.nodeEnv = process.env.NODE_ENV || 'development';
     this.tenantId = (process.env.TENANT_ID || 'bevel').trim().toLowerCase();
     if (!/^[a-z0-9]+$/.test(this.tenantId)) {

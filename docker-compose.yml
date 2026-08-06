@@ -135,18 +135,23 @@ services:
       # serves the SPA itself, so both default to this container's origin.
       - PUBLIC_BACKEND_URL=${PUBLIC_BACKEND_URL:-http://localhost:3001}
       - PUBLIC_FRONTEND_URL=${PUBLIC_FRONTEND_URL:-http://localhost:3001}
-      # An explicit DATABASE_URL WINS — that is how you point this at a managed
-      # Postgres instead of the bundled `db` service. It used to be composed
-      # unconditionally from the POSTGRES_* knobs below, which silently
-      # overrode anything an operator set: `.env` documents DATABASE_URL, so
-      # following it and deploying with compose connected you to the throwaway
-      # container while your real database sat untouched.
+      # The database. Set DATABASE_URL to point at a Postgres you already have;
+      # left unset, the app builds one from the POSTGRES_* values below, which
+      # are the same ones the bundled `db` service is created with.
       #
-      # Falling back to the POSTGRES_* knobs keeps the batteries-included path
-      # working unchanged (in-network hostname `db`). When you do supply a URL,
-      # the `db` service still starts and is simply unused — stop it with
-      # `docker compose up --scale db=0` if that bothers you.
-      - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-bevel}:${POSTGRES_PASSWORD:-bevel}@db:5432/${POSTGRES_DB:-bevel}}
+      # The composition moved INTO the app (`resolveDatabaseUrl`) rather than
+      # being written here as a nested default. Expressing it in compose needed
+      # an interpolated default containing further interpolations, and a
+      # deployment UI that scans this file with a regex rather than a YAML
+      # parser cuts that at the first closing brace — offering the operator a
+      # DATABASE_URL whose value is a truncated fragment. Doing it in code
+      # also lets the parts be URL-encoded, which shell interpolation cannot:
+      # a password containing `@` or `/` used to produce an unparseable URL.
+      - DATABASE_URL
+      - POSTGRES_HOST=db
+      - POSTGRES_USER=${POSTGRES_USER:-bevel}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-bevel}
+      - POSTGRES_DB=${POSTGRES_DB:-bevel}
     # node:22-slim ships neither curl nor wget; Node 22's global fetch probes.
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
