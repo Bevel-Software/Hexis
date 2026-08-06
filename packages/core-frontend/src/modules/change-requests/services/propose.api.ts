@@ -1,5 +1,10 @@
-import { DEFAULT_BRANCH, type PullRequestSummary } from '@bevel-software/platform-shared';
-import { createBranch } from '../../git/services/git.api';
+import {
+  DEFAULT_BRANCH,
+  branchSegment,
+  suggestionsBranchPrefixFor,
+  type PullRequestSummary,
+} from '@bevel-software/platform-shared';
+import { createBranch, deleteBranch } from '../../git/services/git.api';
 import { getOrCreateWorkspace, writeFile } from '../../workspace/services/workspace.api';
 import { openChangeRequest } from '../../pr/services/pr-open.api';
 import { listMyChangeRequests } from './change-requests.api';
@@ -7,15 +12,11 @@ import { listMyChangeRequests } from './change-requests.api';
 /** The default branch's workspace id (id = encodeURIComponent(branch)), read lazily. */
 const defaultWorkspaceId = () => encodeURIComponent(DEFAULT_BRANCH);
 
-/** Keep only characters git branch segments accept; collapse the rest to '-'. */
-export function branchSegment(raw: string): string {
-  const cleaned = raw
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^[-.]+/, '')
-    .replace(/[.]+$/, '');
-  return cleaned || 'user';
-}
+// The segment cleaner lives in `@bevel-software/platform-shared` now — the
+// server judges "may this caller delete this suggestions branch?" from the
+// same naming, and the two sides must never disagree. Re-exported for the
+// library's per-skill branch naming.
+export { branchSegment };
 
 /** The identity a proposal is filed under — enough to name its branch. */
 export interface ProposalAuthor {
@@ -37,9 +38,7 @@ export interface ProposalAuthor {
  * for the human reading the branch list.
  */
 export function knowledgeSuggestionBranchFor(user: ProposalAuthor): string {
-  const who = branchSegment(user.email.split('@')[0]);
-  const id = branchSegment(user.id).slice(0, 8) || 'user';
-  return `suggestions/${who}-${id}/knowledge`;
+  return `${suggestionsBranchPrefixFor(user)}knowledge`;
 }
 
 export interface ProposeKnowledgeChangeInput {
@@ -109,12 +108,20 @@ export async function ensureKnowledgeSuggestionWorkspace(
     try {
       await createBranch(defaultWorkspaceId(), branch, DEFAULT_BRANCH);
     } catch {
-      // Branch may already exist from an earlier (merged/cancelled) round —
-      // reuse it; the change request is what makes it reviewable again.
-      // TODO(backend): a branch left over from a WITHDRAWN request still
-      // carries its commits, so the next request re-proposes them. The clean
-      // fix is a server-side reset-to-target (or resolve-or-create request)
-      // endpoint — the client cannot safely force-reset a shared branch.
+      // The branch already exists — a leftover from a withdrawn round, or a
+      // merge whose retirement failed. Its old commits would ride into the
+      // next request, so TRY a reset: delete the branch (the server also
+      // retires its stale workspace clone) and recreate it fresh from the
+      // default branch. The server recognises `suggestions/<who>-<id>/…` as
+      // the caller's own, so this needs no admin role.
+      try {
+        await deleteBranch(defaultWorkspaceId(), branch);
+        await createBranch(defaultWorkspaceId(), branch, DEFAULT_BRANCH);
+      } catch {
+        // Strictly best-effort: on any refusal (authorship, network, a race
+        // with a concurrent proposal) fall back to plain reuse — the change
+        // request is what makes the branch reviewable either way.
+      }
     }
   }
 
