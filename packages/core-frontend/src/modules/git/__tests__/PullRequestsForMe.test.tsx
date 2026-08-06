@@ -6,9 +6,13 @@ import type { BranchInfo, PullRequestSummary } from '@bevel-software/platform-sh
 const api = vi.hoisted(() => ({ listPullRequestsForMe: vi.fn() }));
 vi.mock('../services/pr.api', () => ({ listPullRequestsForMe: api.listPullRequestsForMe }));
 
+import { MemoryRouter } from 'react-router-dom';
 import { PullRequestsForMe } from '../components/PullRequestsForMe';
 import { GitContext, type GitContextValue } from '../state/git.context';
-import { PrViewerContext, type PrViewerContextValue } from '../../pr/state/pr-viewer.context';
+import {
+  WorkspaceContext,
+  type WorkspaceContextValue,
+} from '../../workspace/state/workspace.context';
 
 function pr(over: Partial<PullRequestSummary> = {}): PullRequestSummary {
   return {
@@ -49,34 +53,25 @@ function makeGit(availability: GitContextValue['availability'] = 'ready'): GitCo
   };
 }
 
-const openPr = vi.fn();
-
 function renderDock() {
-  const prViewer: PrViewerContextValue = {
-    openPrNumber: null,
-    detail: null,
-    notFound: false,
-    selectedPath: null,
-    isLoading: false,
-    lastError: null,
-    openPr,
-    closeViewer: () => {},
-    selectPath: () => {},
-    refresh: async () => {},
-  };
+  // Router + workspace: the shared change-request dialog the rows open reads
+  // `kbDirName` and navigates from its "Open in editor" affordance.
   return render(
-    <GitContext.Provider value={makeGit()}>
-      <PrViewerContext.Provider value={prViewer}>
-        <PullRequestsForMe />
-      </PrViewerContext.Provider>
-    </GitContext.Provider>,
+    <MemoryRouter>
+      <WorkspaceContext.Provider
+        value={{ kbDirName: 'knowledge-base' } as unknown as WorkspaceContextValue}
+      >
+        <GitContext.Provider value={makeGit()}>
+          <PullRequestsForMe />
+        </GitContext.Provider>
+      </WorkspaceContext.Provider>
+    </MemoryRouter>,
   );
 }
 
 describe('PullRequestsForMe — the change-request dock', () => {
   beforeEach(() => {
     api.listPullRequestsForMe.mockReset();
-    openPr.mockReset();
   });
 
   it('carries the count in its header and expands by default', async () => {
@@ -133,12 +128,14 @@ describe('PullRequestsForMe — the change-request dock', () => {
     expect(screen.queryByText('#32')).not.toBeInTheDocument();
   });
 
-  it('opens the request viewer from a row', async () => {
+  it('opens the SHARED change-request dialog from a row', async () => {
     const user = userEvent.setup();
     api.listPullRequestsForMe.mockResolvedValue([pr({ number: 32 })]);
     renderDock();
     await user.click(await screen.findByRole('button', { name: /Restate the enforcement/ }));
-    expect(openPr).toHaveBeenCalledWith(32);
+    expect(
+      await screen.findByRole('dialog', { name: /Change request: Restate the enforcement/ }),
+    ).toBeInTheDocument();
   });
 
   // "We could not ask" is not the same answer as "there is nothing".

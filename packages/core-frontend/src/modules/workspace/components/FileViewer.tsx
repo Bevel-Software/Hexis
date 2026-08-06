@@ -1,13 +1,12 @@
 import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Check, XCircle, Lock, AlertTriangle, ArrowLeft } from 'lucide-react';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
 import { KbFileRail, KB_FILE_RAIL_HEADING_ID } from './KbFileRail';
 import { useLinksOut } from '../hooks/useLinksOut';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
-import { usePrViewer } from '../../pr/state/pr-viewer.context';
 import { useLastCommit } from '../hooks/useLastCommit';
 import { openRawFile } from '../utils/openRawFile';
 import { Banner, Button, Surface } from '../../../shared/components';
@@ -30,7 +29,6 @@ import {
   useAppRegistry,
   useSuggestedPromptSeed,
 } from '../../../core/registry';
-import { PrViewer } from '../../pr/components/PrViewer';
 import { useFileLock } from '../../workflow/hooks/useFileLock';
 import { LockApiError } from '../../workflow/services/lock.api';
 import { useAuth } from '../../auth/state/auth.context';
@@ -43,6 +41,7 @@ import {
   readFileOnBranch,
 } from '../../change-requests/services/change-requests.api';
 import { FileChangeBoxes } from '../../change-requests/components/FileChangeBoxes';
+import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { getFileRenderer, getRendererLayout, isBinaryFile } from './renderers';
@@ -807,7 +806,9 @@ export function FileViewer() {
   // on a file you can read but not write still belongs on this page.
   const openChangeRequests = useOpenChangeRequests();
   const requestsOnThisFile = openFilePath ? openChangeRequests.forPath(openFilePath) : [];
-  const { openPr } = usePrViewer();
+  // The full-bleed banner's "Review the change" opens the SHARED
+  // change-request dialog — the old PR viewer surface is gone.
+  const [bannerCr, setBannerCr] = useState<PullRequestSummary | null>(null);
   const lastCommit = useLastCommit(openFilePath, railOpen);
   // Compare owns the whole column; the rail steps aside for the duration and
   // comes back with the document.
@@ -860,7 +861,6 @@ export function FileViewer() {
           </div>
         </div>
         {registeredPanels}
-        <PrViewer />
       </div>
     );
   }
@@ -1129,7 +1129,7 @@ export function FileViewer() {
                 <Button
                   variant="primary"
                   size="sm"
-                  onClick={() => openPr(requestsOnThisFile[0].number)}
+                  onClick={() => setBannerCr(requestsOnThisFile[0])}
                 >
                   Review the change
                 </Button>
@@ -1342,7 +1342,19 @@ export function FileViewer() {
       )}
       </KbDocumentShell>
       {registeredPanels}
-      <PrViewer />
+      {bannerCr && (
+        <ChangeRequestDialog
+          cr={bannerCr}
+          onClose={() => setBannerCr(null)}
+          onResolved={(kind) => {
+            setBannerCr(null);
+            window.dispatchEvent(new Event(PR_STALE_EVENT));
+            if (kind === 'applied') {
+              reloadTabFromDisk(openFilePath).catch(() => {});
+            }
+          }}
+        />
+      )}
       {shareTarget && (
         <ManageAccessDialog
           key={shareTarget.relativePath}

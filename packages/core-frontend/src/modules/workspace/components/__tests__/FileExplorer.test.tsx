@@ -8,7 +8,6 @@ import { WorkspaceContext, type UploadError, type WorkspaceContextValue } from '
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
-import { PrViewerContext, type PrViewerContextValue } from '../../../pr/state/pr-viewer.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 
 // PullRequestsForMe pulls in router/git wiring we don't want to exercise here;
@@ -65,20 +64,6 @@ function makeGit(): GitContextValue {
   };
 }
 
-function makePrViewer(openPr?: ReturnType<typeof vi.fn>): PrViewerContextValue {
-  return {
-    openPrNumber: null,
-    detail: null,
-    notFound: false,
-    selectedPath: null,
-    isLoading: false,
-    lastError: null,
-    openPr: openPr ?? (() => {}),
-    closeViewer: () => {},
-    selectPath: () => {},
-    refresh: async () => {},
-  };
-}
 
 interface RenderOptions {
   dispatchUpload?: ReturnType<typeof vi.fn>;
@@ -93,8 +78,6 @@ interface RenderOptions {
   openChangeRequestPaths?: string[];
   /** The caller's own open requests: workspace-relative path → CR number. */
   minePaths?: Map<string, number>;
-  /** Spy for the change-request viewer's `openPr`. */
-  openPr?: ReturnType<typeof vi.fn>;
 }
 
 function renderExplorer(opts: RenderOptions = {}) {
@@ -125,18 +108,37 @@ function renderExplorer(opts: RenderOptions = {}) {
         <AuthContext.Provider value={makeAuth()}>
           <WorkspaceContext.Provider value={workspace}>
             <GitContext.Provider value={makeGit()}>
-              <PrViewerContext.Provider value={makePrViewer(opts.openPr)}>
                 <OpenChangeRequestsContext.Provider
                   value={{
                     paths: new Set(opts.openChangeRequestPaths ?? []),
-                    forPath: () => [],
+                    // A suggestion row resolves its request through forPath —
+                    // synthesize a summary for every minePaths entry so the
+                    // shared dialog has something to open.
+                    forPath: (p) => {
+                      const n = opts.minePaths?.get(p);
+                      return n === undefined
+                        ? []
+                        : ([
+                            {
+                              number: n,
+                              title: 'Suggested change',
+                              branch: 'suggestions/me/knowledge',
+                              base: 'main',
+                              state: 'open',
+                              createdAt: '2026-08-01T00:00:00.000Z',
+                              touchedNodePaths: [p],
+                              author: { login: 'user-x' },
+                              review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
+                              url: '',
+                            },
+                          ] as never);
+                    },
                     minePaths: opts.minePaths ?? new Map(),
-                    mineNumbers: new Set(),
+                    mineNumbers: new Set(opts.minePaths?.values() ?? []),
                   }}
                 >
                   <FileExplorer />
                 </OpenChangeRequestsContext.Provider>
-              </PrViewerContext.Provider>
             </GitContext.Provider>
           </WorkspaceContext.Provider>
         </AuthContext.Provider>
@@ -495,9 +497,7 @@ describe('FileExplorer chevron collapse — userIntent vs autoExpanded', () => {
         <AuthContext.Provider value={makeAuth()}>
           <WorkspaceContext.Provider value={workspace}>
             <GitContext.Provider value={makeGit()}>
-              <PrViewerContext.Provider value={makePrViewer()}>
                 <FileExplorer />
-              </PrViewerContext.Provider>
             </GitContext.Provider>
           </WorkspaceContext.Provider>
         </AuthContext.Provider>
@@ -841,11 +841,9 @@ describe('FileExplorer rows — the prototype tree', () => {
    * request, because there is no content on this branch to open.
    */
   it('shows my proposed-only file as a suggestion row that opens the change request', async () => {
-    const openPr = vi.fn();
     renderExplorer({
       fileTree: TREE,
       minePaths: new Map([['docs/new-idea.md', 12]]),
-      openPr,
     });
 
     // Synthesized into its real place in the tree, under `docs/`.
@@ -855,8 +853,12 @@ describe('FileExplorer rows — the prototype tree', () => {
     expect(row).toHaveTextContent('new-idea.md');
     expect(row.className).toContain('text-accent');
 
+    // The click opens the SHARED change-request dialog — there is no content
+    // on this branch to open.
     fireEvent.click(row);
-    expect(openPr).toHaveBeenCalledWith(12);
+    expect(
+      await screen.findByRole('dialog', { name: /Change request: Suggested change/ }),
+    ).toBeInTheDocument();
   });
 
   /**
@@ -878,11 +880,9 @@ describe('FileExplorer rows — the prototype tree', () => {
   });
 
   it('keeps a file that exists on the branch as a normal row even when my request touches it', () => {
-    const openPr = vi.fn();
     renderExplorer({
       fileTree: TREE,
       minePaths: new Map([['brief.md', 12]]),
-      openPr,
     });
 
     // Not synthesized, not recoloured — the branch's own file wins, and the
@@ -890,7 +890,8 @@ describe('FileExplorer rows — the prototype tree', () => {
     expect(screen.queryByTitle('Proposed by you — opens the change request')).toBeNull();
     const row = screen.getByText('brief.md').closest('button')!;
     expect(row.className).not.toContain('text-accent');
+    // A normal row opens the FILE, never the dialog.
     fireEvent.click(row);
-    expect(openPr).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });

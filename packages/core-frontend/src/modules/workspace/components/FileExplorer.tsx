@@ -16,7 +16,7 @@ import {
   PinOff,
   Users,
 } from 'lucide-react';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
 import {
   validateFilename,
   KNOWLEDGE_BASE_DIR,
@@ -25,7 +25,8 @@ import {
 } from '@bevel-software/platform-shared';
 import { useWorkspace, type PendingEntry } from '../state/workspace.context';
 import { mergePendingIntoTree, pathExistsInTree, findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
-import { PrViewerContext } from '../../pr/state/pr-viewer.context';
+import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
+import { PR_STALE_EVENT } from '../../../core/events';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useFileNav } from '../routing/kb-routes';
 import { authFetch } from '../../../lib/api';
@@ -123,8 +124,8 @@ const useManageAccess = () => useContext(ManageAccessContext);
 interface SuggestionsController {
   /** CR number for a synthesized suggestion-only path; null for real files. */
   crFor(path: string): number | null;
-  /** Open the change request view (no-op when no viewer is mounted, e.g. tests). */
-  open(crNumber: number): void;
+  /** Open the shared change-request dialog on the request this path belongs to. */
+  open(path: string, crNumber: number): void;
 }
 const SuggestionsContext = createContext<SuggestionsController>({
   crFor: () => null,
@@ -832,7 +833,7 @@ function FileTreeNode({
           'focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ink-muted',
         )}
         style={{ paddingLeft }}
-        onClick={() => suggestions.open(suggestedCr)}
+        onClick={() => suggestions.open(entry.relativePath, suggestedCr)}
         title="Proposed by you — opens the change request"
       >
         <CaretSlot show={false} />
@@ -1000,17 +1001,19 @@ export function FileExplorer() {
     return mergePendingIntoTree(serverTree, asEntries);
   }, [serverTree, suggestionOnlyPaths]);
 
-  // Nullable on purpose: unit tests mount the explorer without a PR viewer,
-  // and a suggestion row that cannot open anything should do nothing rather
-  // than take the tree down.
-  const prViewer = useContext(PrViewerContext);
-  const openPr = prViewer?.openPr;
+  // A clicked suggestion row opens the SHARED change-request dialog on the
+  // request the path belongs to — the row is a link to the request, and the
+  // dialog is the one change-request view the app has.
+  const [openSuggestionCr, setOpenSuggestionCr] = useState<PullRequestSummary | null>(null);
   const suggestionsController = useMemo<SuggestionsController>(
     () => ({
       crFor: (path) => suggestionOnlyPaths.get(path) ?? null,
-      open: (crNumber) => openPr?.(crNumber),
+      open: (path, crNumber) => {
+        const cr = openChangeRequests.forPath(path).find((c) => c.number === crNumber) ?? null;
+        setOpenSuggestionCr(cr);
+      },
     }),
-    [suggestionOnlyPaths, openPr],
+    [suggestionOnlyPaths, openChangeRequests],
   );
 
   // Pinned folders — a personal, client-side shortcut list surfaced at the top
@@ -1211,6 +1214,16 @@ export function FileExplorer() {
       </PinnedContext.Provider>
       <PullRequestsForMe />
     </div>
+    {openSuggestionCr && (
+      <ChangeRequestDialog
+        cr={openSuggestionCr}
+        onClose={() => setOpenSuggestionCr(null)}
+        onResolved={() => {
+          setOpenSuggestionCr(null);
+          window.dispatchEvent(new Event(PR_STALE_EVENT));
+        }}
+      />
+    )}
     {accessTarget && (
       <ManageAccessDialog
         key={accessTarget.relativePath}

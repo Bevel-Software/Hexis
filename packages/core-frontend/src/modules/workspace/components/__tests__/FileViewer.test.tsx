@@ -126,11 +126,9 @@ import { WorkspaceContext, type WorkspaceContextValue } from '../../state/worksp
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
-import { PrViewerContext, type PrViewerContextValue } from '../../../pr/state/pr-viewer.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 
 let injectPendingFromTest: ((value?: string) => void) | null = null;
-const openPrSpy = vi.fn();
 
 function makeStatus(branch = 'alice/draft'): WorkingTreeStatus {
   return {
@@ -298,26 +296,12 @@ function ViewerHarness({
     login: async () => {},
     logout: () => {},
   };
-  const prViewer: PrViewerContextValue = {
-    openPrNumber: null,
-    detail: null,
-    notFound: false,
-    selectedPath: null,
-    isLoading: false,
-    lastError: null,
-    openPr: openPrSpy,
-    closeViewer: () => {},
-    selectPath: () => {},
-    refresh: async () => {},
-  };
-
   return (
     <MemoryRouter>
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={makeGit(makeStatus(branch))}>
             <ReviewContext.Provider value={review}>
-              <PrViewerContext.Provider value={prViewer}>
                 <OpenChangeRequestsContext.Provider
                   value={{
                     paths: new Set(changeRequests.length ? [filePath] : []),
@@ -342,7 +326,6 @@ function ViewerHarness({
                   </button>
                   <FileViewer />
                 </OpenChangeRequestsContext.Provider>
-              </PrViewerContext.Provider>
             </ReviewContext.Provider>
           </GitContext.Provider>
         </WorkspaceContext.Provider>
@@ -713,11 +696,10 @@ describe('FileViewer', () => {
     expect(await screen.findByText(/proposed a change/)).toBeInTheDocument();
     expect(screen.getByText('Ali Raza')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Read the whole change' }));
-    // The shared dialog, not the PR viewer.
+    // The shared dialog.
     expect(
       await screen.findByRole('dialog', { name: /Change request: Tighten the wording/ }),
     ).toBeInTheDocument();
-    expect(openPrSpy).not.toHaveBeenCalled();
   });
 
   it('says nothing on a file nobody has proposed a change to', () => {
