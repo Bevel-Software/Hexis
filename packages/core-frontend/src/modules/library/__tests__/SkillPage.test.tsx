@@ -896,11 +896,13 @@ describe('SkillPage — deciding on a change', () => {
 
   /**
    * `touchedNodePaths` is "Empty if not yet computed". In that window every
-   * path-derived check collapses together — so the page used to offer a second
-   * editor, and submitting it opened a SECOND change request against a branch
-   * that already had one. Resolving by branch closes the window.
+   * path-derived check collapses together — resolving the caller's own
+   * request by BRANCH is what keeps a proposal-on-top-of-a-proposal
+   * INCREMENTAL: the editor seeds from the file as already proposed, and
+   * submitting reuses the existing request instead of opening a second one
+   * against the same branch.
    */
-  it("recognises the caller's own request before its touched paths are computed", async () => {
+  it("continues the caller's own request before its touched paths are computed", async () => {
     const uncomputed = {
       ...foreignCr,
       appAuthor: { name: 'Razvan' },
@@ -909,20 +911,36 @@ describe('SkillPage — deciding on a change', () => {
     } as unknown as PullRequestSummary;
 
     renderPage(false, [uncomputed], [uncomputed.number]);
-    await screen.findByRole('heading', { name: 'newsletter' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Propose changes' }));
 
-    // No second editor over the top of a request that already exists.
+    // The editor's base is the file AS PROPOSED on the caller's branch —
+    // 'ship the letter' — not the default branch's 'draft the letter'.
+    const textarea = await screen.findByRole('textbox', {
+      name: /Propose changes to SKILL\.md/,
+    });
+    await waitFor(() => expect(textarea).toHaveValue(RAW_BRANCH));
+
+    fireEvent.change(textarea, { target: { value: RAW_BRANCH + '\nAnd a PS.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Propose changes' }));
+
+    // Same request, extended — NOT a second one against the same branch.
     await waitFor(() =>
-      expect(screen.queryByRole('button', { name: 'Propose changes' })).toBeNull(),
+      expect(apiMock.proposeChange).toHaveBeenCalledWith(
+        expect.objectContaining({
+          existingCr: expect.objectContaining({ number: 7 }),
+          content: RAW_BRANCH + '\nAnd a PS.',
+        }),
+      ),
     );
   });
 
-  it('offers the author Withdraw instead of a verdict, and only once per file', async () => {
+  it('offers the author Withdraw AND the way to keep editing their proposal', async () => {
     renderPage(false, [foreignCr], [7]);
 
     const withdraw = await screen.findByRole('button', { name: 'Withdraw' });
-    // You already have a proposal on this file — a second would fork it.
-    expect(screen.queryByRole('button', { name: 'Propose changes' })).toBeNull();
+    // Proposing again stays available — it continues the open request
+    // (seeded from the branch), it does not fork it.
+    expect(screen.getByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
 
     fireEvent.click(withdraw);
     await waitFor(() => expect(apiMock.cancelPullRequest).toHaveBeenCalledWith(7));

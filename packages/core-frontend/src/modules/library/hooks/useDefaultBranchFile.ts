@@ -21,9 +21,24 @@ export function useDefaultBranchFile(
   repoRelativePath: string | null,
   revision = 0,
 ): string | null {
+  return useFileOnBranch(DEFAULT_BRANCH, repoRelativePath, revision);
+}
+
+/**
+ * The same read against ANY branch — `null` branch means "don't fetch". The
+ * skill page uses it to seed an incremental proposal: when the caller already
+ * has an open change request, the editor's base is the file as it reads on
+ * THEIR suggestions branch, so a second round of edits stacks on the first
+ * instead of silently starting over from the default branch.
+ */
+export function useFileOnBranch(
+  branch: string | null,
+  repoRelativePath: string | null,
+  revision = 0,
+): string | null {
   const [file, setFile] = useState<{ key: string; content: string } | null>(null);
   const asked = useRef<Set<string>>(new Set());
-  const key = `${repoRelativePath ?? ''}::${revision}`;
+  const key = `${branch ?? ''}::${repoRelativePath ?? ''}::${revision}`;
 
   /**
    * No `cancelled` flag, deliberately — pairing one with the `asked` guard
@@ -38,15 +53,15 @@ export function useDefaultBranchFile(
    * path we have since navigated away from simply stops matching on read.
    */
   useEffect(() => {
-    if (!repoRelativePath || asked.current.has(key)) return;
+    if (!branch || !repoRelativePath || asked.current.has(key)) return;
     asked.current.add(key);
-    readFileOnBranch(DEFAULT_BRANCH, repoRelativePath)
+    readFileOnBranch(branch, repoRelativePath)
       .then((content) => setFile({ key, content }))
       .catch(() => {
         // Leave it unset rather than storing '': an empty string would diff as
         // "the whole file was deleted".
       });
-  }, [repoRelativePath, key]);
+  }, [branch, repoRelativePath, key]);
 
   return file?.key === key ? file.content : null;
 }

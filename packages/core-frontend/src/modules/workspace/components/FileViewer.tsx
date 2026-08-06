@@ -34,7 +34,12 @@ import { PrViewer } from '../../pr/components/PrViewer';
 import { useFileLock } from '../../workflow/hooks/useFileLock';
 import { LockApiError } from '../../workflow/services/lock.api';
 import { useAuth } from '../../auth/state/auth.context';
-import { proposeKnowledgeChange } from '../../library/services/library.api';
+import {
+  knowledgeSuggestionBranchFor,
+  listMyChangeRequests,
+  proposeKnowledgeChange,
+  readFileOnBranch,
+} from '../../library/services/library.api';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { getFileRenderer, getRendererLayout, isBinaryFile } from './renderers';
 import type { RendererSaveState } from './renderers';
@@ -178,6 +183,26 @@ export function FileViewer() {
   // else's to act on. Knowledge has no toast provider (see KbPageHeader),
   // so this is a banner, dismissed on the next file/mode change.
   const [proposalSent, setProposalSent] = useState(false);
+  // "Loading…" between the Propose click and the editor opening: entering
+  // checks for an existing open proposal and, if there is one, reads the
+  // file's PROPOSED version off the suggestions branch first.
+  const [isEnteringPropose, setIsEnteringPropose] = useState(false);
+  /**
+   * The editor's base when the caller already has an open proposal: the file
+   * as it reads on THEIR suggestions branch. Seeding from it is what makes a
+   * second proposal INCREMENTAL — it stacks on the pending change instead of
+   * silently starting over from this branch's text and overwriting it. Null
+   * = no open proposal (or the read failed): seed from the tab as before.
+   */
+  const [proposeSeed, setProposeSeed] = useState<string | null>(null);
+  /**
+   * What Send actually sends. The tab's content ref lags the editor by one
+   * state propagation and — when a seed is in play — starts out pointing at
+   * THIS branch's text, not the proposed text on screen. This ref is set to
+   * the seed on entry and to every keystroke after, so the zero-edits case
+   * sends what the editor showed, never what it replaced.
+   */
+  const proposeBufferRef = useRef<string | null>(null);
   // Picker overrides set by the chat tool-card's "View full comparison" link.
   // Cleared when the user opens a different file so a deep-link doesn't stick
   // around and override their natural defaults on the next open.
@@ -373,6 +398,9 @@ export function FileViewer() {
     setIsEnteringEdit(false);
     setProposeMode(false);
     setProposalSent(false);
+    setIsEnteringPropose(false);
+    setProposeSeed(null);
+    proposeBufferRef.current = null;
   }, [openFilePath, currentBranch, workspaceId]);
 
   // Monotonic token to scope each enter-edit flow's async completion to
@@ -517,22 +545,52 @@ export function FileViewer() {
   }, [editMode, fileLock]);
 
   /**
-   * Enter propose mode. Deliberately does NOT reload from disk first: there is
-   * no lock to win, so the buffer cannot clobber anyone, and the reviewer sees
-   * any staleness in the change request's diff — where it is visible — rather
-   * than it silently overwriting the file, which is the case the Edit path's
-   * reload exists for.
+   * Enter propose mode. If the caller already has an OPEN proposal, the
+   * editor seeds from the file as it reads on their suggestions branch —
+   * proposing again is a continuation, and starting from this branch's text
+   * would silently overwrite their own pending change. No lock either way:
+   * the lock protects the file's canonical bytes, and a proposal never
+   * touches them. Any staleness against this branch shows up in the change
+   * request's diff, where it is visible.
    */
   const handleEnterPropose = useCallback(() => {
-    if (proposeMode || !openFilePath) return;
+    if (proposeMode || isEnteringPropose || !openFilePath) return;
     setProposalSent(false);
     setSaveError(null);
-    setProposeMode(true);
-  }, [proposeMode, openFilePath]);
+    const targetPath = openFilePath;
+    setIsEnteringPropose(true);
+    (async () => {
+      let seed: string | null = null;
+      const email = auth.user?.email;
+      const prefix = kbDirName ? `${kbDirName}/` : null;
+      if (email && prefix && targetPath.startsWith(prefix)) {
+        try {
+          const branch = knowledgeSuggestionBranchFor(email);
+          const mine = await listMyChangeRequests();
+          const existing = mine.find((c) => c.state === 'open' && c.branch === branch);
+          if (existing) {
+            seed = await readFileOnBranch(branch, targetPath.slice(prefix.length));
+          }
+        } catch (err) {
+          // Degrade to seeding from this branch — worse than the seed, far
+          // better than a propose button that does nothing.
+          console.warn('[FileViewer] could not load the proposed version:', err);
+          seed = null;
+        }
+      }
+      // Switched files while the seed loaded — this propose is moot.
+      if (openFilePathRef.current !== targetPath) return;
+      setProposeSeed(seed);
+      proposeBufferRef.current = seed ?? openFileContentRef.current;
+      setProposeMode(true);
+    })().finally(() => setIsEnteringPropose(false));
+  }, [proposeMode, isEnteringPropose, openFilePath, auth.user, kbDirName]);
 
   /** Leave propose mode, throwing the typed text away and re-reading disk. */
   const handleDiscardProposal = useCallback(() => {
     setProposeMode(false);
+    setProposeSeed(null);
+    proposeBufferRef.current = null;
     if (openFilePath) {
       reloadTabFromDisk(openFilePath).catch((err) => {
         console.warn('[FileViewer] reload after discarding a proposal failed:', err);
@@ -549,13 +607,25 @@ export function FileViewer() {
    */
   const handleSendProposal = useCallback(async (contentOverride?: string) => {
     const path = openFilePathRef.current;
-    // Ctrl+S hands the renderer's buffer straight in; the header button has no
-    // buffer of its own and falls back to the ref, which mirrors the same text
-    // one state-propagation later.
-    const content = contentOverride ?? openFileContentRef.current;
+    // Ctrl+S hands the renderer's buffer straight in; the Send button has no
+    // buffer of its own and falls back to the propose buffer (seed +
+    // keystrokes), then to the tab's mirror.
+    const content = contentOverride ?? proposeBufferRef.current ?? openFileContentRef.current;
     if (!path || !kbDirName || !auth.user || content === null || proposalBusy) return;
     const prefix = `${kbDirName}/`;
     if (!path.startsWith(prefix)) return;
+    // Nothing typed over an existing proposal: the branch already says
+    // exactly this. Close the editor rather than pushing an empty commit at
+    // the change request.
+    if (proposeSeed !== null && content === proposeSeed) {
+      setProposeMode(false);
+      setProposeSeed(null);
+      proposeBufferRef.current = null;
+      if (openFilePathRef.current === path) {
+        reloadTabFromDisk(path).catch(() => {});
+      }
+      return;
+    }
     setProposalBusy(true);
     setSaveError(null);
     try {
@@ -566,6 +636,8 @@ export function FileViewer() {
         userName: auth.user.name,
       });
       setProposeMode(false);
+      setProposeSeed(null);
+      proposeBufferRef.current = null;
       setProposalSent(true);
       // The same signal a share dialog or an agent turn sends: the open
       // change-request list just changed, so the tree dots and the page
@@ -583,7 +655,7 @@ export function FileViewer() {
     } finally {
       setProposalBusy(false);
     }
-  }, [kbDirName, auth.user, proposalBusy, reloadTabFromDisk]);
+  }, [kbDirName, auth.user, proposalBusy, proposeSeed, reloadTabFromDisk]);
 
   // Save flow (PLAN §2):
   //   - Lock is already held because we're in edit mode (handleEnterEditMode
@@ -633,6 +705,9 @@ export function FileViewer() {
   const recordActivity = fileLock.recordActivity;
   const handleValueChange = useCallback((value: string) => {
     recordActivity();
+    // Keep the propose buffer current too — harmless in edit mode, and in
+    // propose mode it is what Send reads (see `proposeBufferRef`).
+    proposeBufferRef.current = value;
     setActiveTabContent(value);
   }, [recordActivity, setActiveTabContent]);
 
@@ -817,8 +892,24 @@ export function FileViewer() {
       // savedContent stays stable through an edit until the save
       // commits, then advances once.
       key={editMode || proposeMode ? `${openFilePath}|edit` : `${openFilePath}|${openFileSavedContent?.length ?? 0}|${openFileSavedContent?.slice(0, 64) ?? ''}|${openFileSavedContent?.slice(-64) ?? ''}`}
-      content={isReviewingPending ? pendingFileContent! : openFileContent}
-      savedContent={isReviewingPending ? pendingFileContent! : (openFileSavedContent ?? openFileContent)}
+      // In propose mode with an open proposal, the buffer AND the dirty
+      // baseline are the PROPOSED text (the seed) — the editor continues the
+      // pending change, and "dirty" means "differs from what I already
+      // proposed", not "differs from this branch".
+      content={
+        isReviewingPending
+          ? pendingFileContent!
+          : proposeMode && proposeSeed !== null
+            ? proposeSeed
+            : openFileContent
+      }
+      savedContent={
+        isReviewingPending
+          ? pendingFileContent!
+          : proposeMode && proposeSeed !== null
+            ? proposeSeed
+            : (openFileSavedContent ?? openFileContent)
+      }
       filePath={openFilePath}
       // In propose mode a save (Ctrl+S) IS sending the proposal — the
       // one thing it must never be is a write to this branch.
@@ -875,10 +966,15 @@ export function FileViewer() {
     <Button
       variant="outline"
       size="tiny"
+      disabled={isEnteringPropose}
       onClick={handleEnterPropose}
-      title="You can't edit this file directly — propose a change for its owners to approve"
+      title={
+        isEnteringPropose
+          ? 'Checking for an open proposal…'
+          : "You can't edit this file directly — propose a change for its owners to approve"
+      }
     >
-      Propose changes
+      {isEnteringPropose ? 'Loading…' : 'Propose changes'}
     </Button>
   ) : (
     <Button

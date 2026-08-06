@@ -16,7 +16,7 @@ import { proposeChange, suggestionBranchFor } from '../../services/library.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
 import { useApplyChangeRequest } from '../../hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../../hooks/useCrFileDiffs';
-import { useDefaultBranchFile } from '../../hooks/useDefaultBranchFile';
+import { useDefaultBranchFile, useFileOnBranch } from '../../hooks/useDefaultBranchFile';
 import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast.context';
 import { LIBRARY_ROOT } from '../../routes/library-paths';
@@ -242,17 +242,25 @@ export function SkillPage() {
   );
 
   /**
-   * Whether to offer the editor. Keyed off `ownCr` — which knows the caller's
-   * request by branch — rather than off `boxes`, which cannot see a request
-   * whose touched paths have not been computed yet and would hand out a second
-   * editor over the top of one.
+   * The editor's BASE — the text the proposal is typed over and diffed
+   * against. With no open request of your own it is the default branch's
+   * file; with one, it is the file as it reads on YOUR suggestions branch,
+   * fetched only once the editor opens. That branch read is what makes a
+   * second round of edits INCREMENTAL: it stacks on what you already
+   * proposed instead of silently starting over from the published text and
+   * overwriting your own pending change.
    *
-   * Consequence worth knowing: one open proposal per person per SKILL, not per
-   * file. Adding a second file to a request you already have open now means
-   * withdrawing it (or asking your agent), which is the cost of never being
-   * able to fork your own pending change in two.
+   * Resolved through `ownCr` (recognised by BRANCH — see above) so the
+   * submit path reuses the existing request; a proposal on top of a request
+   * the page failed to recognise would open a second one against the same
+   * branch.
    */
-  const iAlreadyProposedHere = ownCr !== null;
+  const ownBranchBase = useFileOnBranch(
+    editing && ownCr ? ownCr.branch : null,
+    skillPath ? fileRepoPath : null,
+    revision,
+  );
+  const editorBase = ownCr ? ownBranchBase : rawOnMain;
 
   const openInEditor = useCallback(
     (wsRelative: string) => navigate(kbFileUrl(DEFAULT_BRANCH, wsRelative)),
@@ -411,10 +419,10 @@ export function SkillPage() {
         id={skillPanelId(tabsId)}
         aria-labelledby={skillTabId(tabsId, active)}
       >
-      {editing && rawOnMain !== null ? (
+      {editing && editorBase !== null ? (
         <SkillFileEditor
           file={active}
-          base={rawOnMain}
+          base={editorBase}
           owner={ownerName}
           onCancel={() => setEditing(false)}
           onSubmit={submitProposal}
@@ -441,9 +449,11 @@ export function SkillPage() {
            * this pane now visually matches) when the caller may write the
            * file, `Propose changes` when they may not.
            *
-           * One open proposal per person per file, still — a second would
-           * fork your own pending change into two decisions the owner must
-           * reconcile.
+           * One open proposal per person per SKILL, still — but proposing
+           * again while yours is open is not refused anymore: it opens the
+           * editor over the file AS YOU PROPOSED IT (see `editorBase`), and
+           * submitting updates the same change request. Incremental, never a
+           * fork, never a silent restart from the published text.
            */
           actions={
             fileAccess.canWrite !== false
@@ -457,9 +467,17 @@ export function SkillPage() {
                     Edit
                   </Button>
                 )
-              : rawOnMain !== null &&
-                !iAlreadyProposedHere && (
-                  <Button variant="outline" size="tiny" onClick={() => setEditing(true)}>
+              : rawOnMain !== null && (
+                  <Button
+                    variant="outline"
+                    size="tiny"
+                    onClick={() => setEditing(true)}
+                    title={
+                      ownCr
+                        ? 'Continue your open proposal — edits update the same change request'
+                        : "You can't edit this file directly — propose a change for its owners to approve"
+                    }
+                  >
                     Propose changes
                   </Button>
                 )

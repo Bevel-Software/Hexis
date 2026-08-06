@@ -67,10 +67,20 @@ vi.mock('../../../workflow/services/lock.api', () => ({
 const proposeMock = vi.hoisted(() =>
   vi.fn(async () => ({ branch: 'suggestions/reader/knowledge' })),
 );
+// Entering propose mode checks for the caller's open proposal and, when one
+// exists, reads the file's proposed version — both stubbed so tests decide
+// whether a proposal is already in flight.
+const myCrsMock = vi.hoisted(() => vi.fn(async (): Promise<unknown[]> => []));
+const readBranchMock = vi.hoisted(() => vi.fn(async () => ''));
 vi.mock('../../../library/services/library.api', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../../library/services/library.api')>();
-  return { ...actual, proposeKnowledgeChange: proposeMock };
+  return {
+    ...actual,
+    proposeKnowledgeChange: proposeMock,
+    listMyChangeRequests: myCrsMock,
+    readFileOnBranch: readBranchMock,
+  };
 });
 
 // The access sheet is a 1200-line dialog with its own suite and its own
@@ -759,6 +769,10 @@ describe('FileViewer — proposing a change without write access', () => {
     };
     proposeMock.mockClear();
     proposeMock.mockResolvedValue({ branch: 'suggestions/reader/knowledge' });
+    myCrsMock.mockClear();
+    myCrsMock.mockResolvedValue([]);
+    readBranchMock.mockClear();
+    readBranchMock.mockResolvedValue('');
   });
 
   it('offers Propose changes exactly where Edit is refused', async () => {
@@ -818,6 +832,76 @@ describe('FileViewer — proposing a change without write access', () => {
       await screen.findByText(/sent as a change request/i),
     ).toBeInTheDocument();
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  /**
+   * Proposing AGAIN is a continuation, not a restart. With an open proposal
+   * on the caller's suggestions branch, the editor seeds from the file AS
+   * PROPOSED — and sending stacks the new edits into the same change
+   * request, never silently reverting the pending one to this branch's text.
+   */
+  it('seeds a second proposal from the proposed version, and edits stack', async () => {
+    denyWrite();
+    myCrsMock.mockResolvedValue([
+      { number: 12, state: 'open', branch: 'suggestions/reader/knowledge' },
+    ]);
+    readBranchMock.mockResolvedValue('first proposed paragraph');
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Propose changes' }));
+
+    // The editor shows the PROPOSED text, read from the suggestions branch —
+    // not this branch's "official".
+    const textarea = await screen.findByRole('textbox');
+    expect(textarea).toHaveValue('first proposed paragraph');
+    expect(readBranchMock).toHaveBeenCalledWith(
+      'suggestions/reader/knowledge',
+      'Knowledge/Foo.md',
+    );
+
+    await user.type(textarea, ' plus a second thought');
+    await user.click(screen.getByRole('button', { name: 'Send proposal' }));
+
+    await waitFor(() =>
+      expect(proposeMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: 'first proposed paragraph plus a second thought',
+        }),
+      ),
+    );
+  });
+
+  it('closes without sending when nothing was typed over the open proposal', async () => {
+    denyWrite();
+    myCrsMock.mockResolvedValue([
+      { number: 12, state: 'open', branch: 'suggestions/reader/knowledge' },
+    ]);
+    readBranchMock.mockResolvedValue('first proposed paragraph');
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    await screen.findByRole('textbox');
+    await user.click(screen.getByRole('button', { name: 'Send proposal' }));
+
+    // The branch already says exactly this — no write, no empty commit.
+    await waitFor(() => expect(screen.queryByRole('textbox')).not.toBeInTheDocument());
+    expect(proposeMock).not.toHaveBeenCalled();
   });
 
   it('discard walks away without sending anything', async () => {
