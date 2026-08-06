@@ -13,6 +13,7 @@ import { ConflictHelp } from './ConflictHelp';
 import { useDefaultBranchFile } from '../hooks/useFileOnBranch';
 import { diffLines, type DiffLine } from '../utils/diff';
 import { isBinaryFile } from '../../workspace/components/renderers';
+import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 
 /**
  * Extra context for the file list — NOT a filter. The dialog always shows
@@ -148,6 +149,11 @@ export function ChangeRequestDialog({
   // pathological "lines" — so a binary selection never fetches and never
   // diffs; it states what happened to the file instead.
   const selectedIsBinary = selected !== '' && isBinaryFile(selected);
+  // Markdown renders as a DOCUMENT with red/green change blocks — the same
+  // `MarkdownDiffViewer` the review flow and version history use — because the
+  // person deciding on a knowledge or skill change reads prose, not source.
+  // Everything else keeps the marked-source view below.
+  const selectedIsMarkdown = /\.md$/i.test(selected);
 
   const asked = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -354,10 +360,27 @@ export function ChangeRequestDialog({
                       ? 'A binary file (an image, a document…) changed in this request. There is no text to compare.'
                       : 'A binary file — no text to show, and this request does not touch it.'}
                 </p>
+              ) : selectedIsMarkdown && bothSidesIn && !unreadable.has(selected) ? (
+                // An untouched file arrives here too and simply renders as a
+                // clean document — identical sides diff to all-same blocks —
+                // so the reader gets prose everywhere, marked or not.
+                <MarkdownDiffViewer
+                  payload={{
+                    path: selected,
+                    kind: isAdded ? 'added' : 'modified',
+                    baseline: isAdded ? null : mainRaw,
+                    current: branchRaw,
+                    isBinary: false,
+                  }}
+                />
               ) : (
               <MarkedFile
-                diff={diff}
-                raw={detail !== null && !touchesSelected ? (mainRaw ?? branchRaw) : null}
+                diff={selectedIsMarkdown ? null : diff}
+                raw={
+                  !selectedIsMarkdown && detail !== null && !touchesSelected
+                    ? (mainRaw ?? branchRaw)
+                    : null
+                }
                 unreadable={unreadable.has(selected)}
               />
               )}
@@ -413,6 +436,11 @@ function authorsReason(body: string | undefined): string | null {
  * The file with the change marked in it — one document, not two panes. Removed
  * passages stay in place struck through, added ones sit where they will land,
  * so what you read is the file as it would become.
+ *
+ * Markdown never reaches this view when both sides are in — it renders
+ * through `MarkdownDiffViewer` above. This is the presentation for the files
+ * that ARE source (yaml, scripts, config), plus the loading and unreadable
+ * states for everything.
  */
 function MarkedFile({
   diff,

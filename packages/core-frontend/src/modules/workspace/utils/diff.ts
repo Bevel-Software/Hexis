@@ -1,49 +1,111 @@
+/**
+ * THE line-level differ — every diff surface in the app computes through this
+ * one engine. The review module's rendered-markdown viewer consumes it
+ * directly; the change-requests module adapts its output shape in
+ * `change-requests/utils/diff.ts`. One engine, one set of hardening: CRLF
+ * normalisation, prefix/suffix trimming, and a cost guard — bugs fixed here
+ * are fixed everywhere, and two surfaces can never disagree about what
+ * changed.
+ */
+
 export type DiffLine =
   | { type: 'same'; text: string }
   | { type: 'added'; text: string }
   | { type: 'removed'; text: string };
 
 /**
- * Compute a line-level diff between two strings using LCS.
- * Returns a flat list of lines tagged as same / added / removed.
+ * Split keeping no trailing phantom line for a trailing newline.
+ *
+ * CRLF is normalised away first. A KB file checked out on Windows has `\r\n`
+ * endings while a `<textarea>` hands its value back as `\n` (the HTML spec's
+ * value normalisation), so without this EVERY line of an edited file compares
+ * unequal and a one-word change renders as a whole-file rewrite.
+ */
+function toLines(s: string): string[] {
+  if (s === '') return [];
+  const lines = s.replace(/\r\n?/g, '\n').split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
+
+/**
+ * Diff `oldText` → `newText` line-wise using LCS. Output is ordered: for each
+ * change run, removed lines (from `oldText`) come before added lines (from
+ * `newText`) — consumers that bundle runs into red/green blocks rely on it.
+ *
+ * Cost guard: common prefix/suffix are trimmed first; if the remaining middle
+ * is still enormous (> ~4M cells) the middle collapses to one whole-block
+ * replace instead of an exact LCS — visually "everything here changed", which
+ * is the honest rendering for a file that big anyway.
  */
 export function computeDiff(oldText: string, newText: string): DiffLine[] {
-  const oldLines = oldText.split('\n');
-  const newLines = newText.split('\n');
-  const m = oldLines.length;
-  const n = newLines.length;
+  const a = toLines(oldText);
+  const b = toLines(newText);
 
-  // Build LCS table
-  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      if (oldLines[i - 1] === newLines[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1] + 1;
-      } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-      }
-    }
+  // Trim common prefix / suffix.
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start++;
+  let endA = a.length;
+  let endB = b.length;
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+    endA--;
+    endB--;
   }
 
-  // Backtrack to build diff
-  const result: DiffLine[] = [];
-  let i = m;
-  let j = n;
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
-      result.unshift({ type: 'same', text: oldLines[i - 1] });
-      i--;
-      j--;
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      result.unshift({ type: 'added', text: newLines[j - 1] });
-      j--;
+  const midA = a.slice(start, endA);
+  const midB = b.slice(start, endB);
+  const out: DiffLine[] = a.slice(0, start).map((text) => ({ type: 'same' as const, text }));
+
+  if (midA.length * midB.length > 4_000_000) {
+    for (const text of midA) out.push({ type: 'removed', text });
+    for (const text of midB) out.push({ type: 'added', text });
+  } else {
+    out.push(...lcsDiff(midA, midB));
+  }
+
+  for (const text of a.slice(endA)) out.push({ type: 'same', text });
+  return out;
+}
+
+function lcsDiff(a: string[], b: string[]): DiffLine[] {
+  const n = a.length;
+  const m = b.length;
+  // dp[i][j] = LCS length of a[i:], b[j:]
+  const dp: Uint32Array[] = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out: DiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  // Walk emitting removed-before-added per change run.
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      out.push({ type: 'same', text: a[i] });
+      i++;
+      j++;
     } else {
-      result.unshift({ type: 'removed', text: oldLines[i - 1] });
-      i--;
+      // Collect one contiguous change run.
+      const removed: string[] = [];
+      const added: string[] = [];
+      while (i < n && j < m && a[i] !== b[j]) {
+        if (dp[i + 1][j] >= dp[i][j + 1]) {
+          removed.push(a[i]);
+          i++;
+        } else {
+          added.push(b[j]);
+          j++;
+        }
+      }
+      for (const text of removed) out.push({ type: 'removed', text });
+      for (const text of added) out.push({ type: 'added', text });
     }
   }
-
-  return result;
+  while (i < n) out.push({ type: 'removed', text: a[i++] });
+  while (j < m) out.push({ type: 'added', text: b[j++] });
+  return out;
 }
 
 /** Returns true if two strings differ (ignoring a single terminal newline sequence). */
