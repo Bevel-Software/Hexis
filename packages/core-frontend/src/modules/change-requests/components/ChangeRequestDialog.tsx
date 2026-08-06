@@ -33,7 +33,9 @@ interface ChangeRequestDialogProps {
   cr: PullRequestSummary;
   scope?: ChangeRequestScope;
   onClose(): void;
-  onResolved(kind: 'applied' | 'sent-back'): void;
+  /** Applying is the only verdict this view reaches. Declining a change
+   *  request lives on the skill page, beside the request's own row. */
+  onResolved(): void;
 }
 
 /**
@@ -198,7 +200,7 @@ export function ChangeRequestDialog({
    * why awaiting it is not an answer.
    */
   const applying = useApplyChangeRequest({
-    onApplied: () => onResolved('applied'),
+    onApplied: () => onResolved(),
     onFailed: (_number, refusal) => {
       // Git refusing the merge IS the conflict answer — say what happened and
       // what fixes it, instead of leaving a button that will fail again. Any

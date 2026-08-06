@@ -4,16 +4,12 @@ import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform
 import { useWorkspace } from '../state/workspace.context';
 import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
-import { KbFileRail, KB_FILE_RAIL_HEADING_ID } from './KbFileRail';
-import { useLinksOut } from '../hooks/useLinksOut';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
-import { useLastCommit } from '../hooks/useLastCommit';
-import { openRawFile } from '../utils/openRawFile';
 import { Banner, Button, Surface } from '../../../shared/components';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
-import { useCanonicalFileUrl, useFileNav, resolveRelativePath } from '../routing/kb-routes';
+import { useCanonicalFileUrl } from '../routing/kb-routes';
 import { useReview } from '../../review/state/review.context';
 import { ProtectedBranchBanner } from '../../git/components/ProtectedBranchBanner';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
@@ -44,7 +40,7 @@ import { FileChangeBoxes } from '../../change-requests/components/FileChangeBoxe
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
-import { getFileRenderer, getRendererLayout, isBinaryFile } from './renderers';
+import { getFileRenderer, getRendererLayout } from './renderers';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
@@ -770,14 +766,6 @@ export function FileViewer() {
     }
   }, [openFileContent]);
 
-  // `⋯ → View raw file`. Wrapped in a helper rather than assigning
-  // `window.location.href` inline so a test can spy on the intent without the
-  // navigation (§2.3 forbids assigning location.href in a test).
-  const handleViewRaw = useCallback(() => {
-    if (!workspaceId || !openFilePath) return;
-    openRawFile(workspaceId, openFilePath);
-  }, [workspaceId, openFilePath]);
-
   // Manage access on the open file, reached from the page's Share button.
   //
   // This page shares ONE thing: the file you are reading. It used to also
@@ -796,12 +784,6 @@ export function FileViewer() {
     });
   }, [openFilePath]);
 
-  // Session state, defaulting closed. Open ⇒ the shell switches to the wide
-  // measure and opens the rail's track. Closed costs nothing: `useLastCommit`
-  // is gated on it, so a reader who never opens the rail never pays for the
-  // history request behind its "Edited" row.
-  const [railOpen, setRailOpen] = useState(false);
-  const linksOut = useLinksOut(openFilePath, openFileContent);
   // ALL open requests, not just the ones scoped to you — a colleague's request
   // on a file you can read but not write still belongs on this page.
   const openChangeRequests = useOpenChangeRequests();
@@ -809,19 +791,6 @@ export function FileViewer() {
   // The full-bleed banner's "Review the change" opens the SHARED
   // change-request dialog — the old PR viewer surface is gone.
   const [bannerCr, setBannerCr] = useState<PullRequestSummary | null>(null);
-  const lastCommit = useLastCommit(openFilePath, railOpen);
-  // Compare owns the whole column; the rail steps aside for the duration and
-  // comes back with the document.
-  const railVisible = railOpen && activeTab === 'content';
-  const { openFile: navigateToFile } = useFileNav();
-  const handleOpenLink = useCallback(
-    (href: string) => {
-      if (!openFilePath) return;
-      navigateToFile(resolveRelativePath(openFilePath, href));
-    },
-    [openFilePath, navigateToFile],
-  );
-
 
   if (!openFilePath || openFileContent === null || !Renderer) {
     return (
@@ -1029,22 +998,6 @@ export function FileViewer() {
               roomy={explorerHidden}
         variant={shellVariant}
         scrollRef={editorContainerRef}
-        railLabelledBy={KB_FILE_RAIL_HEADING_ID}
-        rail={
-          railVisible ? (
-            <KbFileRail
-              path={openFilePath}
-              // Null for a binary file. The workspace loads every open file's
-              // content as a string, so `.length` is a number for a PDF too —
-              // it just is not a number that means anything.
-              charCount={isBinaryFile(openFilePath) ? null : openFileContent?.length ?? null}
-              lastCommit={lastCommit}
-              owners={access.owners}
-              linksOut={linksOut}
-              onOpen={handleOpenLink}
-            />
-          ) : undefined
-        }
       >
       <EditorTabs />
       {/* The document names itself, and its actions sit beside its name.
@@ -1064,7 +1017,6 @@ export function FileViewer() {
         onDiscardProposal={handleDiscardProposal}
         writeActionInPane={shellVariant === 'prose'}
         lockedBy={fileLock.externalLock?.holderName ?? null}
-        railOpen={railOpen}
         historyAvailable={historyAvailable}
         isDirty={isManualDirty}
         waitingOnAgentUpdate={waitingOnAgentUpdate}
@@ -1072,13 +1024,10 @@ export function FileViewer() {
         activeTab={activeTab}
         onEdit={handleEnterEditMode}
         onDone={handleExitEditMode}
-        onToggleRail={() => setRailOpen((v) => !v)}
         onOpenHistory={() => setActiveTab('history')}
-        onOpenCompare={() => setActiveTab('compare')}
         onShare={handleShare}
         onCopyPage={canCopyPage ? handleCopyPage : undefined}
         onCopyLink={handleCopyLink}
-        onViewRaw={handleViewRaw}
       />
 
       {/* Content stopped being a tab: the document IS the page, and history
@@ -1346,12 +1295,11 @@ export function FileViewer() {
         <ChangeRequestDialog
           cr={bannerCr}
           onClose={() => setBannerCr(null)}
-          onResolved={(kind) => {
+          // Applying is the only verdict the dialog reaches now.
+          onResolved={() => {
             setBannerCr(null);
             window.dispatchEvent(new Event(PR_STALE_EVENT));
-            if (kind === 'applied') {
-              reloadTabFromDisk(openFilePath).catch(() => {});
-            }
+            reloadTabFromDisk(openFilePath).catch(() => {});
           }}
         />
       )}

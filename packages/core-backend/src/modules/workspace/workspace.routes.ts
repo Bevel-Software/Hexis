@@ -1,12 +1,16 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { IGNORE_FILENAME } from './bevel-ignore.js';
+import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import {
+  AGENTS_DIR,
   DATA_DIR,
   DEFAULT_BRANCH,
   KNOWLEDGE_BASE_DIR,
   KNOWLEDGE_DIR,
+  PIPELINES_DIR,
   GROUPS_DIR,
 } from '@bevel-software/platform-shared';
 import { branchForWorkspaceId, FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
@@ -45,6 +49,7 @@ export function createWorkspaceRoutes(
   accessControl: IAccessControl,
   kbDirName: string,
   creatorAccess: ICreatorAccess,
+  adminAccess: IAdminAccessService,
 ): express.Router {
   const router = express.Router();
 
@@ -466,18 +471,38 @@ export function createWorkspaceRoutes(
       // same treatment so legacy clones don't collapse. Only the folders
       // themselves are forced visible — their contents stay gated by the
       // verdict above.
-      // `Agents/` and `Pipelines/` are no longer structural — the retired
-      // execution-layer folders aren't seeded anymore, so a legacy KB's copy
-      // is ordinary content and gets ordinary access treatment.
       const structuralRoots = new Set([
         KNOWLEDGE_BASE_DIR,
         DATA_DIR,
+        AGENTS_DIR,
+        PIPELINES_DIR,
         GROUPS_DIR,
         KNOWLEDGE_DIR,
       ]);
       for (const wp of wsRelPaths) {
         const rel = toKbRelative(wp, kbDirName);
         if (rel !== null && structuralRoots.has(rel)) verdict.set(wp, true);
+      }
+
+      // `.bevelignore` is ADMIN-ONLY. It is the file that decides what the file
+      // tree and the agent view show at all, so it is deployment configuration
+      // rather than knowledge — and it sits alone in being visible: its
+      // siblings (`.gitignore`, `roles.yaml`, `access.md`, `AGENTS.md`) are
+      // already hidden from every reader by the shipped ignore rules. Somebody
+      // who cannot act on it gains a puzzle; somebody who can needs to reach it.
+      //
+      // Read permission is deliberately NOT the lever. Everyone can read it —
+      // it has to be readable to be applied — so hiding it is a listing
+      // decision, made here, rather than an ACL fiction maintained in a file.
+      //
+      // Resolved through `AdminAccessService` rather than by asking whether
+      // this caller can write `roles.yaml` in THIS workspace: admin is settled
+      // on the default branch precisely so that editing `roles.yaml` on your
+      // own branch cannot promote you, and the same reasoning applies to
+      // anything gated on being an admin.
+      const ignoreFiles = wsRelPaths.filter((wp) => path.basename(wp) === IGNORE_FILENAME);
+      if (ignoreFiles.length > 0 && !(await adminAccess.isAdmin(userEmail))) {
+        for (const wp of ignoreFiles) verdict.set(wp, false);
       }
       return verdict;
     };
@@ -569,8 +594,8 @@ export function createWorkspaceRoutes(
       // Block MIME-sniffing so a misdeclared file can't be promoted to
       // active content by the browser.
       res.setHeader('X-Content-Type-Options', 'nosniff');
-      // …and inline is a DOCUMENT the moment somebody opens it in a tab
-      // ("⋯ → View raw file"), where those scripts would run under THIS
+      // …and inline is a DOCUMENT the moment somebody opens this URL in a tab
+      // directly, where those scripts would run under THIS
       // origin with this user's session — stored XSS for anyone who can write
       // a file into the workspace. `sandbox` drops the document into a unique
       // origin with scripting off. It applies to documents only, so the

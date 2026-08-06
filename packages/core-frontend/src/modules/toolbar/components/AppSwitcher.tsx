@@ -6,9 +6,14 @@ import { activeAppId, useAppRegistry, type AppDef } from '../../../core/registry
 const MENU_ID = 'app-switcher-menu';
 
 /**
- * The clickable brand in the toolbar's top-left: shows the product name and
- * opens the app switcher — the list of top-level surfaces (core apps +
- * registry-contributed ones) the user can move between.
+ * The clickable brand in the toolbar's top-left: shows the product name, the
+ * app you are currently in, and opens the app switcher — the list of
+ * top-level surfaces (core apps + registry-contributed ones) you can move
+ * between.
+ *
+ * Switching between Knowledge and Skills & Tools changes everything below the
+ * toolbar, so the trigger names the destination it landed on ("Bevel /
+ * Knowledge"); a brand on its own left the switch invisible.
  *
  * Open/close mechanics mirror AdminMenu: click toggles, an outside mousedown
  * or Escape closes, and closing hands focus back to the trigger.
@@ -28,6 +33,10 @@ export function AppSwitcher() {
     [registry],
   );
   const activeId = activeAppId(apps, location.pathname);
+  // Named next to the brand so the toolbar answers "which app am I in?"
+  // without opening the menu. Undefined on the standalone settings pages,
+  // where no app is active and the trigger is the brand alone.
+  const activeApp = apps.find((a) => a.id === activeId);
 
   const close = () => {
     setOpen(false);
@@ -63,15 +72,23 @@ export function AppSwitcher() {
         ref={buttonRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1 px-1.5 py-1 rounded hover:bg-hover text-ink"
-        title="Switch app"
+        className="flex min-w-0 items-center gap-1 px-1.5 py-1 rounded hover:bg-hover text-ink"
+        title={activeApp ? `Switch app — currently ${activeApp.label}` : 'Switch app'}
         aria-label="Switch app"
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? MENU_ID : undefined}
       >
-        <span className="text-sm font-semibold tracking-wide">Bevel</span>
-        <ChevronDown size={14} className="text-ink-muted" />
+        <span className="shrink-0 text-sm font-semibold tracking-wide">Bevel</span>
+        {activeApp && (
+          <>
+            <span aria-hidden="true" className="shrink-0 text-sm text-ink-faint">
+              /
+            </span>
+            <span className="truncate text-sm text-ink-muted">{activeApp.label}</span>
+          </>
+        )}
+        <ChevronDown size={14} className="shrink-0 text-ink-muted" />
       </button>
       {open && (
         <div

@@ -152,10 +152,11 @@ export function FileChangeBoxes({
         <ChangeRequestDialog
           cr={openCr}
           onClose={() => setOpenCr(null)}
-          onResolved={(kind) => {
+          // Applying is the only verdict the dialog reaches now — declining
+          // and withdrawing live on the boxes.
+          onResolved={() => {
             setOpenCr(null);
-            if (kind === 'applied') resolved();
-            else window.dispatchEvent(new Event(PR_STALE_EVENT));
+            resolved();
           }}
         />
       )}

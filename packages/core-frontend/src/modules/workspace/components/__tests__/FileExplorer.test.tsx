@@ -611,9 +611,7 @@ describe('FileExplorer chevron collapse — userIntent vs autoExpanded', () => {
 });
 
 // The KB level splits the well-known root folders into labelled top-level
-// sections. `Data/` gets its own section; the retired `Agents/`/`Pipelines/`
-// roots do NOT anymore — a legacy KB's copies fold into the Knowledge section
-// like any other unrecognised folder.
+// sections — with one deliberate exception, `Groups/`.
 describe('FileExplorer sections — root folders', () => {
   beforeEach(() => {
     cleanup();
@@ -626,34 +624,59 @@ describe('FileExplorer sections — root folders', () => {
     children: [],
   });
 
-  it('keeps Data as a section and folds legacy Agents/Pipelines into Knowledge', () => {
+  /**
+   * `Data/`, `Agents/` and `Pipelines/` are never created by core — a
+   * deployment that owns the agentic execution layer seeds them. When they ARE
+   * there they get their own sections, and in particular must not fold into
+   * Knowledge the way a stray content folder does.
+   */
+  it('renders Data, Agents and Pipelines as their own sections when present', () => {
     const tree: FileTreeEntry = {
       name: '.',
       relativePath: '.',
       type: 'directory',
-      children: [
-        dir('KnowledgeBase'),
-        dir('Data'),
-        dir('Agents'),
-        dir('Pipelines'),
-        dir('Skills'),
-        dir('Tools'),
-      ],
+      children: [dir('KnowledgeBase'), dir('Data'), dir('Agents'), dir('Pipelines')],
     };
     renderExplorer({ fileTree: tree });
-    // Directory rows carry their indent on the row DIV wrapping the toggle
-    // button — read the padding there.
-    const rowDivOf = (label: string) =>
-      screen.getByText(label).closest('button')!.parentElement as HTMLElement;
-    // The live sections, at the root indent.
-    const dataIndent = parseInt(rowDivOf('Data').style.paddingLeft, 10);
-    expect(parseInt(rowDivOf('Knowledge').style.paddingLeft, 10)).toBe(dataIndent);
-    // The retired roots stay REACHABLE (a legacy KB may hold real content)
-    // but as children folded into the Knowledge section — one indent deeper,
-    // not sections of their own.
-    for (const legacy of ['Agents', 'Pipelines', 'Skills', 'Tools']) {
-      expect(parseInt(rowDivOf(legacy).style.paddingLeft, 10)).toBeGreaterThan(dataIndent);
-    }
+    expect(screen.getByText('Knowledge')).toBeInTheDocument();
+    expect(screen.getByText('Data')).toBeInTheDocument();
+    expect(screen.getByText('Agents')).toBeInTheDocument();
+    expect(screen.getByText('Pipelines')).toBeInTheDocument();
+  });
+
+  /**
+   * `Groups/` is the Skills & Tools app's storage, and that app presents it as
+   * groups, skills and tools. Listing it here offered a second, worse way in —
+   * raw markdown editing of a SKILL.md, on a folder whose access is managed
+   * from the group page.
+   *
+   * Not shown, and NOT folded into Knowledge either: it is a reserved root, so
+   * the "stray content folder" path must not pick it up. Both halves are
+   * asserted, because dropping it from the reserved set would still hide the
+   * section while quietly moving the whole folder under Knowledge.
+   */
+  it('never shows Groups in the knowledge view', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('KnowledgeBase'), dir('Groups')],
+    };
+    renderExplorer({ fileTree: tree });
+    expect(screen.getByText('Knowledge')).toBeInTheDocument();
+    expect(screen.queryByText('Groups')).not.toBeInTheDocument();
+  });
+
+  /** A KB whose only root is Groups still has a knowledge view — an empty one. */
+  it('does not fall back to the flat tree when Groups is the only root', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('Groups')],
+    };
+    renderExplorer({ fileTree: tree });
+    expect(screen.queryByText('Groups')).not.toBeInTheDocument();
   });
 });
 

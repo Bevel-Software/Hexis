@@ -1,15 +1,25 @@
 import {
+  AGENTS_DIR,
   DATA_DIR,
   KNOWLEDGE_BASE_DIR,
+  PIPELINES_DIR,
   GROUPS_DIR,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
 import type { PendingEntry } from '../state/workspace.context';
 
-// `Agents/` and `Pipelines/` left this set with the retired execution-layer
-// design: they aren't seeded anymore, and a legacy KB's leftover copies fold
-// into the Knowledge section like any other unrecognised root folder.
-export const KB_ROOT_DIRS = new Set([KNOWLEDGE_BASE_DIR, DATA_DIR, GROUPS_DIR]);
+// RESERVED is not the same as CREATED (see kb-layout.ts): core only seeds
+// KnowledgeBase/ and Groups/, but every reserved name renders as its own root
+// when present — a distribution that owns the execution layer seeds Data/,
+// Agents/ and Pipelines/, and a KB that has them must not see them folded
+// into Knowledge as stray content.
+export const KB_ROOT_DIRS = new Set([
+  KNOWLEDGE_BASE_DIR,
+  DATA_DIR,
+  AGENTS_DIR,
+  PIPELINES_DIR,
+  GROUPS_DIR,
+]);
 
 /**
  * Descend past the workspace / KB-clone wrapper levels to the node that holds

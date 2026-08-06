@@ -369,8 +369,8 @@ export function SkillPage() {
         cr={compareCr}
         scope={{ prefix: skill.path, baseFiles: files }}
         onClose={() => setCompareCr(null)}
-        onResolved={(kind) => {
-          toast(kind === 'applied' ? 'Change request is being applied' : 'Sent back to the author');
+        onResolved={() => {
+          toast('Change request is being applied');
           setCompareCr(null);
           data.reload();
         }}

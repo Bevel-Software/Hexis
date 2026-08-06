@@ -224,6 +224,10 @@ export async function createCoreServices(
     // same answer `SEED_ADMIN_EMAILS` used to ask for a second time.
     [config.adminEmail],
     () => settings.resolve('gitUsername') || 'x-access-token',
+    // Root folders this distribution reserves on top of core's two. A plain
+    // value, not a getter: these are named in the composition root rather than
+    // collected on the setup screen, so there is nothing to re-read.
+    ports.kbExtraRootDirs ?? [],
   );
   workspaceService.setSeedService(kbSeedService);
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
