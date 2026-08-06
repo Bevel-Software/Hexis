@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { useEffect, useState } from 'react';
@@ -704,6 +704,20 @@ describe('FileViewer', () => {
   it('says nothing on a file nobody has proposed a change to', () => {
     render(<ViewerHarness initialContent="quiet" />);
     expect(screen.queryByText('Open change request')).not.toBeInTheDocument();
+  });
+
+  /**
+   * The unification the skill page and this viewer share: a document renders
+   * inside the SAME edged pane card, named by the same mono filename bar. The
+   * frame is one declaration (`FilePaneCard`); this pins that this surface
+   * actually mounts it.
+   */
+  it('frames a prose document in the shared file pane card', () => {
+    render(<ViewerHarness initialContent="boxed" />);
+    const card = screen.getByTestId('file-pane-card');
+    // The bar names the file, extension and all — same as the skill page.
+    expect(within(card).getByText('Foo.md')).toBeInTheDocument();
+    expect(within(card).getByText('boxed')).toBeInTheDocument();
   });
 
   it('widens the column when the rail is open', async () => {

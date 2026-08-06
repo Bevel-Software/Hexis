@@ -512,10 +512,13 @@ function formatWhen(iso: string): string {
 
 /**
  * The reading column. Horizontal and vertical padding come from the Library
- * layout's `<main>`, which already wraps every page under `/skills-and-tools`.
+ * layout's `<main>`, which already wraps every page in the shared
+ * `DOCUMENT_COLUMN` measure — the SAME 880px the Knowledge viewer uses. No
+ * extra `max-w` here: narrowing this page below the measure made the same
+ * document render at two widths depending on which surface opened it.
  */
 function Article({ children }: { children: ReactNode }) {
-  return <article className="mx-auto w-full max-w-3xl pb-14">{children}</article>;
+  return <article className="w-full pb-14">{children}</article>;
 }
 
 /**

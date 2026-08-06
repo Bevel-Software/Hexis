@@ -39,6 +39,7 @@ import { PR_STALE_EVENT } from '../../../core/events';
 import { getFileRenderer, getRendererLayout, isBinaryFile } from './renderers';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
+import { FilePaneCard } from './FilePaneCard';
 
 const SUGGESTED_PROMPTS = [
   'Give me an overview of the process landscape.',
@@ -792,6 +793,53 @@ export function FileViewer() {
   const shellVariant =
     activeTab === 'content' ? getRendererLayout(openFilePath) : 'full-bleed';
 
+  // What the pane card's bar names — extension kept, unlike the `<h1>` above,
+  // because the bar is the technical label (`SKILL.md`, `How to get
+  // started.md`) exactly as the skill page's file bar renders it.
+  const fileBaseName = openFilePath.slice(openFilePath.lastIndexOf('/') + 1);
+
+  const rendererElement = (
+    <Renderer
+      // **Why we key on `openFileSavedContent` (read-only mode only).**
+      // When a teammate's save lands, the workspace state updates the
+      // tab's content + savedContent. The renderer's internal
+      // `useState(content)` + sync-on-prop-change `useEffect` is
+      // supposed to pull the new value into `value`, but in practice
+      // (production build, multiple suspended subscribers, etc.) we
+      // were seeing the preview stay on the stale buffer until the
+      // user manually closed + reopened the tab. Keying the renderer
+      // on the bytes themselves forces a fresh mount when those
+      // bytes change, which initializes `value` from the latest
+      // content prop directly and bypasses any stuck-state edge
+      // case. We gate this on `!editMode` so the user's in-flight
+      // edits (where `value` diverges from `savedContent`) don't
+      // trigger a remount that would discard their typing —
+      // savedContent stays stable through an edit until the save
+      // commits, then advances once.
+      key={editMode || proposeMode ? `${openFilePath}|edit` : `${openFilePath}|${openFileSavedContent?.length ?? 0}|${openFileSavedContent?.slice(0, 64) ?? ''}|${openFileSavedContent?.slice(-64) ?? ''}`}
+      content={isReviewingPending ? pendingFileContent! : openFileContent}
+      savedContent={isReviewingPending ? pendingFileContent! : (openFileSavedContent ?? openFileContent)}
+      filePath={openFilePath}
+      // In propose mode a save (Ctrl+S) IS sending the proposal — the
+      // one thing it must never be is a write to this branch.
+      onSave={
+        isReviewingPending
+          ? handlePendingSave
+          : proposeMode
+            ? handleSendProposal
+            : onProtectedBranch
+              ? handlePendingSave
+              : handleSave
+      }
+      onDirtyChange={setIsManualDirty}
+      onValueChange={
+        isReviewingPending || !(editMode || proposeMode) ? undefined : handleValueChange
+      }
+      onSaveStateChange={setManualSaveState}
+      readOnly={isReviewingPending || !(editMode || proposeMode)}
+    />
+  );
+
   return (
     <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
       <ProtectedBranchBanner />
@@ -1082,47 +1130,19 @@ export function FileViewer() {
               explicit Edit mode. Edit mode is gated by the lock, so this
               also covers "someone else holds it" without a separate check.
               The scroll-activity source for the idle-release timer is the
-              shell above, not this wrapper — see `KbDocumentShell.scrollRef`. */}
+              shell above, not this wrapper — see `KbDocumentShell.scrollRef`.
+
+              A PROSE document sits inside `FilePaneCard` — the same edged
+              frame, with the same mono filename bar, that the skill page puts
+              around its files. One file-in-a-box drawing for the whole app;
+              full-bleed renderers (pdf, csv, images…) are viewports, not
+              documents, and keep their unframed definite-height contract. */}
           <div className={shellVariant === 'full-bleed' ? 'flex min-h-0 flex-1 flex-col' : 'min-w-0'}>
-            <Renderer
-              // **Why we key on `openFileSavedContent` (read-only mode only).**
-              // When a teammate's save lands, the workspace state updates the
-              // tab's content + savedContent. The renderer's internal
-              // `useState(content)` + sync-on-prop-change `useEffect` is
-              // supposed to pull the new value into `value`, but in practice
-              // (production build, multiple suspended subscribers, etc.) we
-              // were seeing the preview stay on the stale buffer until the
-              // user manually closed + reopened the tab. Keying the renderer
-              // on the bytes themselves forces a fresh mount when those
-              // bytes change, which initializes `value` from the latest
-              // content prop directly and bypasses any stuck-state edge
-              // case. We gate this on `!editMode` so the user's in-flight
-              // edits (where `value` diverges from `savedContent`) don't
-              // trigger a remount that would discard their typing —
-              // savedContent stays stable through an edit until the save
-              // commits, then advances once.
-              key={editMode || proposeMode ? `${openFilePath}|edit` : `${openFilePath}|${openFileSavedContent?.length ?? 0}|${openFileSavedContent?.slice(0, 64) ?? ''}|${openFileSavedContent?.slice(-64) ?? ''}`}
-              content={isReviewingPending ? pendingFileContent! : openFileContent}
-              savedContent={isReviewingPending ? pendingFileContent! : (openFileSavedContent ?? openFileContent)}
-              filePath={openFilePath}
-              // In propose mode a save (Ctrl+S) IS sending the proposal — the
-              // one thing it must never be is a write to this branch.
-              onSave={
-                isReviewingPending
-                  ? handlePendingSave
-                  : proposeMode
-                    ? handleSendProposal
-                    : onProtectedBranch
-                      ? handlePendingSave
-                      : handleSave
-              }
-              onDirtyChange={setIsManualDirty}
-              onValueChange={
-                isReviewingPending || !(editMode || proposeMode) ? undefined : handleValueChange
-              }
-              onSaveStateChange={setManualSaveState}
-              readOnly={isReviewingPending || !(editMode || proposeMode)}
-            />
+            {shellVariant === 'prose' ? (
+              <FilePaneCard file={fileBaseName}>{rendererElement}</FilePaneCard>
+            ) : (
+              rendererElement
+            )}
           </div>
         </>
       )}
