@@ -338,7 +338,10 @@ describe('workspace file primitives', () => {
     expect(res.stdout.trim()).toBe('kb-seed');
   });
 
-  it('execute_command does not leak GIT_DIR into non-git commands', async () => {
+  // POSIX-only probes: `$GIT_DIR` expansion and `>/dev/null` are `sh`
+  // semantics, and `shell: true` on Windows runs cmd.exe, where the probe
+  // itself (not the scoping under test) is meaningless. CI runs Linux.
+  it.skipIf(process.platform === 'win32')('execute_command does not leak GIT_DIR into non-git commands', async () => {
     const base = await start();
     // The KB-clone GIT_DIR/GIT_WORK_TREE override is scoped to bare `git …`
     // only; a non-git command (e.g. npm/pip that shells git internally) must
@@ -348,7 +351,7 @@ describe('workspace file primitives', () => {
     expect(res.stdout.trim()).toBe('GIT_DIR=[]');
   });
 
-  it('execute_command does not leak GIT_DIR into a chained step after git', async () => {
+  it.skipIf(process.platform === 'win32')('execute_command does not leak GIT_DIR into a chained step after git', async () => {
     const base = await start();
     // Runs under `shell: true`, so a command that merely STARTS with git but
     // chains another step must not export the KB git env to the whole shell —

@@ -31,7 +31,7 @@ import { OidcAuthProvider } from '../modules/auth/oidc-auth-provider.js';
 import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
 import { AccessControlService } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
-import { SkillService } from '../modules/skills/index.js';
+import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
 import { GroupIndexService, JoinRequestsService } from '../modules/groups/index.js';
 import {
@@ -100,6 +100,7 @@ export interface CoreServices {
   sessionOntologyService: SessionOntologyService;
   routineWritePolicy: RoutineWritePolicyService;
   skillService: SkillService;
+  pendingSkillsService: PendingSkillsService;
   toolManualService: ToolManualService;
   groupIndexService: GroupIndexService;
   joinRequestsService: JoinRequestsService;
@@ -380,6 +381,18 @@ export async function createCoreServices(
   // have all landed.
   const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
 
+  // Pending skills: the other half of the catalog — skills that exist only on
+  // an open change request's branch. Built here rather than beside
+  // `skillService` because it needs the workflow service, which does not exist
+  // that early; it holds no state of its own, so where it is constructed is the
+  // only thing the ordering decides.
+  const pendingSkillsService = new PendingSkillsService(
+    workspaceService,
+    accessControl,
+    skillService,
+    workflowService,
+  );
+
   // Subscriber A — catalog freshness: a committed change drops the affected
   // caches immediately instead of waiting out their TTLs. The tool/skill
   // catalogs are global but read the DEFAULT branch only, so only
@@ -632,6 +645,7 @@ export async function createCoreServices(
     sessionOntologyService,
     routineWritePolicy,
     skillService,
+    pendingSkillsService,
     toolManualService,
     groupIndexService,
     joinRequestsService,

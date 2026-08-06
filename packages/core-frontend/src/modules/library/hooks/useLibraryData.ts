@@ -5,8 +5,10 @@ import { listToolSecrets, type ToolSecrets } from '../../secrets-vault/services/
 import {
   defaultWorkspaceId,
   getSkill,
+  listPendingSkills,
   listSkills,
   type LibrarySkillSummary,
+  type PendingSkillSummary,
 } from '../services/library.api';
 import {
   listMyChangeRequests,
@@ -24,6 +26,8 @@ import {
  *                  workspace); tools reuse the `canWrite` the secrets route
  *                  already computes
  *  - change requests — all open + the caller's own, for the review layer
+ *  - pending skills — `GET /api/skills/pending`, the skills that exist only on
+ *                  an open change request's branch (author + approvers only)
  *
  * Non-critical failures degrade to empty sets rather than blocking the page —
  * only the skills+tools pair failing surfaces as a load error.
@@ -32,6 +36,12 @@ export interface LibraryData {
   loading: boolean;
   error: string | null;
   skills: LibrarySkillSummary[];
+  /**
+   * Proposed skills, not yet released. Kept SEPARATE from `skills` all the way
+   * up to the gallery: everything downstream of `skills` treats an entry as a
+   * thing that exists and can be opened, and a proposal is neither.
+   */
+  pendingSkills: PendingSkillSummary[];
   tools: ToolSecrets[];
   /** Skill names (folder ids) whose SKILL.md the caller can write. */
   ownedSkills: Set<string>;
@@ -53,6 +63,7 @@ export function useLibraryData(): LibraryData {
     loading: true,
     error: null,
     skills: [],
+    pendingSkills: [],
     tools: [],
     ownedSkills: new Set(),
     allowedToolsBySkill: new Map(),
@@ -68,7 +79,7 @@ export function useLibraryData(): LibraryData {
     (async () => {
       const [skills, tools] = await Promise.all([listSkills(), listToolSecrets()]);
 
-      const [ownership, crs, mine, details] = await Promise.all([
+      const [ownership, crs, mine, pending, details] = await Promise.all([
         skills.length
           ? fetchFileAccessBatch(
               defaultWorkspaceId(),
@@ -77,6 +88,7 @@ export function useLibraryData(): LibraryData {
           : Promise.resolve({ results: {} as Record<string, boolean> }),
         listOpenChangeRequests().catch(() => [] as PullRequestSummary[]),
         listMyChangeRequests().catch(() => [] as PullRequestSummary[]),
+        listPendingSkills().catch(() => [] as PendingSkillSummary[]),
         Promise.all(
           skills.map(
             (s): Promise<[string, string[]]> =>
@@ -95,6 +107,7 @@ export function useLibraryData(): LibraryData {
         loading: false,
         error: null,
         skills,
+        pendingSkills: pending,
         tools,
         ownedSkills,
         allowedToolsBySkill: new Map(details),

@@ -63,7 +63,7 @@ export class SkillService implements ISkillService {
   }
 
   async getSkill(userEmail: string, name: string, file?: string): Promise<GetSkillResult> {
-    if (!isSafeName(name)) return { ok: false, error: 'not_found' };
+    if (!isSafeSkillName(name)) return { ok: false, error: 'not_found' };
     const found = (await this.scan()).find((s) => s.summary.name === name);
     if (!found) return { ok: false, error: 'not_found' };
 
@@ -142,7 +142,7 @@ export class SkillService implements ISkillService {
         // fall back to the folder name (a readdir entry, safe by construction)
         // to keep listing and lookup consistent.
         const declared = resolveDeclaredId(fm.frontmatter, path.basename(dir));
-        const name = isSafeName(declared) ? declared : path.basename(dir);
+        const name = isSafeSkillName(declared) ? declared : path.basename(dir);
         out.push({
           summary: { name, description: fm.description, version: fm.version, path: relFolder },
           body: fm.body,
@@ -177,8 +177,14 @@ export class SkillService implements ISkillService {
 
 // --- helpers ------------------------------------------------------------------
 
-/** Skill names are folder names; reject anything that could escape the folder. */
-function isSafeName(name: string): boolean {
+/**
+ * Skill names are folder names; reject anything that could escape the folder.
+ *
+ * Exported because the pending-skill surface resolves a name from a SKILL.md
+ * that is not on disk yet and must land on the SAME id the catalog will give it
+ * once merged — a second copy of this rule would drift.
+ */
+export function isSafeSkillName(name: string): boolean {
   return name.length > 0 && !name.includes('/') && !name.includes('\\') && name !== '.' && name !== '..';
 }
 
@@ -194,7 +200,13 @@ function scalarToString(value: unknown): string | undefined {
   return undefined;
 }
 
-function parseSkillFrontmatter(raw: string): {
+/**
+ * Exported for the pending-skill surface, which parses a SKILL.md read at a
+ * change request's ref rather than off disk. Same parser deliberately: a
+ * proposed skill must be described by the same rules that will describe it once
+ * it is released, or the card in review and the card after approval disagree.
+ */
+export function parseSkillFrontmatter(raw: string): {
   description: string;
   version?: string;
   allowedTools?: string[];

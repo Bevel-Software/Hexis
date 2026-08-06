@@ -71,6 +71,7 @@ const CATALOG: LibraryData = {
   tools: [],
   ownedSkills: new Set(['outreach']),
   allowedToolsBySkill: new Map(),
+  pendingSkills: [],
   crs: [],
   myCrNumbers: new Set(),
   reload: vi.fn(),
