@@ -4,6 +4,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { KNOWLEDGE_BASE_DIR, GROUPS_DIR } from '@bevel-software/platform-shared';
+import { IGNORE_FILENAME } from './bevel-ignore.js';
 import type { IKbSeedService } from './kb-seed.interface.js';
 
 const execFileAsync = promisify(execFile);
@@ -221,6 +222,12 @@ export class KbSeedService implements IKbSeedService {
         if (!(await this.exists(path.join(repoDir, rel)))) {
           await this.copyTemplateFile(rel, repoDir);
           added.push(rel);
+          // Adding AGENTS.md to a knowledge base seeded before the rename
+          // leaves it VISIBLE: that repo's `.bevelignore` lists CLAUDE.md and
+          // knows nothing of the new name, so the conventions doc starts
+          // showing up in the file tree and the agent view. We created the
+          // mismatch by adding the file, so we close it here.
+          if (rel === 'AGENTS.md') added.push(...(await this.mergeIgnorePattern(repoDir, rel)));
         }
       }
       added.push(...(await this.ensureRequiredDirs(repoDir)));
@@ -361,6 +368,38 @@ export class KbSeedService implements IKbSeedService {
     const to = path.join(dest, relPath);
     await fs.mkdir(path.dirname(to), { recursive: true });
     await fs.copyFile(from, to);
+  }
+
+  /**
+   * Ensure `.bevelignore` carries `pattern`, appending it when absent. Returns
+   * the paths changed, for the commit.
+   *
+   * APPENDS — never rewrites. The file is the operator's, and every rule
+   * already in it is theirs to keep; this adds one line under a comment saying
+   * where it came from. Absent file, or a file that already lists the pattern,
+   * is a no-op, so running it on every clone changes nothing after the first.
+   *
+   * Matched line-wise rather than by substring: a rule for `Groups/AGENTS.md`
+   * is not a rule for the root `AGENTS.md`, and treating it as one would leave
+   * the mismatch this exists to close.
+   */
+  private async mergeIgnorePattern(repoDir: string, pattern: string): Promise<string[]> {
+    const ignorePath = path.join(repoDir, IGNORE_FILENAME);
+    let current: string;
+    try {
+      current = await fs.readFile(ignorePath, 'utf8');
+    } catch {
+      return []; // No ignore file — the template's copy arrives with the pattern in it.
+    }
+    const lines = current.split('\n').map((l) => l.trim());
+    if (lines.includes(pattern)) return [];
+    const separator = current.endsWith('\n') ? '' : '\n';
+    await fs.appendFile(
+      ignorePath,
+      `${separator}\n# Added by the platform: the conventions doc is not node content.\n${pattern}\n`,
+      'utf8',
+    );
+    return [IGNORE_FILENAME];
   }
 
   /**

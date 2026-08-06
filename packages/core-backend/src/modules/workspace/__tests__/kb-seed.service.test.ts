@@ -243,6 +243,51 @@ describe('KbSeedService', () => {
    * these, and the folders still arrive. Their `.gitkeep` is written rather
    * than copied for exactly that reason.
    */
+  /**
+   * A knowledge base seeded before AGENTS.md was named that: top-up adds the
+   * file, and the `.bevelignore` already there lists only the old name — so
+   * without this the conventions doc starts showing in the file tree and the
+   * agent view on every existing deployment. We created the mismatch by adding
+   * the file, so top-up closes it.
+   */
+  describe('the pre-rename ignore file', () => {
+    const legacy = (ignore: string): Record<string, string> => ({
+      'KnowledgeBase/.gitkeep': '',
+      'Groups/.gitkeep': '',
+      'access.md': '---\nwrite:\n  - Admin\n---\n',
+      'roles.yaml': 'roles:\n  Admin:\n    - a@example.com\n',
+      '.gitignore': '',
+      '.bevelignore': ignore,
+    });
+
+    it('learns about AGENTS.md when top-up adds one', async () => {
+      const upstream = await seededUpstream([DEFAULT_BRANCH], {
+        ...legacy('# mine\n.gitignore\nCLAUDE.md\nMy-Own-Rule/\n'),
+        'CLAUDE.md': '# conventions',
+      });
+      const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
+      await makeSeeder(upstream).topUpWorkspace(repoDir, DEFAULT_BRANCH);
+
+      const dir = await checkout(root, upstream, DEFAULT_BRANCH);
+      expect(await exists(path.join(dir, 'AGENTS.md'))).toBe(true);
+      const ignore = await fs.readFile(path.join(dir, '.bevelignore'), 'utf8');
+      expect(ignore.split('\n').map((l) => l.trim())).toContain('AGENTS.md');
+      // The operator's own rules survive — this appends, it does not rewrite.
+      expect(ignore).toContain('My-Own-Rule/');
+      expect(ignore).toContain('CLAUDE.md');
+    });
+
+    it('is left alone when it already knows the pattern', async () => {
+      const upstream = await seededUpstream([DEFAULT_BRANCH], legacy('AGENTS.md\n'));
+      const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
+      await makeSeeder(upstream).topUpWorkspace(repoDir, DEFAULT_BRANCH);
+
+      const dir = await checkout(root, upstream, DEFAULT_BRANCH);
+      const ignore = await fs.readFile(path.join(dir, '.bevelignore'), 'utf8');
+      expect(ignore.split('\n').filter((l) => l.trim() === 'AGENTS.md')).toHaveLength(1);
+    });
+  });
+
   describe('distribution-reserved roots', () => {
     it('creates extra roots that the template knows nothing about', async () => {
       const upstream = await emptyUpstream();

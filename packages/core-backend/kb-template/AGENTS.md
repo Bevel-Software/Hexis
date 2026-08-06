@@ -13,7 +13,7 @@ change them.
 
 ## Directory Structure
 
-```
+```text
 knowledge-base/
 ├── KnowledgeBase/        ← the knowledge itself; organise it however suits you
 ├── Groups/               ← one folder per group: its skills AND its tools
@@ -24,7 +24,7 @@ knowledge-base/
 Only those two folders are structural, and only `Groups/` has a layout the
 platform reads:
 
-```
+```text
 Groups/<Group>/<skill>/SKILL.md   a skill
 Groups/<Group>/<name>.tool        a tool manual
 Groups/<Group>/access.md          who can read/write the whole group
@@ -52,9 +52,9 @@ Write access to any path is governed by `roles.yaml` (who has which role) and
   = `product team`). The reserved name `deny` cannot be used.
 - **Access rules** live in `access.md` files. Each declares a `write:` list
   whose entries are either grants (bare principal — a role name or
-  `Name <email>`) or denials (lowercase `deny ` prefix + principal).
-  Capitalised forms like `Deny` are *not* triggers; they are treated as part of
-  a name.
+  `Name <email>`) or denials (the lowercase word `deny`, a space, then the
+  principal). Capitalised forms like `Deny` are *not* triggers; they are
+  treated as part of a name.
 - **Resolution** walks repo root → file directory, accumulating per-principal
   state. User-level entries trump role-level entries. A role denial removes
   only that role's contribution; it does not undo grants from other roles.
