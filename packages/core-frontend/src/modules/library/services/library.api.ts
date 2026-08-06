@@ -41,6 +41,21 @@ export interface LibrarySkill extends LibrarySkillSummary {
   files: string[];
 }
 
+/**
+ * A skill that exists only on an open change request's branch — proposed, and
+ * waiting on somebody to approve it. Separate from `LibrarySkillSummary`
+ * because it is not in the catalog: nothing loads it, nothing runs it, and it
+ * is visible only to its author and to whoever could approve it.
+ */
+export interface PendingSkillSummary extends LibrarySkillSummary {
+  changeRequestNumber: number;
+  branch: string;
+  authorName: string;
+  createdAt: string;
+  /** True when the caller proposed it themselves. */
+  isAuthor: boolean;
+}
+
 interface SkillFilePayload {
   name: string;
   file: string;
@@ -66,6 +81,17 @@ export async function getSkill(name: string): Promise<LibrarySkill> {
   );
   if (!data.ok || data.kind !== 'skill') throw new Error("Couldn't load this skill.");
   return data.skill;
+}
+
+/**
+ * Skills awaiting approval that the caller may see. The backend does the
+ * filtering — author or possible approver — so this is a plain read.
+ */
+export async function listPendingSkills(): Promise<PendingSkillSummary[]> {
+  const data = await handleApiResponse<{ skills: PendingSkillSummary[] }>(
+    await authFetch('/api/skills/pending'),
+  );
+  return data.skills;
 }
 
 /** Content of a bundled skill file. `file` is relative to the skill folder. */

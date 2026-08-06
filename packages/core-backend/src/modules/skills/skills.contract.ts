@@ -40,6 +40,37 @@ export type GetSkillResult =
   | { ok: true; kind: 'file'; file: SkillFileContent }
   | { ok: false; error: 'not_found' | 'forbidden' | 'invalid_file' };
 
+/**
+ * A skill that exists ONLY on an open change request's branch — proposed, not
+ * released. It is deliberately NOT a `SkillSummary` the catalog returns: the
+ * catalog is what agents load, and a skill nobody has approved must not be
+ * loadable. This is a review surface only.
+ *
+ * Who may see one is narrower than who may see the catalog: its author, and
+ * whoever could approve it. See `PendingSkillsService` for why that predicate
+ * is the access tree's answer rather than a group-admin check spelled out
+ * again here.
+ */
+export interface PendingSkill extends SkillSummary {
+  /** The open change request that would release it. */
+  changeRequestNumber: number;
+  branch: string;
+  /** Display name of whoever opened the request (person or agent). */
+  authorName: string;
+  createdAt: string;
+  /** True when the caller opened the request themselves. */
+  isAuthor: boolean;
+}
+
+export interface IPendingSkillService {
+  /**
+   * Skills awaiting approval that `userEmail` is entitled to see — the ones
+   * they proposed, and the ones they could approve. Never throws: a review
+   * surface failing must not take the library down with it.
+   */
+  listPendingSkills(userEmail: string): Promise<PendingSkill[]>;
+}
+
 export interface ISkillService {
   /**
    * The default-branch skill catalog. When `userEmail` is given, filtered to
