@@ -20,8 +20,8 @@ import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
   validateFilename,
   KNOWLEDGE_BASE_DIR,
-  GROUPS_DIR,
   DATA_DIR,
+  GROUPS_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
@@ -943,14 +943,24 @@ export function FileExplorer() {
   // Right-click → Manage access opens this sheet for the chosen entry.
   const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);
 
-  // KB content splits Knowledge (`KnowledgeBase/`), Data (`Data/`), Agents
-  // (`Agents/`), Pipelines (`Pipelines/`) and Groups (`Groups/`) into separate
-  // top-level folders; surface them as labelled sections rather than a single
-  // flat root. The Knowledge section hoists `KnowledgeBase/`'s
-  // children and folds in any other top-level content folder (e.g. a stray
-  // `Legal/`); loose top-level files (access.md, roles.yaml) sit below a divider.
-  // Clones that predate the split (none of the well-known root dirs) fall back
-  // to the flat tree.
+  // KB content splits into separate top-level folders; surface them as labelled
+  // sections rather than a single flat root. The Knowledge section hoists
+  // `KnowledgeBase/`'s children and folds in any other top-level content folder
+  // (e.g. a stray `Legal/`); loose top-level files (access.md, roles.yaml) sit
+  // below a divider. Clones that predate the split (none of the well-known root
+  // dirs) fall back to the flat tree.
+  //
+  // `Groups/` is NOT among them. It is the Skills & Tools app's storage — one
+  // folder per group holding its skills and its tools — and that app presents
+  // it as groups, skills and tools rather than as files. Listing it here too
+  // offered a second, worse way in: raw markdown editing of a SKILL.md with
+  // none of the surrounding affordances, on a folder whose access is managed
+  // from the group page. Deep links into a group file still resolve; the
+  // folder just is not a browsing destination in Knowledge.
+  //
+  // `Data/`, `Agents/` and `Pipelines/` are rendered when PRESENT but never
+  // created by core (see `CORE_REQUIRED_DIRS`) — a deployment that owns the
+  // agentic execution layer seeds them, and this reads whatever is there.
   const sections = useMemo(() => {
     // Descend past the workspace / KB-clone wrapper levels to the node that
     // actually holds the well-known root dirs, then split that level.
@@ -962,6 +972,10 @@ export function FileExplorer() {
     const data = findDir(DATA_DIR);
     const agents = findDir(AGENTS_DIR);
     const pipelines = findDir(PIPELINES_DIR);
+    // Groups counts toward "is this a split layout?" even though it is never
+    // rendered: its presence proves the split just as well as the others, and
+    // without it a KB whose only root is Groups would fail this check, fall
+    // back to the flat tree, and show the folder that way instead.
     const groups = findDir(GROUPS_DIR);
     if (!knowledgeBase && !data && !agents && !pipelines && !groups) return null;
     // Any other top-level content folder (e.g. a stray `Legal/`) folds into Knowledge.
@@ -986,13 +1000,11 @@ export function FileExplorer() {
     const pipelinesRoot: FileTreeEntry | null = pipelines
       ? { ...pipelines, name: PIPELINES_DIR }
       : null;
-    const groupsRoot: FileTreeEntry | null = groups ? { ...groups, name: GROUPS_DIR } : null;
     return {
       knowledge,
       data: dataRoot,
       agents: agentsRoot,
       pipelines: pipelinesRoot,
-      groups: groupsRoot,
       looseFiles: kids.filter((c) => c.type === 'file'),
     };
   }, [mergedTree]);
@@ -1091,9 +1103,6 @@ export function FileExplorer() {
             )}
             {sections.pipelines && (
               <FileTreeNode entry={sections.pipelines} depth={0} collapseChildren />
-            )}
-            {sections.groups && (
-              <FileTreeNode entry={sections.groups} depth={0} collapseChildren />
             )}
             {sections.looseFiles.length > 0 && (
               <>

@@ -7,6 +7,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import { AccessConfigError } from '../../access/access-errors.js';
+import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { ICreatorAccess } from '../../access/creator-access.js';
 import { FolderTooLargeError, type WorkspaceService } from '../workspace.service.js';
@@ -110,6 +111,8 @@ async function makeHarness(opts: {
     accessControl,
     'knowledge-base',
     stubCreatorAccess,
+    // Not exercised here — only `.bevelignore`'s tree visibility consults it.
+    { isAdmin: async () => false } as unknown as IAdminAccessService,
   ));
 
   const server = await new Promise<Server>((resolve) => {

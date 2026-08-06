@@ -89,13 +89,18 @@ async function filterReadableEntries(
 
 /**
  * Appended (centrally, in `mount`) to EVERY workspace tool description. A KB
- * author can drop a `CLAUDE.md` at the workspace root to document conventions
+ * author can drop an `AGENTS.md` at the workspace root to document conventions
  * for that knowledge base; agents (ours and external) should consult it before
  * touching files. It rides on every entrypoint — reads (grep/list_files/
  * file_stat) included — because any of them can be a session's first touch.
+ *
+ * `CLAUDE.md` is named as a fallback because knowledge bases seeded before the
+ * rename still carry one, and the seeder never deletes a file it did not
+ * expect. Naming both means an agent finds the conventions either way, instead
+ * of reading none because it looked for the newer name and stopped.
  */
 const KB_CONVENTIONS_NOTE =
-  ' Before your first read or change in a workspace, read `CLAUDE.md` at the KB root (if it exists) — it holds the author\'s conventions for this knowledge base, and you should follow them.';
+  ' Before your first read or change in a workspace, read `AGENTS.md` at the KB root — or `CLAUDE.md` on a knowledge base seeded before it was renamed — if either exists: it holds the author\'s conventions for this knowledge base, and you should follow them.';
 
 const int = (description: string): JsonSchema => ({ type: 'integer', description });
 
@@ -194,7 +199,7 @@ export function registerWorkspaceTools(
     const path = `/api/agent/tools/${spec.name}`;
     const def = toolDef({
       name: spec.name,
-      // Every workspace entrypoint carries the CLAUDE.md reminder, appended once
+      // Every workspace entrypoint carries the AGENTS.md reminder, appended once
       // here so no tool (especially the read-only ones a session hits first) can
       // miss it.
       description: spec.description + KB_CONVENTIONS_NOTE,
