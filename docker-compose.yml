@@ -54,7 +54,7 @@ services:
       # Bitbucket, Azure DevOps, self-hosted): GIT_TOKEN is the Basic-auth
       # password and GIT_USERNAME the Basic username (host-specific — see
       # .env.example).
-      - GIT_TOKEN=${GIT_TOKEN}
+      - GIT_TOKEN=${GIT_TOKEN:-}
       - GIT_USERNAME=${GIT_USERNAME:-}
       - JWT_SECRET=${JWT_SECRET}
       # The deployment owner. REQUIRED: always an admin whatever the sign-in
@@ -82,13 +82,13 @@ services:
       # SSO allow-list (part of the OIDC config above). SSO auto-provisions, so
       # against a multi-tenant issuer this is the only signup boundary.
       - ALLOWED_EMAIL_DOMAINS=${ALLOWED_EMAIL_DOMAINS:-}
-      - KB_REPO_URL=${KB_REPO_URL}
-      - KB_DIR_NAME=${KB_DIR_NAME}
+      - KB_REPO_URL=${KB_REPO_URL:-}
+      - KB_DIR_NAME=${KB_DIR_NAME:-}
       # Branch model. Runtime only now — the frontend is served these over
       # /api/config instead of having them compiled in, so one image runs
       # anywhere and renaming a branch no longer needs a rebuild.
-      - DEFAULT_BRANCH=${DEFAULT_BRANCH}
-      - PROTECTED_BRANCHES=${PROTECTED_BRANCHES}
+      - DEFAULT_BRANCH=${DEFAULT_BRANCH:-}
+      - PROTECTED_BRANCHES=${PROTECTED_BRANCHES:-}
       # 32-byte key (base64 or hex) encrypting secrets-vault values + MCP
       # OAuth client secrets/tokens.
       - SECRETS_ENC_KEY=${SECRETS_ENC_KEY}
