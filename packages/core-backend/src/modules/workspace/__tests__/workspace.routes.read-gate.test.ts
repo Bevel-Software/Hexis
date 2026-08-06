@@ -5,6 +5,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access/creator-access.js';
+import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
@@ -44,6 +45,8 @@ interface Harness {
 async function makeHarness(opts: {
   kbFiles?: Record<string, string>;
   allowFn?: (p: string) => boolean;
+  /** Whether the caller is an admin — only `.bevelignore`'s visibility uses it. */
+  isAdmin?: boolean;
 } = {}): Promise<Harness> {
   const allowP = opts.allowFn ?? allow;
   const canRead = vi.fn(async (_w: string, _e: string, p: string) => allowP(p));
@@ -91,6 +94,7 @@ async function makeHarness(opts: {
       accessControl,
       KB,
       stubCreatorAccess,
+      { isAdmin: async () => opts.isAdmin === true } as unknown as IAdminAccessService,
     ),
   );
   const server = await new Promise<Server>((resolve) => {
@@ -277,5 +281,54 @@ describe('read-permission gates on human read routes', () => {
     ]);
     expect(verdict.get(`${KB}/Knowledge/Open/a.md`)).toBe(true);
     expect(verdict.get(`${KB}/Knowledge/Secret/x.md`)).toBe(false);
+  });
+});
+
+/**
+ * `.bevelignore` decides what the file tree and the agent view show at all, so
+ * it is deployment configuration rather than knowledge. It also sits alone in
+ * being visible — its siblings (`.gitignore`, `roles.yaml`, `access.md`,
+ * `AGENTS.md`) are hidden from every reader by the shipped ignore rules.
+ *
+ * READ PERMISSION IS NOT THE LEVER, which is why this is a listing decision and
+ * not an ACL one: everyone can read the file (it has to be readable to be
+ * applied), so the tests below hold the read verdict at `true` throughout and
+ * assert that admin-ness alone moves the outcome.
+ */
+describe('.bevelignore is admin-only in the file tree', () => {
+  let h: Harness | null = null;
+  afterEach(async () => { if (h) await close(h.server); h = null; });
+
+  const treeFilter = async (isAdmin: boolean) => {
+    h = await makeHarness({ isAdmin, allowFn: () => true });
+    await fetch(`${h.baseUrl}/api/workspace/${WS}/files`);
+    return h.listFilesFilter()!;
+  };
+
+  it('hides it from a non-admin who can otherwise read everything', async () => {
+    const verdict = await (await treeFilter(false))([
+      `${KB}/.bevelignore`,
+      `${KB}/Knowledge/Open/a.md`,
+    ]);
+    expect(verdict.get(`${KB}/.bevelignore`)).toBe(false);
+    // Only that one file — the rest of the tree is untouched.
+    expect(verdict.get(`${KB}/Knowledge/Open/a.md`)).toBe(true);
+  });
+
+  it('shows it to an admin', async () => {
+    const verdict = await (await treeFilter(true))([`${KB}/.bevelignore`]);
+    expect(verdict.get(`${KB}/.bevelignore`)).toBe(true);
+  });
+
+  /** The stack is hierarchical — a nested one governs its own subtree. */
+  it('hides a nested one too, not just the repo-root file', async () => {
+    const verdict = await (await treeFilter(false))([`${KB}/KnowledgeBase/Product/.bevelignore`]);
+    expect(verdict.get(`${KB}/KnowledgeBase/Product/.bevelignore`)).toBe(false);
+  });
+
+  /** Basename match, not substring: a file merely NAMED after it stays visible. */
+  it('does not hide files whose name only contains it', async () => {
+    const verdict = await (await treeFilter(false))([`${KB}/Knowledge/.bevelignore.md`]);
+    expect(verdict.get(`${KB}/Knowledge/.bevelignore.md`)).toBe(true);
   });
 });

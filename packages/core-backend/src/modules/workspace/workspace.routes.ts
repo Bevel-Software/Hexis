@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { IGNORE_FILENAME } from './bevel-ignore.js';
+import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import {
@@ -47,6 +49,7 @@ export function createWorkspaceRoutes(
   accessControl: IAccessControl,
   kbDirName: string,
   creatorAccess: ICreatorAccess,
+  adminAccess: IAdminAccessService,
 ): express.Router {
   const router = express.Router();
 
@@ -479,6 +482,27 @@ export function createWorkspaceRoutes(
       for (const wp of wsRelPaths) {
         const rel = toKbRelative(wp, kbDirName);
         if (rel !== null && structuralRoots.has(rel)) verdict.set(wp, true);
+      }
+
+      // `.bevelignore` is ADMIN-ONLY. It is the file that decides what the file
+      // tree and the agent view show at all, so it is deployment configuration
+      // rather than knowledge — and it sits alone in being visible: its
+      // siblings (`.gitignore`, `roles.yaml`, `access.md`, `AGENTS.md`) are
+      // already hidden from every reader by the shipped ignore rules. Somebody
+      // who cannot act on it gains a puzzle; somebody who can needs to reach it.
+      //
+      // Read permission is deliberately NOT the lever. Everyone can read it —
+      // it has to be readable to be applied — so hiding it is a listing
+      // decision, made here, rather than an ACL fiction maintained in a file.
+      //
+      // Resolved through `AdminAccessService` rather than by asking whether
+      // this caller can write `roles.yaml` in THIS workspace: admin is settled
+      // on the default branch precisely so that editing `roles.yaml` on your
+      // own branch cannot promote you, and the same reasoning applies to
+      // anything gated on being an admin.
+      const ignoreFiles = wsRelPaths.filter((wp) => path.basename(wp) === IGNORE_FILENAME);
+      if (ignoreFiles.length > 0 && !(await adminAccess.isAdmin(userEmail))) {
+        for (const wp of ignoreFiles) verdict.set(wp, false);
       }
       return verdict;
     };
