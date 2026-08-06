@@ -163,6 +163,26 @@ describe('useOpenChangeRequests', () => {
     warn.mockRestore();
   });
 
+  /**
+   * The stale event fires because its sender KNOWS the list changed (a
+   * proposal sent, a suggestion-routed upload landed). The refetch must
+   * bypass the backend's 30s list cache, or the suggestion rows for the
+   * just-uploaded file sit invisible until the TTL — the initial load, with
+   * no such knowledge, takes the cache.
+   */
+  it('refetches FRESH on the stale event, cached on initial load', async () => {
+    const { result } = renderIt();
+    await waitFor(() => expect(result.current.paths.size).toBe(1));
+    expect(api.listMyChangeRequests).toHaveBeenCalledWith({});
+    expect(api.listOpenChangeRequests).toHaveBeenCalledWith({});
+
+    window.dispatchEvent(new Event('bevel:pr-stale'));
+    await waitFor(() =>
+      expect(api.listMyChangeRequests).toHaveBeenCalledWith({ fresh: true }),
+    );
+    expect(api.listOpenChangeRequests).toHaveBeenCalledWith({ fresh: true });
+  });
+
   it('issues ONE request however many consumers read it', async () => {
     const { result } = renderHook(
       () => [useOpenChangeRequests(), useOpenChangeRequests(), useOpenChangeRequests()],

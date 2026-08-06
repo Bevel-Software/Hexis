@@ -905,8 +905,11 @@ export class WorkflowService implements IWorkflowService {
     return this.prs.listOpenPrs(opts);
   }
 
-  listChangeRequestsAuthoredBy(emailOrLogin: string): Promise<ChangeRequest[]> {
-    return this.prs.listPrsAuthoredBy(emailOrLogin);
+  listChangeRequestsAuthoredBy(
+    emailOrLogin: string,
+    opts?: { fresh?: boolean },
+  ): Promise<ChangeRequest[]> {
+    return this.prs.listPrsAuthoredBy(emailOrLogin, opts);
   }
 
   listChangeRequestsForUser(

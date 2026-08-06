@@ -55,8 +55,8 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
 
   useEffect(() => {
     let cancelled = false;
-    const load = () => {
-      listOpenChangeRequests()
+    const load = (opts: { fresh?: boolean } = {}) => {
+      listOpenChangeRequests(opts)
         .then((data) => {
           if (!cancelled) setRequests(data);
         })
@@ -66,7 +66,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
           console.warn('[OpenChangeRequests] load failed:', err);
           if (!cancelled) setRequests([]);
         });
-      listMyChangeRequests()
+      listMyChangeRequests(opts)
         .then((data) => {
           if (!cancelled) setMine(data.filter((c) => c.state === 'open'));
         })
@@ -78,11 +78,16 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     };
     load();
     // The same signal the dock listens for: something in the app just changed
-    // the request list (a share dialog opened one, an agent turn finished).
-    window.addEventListener(PR_STALE_EVENT, load);
+    // the request list (a proposal sent, a suggestion-routed upload landed,
+    // an agent turn finished). FRESH, bypassing the backend's list cache —
+    // the event fires because the sender KNOWS the list changed, and a cached
+    // answer would hide exactly the change it is announcing (the suggestion
+    // rows for a just-uploaded file would sit invisible until the TTL).
+    const onStale = () => load({ fresh: true });
+    window.addEventListener(PR_STALE_EVENT, onStale);
     return () => {
       cancelled = true;
-      window.removeEventListener(PR_STALE_EVENT, load);
+      window.removeEventListener(PR_STALE_EVENT, onStale);
     };
   }, []);
 

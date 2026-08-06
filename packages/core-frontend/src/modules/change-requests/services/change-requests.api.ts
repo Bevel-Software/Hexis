@@ -10,10 +10,17 @@ import { getOrCreateWorkspace, readFile } from '../../workspace/services/workspa
  * so neither surface has to import the other's service layer.
  */
 
-/** All open change requests (callers filter to a folder or a file). */
-export async function listOpenChangeRequests(): Promise<PullRequestSummary[]> {
+/**
+ * All open change requests (callers filter to a folder or a file).
+ * `opts.fresh` bypasses the backend's 30s list cache — for event-driven
+ * refreshes that KNOW the list just changed, where a cached answer would
+ * hide the very change that triggered them.
+ */
+export async function listOpenChangeRequests(
+  opts: { fresh?: boolean } = {},
+): Promise<PullRequestSummary[]> {
   return handleApiResponse<PullRequestSummary[]>(
-    await authFetch('/api/workflow/change-requests'),
+    await authFetch(`/api/workflow/change-requests${opts.fresh ? '?fresh=1' : ''}`),
   );
 }
 
@@ -21,11 +28,13 @@ export async function listOpenChangeRequests(): Promise<PullRequestSummary[]> {
  * The caller's own change requests (any state; callers filter to open). The
  * identity filter lives server-side — an email-hash match — which is the only
  * place it can: the broad list deliberately exposes no email to compare
- * against.
+ * against. Same `fresh` contract as above.
  */
-export async function listMyChangeRequests(): Promise<PullRequestSummary[]> {
+export async function listMyChangeRequests(
+  opts: { fresh?: boolean } = {},
+): Promise<PullRequestSummary[]> {
   return handleApiResponse<PullRequestSummary[]>(
-    await authFetch('/api/workflow/change-requests/mine'),
+    await authFetch(`/api/workflow/change-requests/mine${opts.fresh ? '?fresh=1' : ''}`),
   );
 }
 

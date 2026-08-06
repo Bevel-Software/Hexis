@@ -256,7 +256,10 @@ export interface IWorkflowService {
 
   listChangeRequests(opts?: { fresh?: boolean }): Promise<ChangeRequest[]>;
   /** Change requests authored by the caller (hash-matched against the body marker). */
-  listChangeRequestsAuthoredBy(emailOrLogin: string): Promise<ChangeRequest[]>;
+  listChangeRequestsAuthoredBy(
+    emailOrLogin: string,
+    opts?: { fresh?: boolean },
+  ): Promise<ChangeRequest[]>;
   /** Change requests touching files the user has write permission on. */
   listChangeRequestsForUser(
     workspaceId: string,
