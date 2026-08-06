@@ -39,6 +39,15 @@ export function PersonalGroupPage() {
 
   const name = personalGroupName(user?.name);
   const items = useMemo(() => data.items.filter((i) => i.group === null), [data.items]);
+  /**
+   * For the add dialog's name check. Every skill, not only the ungrouped ones:
+   * a skill's id is its name and ids are global, so a new skill here collides
+   * with a group's just as surely as with one of your own.
+   */
+  const allSkillNames = useMemo(
+    () => data.items.filter((i) => i.kind === 'skill').map((i) => i.name),
+    [data.items],
+  );
   const skillItems = items.filter((i) => i.kind === 'skill');
   const toolItems = items.filter((i) => i.kind === 'integration');
 
@@ -82,7 +91,13 @@ export function PersonalGroupPage() {
         emptyTools="No sign-ins of your own yet."
       />
 
-      {addOpen && <PersonalAddDialog name={name} onClose={() => setAddOpen(false)} />}
+      {addOpen && (
+        <PersonalAddDialog
+          name={name}
+          existingSkills={allSkillNames}
+          onClose={() => setAddOpen(false)}
+        />
+      )}
     </div>
   );
 }
