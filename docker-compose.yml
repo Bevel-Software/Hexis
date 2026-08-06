@@ -76,6 +76,13 @@ services:
       # reached the container and health reported 'unknown' on every hosted
       # deploy. `version.ts` has named this fallback all along; this is what
       # makes it true. Nothing to fill in: absent, health still says 'unknown'.
+      #
+      # LEAVE COOLIFY'S "Include Source Commit in Build" OFF. It controls
+      # BUILD-time availability, and turning it on defeats layer caching across
+      # commits — the setting says so itself, and adds that SOURCE_COMMIT "will
+      # still be available at runtime" either way. Runtime is all we need:
+      # `version.ts` reads it from the process environment when the server
+      # starts, not from anything baked into the image.
       - SOURCE_COMMIT
       # Git host credential. The KB can live on any git server (GitHub, GitLab,
       # Bitbucket, Azure DevOps, self-hosted): GIT_TOKEN is the Basic-auth
