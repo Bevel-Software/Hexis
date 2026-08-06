@@ -29,11 +29,11 @@ services:
   app:
     build:
       context: .
-      args:
-        # Baked into the image and returned by GET /api/health so deploys can
-        # be confirmed by sha, e.g. `GIT_SHA=$(git rev-parse HEAD) docker
-        # compose build`. Unset → health reports 'unknown'.
-        GIT_SHA: ${GIT_SHA:-}
+      # No `args:` block. The image still accepts a GIT_SHA build arg — the
+      # Dockerfile declares it, and `GET /api/health` reports whatever it was
+      # given (`unknown` otherwise) — but naming it here made every deployment
+      # UI that reads this file ask for a value nobody sets by hand. CI passes
+      # it directly: `--build-arg GIT_SHA=$(git rev-parse HEAD)`.
     # NO host port is published here, deliberately. A reverse proxy (Coolify,
     # Traefik, nginx) reaches the container on this port over the compose
     # network, and publishing a FIXED host port alongside that breaks every
@@ -53,18 +53,19 @@ services:
     # purpose, for two reasons.
     #
     # It keeps the deployment UI honest. An orchestrator that reads this file
-    # turns every `${VAR}` it finds into a variable you must fill in or leave
-    # blank — and then refuses to let you delete it, because the file still
-    # names it. A pass-through has no `${VAR}` to find, so the settings that
-    # are collected on the SETUP SCREEN stop being presented as deployment
+    # turns every interpolated reference it finds into a variable you must fill
+    # in or leave blank — and then refuses to let you delete it, because the
+    # file still names it. A pass-through leaves nothing to find, so the
+    # settings collected on the SETUP SCREEN stop being presented as deployment
     # configuration you forgot.
     #
-    # And it keeps `${VAR:-}` from lying. That form defines the variable as an
-    # empty string, which is a value; a pass-through leaves it genuinely unset.
-    # The app treats both as absent, so this is belt and braces rather than
-    # load-bearing — but "unset" is what is meant, so it is what is written.
+    # And it keeps the empty-default form from lying. That form defines the
+    # variable as an empty string, which is a value; a pass-through leaves it
+    # genuinely unset. The app treats both as absent, so this is belt and
+    # braces rather than load-bearing — but "unset" is what is meant, so it
+    # is what is written.
     #
-    # Variables that are genuinely REQUIRED keep their `${VAR}` reference, so
+    # Variables that are genuinely REQUIRED keep an interpolated reference, so
     # the operator is still prompted for them.
     environment:
       - NODE_ENV=production

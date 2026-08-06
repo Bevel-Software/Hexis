@@ -86,8 +86,10 @@ ENV PORT=3001
 
 # Bake the deployed commit sha into the image so `GET /api/health` can report
 # it. `.git` is in .dockerignore, so the sha can't be read inside the build —
-# pass it in: `docker compose build` forwards $GIT_SHA (see docker-compose.yml)
-# and CI passes `--build-arg GIT_SHA=$(git rev-parse HEAD)`.
+# pass it in explicitly: `--build-arg GIT_SHA=$(git rev-parse HEAD)`, which is
+# what CI does. `docker-compose.yml` deliberately does NOT declare it as a build
+# arg — naming it there made every deployment UI reading that file ask for a
+# value nobody sets by hand. Unset, health reports 'unknown'.
 ARG GIT_SHA
 ENV GIT_SHA=${GIT_SHA}
 
