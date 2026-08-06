@@ -858,6 +858,24 @@ describe('FileExplorer rows — the prototype tree', () => {
     expect(openPr).toHaveBeenCalledWith(12);
   });
 
+  /**
+   * "Not in the tree" is ambiguous: new on the suggestions branch, or FILTERED
+   * by the server (.bevelignore, read gates). The overlay may only resurrect
+   * the first — a proposal under a hidden root folder must not conjure that
+   * folder back into the sidebar.
+   */
+  it('does not synthesize a row under a root folder the server hid', () => {
+    renderExplorer({
+      fileTree: TREE,
+      // `Groups` is not in TREE — the server filtered it (bevelignored). The
+      // touched file underneath must NOT appear.
+      minePaths: new Map([['Groups/newsletter/SKILL.md', 12]]),
+    });
+    expect(screen.queryByTitle('Proposed by you — opens the change request')).toBeNull();
+    expect(screen.queryByText('Groups')).toBeNull();
+    expect(screen.queryByText('SKILL.md')).toBeNull();
+  });
+
   it('keeps a file that exists on the branch as a normal row even when my request touches it', () => {
     const openPr = vi.fn();
     renderExplorer({

@@ -3,11 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import {
-  DATA_DIR,
-  KNOWLEDGE_BASE_DIR,
-  GROUPS_DIR,
-} from '@bevel-software/platform-shared';
+import { KNOWLEDGE_BASE_DIR, GROUPS_DIR } from '@bevel-software/platform-shared';
 import type { IKbSeedService } from './kb-seed.interface.js';
 
 const execFileAsync = promisify(execFile);
@@ -36,12 +32,12 @@ const BOT_EMAIL = 'bevel-workflow@bevel.software';
  * directly, so a repo can't be seeded with a stale hard-coded Admin list.
  */
 const REQUIRED_FILES: readonly string[] = ['access.md', 'CLAUDE.md', '.bevelignore', '.gitignore'];
-// `Agents/` and `Pipelines/` are deliberately NOT here (or in the template)
-// anymore: they belonged to a retired execution-layer design, and a seeder
-// that re-creates a folder every time an operator deletes it is worse than no
-// seeder. Legacy KBs that still carry them keep working — the explorer folds
-// unrecognised root folders into the Knowledge section.
-const REQUIRED_DIRS: readonly string[] = [KNOWLEDGE_BASE_DIR, DATA_DIR, GROUPS_DIR];
+// Required = the app cannot OPERATE without it: `KnowledgeBase/` roots the
+// graph, `Groups/` roots skills and tools. `Data/` is not here — it ships in
+// the template for fresh seeds, but it is optional records, and a seeder that
+// re-creates a folder every time an operator deletes it is worse than no
+// seeder (the same reasoning that removed the retired `Agents/`/`Pipelines/`).
+const REQUIRED_DIRS: readonly string[] = [KNOWLEDGE_BASE_DIR, GROUPS_DIR];
 
 /** Redact the token from any string that might surface in a log or error. */
 function redact(s: string): string {
@@ -167,6 +163,13 @@ export class KbSeedService implements IKbSeedService {
    * stays consistent with origin, and the top-up is retried on a future clone.
    */
   async topUpWorkspace(repoDir: string, branch: string): Promise<void> {
+    // Scaffolding lands on PROTECTED branches only. A draft or suggestions
+    // branch is somebody's change-in-waiting, and a seeder commit there
+    // surfaces as noise in their change request's diff against the default
+    // branch (a stray scaffolding file riding along in a skill proposal was
+    // exactly this). Whatever the protected branches are missing, they get
+    // when THEY load — and drafts fork from them.
+    if (!this.protectedBranches().includes(branch)) return;
     try {
       const added: string[] = [];
       for (const rel of REQUIRED_FILES) {

@@ -942,7 +942,8 @@ function FileTreeNode({
 // contributed explorer items.)
 
 export function FileExplorer() {
-  const { fileTree, dispatchUpload, uploadError, clearUploadError, pendingUploads } = useWorkspace();
+  const { fileTree, kbDirName, dispatchUpload, uploadError, clearUploadError, pendingUploads } =
+    useWorkspace();
   const [dragOver, setDragOver] = useState(false);
   // Download is now a per-path permission (resolved server-side from the
   // access tree's `download:` verb), so there's no global preflight gate
@@ -964,11 +965,29 @@ export function FileExplorer() {
   const suggestionOnlyPaths = useMemo(() => {
     const map = new Map<string, number>();
     if (!serverTree) return map;
+    /**
+     * "Not in the tree" has TWO causes, and only one earns a row: the file is
+     * new on the suggestions branch — or the server FILTERED it (.bevelignore,
+     * read gates). The client cannot evaluate those rules itself, but it can
+     * read their verdict off the tree: if the path's top-level folder under
+     * the repo root is absent, the whole subtree is hidden (a skill proposal
+     * under a bevelignored `Groups/` was the observed leak), so the overlay
+     * must not resurrect it. The known cost: a proposal that CREATES a new
+     * top-level root folder shows no row until it merges.
+     */
+    const hiddenRoot = (path: string): boolean => {
+      const prefix = kbDirName && path.startsWith(`${kbDirName}/`) ? `${kbDirName}/` : '';
+      const segments = path.slice(prefix.length).split('/');
+      if (segments.length < 2) return false; // directly under the repo root
+      return !pathExistsInTree(serverTree, `${prefix}${segments[0]}`);
+    };
     for (const [path, crNumber] of openChangeRequests.minePaths) {
-      if (!pathExistsInTree(serverTree, path)) map.set(path, crNumber);
+      if (!pathExistsInTree(serverTree, path) && !hiddenRoot(path)) {
+        map.set(path, crNumber);
+      }
     }
     return map;
-  }, [serverTree, openChangeRequests]);
+  }, [serverTree, openChangeRequests, kbDirName]);
 
   const mergedTree = useMemo(() => {
     if (!serverTree || suggestionOnlyPaths.size === 0) return serverTree;
