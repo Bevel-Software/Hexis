@@ -5,10 +5,12 @@ import type { PullRequestSummary } from '@bevel-software/platform-shared';
 
 const api = vi.hoisted(() => ({
   listOpenChangeRequests: vi.fn(),
+  listMyChangeRequests: vi.fn(),
   listPullRequestsForMe: vi.fn(),
 }));
 vi.mock('../../../library/services/library.api', () => ({
   listOpenChangeRequests: api.listOpenChangeRequests,
+  listMyChangeRequests: api.listMyChangeRequests,
 }));
 vi.mock('../../../git/services/pr.api', () => ({
   listPullRequestsForMe: api.listPullRequestsForMe,
@@ -52,8 +54,10 @@ const renderIt = (kbDirName: string | null = 'knowledge-base') =>
 describe('useOpenChangeRequests', () => {
   beforeEach(() => {
     api.listOpenChangeRequests.mockReset();
+    api.listMyChangeRequests.mockReset();
     api.listPullRequestsForMe.mockReset();
     api.listOpenChangeRequests.mockResolvedValue([pr()]);
+    api.listMyChangeRequests.mockResolvedValue([]);
   });
 
   /**
@@ -127,6 +131,35 @@ describe('useOpenChangeRequests', () => {
     await waitFor(() => expect(result.current.paths.size).toBe(1));
     expect(api.listOpenChangeRequests).toHaveBeenCalled();
     expect(api.listPullRequestsForMe).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The suggestion overlay's data. `/mine` is the one endpoint that can
+   * answer "is this request YOURS" (the identity filter is an email-hash
+   * match, server-side), and the map joins the same two path spaces as the
+   * broad set — a raw repo-relative key would match zero tree rows.
+   */
+  it('maps my own open requests to workspace-relative paths with their number', async () => {
+    api.listMyChangeRequests.mockResolvedValue([
+      pr({ number: 12, touchedNodePaths: ['Knowledge/New idea.md'] }),
+      pr({ number: 13, state: 'merged', touchedNodePaths: ['Knowledge/Done.md'] }),
+    ]);
+    const { result } = renderIt();
+    await waitFor(() =>
+      expect(result.current.minePaths.get('knowledge-base/Knowledge/New idea.md')).toBe(12),
+    );
+    // A merged request is history, not a suggestion — it must not resurrect a row.
+    expect(result.current.minePaths.has('knowledge-base/Knowledge/Done.md')).toBe(false);
+    expect(result.current.minePaths.has('Knowledge/New idea.md')).toBe(false);
+  });
+
+  it('degrades to no suggestion rows when /mine cannot load', async () => {
+    api.listMyChangeRequests.mockRejectedValue(new Error('network down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { result } = renderIt();
+    await waitFor(() => expect(result.current.paths.size).toBe(1));
+    expect(result.current.minePaths.size).toBe(0);
+    warn.mockRestore();
   });
 
   it('issues ONE request however many consumers read it', async () => {

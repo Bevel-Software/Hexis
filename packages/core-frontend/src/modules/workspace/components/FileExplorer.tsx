@@ -25,8 +25,9 @@ import {
   AGENTS_DIR,
   PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
-import { useWorkspace } from '../state/workspace.context';
-import { mergePendingIntoTree, findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
+import { useWorkspace, type PendingEntry } from '../state/workspace.context';
+import { mergePendingIntoTree, pathExistsInTree, findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
+import { PrViewerContext } from '../../pr/state/pr-viewer.context';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useFileNav } from '../routing/kb-routes';
 import { authFetch } from '../../../lib/api';
@@ -109,6 +110,29 @@ const usePinned = () => useContext(PinnedContext);
 // renders the dialog.
 const ManageAccessContext = createContext<(entry: FileTreeEntry) => void>(() => {});
 const useManageAccess = () => useContext(ManageAccessContext);
+
+/**
+ * The tree shows files from TWO places: this branch, and the caller's own
+ * open change requests. A path in this controller is the second kind — it was
+ * synthesized into the tree from `minePaths` because it does not exist on the
+ * branch — and its row renders differently and opens the change request,
+ * because there is no content here to open.
+ *
+ * Context, not props, for the same reason as the two above: the tree is
+ * recursive, and every intermediate directory would otherwise have to carry
+ * a concern that only file rows have.
+ */
+interface SuggestionsController {
+  /** CR number for a synthesized suggestion-only path; null for real files. */
+  crFor(path: string): number | null;
+  /** Open the change request view (no-op when no viewer is mounted, e.g. tests). */
+  open(crNumber: number): void;
+}
+const SuggestionsContext = createContext<SuggestionsController>({
+  crFor: () => null,
+  open: () => {},
+});
+const useSuggestions = () => useContext(SuggestionsContext);
 
 /** Depth-first lookup of a tree entry by its exact relativePath. */
 function findEntryByPath(node: FileTreeEntry, path: string): FileTreeEntry | null {
@@ -413,6 +437,7 @@ function FileTreeNode({
   const { openFile } = useFileNav();
   // One shared fetch behind this — see `OpenChangeRequestsProvider`.
   const openChangeRequests = useOpenChangeRequests();
+  const suggestions = useSuggestions();
 
   const handleDownload = useCallback(async () => {
     if (!workspaceId) return;
@@ -792,6 +817,36 @@ function FileTreeNode({
     );
   }
 
+  // A file from the caller's own open change request that does not exist on
+  // this branch. Its row is a LINK to the request, not a file: there is no
+  // content here to show, so clicking opens the change-request view, and none
+  // of the file affordances (rename, drag, download, context menu) apply —
+  // they would all 404 against a path this branch has never heard of. The
+  // accent colour is the tell that this is proposed, not present.
+  const suggestedCr = suggestions.crFor(entry.relativePath);
+  if (suggestedCr !== null) {
+    return (
+      <button
+        type="button"
+        className={cn(
+          ROW_CLASS,
+          'text-accent hover:bg-hover hover:text-accent-hover',
+          'focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ink-muted',
+        )}
+        style={{ paddingLeft }}
+        onClick={() => suggestions.open(suggestedCr)}
+        title="Proposed by you — opens the change request"
+      >
+        <CaretSlot show={false} />
+        <span className="truncate">{entry.name}</span>
+        <span
+          aria-hidden
+          className="ml-auto h-1.5 w-1.5 flex-none rounded-full bg-accent"
+        />
+      </button>
+    );
+  }
+
   const isActive = entry.relativePath === openFilePath;
 
   return (
@@ -898,9 +953,47 @@ export function FileExplorer() {
   // and `handleDownload` shows the error.
   // Optimistic overlay: every dropped/picked file shows up in the tree
   // within a frame, even before its commit echoes back from the server.
-  const mergedTree = useMemo(
+  const serverTree = useMemo(
     () => (fileTree ? mergePendingIntoTree(fileTree, pendingUploads) : null),
     [fileTree, pendingUploads],
+  );
+
+  // The caller's own proposed files that do NOT exist on this branch — they
+  // live only on the personal suggestions branch behind an open change
+  // request. The tree shows them beside the branch's real files (synthesized
+  // below), coloured differently, and clicking one opens the request.
+  const openChangeRequests = useOpenChangeRequests();
+  const suggestionOnlyPaths = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!serverTree) return map;
+    for (const [path, crNumber] of openChangeRequests.minePaths) {
+      if (!pathExistsInTree(serverTree, path)) map.set(path, crNumber);
+    }
+    return map;
+  }, [serverTree, openChangeRequests]);
+
+  const mergedTree = useMemo(() => {
+    if (!serverTree || suggestionOnlyPaths.size === 0) return serverTree;
+    // Reuses the pending-upload synthesizer: same parent-directory creation,
+    // same sort order, and a real entry always wins over a synthesized one.
+    const asEntries = new Map<string, PendingEntry>();
+    for (const path of suggestionOnlyPaths.keys()) {
+      asEntries.set(path, { fullPath: path, type: 'file' });
+    }
+    return mergePendingIntoTree(serverTree, asEntries);
+  }, [serverTree, suggestionOnlyPaths]);
+
+  // Nullable on purpose: unit tests mount the explorer without a PR viewer,
+  // and a suggestion row that cannot open anything should do nothing rather
+  // than take the tree down.
+  const prViewer = useContext(PrViewerContext);
+  const openPr = prViewer?.openPr;
+  const suggestionsController = useMemo<SuggestionsController>(
+    () => ({
+      crFor: (path) => suggestionOnlyPaths.get(path) ?? null,
+      open: (crNumber) => openPr?.(crNumber),
+    }),
+    [suggestionOnlyPaths, openPr],
   );
 
   // Pinned folders — a personal, client-side shortcut list surfaced at the top
@@ -1060,6 +1153,7 @@ export function FileExplorer() {
       )}
       <PinnedContext.Provider value={pinnedController}>
       <ManageAccessContext.Provider value={setAccessTarget}>
+      <SuggestionsContext.Provider value={suggestionsController}>
       <div className="flex-1 overflow-y-auto min-h-0">
         {/* "Company Context", not "Pinned". The mechanism is pinning; the
             SECTION is the handful of places this company actually works out
@@ -1108,6 +1202,7 @@ export function FileExplorer() {
           <FileTreeNode entry={mergedTree} depth={0} />
         )}
       </div>
+      </SuggestionsContext.Provider>
       </ManageAccessContext.Provider>
       </PinnedContext.Provider>
       <PullRequestsForMe />

@@ -78,7 +78,7 @@ function Wrap({
     <MemoryRouter>
       <WorkspaceContext.Provider value={workspace}>
         <OpenChangeRequestsContext.Provider
-          value={{ paths: new Set(changeRequestPaths), forPath: () => [] }}
+          value={{ paths: new Set(changeRequestPaths), forPath: () => [], minePaths: new Map() }}
         >
           {children}
         </OpenChangeRequestsContext.Provider>

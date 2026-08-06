@@ -61,6 +61,18 @@ vi.mock('../../../workflow/services/lock.api', () => ({
   },
 }));
 
+// The propose flow's one side effect that leaves the page: the network call
+// that commits to the suggestions branch and opens the change request. The
+// spy is the assertion surface; everything else in library.api stays real.
+const proposeMock = vi.hoisted(() =>
+  vi.fn(async () => ({ branch: 'suggestions/reader/knowledge' })),
+);
+vi.mock('../../../library/services/library.api', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../../library/services/library.api')>();
+  return { ...actual, proposeKnowledgeChange: proposeMock };
+});
+
 // The access sheet is a 1200-line dialog with its own suite and its own
 // endpoints. Here it only has to prove WHICH entry the page handed it — a file
 // and its parent folder are the two share scopes, and picking the wrong one is
@@ -162,6 +174,8 @@ function ViewerHarness({
   kbDirName = 'knowledge-base',
   addTab,
   changeRequests = [],
+  authUser = null,
+  captureTyped = false,
 }: {
   initialContent?: string;
   pendingValue?: string;
@@ -171,8 +185,17 @@ function ViewerHarness({
   addTab?: WorkspaceContextValue['addTab'];
   /** Open change requests touching `filePath`. */
   changeRequests?: { number: number; title: string; who: string }[];
+  /** The signed-in user — the propose flow needs one to author the request. */
+  authUser?: AuthContextValue['user'];
+  /**
+   * Route `setActiveTabContent` into `openFileContent` (savedContent stays
+   * put), the way the real workspace state does. Opt-in so the many existing
+   * tests keep the historical no-op.
+   */
+  captureTyped?: boolean;
 }) {
   const [openFileContent, setOpenFileContent] = useState(initialContent);
+  const [savedContent, setSavedContent] = useState(initialContent);
   const [pendingFileContent, setPendingFileContent] = useState<string | null>(null);
 
   useEffect(() => {
@@ -184,10 +207,11 @@ function ViewerHarness({
     };
   }, [pendingValue]);
 
+  const effectiveSaved = captureTyped ? savedContent : openFileContent;
   const tab = {
     path: filePath,
     content: openFileContent,
-    savedContent: openFileContent,
+    savedContent: effectiveSaved,
     isDirty: false,
     pendingFileContent,
   };
@@ -200,10 +224,10 @@ function ViewerHarness({
     dirtyTabFilenames: [],
     openFilePath: filePath,
     openFileContent,
-    openFileSavedContent: openFileContent,
+    openFileSavedContent: effectiveSaved,
     hasUnsavedFileChanges: false,
     pendingFileContent,
-    setActiveTabContent: () => {},
+    setActiveTabContent: captureTyped ? (v: string) => setOpenFileContent(v) : () => {},
     uploadError: null,
     isUploading: false,
     uploadProgress: null,
@@ -228,6 +252,7 @@ function ViewerHarness({
     moveEntry: async () => {},
     saveFile: async (_relativePath: string, content: string) => {
       setOpenFileContent(content);
+      setSavedContent(content);
     },
     reloadTabFromDisk: async () => {},
     setPendingContent: (content: string) => {
@@ -257,8 +282,8 @@ function ViewerHarness({
     clearError: () => {},
   };
   const auth: AuthContextValue = {
-    user: null,
-    token: null,
+    user: authUser,
+    token: authUser ? 't' : null,
     isLoading: false,
     login: async () => {},
     logout: () => {},
@@ -286,6 +311,7 @@ function ViewerHarness({
                 <OpenChangeRequestsContext.Provider
                   value={{
                     paths: new Set(changeRequests.length ? [filePath] : []),
+                    minePaths: new Map(),
                     forPath: (p) =>
                       p === filePath
                         ? (changeRequests.map((c) => ({
@@ -689,5 +715,117 @@ describe('FileViewer', () => {
     await user.click(screen.getByRole('button', { name: 'More actions' }));
     await user.click(screen.getByRole('menuitem', { name: /File details/ }));
     expect(wrap().className).toContain('max-w-[980px]');
+  });
+});
+
+/**
+ * The reader's write path. Where a write grant opens the editor, its absence
+ * now opens the SAME editor pointed somewhere else: the text goes to the
+ * caller's personal suggestions branch as a change request, and the file on
+ * this branch is untouched until an owner approves.
+ */
+describe('FileViewer — proposing a change without write access', () => {
+  const reader = { id: 'u9', email: 'reader@example.com', name: 'Rae Reader' };
+
+  function denyWrite() {
+    accessMock.result = {
+      canWrite: false,
+      canOwner: false,
+      eligible: { roles: ['Admin'], users: [] },
+      owners: EMPTY_ELIGIBLE,
+    };
+  }
+
+  afterEach(() => {
+    accessMock.result = {
+      canWrite: true,
+      canOwner: false,
+      eligible: { roles: ['Admin'], users: [] },
+      owners: EMPTY_ELIGIBLE,
+    };
+    proposeMock.mockClear();
+    proposeMock.mockResolvedValue({ branch: 'suggestions/reader/knowledge' });
+  });
+
+  it('offers Propose changes exactly where Edit is refused', async () => {
+    denyWrite();
+    render(
+      <ViewerHarness initialContent="official" branch="target-company-state" authUser={reader} />,
+    );
+    expect(
+      await screen.findByRole('button', { name: 'Propose changes' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+  });
+
+  it('does not offer Propose changes to someone who can simply edit', async () => {
+    render(
+      <ViewerHarness initialContent="official" branch="target-company-state" authUser={reader} />,
+    );
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Propose changes' })).not.toBeInTheDocument();
+  });
+
+  it('sends the typed text as a knowledge proposal and reports it', async () => {
+    denyWrite();
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    // The read-only "you can't edit" strip yields to the propose surface —
+    // showing both would contradict the open editor.
+    expect(screen.queryByText(/You don't have permission to edit/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/You're proposing a change/)).toBeInTheDocument();
+
+    const textarea = await screen.findByRole('textbox');
+    await user.clear(textarea);
+    await user.type(textarea, 'the corrected paragraph');
+    await user.click(screen.getByRole('button', { name: 'Send proposal' }));
+
+    await waitFor(() =>
+      expect(proposeMock).toHaveBeenCalledWith({
+        // kbDirName stripped: the propose service takes repo-relative paths.
+        repoRelativePath: 'Knowledge/Foo.md',
+        content: 'the corrected paragraph',
+        userEmail: 'reader@example.com',
+        userName: 'Rae Reader',
+      }),
+    );
+    // Back in read mode, with the one confirmation that the change is now
+    // someone else's to act on.
+    expect(
+      await screen.findByText(/sent as a change request/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  it('discard walks away without sending anything', async () => {
+    denyWrite();
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Propose changes' }));
+    const textarea = await screen.findByRole('textbox');
+    await user.type(textarea, ' — never mind');
+    await user.click(screen.getByRole('button', { name: 'Discard' }));
+
+    expect(proposeMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    // The refusal strip is back once the editor is gone.
+    expect(await screen.findByText(/You don't have permission to edit/i)).toBeInTheDocument();
   });
 });

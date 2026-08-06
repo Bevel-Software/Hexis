@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
-import { listOpenChangeRequests } from '../../library/services/library.api';
+import { listMyChangeRequests, listOpenChangeRequests } from '../../library/services/library.api';
 import { useWorkspace } from './workspace.context';
 import { PR_STALE_EVENT } from '../../../core/events';
 import {
@@ -43,6 +43,12 @@ import {
 export function OpenChangeRequestsProvider({ children }: { children: ReactNode }) {
   const { kbDirName } = useWorkspace();
   const [requests, setRequests] = useState<PullRequestSummary[]>([]);
+  /**
+   * The caller's OWN open requests, from `/mine` — the identity filter lives
+   * server-side (email-hash match), which is the only place it can: the broad
+   * list deliberately exposes no email to compare against.
+   */
+  const [mine, setMine] = useState<PullRequestSummary[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -56,6 +62,15 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
           // document. The dots and the banner simply do not appear.
           console.warn('[OpenChangeRequests] load failed:', err);
           if (!cancelled) setRequests([]);
+        });
+      listMyChangeRequests()
+        .then((data) => {
+          if (!cancelled) setMine(data.filter((c) => c.state === 'open'));
+        })
+        .catch((err) => {
+          // Same degradation contract: no suggestion rows, not an error page.
+          console.warn('[OpenChangeRequests] mine load failed:', err);
+          if (!cancelled) setMine([]);
         });
     };
     load();
@@ -79,11 +94,23 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
         else byPath.set(workspaceRelative, [pr]);
       }
     }
+    // Same path-space conversion as above — `touchedNodePaths` is
+    // KB-repo-relative here too. First open request wins a contested path;
+    // one file in two of your own bundles is already a state the UI cannot
+    // untangle, so the row just links to the older one.
+    const minePaths = new Map<string, number>();
+    for (const pr of mine) {
+      for (const repoRelative of pr.touchedNodePaths) {
+        const workspaceRelative = `${kbDirName}/${repoRelative}`;
+        if (!minePaths.has(workspaceRelative)) minePaths.set(workspaceRelative, pr.number);
+      }
+    }
     return {
       paths: new Set(byPath.keys()),
       forPath: (path: string) => byPath.get(path) ?? [],
+      minePaths,
     };
-  }, [requests, kbDirName]);
+  }, [requests, mine, kbDirName]);
 
   return (
     <OpenChangeRequestsContext.Provider value={value}>

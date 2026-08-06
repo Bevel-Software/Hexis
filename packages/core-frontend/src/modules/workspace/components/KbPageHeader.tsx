@@ -53,6 +53,17 @@ export interface KbPageHeaderProps {
   editMode: boolean;
   /** "Loading…" while the lock is acquired. */
   entering: boolean;
+  /**
+   * The reader-without-write-permission editor is open. Mutually exclusive
+   * with `editMode` in practice: propose is only offered where Edit is hidden
+   * (`canWrite === false`), and Edit only where it isn't.
+   */
+  proposeMode: boolean;
+  /** The proposal is on the wire — "Send" disables and says so. */
+  proposalBusy: boolean;
+  onPropose(): void;
+  onSendProposal(): void;
+  onDiscardProposal(): void;
   /** Disables Edit and explains why via `title`. */
   lockedBy: string | null;
   railOpen: boolean;
@@ -110,6 +121,11 @@ export function KbPageHeader({
   canWrite,
   editMode,
   entering,
+  proposeMode,
+  proposalBusy,
+  onPropose,
+  onSendProposal,
+  onDiscardProposal,
   lockedBy,
   railOpen,
   historyAvailable,
@@ -159,6 +175,10 @@ export function KbPageHeader({
   // (`FileViewer.tsx:688`). Dropping `isReviewingPending` breaks the test that
   // asserts the review badge and the button's absence together.
   const showEdit = canWrite !== false && !isReviewingPending && activeTab === 'content';
+  // The counterpart for readers: exactly where Edit is REFUSED (a hard
+  // `canWrite === false`, never the in-flight null), the page offers the
+  // review path instead. Same gates otherwise — same tab, no agent review.
+  const showPropose = canWrite === false && !isReviewingPending && activeTab === 'content';
 
   return (
     <div className="mb-2 flex flex-wrap items-center gap-3">
@@ -271,6 +291,38 @@ export function KbPageHeader({
               ? "Couldn't copy the page"
               : ''}
         </span>
+
+        {/* The reader's write path. Labelled buttons, not icons: proposing is
+            neither frequent nor instantly reversible — it opens a change
+            request other people will read — so it carries words, the same
+            weight rule that keeps Share labelled. */}
+        {showPropose &&
+          (proposeMode ? (
+            <>
+              <Button variant="quiet" size="sm" onClick={onDiscardProposal} disabled={proposalBusy}>
+                Discard
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={onSendProposal}
+                disabled={proposalBusy}
+                title="Send your proposed change for approval"
+              >
+                {proposalBusy ? 'Sending…' : 'Send proposal'}
+              </Button>
+            </>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onPropose}
+              leadingIcon={<Pencil size={13} />}
+              title="You can't edit this file directly — propose a change for its owners to approve"
+            >
+              Propose changes
+            </Button>
+          ))}
 
         {showEdit &&
           (editMode ? (

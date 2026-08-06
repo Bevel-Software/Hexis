@@ -65,7 +65,7 @@ function makeGit(): GitContextValue {
   };
 }
 
-function makePrViewer(): PrViewerContextValue {
+function makePrViewer(openPr?: ReturnType<typeof vi.fn>): PrViewerContextValue {
   return {
     openPrNumber: null,
     detail: null,
@@ -73,7 +73,7 @@ function makePrViewer(): PrViewerContextValue {
     selectedPath: null,
     isLoading: false,
     lastError: null,
-    openPr: () => {},
+    openPr: openPr ?? (() => {}),
     closeViewer: () => {},
     selectPath: () => {},
     refresh: async () => {},
@@ -91,6 +91,10 @@ interface RenderOptions {
   openFilePath?: string | null;
   /** Workspace-relative paths with an open change request. */
   openChangeRequestPaths?: string[];
+  /** The caller's own open requests: workspace-relative path → CR number. */
+  minePaths?: Map<string, number>;
+  /** Spy for the change-request viewer's `openPr`. */
+  openPr?: ReturnType<typeof vi.fn>;
 }
 
 function renderExplorer(opts: RenderOptions = {}) {
@@ -121,11 +125,12 @@ function renderExplorer(opts: RenderOptions = {}) {
         <AuthContext.Provider value={makeAuth()}>
           <WorkspaceContext.Provider value={workspace}>
             <GitContext.Provider value={makeGit()}>
-              <PrViewerContext.Provider value={makePrViewer()}>
+              <PrViewerContext.Provider value={makePrViewer(opts.openPr)}>
                 <OpenChangeRequestsContext.Provider
                   value={{
                     paths: new Set(opts.openChangeRequestPaths ?? []),
                     forPath: () => [],
+                    minePaths: opts.minePaths ?? new Map(),
                   }}
                 >
                   <FileExplorer />
@@ -818,5 +823,47 @@ describe('FileExplorer rows — the prototype tree', () => {
     expect(marked.querySelector('[title="Open change request"]')).not.toBeNull();
     const unmarked = screen.getByText('docs').closest('button')!;
     expect(unmarked.querySelector('[title="Open change request"]')).toBeNull();
+  });
+
+  /**
+   * The tree shows files from two places: this branch, and the caller's own
+   * open change requests. A proposed file that does not exist on the branch
+   * is synthesized in — coloured differently, and a click opens the change
+   * request, because there is no content on this branch to open.
+   */
+  it('shows my proposed-only file as a suggestion row that opens the change request', async () => {
+    const openPr = vi.fn();
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+      openPr,
+    });
+
+    // Synthesized into its real place in the tree, under `docs/`.
+    const row = screen
+      .getByTitle('Proposed by you — opens the change request')
+      .closest('button')!;
+    expect(row).toHaveTextContent('new-idea.md');
+    expect(row.className).toContain('text-accent');
+
+    fireEvent.click(row);
+    expect(openPr).toHaveBeenCalledWith(12);
+  });
+
+  it('keeps a file that exists on the branch as a normal row even when my request touches it', () => {
+    const openPr = vi.fn();
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['brief.md', 12]]),
+      openPr,
+    });
+
+    // Not synthesized, not recoloured — the branch's own file wins, and the
+    // open-request signal for it stays the amber dot (asserted above).
+    expect(screen.queryByTitle('Proposed by you — opens the change request')).toBeNull();
+    const row = screen.getByText('brief.md').closest('button')!;
+    expect(row.className).not.toContain('text-accent');
+    fireEvent.click(row);
+    expect(openPr).not.toHaveBeenCalled();
   });
 });
