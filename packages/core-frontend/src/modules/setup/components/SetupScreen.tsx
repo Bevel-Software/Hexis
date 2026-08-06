@@ -140,7 +140,13 @@ export function SetupScreen({ settings, onSaved }: Props) {
   const [restartRequired, setRestartRequired] = useState(false);
   /** Required answers still missing after a save that otherwise succeeded. */
   const [stillMissing, setStillMissing] = useState<string[]>([]);
+  /** Answered, yet this process is still running on the old branch model. */
+  const [needsRestart, setNeedsRestart] = useState(false);
   const noticeRef = useRef<HTMLDivElement>(null);
+
+  /** What a field would save as: what was typed, else what is already stored. */
+  const resolved = (key: string) =>
+    (draft[key] ?? settings.find((s) => s.key === key)?.value ?? '').trim();
 
   const editable = settings.filter((s) => s.source !== 'env');
   const fromEnv = settings.filter((s) => s.source === 'env');
@@ -203,6 +209,35 @@ export function SetupScreen({ settings, onSaved }: Props) {
     }
   }
 
+  /**
+   * Ask the repository which branch to use, for someone who pressed Save
+   * without pressing Test. They have supplied everything they can be expected
+   * to know; a branch name is something we can look up, so refusing over it
+   * asks a question with a knowable answer. Only when the lookup ALSO comes
+   * back empty is the message worth showing.
+   */
+  async function deriveVersions(): Promise<Record<string, string> | null> {
+    try {
+      const result = await testConnection(draft);
+      if (!result.ok) return null;
+      const suggested =
+        result.defaultBranch ||
+        ['main', 'master', 'trunk'].find((name) => result.branches?.includes(name)) ||
+        result.branches?.[0];
+      if (!suggested) return null;
+      setTest(result);
+      const derived: Record<string, string> = {};
+      if (!resolved('defaultBranch')) derived.defaultBranch = suggested;
+      if (!resolved('protectedBranches')) derived.protectedBranches = suggested;
+      setDraft((d) => ({ ...d, ...derived }));
+      return derived;
+    } catch {
+      // The save carries on and the server says what is missing — a failed
+      // lookup is not itself an error the reader can act on.
+      return null;
+    }
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (saving) return;
@@ -210,7 +245,12 @@ export function SetupScreen({ settings, onSaved }: Props) {
     setError(null);
     setProblems({});
     try {
-      const result = await saveSettings(draft);
+      let payload = draft;
+      if (!resolved('defaultBranch') || !resolved('protectedBranches')) {
+        const derived = await deriveVersions();
+        if (derived) payload = { ...draft, ...derived };
+      }
+      const result = await saveSettings(payload);
       setRestartRequired(result.restartRequired);
       setDraft({});
       // A save can succeed and STILL leave the deployment unusable: a blank
@@ -221,7 +261,20 @@ export function SetupScreen({ settings, onSaved }: Props) {
       const missing = result.settings
         .filter((setting) => REQUIRED_KEYS.includes(setting.key) && !setting.configured)
         .map((setting) => FIELDS[setting.key]?.label ?? setting.key);
-      setStillMissing(result.complete ? [] : missing);
+      setStillMissing(result.complete || result.awaitingRestart ? [] : missing);
+      if (result.awaitingRestart) {
+        setNeedsRestart(true);
+        return;
+      }
+      if (result.complete) {
+        // A FULL RELOAD, not just re-rendering the gate. The branch model the
+        // browser holds was fetched before any of this existed, and every
+        // module that reads it took its value then — so the app behind the
+        // gate would build URLs for a branch called nothing. Reloading is the
+        // one thing guaranteed to re-fetch it everywhere.
+        window.location.reload();
+        return;
+      }
       onSaved();
     } catch (err) {
       if (err instanceof SettingsProblems) setProblems(err.problems);
@@ -310,6 +363,13 @@ export function SetupScreen({ settings, onSaved }: Props) {
           {/* Saved, and still not usable. Without this the form empties itself
               and comes back looking untouched — indistinguishable from a save
               that silently failed. */}
+          {needsRestart && (
+            <Banner tone="wait" role="status" className="mt-6">
+              Saved. This deployment needs a restart to pick the branch settings up — everything
+              else is in place.
+            </Banner>
+          )}
+
           {stillMissing.length > 0 && (
             <Banner tone="wait" role="status" className="mt-6">
               Saved what you filled in — but this deployment still needs{' '}
@@ -319,7 +379,11 @@ export function SetupScreen({ settings, onSaved }: Props) {
           )}
         </div>
 
-        {restartRequired && (
+        {/* Only when setup is otherwise DONE. While it is not, the banner
+            above is already asking for a restart for the same reason, and two
+            notices saying "restart" differ only in urgency — which is exactly
+            the distinction a reader would miss. */}
+        {restartRequired && !needsRestart && (
           <Banner tone="wait" role="status" className="mt-6">
             Saved. One of those settings only takes effect when the server starts, so restart it
             when convenient.
@@ -362,6 +426,47 @@ export function SetupScreen({ settings, onSaved }: Props) {
                   )}
                 </div>
                 {fields.filter((f) => !FIELDS[f.key]?.advanced).map((f) => renderField(f))}
+
+                {/* Immediately under the two fields it proves, and above the
+                    Advanced block it fills in — the middle of the sequence
+                    someone actually performs. It used to sit after every
+                    section, so the answer to "did I type the token right?"
+                    was below the identity-provider questions and, once the
+                    page grew, below the fold entirely. */}
+                {section.id === 'knowledge-base' && (
+                  <Surface tone="sunken" radius="md" className="p-4">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void runTest()}
+                        disabled={testing}
+                      >
+                        {testing ? 'Checking…' : 'Test connection'}
+                      </Button>
+                      <span className="text-meta text-ink-faint">
+                        Checks the address and token against the host, and fills in the versions
+                        below.
+                      </span>
+                    </div>
+                    {test && (
+                      <p
+                        role="status"
+                        className={`mt-3 text-detail ${test.ok ? 'text-ok' : 'text-danger'}`}
+                      >
+                        {test.ok
+                          ? test.empty
+                            ? 'Connected. The repository is empty — it will be set up for you on first use.'
+                            : `Connected. Found ${test.branches?.length ?? 0} branch${
+                                test.branches?.length === 1 ? '' : 'es'
+                              }.`
+                          : test.error}
+                      </p>
+                    )}
+                  </Surface>
+                )}
+
                 {/* Everything a normal setup never touches, out of the way but
                     not hidden: a self-hosted git server does need the token
                     username, and a provider with unusual scopes does need
@@ -396,31 +501,6 @@ export function SetupScreen({ settings, onSaved }: Props) {
             );
           })}
 
-          {/* The point of the screen: prove the answer before committing to it. */}
-          <Surface tone="surface" radius="md" className="p-4">
-            <div className="flex flex-wrap items-center gap-3">
-              <Button type="button" variant="outline" size="sm" onClick={() => void runTest()} disabled={testing}>
-                {testing ? 'Checking…' : 'Test connection'}
-              </Button>
-              <span className="text-meta text-ink-faint">
-                Asks the host whether the URL, token and username work together.
-              </span>
-            </div>
-            {test && (
-              <p
-                role="status"
-                className={`mt-3 text-detail ${test.ok ? 'text-ok' : 'text-danger'}`}
-              >
-                {test.ok
-                  ? test.empty
-                    ? 'Connected. The repository is empty — it will be set up for you on first use.'
-                    : `Connected. Found ${test.branches?.length ?? 0} branch${
-                        test.branches?.length === 1 ? '' : 'es'
-                      }.`
-                  : test.error}
-              </p>
-            )}
-          </Surface>
 
           <div className="flex items-center gap-3">
             <Button type="submit" variant="primary" disabled={saving}>

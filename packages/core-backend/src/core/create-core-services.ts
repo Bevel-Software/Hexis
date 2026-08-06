@@ -216,8 +216,10 @@ export async function createCoreServices(
   const kbSeedService = new KbSeedService(
     () => settings.resolve('kbRepoUrl'),
     config.kbTemplateDir,
-    [...PROTECTED_BRANCHES],
-    DEFAULT_BRANCH,
+    // Getters, not values: the branch model can arrive from the setup screen
+    // after this object exists, and seeding is the first thing that needs it.
+    () => [...PROTECTED_BRANCHES],
+    () => DEFAULT_BRANCH,
     // The deployment owner is the initial Admin of a freshly seeded KB — the
     // same answer `SEED_ADMIN_EMAILS` used to ask for a second time.
     [config.adminEmail],
@@ -396,7 +398,7 @@ export async function createCoreServices(
   const adminAccess = new AdminAccessService(
     accessControl,
     workspaceService,
-    DEFAULT_BRANCH,
+    () => DEFAULT_BRANCH,
     // The deployment owner administers accounts/roles even before the KB's
     // roles.yaml lists them, and whatever the sign-in method — this list is
     // consulted before any roles.yaml lookup, so it holds for SSO too.

@@ -16,8 +16,13 @@ export interface SettingStatus {
 }
 
 export interface SetupStatus {
-  /** The deployment can reach its knowledge base. */
+  /** Reachable knowledge base AND a process that can serve it. */
   complete: boolean;
+  /**
+   * Answered, but the running process still holds the old branch model. Should
+   * be rare — saving applies it — and means a restart, not another answer.
+   */
+  awaitingRestart?: boolean;
   isAdmin: boolean;
   /** Admins only — nobody else is told what is missing. */
   settings?: SettingStatus[];
@@ -26,6 +31,7 @@ export interface SetupStatus {
 export interface SaveResult {
   restartRequired: boolean;
   complete: boolean;
+  awaitingRestart?: boolean;
   settings: SettingStatus[];
 }
 

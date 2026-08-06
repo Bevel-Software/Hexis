@@ -30,10 +30,23 @@ const SETTINGS: SettingStatus[] = [
   { key: 'oidcClientSecret', envVar: 'OIDC_CLIENT_SECRET', section: 'sign-in', source: 'unset', configured: false, secret: true, restartToApply: true },
 ];
 
+/**
+ * Completing setup RELOADS rather than re-rendering: the branch model the
+ * browser holds was fetched before any of it existed, and every module that
+ * reads it took its value then. Stubbed so the assertion is "it reloaded",
+ * which is the actual contract.
+ */
+let reload: ReturnType<typeof vi.fn>;
+
 beforeEach(() => {
   api.fetchSetupStatus.mockReset();
   api.saveSettings.mockReset();
   api.testConnection.mockReset();
+  reload = vi.fn();
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    value: { ...window.location, reload, origin: 'https://example.test' },
+  });
 });
 
 const APP = <div>The application</div>;
@@ -102,12 +115,14 @@ describe('SetupScreen', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
 
     await waitFor(() =>
-      expect(api.saveSettings).toHaveBeenCalledWith({
-        kbRepoUrl: 'https://example.com/kb.git',
-        gitToken: 'ghp_secret',
-      }),
+      expect(api.saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kbRepoUrl: 'https://example.com/kb.git',
+          gitToken: 'ghp_secret',
+        }),
+      ),
     );
-    expect(await screen.findByText('The application')).toBeInTheDocument();
+    await waitFor(() => expect(reload).toHaveBeenCalled());
   });
 
   /**
@@ -352,7 +367,7 @@ describe('SetupScreen', () => {
     api.fetchSetupStatus.mockResolvedValue({ complete: true, isAdmin: true });
     await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
     await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
-    expect(await screen.findByText('The application')).toBeInTheDocument();
+    await waitFor(() => expect(reload).toHaveBeenCalled());
   });
 
   /**
@@ -380,6 +395,87 @@ describe('SetupScreen', () => {
     });
     await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
     await waitFor(() => expect(screen.getByLabelText('Main branch')).toHaveValue('production'));
+  });
+
+  /**
+   * The test belongs beside the two fields it proves, not after every section.
+   * Pinned by position rather than by eye: it drifted to the end once already,
+   * which put "did I type the token right?" below the identity-provider
+   * questions and, on a page that now scrolls, below the fold.
+   */
+  it('keeps the connection test inside the knowledge-base card', async () => {
+    await renderScreen();
+    const card = screen.getByRole('heading', { name: 'Knowledge base' }).closest('section');
+    expect(card).not.toBeNull();
+    expect(card).toContainElement(screen.getByRole('button', { name: 'Test connection' }));
+    // Above Advanced, because testing is what fills Advanced in.
+    const details = card!.querySelector('details');
+    expect(details).not.toBeNull();
+    expect(
+      screen
+        .getByRole('button', { name: 'Test connection' })
+        .compareDocumentPosition(details!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  /**
+   * Pressing Save without pressing Test used to be refused over a missing
+   * branch name. That is a question with a knowable answer — ask the
+   * repository — so it is only worth refusing over when the repository cannot
+   * answer either.
+   */
+  it('works the version out on save rather than refusing over it', async () => {
+    await renderScreen();
+    api.testConnection.mockResolvedValue({ ok: true, branches: ['main'], defaultBranch: 'main' });
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_x');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
+    expect(api.saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultBranch: 'main', protectedBranches: 'main' }),
+    );
+  });
+
+  it('still saves when the repository cannot name a branch either', async () => {
+    await renderScreen();
+    api.testConnection.mockResolvedValue({ ok: true, empty: true, branches: [], defaultBranch: null });
+    api.saveSettings.mockResolvedValue({
+      restartRequired: false,
+      complete: false,
+      settings: SETTINGS,
+    });
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS });
+
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    // Saved what it had, then said what remained — not a refusal up front.
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
+    expect(await screen.findByRole('status')).toHaveTextContent('Main branch');
+  });
+
+  /**
+   * The branch model is applied at boot. Saving it now applies it to the
+   * running process too, but if that ever fails the gate must stay shut and
+   * ask for a restart rather than open onto a server that cannot serve.
+   */
+  it('asks for a restart instead of claiming a field is missing', async () => {
+    await renderScreen();
+    api.saveSettings.mockResolvedValue({
+      restartRequired: true,
+      complete: false,
+      awaitingRestart: true,
+      settings: SETTINGS,
+    });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    const notice = await screen.findByRole('status');
+    expect(notice).toHaveTextContent(/needs a restart/);
+    expect(notice).not.toHaveTextContent(/still needs/);
   });
 
   /** Single sign-on is skippable, and the screen has to say so. */

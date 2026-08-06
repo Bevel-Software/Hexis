@@ -98,18 +98,25 @@ export class KbSeedService implements IKbSeedService {
   constructor(
     kbRepoUrl: string | (() => string),
     private readonly kbTemplateDir: string,
-    private readonly protectedBranches: readonly string[],
-    private readonly defaultBranch: string,
+    protectedBranches: readonly string[] | (() => readonly string[]),
+    defaultBranch: string | (() => string),
     private readonly seedAdminEmails: readonly string[],
     gitUsername: string | (() => string) = 'x-access-token',
   ) {
     // A getter is read per-operation, so a remote supplied through the setup
     // screen is seeded against without restarting; a string is still accepted.
     this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
+    // Read when seeding, not at construction: the branch model can be supplied
+    // through the setup screen, which happens after this object exists.
+    this.protectedBranches =
+      typeof protectedBranches === 'function' ? protectedBranches : () => protectedBranches;
+    this.defaultBranch = typeof defaultBranch === 'function' ? defaultBranch : () => defaultBranch;
     this.gitUsername = typeof gitUsername === 'function' ? gitUsername : () => gitUsername;
   }
 
   private readonly kbRepoUrl: () => string;
+  private readonly protectedBranches: () => readonly string[];
+  private readonly defaultBranch: () => string;
   private readonly gitUsername: () => string;
 
   ensureRemoteSeeded(): Promise<void> {
@@ -146,7 +153,7 @@ export class KbSeedService implements IKbSeedService {
     // later `clone -b <branch>` succeeds. This creates the branch pointer only;
     // per-branch file top-up happens in `topUpWorkspace` when the branch loads.
     const base = this.pickBase(heads);
-    for (const branch of this.protectedBranches) {
+    for (const branch of this.protectedBranches()) {
       if (!heads.has(branch)) {
         await this.createBranchOnRemote(branch, base);
       }
@@ -228,8 +235,8 @@ export class KbSeedService implements IKbSeedService {
 
   /** Prefer the default branch as a base, else the first protected branch present, else any head. */
   private pickBase(heads: Set<string>): string {
-    if (heads.has(this.defaultBranch)) return this.defaultBranch;
-    const protectedPresent = this.protectedBranches.find((b) => heads.has(b));
+    if (heads.has(this.defaultBranch())) return this.defaultBranch();
+    const protectedPresent = this.protectedBranches().find((b) => heads.has(b));
     if (protectedPresent) return protectedPresent;
     // Deterministic pick so repeated runs behave identically.
     return [...heads].sort()[0];
@@ -319,7 +326,7 @@ export class KbSeedService implements IKbSeedService {
 
   /** `git init` a temp repo, lay down the full template + generated roles.yaml, commit. */
   private async buildSeedCommit(dir: string): Promise<void> {
-    await this.git(dir, ['init', '-b', this.defaultBranch]);
+    await this.git(dir, ['init', '-b', this.defaultBranch()]);
     await this.stampIdentity(dir);
     await this.copyTemplateTree(dir);
     await fs.writeFile(path.join(dir, 'roles.yaml'), renderRolesYaml(this.seedAdminEmails), 'utf8');
@@ -333,17 +340,17 @@ export class KbSeedService implements IKbSeedService {
       await this.buildSeedCommit(dir);
       // Point every protected branch at the seed commit. The init branch is
       // already `defaultBranch`; create the rest as refs to HEAD.
-      for (const branch of this.protectedBranches) {
-        if (branch !== this.defaultBranch) {
+      for (const branch of this.protectedBranches()) {
+        if (branch !== this.defaultBranch()) {
           await this.git(dir, ['branch', branch]);
         }
       }
       await this.git(dir, ['remote', 'add', 'origin', this.kbRepoUrl()]);
       // Push only the protected branches — never the stray init branch if it
       // isn't itself protected.
-      await this.git(dir, [...this.credArgs(), 'push', '-u', 'origin', ...this.protectedBranches]);
+      await this.git(dir, [...this.credArgs(), 'push', '-u', 'origin', ...this.protectedBranches()]);
       console.log(
-        `[kb-seed] Seeded empty KB remote with branches: ${this.protectedBranches.join(', ')}`,
+        `[kb-seed] Seeded empty KB remote with branches: ${this.protectedBranches().join(', ')}`,
       );
     });
   }

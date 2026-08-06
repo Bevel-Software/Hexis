@@ -7,7 +7,11 @@ import {
   SettingsValidationError,
   validateHttpsRemote,
 } from './deployment-settings.service.js';
-import { validateBranchModel } from '@bevel-software/platform-shared';
+import {
+  configureBranchModel,
+  isBranchModelConfigured,
+  validateBranchModel,
+} from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 const execFileAsync = promisify(execFile);
@@ -52,7 +56,12 @@ export function createSetupRoutes(
       res.json({ complete, isAdmin: false });
       return;
     }
-    res.json({ complete, isAdmin: true, settings: settings.describe() });
+    res.json({
+      complete,
+      awaitingRestart: awaitingRestart(settings),
+      isAdmin: true,
+      settings: settings.describe(),
+    });
   });
 
   /**
@@ -72,10 +81,32 @@ export function createSetupRoutes(
     }
     try {
       const { restartRequired } = await settings.save(entries, req.userId ?? null);
+      /**
+       * Apply the branch model to THIS process, so pressing Save finishes
+       * setup instead of asking for a restart.
+       *
+       * Only when it was not already configured — reconfiguring a live
+       * deployment mid-flight would swap the branches out from under sessions
+       * that are using them, which is a different and much less welcome
+       * feature. Going from "none" to "some" has nobody to disturb: the app is
+       * gated shut until exactly this moment.
+       *
+       * The services that need it read it when they use it rather than
+       * capturing it at construction, which is what makes applying it here
+       * enough.
+       */
+      if (!isBranchModelConfigured()) {
+        const model = {
+          defaultBranch: settings.resolve('defaultBranch'),
+          protectedBranches: settings.resolve('protectedBranches'),
+        };
+        if (!validateBranchModel(model)) configureBranchModel(model);
+      }
       res.json({
         ok: true,
         restartRequired,
         complete: isComplete(settings),
+        awaitingRestart: awaitingRestart(settings),
         settings: settings.describe(),
       });
     } catch (err) {
@@ -215,8 +246,7 @@ export function createSetupRoutes(
 }
 
 /**
- * Setup is complete when the deployment can do its job: reach the knowledge
- * base, and know which branches are which.
+ * Whether the STORED configuration answers everything the deployment needs.
  *
  * The KB needs a URL and a token — the username and the directory name both
  * have working defaults, so neither can block a start. The branch model has no
@@ -228,7 +258,7 @@ export function createSetupRoutes(
  * deployment signs in perfectly well without it, and gating on it would lock
  * an admin out of the screen where they would set it up.
  */
-export function isComplete(settings: DeploymentSettingsService): boolean {
+export function settingsAnswered(settings: DeploymentSettingsService): boolean {
   const kb = Boolean(settings.resolve('kbRepoUrl') && settings.resolve('gitToken'));
   const branches =
     validateBranchModel({
@@ -236,6 +266,30 @@ export function isComplete(settings: DeploymentSettingsService): boolean {
       protectedBranches: settings.resolve('protectedBranches'),
     }) === null;
   return kb && branches;
+}
+
+/**
+ * Whether THIS PROCESS can actually serve — which is not the same question,
+ * and conflating them opened the gate onto a broken app.
+ *
+ * The branch model is applied once, during boot: services take `DEFAULT_BRANCH`
+ * at construction and the browser is served it before it renders. Saving it
+ * therefore answers the question without changing the answer this process
+ * holds — so a deployment configured through the setup screen reported itself
+ * complete while every workspace call still failed with
+ * `Invalid branch name ""`.
+ *
+ * Requiring the model to be IN EFFECT keeps the gate shut until the restart
+ * that puts it there. {@link awaitingRestart} is what tells the screen to ask
+ * for one rather than claim a field is missing.
+ */
+export function isComplete(settings: DeploymentSettingsService): boolean {
+  return settingsAnswered(settings) && isBranchModelConfigured();
+}
+
+/** Answered, but not yet in effect: everything is stored, the process is stale. */
+export function awaitingRestart(settings: DeploymentSettingsService): boolean {
+  return settingsAnswered(settings) && !isBranchModelConfigured();
 }
 
 /**
