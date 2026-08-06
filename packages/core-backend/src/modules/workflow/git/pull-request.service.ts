@@ -183,10 +183,13 @@ export class PullRequestService implements IPullRequestService {
     return summaries;
   }
 
-  async listPrsAuthoredBy(loginOrEmail: string): Promise<PullRequestSummary[]> {
+  async listPrsAuthoredBy(
+    loginOrEmail: string,
+    opts: { fresh?: boolean } = {},
+  ): Promise<PullRequestSummary[]> {
     const needle = loginOrEmail.trim().toLowerCase();
     if (!needle) return [];
-    const prs = await this.listOpenPrs();
+    const prs = await this.listOpenPrs(opts);
     const needleIsEmail = needle.includes('@');
     const needleHash = needleIsEmail ? hashEmail(needle) : null;
     return prs.filter((p) => {

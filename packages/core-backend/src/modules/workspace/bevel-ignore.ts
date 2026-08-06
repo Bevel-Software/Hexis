@@ -2,7 +2,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import ignore, { type Ignore } from 'ignore';
 
-const IGNORE_FILENAME = '.bevelignore';
+/**
+ * The ignore file's own name. Exported because the file-tree filter hides it
+ * from non-admins, and both places must agree on the spelling.
+ */
+export const IGNORE_FILENAME = '.bevelignore';
 
 /** One .bevelignore file's rules, scoped to the directory it lives in. */
 interface IgnoreLayer {

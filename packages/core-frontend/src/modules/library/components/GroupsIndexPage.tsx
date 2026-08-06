@@ -9,9 +9,10 @@ import { ownersTextOf } from '../utils/group-summary';
 import type { GroupSummary } from '../services/groups.api';
 import { GroupIndexRow } from './GroupIndexRow';
 import { LockGlyph } from './LockGlyph';
+import { ManagedGroupRequests } from './ManagedGroupRequests';
 
 /**
- * The all-groups index — `/skills-and-tools/groups`.
+ * The all-groups index — `/skills-and-tools`, where the Library opens.
  *
  * The sidebar can only show groups you are IN. This page also shows the ones
  * you may DISCOVER — the endpoint returns a group exactly when the caller is
@@ -79,6 +80,13 @@ export function GroupsIndexPage() {
       <p className="mt-0.5 text-ui text-ink-muted">
         A group carries skills and tools for the people in it.
       </p>
+
+      {/* Somebody asking to join one of these is the news on a page about
+          groups, and this is the view the Library opens on — the one place
+          the ask is certain to be seen. Renders nothing when nothing pends. */}
+      <div className="mt-5 empty:mt-0">
+        <ManagedGroupRequests />
+      </div>
 
       {/* "Owned by me" used to head this list and does not any more: it is a
           LENS on every group (the things you answer for, wherever they live),

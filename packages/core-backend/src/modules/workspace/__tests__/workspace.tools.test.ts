@@ -338,37 +338,33 @@ describe('workspace file primitives', () => {
     expect(res.stdout.trim()).toBe('kb-seed');
   });
 
-  it('execute_command does not leak GIT_DIR into non-git commands', async () => {
+  // POSIX-only probes: `$GIT_DIR` expansion and `>/dev/null` are `sh`
+  // semantics, and `shell: true` on Windows runs cmd.exe, where the probe
+  // itself (not the scoping under test) is meaningless. CI runs Linux.
+  it.skipIf(process.platform === 'win32')('execute_command does not leak GIT_DIR into non-git commands', async () => {
     const base = await start();
     // The KB-clone GIT_DIR/GIT_WORK_TREE override is scoped to bare `git …`
     // only; a non-git command (e.g. npm/pip that shells git internally) must
     // NOT inherit it, or the nested git child would target the KB clone.
-    // `shell: true` means sh on POSIX but cmd.exe on Windows, so the probe
-    // differs: sh expands an unset `$GIT_DIR` to empty, while cmd leaves the
-    // literal `%GIT_DIR%` in place (it only substitutes defined variables) —
-    // either shell would print the KB .git path if the override leaked.
-    const isWin = process.platform === 'win32';
-    const command = isWin ? 'echo GIT_DIR=[%GIT_DIR%]' : 'echo "GIT_DIR=[$GIT_DIR]"';
-    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command })).json()) as { stdout: string; stderr: string; exitCode: number };
+    // Probe via `node -e` rather than shell expansion — the override lives in
+    // the spawn env, and `$GIT_DIR` syntax doesn't expand under cmd.exe.
+    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: `node -e "console.log('GIT_DIR=['+(process.env.GIT_DIR||'')+']')"` })).json()) as { stdout: string; stderr: string; exitCode: number };
     expect(res.exitCode).toBe(0);
-    expect(res.stdout.trim()).toBe(isWin ? 'GIT_DIR=[%GIT_DIR%]' : 'GIT_DIR=[]');
+    expect(res.stdout.trim()).toBe('GIT_DIR=[]');
   });
 
-  it('execute_command does not leak GIT_DIR into a chained step after git', async () => {
+  it.skipIf(process.platform === 'win32')('execute_command does not leak GIT_DIR into a chained step after git', async () => {
     const base = await start();
     // Runs under `shell: true`, so a command that merely STARTS with git but
     // chains another step must not export the KB git env to the whole shell —
     // otherwise `git … && npm ci` would leak the KB repo context into the npm/pip
-    // git subprocess. `git --version` needs no repo, so exit stays 0.
-    // Same sh-vs-cmd.exe split as the non-git probe above: cmd echoes the
-    // literal `%GIT_DIR%` only while the variable is unset.
-    const isWin = process.platform === 'win32';
-    const command = isWin
-      ? 'git --version >NUL && echo leak=[%GIT_DIR%]'
-      : 'git --version >/dev/null && echo "leak=[$GIT_DIR]"';
-    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command })).json()) as { stdout: string; stderr: string; exitCode: number };
+    // git subprocess. `git --version` needs no repo, so exit stays 0. The
+    // version line lands on stdout (`>/dev/null` isn't portable to cmd.exe),
+    // so the leak probe is asserted on the LAST line.
+    const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: `git --version && node -e "console.log('leak=['+(process.env.GIT_DIR||'')+']')"` })).json()) as { stdout: string; stderr: string; exitCode: number };
     expect(res.exitCode).toBe(0);
-    expect(res.stdout.trim()).toBe(isWin ? 'leak=[%GIT_DIR%]' : 'leak=[]');
+    const lines = res.stdout.trim().split(/\r?\n/);
+    expect(lines[lines.length - 1].trim()).toBe('leak=[]');
   });
 
   it('read scope refuses write tools (403) but allows reads', async () => {

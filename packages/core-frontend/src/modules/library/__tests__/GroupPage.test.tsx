@@ -103,6 +103,7 @@ const CATALOG: LibraryData = {
     { name: 'outreach', description: 'Runs the GTM outreach.', path: 'Groups/GTM/outreach' },
     { name: 'roadmap', description: 'Keeps the roadmap.', path: 'Groups/Product/roadmap' },
   ],
+  pendingSkills: [],
   tools: [connectedTool()],
   ownedSkills: new Set(['outreach']),
   allowedToolsBySkill: new Map(),
@@ -343,7 +344,7 @@ describe('GroupPage', () => {
     expect(await screen.findByText("This group doesn't exist yet.")).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'All groups' })).toHaveAttribute(
       'href',
-      '/skills-and-tools/groups',
+      '/skills-and-tools',
     );
   });
 

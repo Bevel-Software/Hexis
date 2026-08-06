@@ -8,7 +8,6 @@ import { WorkspaceContext, type UploadError, type WorkspaceContextValue } from '
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
-import { PrViewerContext, type PrViewerContextValue } from '../../../pr/state/pr-viewer.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 
 // PullRequestsForMe pulls in router/git wiring we don't want to exercise here;
@@ -65,20 +64,6 @@ function makeGit(): GitContextValue {
   };
 }
 
-function makePrViewer(): PrViewerContextValue {
-  return {
-    openPrNumber: null,
-    detail: null,
-    notFound: false,
-    selectedPath: null,
-    isLoading: false,
-    lastError: null,
-    openPr: () => {},
-    closeViewer: () => {},
-    selectPath: () => {},
-    refresh: async () => {},
-  };
-}
 
 interface RenderOptions {
   dispatchUpload?: ReturnType<typeof vi.fn>;
@@ -91,6 +76,8 @@ interface RenderOptions {
   openFilePath?: string | null;
   /** Workspace-relative paths with an open change request. */
   openChangeRequestPaths?: string[];
+  /** The caller's own open requests: workspace-relative path → CR number. */
+  minePaths?: Map<string, number>;
 }
 
 function renderExplorer(opts: RenderOptions = {}) {
@@ -121,16 +108,37 @@ function renderExplorer(opts: RenderOptions = {}) {
         <AuthContext.Provider value={makeAuth()}>
           <WorkspaceContext.Provider value={workspace}>
             <GitContext.Provider value={makeGit()}>
-              <PrViewerContext.Provider value={makePrViewer()}>
                 <OpenChangeRequestsContext.Provider
                   value={{
                     paths: new Set(opts.openChangeRequestPaths ?? []),
-                    forPath: () => [],
+                    // A suggestion row resolves its request through forPath —
+                    // synthesize a summary for every minePaths entry so the
+                    // shared dialog has something to open.
+                    forPath: (p) => {
+                      const n = opts.minePaths?.get(p);
+                      return n === undefined
+                        ? []
+                        : ([
+                            {
+                              number: n,
+                              title: 'Suggested change',
+                              branch: 'suggestions/me/knowledge',
+                              base: 'main',
+                              state: 'open',
+                              createdAt: '2026-08-01T00:00:00.000Z',
+                              touchedNodePaths: [p],
+                              author: { login: 'user-x' },
+                              review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
+                              url: '',
+                            },
+                          ] as never);
+                    },
+                    minePaths: opts.minePaths ?? new Map(),
+                    mineNumbers: new Set(opts.minePaths?.values() ?? []),
                   }}
                 >
                   <FileExplorer />
                 </OpenChangeRequestsContext.Provider>
-              </PrViewerContext.Provider>
             </GitContext.Provider>
           </WorkspaceContext.Provider>
         </AuthContext.Provider>
@@ -489,9 +497,7 @@ describe('FileExplorer chevron collapse — userIntent vs autoExpanded', () => {
         <AuthContext.Provider value={makeAuth()}>
           <WorkspaceContext.Provider value={workspace}>
             <GitContext.Provider value={makeGit()}>
-              <PrViewerContext.Provider value={makePrViewer()}>
                 <FileExplorer />
-              </PrViewerContext.Provider>
             </GitContext.Provider>
           </WorkspaceContext.Provider>
         </AuthContext.Provider>
@@ -605,8 +611,7 @@ describe('FileExplorer chevron collapse — userIntent vs autoExpanded', () => {
 });
 
 // The KB level splits the well-known root folders into labelled top-level
-// sections. `Data/`, `Agents/` and `Pipelines/` get their own sections like
-// Skills/Tools — they must not fold into the Knowledge section.
+// sections — with one deliberate exception, `Groups/`.
 describe('FileExplorer sections — root folders', () => {
   beforeEach(() => {
     cleanup();
@@ -619,27 +624,59 @@ describe('FileExplorer sections — root folders', () => {
     children: [],
   });
 
-  it('renders Data, Agents and Pipelines as their own top-level sections', () => {
+  /**
+   * `Data/`, `Agents/` and `Pipelines/` are never created by core — a
+   * deployment that owns the agentic execution layer seeds them. When they ARE
+   * there they get their own sections, and in particular must not fold into
+   * Knowledge the way a stray content folder does.
+   */
+  it('renders Data, Agents and Pipelines as their own sections when present', () => {
     const tree: FileTreeEntry = {
       name: '.',
       relativePath: '.',
       type: 'directory',
-      children: [
-        dir('KnowledgeBase'),
-        dir('Data'),
-        dir('Agents'),
-        dir('Pipelines'),
-        dir('Skills'),
-        dir('Tools'),
-      ],
+      children: [dir('KnowledgeBase'), dir('Data'), dir('Agents'), dir('Pipelines')],
     };
     renderExplorer({ fileTree: tree });
     expect(screen.getByText('Knowledge')).toBeInTheDocument();
     expect(screen.getByText('Data')).toBeInTheDocument();
     expect(screen.getByText('Agents')).toBeInTheDocument();
     expect(screen.getByText('Pipelines')).toBeInTheDocument();
-    expect(screen.getByText('Skills')).toBeInTheDocument();
-    expect(screen.getByText('Tools')).toBeInTheDocument();
+  });
+
+  /**
+   * `Groups/` is the Skills & Tools app's storage, and that app presents it as
+   * groups, skills and tools. Listing it here offered a second, worse way in —
+   * raw markdown editing of a SKILL.md, on a folder whose access is managed
+   * from the group page.
+   *
+   * Not shown, and NOT folded into Knowledge either: it is a reserved root, so
+   * the "stray content folder" path must not pick it up. Both halves are
+   * asserted, because dropping it from the reserved set would still hide the
+   * section while quietly moving the whole folder under Knowledge.
+   */
+  it('never shows Groups in the knowledge view', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('KnowledgeBase'), dir('Groups')],
+    };
+    renderExplorer({ fileTree: tree });
+    expect(screen.getByText('Knowledge')).toBeInTheDocument();
+    expect(screen.queryByText('Groups')).not.toBeInTheDocument();
+  });
+
+  /** A KB whose only root is Groups still has a knowledge view — an empty one. */
+  it('does not fall back to the flat tree when Groups is the only root', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('Groups')],
+    };
+    renderExplorer({ fileTree: tree });
+    expect(screen.queryByText('Groups')).not.toBeInTheDocument();
   });
 });
 
@@ -818,5 +855,66 @@ describe('FileExplorer rows — the prototype tree', () => {
     expect(marked.querySelector('[title="Open change request"]')).not.toBeNull();
     const unmarked = screen.getByText('docs').closest('button')!;
     expect(unmarked.querySelector('[title="Open change request"]')).toBeNull();
+  });
+
+  /**
+   * The tree shows files from two places: this branch, and the caller's own
+   * open change requests. A proposed file that does not exist on the branch
+   * is synthesized in — coloured differently, and a click opens the change
+   * request, because there is no content on this branch to open.
+   */
+  it('shows my proposed-only file as a suggestion row that opens the change request', async () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+    });
+
+    // Synthesized into its real place in the tree, under `docs/`.
+    const row = screen
+      .getByTitle('Proposed by you — opens the change request')
+      .closest('button')!;
+    expect(row).toHaveTextContent('new-idea.md');
+    expect(row.className).toContain('text-accent');
+
+    // The click opens the SHARED change-request dialog — there is no content
+    // on this branch to open.
+    fireEvent.click(row);
+    expect(
+      await screen.findByRole('dialog', { name: /Change request: Suggested change/ }),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * "Not in the tree" is ambiguous: new on the suggestions branch, or FILTERED
+   * by the server (.bevelignore, read gates). The overlay may only resurrect
+   * the first — a proposal under a hidden root folder must not conjure that
+   * folder back into the sidebar.
+   */
+  it('does not synthesize a row under a root folder the server hid', () => {
+    renderExplorer({
+      fileTree: TREE,
+      // `Groups` is not in TREE — the server filtered it (bevelignored). The
+      // touched file underneath must NOT appear.
+      minePaths: new Map([['Groups/newsletter/SKILL.md', 12]]),
+    });
+    expect(screen.queryByTitle('Proposed by you — opens the change request')).toBeNull();
+    expect(screen.queryByText('Groups')).toBeNull();
+    expect(screen.queryByText('SKILL.md')).toBeNull();
+  });
+
+  it('keeps a file that exists on the branch as a normal row even when my request touches it', () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['brief.md', 12]]),
+    });
+
+    // Not synthesized, not recoloured — the branch's own file wins, and the
+    // open-request signal for it stays the amber dot (asserted above).
+    expect(screen.queryByTitle('Proposed by you — opens the change request')).toBeNull();
+    const row = screen.getByText('brief.md').closest('button')!;
+    expect(row.className).not.toContain('text-accent');
+    // A normal row opens the FILE, never the dialog.
+    fireEvent.click(row);
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });

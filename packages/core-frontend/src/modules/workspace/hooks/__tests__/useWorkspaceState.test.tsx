@@ -29,6 +29,22 @@ const apiMocks = vi.hoisted(() => {
 
 vi.mock('../../services/workspace.api', () => apiMocks);
 
+// Access + propose plumbing behind the suggestion-routed upload. Mocked so
+// the routing tests decide the ACL answer and observe the propose calls.
+const accessApiMock = vi.hoisted(() => ({ fetchFileAccess: vi.fn() }));
+vi.mock('../../../access/api', () => ({
+  fetchFileAccess: accessApiMock.fetchFileAccess,
+  fetchFileAccessBatch: vi.fn(async () => ({ results: {} })),
+}));
+const proposeMocks = vi.hoisted(() => ({
+  ensureKnowledgeSuggestionWorkspace: vi.fn(),
+  ensureKnowledgeChangeRequest: vi.fn(async (): Promise<unknown> => null),
+}));
+vi.mock('../../../change-requests/services/propose.api', () => proposeMocks);
+
+import type { ReactNode } from 'react';
+import { AuthContext } from '../../../auth/state/auth.context';
+import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../../core/events';
 import { useWorkspaceState } from '../useWorkspaceState';
 const WorkspaceApiError = apiMocks.WorkspaceApiError;
 
@@ -294,5 +310,174 @@ describe('useWorkspaceState multi-tab', () => {
       expect(parsed.paths).toEqual(['a.md', 'b.md', 'c.md']);
       expect(parsed.activePath).toBe('c.md');
     });
+  });
+});
+
+
+/**
+ * An upload into a KB folder the caller may NOT write neither fails nor
+ * forces its way in: it lands on the personal suggestions branch and becomes
+ * (or extends) their one Knowledge change request — the same review path a
+ * typed proposal takes.
+ */
+describe('dispatchUpload — suggestion routing', () => {
+  // `target-company-state` is protected in the test branch model, and the
+  // workspace id IS the encoded branch name — which is how the hook recovers
+  // the branch to ask "is this protected?".
+  const PROTECTED_FIXTURE = {
+    workspace: {
+      id: 'target-company-state',
+      name: 'Workspace',
+      absolutePath: '/tmp/ws',
+      createdAt: '2026-04-20T00:00:00.000Z',
+      kbDirName: 'knowledge-base',
+    },
+    fileTree: { name: '.', relativePath: '.', type: 'directory' as const, children: [] },
+  };
+
+  function wrapper({ children }: { children: ReactNode }) {
+    return (
+      <AuthContext.Provider
+        value={{
+          user: { id: 'u1', email: 'reader@example.com', name: 'Rae Reader' },
+          token: 't',
+          isLoading: false,
+          login: async () => {},
+          logout: () => {},
+        }}
+      >
+        {children}
+      </AuthContext.Provider>
+    );
+  }
+
+  beforeEach(() => {
+    apiMocks.getOrCreateWorkspace.mockReset().mockResolvedValue(PROTECTED_FIXTURE);
+    apiMocks.listFiles.mockReset().mockResolvedValue(PROTECTED_FIXTURE.fileTree);
+    apiMocks.uploadFile.mockReset().mockResolvedValue(undefined);
+    accessApiMock.fetchFileAccess.mockReset();
+    proposeMocks.ensureKnowledgeSuggestionWorkspace.mockReset().mockResolvedValue({
+      branch: 'suggestions/reader/knowledge',
+      workspaceId: 'suggestions%2Freader%2Fknowledge',
+      kbDirName: 'knowledge-base',
+      existingCr: null,
+    });
+    proposeMocks.ensureKnowledgeChangeRequest.mockReset().mockResolvedValue({
+      number: 12,
+      title: 'Changes from Rae Reader — Knowledge',
+      branch: 'suggestions/reader/knowledge',
+      base: 'target-company-state',
+      state: 'open',
+      createdAt: '2026-08-06T00:00:00.000Z',
+      touchedNodePaths: [],
+      author: { login: 'user-x' },
+      review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
+      url: '',
+    });
+  });
+
+  async function mountProtected() {
+    const { result } = renderHook(() => useWorkspaceState(), { wrapper });
+    await waitFor(() => expect(result.current.workspaceId).toBe('target-company-state'));
+    return result;
+  }
+
+  it('routes an upload into a no-write folder to the suggestions branch', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: false,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    const result = await mountProtected();
+    const onStale = vi.fn();
+    window.addEventListener(PR_STALE_EVENT, onStale);
+    const onAnnounce = vi.fn();
+    window.addEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
+    try {
+      const file = new File(['hello'], 'note.md', { type: 'text/markdown' });
+      await act(async () => {
+        await result.current.dispatchUpload(
+          { kind: 'files', files: [file] },
+          'knowledge-base/KnowledgeBase/Ops',
+        );
+      });
+
+      // The ACL was asked about the TARGET folder, repo-relative.
+      expect(accessApiMock.fetchFileAccess).toHaveBeenCalledWith(
+        'target-company-state',
+        'KnowledgeBase/Ops',
+      );
+      // The bytes went to the SUGGESTIONS workspace, same relative path.
+      expect(apiMocks.uploadFile).toHaveBeenCalledWith(
+        'suggestions%2Freader%2Fknowledge',
+        'knowledge-base/KnowledgeBase/Ops/note.md',
+        file,
+        { defer: false },
+      );
+      // The change request exists, listeners were told, and the user was
+      // told where the files went — silence would read as a failed upload.
+      expect(proposeMocks.ensureKnowledgeChangeRequest).toHaveBeenCalled();
+      expect(onStale).toHaveBeenCalled();
+      // The rows are announced OPTIMISTICALLY, with the uploaded paths — the
+      // server's touched-path diff may trail the commit worker for seconds.
+      expect(onAnnounce).toHaveBeenCalledTimes(1);
+      const detail = (onAnnounce.mock.calls[0][0] as CustomEvent).detail;
+      expect(detail.number).toBe(12);
+      expect(detail.touchedNodePaths).toContain('KnowledgeBase/Ops/note.md');
+      expect(result.current.uploadNotice).toMatch(/became a suggestion/);
+      expect(result.current.uploadError).toBeNull();
+    } finally {
+      window.removeEventListener(PR_STALE_EVENT, onStale);
+      window.removeEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
+    }
+  });
+
+  it('uploads normally when the caller may write the folder', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    const result = await mountProtected();
+    const file = new File(['hello'], 'note.md', { type: 'text/markdown' });
+    await act(async () => {
+      await result.current.dispatchUpload(
+        { kind: 'files', files: [file] },
+        'knowledge-base/KnowledgeBase/Ops',
+      );
+    });
+
+    expect(apiMocks.uploadFile).toHaveBeenCalledWith(
+      'target-company-state',
+      'knowledge-base/KnowledgeBase/Ops/note.md',
+      file,
+      { defer: false },
+    );
+    expect(proposeMocks.ensureKnowledgeSuggestionWorkspace).not.toHaveBeenCalled();
+    expect(result.current.uploadNotice).toBeNull();
+  });
+
+  it('never routes on a draft branch, even without write access', async () => {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...PROTECTED_FIXTURE,
+      workspace: { ...PROTECTED_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    const { result } = renderHook(() => useWorkspaceState(), { wrapper });
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+    const file = new File(['hello'], 'note.md', { type: 'text/markdown' });
+    await act(async () => {
+      await result.current.dispatchUpload(
+        { kind: 'files', files: [file] },
+        'knowledge-base/KnowledgeBase/Ops',
+      );
+    });
+    // Drafts are free-for-all: no ACL question, no suggestion detour.
+    expect(accessApiMock.fetchFileAccess).not.toHaveBeenCalled();
+    expect(apiMocks.uploadFile).toHaveBeenCalledWith(
+      'alice%2Fdraft',
+      'knowledge-base/KnowledgeBase/Ops/note.md',
+      file,
+      { defer: false },
+    );
   });
 });

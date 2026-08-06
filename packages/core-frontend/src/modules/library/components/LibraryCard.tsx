@@ -17,6 +17,13 @@ export interface LibraryCardProps {
    * why it is a quiet right-aligned note and not a badge.
    */
   version?: string;
+  /**
+   * Set only on a skill that does not exist yet — it is on an open change
+   * request, waiting to be approved. `mine` distinguishes the two readers this
+   * card has: the person who proposed it (waiting on someone else) and the
+   * person who has to decide (being waited on).
+   */
+  pending?: { authorName: string; mine: boolean };
   /** Open the item. The whole card is the target. */
   onOpen(): void;
 }
@@ -49,6 +56,7 @@ export function LibraryCard({
   owned,
   status,
   version,
+  pending,
   onOpen,
 }: LibraryCardProps) {
   /**
@@ -61,8 +69,17 @@ export function LibraryCard({
    * A SKILL is silent unless something is in its way. A skill has no state of
    * its own to report; a green "Ready" on every skill in the grid is a row of
    * noise that says nothing, and it buries the two cards that DO need you.
+   *
+   * A PROPOSED skill overrides both, because the one thing to know about it is
+   * that it is not usable yet — and by whose hand it got here. The status it
+   * carries is about integrations and has nothing to say about a file nobody
+   * has approved.
    */
-  const footNote = kind === 'integration' || status.state !== 'ok' ? status : null;
+  const footNote = pending
+    ? null
+    : kind === 'integration' || status.state !== 'ok'
+      ? status
+      : null;
 
   return (
     <Surface
@@ -71,7 +88,13 @@ export function LibraryCard({
       data-testid={`library-card-${kind}-${id}`}
       interactive
       padded
-      className="flex min-h-28 flex-col gap-1.5 text-left"
+      // Dashed, because the card is an outline of a skill rather than one: the
+      // border says "not here yet" before any text is read, and it survives the
+      // badge being missed at a glance.
+      className={cn(
+        'flex min-h-28 flex-col gap-1.5 text-left',
+        pending && 'border-dashed',
+      )}
       onClick={onOpen}
     >
       <span className="flex items-center gap-2">
@@ -80,7 +103,12 @@ export function LibraryCard({
             column of coloured squares that distinguish nothing. */}
         {kind === 'integration' && <ToolLogo slug={id} name={name} />}
         <span className="truncate text-lede font-semibold text-ink">{name}</span>
-        {owned && (
+        {pending && (
+          <Badge tone="wait" size="xs" className="shrink-0 uppercase">
+            In review
+          </Badge>
+        )}
+        {owned && !pending && (
           <Badge tone="outline" size="xs" className="shrink-0 uppercase">
             Owner
           </Badge>
@@ -95,8 +123,19 @@ export function LibraryCard({
           still costs the two lines of description their room, so a healthy
           skill with no version simply ends after its description — which is
           what makes the cards that DO carry a note stand out at a glance. */}
-      {(footNote || version) && (
+      {/* A proposal's foot names the person the decision is between. "Waiting
+          on approval" to its author and "waiting on you" to whoever can give
+          it are the same fact told to the two people who can act on it — and
+          neither is served by the generic status line above. */}
+      {(footNote || version || pending) && (
         <span className="mt-auto flex items-center gap-1.5 pt-2 text-meta text-ink-faint">
+          {pending && (
+            <span className="truncate font-semibold text-wait">
+              {pending.mine
+                ? 'Waiting on approval'
+                : `From ${pending.authorName} — waiting on you`}
+            </span>
+          )}
           {footNote && (
             <span className={cn('flex items-center gap-1.5 font-semibold', STATUS_INK[footNote.state])}>
               <StatusDot state={footNote.state} />

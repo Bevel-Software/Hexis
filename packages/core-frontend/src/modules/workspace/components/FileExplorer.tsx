@@ -16,17 +16,19 @@ import {
   PinOff,
   Users,
 } from 'lucide-react';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
 import {
   validateFilename,
   KNOWLEDGE_BASE_DIR,
-  GROUPS_DIR,
   DATA_DIR,
+  GROUPS_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
-import { useWorkspace } from '../state/workspace.context';
-import { mergePendingIntoTree, findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
+import { useWorkspace, type PendingEntry } from '../state/workspace.context';
+import { mergePendingIntoTree, pathExistsInTree, findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
+import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
+import { PR_STALE_EVENT } from '../../../core/events';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useFileNav } from '../routing/kb-routes';
 import { authFetch } from '../../../lib/api';
@@ -109,6 +111,29 @@ const usePinned = () => useContext(PinnedContext);
 // renders the dialog.
 const ManageAccessContext = createContext<(entry: FileTreeEntry) => void>(() => {});
 const useManageAccess = () => useContext(ManageAccessContext);
+
+/**
+ * The tree shows files from TWO places: this branch, and the caller's own
+ * open change requests. A path in this controller is the second kind — it was
+ * synthesized into the tree from `minePaths` because it does not exist on the
+ * branch — and its row renders differently and opens the change request,
+ * because there is no content here to open.
+ *
+ * Context, not props, for the same reason as the two above: the tree is
+ * recursive, and every intermediate directory would otherwise have to carry
+ * a concern that only file rows have.
+ */
+interface SuggestionsController {
+  /** CR number for a synthesized suggestion-only path; null for real files. */
+  crFor(path: string): number | null;
+  /** Open the shared change-request dialog on the request this path belongs to. */
+  open(path: string, crNumber: number): void;
+}
+const SuggestionsContext = createContext<SuggestionsController>({
+  crFor: () => null,
+  open: () => {},
+});
+const useSuggestions = () => useContext(SuggestionsContext);
 
 /** Depth-first lookup of a tree entry by its exact relativePath. */
 function findEntryByPath(node: FileTreeEntry, path: string): FileTreeEntry | null {
@@ -413,6 +438,7 @@ function FileTreeNode({
   const { openFile } = useFileNav();
   // One shared fetch behind this — see `OpenChangeRequestsProvider`.
   const openChangeRequests = useOpenChangeRequests();
+  const suggestions = useSuggestions();
 
   const handleDownload = useCallback(async () => {
     if (!workspaceId) return;
@@ -792,6 +818,36 @@ function FileTreeNode({
     );
   }
 
+  // A file from the caller's own open change request that does not exist on
+  // this branch. Its row is a LINK to the request, not a file: there is no
+  // content here to show, so clicking opens the change-request view, and none
+  // of the file affordances (rename, drag, download, context menu) apply —
+  // they would all 404 against a path this branch has never heard of. The
+  // accent colour is the tell that this is proposed, not present.
+  const suggestedCr = suggestions.crFor(entry.relativePath);
+  if (suggestedCr !== null) {
+    return (
+      <button
+        type="button"
+        className={cn(
+          ROW_CLASS,
+          'text-accent hover:bg-hover hover:text-accent-hover',
+          'focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ink-muted',
+        )}
+        style={{ paddingLeft }}
+        onClick={() => suggestions.open(entry.relativePath, suggestedCr)}
+        title="Proposed by you — opens the change request"
+      >
+        <CaretSlot show={false} />
+        <span className="truncate">{entry.name}</span>
+        <span
+          aria-hidden
+          className="ml-auto h-1.5 w-1.5 flex-none rounded-full bg-accent"
+        />
+      </button>
+    );
+  }
+
   const isActive = entry.relativePath === openFilePath;
 
   return (
@@ -889,7 +945,16 @@ function FileTreeNode({
 // contributed explorer items.)
 
 export function FileExplorer() {
-  const { fileTree, dispatchUpload, uploadError, clearUploadError, pendingUploads } = useWorkspace();
+  const {
+    fileTree,
+    kbDirName,
+    dispatchUpload,
+    uploadError,
+    clearUploadError,
+    uploadNotice,
+    clearUploadNotice,
+    pendingUploads,
+  } = useWorkspace();
   const [dragOver, setDragOver] = useState(false);
   // Download is now a per-path permission (resolved server-side from the
   // access tree's `download:` verb), so there's no global preflight gate
@@ -898,9 +963,67 @@ export function FileExplorer() {
   // and `handleDownload` shows the error.
   // Optimistic overlay: every dropped/picked file shows up in the tree
   // within a frame, even before its commit echoes back from the server.
-  const mergedTree = useMemo(
+  const serverTree = useMemo(
     () => (fileTree ? mergePendingIntoTree(fileTree, pendingUploads) : null),
     [fileTree, pendingUploads],
+  );
+
+  // The caller's own proposed files that do NOT exist on this branch — they
+  // live only on the personal suggestions branch behind an open change
+  // request. The tree shows them beside the branch's real files (synthesized
+  // below), coloured differently, and clicking one opens the request.
+  const openChangeRequests = useOpenChangeRequests();
+  const suggestionOnlyPaths = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!serverTree) return map;
+    /**
+     * "Not in the tree" has TWO causes, and only one earns a row: the file is
+     * new on the suggestions branch — or the server FILTERED it (.bevelignore,
+     * read gates). The client cannot evaluate those rules itself, but it can
+     * read their verdict off the tree: if the path's top-level folder under
+     * the repo root is absent, the whole subtree is hidden (a skill proposal
+     * under a bevelignored `Groups/` was the observed leak), so the overlay
+     * must not resurrect it. The known cost: a proposal that CREATES a new
+     * top-level root folder shows no row until it merges.
+     */
+    const hiddenRoot = (path: string): boolean => {
+      const prefix = kbDirName && path.startsWith(`${kbDirName}/`) ? `${kbDirName}/` : '';
+      const segments = path.slice(prefix.length).split('/');
+      if (segments.length < 2) return false; // directly under the repo root
+      return !pathExistsInTree(serverTree, `${prefix}${segments[0]}`);
+    };
+    for (const [path, crNumber] of openChangeRequests.minePaths) {
+      if (!pathExistsInTree(serverTree, path) && !hiddenRoot(path)) {
+        map.set(path, crNumber);
+      }
+    }
+    return map;
+  }, [serverTree, openChangeRequests, kbDirName]);
+
+  const mergedTree = useMemo(() => {
+    if (!serverTree || suggestionOnlyPaths.size === 0) return serverTree;
+    // Reuses the pending-upload synthesizer: same parent-directory creation,
+    // same sort order, and a real entry always wins over a synthesized one.
+    const asEntries = new Map<string, PendingEntry>();
+    for (const path of suggestionOnlyPaths.keys()) {
+      asEntries.set(path, { fullPath: path, type: 'file' });
+    }
+    return mergePendingIntoTree(serverTree, asEntries);
+  }, [serverTree, suggestionOnlyPaths]);
+
+  // A clicked suggestion row opens the SHARED change-request dialog on the
+  // request the path belongs to — the row is a link to the request, and the
+  // dialog is the one change-request view the app has.
+  const [openSuggestionCr, setOpenSuggestionCr] = useState<PullRequestSummary | null>(null);
+  const suggestionsController = useMemo<SuggestionsController>(
+    () => ({
+      crFor: (path) => suggestionOnlyPaths.get(path) ?? null,
+      open: (path, crNumber) => {
+        const cr = openChangeRequests.forPath(path).find((c) => c.number === crNumber) ?? null;
+        setOpenSuggestionCr(cr);
+      },
+    }),
+    [suggestionOnlyPaths, openChangeRequests],
   );
 
   // Pinned folders — a personal, client-side shortcut list surfaced at the top
@@ -943,14 +1066,24 @@ export function FileExplorer() {
   // Right-click → Manage access opens this sheet for the chosen entry.
   const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);
 
-  // KB content splits Knowledge (`KnowledgeBase/`), Data (`Data/`), Agents
-  // (`Agents/`), Pipelines (`Pipelines/`) and Groups (`Groups/`) into separate
-  // top-level folders; surface them as labelled sections rather than a single
-  // flat root. The Knowledge section hoists `KnowledgeBase/`'s
-  // children and folds in any other top-level content folder (e.g. a stray
-  // `Legal/`); loose top-level files (access.md, roles.yaml) sit below a divider.
-  // Clones that predate the split (none of the well-known root dirs) fall back
-  // to the flat tree.
+  // KB content splits into separate top-level folders; surface them as labelled
+  // sections rather than a single flat root. The Knowledge section hoists
+  // `KnowledgeBase/`'s children and folds in any other top-level content folder
+  // (e.g. a stray `Legal/`); loose top-level files (access.md, roles.yaml) sit
+  // below a divider. Clones that predate the split (none of the well-known root
+  // dirs) fall back to the flat tree.
+  //
+  // `Groups/` is NOT among them. It is the Skills & Tools app's storage — one
+  // folder per group holding its skills and its tools — and that app presents
+  // it as groups, skills and tools rather than as files. Listing it here too
+  // offered a second, worse way in: raw markdown editing of a SKILL.md with
+  // none of the surrounding affordances, on a folder whose access is managed
+  // from the group page. Deep links into a group file still resolve; the
+  // folder just is not a browsing destination in Knowledge.
+  //
+  // `Data/`, `Agents/` and `Pipelines/` are rendered when PRESENT but never
+  // created by core (see `CORE_REQUIRED_DIRS`) — a deployment that owns the
+  // agentic execution layer seeds them, and this reads whatever is there.
   const sections = useMemo(() => {
     // Descend past the workspace / KB-clone wrapper levels to the node that
     // actually holds the well-known root dirs, then split that level.
@@ -962,16 +1095,20 @@ export function FileExplorer() {
     const data = findDir(DATA_DIR);
     const agents = findDir(AGENTS_DIR);
     const pipelines = findDir(PIPELINES_DIR);
+    // Groups counts toward "is this a split layout?" even though it is never
+    // rendered: its presence proves the split just as well as the others, and
+    // without it a KB whose only root is Groups would fail this check, fall
+    // back to the flat tree, and show the folder that way instead.
     const groups = findDir(GROUPS_DIR);
     if (!knowledgeBase && !data && !agents && !pipelines && !groups) return null;
     // Any other top-level content folder (e.g. a stray `Legal/`) folds into Knowledge.
     const otherDirs = kids.filter(
       (c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name),
     );
-    // Present Knowledge, Data, Agents, Pipelines and Groups as named roots.
-    // Knowledge is synthetic so it can relabel `KnowledgeBase` and
-    // absorb the stray content folders; it reuses KnowledgeBase's own path so
-    // file ops on the row still resolve.
+    // Present Knowledge, Data and Groups as named roots. Knowledge is
+    // synthetic so it can relabel `KnowledgeBase` and absorb the stray
+    // content folders; it reuses KnowledgeBase's own path so file ops on the
+    // row still resolve.
     const knowledge: FileTreeEntry | null = knowledgeBase
       ? {
           ...knowledgeBase,
@@ -986,13 +1123,11 @@ export function FileExplorer() {
     const pipelinesRoot: FileTreeEntry | null = pipelines
       ? { ...pipelines, name: PIPELINES_DIR }
       : null;
-    const groupsRoot: FileTreeEntry | null = groups ? { ...groups, name: GROUPS_DIR } : null;
     return {
       knowledge,
       data: dataRoot,
       agents: agentsRoot,
       pipelines: pipelinesRoot,
-      groups: groupsRoot,
       looseFiles: kids.filter((c) => c.type === 'file'),
     };
   }, [mergedTree]);
@@ -1058,8 +1193,30 @@ export function FileExplorer() {
           </IconButton>
         </div>
       )}
+      {/* Not an error: the upload LANDED, on the suggestions branch. Saying
+          so is load-bearing — nothing appears in the tree where the user
+          dropped the files, and silence there reads as a failed upload. */}
+      {uploadNotice && (
+        <div
+          role="status"
+          className="flex items-start gap-1 px-2 py-1 text-xs text-ink bg-wait-soft border-b border-line shrink-0"
+        >
+          <span className="flex-1" title={uploadNotice}>
+            {uploadNotice}
+          </span>
+          <IconButton
+            size={18}
+            title="Dismiss"
+            aria-label="Dismiss upload notice"
+            onClick={clearUploadNotice}
+          >
+            <X size={12} />
+          </IconButton>
+        </div>
+      )}
       <PinnedContext.Provider value={pinnedController}>
       <ManageAccessContext.Provider value={setAccessTarget}>
+      <SuggestionsContext.Provider value={suggestionsController}>
       <div className="flex-1 overflow-y-auto min-h-0">
         {/* "Company Context", not "Pinned". The mechanism is pinning; the
             SECTION is the handful of places this company actually works out
@@ -1092,9 +1249,6 @@ export function FileExplorer() {
             {sections.pipelines && (
               <FileTreeNode entry={sections.pipelines} depth={0} collapseChildren />
             )}
-            {sections.groups && (
-              <FileTreeNode entry={sections.groups} depth={0} collapseChildren />
-            )}
             {sections.looseFiles.length > 0 && (
               <>
                 <div className="mx-3 my-2 border-t border-line" />
@@ -1108,10 +1262,21 @@ export function FileExplorer() {
           <FileTreeNode entry={mergedTree} depth={0} />
         )}
       </div>
+      </SuggestionsContext.Provider>
       </ManageAccessContext.Provider>
       </PinnedContext.Provider>
       <PullRequestsForMe />
     </div>
+    {openSuggestionCr && (
+      <ChangeRequestDialog
+        cr={openSuggestionCr}
+        onClose={() => setOpenSuggestionCr(null)}
+        onResolved={() => {
+          setOpenSuggestionCr(null);
+          window.dispatchEvent(new Event(PR_STALE_EVENT));
+        }}
+      />
+    )}
     {accessTarget && (
       <ManageAccessDialog
         key={accessTarget.relativePath}

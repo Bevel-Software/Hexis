@@ -48,7 +48,8 @@ async function seedWorkspace(
   // env) see them too: autocrlf off keeps `git checkout` (discardPath) from
   // rewriting the LF fixtures as CRLF under Git-for-Windows' system-level
   // `core.autocrlf=true`; longpaths lifts Windows' 260-char MAX_PATH, which
-  // the deep-KB-path subject-truncation test exceeds. Both are no-ops on Linux.
+  // the deep-KB-path subject-truncation test exceeds. Both are no-ops on
+  // Linux/CI — they pin the repo to the behaviour the assertions assume.
   await runGit(repo, ['config', 'core.autocrlf', 'false']);
   await runGit(repo, ['config', 'core.longpaths', 'true']);
   // An initial commit so HEAD exists.

@@ -31,7 +31,7 @@ import { OidcAuthProvider } from '../modules/auth/oidc-auth-provider.js';
 import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
 import { AccessControlService } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
-import { SkillService } from '../modules/skills/index.js';
+import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
 import { GroupIndexService, JoinRequestsService } from '../modules/groups/index.js';
 import {
@@ -100,6 +100,7 @@ export interface CoreServices {
   sessionOntologyService: SessionOntologyService;
   routineWritePolicy: RoutineWritePolicyService;
   skillService: SkillService;
+  pendingSkillsService: PendingSkillsService;
   toolManualService: ToolManualService;
   groupIndexService: GroupIndexService;
   joinRequestsService: JoinRequestsService;
@@ -224,6 +225,10 @@ export async function createCoreServices(
     // same answer `SEED_ADMIN_EMAILS` used to ask for a second time.
     [config.adminEmail],
     () => settings.resolve('gitUsername') || 'x-access-token',
+    // Root folders this distribution reserves on top of core's two. A plain
+    // value, not a getter: these are named in the composition root rather than
+    // collected on the setup screen, so there is nothing to re-read.
+    ports.kbExtraRootDirs ?? [],
   );
   workspaceService.setSeedService(kbSeedService);
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
@@ -332,10 +337,15 @@ export async function createCoreServices(
   // worker drains the queue out of band so a git hiccup can't block the
   // user-visible save path. See `lock-decoupling-plan.md`.
   const pendingCommitsService = new PendingCommitsService(db);
-  // Let the git status path tell an expected dirty tree (queued saves still
-  // draining) from a genuinely orphaned one before it warns loudly.
-  gitService.setPendingCommitsProbe((workspaceId) =>
-    pendingCommitsService.hasAnyForWorkspace(workspaceId),
+  // Let the git status path tell an expected dirty tree from a genuinely
+  // orphaned one before it warns loudly. Two innocent explanations: queued
+  // saves still draining through the worker, and a lock currently HELD —
+  // deletes and saves mutate the disk while the lock is held but only queue
+  // their commit at release, so a status poll landing inside that window sees
+  // dirt with an empty queue (observed on multi-folder deletes).
+  gitService.setPendingCommitsProbe(async (workspaceId) =>
+    (await pendingCommitsService.hasAnyForWorkspace(workspaceId)) ||
+    (await fileLockService.hasAnyActive(workspaceId)),
   );
   // In-process event bus: every WorkflowService mutation method that
   // succeeds emits a typed event; the SSE route fans it to connected
@@ -370,6 +380,18 @@ export async function createCoreServices(
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
   const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
+
+  // Pending skills: the other half of the catalog — skills that exist only on
+  // an open change request's branch. Built here rather than beside
+  // `skillService` because it needs the workflow service, which does not exist
+  // that early; it holds no state of its own, so where it is constructed is the
+  // only thing the ordering decides.
+  const pendingSkillsService = new PendingSkillsService(
+    workspaceService,
+    accessControl,
+    skillService,
+    workflowService,
+  );
 
   // Subscriber A — catalog freshness: a committed change drops the affected
   // caches immediately instead of waiting out their TTLs. The tool/skill
@@ -623,6 +645,7 @@ export async function createCoreServices(
     sessionOntologyService,
     routineWritePolicy,
     skillService,
+    pendingSkillsService,
     toolManualService,
     groupIndexService,
     joinRequestsService,

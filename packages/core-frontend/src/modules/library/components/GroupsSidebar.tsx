@@ -1,7 +1,25 @@
-import type { ReactNode } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 import { cn } from '../../../lib/utils';
 import type { LibraryFilter } from '../utils/status';
 import { LockGlyph } from './LockGlyph';
+
+/**
+ * Where a right-click landed in the nav, and everything the layout needs to
+ * answer it — so the sidebar can report the event without owning a menu.
+ *
+ * The coordinates and the row element are read from the event SYNCHRONOUSLY
+ * here, because `currentTarget` is only itself for the duration of the handler.
+ */
+export interface SidebarContextTarget {
+  /** The row's filter — `null` when the click landed on the nav's empty space. */
+  filter: LibraryFilter | null;
+  /** What was clicked, by name. The menu uses it for its accessible name. */
+  label: string;
+  x: number;
+  y: number;
+  /** The row itself, so Escape can hand focus back to it. `null` for empty space. */
+  row: HTMLElement | null;
+}
 
 export interface GroupsSidebarProps {
   /** What the URL has selected, or null on a page with no gallery filter. */
@@ -30,6 +48,25 @@ export interface GroupsSidebarProps {
   onFinishSetup(): void;
   /** Start a new group. The layout owns the dialog; this is only the intent. */
   onCreateGroup(): void;
+  /**
+   * The all-groups index is showing. Beside `filter` rather than inside it: the
+   * index lists PLACES, not a filtered slice of the catalog, so it is not a
+   * `LibraryFilter` and pretending otherwise would put a row in the gallery's
+   * vocabulary that no gallery can render.
+   */
+  groupsIndexActive: boolean;
+  /** Go to the index — the Library's home. */
+  onOpenGroupsIndex(): void;
+  /**
+   * A row — or the nav's empty space — was right-clicked. Like every other
+   * handler here this is an INTENT, not a menu: the layout owns the popup,
+   * because the verbs in it (add to this group, manage its access) need the
+   * group summaries and the workspace, and the sidebar knows neither.
+   *
+   * Omitted, the nav does nothing on right-click and the browser's own menu
+   * appears — which is the honest default for a view with no actions wired.
+   */
+  onContextMenu?(target: SidebarContextTarget): void;
 }
 
 /**
@@ -62,6 +99,9 @@ export function GroupsSidebar({
   attentionCount,
   onFinishSetup,
   onCreateGroup,
+  groupsIndexActive,
+  onOpenGroupsIndex,
+  onContextMenu,
 }: GroupsSidebarProps) {
   const rowClass = (selected: boolean) =>
     cn(
@@ -69,19 +109,47 @@ export function GroupsSidebar({
       selected ? 'bg-hover font-semibold text-ink' : 'text-ink-muted hover:bg-hover hover:text-ink',
     );
 
+  /**
+   * Whether a row's filter is the one the URL has selected. Derived from the
+   * row's OWN target rather than restated at each call site, so a row cannot
+   * light up for a filter it does not navigate to.
+   */
+  const isCurrent = (target: LibraryFilter) =>
+    target.kind === 'group'
+      ? filter?.kind === 'group' && filter.group === target.group
+      : filter?.kind === target.kind;
+
+  /**
+   * Report a right-click upward. `preventDefault` only when somebody is
+   * listening — with no handler the browser's own menu is the right answer.
+   * `stopPropagation` is what keeps a row's click from also reaching the nav
+   * behind it, which would open the empty-space menu instead.
+   */
+  const openMenu = (
+    e: MouseEvent<HTMLElement>,
+    target: LibraryFilter | null,
+    label: string,
+    row: HTMLElement | null,
+  ) => {
+    if (!onContextMenu) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onContextMenu({ filter: target, label, x: e.clientX, y: e.clientY, row });
+  };
+
   const row = (
     label: string,
-    selected: boolean,
-    onClick: () => void,
+    target: LibraryFilter,
     count: number,
     tone: 'count' | 'pending' = 'count',
   ) => (
     <button
       key={label}
       type="button"
-      aria-current={selected}
-      className={rowClass(selected)}
-      onClick={onClick}
+      aria-current={isCurrent(target)}
+      className={rowClass(isCurrent(target))}
+      onClick={() => onSelect(target)}
+      onContextMenu={(e) => openMenu(e, target, label, e.currentTarget)}
     >
       <span className="truncate">{label}</span>
       {/* An empty count is not a count — show nothing rather than a grey 0. */}
@@ -109,34 +177,69 @@ export function GroupsSidebar({
    * (a non-member has nothing to fix). The accessible name carries the state in
    * words, so the glyph itself can stay decorative.
    */
-  const lockedRow = (name: string) => (
-    <button
-      key={`locked:${name}`}
-      type="button"
-      aria-label={`${name} (locked)`}
-      aria-current={filter?.kind === 'group' && filter.group === name}
-      className={rowClass(filter?.kind === 'group' && filter.group === name)}
-      onClick={() => onSelect({ kind: 'group', group: name })}
-    >
-      <span className="truncate">{name}</span>
-      <span className="flex h-4.5 shrink-0 basis-5.5 items-center justify-center text-ink-faint">
-        <LockGlyph className="size-3" />
-      </span>
-    </button>
-  );
+  const lockedRow = (name: string) => {
+    const target: LibraryFilter = { kind: 'group', group: name };
+    return (
+      <button
+        key={`locked:${name}`}
+        type="button"
+        aria-label={`${name} (locked)`}
+        aria-current={isCurrent(target)}
+        className={rowClass(isCurrent(target))}
+        onClick={() => onSelect(target)}
+        // A locked row gets the SAME menu as a readable one, for the same
+        // reason it gets the same click: a group you are not in is still a
+        // place, and `Manage access` is exactly the item an admin locked out of
+        // one needs. Which verbs are actually true is the layout's call.
+        onContextMenu={(e) => openMenu(e, target, name, e.currentTarget)}
+      >
+        <span className="truncate">{name}</span>
+        <span className="flex h-4.5 shrink-0 basis-5.5 items-center justify-center text-ink-faint">
+          <LockGlyph className="size-3" />
+        </span>
+      </button>
+    );
+  };
 
   return (
     <>
         <nav
           aria-label="Library groups"
           className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto"
+          // The nav's empty space is a target too — Knowledge's tree gives its
+          // ROOT row a menu holding the create verbs, and this is where the
+          // Library's equivalent click lands. Rows stop the event before it
+          // reaches here, so this only ever fires on the gaps between them.
+          onContextMenu={(e) => openMenu(e, null, 'Library', null)}
         >
-          {/* "Owned by me" is a LENS — the whole catalog, sliced to yours —
-              which is exactly what the group rows below are not. Naming the
-              section is what keeps that distinction visible. `Everything` had
-              a row here once and went: the Library already LANDS on
-              everything, so the row was a second name for "here". */}
-          <SectionLabel>Library</SectionLabel>
+          {/* The home row, above every section and belonging to none of them:
+              it is where the Library opens, and the one place that lists the
+              groups you are NOT in beside the ones you are. Unlabelled and
+              first for the same reason — a destination the whole surface
+              hangs off does not sit inside a category of lenses.
+
+              Written out rather than built by `row`, because it is the one
+              row with no `LibraryFilter` behind it: the index is a list of
+              PLACES, not a slice of the catalog. Its menu is therefore the
+              nav's own (`filter: null`) — create a group, and none of the
+              verbs that need a folder to point at. */}
+          <button
+            type="button"
+            aria-current={groupsIndexActive}
+            className={rowClass(groupsIndexActive)}
+            onClick={onOpenGroupsIndex}
+            onContextMenu={(e) => openMenu(e, null, 'All groups', e.currentTarget)}
+          >
+            <span className="truncate">All groups</span>
+          </button>
+
+          {/* Lenses — the whole catalog, sliced — which is exactly what the
+              group rows below are not. Naming the section is what keeps that
+              distinction visible. `Everything` is a row again now that the
+              Library lands on the groups index instead: without one it would
+              be a page with no way in. */}
+          <SectionLabel spaced>Library</SectionLabel>
+          {row('Everything', { kind: 'all' }, 0)}
           {/* Amber is a summons, not a total. It shows how many of your own
               items need something FROM YOU; when none do, the slot falls back
               to the plain count of what you own, in grey. A permanent amber 26
@@ -144,8 +247,7 @@ export function GroupsSidebar({
               this page that is supposed to mean "look here". */}
           {row(
             'Owned by me',
-            filter?.kind === 'owned',
-            () => onSelect({ kind: 'owned' }),
+            { kind: 'owned' },
             ownedAttention > 0 ? ownedAttention : ownedCount,
             ownedAttention > 0 ? 'pending' : 'count',
           )}
@@ -153,19 +255,13 @@ export function GroupsSidebar({
 
           {/* Your own space leads the groups, as in the prototype (line 2487):
               it is the one you are always in. */}
-          {row(
-            personalGroupLabel,
-            filter?.kind === 'ungrouped',
-            () => onSelect({ kind: 'ungrouped' }),
-            ungroupedCount,
-          )}
+          {row(personalGroupLabel, { kind: 'ungrouped' }, ungroupedCount)}
           {groups.map(({ group, count, attention }) =>
             // Amber wins the count slot: a group that needs setup is telling you
             // something, and how many items it holds is not the news.
             row(
               group,
-              filter?.kind === 'group' && filter.group === group,
-              () => onSelect({ kind: 'group', group }),
+              { kind: 'group', group },
               attention > 0 ? attention : count,
               attention > 0 ? 'pending' : 'count',
             ),
@@ -202,10 +298,10 @@ export function GroupsSidebar({
  * workspace but not in your MCP, and the break is what keeps the heading
  * honest about them.)
  *
- * `All groups` used to be a row here. It went: the index is where you go to
- * find a group you are NOT in, which is a rare errand, and it sat above the
- * groups themselves collecting clicks meant for them. The breadcrumb on every
- * group page still leads there, which is the moment you actually want it.
+ * `All groups` is NOT a row here. It heads the whole nav instead: it is the
+ * Library's home rather than one more entry in the set mounted into your MCP,
+ * and inside this list it used to collect the clicks meant for the groups
+ * under it.
  *
  * The `+` is always in the DOM and always reachable by keyboard; only its
  * opacity follows hover, so the nav stays quiet without the control being

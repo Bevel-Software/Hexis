@@ -37,6 +37,7 @@ async function seedWorkspace(root: string, workspaceId: string): Promise<{
   // autocrlf off: the autostash test reads back a file `git stash pop` wrote.
   // Under Git-for-Windows' system-level `core.autocrlf=true` that checkout
   // would rewrite the LF fixture as CRLF and fail the byte-for-byte assertion.
+  // A no-op on Linux/CI.
   await runGit(repo, ['config', 'core.autocrlf', 'false']);
   return { upstream, repo };
 }

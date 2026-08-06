@@ -1,16 +1,28 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { useAuth } from '../../auth/state/auth.context';
 import { attentionOf, useLibrary } from '../state/library-data';
 import { personalGroupName } from '../utils/personal-group';
-import { libraryFilterForPath, pathForLibraryFilter } from '../routes/library-paths';
-import { groupCounts } from '../utils/status';
+import {
+  isGroupsIndexPath,
+  libraryFilterForPath,
+  pathForGroupsIndex,
+  pathForLibraryFilter,
+} from '../routes/library-paths';
+import { groupCounts, type LibraryFilter } from '../utils/status';
+import { primaryFolderOf } from '../utils/group-summary';
+import { LINK_COPIED_TOAST, LINK_COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
+import { useLibraryToast } from '../state/toast.context';
 import { useSidebar } from '../../layout/state/sidebar';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
+import { useWorkspace } from '../../workspace/state/workspace.context';
+import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { ConnectAgentPill } from '../../onboarding/components/ConnectAgentPill';
-import { GroupsSidebar } from './GroupsSidebar';
+import { GroupsSidebar, type SidebarContextTarget } from './GroupsSidebar';
+import { GroupsSidebarMenu } from './GroupsSidebarMenu';
+import { AddToGroupDialog } from './AddToGroupDialog';
 import { NewGroupDialog } from './NewGroupDialog';
 
 /**
@@ -27,7 +39,35 @@ export function LibraryLayout() {
   const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { kbDirName } = useWorkspace();
+  const toast = useLibraryToast();
   const [newGroupOpen, setNewGroupOpen] = useState(false);
+  /**
+   * The sidebar's right-click menu, and the two sheets it can open. All three
+   * live HERE rather than in `GroupsSidebar` because the verbs need the group
+   * summaries and the workspace's KB dir — the sidebar is handed a list of
+   * names and counts and knows neither. The sidebar reports the click; this
+   * decides what is true about what was clicked.
+   */
+  const [menu, setMenu] = useState<SidebarContextTarget | null>(null);
+  /**
+   * Captured whole at pick time, not looked up at render time: the menu closes
+   * as it hands over, so by the time the dialog paints there is no `menu` left
+   * to re-derive the group from.
+   */
+  const [addTo, setAddTo] = useState<{
+    name: string;
+    primaryPath: string;
+    canWrite: boolean;
+  } | null>(null);
+  const [manageFolder, setManageFolder] = useState<string | null>(null);
+  /**
+   * The row the open menu came from. A ref, not state, because
+   * `useDismissableMenu` wants a stable `RefObject` to return focus INTO on
+   * Escape — re-rendering the menu to tell it about the row would defeat the
+   * point.
+   */
+  const menuRow = useRef<HTMLElement | null>(null);
   /**
    * Whether the nav is hidden. The state lives in a module store because the
    * button that flips it sits in the top bar, outside this layout's tree —
@@ -78,6 +118,50 @@ export function LibraryLayout() {
     [items],
   );
 
+  /**
+   * What the open menu is pointing at.
+   *
+   * A group row resolves to its summary, which is where the folder behind it
+   * lives — and therefore whether `Add a skill or tool` and `Manage access`
+   * have anything to act on at all. A LENS row resolves to nothing, because
+   * neither lens is a folder: "Owned by me" and your own space are slices of
+   * the catalog, and there is no `access.md` behind a slice. That is the same
+   * call the group page's `PageActions` already makes when it hides `Share` on
+   * the personal page, and the menu has to make it the same way or the two
+   * surfaces disagree about what a lens is.
+   *
+   * `Manage access` stays UNGATED on `canWrite`, exactly as `Share` is: for a
+   * non-writer the dialog renders read-only, which is precisely what "who is
+   * this shared with?" should answer.
+   */
+  const menuFilter = menu?.filter ?? null;
+  const menuGroup = menuFilter?.kind === 'group' ? menuFilter.group : null;
+  const menuSummary = useMemo(
+    () => (menuGroup ? groupSummaries.find((g) => g.name === menuGroup) : undefined),
+    [groupSummaries, menuGroup],
+  );
+  const menuFolder = menuSummary ? primaryFolderOf(menuSummary) : null;
+
+  const openContextMenu = useCallback((target: SidebarContextTarget) => {
+    menuRow.current = target.row;
+    setMenu(target);
+  }, []);
+
+  /**
+   * A link to a row's page — origin + the row's own route, so it is the URL
+   * that row navigates to and not the one you happen to be standing on. The
+   * clipboard can refuse outright (a non-secure origin, an unfocused document),
+   * and a silent no-op is the worst possible answer to "copy this" — so the
+   * toast tells the truth either way.
+   */
+  const copyLink = useCallback(
+    async (target: LibraryFilter) => {
+      const ok = await copyToClipboard(`${window.location.origin}${pathForLibraryFilter(target)}`);
+      toast(ok ? LINK_COPIED_TOAST : LINK_COPY_FAILED_TOAST, ok ? 'neutral' : 'danger');
+    },
+    [toast],
+  );
+
   return (
     <div className="flex h-full min-h-0 bg-canvas text-ink">
       {/* The connect-your-agent CTA sits above the group list — the one row
@@ -102,8 +186,68 @@ export function LibraryLayout() {
           attentionCount={attentionCount}
           onFinishSetup={() => navigate('/connect')}
           onCreateGroup={() => setNewGroupOpen(true)}
+          groupsIndexActive={isGroupsIndexPath(location.pathname)}
+          onOpenGroupsIndex={() => navigate(pathForGroupsIndex())}
+          onContextMenu={openContextMenu}
         />
       </SidebarFrame>
+
+      {/* The nav's right-click menu — Knowledge's file tree has had one since it
+          shipped, and two sidebars in one app should not answer the same
+          gesture two different ways. Rendered HERE, outside the frame, because
+          it is fixed to the pointer rather than laid out in the column. */}
+      {menu && (
+        <GroupsSidebarMenu
+          x={menu.x}
+          y={menu.y}
+          label={menu.label}
+          onClose={() => setMenu(null)}
+          onAdd={
+            menuGroup && menuFolder && menuSummary
+              ? () =>
+                  setAddTo({
+                    name: menuGroup,
+                    primaryPath: menuFolder,
+                    canWrite: menuSummary.canWrite,
+                  })
+              : undefined
+          }
+          onCreateGroup={() => setNewGroupOpen(true)}
+          onCopyLink={menuFilter ? () => void copyLink(menuFilter) : undefined}
+          onManageAccess={menuFolder && kbDirName ? () => setManageFolder(menuFolder) : undefined}
+          returnFocusTo={menuRow}
+        />
+      )}
+
+      {addTo && (
+        <AddToGroupDialog
+          name={addTo.name}
+          primaryPath={addTo.primaryPath}
+          canWrite={addTo.canWrite}
+          // Every skill, not just this group's: a skill's id is its name and
+          // ids are global, so that is the collision the create half must catch.
+          existingSkills={items.filter((i) => i.kind === 'skill').map((i) => i.name)}
+          onClose={() => setAddTo(null)}
+        />
+      )}
+
+      {manageFolder && kbDirName && (
+        <ManageAccessDialog
+          entry={{
+            name: manageFolder.split('/').pop() ?? manageFolder,
+            relativePath: `${kbDirName}/${manageFolder}`,
+            type: 'directory',
+          }}
+          onClose={() => {
+            setManageFolder(null);
+            // Granting through the dialog can settle a pending join request —
+            // refresh the roster and the catalog together, exactly as the group
+            // page does when its copy of this dialog closes.
+            reloadGroups();
+            reload();
+          }}
+        />
+      )}
 
       {newGroupOpen && (
         <NewGroupDialog

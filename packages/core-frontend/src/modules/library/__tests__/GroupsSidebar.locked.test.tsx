@@ -30,6 +30,8 @@ function renderSidebar(over: Partial<GroupsSidebarProps> = {}) {
     attentionCount: 2,
     onFinishSetup: vi.fn(),
     onCreateGroup: vi.fn(),
+    groupsIndexActive: false,
+    onOpenGroupsIndex: vi.fn(),
 
     ...over,
   };
@@ -55,6 +57,8 @@ describe('GroupsSidebar — locked groups', () => {
       .getAllByRole('button')
       .map((b) => b.getAttribute('aria-label') ?? b.textContent);
     expect(labels).toEqual([
+      'All groups',
+      'Everything',
       'Owned by me2',
       'New group',
       // Your own space leads the groups; the ones you cannot enter trail them.

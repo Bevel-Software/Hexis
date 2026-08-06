@@ -1,6 +1,6 @@
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { Badge } from '../../../shared/components';
-import { changeAuthorName } from '../utils/cr-author';
+import { changeAuthorName } from '../../change-requests/utils/author';
 
 interface ChangeRequestDockProps {
   crs: PullRequestSummary[];

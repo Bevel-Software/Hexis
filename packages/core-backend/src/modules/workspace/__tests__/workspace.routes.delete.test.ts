@@ -9,6 +9,7 @@ import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
+import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { ICreatorAccess } from '../../access/creator-access.js';
 import type { WorkspaceService } from '../workspace.service.js';
@@ -97,6 +98,8 @@ async function makeHarness(): Promise<Harness> {
     accessControl,
     'knowledge-base',
     stubCreatorAccess,
+    // Not exercised here — only `.bevelignore`'s tree visibility consults it.
+    { isAdmin: async () => false } as unknown as IAdminAccessService,
   ));
 
   const server = await new Promise<Server>((resolve) => {
