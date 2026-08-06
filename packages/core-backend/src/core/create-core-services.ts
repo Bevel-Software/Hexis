@@ -332,10 +332,15 @@ export async function createCoreServices(
   // worker drains the queue out of band so a git hiccup can't block the
   // user-visible save path. See `lock-decoupling-plan.md`.
   const pendingCommitsService = new PendingCommitsService(db);
-  // Let the git status path tell an expected dirty tree (queued saves still
-  // draining) from a genuinely orphaned one before it warns loudly.
-  gitService.setPendingCommitsProbe((workspaceId) =>
-    pendingCommitsService.hasAnyForWorkspace(workspaceId),
+  // Let the git status path tell an expected dirty tree from a genuinely
+  // orphaned one before it warns loudly. Two innocent explanations: queued
+  // saves still draining through the worker, and a lock currently HELD —
+  // deletes and saves mutate the disk while the lock is held but only queue
+  // their commit at release, so a status poll landing inside that window sees
+  // dirt with an empty queue (observed on multi-folder deletes).
+  gitService.setPendingCommitsProbe(async (workspaceId) =>
+    (await pendingCommitsService.hasAnyForWorkspace(workspaceId)) ||
+    (await fileLockService.hasAnyActive(workspaceId)),
   );
   // In-process event bus: every WorkflowService mutation method that
   // succeeds emits a typed event; the SSE route fans it to connected

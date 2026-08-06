@@ -266,4 +266,21 @@ export class FileLockService {
     }
     return rowToFileLock(row);
   }
+
+  /**
+   * Is ANY unexpired lock held anywhere in this workspace? Feeds the git
+   * status sanity check: a held lock means a mutation is mid-flight — the
+   * file may already be changed (or deleted) on disk while its commit is only
+   * queued at RELEASE — so a dirty tree during that window is expected, not
+   * the "missed lock-release commit" the loud warning is for. Expired rows
+   * don't count (their holder is gone; they explain nothing).
+   */
+  async hasAnyActive(workspaceId: string): Promise<boolean> {
+    const rows = await this.db
+      .select({ path: fileLocks.path })
+      .from(fileLocks)
+      .where(and(eq(fileLocks.workspaceId, workspaceId), gt(fileLocks.expiresAt, new Date())))
+      .limit(1);
+    return rows.length > 0;
+  }
 }

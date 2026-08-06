@@ -178,10 +178,10 @@ describe('read-permission gates on human read routes', () => {
 
   it('keeps the structural root folders visible even when nothing is readable', async () => {
     // A user with no read grants: the access batch denies everything. The
-    // structural top-level folders (KnowledgeBase, Data, Agents, Pipelines,
-    // Groups) must still resolve readable (so the explorer renders its
-    // section view), while their contents stay gated. The retired Skills/
-    // and Tools/ roots get NO structural treatment — they are ordinary
+    // structural top-level folders (KnowledgeBase, Data, Groups) must still
+    // resolve readable (so the explorer renders its section view), while
+    // their contents stay gated. The retired Skills/, Tools/, Agents/ and
+    // Pipelines/ roots get NO structural treatment — they are ordinary
     // (denied) folders now.
     h = await makeHarness({ allowFn: () => false });
     expect((await get('/files')).status).toBe(200);
@@ -201,10 +201,10 @@ describe('read-permission gates on human read routes', () => {
     // Folders themselves: forced visible.
     expect(verdict.get(`${KB}/KnowledgeBase`)).toBe(true);
     expect(verdict.get(`${KB}/Data`)).toBe(true);
-    expect(verdict.get(`${KB}/Agents`)).toBe(true);
-    expect(verdict.get(`${KB}/Pipelines`)).toBe(true);
     expect(verdict.get(`${KB}/Groups`)).toBe(true);
     // Retired roots: no override, the deny-all batch verdict stands.
+    expect(verdict.get(`${KB}/Agents`)).toBe(false);
+    expect(verdict.get(`${KB}/Pipelines`)).toBe(false);
     expect(verdict.get(`${KB}/Skills`)).toBe(false);
     expect(verdict.get(`${KB}/Tools`)).toBe(false);
     // Their contents: still gated (the override matches only the exact folder).

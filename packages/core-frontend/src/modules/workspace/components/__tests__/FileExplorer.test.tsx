@@ -610,8 +610,9 @@ describe('FileExplorer chevron collapse — userIntent vs autoExpanded', () => {
 });
 
 // The KB level splits the well-known root folders into labelled top-level
-// sections. `Data/`, `Agents/` and `Pipelines/` get their own sections like
-// Skills/Tools — they must not fold into the Knowledge section.
+// sections. `Data/` gets its own section; the retired `Agents/`/`Pipelines/`
+// roots do NOT anymore — a legacy KB's copies fold into the Knowledge section
+// like any other unrecognised folder.
 describe('FileExplorer sections — root folders', () => {
   beforeEach(() => {
     cleanup();
@@ -624,7 +625,7 @@ describe('FileExplorer sections — root folders', () => {
     children: [],
   });
 
-  it('renders Data, Agents and Pipelines as their own top-level sections', () => {
+  it('keeps Data as a section and folds legacy Agents/Pipelines into Knowledge', () => {
     const tree: FileTreeEntry = {
       name: '.',
       relativePath: '.',
@@ -639,12 +640,19 @@ describe('FileExplorer sections — root folders', () => {
       ],
     };
     renderExplorer({ fileTree: tree });
-    expect(screen.getByText('Knowledge')).toBeInTheDocument();
-    expect(screen.getByText('Data')).toBeInTheDocument();
-    expect(screen.getByText('Agents')).toBeInTheDocument();
-    expect(screen.getByText('Pipelines')).toBeInTheDocument();
-    expect(screen.getByText('Skills')).toBeInTheDocument();
-    expect(screen.getByText('Tools')).toBeInTheDocument();
+    // Directory rows carry their indent on the row DIV wrapping the toggle
+    // button — read the padding there.
+    const rowDivOf = (label: string) =>
+      screen.getByText(label).closest('button')!.parentElement as HTMLElement;
+    // The live sections, at the root indent.
+    const dataIndent = parseInt(rowDivOf('Data').style.paddingLeft, 10);
+    expect(parseInt(rowDivOf('Knowledge').style.paddingLeft, 10)).toBe(dataIndent);
+    // The retired roots stay REACHABLE (a legacy KB may hold real content)
+    // but as children folded into the Knowledge section — one indent deeper,
+    // not sections of their own.
+    for (const legacy of ['Agents', 'Pipelines', 'Skills', 'Tools']) {
+      expect(parseInt(rowDivOf(legacy).style.paddingLeft, 10)).toBeGreaterThan(dataIndent);
+    }
   });
 });
 

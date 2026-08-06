@@ -4,10 +4,8 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
-  AGENTS_DIR,
   DATA_DIR,
   KNOWLEDGE_BASE_DIR,
-  PIPELINES_DIR,
   GROUPS_DIR,
 } from '@bevel-software/platform-shared';
 import type { IKbSeedService } from './kb-seed.interface.js';
@@ -38,13 +36,12 @@ const BOT_EMAIL = 'bevel-workflow@bevel.software';
  * directly, so a repo can't be seeded with a stale hard-coded Admin list.
  */
 const REQUIRED_FILES: readonly string[] = ['access.md', 'CLAUDE.md', '.bevelignore', '.gitignore'];
-const REQUIRED_DIRS: readonly string[] = [
-  KNOWLEDGE_BASE_DIR,
-  DATA_DIR,
-  AGENTS_DIR,
-  PIPELINES_DIR,
-  GROUPS_DIR,
-];
+// `Agents/` and `Pipelines/` are deliberately NOT here (or in the template)
+// anymore: they belonged to a retired execution-layer design, and a seeder
+// that re-creates a folder every time an operator deletes it is worse than no
+// seeder. Legacy KBs that still carry them keep working — the explorer folds
+// unrecognised root folders into the Knowledge section.
+const REQUIRED_DIRS: readonly string[] = [KNOWLEDGE_BASE_DIR, DATA_DIR, GROUPS_DIR];
 
 /** Redact the token from any string that might surface in a log or error. */
 function redact(s: string): string {

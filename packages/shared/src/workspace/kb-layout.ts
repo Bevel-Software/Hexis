@@ -75,10 +75,17 @@ export function groupOfPath(repoRelativePath: string): string | null {
  */
 export const DATA_DIR = 'Data';
 
-/** Folder under the repo root that holds `.agent` files — agent role configurations (not graph nodes). */
+/**
+ * @deprecated Legacy folder from the retired execution-layer design (`.agent`
+ * role files). No longer seeded, no longer structural — the constant survives
+ * only for consumers still handling old KBs that carry the folder.
+ */
 export const AGENTS_DIR = 'Agents';
 
-/** Folder under the repo root that holds `.pipeline` files — execution-layer processes (not graph nodes). */
+/**
+ * @deprecated Legacy folder from the retired execution-layer design
+ * (`.pipeline` files). Same status as {@link AGENTS_DIR}.
+ */
 export const PIPELINES_DIR = 'Pipelines';
 
 /**

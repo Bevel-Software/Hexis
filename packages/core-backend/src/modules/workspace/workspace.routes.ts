@@ -3,12 +3,10 @@ import path from 'node:path';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import {
-  AGENTS_DIR,
   DATA_DIR,
   DEFAULT_BRANCH,
   KNOWLEDGE_BASE_DIR,
   KNOWLEDGE_DIR,
-  PIPELINES_DIR,
   GROUPS_DIR,
 } from '@bevel-software/platform-shared';
 import { branchForWorkspaceId, FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
@@ -468,11 +466,12 @@ export function createWorkspaceRoutes(
       // same treatment so legacy clones don't collapse. Only the folders
       // themselves are forced visible — their contents stay gated by the
       // verdict above.
+      // `Agents/` and `Pipelines/` are no longer structural — the retired
+      // execution-layer folders aren't seeded anymore, so a legacy KB's copy
+      // is ordinary content and gets ordinary access treatment.
       const structuralRoots = new Set([
         KNOWLEDGE_BASE_DIR,
         DATA_DIR,
-        AGENTS_DIR,
-        PIPELINES_DIR,
         GROUPS_DIR,
         KNOWLEDGE_DIR,
       ]);

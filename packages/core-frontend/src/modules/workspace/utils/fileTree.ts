@@ -1,20 +1,15 @@
 import {
-  AGENTS_DIR,
   DATA_DIR,
   KNOWLEDGE_BASE_DIR,
-  PIPELINES_DIR,
   GROUPS_DIR,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
 import type { PendingEntry } from '../state/workspace.context';
 
-export const KB_ROOT_DIRS = new Set([
-  KNOWLEDGE_BASE_DIR,
-  DATA_DIR,
-  AGENTS_DIR,
-  PIPELINES_DIR,
-  GROUPS_DIR,
-]);
+// `Agents/` and `Pipelines/` left this set with the retired execution-layer
+// design: they aren't seeded anymore, and a legacy KB's leftover copies fold
+// into the Knowledge section like any other unrecognised root folder.
+export const KB_ROOT_DIRS = new Set([KNOWLEDGE_BASE_DIR, DATA_DIR, GROUPS_DIR]);
 
 /**
  * Descend past the workspace / KB-clone wrapper levels to the node that holds

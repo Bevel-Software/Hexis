@@ -22,8 +22,6 @@ import {
   KNOWLEDGE_BASE_DIR,
   GROUPS_DIR,
   DATA_DIR,
-  AGENTS_DIR,
-  PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
 import { useWorkspace, type PendingEntry } from '../state/workspace.context';
 import { mergePendingIntoTree, pathExistsInTree, findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
@@ -1036,12 +1034,13 @@ export function FileExplorer() {
   // Right-click → Manage access opens this sheet for the chosen entry.
   const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);
 
-  // KB content splits Knowledge (`KnowledgeBase/`), Data (`Data/`), Agents
-  // (`Agents/`), Pipelines (`Pipelines/`) and Groups (`Groups/`) into separate
-  // top-level folders; surface them as labelled sections rather than a single
-  // flat root. The Knowledge section hoists `KnowledgeBase/`'s
-  // children and folds in any other top-level content folder (e.g. a stray
-  // `Legal/`); loose top-level files (access.md, roles.yaml) sit below a divider.
+  // KB content splits Knowledge (`KnowledgeBase/`), Data (`Data/`) and Groups
+  // (`Groups/`) into separate top-level folders; surface them as labelled
+  // sections rather than a single flat root. The Knowledge section hoists
+  // `KnowledgeBase/`'s children and folds in any other top-level content
+  // folder (a stray `Legal/`, or a legacy `Agents/`/`Pipelines/` from the
+  // retired execution-layer design — no longer seeded, no longer a section);
+  // loose top-level files (access.md, roles.yaml) sit below a divider.
   // Clones that predate the split (none of the well-known root dirs) fall back
   // to the flat tree.
   const sections = useMemo(() => {
@@ -1053,18 +1052,16 @@ export function FileExplorer() {
       kids.find((c) => c.type === 'directory' && c.name === name);
     const knowledgeBase = findDir(KNOWLEDGE_BASE_DIR);
     const data = findDir(DATA_DIR);
-    const agents = findDir(AGENTS_DIR);
-    const pipelines = findDir(PIPELINES_DIR);
     const groups = findDir(GROUPS_DIR);
-    if (!knowledgeBase && !data && !agents && !pipelines && !groups) return null;
+    if (!knowledgeBase && !data && !groups) return null;
     // Any other top-level content folder (e.g. a stray `Legal/`) folds into Knowledge.
     const otherDirs = kids.filter(
       (c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name),
     );
-    // Present Knowledge, Data, Agents, Pipelines and Groups as named roots.
-    // Knowledge is synthetic so it can relabel `KnowledgeBase` and
-    // absorb the stray content folders; it reuses KnowledgeBase's own path so
-    // file ops on the row still resolve.
+    // Present Knowledge, Data and Groups as named roots. Knowledge is
+    // synthetic so it can relabel `KnowledgeBase` and absorb the stray
+    // content folders; it reuses KnowledgeBase's own path so file ops on the
+    // row still resolve.
     const knowledge: FileTreeEntry | null = knowledgeBase
       ? {
           ...knowledgeBase,
@@ -1075,16 +1072,10 @@ export function FileExplorer() {
         ? { name: 'Knowledge', relativePath: otherDirs[0].relativePath, type: 'directory', children: otherDirs }
         : null;
     const dataRoot: FileTreeEntry | null = data ? { ...data, name: DATA_DIR } : null;
-    const agentsRoot: FileTreeEntry | null = agents ? { ...agents, name: AGENTS_DIR } : null;
-    const pipelinesRoot: FileTreeEntry | null = pipelines
-      ? { ...pipelines, name: PIPELINES_DIR }
-      : null;
     const groupsRoot: FileTreeEntry | null = groups ? { ...groups, name: GROUPS_DIR } : null;
     return {
       knowledge,
       data: dataRoot,
-      agents: agentsRoot,
-      pipelines: pipelinesRoot,
       groups: groupsRoot,
       looseFiles: kids.filter((c) => c.type === 'file'),
     };
@@ -1179,12 +1170,6 @@ export function FileExplorer() {
             )}
             {sections.data && (
               <FileTreeNode entry={sections.data} depth={0} collapseChildren />
-            )}
-            {sections.agents && (
-              <FileTreeNode entry={sections.agents} depth={0} collapseChildren />
-            )}
-            {sections.pipelines && (
-              <FileTreeNode entry={sections.pipelines} depth={0} collapseChildren />
             )}
             {sections.groups && (
               <FileTreeNode entry={sections.groups} depth={0} collapseChildren />
