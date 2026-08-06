@@ -115,7 +115,7 @@ export interface AdminMenuItem {
  * An auxiliary surface mounted inside the FileViewer container (rendered on
  * every FileViewer return path, positioned via its own absolute styling).
  * The enterprise registry contributes the agent-review surface here; the
- * change-request viewer (PrViewer) is core and stays hard-mounted.
+ * change-request dialog (ChangeRequestDialog) is core and shared by every surface.
  */
 export interface FileViewerPanelDef {
   id: string;
@@ -269,7 +269,7 @@ export interface AppRegistry {
   viewerRoutes: RouteDef[];
   /**
    * Ordered wrappers applied INSIDE the core providers (workspace, git,
-   * auto-update, pr-viewer, admin, event bus) but OUTSIDE the layout, so they
+   * auto-update, admin, event bus) but OUTSIDE the layout, so they
    * can read core state and every pane sees them. `providers[0]` is outermost.
    */
   providers: Array<(children: ReactNode) => ReactElement>;

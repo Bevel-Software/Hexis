@@ -335,7 +335,11 @@ export async function createCoreServer(
     core.db,
     core.kbDirName,
   ));
-  app.use('/api', core.authMiddleware, createSkillsRoutes(core.skillService));
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createSkillsRoutes(core.skillService, core.pendingSkillsService),
+  );
   // Group enumeration + join requests. Browser-only (JWT), and fail-closed
   // like every other read surface: groups the caller cannot access (member,
   // manager, or discoverable via the access.md file's own read grant) are

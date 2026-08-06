@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
-import { readFileOnBranch } from '../services/library.api';
+import { readFileOnBranch } from '../services/change-requests.api';
+import { isBinaryFile } from '../../workspace/components/renderers';
 import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
 
 /**
@@ -38,6 +39,10 @@ export function useCrFileDiffs(
    * the KEY (cr + path + revision), not by cleanup.
    */
   useEffect(() => {
+    // A binary file has no honest text diff, and line-diffing decoded binary
+    // bytes is quadratic enough to hang the tab — never even read it. The
+    // boxes render their own binary notice instead of a diff.
+    if (isBinaryFile(repoRelativePath)) return;
     for (const cr of relevant) {
       const k = key(cr.number);
       if (asked.current.has(k)) continue;

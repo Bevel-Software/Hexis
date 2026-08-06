@@ -18,8 +18,6 @@ import { GitContext } from '../modules/git/state/git.context';
 import { AutoUpdateContext } from '../modules/git/state/auto-update.context';
 import { useGitState } from '../modules/git/hooks/useGitState';
 import { useAutoPullUpdates } from '../modules/git/hooks/useAutoPullUpdates';
-import { PrViewerContext } from '../modules/pr/state/pr-viewer.context';
-import { usePrViewerState } from '../modules/pr/hooks/usePrViewerState';
 import { EventBusProvider } from '../modules/workflow/state/EventBusProvider';
 import { EventBusFocusBinder } from '../modules/workflow/state/EventBusFocusBinder';
 import { Toolbar } from '../modules/toolbar/components/Toolbar';
@@ -106,7 +104,6 @@ function AuthenticatedAppInner() {
   const workspaceState = useWorkspaceState();
   const gitState = useGitState(workspaceState.workspaceId);
   const autoUpdateState = useAutoPullUpdates(gitState, workspaceState);
-  const prViewerState = usePrViewerState();
 
   // Refresh git status whenever the user accepts/rejects pending content, since that
   // is the moment new bytes hit the working tree.
@@ -144,11 +141,9 @@ function AuthenticatedAppInner() {
       <EventBusFocusBinder />
       <GitContext.Provider value={gitState}>
         <AutoUpdateContext.Provider value={autoUpdateState}>
-          <PrViewerContext.Provider value={prViewerState}>
-            <AdminProvider>
-              <CrCreationHost>{chrome}</CrCreationHost>
-            </AdminProvider>
-          </PrViewerContext.Provider>
+          <AdminProvider>
+            <CrCreationHost>{chrome}</CrCreationHost>
+          </AdminProvider>
         </AutoUpdateContext.Provider>
       </GitContext.Provider>
     </WorkspaceContext.Provider>

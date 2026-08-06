@@ -108,8 +108,12 @@ export function CardGrid({
   return (
     <div className={cn('grid gap-2.5', 'grid-cols-[repeat(auto-fill,minmax(236px,1fr))]')}>
       {items.map((item) => (
+        // The change-request number is part of the key, not decoration: two
+        // people can propose a skill of the same name into different groups,
+        // and until one of them merges neither is in the catalog to collide
+        // with — so the name alone is not yet unique.
         <LibraryCard
-          key={`${item.kind}:${item.id}`}
+          key={`${item.kind}:${item.id}:${item.pending?.changeRequestNumber ?? ''}`}
           kind={item.kind}
           id={item.id}
           name={item.name}
@@ -117,6 +121,12 @@ export function CardGrid({
           owned={item.owned}
           status={item.status}
           version={item.version}
+          pending={
+            item.pending && {
+              authorName: item.pending.authorName,
+              mine: item.pending.mine,
+            }
+          }
           onOpen={() => onOpen(item)}
         />
       ))}

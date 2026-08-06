@@ -22,6 +22,7 @@ import {
   assertValidBranchName,
   assertValidRelativePath,
   isBranchAuthoredBy,
+  isOwnSuggestionsBranch,
   isProtectedBranch,
   PROTECTED_BRANCHES,
 } from './branch-name.js';
@@ -607,7 +608,7 @@ export class GitService implements IGitService {
     workspaceId: string,
     name: string,
     user: AuthUser,
-    opts: { onlyIfNoRemote?: boolean } = {},
+    opts: { onlyIfNoRemote?: boolean; systemCleanup?: boolean } = {},
   ): Promise<void> {
     assertValidBranchName(name);
     if (isProtectedBranch(name)) {
@@ -622,7 +623,12 @@ export class GitService implements IGitService {
         );
       }
 
-      if (opts.onlyIfNoRemote) {
+      if (opts.systemCleanup) {
+        // Internal post-merge retirement (never reachable from a route): the
+        // merge that emptied this branch was itself authorized, so no
+        // authorship check — the protected-branch and checked-out guards
+        // above still hold.
+      } else if (opts.onlyIfNoRemote) {
         // Legacy orphan-cleanup path (PR merged + remote head pruned). Skip
         // the authorship check — callers prune any orphan they encounter,
         // not just their own — but keep the "refuse if origin still has the
@@ -642,7 +648,13 @@ export class GitService implements IGitService {
         // that predicate is the existing source of truth for `Admin`-role
         // membership inside the access model — no separate `isAdmin()` plumbing
         // needed.
-        const isAuthor = isBranchAuthoredBy(name, user.email);
+        // Two authorship conventions: `<localpart>/…` UI drafts, and the
+        // `suggestions/<who>-<id8>/…` namespace the propose flow files its
+        // branches under — a user resetting THEIR OWN suggestion bundle is
+        // deleting their own branch.
+        const isAuthor =
+          isBranchAuthoredBy(name, user.email) ||
+          isOwnSuggestionsBranch(name, { email: user.email, id: user.id });
         const isAdmin = this.accessControl
           ? await this.accessControl.canWrite(workspaceId, user.email, 'roles.yaml')
           : false;

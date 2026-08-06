@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
-import { changeAuthorName } from '../utils/cr-author';
+import { changeAuthorName } from '../utils/author';
 
 /** Only the two author fields matter here; the rest of the summary is noise. */
 function cr(appAuthorName?: string): PullRequestSummary {

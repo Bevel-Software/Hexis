@@ -6,6 +6,7 @@ import {
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
 import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
+import { GitContext, type GitContextValue } from '../../git/state/git.context';
 import type { PullRequestSummary, WorkflowEvent } from '@bevel-software/platform-shared';
 import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
@@ -27,16 +28,20 @@ vi.mock('../services/library.api', () => ({
   defaultWorkspaceId: () => 'target-company-state',
   getSkill: apiMock.getSkill,
   getSkillFile: apiMock.getSkillFile,
-  readFileOnBranch: apiMock.readFileOnBranch,
   proposeChange: apiMock.proposeChange,
   listSkills: vi.fn(),
-  listOpenChangeRequests: vi.fn(),
-  listMyChangeRequests: vi.fn(),
   // Real behaviour, not a stub: the page resolves the caller's own request by
   // this branch name, so a `vi.fn()` returning undefined would quietly disable
   // the very lookup these tests are checking.
   suggestionBranchFor: (email: string, skill: string) =>
     `suggestions/${email.split('@')[0]}/${skill}`,
+}));
+// The change-request module's reads — the branch-file read feeds the editor
+// base and the per-request diffs.
+vi.mock('../../change-requests/services/change-requests.api', () => ({
+  listOpenChangeRequests: vi.fn(async () => []),
+  listMyChangeRequests: vi.fn(async () => []),
+  readFileOnBranch: apiMock.readFileOnBranch,
 }));
 vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: apiMock.mergePullRequest }));
 vi.mock('../../pr/services/pr-cancel.api', () => ({
@@ -51,6 +56,23 @@ vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: apiMock.ap
 // the raw source so assertions can see the body text.
 vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
   KbMarkdownView: ({ source }: { source: string }) => <div data-testid="md-view">{source}</div>,
+}));
+
+// The file bar's Edit-or-Propose decision asks the per-file access resolver.
+// Default here is the READER's answer (`canWrite: false`) so the proposing
+// suites below exercise the propose path; the Edit test flips it.
+const accessMock = vi.hoisted(() => ({
+  result: {
+    canWrite: false,
+    eligible: { roles: [], users: [] },
+    owners: { roles: [], users: [] },
+  },
+  fetchFileAccess: vi.fn(),
+}));
+accessMock.fetchFileAccess.mockImplementation(async () => accessMock.result);
+vi.mock('../../access/api', () => ({
+  fetchFileAccess: accessMock.fetchFileAccess,
+  fetchFileAccessBatch: vi.fn(async () => ({ results: {} })),
 }));
 
 // The page reads the catalog through `useLibrary()`. Mocking the hook rather
@@ -76,6 +98,29 @@ const auth = {
   login: async () => {},
   logout: () => {},
 } as AuthContextValue;
+
+// The page's id-link resolver (`useNodeIdNav`) reads the current branch off
+// this context; the tests never follow an id-link, so a minimal stub is all
+// the provider needs to be.
+const git = {
+  status: { branch: 'main', hasUpstream: true, unmergedFromUpstream: false },
+  branches: [],
+  availability: 'ready',
+  lastError: null,
+  refreshStatus: async () => null,
+  refreshBranches: async () => {},
+  createBranch: async () => {},
+  deleteBranch: async () => {},
+  pull: async () => {},
+  fetchForkBase: async () => null,
+  revert: async () => ({
+    sha: 'a', authorName: 'n', authorEmail: 'e', subject: 's', committedAt: '2026-01-01T00:00:00Z',
+  }),
+  fetchFileHistory: async () => [],
+  fetchFileDiff: async () => '',
+  fetchFileAtChange: async () => ({ baseline: null, current: null }),
+  fetchFileComparison: async () => '',
+} as GitContextValue;
 
 const skillSummary = {
   name: 'newsletter',
@@ -190,6 +235,7 @@ function renderPage(
     <MemoryRouter initialEntries={['/skills-and-tools/skills/newsletter']}>
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
+          <GitContext.Provider value={git}>
           <EventBusContext.Provider value={bus}>
             {/* The real toast provider: the success message IS the page's
                 report that the merge landed, so a stubbed-out toast would
@@ -200,6 +246,7 @@ function renderPage(
               </Routes>
             </LibraryToastProvider>
           </EventBusContext.Provider>
+          </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
     </MemoryRouter>,
@@ -247,14 +294,18 @@ beforeEach(() => {
     ],
   });
   apiMock.approvePrFile.mockReset().mockResolvedValue([]);
+  accessMock.result = {
+    canWrite: false,
+    eligible: { roles: [], users: [] },
+    owners: { roles: [], users: [] },
+  };
 });
 
 describe('SkillPage', () => {
-  it('loads the skill and shows its name, description, needed integrations and files', async () => {
+  it('loads the skill and shows its name, needed integrations and files', async () => {
     renderPage(false);
 
     expect(await screen.findByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
-    expect(screen.getByText('Drafts the Friday newsletter for review.')).toBeInTheDocument();
     expect(apiMock.getSkill).toHaveBeenCalledWith('newsletter');
 
     // Needed integration derived from allowed-tools, with its connection state.
@@ -266,8 +317,16 @@ describe('SkillPage', () => {
     expect(screen.getByRole('tab', { name: /SKILL\.md/ })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /sources\.yaml/ })).toBeInTheDocument();
 
-    // SKILL.md body renders through the markdown view.
-    expect(screen.getByTestId('md-view').textContent).toContain('Collect the news');
+    // SKILL.md renders through the markdown view from its RAW default-branch
+    // bytes — frontmatter included, so the renderer's frontmatter panel (not a
+    // header paragraph) is what says what the skill is for. The stripped
+    // `skill.body` copy must NOT be the source anymore.
+    await waitFor(() =>
+      expect(screen.getByTestId('md-view').textContent).toContain('Collect the news'),
+    );
+    expect(screen.getByTestId('md-view').textContent).toContain('name: newsletter');
+    // The description is no longer repeated above the pane.
+    expect(screen.queryByText('Drafts the Friday newsletter for review.')).toBeNull();
   });
 
   it('marks the open tab selected and loads a bundled file on click', async () => {
@@ -397,12 +456,34 @@ describe('SkillPage', () => {
    * sit beside Propose; it bypassed review and, on a protected branch, usually
    * ended in an AccessDenied after the user had already navigated away.
    */
-  it('offers exactly one way to change the file — no direct-edit escape hatch', async () => {
+  it('offers exactly ONE way to change the file: Propose for a caller who may not write it', async () => {
     renderPage(true);
     // Propose appears once the file's raw text is in hand, so wait for it —
     // asserting Edit's absence before the bar has rendered proves nothing.
     expect(await screen.findByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+  });
+
+  /**
+   * …and Edit for a caller who MAY. The old direct-edit escape hatch was cut
+   * because it was offered to everyone and ended in AccessDenied for most;
+   * gated by the real per-file ACL it is the honest button again. Exactly one
+   * of the two shows, never both.
+   */
+  it('offers Edit instead of Propose when the ACL says the caller may write the file', async () => {
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    renderPage(true);
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Propose changes' })).toBeNull();
+    // Resolved against the file on the DEFAULT branch, kbDirName stripped.
+    expect(accessMock.fetchFileAccess).toHaveBeenCalledWith(
+      'target-company-state',
+      'Skills/newsletter/SKILL.md',
+    );
   });
 
   /**
@@ -662,21 +743,18 @@ describe('SkillPage — deciding on a change', () => {
   /**
    * "The skill now reads with that change" has to be TRUE of what is on screen.
    *
-   * The reading pane renders `skill.body` from `useSkillDetail`, which fetches
-   * once per skill — so a merge changed the file on the server while the pane
-   * kept rendering the text from before it, directly under a message saying it
-   * had changed. Re-reading the skill is what makes the sentence honest.
+   * The reading pane renders the RAW default-branch file, keyed by a revision
+   * the apply bumps — so a merge that changed the file on the server must
+   * re-read it, or the pane keeps rendering the text from before the merge
+   * directly under a message saying it had changed.
    */
   it('re-reads the skill so the pane shows the merged text', async () => {
     const bus = makeFakeBus();
     renderPage(true, [foreignCr], [], bus);
     expect((await screen.findByTestId('md-view')).textContent).toContain('draft the letter');
 
-    // What the server returns once the change request has landed.
-    apiMock.getSkill.mockResolvedValue({
-      ...skillDetail,
-      body: '# Newsletter drafter\nCollect the news and ship the letter.',
-    });
+    // What the default branch returns once the change request has landed.
+    apiMock.readFileOnBranch.mockImplementation(() => Promise.resolve(RAW_BRANCH));
 
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
@@ -741,6 +819,13 @@ describe('SkillPage — deciding on a change', () => {
     ).toBeInTheDocument();
     // A change that cannot land must not keep offering the button that fails.
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+    // The way out is handed over ready to paste: the exact agent prompt,
+    // request number and branches filled in, with a Copy button beside it.
+    expect(screen.getByText(/ask your agent to resolve it/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Change request #7 can no longer be applied[\s\S]*`suggestions\/olga\/newsletter`/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument();
   });
 
   /**
@@ -823,11 +908,13 @@ describe('SkillPage — deciding on a change', () => {
 
   /**
    * `touchedNodePaths` is "Empty if not yet computed". In that window every
-   * path-derived check collapses together — so the page used to offer a second
-   * editor, and submitting it opened a SECOND change request against a branch
-   * that already had one. Resolving by branch closes the window.
+   * path-derived check collapses together — resolving the caller's own
+   * request by BRANCH is what keeps a proposal-on-top-of-a-proposal
+   * INCREMENTAL: the editor seeds from the file as already proposed, and
+   * submitting reuses the existing request instead of opening a second one
+   * against the same branch.
    */
-  it("recognises the caller's own request before its touched paths are computed", async () => {
+  it("continues the caller's own request before its touched paths are computed", async () => {
     const uncomputed = {
       ...foreignCr,
       appAuthor: { name: 'Razvan' },
@@ -836,20 +923,37 @@ describe('SkillPage — deciding on a change', () => {
     } as unknown as PullRequestSummary;
 
     renderPage(false, [uncomputed], [uncomputed.number]);
-    await screen.findByRole('heading', { name: 'newsletter' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Propose changes' }));
 
-    // No second editor over the top of a request that already exists.
+    // The editor's base is the file AS PROPOSED on the caller's branch —
+    // 'ship the letter' — not the default branch's 'draft the letter'.
+    const textarea = await screen.findByRole('textbox', {
+      name: /Propose changes to SKILL\.md/,
+    });
+    await waitFor(() => expect(textarea).toHaveValue(RAW_BRANCH));
+
+    fireEvent.change(textarea, { target: { value: RAW_BRANCH + '\nAnd a PS.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Propose changes' }));
+
+    // Same request, extended — NOT a second one against the same branch.
     await waitFor(() =>
-      expect(screen.queryByRole('button', { name: 'Propose changes' })).toBeNull(),
+      expect(apiMock.proposeChange).toHaveBeenCalledWith(
+        expect.objectContaining({
+          existingCr: expect.objectContaining({ number: 7 }),
+          content: RAW_BRANCH + '\nAnd a PS.',
+        }),
+      ),
     );
   });
 
-  it('offers the author Withdraw instead of a verdict, and only once per file', async () => {
+  it('offers the author Withdraw AND the way to keep editing their proposal', async () => {
     renderPage(false, [foreignCr], [7]);
 
     const withdraw = await screen.findByRole('button', { name: 'Withdraw' });
-    // You already have a proposal on this file — a second would fork it.
-    expect(screen.queryByRole('button', { name: 'Propose changes' })).toBeNull();
+    // Proposing again stays available — it continues the open request
+    // (seeded from the branch), it does not fork it. Async: the button waits
+    // on the default-branch raw arriving, one fetch behind the box.
+    expect(await screen.findByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
 
     fireEvent.click(withdraw);
     await waitFor(() => expect(apiMock.cancelPullRequest).toHaveBeenCalledWith(7));

@@ -15,7 +15,6 @@ import { WorkspaceContext, type WorkspaceContextValue } from '../../../workspace
 import { makeWorkspaceFixture } from '../../../workspace/__tests__/testFixtures';
 import { LayoutContext, type LayoutController } from '../../../layout/state/layout.context';
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
-import { PrViewerContext, type PrViewerContextValue } from '../../../pr/state/pr-viewer.context';
 import { AdminContext } from '../../../admin/state/admin.context';
 // The gear menu's extension rows (in the enterprise build: Connectors,
 // Watchlist, Routines, Connected apps, feedback, LLM config, user accounts)
@@ -124,18 +123,6 @@ function renderToolbar(overrides?: {
     ...overrides?.layout,
   };
 
-  const prViewer: PrViewerContextValue = {
-    openPrNumber: null,
-    detail: null,
-    notFound: false,
-    selectedPath: null,
-    isLoading: false,
-    lastError: null,
-    openPr: () => {},
-    closeViewer: () => {},
-    selectPath: () => {},
-    refresh: async () => {},
-  };
 
   const review: ReviewContextValue = {
     session: null,
@@ -160,7 +147,6 @@ function renderToolbar(overrides?: {
           <GitContext.Provider value={git}>
             <AutoUpdateContext.Provider value={overrides?.autoUpdate ?? IDLE_AUTO_UPDATE}>
               <ReviewContext.Provider value={review}>
-                <PrViewerContext.Provider value={prViewer}>
                   <LayoutContext.Provider value={layout}>
                     <AdminContext.Provider
                       value={{
@@ -185,7 +171,6 @@ function renderToolbar(overrides?: {
                       </AppRegistryContext.Provider>
                     </AdminContext.Provider>
                   </LayoutContext.Provider>
-                </PrViewerContext.Provider>
               </ReviewContext.Provider>
             </AutoUpdateContext.Provider>
           </GitContext.Provider>

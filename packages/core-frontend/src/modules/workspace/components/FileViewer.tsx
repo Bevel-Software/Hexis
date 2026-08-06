@@ -1,18 +1,16 @@
 import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Check, XCircle, Lock, AlertTriangle, ArrowLeft } from 'lucide-react';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
-import { usePrViewer } from '../../pr/state/pr-viewer.context';
 import { Banner, Button, Surface } from '../../../shared/components';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
 import { useCanonicalFileUrl } from '../routing/kb-routes';
 import { useReview } from '../../review/state/review.context';
-import { ProtectedBranchBanner } from '../../git/components/ProtectedBranchBanner';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { useFileAccess } from '../../access/hooks/useFileAccess';
 import { AccessRestrictedBanner } from '../../access/components/AccessRestrictedBanner';
@@ -26,13 +24,25 @@ import {
   useAppRegistry,
   useSuggestedPromptSeed,
 } from '../../../core/registry';
-import { PrViewer } from '../../pr/components/PrViewer';
 import { useFileLock } from '../../workflow/hooks/useFileLock';
 import { LockApiError } from '../../workflow/services/lock.api';
 import { useAuth } from '../../auth/state/auth.context';
+import {
+  knowledgeSuggestionBranchFor,
+  proposeKnowledgeChange,
+} from '../../change-requests/services/propose.api';
+import {
+  listMyChangeRequests,
+  readFileOnBranch,
+} from '../../change-requests/services/change-requests.api';
+import { FileChangeBoxes } from '../../change-requests/components/FileChangeBoxes';
+import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
+import { formatEligible } from '../../access/hooks/useFileAccess';
+import { PR_STALE_EVENT } from '../../../core/events';
 import { getFileRenderer, getRendererLayout } from './renderers';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
+import { FilePaneCard } from './FilePaneCard';
 
 const SUGGESTED_PROMPTS = [
   'Give me an overview of the process landscape.',
@@ -43,6 +53,7 @@ const SUGGESTED_PROMPTS = [
 export function FileViewer() {
   const {
     workspaceId,
+    kbDirName,
     openFilePath,
     openFileContent,
     openFileSavedContent,
@@ -157,6 +168,39 @@ export function FileViewer() {
   >(null);
   const [pendingDeferred, setPendingDeferred] = useState(false);
   const [hadPending, setHadPending] = useState(false);
+
+  // **Propose mode** — the write path for a reader WITHOUT write permission.
+  // Where Edit acquires the file lock and commits to this branch, Propose
+  // takes no lock and never touches this branch: the text goes to the
+  // caller's personal suggestions branch and surfaces as a change request
+  // for the file's owners to approve. No lock because the lock protects the
+  // file's canonical bytes, and a proposal does not change them.
+  const [proposeMode, setProposeMode] = useState(false);
+  const [proposalBusy, setProposalBusy] = useState(false);
+  // The one confirmation the author gets that the proposal is now someone
+  // else's to act on. Knowledge has no toast provider (see KbPageHeader),
+  // so this is a banner, dismissed on the next file/mode change.
+  const [proposalSent, setProposalSent] = useState(false);
+  // "Loading…" between the Propose click and the editor opening: entering
+  // checks for an existing open proposal and, if there is one, reads the
+  // file's PROPOSED version off the suggestions branch first.
+  const [isEnteringPropose, setIsEnteringPropose] = useState(false);
+  /**
+   * The editor's base when the caller already has an open proposal: the file
+   * as it reads on THEIR suggestions branch. Seeding from it is what makes a
+   * second proposal INCREMENTAL — it stacks on the pending change instead of
+   * silently starting over from this branch's text and overwriting it. Null
+   * = no open proposal (or the read failed): seed from the tab as before.
+   */
+  const [proposeSeed, setProposeSeed] = useState<string | null>(null);
+  /**
+   * What Send actually sends. The tab's content ref lags the editor by one
+   * state propagation and — when a seed is in play — starts out pointing at
+   * THIS branch's text, not the proposed text on screen. This ref is set to
+   * the seed on entry and to every keystroke after, so the zero-edits case
+   * sends what the editor showed, never what it replaced.
+   */
+  const proposeBufferRef = useRef<string | null>(null);
   // Picker overrides set by the chat tool-card's "View full comparison" link.
   // Cleared when the user opens a different file so a deep-link doesn't stick
   // around and override their natural defaults on the next open.
@@ -178,6 +222,9 @@ export function FileViewer() {
   // history tab of file B, which is surprising — opening a file should default
   // to showing what's in it.
   useEffect(() => {
+    // Intentional reset-on-key-change (same pattern as useWorkspaceState):
+    // opening a different file must start from the content tab.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setActiveTab('content');
     setIsManualDirty(false);
     setManualSaveState('idle');
@@ -238,6 +285,7 @@ export function FileViewer() {
     const hasPendingNow = pendingFileContent !== null;
 
     if (!hasPendingNow) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setPendingDeferred(false);
       setHadPending(false);
     } else if (!hadPending) {
@@ -248,11 +296,14 @@ export function FileViewer() {
 
   // Pending review / protected branches are read-only surfaces — ensure the file-
   // level dirty indicator does not stay latched from a prior editable state.
+  // Propose mode is the exception: it IS the editable surface for a reader
+  // without write access, and its dirty flag is real.
   useEffect(() => {
-    if (onProtectedBranch || isReviewingPending) {
+    if ((onProtectedBranch && !proposeMode) || isReviewingPending) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsManualDirty(false);
     }
-  }, [onProtectedBranch, isReviewingPending]);
+  }, [onProtectedBranch, isReviewingPending, proposeMode]);
 
   const handleRevertCompleted = useCallback(async () => {
     await refreshFileTree();
@@ -346,8 +397,15 @@ export function FileViewer() {
   // `isEnteringEdit` flag is cleared too so a switch-during-load
   // doesn't leave the new tab's button stuck in "Loading…".
   useEffect(() => {
+    // Intentional reset-on-key-change: a new file starts in View mode.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setEditMode(false);
     setIsEnteringEdit(false);
+    setProposeMode(false);
+    setProposalSent(false);
+    setIsEnteringPropose(false);
+    setProposeSeed(null);
+    proposeBufferRef.current = null;
   }, [openFilePath, currentBranch, workspaceId]);
 
   // Monotonic token to scope each enter-edit flow's async completion to
@@ -491,6 +549,137 @@ export function FileViewer() {
     });
   }, [editMode, fileLock]);
 
+  /**
+   * Enter propose mode. If the caller already has an OPEN proposal, the
+   * editor seeds from the file as it reads on their suggestions branch —
+   * proposing again is a continuation, and starting from this branch's text
+   * would silently overwrite their own pending change. No lock either way:
+   * the lock protects the file's canonical bytes, and a proposal never
+   * touches them. Any staleness against this branch shows up in the change
+   * request's diff, where it is visible.
+   */
+  const handleEnterPropose = useCallback(() => {
+    if (proposeMode || isEnteringPropose || !openFilePath) return;
+    setProposalSent(false);
+    setSaveError(null);
+    const targetPath = openFilePath;
+    setIsEnteringPropose(true);
+    (async () => {
+      let seed: string | null = null;
+      const user = auth.user;
+      const prefix = kbDirName ? `${kbDirName}/` : null;
+      if (user && prefix && targetPath.startsWith(prefix)) {
+        let existing = null;
+        try {
+          const branch = knowledgeSuggestionBranchFor(user);
+          const mine = await listMyChangeRequests();
+          existing = mine.find((c) => c.state === 'open' && c.branch === branch) ?? null;
+          if (existing) {
+            seed = await readFileOnBranch(branch, targetPath.slice(prefix.length));
+          }
+        } catch (err) {
+          // TWO failure causes, and only one may degrade. "Is there an open
+          // proposal?" failing means we KNOW nothing — seed from this branch,
+          // which is better than a propose button that does nothing. But a
+          // proposal we KNOW exists and could not read must refuse: opening
+          // the editor on this branch's text and sending would silently
+          // replace the caller's pending proposal — the exact overwrite the
+          // seed exists to prevent.
+          if (existing) {
+            console.warn('[FileViewer] could not read the open proposal:', err);
+            if (openFilePathRef.current === targetPath) {
+              setSaveError({
+                kind: 'generic',
+                message:
+                  "Couldn't load your open proposal, so the editor stayed closed — try again in a moment.",
+              });
+            }
+            return;
+          }
+          console.warn('[FileViewer] could not check for an open proposal:', err);
+          seed = null;
+        }
+      }
+      // Switched files while the seed loaded — this propose is moot.
+      if (openFilePathRef.current !== targetPath) return;
+      setProposeSeed(seed);
+      proposeBufferRef.current = seed ?? openFileContentRef.current;
+      setProposeMode(true);
+    })().finally(() => setIsEnteringPropose(false));
+  }, [proposeMode, isEnteringPropose, openFilePath, auth.user, kbDirName]);
+
+  /** Leave propose mode, throwing the typed text away and re-reading disk. */
+  const handleDiscardProposal = useCallback(() => {
+    setProposeMode(false);
+    setProposeSeed(null);
+    proposeBufferRef.current = null;
+    if (openFilePath) {
+      reloadTabFromDisk(openFilePath).catch((err) => {
+        console.warn('[FileViewer] reload after discarding a proposal failed:', err);
+      });
+    }
+  }, [openFilePath, reloadTabFromDisk]);
+
+  /**
+   * Send the proposal: the buffer goes to the caller's personal suggestions
+   * branch and an open change request against the default branch is created
+   * (or reused — one bundle per person). The file on THIS branch is untouched,
+   * so on success the tab re-reads disk: leaving the proposed text on screen
+   * would claim the file now says something it does not.
+   */
+  const handleSendProposal = useCallback(async (contentOverride?: string) => {
+    const path = openFilePathRef.current;
+    // Ctrl+S hands the renderer's buffer straight in; the Send button has no
+    // buffer of its own and falls back to the propose buffer (seed +
+    // keystrokes), then to the tab's mirror.
+    const content = contentOverride ?? proposeBufferRef.current ?? openFileContentRef.current;
+    if (!path || !kbDirName || !auth.user || content === null || proposalBusy) return;
+    const prefix = `${kbDirName}/`;
+    if (!path.startsWith(prefix)) return;
+    // Nothing typed over an existing proposal: the branch already says
+    // exactly this. Close the editor rather than pushing an empty commit at
+    // the change request.
+    if (proposeSeed !== null && content === proposeSeed) {
+      setProposeMode(false);
+      setProposeSeed(null);
+      proposeBufferRef.current = null;
+      if (openFilePathRef.current === path) {
+        reloadTabFromDisk(path).catch(() => {});
+      }
+      return;
+    }
+    setProposalBusy(true);
+    setSaveError(null);
+    try {
+      await proposeKnowledgeChange({
+        repoRelativePath: path.slice(prefix.length),
+        content,
+        userEmail: auth.user.email,
+        userId: auth.user.id,
+        userName: auth.user.name,
+      });
+      setProposeMode(false);
+      setProposeSeed(null);
+      proposeBufferRef.current = null;
+      setProposalSent(true);
+      // The same signal a share dialog or an agent turn sends: the open
+      // change-request list just changed, so the tree dots and the page
+      // banner refetch.
+      window.dispatchEvent(new Event(PR_STALE_EVENT));
+      if (openFilePathRef.current === path) {
+        await reloadTabFromDisk(path);
+      }
+    } catch (err) {
+      console.error('[FileViewer] sending a proposal failed:', err);
+      setSaveError({
+        kind: 'generic',
+        message: err instanceof Error ? err.message : "Couldn't send your proposed change.",
+      });
+    } finally {
+      setProposalBusy(false);
+    }
+  }, [kbDirName, auth.user, proposalBusy, proposeSeed, reloadTabFromDisk]);
+
   // Save flow (PLAN §2):
   //   - Lock is already held because we're in edit mode (handleEnterEditMode
   //     guarantees it). Save = checkpoint commit, lock stays held so
@@ -539,6 +728,9 @@ export function FileViewer() {
   const recordActivity = fileLock.recordActivity;
   const handleValueChange = useCallback((value: string) => {
     recordActivity();
+    // Keep the propose buffer current too — harmless in edit mode, and in
+    // propose mode it is what Send reads (see `proposeBufferRef`).
+    proposeBufferRef.current = value;
     setActiveTabContent(value);
   }, [recordActivity, setActiveTabContent]);
 
@@ -620,12 +812,13 @@ export function FileViewer() {
   // on a file you can read but not write still belongs on this page.
   const openChangeRequests = useOpenChangeRequests();
   const requestsOnThisFile = openFilePath ? openChangeRequests.forPath(openFilePath) : [];
-  const { openPr } = usePrViewer();
+  // The full-bleed banner's "Review the change" opens the SHARED
+  // change-request dialog — the old PR viewer surface is gone.
+  const [bannerCr, setBannerCr] = useState<PullRequestSummary | null>(null);
 
   if (!openFilePath || openFileContent === null || !Renderer) {
     return (
       <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
-        <ProtectedBranchBanner />
         <PullNeededBanner />
         <EditorTabs />
         <div className="flex-1 flex items-center justify-center px-6">
@@ -660,7 +853,6 @@ export function FileViewer() {
           </div>
         </div>
         {registeredPanels}
-        <PrViewer />
       </div>
     );
   }
@@ -672,11 +864,154 @@ export function FileViewer() {
   const shellVariant =
     activeTab === 'content' ? getRendererLayout(openFilePath) : 'full-bleed';
 
+  // What the pane card's bar names — extension kept, unlike the `<h1>` above,
+  // because the bar is the technical label (`SKILL.md`, `How to get
+  // started.md`) exactly as the skill page's file bar renders it.
+  const fileBaseName = openFilePath.slice(openFilePath.lastIndexOf('/') + 1);
+
+  // The repo-relative path (kbDirName stripped) — what the change-request
+  // machinery speaks. Null for files outside the KB clone, which cannot have
+  // change requests.
+  const repoRelativePath =
+    kbDirName && openFilePath.startsWith(`${kbDirName}/`)
+      ? openFilePath.slice(kbDirName.length + 1)
+      : null;
+  const ownersLabel =
+    access.owners.roles.length > 0 || access.owners.users.length > 0
+      ? formatEligible(access.owners)
+      : 'the owners';
+
+  const rendererElement = (
+    // The renderer is a dynamic per-extension lookup resolved in a useMemo
+    // above — not a component created during render.
+    // eslint-disable-next-line react-hooks/static-components
+    <Renderer
+      // **Why we key on `openFileSavedContent` (read-only mode only).**
+      // When a teammate's save lands, the workspace state updates the
+      // tab's content + savedContent. The renderer's internal
+      // `useState(content)` + sync-on-prop-change `useEffect` is
+      // supposed to pull the new value into `value`, but in practice
+      // (production build, multiple suspended subscribers, etc.) we
+      // were seeing the preview stay on the stale buffer until the
+      // user manually closed + reopened the tab. Keying the renderer
+      // on the bytes themselves forces a fresh mount when those
+      // bytes change, which initializes `value` from the latest
+      // content prop directly and bypasses any stuck-state edge
+      // case. We gate this on `!editMode` so the user's in-flight
+      // edits (where `value` diverges from `savedContent`) don't
+      // trigger a remount that would discard their typing —
+      // savedContent stays stable through an edit until the save
+      // commits, then advances once.
+      key={editMode || proposeMode ? `${openFilePath}|edit` : `${openFilePath}|${openFileSavedContent?.length ?? 0}|${openFileSavedContent?.slice(0, 64) ?? ''}|${openFileSavedContent?.slice(-64) ?? ''}`}
+      // In propose mode with an open proposal, the buffer AND the dirty
+      // baseline are the PROPOSED text (the seed) — the editor continues the
+      // pending change, and "dirty" means "differs from what I already
+      // proposed", not "differs from this branch".
+      content={
+        isReviewingPending
+          ? pendingFileContent!
+          : proposeMode && proposeSeed !== null
+            ? proposeSeed
+            : openFileContent
+      }
+      savedContent={
+        isReviewingPending
+          ? pendingFileContent!
+          : proposeMode && proposeSeed !== null
+            ? proposeSeed
+            : (openFileSavedContent ?? openFileContent)
+      }
+      filePath={openFilePath}
+      // In propose mode a save (Ctrl+S) IS sending the proposal — the
+      // one thing it must never be is a write to this branch.
+      onSave={
+        isReviewingPending
+          ? handlePendingSave
+          : proposeMode
+            ? handleSendProposal
+            : onProtectedBranch
+              ? handlePendingSave
+              : handleSave
+      }
+      onDirtyChange={setIsManualDirty}
+      onValueChange={
+        isReviewingPending || !(editMode || proposeMode) ? undefined : handleValueChange
+      }
+      onSaveStateChange={setManualSaveState}
+      readOnly={isReviewingPending || !(editMode || proposeMode)}
+    />
+  );
+
+  // The pane bar's write action — the labelled button at the frame's top
+  // left, same slot the skill page uses. What it says is the access answer:
+  // `Edit` when you may write the file, `Propose changes` when you may not
+  // (null = lookup in flight = optimistic Edit, exactly the header's old
+  // rule). While a mode is OPEN it shows the way out instead. The header's
+  // own cluster is suppressed for prose files (`writeActionInPane`).
+  const lockedBy = fileLock.externalLock?.holderName ?? null;
+  const paneActions = isReviewingPending ? null : proposeMode ? (
+    <>
+      <Button variant="quiet" size="tiny" onClick={handleDiscardProposal} disabled={proposalBusy}>
+        Discard
+      </Button>
+      <Button
+        variant="primary"
+        size="tiny"
+        onClick={() => void handleSendProposal()}
+        disabled={proposalBusy}
+        title="Send your proposed change for approval"
+      >
+        {proposalBusy ? 'Sending…' : 'Send proposal'}
+      </Button>
+    </>
+  ) : editMode ? (
+    <Button
+      variant="outline"
+      size="tiny"
+      onClick={handleExitEditMode}
+      title="Save changes and return to view mode"
+    >
+      Done
+    </Button>
+  ) : accessRestricted ? (
+    <Button
+      variant="outline"
+      size="tiny"
+      disabled={isEnteringPropose}
+      onClick={handleEnterPropose}
+      title={
+        isEnteringPropose
+          ? 'Checking for an open proposal…'
+          : "You can't edit this file directly — propose a change for its owners to approve"
+      }
+    >
+      {isEnteringPropose ? 'Loading…' : 'Propose changes'}
+    </Button>
+  ) : (
+    <Button
+      variant="outline"
+      size="tiny"
+      disabled={!!lockedBy || isEnteringEdit}
+      onClick={handleEnterEditMode}
+      title={
+        lockedBy
+          ? `Locked by ${lockedBy}`
+          : isEnteringEdit
+            ? 'Acquiring lock and fetching latest content…'
+            : 'Click to edit this file'
+      }
+    >
+      {isEnteringEdit ? 'Loading…' : 'Edit'}
+    </Button>
+  );
+
   return (
     <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
-      <ProtectedBranchBanner />
       <PullNeededBanner />
-      {accessRestricted && openFilePath && (
+      {/* Hidden while proposing: "you don't have permission to edit" over an
+          open editor reads as a contradiction — the propose surface's own
+          notice (below) explains where the text is going instead. */}
+      {accessRestricted && !proposeMode && openFilePath && (
         <AccessRestrictedBanner path={openFilePath} eligible={access.eligible} />
       )}
       {/* ONE column holds the tabs, the title and the text at the same width,
@@ -700,6 +1035,12 @@ export function FileViewer() {
         canWrite={access.canWrite}
         editMode={editMode}
         entering={isEnteringEdit}
+        proposeMode={proposeMode}
+        proposalBusy={proposalBusy}
+        onPropose={handleEnterPropose}
+        onSendProposal={() => void handleSendProposal()}
+        onDiscardProposal={handleDiscardProposal}
+        writeActionInPane={shellVariant === 'prose'}
         lockedBy={fileLock.externalLock?.holderName ?? null}
         historyAvailable={historyAvailable}
         isDirty={isManualDirty}
@@ -738,11 +1079,15 @@ export function FileViewer() {
         </>
       ) : (
         <>
-          {/* Somebody has proposed a change to this file. It says so here
-              whoever opened it — the signal comes from the broad endpoint, not
-              from the dock's you-scoped queue, so a colleague's request on a
-              file you can read but not write still shows. */}
-          {requestsOnThisFile.length > 0 && (
+          {/* Somebody has proposed a change to this file. For a DOCUMENT the
+              proposals render as change boxes UNDER the file (below) — the
+              skill page's presentation, because the question they ask is
+              unanswerable without the text. This banner remains only for
+              full-bleed files, which have no below to put a box in. The
+              signal comes from the broad endpoint, not from the dock's
+              you-scoped queue, so a colleague's request on a file you can
+              read but not write still shows. */}
+          {requestsOnThisFile.length > 0 && shellVariant !== 'prose' && (
             <Banner role="note" tone="wait" className="mb-4 flex-none">
               <div className="font-semibold">
                 {requestsOnThisFile.length === 1
@@ -758,9 +1103,36 @@ export function FileViewer() {
                 <Button
                   variant="primary"
                   size="sm"
-                  onClick={() => openPr(requestsOnThisFile[0].number)}
+                  onClick={() => setBannerCr(requestsOnThisFile[0])}
                 >
                   Review the change
+                </Button>
+              </div>
+            </Banner>
+          )}
+          {/* Propose mode's one-line contract: where the text goes, and that
+              nothing on this page changes until someone with write access
+              says yes. Shown INSTEAD of the access-restricted banner. */}
+          {proposeMode && (
+            <Banner role="status" tone="wait" aria-live="polite" className="mb-4 flex-none">
+              You're proposing a change. Nothing here changes until someone with write
+              access approves it.
+            </Banner>
+          )}
+          {proposalSent && (
+            <Banner
+              role="status"
+              tone="ok"
+              icon={<Check size={14} />}
+              aria-live="polite"
+              className="mb-4 flex-none"
+            >
+              <div className="flex items-center gap-2">
+                <span className="flex-1">
+                  Your proposed change was sent as a change request.
+                </span>
+                <Button variant="quiet" size="sm" title="Dismiss" onClick={() => setProposalSent(false)}>
+                  Dismiss
                 </Button>
               </div>
             </Banner>
@@ -907,41 +1279,55 @@ export function FileViewer() {
               explicit Edit mode. Edit mode is gated by the lock, so this
               also covers "someone else holds it" without a separate check.
               The scroll-activity source for the idle-release timer is the
-              shell above, not this wrapper — see `KbDocumentShell.scrollRef`. */}
+              shell above, not this wrapper — see `KbDocumentShell.scrollRef`.
+
+              A PROSE document sits inside `FilePaneCard` — the same edged
+              frame, with the same mono filename bar, that the skill page puts
+              around its files. One file-in-a-box drawing for the whole app;
+              full-bleed renderers (pdf, csv, images…) are viewports, not
+              documents, and keep their unframed definite-height contract. */}
           <div className={shellVariant === 'full-bleed' ? 'flex min-h-0 flex-1 flex-col' : 'min-w-0'}>
-            <Renderer
-              // **Why we key on `openFileSavedContent` (read-only mode only).**
-              // When a teammate's save lands, the workspace state updates the
-              // tab's content + savedContent. The renderer's internal
-              // `useState(content)` + sync-on-prop-change `useEffect` is
-              // supposed to pull the new value into `value`, but in practice
-              // (production build, multiple suspended subscribers, etc.) we
-              // were seeing the preview stay on the stale buffer until the
-              // user manually closed + reopened the tab. Keying the renderer
-              // on the bytes themselves forces a fresh mount when those
-              // bytes change, which initializes `value` from the latest
-              // content prop directly and bypasses any stuck-state edge
-              // case. We gate this on `!editMode` so the user's in-flight
-              // edits (where `value` diverges from `savedContent`) don't
-              // trigger a remount that would discard their typing —
-              // savedContent stays stable through an edit until the save
-              // commits, then advances once.
-              key={editMode ? `${openFilePath}|edit` : `${openFilePath}|${openFileSavedContent?.length ?? 0}|${openFileSavedContent?.slice(0, 64) ?? ''}|${openFileSavedContent?.slice(-64) ?? ''}`}
-              content={isReviewingPending ? pendingFileContent! : openFileContent}
-              savedContent={isReviewingPending ? pendingFileContent! : (openFileSavedContent ?? openFileContent)}
-              filePath={openFilePath}
-              onSave={isReviewingPending || onProtectedBranch ? handlePendingSave : handleSave}
-              onDirtyChange={setIsManualDirty}
-              onValueChange={isReviewingPending || onProtectedBranch || !editMode ? undefined : handleValueChange}
-              onSaveStateChange={setManualSaveState}
-              readOnly={isReviewingPending || onProtectedBranch || !editMode}
-            />
+            {shellVariant === 'prose' ? (
+              <>
+                <FilePaneCard file={fileBaseName} actions={paneActions}>
+                  {rendererElement}
+                </FilePaneCard>
+                {/* Every open proposal on this file, under the file it is
+                    about — the same boxes, the same dialog, as the skill
+                    page. Hidden while the reader IS editing or proposing:
+                    the diffs are against text that is changing under them. */}
+                {!editMode && !proposeMode && repoRelativePath && requestsOnThisFile.length > 0 && (
+                  <FileChangeBoxes
+                    repoRelativePath={repoRelativePath}
+                    requests={requestsOnThisFile}
+                    canDecide={access.canWrite === true}
+                    ownersLabel={ownersLabel}
+                    onApplied={() => {
+                      reloadTabFromDisk(openFilePath).catch(() => {});
+                    }}
+                  />
+                )}
+              </>
+            ) : (
+              rendererElement
+            )}
           </div>
         </>
       )}
       </KbDocumentShell>
       {registeredPanels}
-      <PrViewer />
+      {bannerCr && (
+        <ChangeRequestDialog
+          cr={bannerCr}
+          onClose={() => setBannerCr(null)}
+          // Applying is the only verdict the dialog reaches now.
+          onResolved={() => {
+            setBannerCr(null);
+            window.dispatchEvent(new Event(PR_STALE_EVENT));
+            reloadTabFromDisk(openFilePath).catch(() => {});
+          }}
+        />
+      )}
       {shareTarget && (
         <ManageAccessDialog
           key={shareTarget.relativePath}

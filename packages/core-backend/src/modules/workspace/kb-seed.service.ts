@@ -225,6 +225,13 @@ export class KbSeedService implements IKbSeedService {
    * stays consistent with origin, and the top-up is retried on a future clone.
    */
   async topUpWorkspace(repoDir: string, branch: string): Promise<void> {
+    // Scaffolding lands on PROTECTED branches only. A draft or suggestions
+    // branch is somebody's change-in-waiting, and a seeder commit there
+    // surfaces as noise in their change request's diff against the default
+    // branch (a stray scaffolding file riding along in a skill proposal was
+    // exactly this). Whatever the protected branches are missing, they get
+    // when THEY load — and drafts fork from them.
+    if (!this.protectedBranches().includes(branch)) return;
     try {
       const added: string[] = [];
       for (const rel of REQUIRED_FILES) {
