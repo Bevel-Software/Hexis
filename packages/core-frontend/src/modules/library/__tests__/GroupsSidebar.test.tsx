@@ -28,24 +28,42 @@ function renderSidebar(over: Partial<GroupsSidebarProps> = {}) {
     attentionCount: 2,
     onFinishSetup,
     onCreateGroup: vi.fn(),
+    groupsIndexActive: false,
+    onOpenGroupsIndex: vi.fn(),
 
     ...over,
   };
   render(<GroupsSidebar {...props} />);
-  return { onSelect, onFinishSetup, onCreateGroup: props.onCreateGroup as Mock };
+  return {
+    onSelect,
+    onFinishSetup,
+    onCreateGroup: props.onCreateGroup as Mock,
+    onOpenGroupsIndex: props.onOpenGroupsIndex as Mock,
+  };
 }
 
 const row = (name: RegExp | string) => screen.getByRole('button', { name });
 
 describe('GroupsSidebar', () => {
-  it('carries no All groups row — the index is a breadcrumb destination now', () => {
-    renderSidebar();
-    expect(screen.queryByRole('button', { name: /^All groups/ })).not.toBeInTheDocument();
+  it('leads with All groups — the Library opens there, so the nav starts there', () => {
+    const { onOpenGroupsIndex } = renderSidebar();
+    const rows = screen.getAllByRole('button');
+    expect(rows[0]).toHaveAccessibleName('All groups');
+    fireEvent.click(rows[0]);
+    expect(onOpenGroupsIndex).toHaveBeenCalledTimes(1);
   });
 
-  it('carries no Everything row — the Library already lands on everything', () => {
-    renderSidebar();
-    expect(screen.queryByRole('button', { name: /^Everything/ })).not.toBeInTheDocument();
+  it('marks All groups current on the index, and nothing else', () => {
+    renderSidebar({ filter: null, groupsIndexActive: true });
+    expect(row(/^All groups/)).toHaveAttribute('aria-current', 'true');
+    expect(row(/^Everything/)).toHaveAttribute('aria-current', 'false');
+    expect(row(/^Owned by me/)).toHaveAttribute('aria-current', 'false');
+  });
+
+  it('keeps Everything as a lens of its own, since the root is the index now', () => {
+    renderSidebar({ filter: { kind: 'all' } });
+    expect(row(/^Everything/)).toHaveAttribute('aria-current', 'true');
+    expect(row(/^All groups/)).toHaveAttribute('aria-current', 'false');
   });
 
   it('heads the group rows with what the list is: the set in your MCP', () => {
@@ -83,6 +101,7 @@ describe('GroupsSidebar', () => {
   it('emits the right LibraryFilter per row', () => {
     const { onSelect } = renderSidebar();
     const expected: [RegExp, LibraryFilter][] = [
+      [/^Everything/, { kind: 'all' }],
       [/^Owned by me/, { kind: 'owned' }],
       [/^GTM/, { kind: 'group', group: 'GTM' }],
       [/^Juan's Group/, { kind: 'ungrouped' }],

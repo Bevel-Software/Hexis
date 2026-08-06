@@ -49,6 +49,15 @@ export interface GroupsSidebarProps {
   /** Start a new group. The layout owns the dialog; this is only the intent. */
   onCreateGroup(): void;
   /**
+   * The all-groups index is showing. Beside `filter` rather than inside it: the
+   * index lists PLACES, not a filtered slice of the catalog, so it is not a
+   * `LibraryFilter` and pretending otherwise would put a row in the gallery's
+   * vocabulary that no gallery can render.
+   */
+  groupsIndexActive: boolean;
+  /** Go to the index — the Library's home. */
+  onOpenGroupsIndex(): void;
+  /**
    * A row — or the nav's empty space — was right-clicked. Like every other
    * handler here this is an INTENT, not a menu: the layout owns the popup,
    * because the verbs in it (add to this group, manage its access) need the
@@ -90,6 +99,8 @@ export function GroupsSidebar({
   attentionCount,
   onFinishSetup,
   onCreateGroup,
+  groupsIndexActive,
+  onOpenGroupsIndex,
   onContextMenu,
 }: GroupsSidebarProps) {
   const rowClass = (selected: boolean) =>
@@ -201,12 +212,34 @@ export function GroupsSidebar({
           // reaches here, so this only ever fires on the gaps between them.
           onContextMenu={(e) => openMenu(e, null, 'Library', null)}
         >
-          {/* "Owned by me" is a LENS — the whole catalog, sliced to yours —
-              which is exactly what the group rows below are not. Naming the
-              section is what keeps that distinction visible. `Everything` had
-              a row here once and went: the Library already LANDS on
-              everything, so the row was a second name for "here". */}
-          <SectionLabel>Library</SectionLabel>
+          {/* The home row, above every section and belonging to none of them:
+              it is where the Library opens, and the one place that lists the
+              groups you are NOT in beside the ones you are. Unlabelled and
+              first for the same reason — a destination the whole surface
+              hangs off does not sit inside a category of lenses.
+
+              Written out rather than built by `row`, because it is the one
+              row with no `LibraryFilter` behind it: the index is a list of
+              PLACES, not a slice of the catalog. Its menu is therefore the
+              nav's own (`filter: null`) — create a group, and none of the
+              verbs that need a folder to point at. */}
+          <button
+            type="button"
+            aria-current={groupsIndexActive}
+            className={rowClass(groupsIndexActive)}
+            onClick={onOpenGroupsIndex}
+            onContextMenu={(e) => openMenu(e, null, 'All groups', e.currentTarget)}
+          >
+            <span className="truncate">All groups</span>
+          </button>
+
+          {/* Lenses — the whole catalog, sliced — which is exactly what the
+              group rows below are not. Naming the section is what keeps that
+              distinction visible. `Everything` is a row again now that the
+              Library lands on the groups index instead: without one it would
+              be a page with no way in. */}
+          <SectionLabel spaced>Library</SectionLabel>
+          {row('Everything', { kind: 'all' }, 0)}
           {/* Amber is a summons, not a total. It shows how many of your own
               items need something FROM YOU; when none do, the slot falls back
               to the plain count of what you own, in grey. A permanent amber 26
@@ -265,10 +298,10 @@ export function GroupsSidebar({
  * workspace but not in your MCP, and the break is what keeps the heading
  * honest about them.)
  *
- * `All groups` used to be a row here. It went: the index is where you go to
- * find a group you are NOT in, which is a rare errand, and it sat above the
- * groups themselves collecting clicks meant for them. The breadcrumb on every
- * group page still leads there, which is the moment you actually want it.
+ * `All groups` is NOT a row here. It heads the whole nav instead: it is the
+ * Library's home rather than one more entry in the set mounted into your MCP,
+ * and inside this list it used to collect the clicks meant for the groups
+ * under it.
  *
  * The `+` is always in the DOM and always reachable by keyboard; only its
  * opacity follows hover, so the nav stays quiet without the control being

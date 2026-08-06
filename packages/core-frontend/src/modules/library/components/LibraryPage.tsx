@@ -5,15 +5,12 @@ import { useLibrary, type LibraryItem } from '../state/library-data';
 import { pathForSkill, pathForTool } from '../routes/library-paths';
 import { emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
-import { GroupJoinRequests } from './GroupJoinRequests';
 import { GroupItemSections } from './group-page-parts';
 import { PendingSkillReview } from './PendingSkillReview';
 
 /**
- * The Library gallery — the card grid at `/skills-and-tools` and its three
- * filtered views (`/owned`, `/yours`, and a group's cards).
+ * The Library gallery — the card grid at `/skills-and-tools/everything` and its
+ * filtered views (`/owned`, and a group's cards).
  *
  * This is CONTENT only: the sidebar, the flex shell and the data live in
  * `LibraryLayout` + `LibraryProvider` above it. The filter arrives as a prop
@@ -35,7 +32,7 @@ import { PendingSkillReview } from './PendingSkillReview';
 function headingFor(filter: LibraryFilter): string {
   switch (filter.kind) {
     case 'all':
-      return 'Library';
+      return 'Everything';
     case 'owned':
       return 'Owned by me';
     case 'ungrouped':
@@ -48,12 +45,7 @@ function headingFor(filter: LibraryFilter): string {
 export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const data = useLibrary();
   const navigate = useNavigate();
-  const { kbDirName } = useWorkspace();
   const [query, setQuery] = useState('');
-  /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
-  const [manageFolder, setManageFolder] = useState<string | null>(null);
-  /** Bumped when an access edit lands, so the join-request surfaces refetch. */
-  const [accessRevision, setAccessRevision] = useState(0);
   /** The proposed skill being reviewed, if the reader opened one. */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
 
@@ -61,23 +53,6 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
     () => filterLibraryItems(data.items, filter, query),
     [data.items, filter, query],
   );
-
-  /**
-   * The groups whose join requests the CALLER can answer, on the Everything
-   * view only. Everything is where an admin lands, so it is the one place a
-   * request is guaranteed to be SEEN — the group's own page carries the same
-   * surface, but nobody visits a group to find out that somebody wants in.
-   *
-   * Each renders its own banner and fetches its own requests; a banner with
-   * nothing pending renders nothing.
-   */
-  const managedGroups = useMemo(() => {
-    if (filter.kind !== 'all') return [];
-    return data.groupSummaries
-      .filter((g) => g.canWrite)
-      .slice()
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [filter, data.groupSummaries]);
 
   /**
    * Both kinds open a PAGE now — the skill page landed alongside the tool one.
@@ -112,16 +87,6 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
       </div>
 
       <div className="mt-5" />
-
-      {managedGroups.map((g) => (
-        <GroupJoinRequests
-          key={g.name}
-          group={g.name}
-          folders={g.folders}
-          onManage={setManageFolder}
-          reloadSignal={accessRevision}
-        />
-      ))}
 
       {data.error ? (
         <Banner role="alert" tone="danger">
@@ -163,25 +128,6 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
             // same reload — one load answers both, so the card cannot appear
             // twice in the frame between them.
             data.reload();
-          }}
-        />
-      )}
-
-      {/* `kbDirName` gates it — the resolver addresses files repo-relative
-          and the dialog strips that prefix, so without it the path we hand
-          over is not the path we mean. */}
-      {manageFolder && kbDirName && (
-        <ManageAccessDialog
-          entry={{
-            name: manageFolder.split('/').pop() ?? manageFolder,
-            relativePath: `${kbDirName}/${manageFolder}`,
-            type: 'directory',
-          }}
-          onClose={() => {
-            setManageFolder(null);
-            data.reloadGroups();
-            data.reload();
-            setAccessRevision((r) => r + 1);
           }}
         />
       )}
