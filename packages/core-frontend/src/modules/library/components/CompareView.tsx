@@ -1,15 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { type PullRequestDetail, type PullRequestSummary } from '@bevel-software/platform-shared';
-import { Badge, Banner, Button, Surface, TextAreaField } from '../../../shared/components';
+import { Badge, Banner, Button, Surface } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
-import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
-import { postPrComment } from '../../pr/services/pr-comments.api';
 import { readFileOnBranch, type LibrarySkill } from '../services/library.api';
 import { changeAuthorName } from '../utils/cr-author';
 import { useDefaultBranchFile } from '../hooks/useDefaultBranchFile';
@@ -19,7 +14,9 @@ interface CompareViewProps {
   skill: LibrarySkill;
   cr: PullRequestSummary;
   onClose(): void;
-  onResolved(kind: 'applied' | 'sent-back'): void;
+  /** Applying is the only verdict this view reaches. Declining a change
+   *  request lives on the skill page, beside the request's own row. */
+  onResolved(): void;
 }
 
 /**
@@ -41,16 +38,11 @@ export function CompareView({
   onClose,
   onResolved,
 }: CompareViewProps) {
-  const navigate = useNavigate();
-  const { kbDirName } = useWorkspace();
   const [detail, setDetail] = useState<PullRequestDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [branchContents, setBranchContents] = useState<Record<string, string | null>>({});
   /** Files whose branch copy could not be read — shown as such, never guessed at. */
   const [unreadable, setUnreadable] = useState<Set<string>>(new Set());
-  const [busy, setBusy] = useState(false);
-  const [sendBackOpen, setSendBackOpen] = useState(false);
-  const [sendBackNote, setSendBackNote] = useState('');
   const [blocked, setBlocked] = useState(false);
 
   const isTop = useModalLayer(true);
@@ -176,7 +168,7 @@ export function CompareView({
    * why awaiting it is not an answer.
    */
   const applying = useApplyChangeRequest({
-    onApplied: () => onResolved('applied'),
+    onApplied: () => onResolved(),
     onFailed: (_number, refusal) => {
       // Git refusing the merge IS the conflict answer — say what happened and
       // what fixes it, instead of leaving a button that will fail again. Any
@@ -191,20 +183,6 @@ export function CompareView({
   // Name the step: recording approvals and merging are separately slow, and one
   // label over both makes the longer half look stalled.
   const applyLabel = applying.phase === 'approving' ? 'Approving…' : 'Applying…';
-
-  async function sendBack() {
-    setBusy(true);
-    setError(null);
-    try {
-      const note = sendBackNote.trim();
-      if (note) await postPrComment(cr.number, { body: note });
-      await cancelPullRequest(cr.number);
-      onResolved('sent-back');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't send this change request back.");
-      setBusy(false);
-    }
-  }
 
   const author = changeAuthorName(cr);
   const firstName = author.split(' ')[0];
@@ -278,8 +256,8 @@ export function CompareView({
         {blocked && (
           <Banner tone="wait" role="alert" className="mx-8 mt-4">
             <b className="font-semibold">Can't apply</b> — files changed after {firstName} wrote
-            this, so there is no honest before and after to apply. Sending it back for a redo
-            against the current text is the fix.
+            this, so there is no honest before and after to apply. It has to be proposed again
+            against the current text.
           </Banner>
         )}
 
@@ -339,18 +317,6 @@ export function CompareView({
                     ? ' · what changes is marked'
                     : ' · not touched by this request'}
               </span>
-              {kbDirName && (
-                <Button
-                  variant="quiet"
-                  size="tiny"
-                  className="ml-auto"
-                  onClick={() =>
-                    navigate(kbFileUrl(cr.branch, `${kbDirName}/${skill.path}/${selected}`))
-                  }
-                >
-                  Open in editor
-                </Button>
-              )}
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto">
               {/* The diff only needs the two file contents, so it renders as
@@ -373,47 +339,17 @@ export function CompareView({
               ? `Nothing changes for anyone until ${firstName} proposes it again against the current text.`
               : 'Every agent that connects after this picks it up. There is no staged rollout.'}
           </p>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={busy || applyBusy}
-            onClick={() => setSendBackOpen(true)}
-          >
-            Send back with a note
-          </Button>
           {!blocked && (
             <Button
               variant="primary"
               size="sm"
-              disabled={busy || applyBusy}
+              disabled={applyBusy}
               onClick={() => applying.apply(cr)}
             >
               {applyBusy ? applyLabel : 'Apply changes'}
             </Button>
           )}
         </div>
-
-        {sendBackOpen && (
-          <div className="absolute inset-x-0 bottom-0 border-t border-line bg-surface px-8 py-5 shadow-overlay">
-            <label className="block text-label font-semibold uppercase text-ink-faint">
-              Note for the author (optional)
-              <TextAreaField
-                rows={3}
-                className="mt-1.5 font-normal normal-case tracking-normal"
-                value={sendBackNote}
-                onChange={(e) => setSendBackNote(e.target.value)}
-              />
-            </label>
-            <div className="mt-3 flex justify-end gap-2">
-              <Button variant="quiet" size="sm" onClick={() => setSendBackOpen(false)} disabled={busy}>
-                Cancel
-              </Button>
-              <Button variant="danger" size="sm" onClick={() => void sendBack()} disabled={busy}>
-                {busy ? 'Working…' : 'Send back'}
-              </Button>
-            </div>
-          </div>
-        )}
       </Surface>
     </div>
   );

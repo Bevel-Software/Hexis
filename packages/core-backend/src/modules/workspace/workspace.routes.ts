@@ -594,8 +594,8 @@ export function createWorkspaceRoutes(
       // Block MIME-sniffing so a misdeclared file can't be promoted to
       // active content by the browser.
       res.setHeader('X-Content-Type-Options', 'nosniff');
-      // …and inline is a DOCUMENT the moment somebody opens it in a tab
-      // ("⋯ → View raw file"), where those scripts would run under THIS
+      // …and inline is a DOCUMENT the moment somebody opens this URL in a tab
+      // directly, where those scripts would run under THIS
       // origin with this user's session — stored XSS for anyone who can write
       // a file into the workspace. `sandbox` drops the document into a unique
       // origin with scripting off. It applies to documents only, so the
