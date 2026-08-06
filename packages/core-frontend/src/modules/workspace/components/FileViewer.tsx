@@ -36,10 +36,14 @@ import { LockApiError } from '../../workflow/services/lock.api';
 import { useAuth } from '../../auth/state/auth.context';
 import {
   knowledgeSuggestionBranchFor,
-  listMyChangeRequests,
   proposeKnowledgeChange,
+} from '../../change-requests/services/propose.api';
+import {
+  listMyChangeRequests,
   readFileOnBranch,
-} from '../../library/services/library.api';
+} from '../../change-requests/services/change-requests.api';
+import { FileChangeBoxes } from '../../change-requests/components/FileChangeBoxes';
+import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { getFileRenderer, getRendererLayout, isBinaryFile } from './renderers';
 import type { RendererSaveState } from './renderers';
@@ -873,6 +877,18 @@ export function FileViewer() {
   // started.md`) exactly as the skill page's file bar renders it.
   const fileBaseName = openFilePath.slice(openFilePath.lastIndexOf('/') + 1);
 
+  // The repo-relative path (kbDirName stripped) — what the change-request
+  // machinery speaks. Null for files outside the KB clone, which cannot have
+  // change requests.
+  const repoRelativePath =
+    kbDirName && openFilePath.startsWith(`${kbDirName}/`)
+      ? openFilePath.slice(kbDirName.length + 1)
+      : null;
+  const ownersLabel =
+    access.owners.roles.length > 0 || access.owners.users.length > 0
+      ? formatEligible(access.owners)
+      : 'the owners';
+
   const rendererElement = (
     <Renderer
       // **Why we key on `openFileSavedContent` (read-only mode only).**
@@ -1089,11 +1105,15 @@ export function FileViewer() {
         </>
       ) : (
         <>
-          {/* Somebody has proposed a change to this file. It says so here
-              whoever opened it — the signal comes from the broad endpoint, not
-              from the dock's you-scoped queue, so a colleague's request on a
-              file you can read but not write still shows. */}
-          {requestsOnThisFile.length > 0 && (
+          {/* Somebody has proposed a change to this file. For a DOCUMENT the
+              proposals render as change boxes UNDER the file (below) — the
+              skill page's presentation, because the question they ask is
+              unanswerable without the text. This banner remains only for
+              full-bleed files, which have no below to put a box in. The
+              signal comes from the broad endpoint, not from the dock's
+              you-scoped queue, so a colleague's request on a file you can
+              read but not write still shows. */}
+          {requestsOnThisFile.length > 0 && shellVariant !== 'prose' && (
             <Banner role="note" tone="wait" className="mb-4 flex-none">
               <div className="font-semibold">
                 {requestsOnThisFile.length === 1
@@ -1294,9 +1314,26 @@ export function FileViewer() {
               documents, and keep their unframed definite-height contract. */}
           <div className={shellVariant === 'full-bleed' ? 'flex min-h-0 flex-1 flex-col' : 'min-w-0'}>
             {shellVariant === 'prose' ? (
-              <FilePaneCard file={fileBaseName} actions={paneActions}>
-                {rendererElement}
-              </FilePaneCard>
+              <>
+                <FilePaneCard file={fileBaseName} actions={paneActions}>
+                  {rendererElement}
+                </FilePaneCard>
+                {/* Every open proposal on this file, under the file it is
+                    about — the same boxes, the same dialog, as the skill
+                    page. Hidden while the reader IS editing or proposing:
+                    the diffs are against text that is changing under them. */}
+                {!editMode && !proposeMode && repoRelativePath && requestsOnThisFile.length > 0 && (
+                  <FileChangeBoxes
+                    repoRelativePath={repoRelativePath}
+                    requests={requestsOnThisFile}
+                    canDecide={access.canWrite === true}
+                    ownersLabel={ownersLabel}
+                    onApplied={() => {
+                      reloadTabFromDisk(openFilePath).catch(() => {});
+                    }}
+                  />
+                )}
+              </>
             ) : (
               rendererElement
             )}

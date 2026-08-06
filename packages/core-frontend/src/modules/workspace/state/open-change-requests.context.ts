@@ -14,6 +14,8 @@ export interface OpenChangeRequests {
    * (there is no content on this branch to show).
    */
   minePaths: ReadonlyMap<string, number>;
+  /** The caller's own open request NUMBERS — "is this one mine?" for the boxes. */
+  mineNumbers: ReadonlySet<number>;
 }
 
 /**
@@ -25,6 +27,7 @@ export const NO_CHANGE_REQUESTS: OpenChangeRequests = {
   paths: new Set<string>(),
   forPath: () => [],
   minePaths: new Map<string, number>(),
+  mineNumbers: new Set<number>(),
 };
 
 /** The provider lives in `./open-change-requests.tsx`. */

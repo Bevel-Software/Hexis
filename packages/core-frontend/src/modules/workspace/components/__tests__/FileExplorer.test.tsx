@@ -131,6 +131,7 @@ function renderExplorer(opts: RenderOptions = {}) {
                     paths: new Set(opts.openChangeRequestPaths ?? []),
                     forPath: () => [],
                     minePaths: opts.minePaths ?? new Map(),
+                    mineNumbers: new Set(),
                   }}
                 >
                   <FileExplorer />

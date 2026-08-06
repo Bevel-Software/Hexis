@@ -63,25 +63,25 @@ vi.mock('../../../workflow/services/lock.api', () => ({
 
 // The propose flow's one side effect that leaves the page: the network call
 // that commits to the suggestions branch and opens the change request. The
-// spy is the assertion surface; everything else in library.api stays real.
+// spy is the assertion surface; the branch-name helper stays real.
 const proposeMock = vi.hoisted(() =>
   vi.fn(async () => ({ branch: 'suggestions/reader/knowledge' })),
 );
-// Entering propose mode checks for the caller's open proposal and, when one
-// exists, reads the file's proposed version — both stubbed so tests decide
-// whether a proposal is already in flight.
+vi.mock('../../../change-requests/services/propose.api', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../../change-requests/services/propose.api')>();
+  return { ...actual, proposeKnowledgeChange: proposeMock };
+});
+// Entering propose mode checks for the caller's open proposal and reads the
+// file's proposed version; the change boxes read the default-branch raw for
+// their diffs — all stubbed so tests decide what is in flight.
 const myCrsMock = vi.hoisted(() => vi.fn(async (): Promise<unknown[]> => []));
 const readBranchMock = vi.hoisted(() => vi.fn(async () => ''));
-vi.mock('../../../library/services/library.api', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../../../library/services/library.api')>();
-  return {
-    ...actual,
-    proposeKnowledgeChange: proposeMock,
-    listMyChangeRequests: myCrsMock,
-    readFileOnBranch: readBranchMock,
-  };
-});
+vi.mock('../../../change-requests/services/change-requests.api', () => ({
+  listOpenChangeRequests: vi.fn(async () => []),
+  listMyChangeRequests: myCrsMock,
+  readFileOnBranch: readBranchMock,
+}));
 
 // The access sheet is a 1200-line dialog with its own suite and its own
 // endpoints. Here it only has to prove WHICH entry the page handed it — a file
@@ -322,6 +322,7 @@ function ViewerHarness({
                   value={{
                     paths: new Set(changeRequests.length ? [filePath] : []),
                     minePaths: new Map(),
+                    mineNumbers: new Set<number>(),
                     forPath: (p) =>
                       p === filePath
                         ? (changeRequests.map((c) => ({
@@ -329,6 +330,8 @@ function ViewerHarness({
                             title: c.title,
                             appAuthor: { name: c.who },
                             author: { login: 'bevel-bot' },
+                            branch: `suggestions/${c.who.toLowerCase().replace(/\s+/g, '-')}/knowledge`,
+                            createdAt: new Date().toISOString(),
                             touchedNodePaths: ['Knowledge/Foo.md'],
                           })) as never)
                         : [],
@@ -696,7 +699,9 @@ describe('FileViewer', () => {
   // The D3 asymmetry, made visible: this signal comes from the BROAD endpoint,
   // so a request opened by somebody else on a file you can read but not write
   // still says so here — while the dock, which is scoped to you, stays empty.
-  it('says so on the page when a file has an open change request', async () => {
+  // A DOCUMENT shows it as the skill page does: a change box UNDER the file,
+  // whose "Read the whole change" opens the shared change-request dialog.
+  it('shows an open change request as a box under the document', async () => {
     const user = userEvent.setup();
     render(
       <ViewerHarness
@@ -705,15 +710,19 @@ describe('FileViewer', () => {
       />,
     );
 
-    expect(await screen.findByText('Open change request')).toBeInTheDocument();
-    expect(screen.getByText(/Ali Raza proposed/)).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Review the change' }));
-    expect(openPrSpy).toHaveBeenCalledWith(32);
+    expect(await screen.findByText(/proposed a change/)).toBeInTheDocument();
+    expect(screen.getByText('Ali Raza')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Read the whole change' }));
+    // The shared dialog, not the PR viewer.
+    expect(
+      await screen.findByRole('dialog', { name: /Change request: Tighten the wording/ }),
+    ).toBeInTheDocument();
+    expect(openPrSpy).not.toHaveBeenCalled();
   });
 
   it('says nothing on a file nobody has proposed a change to', () => {
     render(<ViewerHarness initialContent="quiet" />);
-    expect(screen.queryByText('Open change request')).not.toBeInTheDocument();
+    expect(screen.queryByText(/proposed a change/)).not.toBeInTheDocument();
   });
 
   /**

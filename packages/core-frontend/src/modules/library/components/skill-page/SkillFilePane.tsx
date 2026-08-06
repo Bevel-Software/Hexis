@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react';
+import '../../../change-requests/change-requests.css';
 import { FilePaneCard } from '../../../workspace/components/FilePaneCard';
 import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdownView';
-import type { DiffLine } from '../../utils/diff';
+import type { DiffLine } from '../../../change-requests/utils/diff';
 
 interface SkillFilePaneProps {
   /** Repo-relative-to-the-skill file name, e.g. `SKILL.md`. */

@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { Button, Surface } from '../../../../shared/components';
-import { cn } from '../../../../lib/utils';
-import { collapseUnchanged, type DiffLine } from '../../utils/diff';
+import '../change-requests.css';
+import { Button, Surface } from '../../../shared/components';
+import { cn } from '../../../lib/utils';
+import { collapseUnchanged, type DiffLine } from '../utils/diff';
 
-export interface SkillChangeBoxProps {
+export interface ChangeBoxProps {
   /** File the proposal is against, relative to the skill folder. */
   file: string;
   /** Display name of whoever proposed it. */
@@ -73,7 +74,7 @@ export interface SkillChangeBoxProps {
  *    whoever landed first. The box names the fix instead of offering a button
  *    that would do the wrong thing.
  */
-export function SkillChangeBox({
+export function ChangeBox({
   file,
   author,
   when,
@@ -90,7 +91,7 @@ export function SkillChangeBox({
   onDecline,
   onWithdraw,
   onOpenFull,
-}: SkillChangeBoxProps) {
+}: ChangeBoxProps) {
   const who = mine ? 'You' : author;
   const first = author.split(' ')[0];
   // Name the step. "Approving…" and "Applying…" are different waits with

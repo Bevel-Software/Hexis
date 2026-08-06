@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { readFileOnBranch } from '../services/library.api';
+import { readFileOnBranch } from '../services/change-requests.api';
 
 /**
  * The file's RAW text on the default branch.

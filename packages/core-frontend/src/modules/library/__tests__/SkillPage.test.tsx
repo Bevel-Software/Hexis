@@ -28,16 +28,20 @@ vi.mock('../services/library.api', () => ({
   defaultWorkspaceId: () => 'target-company-state',
   getSkill: apiMock.getSkill,
   getSkillFile: apiMock.getSkillFile,
-  readFileOnBranch: apiMock.readFileOnBranch,
   proposeChange: apiMock.proposeChange,
   listSkills: vi.fn(),
-  listOpenChangeRequests: vi.fn(),
-  listMyChangeRequests: vi.fn(),
   // Real behaviour, not a stub: the page resolves the caller's own request by
   // this branch name, so a `vi.fn()` returning undefined would quietly disable
   // the very lookup these tests are checking.
   suggestionBranchFor: (email: string, skill: string) =>
     `suggestions/${email.split('@')[0]}/${skill}`,
+}));
+// The change-request module's reads — the branch-file read feeds the editor
+// base and the per-request diffs.
+vi.mock('../../change-requests/services/change-requests.api', () => ({
+  listOpenChangeRequests: vi.fn(async () => []),
+  listMyChangeRequests: vi.fn(async () => []),
+  readFileOnBranch: apiMock.readFileOnBranch,
 }));
 vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: apiMock.mergePullRequest }));
 vi.mock('../../pr/services/pr-cancel.api', () => ({
@@ -939,8 +943,9 @@ describe('SkillPage — deciding on a change', () => {
 
     const withdraw = await screen.findByRole('button', { name: 'Withdraw' });
     // Proposing again stays available — it continues the open request
-    // (seeded from the branch), it does not fork it.
-    expect(screen.getByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
+    // (seeded from the branch), it does not fork it. Async: the button waits
+    // on the default-branch raw arriving, one fetch behind the box.
+    expect(await screen.findByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
 
     fireEvent.click(withdraw);
     await waitFor(() => expect(apiMock.cancelPullRequest).toHaveBeenCalledWith(7));

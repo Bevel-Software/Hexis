@@ -14,23 +14,23 @@ import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { useFileAccess } from '../../../access/hooks/useFileAccess';
 import { proposeChange, suggestionBranchFor } from '../../services/library.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
-import { useApplyChangeRequest } from '../../hooks/useApplyChangeRequest';
-import { useCrFileDiffs } from '../../hooks/useCrFileDiffs';
-import { useDefaultBranchFile, useFileOnBranch } from '../../hooks/useDefaultBranchFile';
+import { useApplyChangeRequest } from '../../../change-requests/hooks/useApplyChangeRequest';
+import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
+import { useDefaultBranchFile, useFileOnBranch } from '../../../change-requests/hooks/useFileOnBranch';
 import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast.context';
 import { LIBRARY_ROOT } from '../../routes/library-paths';
-import { changeAuthorName } from '../../utils/cr-author';
+import { changeAuthorName, formatWhen } from '../../../change-requests/utils/author';
 import { ownersTextOf } from '../../utils/group-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
 import { StatusDot } from '../StatusDot';
 import { ChangeRequestDock } from '../ChangeRequestDock';
-import { CompareView } from '../CompareView';
+import { ChangeRequestDialog } from '../../../change-requests/components/ChangeRequestDialog';
 import { SkillFileTabs } from './SkillFileTabs';
 import { skillPanelId, skillTabId } from './tab-ids';
 import { SkillFilePane } from './SkillFilePane';
 import { SkillFileEditor } from './SkillFileEditor';
-import { SkillChangeBox } from './SkillChangeBox';
+import { ChangeBox } from '../../../change-requests/components/ChangeBox';
 
 /**
  * One skill, as a page — the prototype's skill item (line 1964), which says of
@@ -356,13 +356,16 @@ export function SkillPage() {
 
   const group = groupOfPath(skill.path);
 
-  // The compare view is a full-screen surface, not a layer over this page —
-  // rendering both would leave the page's dock and tabs live underneath it.
+  // The change-request dialog is a full-screen surface, not a layer over this
+  // page — rendering both would leave the page's dock and tabs live
+  // underneath it. It is the SHARED dialog, scoped to this skill: its folder
+  // frames the file list, and the skill's own files always show so an owner
+  // can read the untouched parts too.
   if (compareCr) {
     return (
-      <CompareView
-        skill={skill}
+      <ChangeRequestDialog
         cr={compareCr}
+        scope={{ prefix: skill.path, baseFiles: files }}
         onClose={() => setCompareCr(null)}
         onResolved={(kind) => {
           toast(kind === 'applied' ? 'Change request is being applied' : 'Sent back to the author');
@@ -495,7 +498,7 @@ export function SkillPage() {
           // means a side has not arrived yet.
           const fileDiff = crDiffs.get(cr.number) ?? null;
           return (
-            <SkillChangeBox
+            <ChangeBox
               key={cr.number}
               file={active}
               author={changeAuthorName(cr)}
@@ -536,20 +539,6 @@ export function SkillPage() {
 /** Does this change request touch anything inside the skill folder? */
 function touchesSkill(cr: PullRequestSummary, skillPath: string): boolean {
   return cr.touchedNodePaths.some((p) => p === skillPath || p.startsWith(`${skillPath}/`));
-}
-
-/**
- * "today", "yesterday", or a plain date. A change box is read by someone
- * deciding whether to act now, and "3 Aug" answers that worse than "today"
- * does — but an exact timestamp answers it no better, so it stops there.
- */
-function formatWhen(iso: string): string {
-  const then = new Date(iso);
-  if (Number.isNaN(then.getTime())) return 'recently';
-  const days = Math.floor((Date.now() - then.getTime()) / 86_400_000);
-  if (days <= 0) return 'today';
-  if (days === 1) return 'yesterday';
-  return then.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
 
 /**

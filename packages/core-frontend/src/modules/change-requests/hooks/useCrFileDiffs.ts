@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
-import { readFileOnBranch } from '../services/library.api';
+import { readFileOnBranch } from '../services/change-requests.api';
 import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
 
 /**

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { type PullRequestDetail, type PullRequestSummary } from '@bevel-software/platform-shared';
+import '../change-requests.css';
 import { Badge, Banner, Button, Surface, TextAreaField } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
@@ -10,37 +11,54 @@ import { fetchPrDetail } from '../../pr/services/pr-detail.api';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
 import { postPrComment } from '../../pr/services/pr-comments.api';
-import { readFileOnBranch, type LibrarySkill } from '../services/library.api';
-import { changeAuthorName } from '../utils/cr-author';
-import { useDefaultBranchFile } from '../hooks/useDefaultBranchFile';
+import { readFileOnBranch } from '../services/change-requests.api';
+import { changeAuthorName } from '../utils/author';
+import { useDefaultBranchFile } from '../hooks/useFileOnBranch';
 import { diffLines, type DiffLine } from '../utils/diff';
 
-interface CompareViewProps {
-  skill: LibrarySkill;
+/**
+ * The folder the dialog reads the request WITHIN. The skill page scopes to
+ * the skill: its folder is the prefix, and `baseFiles` (SKILL.md + bundled
+ * files, prefix-relative) always list so an owner can read the untouched
+ * parts too. Without a scope — the Knowledge viewer — the whole repo is the
+ * frame: the file list is exactly what the request touches, paths shown
+ * repo-relative.
+ */
+export interface ChangeRequestScope {
+  /** Repo-root-relative folder, no trailing slash (e.g. `Groups/gtm/rfi`). */
+  prefix: string;
+  /** Files that always list, relative to `prefix`, whether touched or not. */
+  baseFiles: string[];
+}
+
+interface ChangeRequestDialogProps {
   cr: PullRequestSummary;
+  scope?: ChangeRequestScope;
   onClose(): void;
   onResolved(kind: 'applied' | 'sent-back'): void;
 }
 
 /**
- * The whole change request, as one decision — Juan's change-request view.
+ * The whole change request, as one decision — Juan's change-request view,
+ * and THE change-request view for every surface (the skill page opens it
+ * over a skill scope; the Knowledge viewer opens it unscoped).
  *
- * The per-file boxes on the skill page answer "what does this do to the file I
- * am reading?". This answers the different question an owner has to answer
- * before applying anything: what does this change do to the SKILL? So it reads
- * top-down as an argument — what is being asked, why, how big it is, and only
- * then the files — rather than as two panels to compare word by word.
+ * The per-file boxes answer "what does this do to the file I am reading?".
+ * This answers the different question an owner has to answer before applying
+ * anything: what does this change do as a WHOLE? So it reads top-down as an
+ * argument — what is being asked, why, how big it is, and only then the
+ * files — rather than as two panels to compare word by word.
  *
  * The layout is deliberately fixed to the viewport: the buttons never move and
  * the document scrolls to meet them. A decision surface where the verdict
  * scrolls off screen invites the reader to act before reaching the bottom.
  */
-export function CompareView({
-  skill,
+export function ChangeRequestDialog({
   cr,
+  scope,
   onClose,
   onResolved,
-}: CompareViewProps) {
+}: ChangeRequestDialogProps) {
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
   const [detail, setDetail] = useState<PullRequestDetail | null>(null);
@@ -81,11 +99,10 @@ export function CompareView({
     };
   }, [cr.number]);
 
-  const prefix = `${skill.path}/`;
-  const mainFiles = useMemo(
-    () => ['SKILL.md', ...skill.files.map((f) => f.slice(prefix.length))],
-    [skill.files, prefix],
-  );
+  // '' prefix = the whole repo: every touched file is "inside", shown by its
+  // repo-relative path, and the outside badge never has anything to count.
+  const prefix = scope ? `${scope.prefix}/` : '';
+  const mainFiles = useMemo(() => scope?.baseFiles ?? [], [scope]);
   const changedFiles = useMemo(() => {
     const set = new Set<string>();
     for (const f of detail?.files ?? []) {
@@ -104,12 +121,12 @@ export function CompareView({
     () => (detail?.files ?? []).filter((f) => !f.path.startsWith(prefix)).length,
     [detail, prefix],
   );
-  const allFiles = useMemo(
-    () => [...mainFiles, ...addedFiles.filter((f) => !mainFiles.includes(f))],
-    [mainFiles, addedFiles],
-  );
+  const allFiles = useMemo(() => {
+    const touched = [...changedFiles].filter((f) => !mainFiles.includes(f));
+    return [...mainFiles, ...touched];
+  }, [mainFiles, changedFiles]);
 
-  /** The scale line: how much of the skill this touches, in the KB's own terms. */
+  /** The scale line: how much this touches, in the KB's own terms. */
   const scale = useMemo(() => {
     const files = (detail?.files ?? []).filter((f) => f.path.startsWith(prefix));
     return {
@@ -123,10 +140,11 @@ export function CompareView({
    * Land on the first changed file, until the reader picks one — DERIVED, so
    * the landing happens on the render the detail arrives rather than one render
    * later. `picked` staying null is what keeps "I haven't chosen yet" distinct
-   * from "I chose SKILL.md".
+   * from "I chose the first file".
    */
   const [picked, setPicked] = useState<string | null>(null);
-  const selected = picked ?? allFiles.find((f) => changedFiles.has(f)) ?? 'SKILL.md';
+  const selected =
+    picked ?? allFiles.find((f) => changedFiles.has(f)) ?? allFiles[0] ?? '';
   const setSelected = setPicked;
 
   /**
@@ -137,21 +155,23 @@ export function CompareView({
    */
   const asked = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!asked.current.has(selected)) {
+    // `selected` is '' until the detail names any file in an unscoped dialog —
+    // nothing to read yet.
+    if (selected && !asked.current.has(selected)) {
       asked.current.add(selected);
-      readFileOnBranch(cr.branch, `${skill.path}/${selected}`)
+      readFileOnBranch(cr.branch, `${prefix}${selected}`)
         .then((content) => setBranchContents((c) => ({ ...c, [selected]: content })))
         // NOT `''`. An unreadable branch copy stored as empty would diff as
         // "every line deleted" — a change request that erases the file.
         .catch(() => setUnreadable((s) => new Set(s).add(selected)));
     }
-  }, [selected, cr.branch, skill.path]);
+  }, [selected, cr.branch, prefix]);
 
   const isAdded = addedFiles.includes(selected);
   // Raw-vs-raw: the skills API hands back SKILL.md's PARSED body (frontmatter
   // stripped), and diffing that against a raw branch read renders the
   // frontmatter as a deletion and the whole file as changed.
-  const mainRaw = useDefaultBranchFile(isAdded ? null : `${skill.path}/${selected}`);
+  const mainRaw = useDefaultBranchFile(isAdded || !selected ? null : `${prefix}${selected}`);
   const branchRaw = branchContents[selected] ?? null;
 
   /**
@@ -235,7 +255,7 @@ export function CompareView({
               <span className="font-mono">{cr.branch}</span>
               {outsideCount > 0 && (
                 <Badge tone="wait" size="xs">
-                  +{outsideCount} file{outsideCount === 1 ? '' : 's'} outside this skill
+                  +{outsideCount} file{outsideCount === 1 ? '' : 's'} outside this folder
                 </Badge>
               )}
             </p>
@@ -339,13 +359,13 @@ export function CompareView({
                     ? ' · what changes is marked'
                     : ' · not touched by this request'}
               </span>
-              {kbDirName && (
+              {kbDirName && selected && (
                 <Button
                   variant="quiet"
                   size="tiny"
                   className="ml-auto"
                   onClick={() =>
-                    navigate(kbFileUrl(cr.branch, `${kbDirName}/${skill.path}/${selected}`))
+                    navigate(kbFileUrl(cr.branch, `${kbDirName}/${prefix}${selected}`))
                   }
                 >
                   Open in editor

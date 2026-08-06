@@ -8,9 +8,10 @@ const api = vi.hoisted(() => ({
   listMyChangeRequests: vi.fn(),
   listPullRequestsForMe: vi.fn(),
 }));
-vi.mock('../../../library/services/library.api', () => ({
+vi.mock('../../../change-requests/services/change-requests.api', () => ({
   listOpenChangeRequests: api.listOpenChangeRequests,
   listMyChangeRequests: api.listMyChangeRequests,
+  readFileOnBranch: vi.fn(),
 }));
 vi.mock('../../../git/services/pr.api', () => ({
   listPullRequestsForMe: api.listPullRequestsForMe,

@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
-import { listMyChangeRequests, listOpenChangeRequests } from '../../library/services/library.api';
+import {
+  listMyChangeRequests,
+  listOpenChangeRequests,
+} from '../../change-requests/services/change-requests.api';
 import { useWorkspace } from './workspace.context';
 import { PR_STALE_EVENT } from '../../../core/events';
 import {
@@ -109,6 +112,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       paths: new Set(byPath.keys()),
       forPath: (path: string) => byPath.get(path) ?? [],
       minePaths,
+      mineNumbers: new Set(mine.map((pr) => pr.number)),
     };
   }, [requests, mine, kbDirName]);
 
