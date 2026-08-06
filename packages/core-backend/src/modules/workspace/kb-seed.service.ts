@@ -3,7 +3,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { KNOWLEDGE_BASE_DIR, GROUPS_DIR } from '@bevel-software/platform-shared';
 import type { IKbSeedService } from './kb-seed.interface.js';
 
 const execFileAsync = promisify(execFile);
@@ -14,30 +13,6 @@ const execFileAsync = promisify(execFile);
  */
 const BOT_NAME = 'Bevel Workflow';
 const BOT_EMAIL = 'bevel-workflow@bevel.software';
-
-/**
- * The **required scaffolding** — the minimum an operational KB needs. When a
- * branch is loaded, any of these that are missing are added to it; the sample
- * ontology is NOT (it only seeds a fully-empty repo).
- *
- * Two kinds:
- *  - {@link REQUIRED_FILES}: repo-root files added when the file is missing.
- *  - {@link REQUIRED_DIRS}: well-known root dirs the app expects to exist; when a
- *    dir is entirely absent it's created by adding its `<dir>/.gitkeep`. Keyed on
- *    the *directory's* existence, not the `.gitkeep` file — so a branch that
- *    already has content under `KnowledgeBase/` never gets a pointless placeholder.
- *
- * `roles.yaml` is in neither, and is not part of the template at all: it is
- * generated from `ADMIN_EMAIL` (see {@link renderRolesYaml}) and written
- * directly, so a repo can't be seeded with a stale hard-coded Admin list.
- */
-const REQUIRED_FILES: readonly string[] = ['access.md', 'CLAUDE.md', '.bevelignore', '.gitignore'];
-// Required = the app cannot OPERATE without it: `KnowledgeBase/` roots the
-// graph, `Groups/` roots skills and tools. `Data/` is not here — it ships in
-// the template for fresh seeds, but it is optional records, and a seeder that
-// re-creates a folder every time an operator deletes it is worse than no
-// seeder (the same reasoning that removed the retired `Agents/`/`Pipelines/`).
-const REQUIRED_DIRS: readonly string[] = [KNOWLEDGE_BASE_DIR, GROUPS_DIR];
 
 /** Redact the token from any string that might surface in a log or error. */
 function redact(s: string): string {
@@ -112,6 +87,44 @@ export class KbSeedService implements IKbSeedService {
   private readonly defaultBranch: () => string;
   private readonly gitUsername: () => string;
 
+  /**
+   * The **required scaffolding**, read from the template itself: every
+   * top-level FILE of `kb-template/` is required verbatim, every top-level
+   * DIRECTORY is required to exist (kept present via its `.gitkeep` when
+   * entirely absent — keyed on the directory, so a branch with content under
+   * `KnowledgeBase/` never gets a pointless placeholder; the sample ontology
+   * only ever seeds a fully-empty repo).
+   *
+   * One source of truth: adding something to the template both seeds it into
+   * fresh repos AND maintains it on the protected branches; removing it
+   * releases the seeder's grip. Which is also the contract's warning label —
+   * the template is INVARIANTS, not suggestions. Anything an operator may
+   * delete and expect to STAY deleted does not belong in it (`Data/` left for
+   * exactly that reason; agents create it on demand).
+   *
+   * `roles.yaml` is in neither list and not in the template at all: it is
+   * generated from `ADMIN_EMAIL` (see {@link renderRolesYaml}) and written
+   * directly, so a repo can't be seeded with a stale hard-coded Admin list.
+   *
+   * Cached: the template ships inside the package and cannot change while
+   * the process runs.
+   */
+  private scaffolding: Promise<{ files: string[]; dirs: string[] }> | null = null;
+
+  private requiredScaffolding(): Promise<{ files: string[]; dirs: string[] }> {
+    this.scaffolding ??= (async () => {
+      const entries = await fs.readdir(this.kbTemplateDir, { withFileTypes: true });
+      const files: string[] = [];
+      const dirs: string[] = [];
+      for (const entry of entries) {
+        (entry.isDirectory() ? dirs : files).push(entry.name);
+      }
+      // Sorted so the top-up commit message lists additions deterministically.
+      return { files: files.sort(), dirs: dirs.sort() };
+    })();
+    return this.scaffolding;
+  }
+
   ensureRemoteSeeded(): Promise<void> {
     // Cache the promise, not just a boolean, so concurrent first-callers share
     // one run. On failure we clear it so a later call can retry (a transient
@@ -171,17 +184,26 @@ export class KbSeedService implements IKbSeedService {
     // when THEY load — and drafts fork from them.
     if (!this.protectedBranches().includes(branch)) return;
     try {
+      const { files: requiredFiles, dirs: requiredDirs } = await this.requiredScaffolding();
       const added: string[] = [];
-      for (const rel of REQUIRED_FILES) {
+      for (const rel of requiredFiles) {
         if (!(await this.exists(path.join(repoDir, rel)))) {
           await this.copyTemplateFile(rel, repoDir);
           added.push(rel);
         }
       }
-      for (const rootDir of REQUIRED_DIRS) {
+      for (const rootDir of requiredDirs) {
         if (!(await this.exists(path.join(repoDir, rootDir)))) {
           const keep = `${rootDir}/.gitkeep`;
-          await this.copyTemplateFile(keep, repoDir);
+          if (await this.exists(path.join(this.kbTemplateDir, keep))) {
+            await this.copyTemplateFile(keep, repoDir);
+          } else {
+            // A template dir carrying content but no `.gitkeep`: keep the dir
+            // present with an empty marker rather than replaying its sample
+            // content onto a branch that deliberately has its own.
+            await fs.mkdir(path.join(repoDir, rootDir), { recursive: true });
+            await fs.writeFile(path.join(repoDir, keep), '', 'utf8');
+          }
           added.push(keep);
         }
       }

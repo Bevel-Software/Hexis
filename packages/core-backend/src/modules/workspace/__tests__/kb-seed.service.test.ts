@@ -197,6 +197,41 @@ describe('KbSeedService', () => {
     });
 
     /**
+     * The scaffolding contract IS the template folder — not a hardcoded list.
+     * A custom template's own top-level files and dirs get topped up; entries
+     * the packaged template has but this one doesn't are simply not enforced.
+     * (This is also what lets an enterprise deployment point KB_TEMPLATE_DIR
+     * at its own template and get its own invariants maintained.)
+     */
+    it('derives the required scaffolding from the template folder itself', async () => {
+      const upstream = await seededUpstream(PROTECTED, {
+        'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
+        'KnowledgeBase/Real/Knowledge/.gitkeep': '',
+      });
+      const customTemplate = path.join(root, 'custom-template');
+      await fs.mkdir(path.join(customTemplate, 'Playbooks'), { recursive: true });
+      await fs.writeFile(path.join(customTemplate, 'Playbooks/.gitkeep'), '', 'utf8');
+      await fs.writeFile(path.join(customTemplate, 'HOUSE-RULES.md'), 'be kind', 'utf8');
+      const seeder = new KbSeedService(
+        upstream,
+        customTemplate,
+        PROTECTED,
+        DEFAULT_BRANCH,
+        ADMINS,
+      );
+
+      const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
+      await seeder.topUpWorkspace(repoDir, DEFAULT_BRANCH);
+
+      const dir = await checkout(root, upstream, DEFAULT_BRANCH);
+      // This template's entries are enforced…
+      expect(await exists(path.join(dir, 'HOUSE-RULES.md'))).toBe(true);
+      expect(await exists(path.join(dir, 'Playbooks/.gitkeep'))).toBe(true);
+      // …and the packaged template's are not — CLAUDE.md is not in this one.
+      expect(await exists(path.join(dir, 'CLAUDE.md'))).toBe(false);
+    });
+
+    /**
      * The opposite of the old behavior, deliberately. A non-protected branch
      * is somebody's change-in-waiting — a suggestions branch behind an open
      * change request, a personal draft — and a scaffolding commit landing on

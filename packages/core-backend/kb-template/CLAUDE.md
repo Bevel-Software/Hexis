@@ -17,7 +17,7 @@ knowledge-base/
 │       ├── NodeTypes/
 │       └── Knowledge/
 ├── Groups/               ← one folder per group: its skills AND its tools (not part of the graph)
-├── Data/                 ← agent-produced records, parsed like KnowledgeBase/ (dashboards read here)
+├── Data/                 ← agent-produced records, parsed like KnowledgeBase/ (created on demand)
 ├── roles.yaml            ← identity → role mapping (Admin-only edits)
 └── access.md             ← repo-root access-control rules
 ```
@@ -26,7 +26,7 @@ Ontologies live as **direct subfolders of `KnowledgeBase/`** (curated knowledge)
 
 ### Agent-produced records (`Data/`)
 
-- **`Data/`** — what agents produce and consume, split out of the curated `Knowledge/` folders: work items/tickets, run records, intermediate outputs. Dashboards read from here. **Parsed exactly like `KnowledgeBase/`** — its subfolders are self-contained ontologies (`NodeTypes/` + `Knowledge/`), so data records are real typed graph nodes; `Data/` itself qualifies as a single ontology when it directly contains both marker folders. Instance nodes carry current state; full transcripts/logs stay plain files (no `nodeType:` frontmatter) so they never enter the graph payload. `Data/` paths are exempt from the one-ontology-per-session boundary — an agent reads knowledge and writes data records in the same session. The folder's `README.md` documents its structure and contents.
+- **`Data/`** — what agents produce and consume, split out of the curated `Knowledge/` folders: work items/tickets, run records, intermediate outputs. Dashboards read from here. **Parsed exactly like `KnowledgeBase/`** — its subfolders are self-contained ontologies (`NodeTypes/` + `Knowledge/`), so data records are real typed graph nodes; `Data/` itself qualifies as a single ontology when it directly contains both marker folders. Instance nodes carry current state; full transcripts/logs stay plain files (no `nodeType:` frontmatter) so they never enter the graph payload. `Data/` paths are exempt from the one-ontology-per-session boundary — an agent reads knowledge and writes data records in the same session. The folder is not scaffolded — create it the first time something has a record to write.
 
 **Cross-ontology references are allowed.** A node in `Processes/Knowledge/...` may link to a node in `Product/Knowledge/...` (or vice versa) using a normal file-relative markdown link, e.g. `[Foo](../../Product/Knowledge/.../Foo.md)`. The parser resolves the link to a repo-root path and the validator checks the target exists across all ontologies.
 
