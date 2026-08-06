@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { History, Undo2, AlertTriangle, Loader2 } from 'lucide-react';
-import type { CommitAttribution } from '@bevel-software/platform-shared';
+import type { CommitAttribution, FileDiffPayload } from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
 import { formatRelativeTime } from '../../../lib/utils';
 import { UnifiedDiffView } from './UnifiedDiffView';
+import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { friendlyGitError } from '../services/error-messages';
 import { useFileAccess } from '../../access/hooks/useFileAccess';
 import { useEventBus, canonicalizeWorkspaceId } from '../../workflow/state/event-bus.context';
@@ -11,6 +12,10 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 
 function shortSha(sha: string): string {
   return sha.slice(0, 7);
+}
+
+function isMarkdownPath(p: string): boolean {
+  return /\.md$/i.test(p);
 }
 
 function formatAbsoluteTime(iso: string): string {
@@ -36,6 +41,10 @@ export function FileHistoryPanel({ filePath, onRevertCompleted }: Props) {
   const [commits, setCommits] = useState<CommitAttribution[] | null>(null);
   const [selected, setSelected] = useState<CommitAttribution | null>(null);
   const [diff, setDiff] = useState<string | null>(null);
+  // Markdown files render through the same viewer as "Review agent changes":
+  // full before/after contents diffed client-side into a rendered-markdown
+  // red/green view. `diff` (the raw patch) stays the path for everything else.
+  const [mdPayload, setMdPayload] = useState<FileDiffPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [diffLoading, setDiffLoading] = useState(false);
   const [reverting, setReverting] = useState(false);
@@ -59,7 +68,7 @@ export function FileHistoryPanel({ filePath, onRevertCompleted }: Props) {
   // Pull the stable callbacks out so the effect's deps don't include the whole
   // `git` object — that object is a useMemo result that changes on every status
   // poll, which would otherwise wipe local state (selection, loading) every 30s.
-  const { fetchFileHistory, fetchFileDiff, revert } = git;
+  const { fetchFileHistory, fetchFileDiff, fetchFileAtChange, revert } = git;
 
   useEffect(() => {
     let cancelled = false;
@@ -68,6 +77,7 @@ export function FileHistoryPanel({ filePath, onRevertCompleted }: Props) {
     setNotice(null);
     setSelected(null);
     setDiff(null);
+    setMdPayload(null);
     setCommits(null);
     latestDiffRequestRef.current = null;
     fetchFileHistory(filePath, 20)
@@ -130,8 +140,31 @@ export function FileHistoryPanel({ filePath, onRevertCompleted }: Props) {
       // reflects only the currently-selected save's state.
       setError(null);
       setDiff(null);
+      setMdPayload(null);
       setDiffLoading(true);
       latestDiffRequestRef.current = commit.sha;
+      if (isMarkdownPath(filePath)) {
+        fetchFileAtChange(filePath, commit.sha)
+          .then(({ baseline, current }) => {
+            if (latestDiffRequestRef.current !== commit.sha) return;
+            setMdPayload({
+              path: filePath,
+              kind: baseline === null ? 'added' : current === null ? 'deleted' : 'modified',
+              baseline,
+              current,
+              isBinary: false,
+            });
+          })
+          .catch((err) => {
+            if (latestDiffRequestRef.current === commit.sha) {
+              setError(friendlyGitError(err));
+            }
+          })
+          .finally(() => {
+            if (latestDiffRequestRef.current === commit.sha) setDiffLoading(false);
+          });
+        return;
+      }
       fetchFileDiff(filePath, commit.sha)
         .then((d) => {
           if (latestDiffRequestRef.current === commit.sha) setDiff(d);
@@ -145,7 +178,7 @@ export function FileHistoryPanel({ filePath, onRevertCompleted }: Props) {
           if (latestDiffRequestRef.current === commit.sha) setDiffLoading(false);
         });
     },
-    [filePath, fetchFileDiff],
+    [filePath, fetchFileDiff, fetchFileAtChange],
   );
 
   const handleRevert = useCallback(async () => {
@@ -282,6 +315,18 @@ export function FileHistoryPanel({ filePath, onRevertCompleted }: Props) {
                     <Loader2 size={13} className="animate-spin" />
                     Loading changes…
                   </div>
+                )}
+                {!diffLoading && mdPayload !== null && (
+                  mdPayload.baseline === null && mdPayload.current === null ? (
+                    // The commit exists in the file's log but the file is
+                    // absent on both sides (e.g. a pure rename elsewhere in
+                    // the commit) — mirror the raw view's empty state.
+                    <div className="px-3 py-3 text-xs text-ink-muted">
+                      No file changes in this save.
+                    </div>
+                  ) : (
+                    <MarkdownDiffViewer payload={mdPayload} />
+                  )
                 )}
                 {!diffLoading && diff !== null && (
                   <UnifiedDiffView

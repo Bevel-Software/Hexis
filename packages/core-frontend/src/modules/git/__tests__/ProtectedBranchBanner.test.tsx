@@ -33,6 +33,7 @@ function makeGit(
     revert: async () => ({ authorName: '', authorEmail: '', sha: '', subject: '', committedAt: '' }),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
   };
 }

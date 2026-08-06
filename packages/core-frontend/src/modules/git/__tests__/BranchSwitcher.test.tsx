@@ -65,6 +65,7 @@ function makeGit(overrides: Partial<GitContextValue> = {}): GitContextValue {
     revert: async () => makeAttr(),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
     ...overrides,
   };

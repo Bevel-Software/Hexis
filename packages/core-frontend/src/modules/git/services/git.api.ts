@@ -145,6 +145,23 @@ export async function fetchFileDiff(
   return data.diff;
 }
 
+/**
+ * Full file contents on both sides of one commit (`sha^` vs `sha`). Null on a
+ * side means the file is absent there (added / deleted at this commit). Used
+ * by the history panel to render markdown diffs; `fetchFileDiff` keeps
+ * serving the raw patch for other file types.
+ */
+export async function fetchFileAtChange(
+  workspaceId: string,
+  path: string,
+  sha: string,
+): Promise<{ baseline: string | null; current: string | null }> {
+  const q = new URLSearchParams({ path, sha });
+  return handleApiResponse(
+    await authFetch(`/api/workspace/${workspaceId}/workflow/file-at-change?${q.toString()}`),
+  );
+}
+
 export async function fetchFileComparison(
   workspaceId: string,
   path: string,

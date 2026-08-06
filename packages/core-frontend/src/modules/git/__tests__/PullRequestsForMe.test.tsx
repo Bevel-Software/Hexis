@@ -45,6 +45,7 @@ function makeGit(availability: GitContextValue['availability'] = 'ready'): GitCo
     }),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
   };
 }

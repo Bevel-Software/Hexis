@@ -312,6 +312,23 @@ export function createWorkflowRoutes(
     }
   });
 
+  router.get('/workspace/:id/workflow/file-at-change', async (req, res) => {
+    if (!(await requireUser(req, res))) return;
+    const pathParam = typeof req.query.path === 'string' ? req.query.path : '';
+    const sha = typeof req.query.sha === 'string' ? req.query.sha : '';
+    if (!pathParam || !sha) {
+      res.status(400).json({ error: 'path and sha are required' });
+      return;
+    }
+    try {
+      const { baseline, current } = await workflow.fileAtChange(req.params.id, pathParam, sha);
+      res.json({ baseline, current });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
   // ── File locks ────────────────────────────────────────────────────────────
 
   router.post('/workspace/:id/workflow/locks', async (req, res) => {

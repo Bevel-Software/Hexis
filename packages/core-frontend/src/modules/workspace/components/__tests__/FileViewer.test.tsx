@@ -150,6 +150,7 @@ function makeGit(status: WorkingTreeStatus): GitContextValue {
     }),
     fetchFileHistory: fetchFileHistoryMock,
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
   };
 }
