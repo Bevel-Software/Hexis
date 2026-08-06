@@ -91,7 +91,11 @@ export async function listPendingSkills(): Promise<PendingSkillSummary[]> {
   const data = await handleApiResponse<{ skills: PendingSkillSummary[] }>(
     await authFetch('/api/skills/pending'),
   );
-  return data.skills;
+  // Guarded, not trusted: a backend BUILT BEFORE this route existed answers
+  // through `/skills/:name` with `{ok:false}` — a 200 whose shape is not this
+  // one. The review shelf degrading to empty is the right failure; `undefined`
+  // reaching the item mapper took the whole library down (blank page).
+  return Array.isArray(data.skills) ? data.skills : [];
 }
 
 /** Content of a bundled skill file. `file` is relative to the skill folder. */
