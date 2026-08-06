@@ -14,10 +14,20 @@ import type { GroupSummary } from '../services/groups.api';
 const dataMock = vi.hoisted(() => ({ useLibraryData: vi.fn() }));
 vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryData }));
 
-const groupsMock = vi.hoisted(() => ({ listGroups: vi.fn() }));
-vi.mock('../services/groups.api', () => ({ listGroups: groupsMock.listGroups }));
+const groupsMock = vi.hoisted(() => ({ listGroups: vi.fn(), listJoinRequests: vi.fn() }));
+vi.mock('../services/groups.api', () => ({
+  listGroups: groupsMock.listGroups,
+  // The page carries the managers' join-request banners now — it is where the
+  // Library lands, so it is where an unanswered request is certain to be seen.
+  listJoinRequests: groupsMock.listJoinRequests,
+  reconcileJoinRequest: vi.fn(),
+}));
 
 import { LibraryProvider } from '../state/library-data';
+import {
+  WorkspaceContext,
+  type WorkspaceContextValue,
+} from '../../workspace/state/workspace.context';
 import { GroupsIndexPage } from '../components/GroupsIndexPage';
 import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
 
@@ -85,17 +95,25 @@ function LocationProbe() {
   return <div aria-label="href">{location.pathname + location.search}</div>;
 }
 
+/** `kbDirName` is what the request banners' Manage-access affordance needs. */
+const WORKSPACE = {
+  workspaceId: 'target-company-state',
+  kbDirName: 'knowledge-base',
+} as unknown as WorkspaceContextValue;
+
 function renderIndex() {
   return render(
-    <MemoryRouter initialEntries={['/skills-and-tools/groups']}>
+    <MemoryRouter initialEntries={['/skills-and-tools']}>
       {withAuth(
-      <LibraryProvider>
-        <Routes>
-          <Route path="/skills-and-tools/groups" element={<GroupsIndexPage />} />
-          <Route path="*" element={<div />} />
-        </Routes>
-        <LocationProbe />
-      </LibraryProvider>,
+      <WorkspaceContext.Provider value={WORKSPACE}>
+        <LibraryProvider>
+          <Routes>
+            <Route path="/skills-and-tools" element={<GroupsIndexPage />} />
+            <Route path="*" element={<div />} />
+          </Routes>
+          <LocationProbe />
+        </LibraryProvider>
+      </WorkspaceContext.Provider>,
       )}
     </MemoryRouter>,
   );
@@ -108,6 +126,7 @@ describe('GroupsIndexPage', () => {
   beforeEach(() => {
     dataMock.useLibraryData.mockReturnValue(CATALOG);
     groupsMock.listGroups.mockResolvedValue([summary()]);
+    groupsMock.listJoinRequests.mockResolvedValue([]);
   });
 
   it('names itself and its two sections', async () => {

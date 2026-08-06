@@ -335,7 +335,7 @@ describe('GroupPage', () => {
     expect(await screen.findByText("This group doesn't exist yet.")).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'All groups' })).toHaveAttribute(
       'href',
-      '/skills-and-tools/groups',
+      '/skills-and-tools',
     );
   });
 
