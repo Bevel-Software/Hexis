@@ -55,7 +55,11 @@ export function registerToolManualsTools(
     })),
   );
 
-  const defaultWs = workspaceIdForBranch(DEFAULT_BRANCH);
+  // A FUNCTION, not a constant — this factory runs at boot, and on a
+  // setup-screen deployment the branch model is applied AFTER boot. Only a
+  // read inside a handler body sees the configured `DEFAULT_BRANCH`; a
+  // construction-time capture would hold the empty pre-setup id until restart.
+  const defaultWs = () => workspaceIdForBranch(DEFAULT_BRANCH);
   const varKey = (manualName: string, varName: string) => utcpNamespacedKey(manualName, varName);
 
   const listSetupDef = toolDef({
@@ -140,7 +144,7 @@ export function registerToolManualsTools(
           path: m.path,
           type: m.type,
           setup: m.setup ?? null,
-          canWrite: await deps.accessControl.canWrite(defaultWs, ctx.user.email, m.path),
+          canWrite: await deps.accessControl.canWrite(defaultWs(), ctx.user.email, m.path),
           variables: (m.variables ?? []).map((v) => {
             const st = statusByKey.get(varKey(m.name, v.name));
             const isOAuth = v.oauth != null;

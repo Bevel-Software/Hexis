@@ -147,10 +147,25 @@ export class WorkspaceService implements IWorkspaceService {
 
   constructor(
     private readonly workspacesRoot: string,
-    private readonly kbRepoUrl: string,
+    /**
+     * The KB remote. A GETTER is read per-clone, so a repository supplied
+     * through the setup screen takes effect without restarting the process; a
+     * plain string is still accepted for callers that have nothing to vary.
+     *
+     * `kbDirName` stays a plain string on purpose — it is threaded into a
+     * dozen other services at construction, so making it live only here would
+     * buy an inconsistency rather than a feature.
+     */
+    kbRepoUrl: string | (() => string),
     private readonly kbDirName: string,
-    private readonly gitUsername: string = 'x-access-token',
-  ) {}
+    gitUsername: string | (() => string) = 'x-access-token',
+  ) {
+    this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
+    this.gitUsername = typeof gitUsername === 'function' ? gitUsername : () => gitUsername;
+  }
+
+  private readonly kbRepoUrl: () => string;
+  private readonly gitUsername: () => string;
 
   setDiffService(diffService: IDiffService): void {
     this.diffService = diffService;
@@ -185,10 +200,10 @@ export class WorkspaceService implements IWorkspaceService {
       // Username is provider-specific (GitHub `x-access-token`, GitLab `oauth2`, …); the token is
       // always the Basic-auth password, which every major host accepts.
       args.push(
-        '-c', `credential.helper=!f() { echo "username=${this.gitUsername}"; echo "password=$GITHUB_TOKEN"; }; f`,
+        '-c', `credential.helper=!f() { echo "username=${this.gitUsername()}"; echo "password=$GITHUB_TOKEN"; }; f`,
       );
     }
-    args.push(this.kbRepoUrl, targetDir);
+    args.push(this.kbRepoUrl(), targetDir);
     return args;
   }
 

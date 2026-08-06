@@ -115,7 +115,7 @@ export interface AdminMenuItem {
  * An auxiliary surface mounted inside the FileViewer container (rendered on
  * every FileViewer return path, positioned via its own absolute styling).
  * The enterprise registry contributes the agent-review surface here; the
- * change-request viewer (PrViewer) is core and stays hard-mounted.
+ * change-request dialog (ChangeRequestDialog) is core and shared by every surface.
  */
 export interface FileViewerPanelDef {
   id: string;
@@ -269,7 +269,7 @@ export interface AppRegistry {
   viewerRoutes: RouteDef[];
   /**
    * Ordered wrappers applied INSIDE the core providers (workspace, git,
-   * auto-update, pr-viewer, admin, event bus) but OUTSIDE the layout, so they
+   * auto-update, admin, event bus) but OUTSIDE the layout, so they
    * can read core state and every pane sees them. `providers[0]` is outermost.
    */
   providers: Array<(children: ReactNode) => ReactElement>;
@@ -285,6 +285,15 @@ export interface AppRegistry {
   renderers: FileRendererDef[];
   /** Extra rows in the explorer's Pinned section (see {@link ExplorerItemDef}). */
   explorerItems: ExplorerItemDef[];
+  /**
+   * How many unread items the gear menu's badge should show, if anything is
+   * counting. CORE COUNTS NOTHING: the feedback inbox behind that badge is an
+   * enterprise module, and core polled its endpoint every thirty seconds
+   * regardless — a guaranteed 404 on every core deployment, forever, filling
+   * the console of the one screen an operator looks at when something is
+   * wrong. Absent means no badge and, more to the point, no request.
+   */
+  adminUnreadCount?: (since: string | null) => Promise<number>;
   /**
    * Static override of the change-request port. Overrides that need runtime
    * state (e.g. the chat dispatch) should instead shadow

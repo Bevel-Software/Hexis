@@ -49,10 +49,24 @@ function toAuthUser(user: {
   };
 }
 
+/**
+ * What this service needs from the deployment's configuration, and nothing
+ * more. Narrowed from `CoreConfig` so the caller can supply a value that is
+ * RESOLVED rather than read straight off the environment — the SSO domain
+ * allow-list is settable from the setup screen, and taking the whole config
+ * object would have quietly pinned it to the env-only half.
+ */
+export interface AuthConfig {
+  jwtSecret: string;
+  adminEmail: string;
+  adminPassword: string;
+  allowedEmailDomains: string[];
+}
+
 export class AuthService {
   constructor(
     private readonly db: Database,
-    private readonly config: CoreConfig,
+    private readonly config: AuthConfig,
   ) {}
 
   /**
@@ -79,7 +93,6 @@ export class AuthService {
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid credentials');
     }
-    this.assertAllowedDomain(normalizedEmail);
 
     const provided = password ?? '';
     const isEnvAdmin =
@@ -147,7 +160,6 @@ export class AuthService {
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid email');
     }
-    this.assertAllowedDomain(normalizedEmail);
     this.assertPasswordPolicy(password);
     const suppliedName = (name ?? '').trim();
     const displayName = suppliedName || normalizedEmail.split('@')[0] || normalizedEmail;
@@ -306,12 +318,13 @@ export class AuthService {
   }
 
   /**
-   * Whether `email` passes the optional `ALLOWED_EMAIL_DOMAINS` guard. Returns
-   * true when no guard is configured (the default). Matches the email's domain
-   * exactly or as a subdomain, so `bevel.software` admits `a@bevel.software`
-   * and `a@eu.bevel.software` but not `a@notbevel.software`. When a guard IS
-   * configured, a missing/blank email fails closed. Exposed so non-login
-   * surfaces (the embed panel) can apply the same gate.
+   * Whether `email` passes the optional `ALLOWED_EMAIL_DOMAINS` guard — the
+   * SSO allow-list. Returns true when no guard is configured (the default).
+   * Matches the email's domain exactly or as a subdomain, so `bevel.software`
+   * admits `a@bevel.software` and `a@eu.bevel.software` but not
+   * `a@notbevel.software`. When a guard IS configured, a missing/blank email
+   * fails closed. Exposed so non-login surfaces (the embed panel) can apply
+   * the same gate.
    */
   isEmailDomainAllowed(email: string): boolean {
     const allowed = this.config.allowedEmailDomains;
@@ -322,9 +335,17 @@ export class AuthService {
   }
 
   /**
-   * Enforce {@link isEmailDomainAllowed} at the login paths. No-op when the
-   * guard is unset. Expects an already-normalized (trimmed, lower-cased,
+   * Enforce {@link isEmailDomainAllowed} on SSO sign-in. No-op when the guard
+   * is unset. Expects an already-normalized (trimmed, lower-cased,
    * regex-validated) email.
+   *
+   * SSO ONLY, deliberately. It exists because SSO auto-provisions — an account
+   * appears the first time the issuer authenticates someone, with nobody
+   * approving it. The other two entry points do not have that property: an
+   * admin-created account is vetted by the act of creating it, and password
+   * login can only reach an account that already exists. Applying it there
+   * gated nothing, and could lock out a bootstrap admin whose own address sits
+   * outside the list.
    */
   private assertAllowedDomain(normalizedEmail: string): void {
     if (!this.isEmailDomainAllowed(normalizedEmail)) {

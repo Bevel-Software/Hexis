@@ -51,6 +51,22 @@ export interface LibraryItem {
    * down from `SKILL.md`, so absence is the normal case, not a load failure.
    */
   version?: string;
+  /**
+   * Set only on a skill that does not exist yet — it lives on an open change
+   * request's branch and is waiting on somebody to approve it.
+   *
+   * Deliberately NOT folded into `status`: `AttentionStatus` answers "is
+   * anything standing in this item's way?", which drives the setup filter and
+   * the amber counts, and a skill under review is not a broken skill. Callers
+   * that must treat a proposal differently — the card, the click — read this.
+   */
+  pending?: {
+    changeRequestNumber: number;
+    branch: string;
+    authorName: string;
+    /** True when the reader proposed it themselves. */
+    mine: boolean;
+  };
 }
 
 export interface LibraryContextValue extends LibraryData {
@@ -107,6 +123,34 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
         neededToolsFor({ allowedTools: data.allowedToolsBySkill.get(s.name) }, data.tools),
       ),
     }));
+    /**
+     * Proposed skills, alongside the released ones rather than in a pile of
+     * their own. The question "is this skill available?" is asked in the same
+     * place as "does this group have one?", and a separate shelf answers the
+     * second while hiding the first — which is exactly the failure this fixes:
+     * a skill an agent proposed was nowhere at all until it merged.
+     *
+     * `status` is the neutral `ok`: a proposal has no integrations resolved
+     * against it, and reporting `warn` would put it in the setup filter and the
+     * group's amber count as though something were broken.
+     */
+    const pendingItems: LibraryItem[] = data.pendingSkills.map((s) => ({
+      kind: 'skill',
+      id: s.name,
+      name: s.name,
+      description: s.description,
+      owned: false,
+      group: groupOfPath(s.path),
+      path: s.path,
+      version: s.version,
+      status: { state: 'ok', text: 'In review' },
+      pending: {
+        changeRequestNumber: s.changeRequestNumber,
+        branch: s.branch,
+        authorName: s.authorName,
+        mine: s.isAuthor,
+      },
+    }));
     const toolItems: LibraryItem[] = data.tools.map((t) => ({
       kind: 'integration',
       id: t.slug,
@@ -119,8 +163,14 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       path: t.path,
       status: toolStatus(t),
     }));
-    return [...skillItems, ...toolItems];
-  }, [data.skills, data.tools, data.ownedSkills, data.allowedToolsBySkill]);
+    return [...skillItems, ...pendingItems, ...toolItems];
+  }, [
+    data.skills,
+    data.pendingSkills,
+    data.tools,
+    data.ownedSkills,
+    data.allowedToolsBySkill,
+  ]);
 
   // The loading flag is raised HERE rather than in the effect: `useState(true)`
   // already covers the first load, and flipping it from the event that asked

@@ -29,10 +29,12 @@ pnpm install
 pnpm build
 
 # 3. Configure
-cp .env.example .env   # then fill in at least: DATABASE_URL, JWT_SECRET,
-                       # ADMIN_EMAIL + ADMIN_PASSWORD (your way in before any
-                       # account exists), KB_REPO_URL, GIT_TOKEN,
-                       # SECRETS_ENC_KEY, SEED_ADMIN_EMAILS (for an empty KB repo)
+cp .env.example .env   # then fill in: DATABASE_URL (or the POSTGRES_* knobs
+                       # if you use the Postgres docker-compose ships), JWT_SECRET,
+                       # SECRETS_ENC_KEY, ADMIN_EMAIL — plus ADMIN_PASSWORD
+                       # unless you set LOGIN_PASSWORD=false. The knowledge-base
+                       # repo and its token are asked for on the setup screen at
+                       # first sign-in, where they can be tested before saving.
 
 # 4. Run (backend :3001 + Vite dev server :5173)
 pnpm dev
@@ -53,21 +55,22 @@ outgoing one still holds it.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | Postgres connection string |
+| `DATABASE_URL` | yes* | Postgres connection string. Wins over the `POSTGRES_*` knobs — set it to use a database you already have |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | when no `DATABASE_URL` | Credentials the connection string is built from when `DATABASE_URL` is unset, and the ones the bundled database is created with. URL-encoded, so special characters in the password are safe. Applied to the database only when its volume is first initialised |
 | `JWT_SECRET` | yes | Signs login sessions + OAuth state |
-| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | first boot | Bootstrap admin sign-in, checked against the env and never stored — the only way into a deployment with no accounts yet. Unset either to revoke it |
-| `KB_REPO_URL` | yes | https clone/push URL of the knowledge-base repo (any git host) |
-| `GIT_TOKEN` / `GIT_USERNAME` | yes | Git credential (Basic password / host-specific username) |
+| `ADMIN_EMAIL` | yes | The deployment owner: always an admin (whatever the sign-in method), and the initial Admin of a freshly seeded KB |
+| `ADMIN_PASSWORD` | with password login | Password half of the bootstrap credential — checked against the env, never stored. Not needed when `LOGIN_PASSWORD=false` |
+| `KB_REPO_URL` | setup screen | https clone/push URL of the knowledge-base repo (any git host). Leave unset and an admin supplies it on first sign-in |
+| `GIT_TOKEN` / `GIT_USERNAME` | setup screen | Git credential (Basic password / host-specific username). Also settable on first sign-in, where it can be tested against the host |
 | `SECRETS_ENC_KEY` | yes | 32-byte key (base64/hex) encrypting vault secrets + MCP OAuth tokens |
-| `SEED_ADMIN_EMAILS` | first boot | Initial Admin(s) written into `roles.yaml` when seeding an EMPTY KB repo |
 | `KB_DIR_NAME` | no | Directory name of the KB clone inside each workspace |
-| `DEFAULT_BRANCH` / `PROTECTED_BRANCHES` | no | Branch model (baked into the frontend at build time too) |
+| `DEFAULT_BRANCH` / `PROTECTED_BRANCHES` | setup screen | Branch model. Runtime only — the frontend fetches it from `/api/config`, so one build serves any deployment. Settable on first sign-in, where the repository's real branches are offered |
 | `PORT` | no | Backend port (default 3001) |
 | `PUBLIC_BACKEND_URL` / `PUBLIC_FRONTEND_URL` | prod | Public origins for OAuth redirects + bounces |
 | `TENANT_ID` | no | Slug branding every credential prefix (default `bevel`) |
-| `ALLOWED_EMAIL_DOMAINS` | no | Email-domain allow-list for login |
+| `ALLOWED_EMAIL_DOMAINS` | no | SSO allow-list, settable on the setup screen beside the SSO settings it guards. SSO auto-provisions, so against a multi-tenant issuer this is the only thing limiting who can sign themselves up. Not applied to admin-created accounts or password login |
 | `LOGIN_PASSWORD` | no | `false` hides password login and rejects `/api/auth/login` |
-| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | no | Generic OIDC single sign-on; the method appears once all three are set |
+| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | no | Generic OIDC single sign-on; the method appears once all three are set. Also settable on the setup screen, which shows the redirect URI to register |
 | `TRUST_PROXY` | behind a proxy | Reverse-proxy hop count, so `req.ip` and the per-IP login rate limit see the real client |
 | `KB_TEMPLATE_DIR` | no | Overrides the packaged KB seed template |
 | `ONTOLOGY_SESSION_BLOCK` | no | Ontology-session touch tracking toggle (default on) |

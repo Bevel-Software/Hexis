@@ -431,8 +431,12 @@ export function createWorkflowRoutes(
   router.get('/workflow/change-requests/mine', async (req, res) => {
     const user = await requireUser(req, res);
     if (!user) return;
+    // `?fresh=1` bypasses the 30s list cache — event-driven refreshes (a
+    // proposal or suggestion-routed upload just landed) ask because they KNOW
+    // the list changed, and a cached answer would hide their own change.
+    const fresh = isTruthyQuery(req.query.fresh);
     try {
-      res.json(await workflow.listChangeRequestsAuthoredBy(user.email));
+      res.json(await workflow.listChangeRequestsAuthoredBy(user.email, { fresh }));
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

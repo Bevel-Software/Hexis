@@ -7,7 +7,11 @@ export { PROTECTED_BRANCHES, isProtectedBranch } from '@bevel-software/platform-
 // picker's `canDelete` rule and the backend authorisation check on
 // `deleteBranch` must agree on every edge case (uppercase email, dotted
 // localpart, etc.).
-export { branchAuthorLocalpart, isBranchAuthoredBy } from '@bevel-software/platform-shared';
+export {
+  branchAuthorLocalpart,
+  isBranchAuthoredBy,
+  isOwnSuggestionsBranch,
+} from '@bevel-software/platform-shared';
 
 const VALID_BRANCH_REGEX = /^[A-Za-z0-9][A-Za-z0-9/_\-.]*$/;
 

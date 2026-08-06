@@ -29,6 +29,8 @@ import {
 } from '../modules/secrets-vault/index.js';
 import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
+import { createSetupRoutes } from '../modules/settings/setup.routes.js';
+import { DEFAULT_BRANCH, PROTECTED_BRANCHES } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -148,6 +150,29 @@ export async function createCoreServer(
     res.json({ status: 'ok', sha: GIT_SHA, timestamp: Date.now() });
   });
 
+  /**
+   * The handful of facts the browser needs BEFORE it can render anything, and
+   * therefore before it can authenticate: the branch model.
+   *
+   * Unauthenticated on purpose. The login screen, the router and every module
+   * that reads `DEFAULT_BRANCH` are loaded before a session exists, so a gated
+   * endpoint could not answer in time. What it discloses is two branch names —
+   * which every change request and every URL already shows to anyone who does
+   * get in — and nothing about the repository they live in.
+   *
+   * This replaces baking the values into the frontend bundle at build time.
+   * One artifact now serves any deployment, and renaming a branch no longer
+   * means a rebuild.
+   */
+  app.get('/api/config', (_req, res) => {
+    res.json({
+      branchModel: {
+        defaultBranch: DEFAULT_BRANCH,
+        protectedBranches: [...PROTECTED_BRANCHES],
+      },
+    });
+  });
+
   // Overlay boot-time side effects (startup reconciles, periodic sweeps).
   await ext.onBoot?.(core);
 
@@ -226,12 +251,12 @@ export async function createCoreServer(
   const sessionOntologyGate = {
     service: core.sessionOntologyService,
     enabled: core.config.ontologySessionBlock,
-    kbDirName: core.config.kbDirName,
+    kbDirName: core.kbDirName,
     recoveryBotEmail: RECOVERY_BOT_EMAIL,
     hooks: core.workflowService.hooks,
   };
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.accessControl, core.config.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink);
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService);
   registerToolManualsTools(core.toolRegistry, toolsRouter, ta, th, core.toolManualService, {
     accessControl: core.accessControl,
@@ -275,8 +300,9 @@ export async function createCoreServer(
     core.workflowService,
     core.eventBus,
     core.accessControl,
-    core.config.kbDirName,
+    core.kbDirName,
     core.creatorAccess,
+    core.adminAccess,
   ));
   // Workflow is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes
@@ -298,7 +324,7 @@ export async function createCoreServer(
     core.authService,
     core.workflowService,
     core.accessControl,
-    core.config.kbDirName,
+    core.kbDirName,
   ));
   app.use('/api', core.authMiddleware, createAccessRoutes(
     core.accessControl,
@@ -307,9 +333,13 @@ export async function createCoreServer(
     core.workflowService,
     core.eventBus,
     core.db,
-    core.config.kbDirName,
+    core.kbDirName,
   ));
-  app.use('/api', core.authMiddleware, createSkillsRoutes(core.skillService));
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createSkillsRoutes(core.skillService, core.pendingSkillsService),
+  );
   // Group enumeration + join requests. Browser-only (JWT), and fail-closed
   // like every other read surface: groups the caller cannot access (member,
   // manager, or discoverable via the access.md file's own read grant) are
@@ -320,7 +350,7 @@ export async function createCoreServer(
     core.workflowService,
     core.workspaceService,
     core.joinRequestsService,
-    core.config.kbDirName,
+    core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
   ));
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
@@ -333,6 +363,10 @@ export async function createCoreServer(
     core.adminAccess,
     core.accountErasureService,
   ));
+  // First-run setup. Mounted with the other authed routes but touching NO
+  // workspace — it has to work on a deployment that has no knowledge base yet,
+  // which is the whole reason it exists.
+  app.use('/api', core.authMiddleware, createSetupRoutes(core.settings, core.adminAccess));
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe

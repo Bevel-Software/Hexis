@@ -64,6 +64,37 @@ describe('AppSwitcher', () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 
+  it('names the current app next to the brand', () => {
+    renderSwitcher({ path: '/skills-and-tools' });
+    const trigger = screen.getByRole('button', { name: 'Switch app' });
+    expect(trigger).toHaveTextContent('Bevel');
+    expect(trigger).toHaveTextContent('Skills & Tools');
+  });
+
+  it('names the current app on a deep link inside it', () => {
+    renderSwitcher({ path: '/workspace/main/Skills' });
+    expect(screen.getByRole('button', { name: 'Switch app' })).toHaveTextContent(
+      'Knowledge',
+    );
+  });
+
+  it('shows the brand alone where no app is active', () => {
+    renderSwitcher({ path: '/secrets' });
+    const trigger = screen.getByRole('button', { name: 'Switch app' });
+    expect(trigger).toHaveTextContent('Bevel');
+    expect(trigger).not.toHaveTextContent('Knowledge');
+    expect(trigger).not.toHaveTextContent('Skills & Tools');
+  });
+
+  it('updates the named app after switching', async () => {
+    renderSwitcher({ path: '/workspace' });
+    await userEvent.click(screen.getByRole('button', { name: 'Switch app' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /Skills & Tools/ }));
+    expect(screen.getByRole('button', { name: 'Switch app' })).toHaveTextContent(
+      'Skills & Tools',
+    );
+  });
+
   it('opens the Apps list with the two core apps', async () => {
     renderSwitcher();
     await userEvent.click(screen.getByRole('button', { name: 'Switch app' }));
