@@ -29,7 +29,8 @@ pnpm install
 pnpm build
 
 # 3. Configure
-cp .env.example .env   # then fill in: DATABASE_URL, JWT_SECRET,
+cp .env.example .env   # then fill in: DATABASE_URL (or the POSTGRES_* knobs
+                       # if you use the Postgres docker-compose ships), JWT_SECRET,
                        # SECRETS_ENC_KEY, ADMIN_EMAIL — plus ADMIN_PASSWORD
                        # unless you set LOGIN_PASSWORD=false. The knowledge-base
                        # repo and its token are asked for on the setup screen at
@@ -54,7 +55,8 @@ outgoing one still holds it.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | Postgres connection string |
+| `DATABASE_URL` | yes* | Postgres connection string. Wins over the `POSTGRES_*` knobs — set it to use a database you already have |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | compose only | Credentials for the Postgres docker-compose brings with it; compose builds `DATABASE_URL` from them when you do not supply one. Applied only when the volume is first initialised |
 | `JWT_SECRET` | yes | Signs login sessions + OAuth state |
 | `ADMIN_EMAIL` | yes | The deployment owner: always an admin (whatever the sign-in method), and the initial Admin of a freshly seeded KB |
 | `ADMIN_PASSWORD` | with password login | Password half of the bootstrap credential — checked against the env, never stored. Not needed when `LOGIN_PASSWORD=false` |
