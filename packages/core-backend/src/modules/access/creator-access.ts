@@ -35,7 +35,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { GROUPS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from './access-control.interface.js';
 import { spliceGrant, type Principal } from './access-splice.js';
@@ -86,6 +85,16 @@ export interface ICreatorAccess {
   ): Promise<string | null>;
 
   noteAccessFileWritten(workspaceId: string): void;
+}
+
+/**
+ * The splice-safe principal for a creator — exported because group
+ * provisioning (`GroupProvisionService`) writes the same `Name <email>`
+ * entries into the access.md files it seeds, and two spellings of the same
+ * person would read as two people.
+ */
+export function creatorPrincipal(creator: Creator): Principal {
+  return { kind: 'user', email: creator.email, displayName: safeDisplayName(creator) };
 }
 
 /**
@@ -160,15 +169,11 @@ export class CreatorAccessService implements ICreatorAccess {
           warnSkipped(rel, err);
           return null;
         }
-        // A DIRECT group folder (`Groups/<Name>`) seeds the new-format
-        // access.md: `read: everyone` in the FRONTMATTER makes the group
-        // discoverable (anyone may open the file and ask to join), while the
-        // BODY — the folder's actual rules — names only the creator, who
-        // gets read+write+owner: creating a group makes you the one who
-        // runs it (adds content, manages access, answers join requests).
-        // The `read: []` placeholder is what makes the body parse as rules
-        // from the first byte, so every later splice targets the body.
-        const isGroupRoot = new RegExp(`^${GROUPS_DIR}/[^/]+$`).test(acc);
+        // NOTE: a direct group folder (`Groups/<Name>`) is no longer special
+        // here. Groups — and personal folders — are made by the dedicated
+        // provisioning endpoint (`GroupProvisionService`), which writes the
+        // full ownership template itself; this generic read-grant only covers
+        // ad-hoc folder creation elsewhere in the tree.
         return {
           kind: 'seed-access-md',
           wsRelPath: `${this.kbDirName}/${acc}/access.md`,
@@ -178,29 +183,10 @@ export class CreatorAccessService implements ICreatorAccess {
               // concurrent creator's grant survives; ours lands next to it.
               // `target: 'folder'` so a new-format access.md (body-governed)
               // gets the grant in its FOLDER rules, never its self-frontmatter.
-              // Only the TEMPLATE is gated on the file being absent — never
-              // overwrite content somebody else got there first with. The
-              // grants are NOT gated: this plan only exists because the
-              // folder was being created, so a non-empty `current` here means
-              // a CONCURRENT creator seeded it first, and both initiators of
-              // a group deserve the full creator grants. spliceGrant is
-              // duplicate-safe, so re-applying over their entries no-ops.
-              let out = isGroupRoot && !current.trim()
-                ? '---\nread:\n  - everyone\n---\nread: []\n'
-                : current;
-              out = spliceGrant(out, 'read', principal, {
+              return spliceGrant(current, 'read', principal, {
                 allowScalar: false,
                 target: 'folder',
               }).text;
-              if (isGroupRoot) {
-                for (const verb of ['write', 'owner'] as const) {
-                  out = spliceGrant(out, verb, principal, {
-                    allowScalar: false,
-                    target: 'folder',
-                  }).text;
-                }
-              }
-              return out;
             } catch (err) {
               warnSkipped(rel, err);
               return current;
@@ -283,7 +269,7 @@ export class CreatorAccessService implements ICreatorAccess {
   }
 
   private principalFor(creator: Creator): Principal {
-    return { kind: 'user', email: creator.email, displayName: safeDisplayName(creator) };
+    return creatorPrincipal(creator);
   }
 }
 

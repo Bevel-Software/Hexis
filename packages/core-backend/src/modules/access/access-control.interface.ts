@@ -342,22 +342,6 @@ export interface IAccessControl {
   ): Promise<Map<string, boolean> | null>;
 
   /**
-   * Whether `relativePath` — a file OR a directory — is present in the tree at
-   * `ref`. Not an access question, but it is asked by the write gate, which
-   * distinguishes "creating something that does not exist yet" from "editing
-   * something that does": see the new-folder carve-out in
-   * `WorkflowService.assertCanWriteAtPath`. Reads at the ref rather than the
-   * working tree for the same reason every other gate does — a caller must not
-   * be able to change the answer by touching their own checkout.
-   *
-   * False is returned for a missing path AND for an unresolvable ref — the two
-   * are indistinguishable from git's exit status. A caller that treats `false`
-   * as permission must therefore corroborate it (the carve-out above also
-   * requires the PARENT to exist, which a bogus ref fails).
-   */
-  existsAtRef(workspaceId: string, ref: string, relativePath: string): Promise<boolean>;
-
-  /**
    * The set of principals with `write` on this path as of `ref`. Used by PR
    * reviewer routing and the per-file approval UI rendered against the PR
    * head. Returns null with the same null-semantics as `canWriteAtRef`.

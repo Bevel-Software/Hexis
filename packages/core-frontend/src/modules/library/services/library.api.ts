@@ -1,4 +1,4 @@
-import { DEFAULT_BRANCH, type PullRequestSummary } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, GROUPS_DIR, type PullRequestSummary } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
 import { createBranch } from '../../git/services/git.api';
@@ -6,6 +6,7 @@ import { getOrCreateWorkspace, writeFile } from '../../workspace/services/worksp
 import { openChangeRequest } from '../../pr/services/pr-open.api';
 import { postPrComment } from '../../pr/services/pr-comments.api';
 import { branchSegment } from '../../change-requests/services/propose.api';
+import { ensurePersonalGroup } from './groups.api';
 
 /**
  * Library data access. Skills come from the browser skill routes
@@ -196,19 +197,29 @@ export async function proposeChange(
  */
 export const EMPTY_SKILL_MD = '---\ndescription:\n---\n\n';
 
-export interface CreateSkillInput {
-  /**
-   * Repo-root-relative folder the skill lands in — `Groups/GTM` for a group's,
-   * or bare `Groups` for one that belongs to no group.
-   */
-  parentPath: string;
+export type CreateSkillInput = {
   /** The skill's name, which becomes its folder name. */
   name: string;
-  /** False (or unknown) routes the new file through a change request instead. */
-  canWrite: boolean;
   userEmail: string;
   userName: string;
-}
+} & (
+  | {
+      /** Repo-root-relative group folder the skill lands in — `Groups/GTM`. */
+      parentPath: string;
+      /** False (or unknown) routes the new file through a change request instead. */
+      canWrite: boolean;
+    }
+  | {
+      /**
+       * The skill is the caller's own: it lands in their personal folder
+       * (`Groups/personal-<id>/`), which the provisioning endpoint ensures —
+       * and commits — first. Always a direct write: the ensured folder's
+       * access.md names the caller as owner, so the write gate passes on its
+       * own, with no permission special-case anywhere.
+       */
+      personal: true;
+    }
+);
 
 export interface CreatedSkill {
   /** Repo-root-relative path of the new `SKILL.md`. */
@@ -235,9 +246,13 @@ export interface CreatedSkill {
  * back so they can say which of the two happened rather than guess.
  */
 export async function createEmptySkill(input: CreateSkillInput): Promise<CreatedSkill> {
-  const repoRelativePath = `${input.parentPath}/${input.name}/SKILL.md`;
+  const parentPath =
+    'personal' in input
+      ? `${GROUPS_DIR}/${(await ensurePersonalGroup()).folder}`
+      : input.parentPath;
+  const repoRelativePath = `${parentPath}/${input.name}/SKILL.md`;
 
-  if (!input.canWrite) {
+  if (!('personal' in input) && !input.canWrite) {
     const { branch, kbDirName } = await proposeChange({
       skillName: input.name,
       repoRelativePath,

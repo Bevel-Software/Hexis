@@ -87,8 +87,7 @@ export function AddToGroupDialog({
       </p>
 
       <NewSkillPanel
-        parentPath={primaryPath}
-        canWrite={canWrite}
+        destination={{ parentPath: primaryPath, canWrite }}
         existingSkills={existingSkills}
         onCreated={onClose}
       />

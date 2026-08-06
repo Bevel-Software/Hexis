@@ -41,7 +41,7 @@ import type {
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
 } from '@bevel-software/platform-shared';
-import { isProtectedBranch, GROUPS_DIR } from '@bevel-software/platform-shared';
+import { isProtectedBranch } from '@bevel-software/platform-shared';
 import { and, eq } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
@@ -534,7 +534,6 @@ export class WorkflowService implements IWorkflowService {
     );
     if (!result) return; // no config at ref → default-allow (bootstrap)
     if (result.get(repoRelative)) return;
-    if (await this.isNewEntryUnderGroups(workspaceId, repoRelative)) return;
     const eligible = await this.accessControl.eligibleWritersAtRef(
       workspaceId,
       `HEAD`,
@@ -545,53 +544,6 @@ export class WorkflowService implements IWorkflowService {
       eligibleRoles: eligible?.roles ?? [],
       eligibleUsers: eligible?.users ?? [],
     });
-  }
-
-  /**
-   * Whether `repoRelative` sits inside a direct child of `Groups/` that does
-   * not exist yet — the one thing the root's `write: Admin` rule must not
-   * stop.
-   *
-   * `Groups/` is where a group and an ungrouped skill both live, one segment
-   * down (`Groups/<Group>/…`, `Groups/<skill>/SKILL.md`), and the model says
-   * making one makes it yours: creating a group makes you the person who runs
-   * it, and an ungrouped skill is "owned by whoever made it"
-   * (`kb-template/Groups/README.md`). `CreatorAccessService` already writes
-   * exactly that — a new `Groups/<name>/access.md` naming the creator under
-   * read, write and owner. But it could never land: seeding that file is
-   * itself a write under `Groups/`, so the gate refused it, the seed's own
-   * error handler swallowed the refusal as best-effort, and the creation then
-   * failed too. Everyone but an Admin got a 403 for a folder the product says
-   * is theirs to make.
-   *
-   * The exemption is as narrow as that story requires:
-   *
-   *   - `Groups/` itself must EXIST at the ref. This is what makes the check
-   *     safe against a ref that does not resolve: `existsAtRef` cannot tell a
-   *     missing path from a missing ref, so a bogus ref fails here and the
-   *     carve-out never fires.
-   *   - `Groups/<name>` must NOT exist at the ref. Nothing that already has
-   *     content, rules, or an owner is reachable — this can only ever admit
-   *     the first write into a folder that does not exist yet.
-   *   - Only paths BELOW `Groups/<name>/`. `Groups/<name>` as a file, and
-   *     anything sitting directly in `Groups/`, stay gated.
-   *
-   * Everything after that first write is governed normally, by the `access.md`
-   * the creation seeds. The one thing this hands out is the ability to claim an
-   * unused name under `Groups/` — which is what the New-group button has always
-   * offered, and which the seeded rules immediately fence off from everyone
-   * else.
-   */
-  private async isNewEntryUnderGroups(
-    workspaceId: string,
-    repoRelative: string,
-  ): Promise<boolean> {
-    const segments = repoRelative.split('/');
-    // `Groups` + the new folder + at least one thing inside it.
-    if (segments.length < 3 || segments[0] !== GROUPS_DIR) return false;
-    const folder = `${GROUPS_DIR}/${segments[1]}`;
-    if (!(await this.accessControl.existsAtRef(workspaceId, 'HEAD', GROUPS_DIR))) return false;
-    return !(await this.accessControl.existsAtRef(workspaceId, 'HEAD', folder));
   }
 
   // ── File locks ────────────────────────────────────────────────────────────

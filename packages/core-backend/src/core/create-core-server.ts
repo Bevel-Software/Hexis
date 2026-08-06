@@ -350,6 +350,7 @@ export async function createCoreServer(
     core.workflowService,
     core.workspaceService,
     core.joinRequestsService,
+    core.groupProvisionService,
     core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
   ));

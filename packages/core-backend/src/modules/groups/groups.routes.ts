@@ -12,6 +12,7 @@ import { spliceGrant } from '../access/access-splice.js';
 import { WorkflowDomainError } from '../workflow/workflow.errors.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { groupsWorkspaceId } from './groups.service.js';
+import { GroupProvisionError, type GroupProvisionService } from './group-provision.service.js';
 import type { JoinRequestsService } from './join-requests.service.js';
 import type {
   GroupCatalogEntry,
@@ -56,6 +57,7 @@ export function createGroupsRoutes(
   workflow: IWorkflowService,
   workspaceService: WorkspaceService,
   joinRequests: JoinRequestsService,
+  provision: GroupProvisionService,
   kbDirName: string,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
 ): express.Router {
@@ -145,6 +147,56 @@ export function createGroupsRoutes(
    * workflow's: draft branches are ungated, and the merge gate requires an
    * approver who can write the touched access.md.
    */
+  /**
+   * Create a group — the ONE door through which `Groups/<name>/` folders come
+   * to exist. Any authenticated user may create one; that is the product
+   * model (making a group makes you the one who runs it), and the seeded
+   * access.md immediately fences the new folder off from everyone else. See
+   * `GroupProvisionService` for why this is an endpoint and not a write path.
+   */
+  router.post('/groups', async (req, res) => {
+    const user = await resolveUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const { name } = req.body as { name?: string };
+    if (typeof name !== 'string') {
+      res.status(400).json({ error: 'name is required in body' });
+      return;
+    }
+    try {
+      const result = await provision.createGroup(user, name);
+      res.status(201).json(result);
+    } catch (err) {
+      if (err instanceof GroupProvisionError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+      console.error('[groups] create failed:', err);
+      res.status(500).json({ error: 'Failed to create the group' });
+    }
+  });
+
+  /**
+   * Ensure the caller's personal folder (`Groups/personal-<id>/`) exists —
+   * idempotent; the UI calls it lazily right before the first personal-skill
+   * write. Private by construction: its access.md names only the caller.
+   */
+  router.post('/groups/personal', async (req, res) => {
+    const user = await resolveUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    try {
+      res.json(await provision.ensurePersonalGroup(user));
+    } catch (err) {
+      console.error('[groups] personal-folder ensure failed:', err);
+      res.status(500).json({ error: 'Failed to prepare your personal folder' });
+    }
+  });
+
   router.post('/groups/:name/join-request', async (req, res) => {
     const email = req.userEmail;
     if (!email) {

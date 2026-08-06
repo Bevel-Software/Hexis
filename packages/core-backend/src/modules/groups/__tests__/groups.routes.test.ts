@@ -145,6 +145,9 @@ async function makeHarness(opts: HarnessOpts = {}) {
       workflow,
       workspaceService,
       joinRequests,
+      // Provisioning is exercised by its own service tests; the routes here
+      // only need the parameter slot filled.
+      {} as never,
       KB,
       async (req) => (req.userEmail ? { ...ALI_USER, email: req.userEmail } : null),
     ),

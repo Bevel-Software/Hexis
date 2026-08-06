@@ -1,4 +1,3 @@
-import { GROUPS_DIR } from '@bevel-software/platform-shared';
 import { Button, Dialog, Surface } from '../../../shared/components';
 import { NewSkillPanel } from './NewSkillPanel';
 import { useLibraryToast } from '../state/toast.context';
@@ -24,18 +23,12 @@ export interface PersonalAddDialogProps {
  * This page used to have no first door at all. The reason was real but narrow:
  * the group dialog's first half was a LINK into the destination folder, and
  * this page is defined as the items in no folder, so there was nothing to open.
- * That objection died with the link. An ungrouped skill has a perfectly
- * definite home on disk — `Groups/<name>/SKILL.md`, one level above where a
- * group's skills sit (see `groupOfPath`) — so there has always been somewhere
- * to WRITE, only nowhere to open.
- *
- * A skill made here is YOURS, and that is not wishful phrasing about a review
- * queue: the folder is brand new, so `CreatorAccessService` seeds its
- * `access.md` naming you under read, write AND owner before the file lands
- * (`creator-access.ts`, the `isGroupRoot` branch). Hence `canWrite` is passed
- * as `true` rather than looked up. Asking the access tree first would get the
- * wrong answer for the right reason — nobody can write `Groups/` itself, and
- * this write is what creates the rules that govern everything after it.
+ * That objection died with the link: a personal skill has a perfectly definite
+ * home — the caller's own `Groups/personal-<id>/` folder, which
+ * `createEmptySkill` ensures through the provisioning endpoint before the
+ * first write. The folder's seeded access.md names you as its owner, so the
+ * write that follows passes the ordinary gate on its own merits — no
+ * permission special-case anywhere in this flow.
  */
 export function PersonalAddDialog({ name, existingSkills, onClose }: PersonalAddDialogProps) {
   const toast = useLibraryToast();
@@ -66,12 +59,7 @@ export function PersonalAddDialog({ name, existingSkills, onClose }: PersonalAdd
         {`It lands in ${name} — yours alone until you add it to a group.`}
       </p>
 
-      <NewSkillPanel
-        parentPath={GROUPS_DIR}
-        canWrite
-        existingSkills={existingSkills}
-        onCreated={onClose}
-      />
+      <NewSkillPanel destination={{ personal: true }} existingSkills={existingSkills} onCreated={onClose} />
 
       <div className="my-3.5 flex items-center gap-3">
         <span aria-hidden="true" className="h-px flex-1 bg-line" />

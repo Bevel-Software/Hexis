@@ -14,7 +14,7 @@ import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
  * It carried one door until now — copy a prompt — because its first half used
  * to be a LINK into the destination folder and this page is defined as the
  * items in no folder. Writing needs no such destination: an ungrouped skill
- * lives at `Groups/<name>/SKILL.md`, so the door is back.
+ * lives in the caller's own `Groups/personal-<id>/` folder, so the door is back.
  *
  * The load-bearing assertion is that it creates DIRECTLY. A skill you make
  * here is yours — the new folder's `access.md` is seeded naming you as owner
@@ -101,14 +101,17 @@ describe('PersonalAddDialog', () => {
     expect(screen.getByText(/yours alone until you add it to a group/)).toBeInTheDocument();
   });
 
-  it('writes an ungrouped skill straight under Groups/, one level above a group’s', async () => {
+  it('creates the skill as PERSONAL — destination resolution belongs to the api layer', async () => {
+    // The dialog does not know (or guess) the personal folder's name: it
+    // says `personal: true`, and `createEmptySkill` ensures the folder via
+    // the provisioning endpoint before the write.
     const { field, create, onClose, href } = renderDialog();
     fireEvent.change(field(), { target: { value: 'scratch' } });
     fireEvent.click(create());
 
     await waitFor(() =>
       expect(apiMock.createEmptySkill).toHaveBeenCalledWith(
-        expect.objectContaining({ parentPath: 'Groups', name: 'scratch' }),
+        expect.objectContaining({ personal: true, name: 'scratch' }),
       ),
     );
     await waitFor(() =>
@@ -118,16 +121,16 @@ describe('PersonalAddDialog', () => {
   });
 
   it('creates it directly — a skill of your own is never sent for review', async () => {
-    // The whole point of the personal list. The new folder's access.md names
-    // the creator as owner as part of this same write, so there is nobody to
-    // review it and nothing to wait for.
+    // The whole point of the personal list: the ensured personal folder's
+    // access.md names the creator as owner, so there is nobody to review it
+    // and nothing to wait for.
     const { field, create } = renderDialog();
     fireEvent.change(field(), { target: { value: 'scratch' } });
     fireEvent.click(create());
 
     await waitFor(() =>
       expect(apiMock.createEmptySkill).toHaveBeenCalledWith(
-        expect.objectContaining({ canWrite: true }),
+        expect.objectContaining({ personal: true }),
       ),
     );
     expect(await screen.findByText(/opening it/)).toBeInTheDocument();

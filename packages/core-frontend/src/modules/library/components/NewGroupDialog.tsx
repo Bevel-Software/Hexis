@@ -1,10 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, Dialog, TextField } from '../../../shared/components';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { createDirectory } from '../../workspace/services/workspace.api';
-import { GROUPS_DIR } from '@bevel-software/platform-shared';
-import { defaultWorkspaceId } from '../services/library.api';
+import { createGroup } from '../services/groups.api';
 import { pathForGroup } from '../routes/library-paths';
 import { useLibraryToast } from '../state/toast.context';
 
@@ -19,19 +16,15 @@ export interface NewGroupDialogProps {
 /**
  * Make a group — the prototype's `newSpaceModal` (line 2769).
  *
- * A group IS a folder, so creating one is `mkdir Groups/<Name>` and nothing
- * else. That is not a shortcut: the whole model is that the KB is the source
- * of truth, so a group that existed anywhere but on disk would be a second
- * registry to keep in sync.
- *
- * The creator gets read access for free, and not by accident — the directory
- * endpoint seeds the new folder's `access.md` naming its creator under `read:`
- * BEFORE the folder appears (`workspace.routes.ts:886`). Without that seeding
- * the default-deny tree filter would hide the folder from the person who just
- * made it. So there is no access step in this dialog: you already have it.
+ * A group IS a folder, and the folder comes from the DEDICATED provisioning
+ * endpoint (`POST /api/groups`) — the one privileged door for claiming a name
+ * under `Groups/`. The endpoint writes the folder's `access.md` naming the
+ * creator under read, write and owner (with the file itself readable by
+ * everyone, so the group is discoverable and joinable) and commits it before
+ * answering. So there is no access step in this dialog: by the time the
+ * response arrives, the group exists and it is yours.
  */
 export function NewGroupDialog({ existing, onClose, onCreated }: NewGroupDialogProps) {
-  const { kbDirName } = useWorkspace();
   const navigate = useNavigate();
   const toast = useLibraryToast();
   const [name, setName] = useState('');
@@ -51,18 +44,21 @@ export function NewGroupDialog({ existing, onClose, onCreated }: NewGroupDialogP
     : illegal
       ? "A group name can't contain / or \\."
       : null;
-  const canCreate = trimmed.length > 0 && !error && !busy && Boolean(kbDirName);
+  const canCreate = trimmed.length > 0 && !error && !busy;
 
   async function create() {
-    if (!canCreate || !kbDirName) return;
+    if (!canCreate) return;
     setBusy(true);
     try {
-      await createDirectory(defaultWorkspaceId(), `${kbDirName}/${GROUPS_DIR}/${trimmed}`);
+      await createGroup(trimmed);
       onCreated();
       onClose();
       navigate(pathForGroup(trimmed));
-    } catch {
-      toast("Couldn't create that group — try again.", 'danger');
+    } catch (err) {
+      // The server's refusal names the problem (name taken, reserved
+      // prefix…) — worth more than a generic apology.
+      const msg = err instanceof Error ? err.message : "Couldn't create that group — try again.";
+      toast(msg, 'danger');
       setBusy(false);
     }
   }
@@ -109,9 +105,6 @@ export function NewGroupDialog({ existing, onClose, onCreated }: NewGroupDialogP
         </p>
       )}
 
-      {!kbDirName && (
-        <p className="mt-1.5 text-detail text-ink-muted">Workspace still loading…</p>
-      )}
     </Dialog>
   );
 }

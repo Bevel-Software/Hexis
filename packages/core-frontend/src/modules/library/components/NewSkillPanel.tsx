@@ -6,22 +6,23 @@ import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import { createEmptySkill } from '../services/library.api';
 import { useLibraryToast } from '../state/toast.context';
 
+/**
+ * Where the new skill lands.
+ *
+ *   - A GROUP destination carries the folder and the caller's write verdict
+ *     on it. `canWrite: null` (verdict not in yet) is treated as "not a
+ *     writer", same rule the surrounding dialogs use: the cautious path —
+ *     a change request — is correct either way, the confident one is not.
+ *   - PERSONAL means the caller's own folder (`Groups/personal-<id>/`),
+ *     which `createEmptySkill` ensures via the provisioning endpoint before
+ *     writing. Always direct: the ensured folder is theirs by construction.
+ */
+export type NewSkillDestination =
+  | { parentPath: string; canWrite: boolean | null }
+  | { personal: true };
+
 export interface NewSkillPanelProps {
-  /**
-   * Repo-root-relative folder the skill lands in — `Groups/GTM` for a group's,
-   * or bare `Groups` for one that belongs to no group.
-   */
-  parentPath: string;
-  /**
-   * Whether the caller may write `parentPath`. `null` (verdict not in yet) is
-   * treated as "not a writer", same rule the surrounding dialogs use: the
-   * cautious path is correct either way, the confident one is not.
-   *
-   * Pass `true` for a destination the creation makes yours — see
-   * `PersonalAddDialog`, where the new folder is a brand-new one under
-   * `Groups/` and the write seeds its own ownership.
-   */
-  canWrite: boolean | null;
+  destination: NewSkillDestination;
   /** Every skill name already in the catalog — see the collision check below. */
   existingSkills: string[];
   /** Fired once the file exists; the host dialog closes on it. */
@@ -43,8 +44,7 @@ export interface NewSkillPanelProps {
  * before the skill was worth anything.
  */
 export function NewSkillPanel({
-  parentPath,
-  canWrite,
+  destination,
   existingSkills,
   onCreated,
 }: NewSkillPanelProps) {
@@ -80,9 +80,10 @@ export function NewSkillPanel({
     setBusy(true);
     try {
       const created = await createEmptySkill({
-        parentPath,
+        ...('personal' in destination
+          ? { personal: true as const }
+          : { parentPath: destination.parentPath, canWrite: destination.canWrite === true }),
         name: trimmed,
-        canWrite: canWrite === true,
         userEmail: user.email,
         userName: user.name,
       });
