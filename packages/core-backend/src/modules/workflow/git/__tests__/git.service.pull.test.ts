@@ -34,6 +34,10 @@ async function seedWorkspace(root: string, workspaceId: string): Promise<{
   // identity must live in the repo, not just in this test's runGit env.
   await runGit(repo, ['config', 'user.email', 'workspace@bevel.test']);
   await runGit(repo, ['config', 'user.name', 'bevel Workspace']);
+  // autocrlf off: the autostash test reads back a file `git stash pop` wrote.
+  // Under Git-for-Windows' system-level `core.autocrlf=true` that checkout
+  // would rewrite the LF fixture as CRLF and fail the byte-for-byte assertion.
+  await runGit(repo, ['config', 'core.autocrlf', 'false']);
   return { upstream, repo };
 }
 

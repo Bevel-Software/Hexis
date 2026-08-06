@@ -191,8 +191,10 @@ describe('GitService.logForFile', () => {
     const limited = await svc.logForFile(workspaceId, 'Knowledge/Foo.md', 5);
     expect(limited).toHaveLength(5);
     // Timeout is generous because Windows process-spawn dominates here — on
-    // Linux CI this finishes in ~3 s.
-  }, 60000);
+    // Linux CI this finishes in ~3 s. Under a full-suite parallel run on
+    // Windows the 220 spawns contend with every other git suite, so the cap
+    // has to absorb that load, not just the isolated cost.
+  }, 180_000);
 
   // Regression: pathspec literal handling. `git log -- '[Approved] foo.md'`
   // would otherwise interpret `[Approved]` as a character-class glob and
