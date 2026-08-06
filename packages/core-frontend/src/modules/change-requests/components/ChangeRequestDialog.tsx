@@ -15,17 +15,16 @@ import { diffLines, type DiffLine } from '../utils/diff';
 import { isBinaryFile } from '../../workspace/components/renderers';
 
 /**
- * The folder the dialog reads the request WITHIN. The skill page scopes to
- * the skill: its folder is the prefix, and `baseFiles` (SKILL.md + bundled
- * files, prefix-relative) always list so an owner can read the untouched
- * parts too. Without a scope — the Knowledge viewer — the whole repo is the
- * frame: the file list is exactly what the request touches, paths shown
- * repo-relative.
+ * Extra context for the file list — NOT a filter. The dialog always shows
+ * EVERY file the request touches, repo-relative, whatever surface opened it:
+ * a decision about the whole request must not hide part of it behind a badge.
+ * A scope only ADDS the surface's own files (a skill's SKILL.md and bundle)
+ * so the owner can read the untouched parts of the thing under review too.
  */
 export interface ChangeRequestScope {
   /** Repo-root-relative folder, no trailing slash (e.g. `Groups/gtm/rfi`). */
   prefix: string;
-  /** Files that always list, relative to `prefix`, whether touched or not. */
+  /** Files that ALWAYS list, relative to `prefix`, whether touched or not. */
   baseFiles: string[];
 }
 
@@ -94,27 +93,22 @@ export function ChangeRequestDialog({
     };
   }, [cr.number]);
 
-  // '' prefix = the whole repo: every touched file is "inside", shown by its
-  // repo-relative path, and the outside badge never has anything to count.
-  const prefix = scope ? `${scope.prefix}/` : '';
-  const mainFiles = useMemo(() => scope?.baseFiles ?? [], [scope]);
+  // EVERYTHING is repo-relative, scoped or not — the scope's baseFiles are
+  // lifted to full paths, and every touched file lists whatever folder it is
+  // in. The dialog is a decision about the WHOLE request; a file it touches
+  // outside the surface that opened it is part of the decision, not a badge.
+  const mainFiles = useMemo(
+    () => (scope ? scope.baseFiles.map((f) => `${scope.prefix}/${f}`) : []),
+    [scope],
+  );
   const changedFiles = useMemo(() => {
     const set = new Set<string>();
-    for (const f of detail?.files ?? []) {
-      if (f.path.startsWith(prefix)) set.add(f.path.slice(prefix.length));
-    }
+    for (const f of detail?.files ?? []) set.add(f.path);
     return set;
-  }, [detail, prefix]);
+  }, [detail]);
   const addedFiles = useMemo(
-    () =>
-      (detail?.files ?? [])
-        .filter((f) => f.status === 'added' && f.path.startsWith(prefix))
-        .map((f) => f.path.slice(prefix.length)),
-    [detail, prefix],
-  );
-  const outsideCount = useMemo(
-    () => (detail?.files ?? []).filter((f) => !f.path.startsWith(prefix)).length,
-    [detail, prefix],
+    () => (detail?.files ?? []).filter((f) => f.status === 'added').map((f) => f.path),
+    [detail],
   );
   const allFiles = useMemo(() => {
     const touched = [...changedFiles].filter((f) => !mainFiles.includes(f));
@@ -123,13 +117,13 @@ export function ChangeRequestDialog({
 
   /** The scale line: how much this touches, in the KB's own terms. */
   const scale = useMemo(() => {
-    const files = (detail?.files ?? []).filter((f) => f.path.startsWith(prefix));
+    const files = detail?.files ?? [];
     return {
       files: files.length,
       plus: files.reduce((n, f) => n + f.additions, 0),
       minus: files.reduce((n, f) => n + f.deletions, 0),
     };
-  }, [detail, prefix]);
+  }, [detail]);
 
   /**
    * Land on the first changed file, until the reader picks one — DERIVED, so
@@ -161,20 +155,20 @@ export function ChangeRequestDialog({
     // nothing to read yet. Binary files are never read at all (above).
     if (selected && !selectedIsBinary && !asked.current.has(selected)) {
       asked.current.add(selected);
-      readFileOnBranch(cr.branch, `${prefix}${selected}`)
+      readFileOnBranch(cr.branch, selected)
         .then((content) => setBranchContents((c) => ({ ...c, [selected]: content })))
         // NOT `''`. An unreadable branch copy stored as empty would diff as
         // "every line deleted" — a change request that erases the file.
         .catch(() => setUnreadable((s) => new Set(s).add(selected)));
     }
-  }, [selected, selectedIsBinary, cr.branch, prefix]);
+  }, [selected, selectedIsBinary, cr.branch]);
 
   const isAdded = addedFiles.includes(selected);
   // Raw-vs-raw: the skills API hands back SKILL.md's PARSED body (frontmatter
   // stripped), and diffing that against a raw branch read renders the
   // frontmatter as a deletion and the whole file as changed.
   const mainRaw = useDefaultBranchFile(
-    isAdded || !selected || selectedIsBinary ? null : `${prefix}${selected}`,
+    isAdded || !selected || selectedIsBinary ? null : selected,
   );
   const branchRaw = branchContents[selected] ?? null;
 
@@ -243,11 +237,6 @@ export function ChangeRequestDialog({
               <span>{author}</span>
               <span aria-hidden="true" className="text-ink-faint">·</span>
               <span className="font-mono">{cr.branch}</span>
-              {outsideCount > 0 && (
-                <Badge tone="wait" size="xs">
-                  +{outsideCount} file{outsideCount === 1 ? '' : 's'} outside this folder
-                </Badge>
-              )}
             </p>
           </div>
           <Button variant="quiet" size="sm" onClick={onClose} aria-label="Close change request">

@@ -532,7 +532,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       if (!repoRelative) return null;
       const access = await fetchFileAccess(workspaceId, repoRelative);
       if (access.canWrite) return null;
-      return ensureKnowledgeSuggestionWorkspace(authUser.email);
+      return ensureKnowledgeSuggestionWorkspace(authUser);
     },
     [workspaceId, kbDirName, authUser],
   );

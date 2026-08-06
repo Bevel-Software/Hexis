@@ -255,7 +255,7 @@ export interface IWorkflowService {
   // ── Change Requests ───────────────────────────────────────────────────────
 
   listChangeRequests(opts?: { fresh?: boolean }): Promise<ChangeRequest[]>;
-  /** Change requests authored by the caller (hash-matched against the body marker). */
+  /** Change requests authored by the given user (matched on stored author identity). */
   listChangeRequestsAuthoredBy(
     emailOrLogin: string,
     opts?: { fresh?: boolean },

@@ -223,6 +223,9 @@ export function FileViewer() {
   // history tab of file B, which is surprising — opening a file should default
   // to showing what's in it.
   useEffect(() => {
+    // Intentional reset-on-key-change (same pattern as useWorkspaceState):
+    // opening a different file must start from the content tab.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setActiveTab('content');
     setIsManualDirty(false);
     setManualSaveState('idle');
@@ -283,6 +286,7 @@ export function FileViewer() {
     const hasPendingNow = pendingFileContent !== null;
 
     if (!hasPendingNow) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setPendingDeferred(false);
       setHadPending(false);
     } else if (!hadPending) {
@@ -297,6 +301,7 @@ export function FileViewer() {
   // without write access, and its dirty flag is real.
   useEffect(() => {
     if ((onProtectedBranch && !proposeMode) || isReviewingPending) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsManualDirty(false);
     }
   }, [onProtectedBranch, isReviewingPending, proposeMode]);
@@ -393,6 +398,8 @@ export function FileViewer() {
   // `isEnteringEdit` flag is cleared too so a switch-during-load
   // doesn't leave the new tab's button stuck in "Loading…".
   useEffect(() => {
+    // Intentional reset-on-key-change: a new file starts in View mode.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setEditMode(false);
     setIsEnteringEdit(false);
     setProposeMode(false);
@@ -560,20 +567,37 @@ export function FileViewer() {
     setIsEnteringPropose(true);
     (async () => {
       let seed: string | null = null;
-      const email = auth.user?.email;
+      const user = auth.user;
       const prefix = kbDirName ? `${kbDirName}/` : null;
-      if (email && prefix && targetPath.startsWith(prefix)) {
+      if (user && prefix && targetPath.startsWith(prefix)) {
+        let existing = null;
         try {
-          const branch = knowledgeSuggestionBranchFor(email);
+          const branch = knowledgeSuggestionBranchFor(user);
           const mine = await listMyChangeRequests();
-          const existing = mine.find((c) => c.state === 'open' && c.branch === branch);
+          existing = mine.find((c) => c.state === 'open' && c.branch === branch) ?? null;
           if (existing) {
             seed = await readFileOnBranch(branch, targetPath.slice(prefix.length));
           }
         } catch (err) {
-          // Degrade to seeding from this branch — worse than the seed, far
-          // better than a propose button that does nothing.
-          console.warn('[FileViewer] could not load the proposed version:', err);
+          // TWO failure causes, and only one may degrade. "Is there an open
+          // proposal?" failing means we KNOW nothing — seed from this branch,
+          // which is better than a propose button that does nothing. But a
+          // proposal we KNOW exists and could not read must refuse: opening
+          // the editor on this branch's text and sending would silently
+          // replace the caller's pending proposal — the exact overwrite the
+          // seed exists to prevent.
+          if (existing) {
+            console.warn('[FileViewer] could not read the open proposal:', err);
+            if (openFilePathRef.current === targetPath) {
+              setSaveError({
+                kind: 'generic',
+                message:
+                  "Couldn't load your open proposal, so the editor stayed closed — try again in a moment.",
+              });
+            }
+            return;
+          }
+          console.warn('[FileViewer] could not check for an open proposal:', err);
           seed = null;
         }
       }
@@ -632,6 +656,7 @@ export function FileViewer() {
         repoRelativePath: path.slice(prefix.length),
         content,
         userEmail: auth.user.email,
+        userId: auth.user.id,
         userName: auth.user.name,
       });
       setProposeMode(false);
@@ -859,6 +884,9 @@ export function FileViewer() {
       : 'the owners';
 
   const rendererElement = (
+    // The renderer is a dynamic per-extension lookup resolved in a useMemo
+    // above — not a component created during render.
+    // eslint-disable-next-line react-hooks/static-components
     <Renderer
       // **Why we key on `openFileSavedContent` (read-only mode only).**
       // When a teammate's save lands, the workspace state updates the

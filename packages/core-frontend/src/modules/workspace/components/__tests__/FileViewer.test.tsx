@@ -65,7 +65,7 @@ vi.mock('../../../workflow/services/lock.api', () => ({
 // that commits to the suggestions branch and opens the change request. The
 // spy is the assertion surface; the branch-name helper stays real.
 const proposeMock = vi.hoisted(() =>
-  vi.fn(async () => ({ branch: 'suggestions/reader/knowledge' })),
+  vi.fn(async () => ({ branch: 'suggestions/reader-u9/knowledge' })),
 );
 vi.mock('../../../change-requests/services/propose.api', async (importOriginal) => {
   const actual =
@@ -745,7 +745,7 @@ describe('FileViewer — proposing a change without write access', () => {
       owners: EMPTY_ELIGIBLE,
     };
     proposeMock.mockClear();
-    proposeMock.mockResolvedValue({ branch: 'suggestions/reader/knowledge' });
+    proposeMock.mockResolvedValue({ branch: 'suggestions/reader-u9/knowledge' });
     myCrsMock.mockClear();
     myCrsMock.mockResolvedValue([]);
     readBranchMock.mockClear();
@@ -800,6 +800,7 @@ describe('FileViewer — proposing a change without write access', () => {
         repoRelativePath: 'Knowledge/Foo.md',
         content: 'the corrected paragraph',
         userEmail: 'reader@example.com',
+        userId: 'u9',
         userName: 'Rae Reader',
       }),
     );
@@ -820,7 +821,7 @@ describe('FileViewer — proposing a change without write access', () => {
   it('seeds a second proposal from the proposed version, and edits stack', async () => {
     denyWrite();
     myCrsMock.mockResolvedValue([
-      { number: 12, state: 'open', branch: 'suggestions/reader/knowledge' },
+      { number: 12, state: 'open', branch: 'suggestions/reader-u9/knowledge' },
     ]);
     readBranchMock.mockResolvedValue('first proposed paragraph');
     const user = userEvent.setup();
@@ -840,7 +841,7 @@ describe('FileViewer — proposing a change without write access', () => {
     const textarea = await screen.findByRole('textbox');
     expect(textarea).toHaveValue('first proposed paragraph');
     expect(readBranchMock).toHaveBeenCalledWith(
-      'suggestions/reader/knowledge',
+      'suggestions/reader-u9/knowledge',
       'Knowledge/Foo.md',
     );
 
@@ -859,7 +860,7 @@ describe('FileViewer — proposing a change without write access', () => {
   it('closes without sending when nothing was typed over the open proposal', async () => {
     denyWrite();
     myCrsMock.mockResolvedValue([
-      { number: 12, state: 'open', branch: 'suggestions/reader/knowledge' },
+      { number: 12, state: 'open', branch: 'suggestions/reader-u9/knowledge' },
     ]);
     readBranchMock.mockResolvedValue('first proposed paragraph');
     const user = userEvent.setup();

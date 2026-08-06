@@ -61,11 +61,17 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
    * soon as a REAL fetch covers all its paths — the server's answer wins the
    * moment it exists.
    */
-  const [announced, setAnnounced] = useState<PullRequestSummary[]>([]);
+  const [announced, setAnnounced] = useState<{ cr: PullRequestSummary; at: number }[]>([]);
 
   useEffect(() => {
     let cancelled = false;
     const load = (opts: { fresh?: boolean } = {}) => {
+      // When THIS fetch left the building — only a fetch that STARTED after
+      // an announcement may declare its request gone. The announce and the
+      // stale event fire in the same tick, so a same-tick fresh fetch can
+      // still race the server's own row; timestamps make "predates the
+      // announcement" checkable instead of assumed.
+      const startedAt = Date.now();
       listOpenChangeRequests(opts)
         .then((data) => {
           if (!cancelled) setRequests(data);
@@ -84,13 +90,14 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
           // Reconcile: an announced entry whose every path the real list now
           // carries has been overtaken; one whose request is GONE (declined,
           // merged, withdrawn elsewhere) must not haunt the tree either — but
-          // only a FRESH answer may say "gone": a stale or already-in-flight
-          // fetch predates the announcement and would drop it by race.
+          // only a FRESH fetch that STARTED after the announcement may say
+          // "gone": anything earlier predates the request and would drop it
+          // by race.
           setAnnounced((prev) =>
             prev.filter((a) => {
-              const real = open.find((c) => c.number === a.number);
-              if (!real) return !opts.fresh;
-              return !a.touchedNodePaths.every((p) => real.touchedNodePaths.includes(p));
+              const real = open.find((c) => c.number === a.cr.number);
+              if (!real) return !(opts.fresh && startedAt > a.at);
+              return !a.cr.touchedNodePaths.every((p) => real.touchedNodePaths.includes(p));
             }),
           );
         })
@@ -112,7 +119,10 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     const onAnnounce = (e: Event) => {
       const cr = (e as CustomEvent<PullRequestSummary>).detail;
       if (!cr || typeof cr.number !== 'number') return;
-      setAnnounced((prev) => [...prev.filter((p) => p.number !== cr.number), cr]);
+      setAnnounced((prev) => [
+        ...prev.filter((p) => p.cr.number !== cr.number),
+        { cr, at: Date.now() },
+      ]);
     };
     window.addEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
     return () => {
@@ -133,9 +143,14 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
         else byPath.set(workspaceRelative, [pr]);
       }
     }
-    // Announced (optimistic) entries join every derived view, without ever
-    // duplicating a request the broad list already shows on a path.
-    for (const pr of announced) {
+    // `/mine` and the announced (optimistic) entries join every derived view,
+    // without ever duplicating a request the broad list already shows on a
+    // path. `/mine` matters here too: a suggestion row is created from
+    // `minePaths`, and its click resolves the request through `forPath` — a
+    // request the broad list is missing (touched-path lag, a failed broad
+    // fetch) would otherwise produce a row whose click does nothing.
+    const announcedCrs = announced.map((a) => a.cr);
+    for (const pr of [...mine, ...announcedCrs]) {
       for (const repoRelative of pr.touchedNodePaths) {
         const workspaceRelative = `${kbDirName}/${repoRelative}`;
         const list = byPath.get(workspaceRelative);
@@ -148,7 +163,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     // one file in two of your own bundles is already a state the UI cannot
     // untangle, so the row just links to the older one.
     const minePaths = new Map<string, number>();
-    for (const pr of [...mine, ...announced]) {
+    for (const pr of [...mine, ...announcedCrs]) {
       for (const repoRelative of pr.touchedNodePaths) {
         const workspaceRelative = `${kbDirName}/${repoRelative}`;
         if (!minePaths.has(workspaceRelative)) minePaths.set(workspaceRelative, pr.number);
@@ -158,7 +173,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       paths: new Set(byPath.keys()),
       forPath: (path: string) => byPath.get(path) ?? [],
       minePaths,
-      mineNumbers: new Set([...mine, ...announced].map((pr) => pr.number)),
+      mineNumbers: new Set([...mine, ...announcedCrs].map((pr) => pr.number)),
     };
   }, [requests, mine, announced, kbDirName]);
 

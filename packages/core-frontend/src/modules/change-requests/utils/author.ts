@@ -36,7 +36,11 @@ export function changeAuthorName(cr: PullRequestSummary): string {
 export function formatWhen(iso: string): string {
   const then = new Date(iso);
   if (Number.isNaN(then.getTime())) return 'recently';
-  const days = Math.floor((Date.now() - then.getTime()) / 86_400_000);
+  // LOCAL calendar days, not elapsed milliseconds: a request from 23:59
+  // yesterday is "yesterday" at 00:01, not "today". Future timestamps (clock
+  // skew) collapse to "today" rather than a nonsense negative.
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOfDay(new Date()) - startOfDay(then)) / 86_400_000);
   if (days <= 0) return 'today';
   if (days === 1) return 'yesterday';
   return then.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });

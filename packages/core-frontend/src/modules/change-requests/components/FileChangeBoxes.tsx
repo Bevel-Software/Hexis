@@ -58,7 +58,10 @@ export function FileChangeBoxes({
   /** The request opened full-screen in the shared dialog, if any. */
   const [openCr, setOpenCr] = useState<PullRequestSummary | null>(null);
 
-  const rawOnMain = useDefaultBranchFile(repoRelativePath, revision);
+  // Binary files never diff (see the box's `binary` prop) — so never fetch
+  // and decode their default-branch bytes either.
+  const binary = isBinaryFile(repoRelativePath);
+  const rawOnMain = useDefaultBranchFile(binary ? null : repoRelativePath, revision);
   const crDiffs = useCrFileDiffs(requests, repoRelativePath, rawOnMain, revision);
 
   const resolved = useCallback(() => {
@@ -126,7 +129,7 @@ export function FileChangeBoxes({
             mine={mine}
             canDecide={canDecide && !mine}
             diff={fileDiff}
-            binary={isBinaryFile(repoRelativePath)}
+            binary={binary}
             upToDate={fileDiff !== null && fileDiff.length === 0}
             blocked={blockedCrs.has(cr.number)}
             conflictPrompt={conflictResolutionPrompt(cr)}
