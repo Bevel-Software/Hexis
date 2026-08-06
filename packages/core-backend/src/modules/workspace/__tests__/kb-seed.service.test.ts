@@ -134,10 +134,14 @@ describe('KbSeedService', () => {
       }
     });
 
-    it('throws when no admin emails are configured', async () => {
+    // Unreachable through the app — `ADMIN_EMAIL` is required at boot, so the
+    // list always has exactly one entry. Kept as a guard on the seeder's own
+    // contract: a KB seeded with no Admin cannot resolve access at all, and
+    // silently writing an Admin-less roles.yaml would be worse than refusing.
+    it('refuses to seed an empty remote with no initial Admin', async () => {
       const upstream = await emptyUpstream();
       await expect(makeSeeder(upstream, []).ensureRemoteSeeded()).rejects.toThrow(
-        /SEED_ADMIN_EMAILS/,
+        /no initial Admin/,
       );
     });
   });

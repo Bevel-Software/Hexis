@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { X, Lock, Loader2, ChevronDown, Check, Globe } from 'lucide-react';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
@@ -219,6 +227,136 @@ function summarizeVerbs(v: VerbSet): string {
   else if (v.read) parts.push('Can read');
   if (v.download) parts.push('Can download');
   return parts.length ? parts.join(', ') : 'No access';
+}
+
+/** Gap between a trigger and its menu, and the minimum inset from a viewport edge. */
+const MENU_GAP = 4;
+const MENU_MARGIN = 8;
+/**
+ * `MenuPanel`'s own `min-w-[200px]`. We position a box and the panel renders
+ * inside it, so the two must agree: a narrower requested width would place a
+ * 192px box that paints 200px wide, and a right-aligned menu would overhang its
+ * trigger by the difference.
+ */
+const MENU_MIN_WIDTH = 200;
+
+/**
+ * A dropdown panel that escapes the dialog's scroll container.
+ *
+ * `Dialog` renders its body inside `overflow-y-auto` so a long access list
+ * scrolls under the pinned header and footer. An ABSOLUTELY positioned menu in
+ * that box is clipped by it: open the verb menu on a low grantee row and
+ * everything past the first item or two — "Remove access" included — is cut off
+ * at the body's edge, unreachable without scrolling the list out from under the
+ * menu.
+ *
+ * `position: fixed` is the fix, because an overflow ancestor doesn't clip a
+ * descendant whose containing block is the viewport. Deliberately NOT a portal:
+ * the panel stays inside `Dialog`'s focus trap, which queries its own subtree,
+ * so the items remain Tab-reachable. Being fixed, it has to be re-anchored to
+ * the trigger's measured rect on scroll and resize — the same shape
+ * `BranchSwitcher` uses for its portaled menu — and, because both boxes can
+ * change size with the menu still open, whenever either one is resized.
+ *
+ * The anchor is the panel's own DOM PARENT — i.e. render this where the
+ * `absolute` panel used to sit, and it lines up against the same box `absolute`
+ * measured. That's not just brevity: a ref passed down from the parent is NOT
+ * attached yet when this component's layout effect runs (React attaches refs
+ * bottom-up, children first), so the first placement would silently no-op and
+ * the panel would stay hidden.
+ */
+function AnchoredMenu({
+  /**
+   * Panel width in px, or `'anchor'` to match the trigger (the combobox case).
+   * Clamped up to {@link MENU_MIN_WIDTH} either way.
+   */
+  width = MENU_MIN_WIDTH,
+  /** Which edge lines up with the anchor's. */
+  align = 'right',
+  className = '',
+  children,
+}: {
+  width?: number | 'anchor';
+  align?: 'left' | 'right';
+  className?: string;
+  children: ReactNode;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    const anchorEl = panel?.parentElement ?? null;
+    const place = () => {
+      const el = panelRef.current;
+      const anchor = el?.parentElement?.getBoundingClientRect();
+      if (!anchor || !el) return;
+      const w = Math.max(width === 'anchor' ? anchor.width : width, MENU_MIN_WIDTH);
+      // Width BEFORE height: the panel wraps and grows taller when narrower, so
+      // measuring at the wrong width picks the wrong side to open on.
+      el.style.width = `${w}px`;
+      const h = el.offsetHeight;
+      const left = Math.max(
+        MENU_MARGIN,
+        Math.min(
+          align === 'right' ? anchor.right - w : anchor.left,
+          window.innerWidth - w - MENU_MARGIN,
+        ),
+      );
+      // Below by default. Flip above only when the panel would run off the
+      // bottom AND there is actually room up there — otherwise a tall menu on a
+      // low trigger would just lose its top instead of its bottom.
+      const below = anchor.bottom + MENU_GAP;
+      const above = anchor.top - MENU_GAP - h;
+      const top =
+        below + h > window.innerHeight - MENU_MARGIN && above >= MENU_MARGIN ? above : below;
+      // Keep the previous object when nothing moved. `place` runs on every
+      // scroll frame and on every observed resize, and a fresh object each time
+      // would re-render for nothing — and, since the panel is what's observed,
+      // feed the observer its own output.
+      setPos((prev) =>
+        prev && prev.top === top && prev.left === left && prev.width === w
+          ? prev
+          : { top, left, width: w },
+      );
+    };
+    place();
+    // Both measured boxes move under us while the menu is open, and neither
+    // move fires scroll or resize. The trigger relabels itself as verbs are
+    // toggled ("Can edit" → "Owner, Can download"), which shifts `anchor.right`
+    // out from under a right-aligned panel; the panel itself grows and shrinks
+    // as the suggestion list follows what's typed, so one measured to fit below
+    // ends up hanging off the bottom it was checked against.
+    const observer = new ResizeObserver(place);
+    if (anchorEl) observer.observe(anchorEl);
+    if (panel) observer.observe(panel);
+    window.addEventListener('resize', place);
+    // Capture phase: the dialog body is what scrolls, and scroll events don't
+    // bubble to `window`.
+    window.addEventListener('scroll', place, true);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+    };
+  }, [width, align]);
+
+  return (
+    <div
+      ref={panelRef}
+      className="fixed z-[60]"
+      style={{
+        top: pos?.top ?? 0,
+        left: pos?.left ?? 0,
+        width: pos?.width ?? (typeof width === 'number' ? width : undefined),
+        // Covers the measuring pass only. `useLayoutEffect` places the panel
+        // before the browser paints, so an unpositioned one is never on screen.
+        visibility: pos ? undefined : 'hidden',
+      }}
+    >
+      <MenuPanel className={`w-full ${className}`}>{children}</MenuPanel>
+    </div>
+  );
 }
 
 /**
@@ -868,7 +1006,7 @@ export function ManageAccessDialog({
             {summarizeVerbs(p.verbs)}
           </span>
         ) : canManage ? (
-          <div className="relative shrink-0">
+          <div className="shrink-0">
             <Button
               variant="quiet"
               size="sm"
@@ -879,7 +1017,7 @@ export function ManageAccessDialog({
               {summarizeVerbs(p.verbs)}
             </Button>
             {openRowKey === p.key && (
-              <MenuPanel className="absolute right-0 z-20 mt-1 w-48">
+              <AnchoredMenu>
                 {TIER_ROLES.map((role) => {
                   const k = ROLE_TO_KEY[role];
                   const checked = p.verbs[k];
@@ -925,7 +1063,7 @@ export function ManageAccessDialog({
                 >
                   Remove access
                 </MenuItem>
-              </MenuPanel>
+              </AnchoredMenu>
             )}
           </div>
         ) : (
@@ -992,7 +1130,7 @@ export function ManageAccessDialog({
                   />
                 </div>
                 {query.trim() && suggest && (suggest.groups.length > 0 || suggest.people.length > 0) && (
-                  <MenuPanel className="absolute left-0 right-0 z-10 mt-1 max-h-56 overflow-auto">
+                  <AnchoredMenu width="anchor" align="left" className="max-h-56 overflow-auto">
                     {suggest.groups.map((g) => (
                       <MenuItem
                         key={`g:${g}`}
@@ -1029,11 +1167,11 @@ export function ManageAccessDialog({
                         </MenuItem>
                       );
                     })}
-                  </MenuPanel>
+                  </AnchoredMenu>
                 )}
               </div>
 
-              <div className="relative shrink-0">
+              <div className="shrink-0">
                 <Button
                   variant="outline"
                   size="sm"
@@ -1044,7 +1182,7 @@ export function ManageAccessDialog({
                   <span className="truncate">{summarizeVerbs(effectiveNewVerbs)}</span>
                 </Button>
                 {verbOpen && (
-                  <MenuPanel className="absolute right-0 z-10 mt-1 w-48">
+                  <AnchoredMenu>
                     {TIER_ROLES.map((role) => {
                       const k = ROLE_TO_KEY[role];
                       const checked = effectiveNewVerbs[k];
@@ -1078,7 +1216,7 @@ export function ManageAccessDialog({
                     >
                       Can download
                     </MenuItem>
-                  </MenuPanel>
+                  </AnchoredMenu>
                 )}
               </div>
 

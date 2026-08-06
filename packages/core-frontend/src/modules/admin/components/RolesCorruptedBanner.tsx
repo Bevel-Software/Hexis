@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { ShieldAlert, Loader2 } from 'lucide-react';
 import { useAdmin } from '../state/admin.context';
 import { RolesApiError } from '../services/roles.api';
+import { Button } from '../../../shared/components';
 
 /**
  * App-wide break-glass banner shown when `roles.yaml` fails to parse. A
@@ -46,29 +47,29 @@ export function RolesCorruptedBanner() {
   return (
     <div
       role="alert"
-      className="flex flex-col gap-1 px-4 py-2.5 bg-red-600 text-white text-sm shrink-0"
+      className="flex flex-col gap-1 px-4 py-2.5 bg-danger-soft border-b border-line text-danger text-sm shrink-0"
     >
       <div className="flex items-center gap-2">
         <ShieldAlert size={16} className="shrink-0" />
         <span className="flex-1 font-semibold">
           Roles file corrupted — contact Bevel for assistance.
         </span>
-        <button
-          type="button"
+        <Button
+          variant="danger"
+          size="tiny"
           onClick={onRecover}
           disabled={running}
-          className="inline-flex items-center gap-1.5 rounded bg-white/15 hover:bg-white/25 disabled:opacity-60 px-2.5 py-1 text-xs font-medium border border-white/30"
+          leadingIcon={running ? <Loader2 size={12} className="animate-spin" /> : undefined}
         >
-          {running && <Loader2 size={12} className="animate-spin" />}
           {running ? 'Recovering…' : 'Bevel Recovery — only press if you are from Bevel'}
-        </button>
+        </Button>
       </div>
       {rolesConfigErrors.length > 0 && (
-        <span className="pl-6 text-xs text-red-100/90 font-mono break-all">
+        <span className="pl-6 text-xs text-ink-muted font-mono break-all">
           {rolesConfigErrors.join('; ')}
         </span>
       )}
-      {error && <span className="pl-6 text-xs text-red-100">{error}</span>}
+      {error && <span className="pl-6 text-xs text-danger">{error}</span>}
     </div>
   );
 }

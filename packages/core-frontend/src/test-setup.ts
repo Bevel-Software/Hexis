@@ -1,6 +1,15 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
 import { afterEach, beforeEach } from 'vitest';
+import { configureBranchModel } from '@bevel-software/platform-shared';
+
+// The branch model is applied during boot now, not read from the environment
+// at import. In the browser that is `loadServerConfig()`; here it is this,
+// pinned to the historical two-branch pair the suites assert against.
+configureBranchModel({
+  defaultBranch: 'target-company-state',
+  protectedBranches: ['current-company-state', 'target-company-state'],
+});
 
 function createInMemoryStorage(): Storage {
   const store = new Map<string, string>();

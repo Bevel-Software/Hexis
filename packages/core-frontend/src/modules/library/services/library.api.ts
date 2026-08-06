@@ -16,7 +16,13 @@ import { postPrComment } from '../../pr/services/pr-comments.api';
  */
 
 /** The default-branch workspace id — derivable client-side (id = encodeURIComponent(branch)). */
-export const DEFAULT_WORKSPACE_ID = encodeURIComponent(DEFAULT_BRANCH);
+/**
+ * The default branch's workspace id. A FUNCTION because the branch model is
+ * applied during boot from `/api/config`: a module-scope constant would capture
+ * the empty string that exists before it, and being exported would spread that
+ * snapshot to every importer.
+ */
+export const defaultWorkspaceId = () => encodeURIComponent(DEFAULT_BRANCH);
 
 export interface LibrarySkillSummary {
   /** Canonical id = the skill's folder name (e.g. `rfi`). */
@@ -138,7 +144,7 @@ export async function proposeChange(input: ProposeChangeInput): Promise<{ branch
 
   if (!input.existingCr) {
     try {
-      await createBranch(DEFAULT_WORKSPACE_ID, branch, DEFAULT_BRANCH);
+      await createBranch(defaultWorkspaceId(), branch, DEFAULT_BRANCH);
     } catch {
       // Branch may already exist from an earlier (merged/cancelled) round —
       // reuse it; the change request below is what makes it reviewable again.

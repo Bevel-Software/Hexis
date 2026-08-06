@@ -49,7 +49,7 @@ export function ProtectedBranchBanner() {
   return (
     <div
       role="status"
-      className="flex items-center gap-2 px-3 py-1.5 bg-amber-50 border-b border-amber-200 text-xs text-amber-800 shrink-0"
+      className="flex items-center gap-2 px-3 py-1.5 bg-wait-soft border-b border-line text-xs text-ink shrink-0"
     >
       <Info size={13} className="shrink-0" />
       <span className="flex-1">
