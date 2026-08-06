@@ -31,7 +31,7 @@ and its own concrete types.
   (notes, scratch docs) — allowed, but invisible to the graph.
 
 Conventions (naming, child-node folders, Source of Information blocks,
-cross-ontology links) are documented in the repo-root `CLAUDE.md`.
+cross-ontology links) are documented in the repo-root `AGENTS.md`.
 
 **Not for agent output**: records produced by agents and pipelines (work
 items, instances, transcripts) belong in the `Data/` base folder, not here.

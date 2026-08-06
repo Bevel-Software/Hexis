@@ -102,7 +102,7 @@ describe('KbSeedService', () => {
       for (const branch of PROTECTED) {
         const dir = await checkout(root, upstream, branch);
         expect(await exists(path.join(dir, 'access.md'))).toBe(true);
-        expect(await exists(path.join(dir, 'CLAUDE.md'))).toBe(true);
+        expect(await exists(path.join(dir, 'AGENTS.md'))).toBe(true);
         expect(await exists(path.join(dir, '.bevelignore'))).toBe(true);
         expect(await exists(path.join(dir, '.gitignore'))).toBe(true);
         // The well-known KB roots are seeded (kept present via their .gitkeep).
@@ -135,7 +135,7 @@ describe('KbSeedService', () => {
       const upstream = await seededUpstream([DEFAULT_BRANCH], {
         'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
         'access.md': 'existing',
-        'CLAUDE.md': 'existing',
+        'AGENTS.md': 'existing',
         '.bevelignore': 'x',
         '.gitignore': 'x',
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
@@ -153,7 +153,7 @@ describe('KbSeedService', () => {
         // roles.yaml + access.md already exist with custom content — must survive.
         'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
         'access.md': 'CUSTOM ACCESS RULES',
-        // CLAUDE.md / .bevelignore / .gitignore are absent → should be added.
+        // AGENTS.md / .bevelignore / .gitignore are absent → should be added.
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
         'Groups/.gitkeep': '',
       });
@@ -168,7 +168,7 @@ describe('KbSeedService', () => {
       expect(await fs.readFile(path.join(dir, 'access.md'), 'utf8')).toBe('CUSTOM ACCESS RULES');
       expect(await fs.readFile(path.join(dir, 'roles.yaml'), 'utf8')).toContain('keep@example.com');
       // Missing scaffolding added.
-      expect(await exists(path.join(dir, 'CLAUDE.md'))).toBe(true);
+      expect(await exists(path.join(dir, 'AGENTS.md'))).toBe(true);
       expect(await exists(path.join(dir, '.bevelignore'))).toBe(true);
       // Sample content is NOT restored — the real KnowledgeBase already had content,
       // so no placeholder .gitkeep is dropped into it, and no ExampleOntology appears.
@@ -211,8 +211,101 @@ describe('KbSeedService', () => {
       await makeSeeder(upstream).topUpWorkspace(repoDir, 'alice/feature');
 
       const dir = await checkout(root, upstream, 'alice/feature');
-      expect(await exists(path.join(dir, 'CLAUDE.md'))).toBe(true);
+      expect(await exists(path.join(dir, 'AGENTS.md'))).toBe(true);
       expect(await exists(path.join(dir, 'access.md'))).toBe(true);
+    });
+  });
+
+  /**
+   * The conventions file was called CLAUDE.md before it was called AGENTS.md.
+   * A knowledge base seeded under the old name is a customer git repo we do not
+   * otherwise rewrite, so the rename only reaches it here — and it has to move
+   * the file, not replace it: the content is the author's, not the template's.
+   */
+  describe('legacy conventions file → renamed in place', () => {
+    /** A KB as it looked before the rename: authored CLAUDE.md, ignore line to match. */
+    async function preRenameUpstream(claudeContent = 'AUTHORED CONVENTIONS'): Promise<string> {
+      return seededUpstream(PROTECTED, {
+        'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
+        'access.md': 'existing',
+        'CLAUDE.md': claudeContent,
+        '.bevelignore': '# hide the conventions file\nCLAUDE.md\nroles.yaml\n',
+        '.gitignore': 'x',
+        'KnowledgeBase/Real/Knowledge/.gitkeep': '',
+        'Groups/.gitkeep': '',
+      });
+    }
+
+    it('renames CLAUDE.md to AGENTS.md, keeping the author’s content', async () => {
+      const upstream = await preRenameUpstream();
+      const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
+      await makeSeeder(upstream).topUpWorkspace(repoDir, DEFAULT_BRANCH);
+
+      const dir = await checkout(root, upstream, DEFAULT_BRANCH);
+      expect(await exists(path.join(dir, 'CLAUDE.md'))).toBe(false);
+      // Moved, not replaced by the template — the author's words survive.
+      expect(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8')).toBe('AUTHORED CONVENTIONS');
+    });
+
+    it('records it as a rename so history follows the file', async () => {
+      const upstream = await preRenameUpstream();
+      const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
+      await makeSeeder(upstream).topUpWorkspace(repoDir, DEFAULT_BRANCH);
+
+      const dir = await checkout(root, upstream, DEFAULT_BRANCH);
+      const status = await git(dir, ['show', '--name-status', '--find-renames', 'HEAD']);
+      expect(status).toMatch(/^R\d*\s+CLAUDE\.md\s+AGENTS\.md$/m);
+    });
+
+    it('retargets the .bevelignore line so the file stays hidden', async () => {
+      const upstream = await preRenameUpstream();
+      const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
+      await makeSeeder(upstream).topUpWorkspace(repoDir, DEFAULT_BRANCH);
+
+      const dir = await checkout(root, upstream, DEFAULT_BRANCH);
+      const ignore = await fs.readFile(path.join(dir, '.bevelignore'), 'utf8');
+      // Trimmed: git hands the file back with CRLF on Windows, and the rewrite
+      // preserves whatever line endings the author's file already had.
+      const entries = ignore.split('\n').map((l) => l.trim());
+      expect(entries).toContain('AGENTS.md');
+      expect(entries).not.toContain('CLAUDE.md');
+      // Only the exact-match line is rewritten — a comment naming the old file
+      // is prose, not a pattern, and is left as the author wrote it.
+      expect(ignore).toContain('# hide the conventions file');
+      expect(ignore).toContain('roles.yaml');
+    });
+
+    it('leaves both files alone when the KB already has an AGENTS.md', async () => {
+      // Nothing here is safe to overwrite: both files have content someone wrote.
+      const upstream = await seededUpstream(PROTECTED, {
+        'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
+        'access.md': 'existing',
+        'CLAUDE.md': 'OLD',
+        'AGENTS.md': 'NEW',
+        '.bevelignore': 'CLAUDE.md\n',
+        '.gitignore': 'x',
+        'KnowledgeBase/Real/Knowledge/.gitkeep': '',
+        'Groups/.gitkeep': '',
+      });
+      const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
+      await makeSeeder(upstream).topUpWorkspace(repoDir, DEFAULT_BRANCH);
+
+      const dir = await checkout(root, upstream, DEFAULT_BRANCH);
+      expect(await fs.readFile(path.join(dir, 'CLAUDE.md'), 'utf8')).toBe('OLD');
+      expect(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8')).toBe('NEW');
+    });
+
+    it('is idempotent — a migrated branch makes no second commit', async () => {
+      const upstream = await preRenameUpstream();
+      const first = await checkout(root, upstream, DEFAULT_BRANCH);
+      await makeSeeder(upstream).topUpWorkspace(first, DEFAULT_BRANCH);
+      const after1 = await headCommitCount(root, upstream, DEFAULT_BRANCH);
+
+      const second = await checkout(root, upstream, DEFAULT_BRANCH);
+      await makeSeeder(upstream).topUpWorkspace(second, DEFAULT_BRANCH);
+      const after2 = await headCommitCount(root, upstream, DEFAULT_BRANCH);
+
+      expect(after2).toBe(after1);
     });
   });
 });

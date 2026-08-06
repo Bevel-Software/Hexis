@@ -33,7 +33,7 @@ describe('SpillStore', () => {
 
   it('does not treat a normal workspace path as a spill ref', () => {
     expect(store.isSpillRef('docs/readme.md')).toBe(false);
-    expect(store.isSpillRef('knowledge-base/CLAUDE.md')).toBe(false);
+    expect(store.isSpillRef('knowledge-base/AGENTS.md')).toBe(false);
   });
 
   it('rejects a ref whose id tries to escape the store', async () => {

@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import type { LocalFilesystem } from '@mastra/core/workspace';
+import { KB_CONVENTIONS_FILE } from '@bevel-software/platform-shared';
 import type { IToolRegistry, JsonSchema } from '../tool-registry/tool.contract.js';
 import { ToolError, type ToolContext, type ToolHandler } from '../tool-helpers/tool.contract.js';
 import { BRANCH_INPUT, toolDef } from '../tool-helpers/tool-def.js';
@@ -89,13 +90,16 @@ async function filterReadableEntries(
 
 /**
  * Appended (centrally, in `mount`) to EVERY workspace tool description. A KB
- * author can drop a `CLAUDE.md` at the workspace root to document conventions
+ * author can drop an `AGENTS.md` at the workspace root to document conventions
  * for that knowledge base; agents (ours and external) should consult it before
  * touching files. It rides on every entrypoint — reads (grep/list_files/
  * file_stat) included — because any of them can be a session's first touch.
+ *
+ * The filename comes from the shared constant rather than being spelled out
+ * here, so this note can't drift from the file the seeder actually writes.
  */
 const KB_CONVENTIONS_NOTE =
-  ' Before your first read or change in a workspace, read `CLAUDE.md` at the KB root (if it exists) — it holds the author\'s conventions for this knowledge base, and you should follow them.';
+  ` Before your first read or change in a workspace, read \`${KB_CONVENTIONS_FILE}\` at the KB root (if it exists) — it holds the author's conventions for this knowledge base, and you should follow them.`;
 
 const int = (description: string): JsonSchema => ({ type: 'integer', description });
 
@@ -194,7 +198,7 @@ export function registerWorkspaceTools(
     const path = `/api/agent/tools/${spec.name}`;
     const def = toolDef({
       name: spec.name,
-      // Every workspace entrypoint carries the CLAUDE.md reminder, appended once
+      // Every workspace entrypoint carries the AGENTS.md reminder, appended once
       // here so no tool (especially the read-only ones a session hits first) can
       // miss it.
       description: spec.description + KB_CONVENTIONS_NOTE,

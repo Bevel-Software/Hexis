@@ -12,7 +12,7 @@
 .gitignore
 .gitattributes
 # README.md files are the base folders' own documentation — keep them visible.
-CLAUDE.md
+AGENTS.md
 
 # Empty-folder placeholders used only for committing empty dirs.
 **/.gitkeep

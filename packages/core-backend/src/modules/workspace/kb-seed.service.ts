@@ -6,7 +6,9 @@ import { promisify } from 'node:util';
 import {
   AGENTS_DIR,
   DATA_DIR,
+  KB_CONVENTIONS_FILE,
   KNOWLEDGE_BASE_DIR,
+  LEGACY_KB_CONVENTIONS_FILE,
   PIPELINES_DIR,
   GROUPS_DIR,
 } from '@bevel-software/platform-shared';
@@ -37,7 +39,15 @@ const BOT_EMAIL = 'bevel-workflow@bevel.software';
  * generated from `ADMIN_EMAIL` (see {@link renderRolesYaml}) and written
  * directly, so a repo can't be seeded with a stale hard-coded Admin list.
  */
-const REQUIRED_FILES: readonly string[] = ['access.md', 'CLAUDE.md', '.bevelignore', '.gitignore'];
+const REQUIRED_FILES: readonly string[] = [
+  'access.md',
+  KB_CONVENTIONS_FILE,
+  '.bevelignore',
+  '.gitignore',
+];
+
+/** The KB-local ignore file whose entries hide paths from the tree / agent view. */
+const BEVELIGNORE = '.bevelignore';
 const REQUIRED_DIRS: readonly string[] = [
   KNOWLEDGE_BASE_DIR,
   DATA_DIR,
@@ -171,6 +181,12 @@ export class KbSeedService implements IKbSeedService {
    */
   async topUpWorkspace(repoDir: string, branch: string): Promise<void> {
     try {
+      // BEFORE the required-file scan: a KB seeded under the old name has no
+      // `AGENTS.md`, so the scan below would drop a pristine template copy next
+      // to the author's own `CLAUDE.md` and leave agents two conventions files
+      // to choose between. Renaming first makes the scan see the file it wants.
+      const renamed = await this.renameLegacyConventionsFile(repoDir);
+
       const added: string[] = [];
       for (const rel of REQUIRED_FILES) {
         if (!(await this.exists(path.join(repoDir, rel)))) {
@@ -202,17 +218,25 @@ export class KbSeedService implements IKbSeedService {
         }
       }
 
-      if (added.length === 0) return; // already fully scaffolded → no-op
+      if (added.length === 0 && !renamed) return; // already fully scaffolded → no-op
 
       // Stamp the bot identity so the commit has an author even if the clone
       // wasn't configured with one (the workspace clone already sets the same
       // values, so this is a harmless no-op there).
       await this.stampIdentity(repoDir);
-      await this.git(repoDir, ['add', '--', ...added]);
-      await this.git(repoDir, ['commit', '-m', `Add missing KB scaffolding: ${added.join(', ')}`]);
+      // The rename is already staged by `git mv`; only the copied-in files need
+      // adding. `add` with an empty pathspec is an error, hence the guard.
+      if (added.length > 0) await this.git(repoDir, ['add', '--', ...added]);
+      const summary = [
+        added.length > 0 ? `Add missing KB scaffolding: ${added.join(', ')}` : null,
+        renamed ? `Rename ${LEGACY_KB_CONVENTIONS_FILE} → ${KB_CONVENTIONS_FILE}` : null,
+      ]
+        .filter(Boolean)
+        .join('; ');
+      await this.git(repoDir, ['commit', '-m', summary]);
       try {
         await this.git(repoDir, ['push', 'origin', `HEAD:refs/heads/${branch}`]);
-        console.log(`[kb-seed] Topped up "${branch}" with: ${added.join(', ')}`);
+        console.log(`[kb-seed] Topped up "${branch}": ${summary}`);
       } catch (err) {
         // Roll the local branch back to origin so the workspace never sits ahead
         // of the remote (which would confuse the workflow git layer). The files
@@ -231,6 +255,64 @@ export class KbSeedService implements IKbSeedService {
         err instanceof Error ? redact(err.message) : String(err),
       );
     }
+  }
+
+  /**
+   * Move a pre-rename `CLAUDE.md` to {@link KB_CONVENTIONS_FILE}, returning
+   * whether anything moved. This is what makes the rename reach knowledge bases
+   * that already exist: they are customer git repos we don't otherwise rewrite,
+   * and the file usually carries the author's own conventions, so it is MOVED
+   * (history follows, edits survive) rather than replaced by the template.
+   *
+   * Uses `git mv`, so the rename lands staged and is recorded as a rename
+   * rather than a delete+add.
+   *
+   * Declines when the new name already exists — either the branch is migrated
+   * already, or the author wrote their own `AGENTS.md` and the legacy file is
+   * theirs to reconcile. Overwriting either would destroy content.
+   */
+  private async renameLegacyConventionsFile(repoDir: string): Promise<boolean> {
+    const hasLegacy = await this.exists(path.join(repoDir, LEGACY_KB_CONVENTIONS_FILE));
+    const hasCurrent = await this.exists(path.join(repoDir, KB_CONVENTIONS_FILE));
+    if (!hasLegacy || hasCurrent) return false;
+
+    await this.git(repoDir, ['mv', '--', LEGACY_KB_CONVENTIONS_FILE, KB_CONVENTIONS_FILE]);
+    await this.retargetBevelignore(repoDir);
+    return true;
+  }
+
+  /**
+   * Point an existing `.bevelignore` at the new filename.
+   *
+   * Without this the rename would have a visible side effect: the conventions
+   * file is hidden from the tree and the agent view by a `.bevelignore` line
+   * naming it, and that file already exists in a migrated KB — so the top-up
+   * never replaces it, the stale `CLAUDE.md` line stops matching anything, and
+   * the renamed file appears in the tree for the first time.
+   *
+   * Rewrites only an exact-match line (ignoring surrounding whitespace) so a
+   * comment mentioning the old name, or a broader pattern the author wrote, is
+   * left alone. Best-effort: a KB without the line, or without the file, simply
+   * keeps whatever visibility it has.
+   */
+  private async retargetBevelignore(repoDir: string): Promise<void> {
+    const file = path.join(repoDir, BEVELIGNORE);
+    let content: string;
+    try {
+      content = await fs.readFile(file, 'utf8');
+    } catch {
+      return; // no ignore file → nothing to retarget
+    }
+    const lines = content.split('\n');
+    let changed = false;
+    const next = lines.map((line) => {
+      if (line.trim() !== LEGACY_KB_CONVENTIONS_FILE) return line;
+      changed = true;
+      return line.replace(LEGACY_KB_CONVENTIONS_FILE, KB_CONVENTIONS_FILE);
+    });
+    if (!changed) return;
+    await fs.writeFile(file, next.join('\n'), 'utf8');
+    await this.git(repoDir, ['add', '--', BEVELIGNORE]);
   }
 
   /** Prefer the default branch as a base, else the first protected branch present, else any head. */

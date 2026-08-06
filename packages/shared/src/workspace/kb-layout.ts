@@ -82,6 +82,29 @@ export const AGENTS_DIR = 'Agents';
 export const PIPELINES_DIR = 'Pipelines';
 
 /**
+ * The repo-root conventions file: the KB author's house rules, which every
+ * agent is told to read before its first touch of a workspace.
+ *
+ * `AGENTS.md` is the cross-tool convention — Claude Code, Cursor and others
+ * pick it up from a repo root on their own, so the file keeps working for an
+ * agent that never sees our tool descriptions.
+ *
+ * Named here, once, because the file is referenced from three places that must
+ * agree: the seed template, the scaffolding top-up, and the note appended to
+ * every workspace tool description. They drifted apart before.
+ */
+export const KB_CONVENTIONS_FILE = 'AGENTS.md';
+
+/**
+ * What {@link KB_CONVENTIONS_FILE} used to be called. Kept as a constant, not
+ * a string in one migration branch, because a KB seeded before the rename
+ * still carries this name — with the author's own edits in it. The top-up pass
+ * renames it in place rather than dropping a second, templated file beside it
+ * (see `KbSeedService.topUpWorkspace`).
+ */
+export const LEGACY_KB_CONVENTIONS_FILE = 'CLAUDE.md';
+
+/**
  * The roots whose subfolders are discovered as ontologies by the graph parser
  * (each subfolder with both `NodeTypes/` and `Knowledge/` is an ontology).
  */

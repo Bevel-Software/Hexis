@@ -470,7 +470,7 @@ export function FileViewer() {
       // Surface non-resolution failures inline. Three shapes we care about:
       //   - 422 with a `validation` payload  → render the mustFix list
       //     so the user can see which KB issues are blocking the commit
-      //     (per CLAUDE.md the validator gates EVERY commit, even
+      //     (per AGENTS.md the validator gates EVERY commit, even
       //     unrelated edits — without this UI the failure looks silent).
       //   - other LockApiError                → render the server message
       //   - anything else                     → render the JS message

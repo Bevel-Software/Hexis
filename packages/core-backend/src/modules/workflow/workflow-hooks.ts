@@ -14,7 +14,7 @@ import type { ValidationReport } from '@bevel-software/platform-shared';
  *     (`commit` / `commitFile`), exactly where the injected `IKbValidator`
  *     used to run. A returned report with `mustFix` entries is logged/surfaced
  *     but NEVER blocks the commit, and a hook that throws is caught and logged
- *     (see CLAUDE.md "Validation is advisory"). The signature mirrors the old
+ *     (see AGENTS.md "Validation is advisory"). The signature mirrors the old
  *     `runValidation(workspaceId)` shape so `KbValidatorService` registers
  *     with a one-line adapter.
  *

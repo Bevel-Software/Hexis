@@ -96,7 +96,7 @@ Links found under headings without an explicit `link` parameter default to `outb
 ### folder-parent
 Marks the field that determines this node's **placement** on disk — where its `.md` file is filed. One field per type drives placement (the first one tagged). It works in two modes, depending on whether the field it sits on is a link:
 
-- **On a `link` field** → the node is filed as a **child of the linked node**, inheriting that parent's path (the child-node folder convention described in `CLAUDE.md`). Example: `# Home (link architecture, folder-parent)` — the node nests under the architecture node it links to.
+- **On a `link` field** → the node is filed as a **child of the linked node**, inheriting that parent's path (the child-node folder convention described in `AGENTS.md`). Example: `# Home (link architecture, folder-parent)` — the node nests under the architecture node it links to.
 - **On a plain-text field** (no `link`) → the node is filed in a **subfolder named after the field's value** (its first line), appended onto the ontology's base path. Example — a nested sub-field: `## Class (folder-parent)` where a node sets `Class: product` files that node under a `product/` folder.
 
 This is what bulk node uploads use to place each node; when a type has no `folder-parent` field, the node is placed at the explicitly supplied path instead.

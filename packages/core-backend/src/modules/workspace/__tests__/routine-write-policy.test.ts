@@ -22,7 +22,7 @@ describe('RoutineWritePolicyService', () => {
     // Graph nodes and any other path are refused.
     for (const blocked of [
       'knowledge-base/KnowledgeBase/Product/Knowledge/sc-b2g-no-self-billing.md',
-      'knowledge-base/CLAUDE.md',
+      'knowledge-base/AGENTS.md',
       'knowledge-base/KnowledgeBase/GTM/notes.txt',
       'knowledge-base/KnowledgeBase/GTM', // a directory (mkdir) — no extension
     ]) {
