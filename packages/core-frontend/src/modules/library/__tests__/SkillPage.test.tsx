@@ -54,6 +54,23 @@ vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
   KbMarkdownView: ({ source }: { source: string }) => <div data-testid="md-view">{source}</div>,
 }));
 
+// The file bar's Edit-or-Propose decision asks the per-file access resolver.
+// Default here is the READER's answer (`canWrite: false`) so the proposing
+// suites below exercise the propose path; the Edit test flips it.
+const accessMock = vi.hoisted(() => ({
+  result: {
+    canWrite: false,
+    eligible: { roles: [], users: [] },
+    owners: { roles: [], users: [] },
+  },
+  fetchFileAccess: vi.fn(),
+}));
+accessMock.fetchFileAccess.mockImplementation(async () => accessMock.result);
+vi.mock('../../access/api', () => ({
+  fetchFileAccess: accessMock.fetchFileAccess,
+  fetchFileAccessBatch: vi.fn(async () => ({ results: {} })),
+}));
+
 // The page reads the catalog through `useLibrary()`. Mocking the hook rather
 // than mounting `LibraryProvider` keeps the provider's real fetch (and its N+1
 // `getSkill`) out of a test about one page.
@@ -272,6 +289,11 @@ beforeEach(() => {
     ],
   });
   apiMock.approvePrFile.mockReset().mockResolvedValue([]);
+  accessMock.result = {
+    canWrite: false,
+    eligible: { roles: [], users: [] },
+    owners: { roles: [], users: [] },
+  };
 });
 
 describe('SkillPage', () => {
@@ -429,12 +451,34 @@ describe('SkillPage', () => {
    * sit beside Propose; it bypassed review and, on a protected branch, usually
    * ended in an AccessDenied after the user had already navigated away.
    */
-  it('offers exactly one way to change the file — no direct-edit escape hatch', async () => {
+  it('offers exactly ONE way to change the file: Propose for a caller who may not write it', async () => {
     renderPage(true);
     // Propose appears once the file's raw text is in hand, so wait for it —
     // asserting Edit's absence before the bar has rendered proves nothing.
     expect(await screen.findByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+  });
+
+  /**
+   * …and Edit for a caller who MAY. The old direct-edit escape hatch was cut
+   * because it was offered to everyone and ended in AccessDenied for most;
+   * gated by the real per-file ACL it is the honest button again. Exactly one
+   * of the two shows, never both.
+   */
+  it('offers Edit instead of Propose when the ACL says the caller may write the file', async () => {
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    renderPage(true);
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Propose changes' })).toBeNull();
+    // Resolved against the file on the DEFAULT branch, kbDirName stripped.
+    expect(accessMock.fetchFileAccess).toHaveBeenCalledWith(
+      'target-company-state',
+      'Skills/newsletter/SKILL.md',
+    );
   });
 
   /**

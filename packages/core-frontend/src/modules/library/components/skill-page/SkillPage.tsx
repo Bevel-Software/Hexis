@@ -11,6 +11,7 @@ import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
 import { kbFileUrl, resolveRelativePath, useNodeIdNav } from '../../../workspace/routing/kb-routes';
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
+import { useFileAccess } from '../../../access/hooks/useFileAccess';
 import { proposeChange, suggestionBranchFor } from '../../services/library.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
 import { useApplyChangeRequest } from '../../hooks/useApplyChangeRequest';
@@ -158,6 +159,18 @@ export function SkillPage() {
   }, [skillCrs, prefix]);
 
   const fileRepoPath = `${skillPath}/${active}`;
+
+  /**
+   * May the caller WRITE this file — the real per-file ACL answer, resolved
+   * against the default branch (where skills live), not a guess from the
+   * catalog's `owned` flag. This is what decides which button the file bar
+   * carries: `Edit` for a hard-or-optimistic yes (null = lookup in flight,
+   * same rule as the Knowledge viewer), `Propose changes` for a hard no.
+   */
+  const fileAccess = useFileAccess(
+    kbDirName && skillPath ? `${kbDirName}/${fileRepoPath}` : null,
+    DEFAULT_BRANCH,
+  );
 
   /** Bumped after every write so the branch reads re-run against fresh content. */
   const [revision, setRevision] = useState(0);
@@ -418,27 +431,38 @@ export function SkillPage() {
           onOpenNodeId={openNodeId}
           headingLink={headingLink}
           /*
-           * ONE action, deliberately. There used to be an `Edit` beside this
-           * that jumped to the Knowledge app's editor on the default branch —
-           * a direct commit, no review. Two adjacent buttons that both mean
-           * "change this file" but differ on whether anyone gets to say no is
-           * a trap, and it usually sprang: `main` is protected, so for everyone
-           * without a write grant on the path that route ends in an
-           * AccessDenied AFTER they have navigated away and typed the change.
-           * Editing straight into the KB still exists in the Knowledge app; it
-           * just stops being offered here as if it were the same thing.
+           * ONE action, decided by the ACL. An `Edit` used to sit beside
+           * `Propose changes` for EVERYONE and jump to the Knowledge editor —
+           * where, for anyone without a write grant, it ended in AccessDenied
+           * after they had navigated away and typed the change. The trap was
+           * never the button; it was offering it to people it would refuse.
+           * So now the file bar asks the per-file access resolver and shows
+           * exactly one of the two: `Edit` (to the Knowledge editor, which
+           * this pane now visually matches) when the caller may write the
+           * file, `Propose changes` when they may not.
            *
-           * One open proposal per person per file, too — a second would fork
-           * your own pending change into two decisions the owner must
+           * One open proposal per person per file, still — a second would
+           * fork your own pending change into two decisions the owner must
            * reconcile.
            */
           actions={
-            rawOnMain !== null &&
-            !iAlreadyProposedHere && (
-              <Button variant="outline" size="tiny" onClick={() => setEditing(true)}>
-                Propose changes
-              </Button>
-            )
+            fileAccess.canWrite !== false
+              ? kbDirName && (
+                  <Button
+                    variant="outline"
+                    size="tiny"
+                    onClick={() => openInEditor(`${kbDirName}/${fileRepoPath}`)}
+                    title="Open this file in the Knowledge editor"
+                  >
+                    Edit
+                  </Button>
+                )
+              : rawOnMain !== null &&
+                !iAlreadyProposedHere && (
+                  <Button variant="outline" size="tiny" onClick={() => setEditing(true)}>
+                    Propose changes
+                  </Button>
+                )
           }
         />
       )}

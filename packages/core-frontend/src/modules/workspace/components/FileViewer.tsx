@@ -840,6 +840,64 @@ export function FileViewer() {
     />
   );
 
+  // The pane bar's write action — the labelled button at the frame's top
+  // left, same slot the skill page uses. What it says is the access answer:
+  // `Edit` when you may write the file, `Propose changes` when you may not
+  // (null = lookup in flight = optimistic Edit, exactly the header's old
+  // rule). While a mode is OPEN it shows the way out instead. The header's
+  // own cluster is suppressed for prose files (`writeActionInPane`).
+  const lockedBy = fileLock.externalLock?.holderName ?? null;
+  const paneActions = isReviewingPending ? null : proposeMode ? (
+    <>
+      <Button variant="quiet" size="tiny" onClick={handleDiscardProposal} disabled={proposalBusy}>
+        Discard
+      </Button>
+      <Button
+        variant="primary"
+        size="tiny"
+        onClick={() => void handleSendProposal()}
+        disabled={proposalBusy}
+        title="Send your proposed change for approval"
+      >
+        {proposalBusy ? 'Sending…' : 'Send proposal'}
+      </Button>
+    </>
+  ) : editMode ? (
+    <Button
+      variant="outline"
+      size="tiny"
+      onClick={handleExitEditMode}
+      title="Save changes and return to view mode"
+    >
+      Done
+    </Button>
+  ) : accessRestricted ? (
+    <Button
+      variant="outline"
+      size="tiny"
+      onClick={handleEnterPropose}
+      title="You can't edit this file directly — propose a change for its owners to approve"
+    >
+      Propose changes
+    </Button>
+  ) : (
+    <Button
+      variant="outline"
+      size="tiny"
+      disabled={!!lockedBy || isEnteringEdit}
+      onClick={handleEnterEditMode}
+      title={
+        lockedBy
+          ? `Locked by ${lockedBy}`
+          : isEnteringEdit
+            ? 'Acquiring lock and fetching latest content…'
+            : 'Click to edit this file'
+      }
+    >
+      {isEnteringEdit ? 'Loading…' : 'Edit'}
+    </Button>
+  );
+
   return (
     <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
       <ProtectedBranchBanner />
@@ -892,6 +950,7 @@ export function FileViewer() {
         onPropose={handleEnterPropose}
         onSendProposal={() => void handleSendProposal()}
         onDiscardProposal={handleDiscardProposal}
+        writeActionInPane={shellVariant === 'prose'}
         lockedBy={fileLock.externalLock?.holderName ?? null}
         railOpen={railOpen}
         historyAvailable={historyAvailable}
@@ -1139,7 +1198,9 @@ export function FileViewer() {
               documents, and keep their unframed definite-height contract. */}
           <div className={shellVariant === 'full-bleed' ? 'flex min-h-0 flex-1 flex-col' : 'min-w-0'}>
             {shellVariant === 'prose' ? (
-              <FilePaneCard file={fileBaseName}>{rendererElement}</FilePaneCard>
+              <FilePaneCard file={fileBaseName} actions={paneActions}>
+                {rendererElement}
+              </FilePaneCard>
             ) : (
               rendererElement
             )}

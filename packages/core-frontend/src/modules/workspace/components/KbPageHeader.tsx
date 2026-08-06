@@ -64,6 +64,13 @@ export interface KbPageHeaderProps {
   onPropose(): void;
   onSendProposal(): void;
   onDiscardProposal(): void;
+  /**
+   * The write action (Edit / Propose changes / Done) lives in the file pane
+   * card's bar instead of here. True for prose documents — the ones that GET
+   * a pane card; full-bleed renderers keep the header's controls, because
+   * they have no bar to carry them.
+   */
+  writeActionInPane?: boolean;
   /** Disables Edit and explains why via `title`. */
   lockedBy: string | null;
   railOpen: boolean;
@@ -126,6 +133,7 @@ export function KbPageHeader({
   onPropose,
   onSendProposal,
   onDiscardProposal,
+  writeActionInPane = false,
   lockedBy,
   railOpen,
   historyAvailable,
@@ -174,11 +182,15 @@ export function KbPageHeader({
   // Preserved verbatim from the chrome strip this replaces
   // (`FileViewer.tsx:688`). Dropping `isReviewingPending` breaks the test that
   // asserts the review badge and the button's absence together.
-  const showEdit = canWrite !== false && !isReviewingPending && activeTab === 'content';
+  // `writeActionInPane` retires the whole cluster: the pane card's bar owns
+  // Edit/Propose for documents, and two controls for one action is a trap.
+  const showEdit =
+    !writeActionInPane && canWrite !== false && !isReviewingPending && activeTab === 'content';
   // The counterpart for readers: exactly where Edit is REFUSED (a hard
   // `canWrite === false`, never the in-flight null), the page offers the
   // review path instead. Same gates otherwise — same tab, no agent review.
-  const showPropose = canWrite === false && !isReviewingPending && activeTab === 'content';
+  const showPropose =
+    !writeActionInPane && canWrite === false && !isReviewingPending && activeTab === 'content';
 
   return (
     <div className="mb-2 flex flex-wrap items-center gap-3">
