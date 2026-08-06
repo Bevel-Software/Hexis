@@ -1738,6 +1738,44 @@ export class GitService implements IGitService {
     });
   }
 
+  /**
+   * Full file contents on both sides of one commit: `baseline` is the file at
+   * `<sha>^` (the parent), `current` at `<sha>`. Null means the file is absent
+   * at that ref — added files have `baseline: null`, deleted files
+   * `current: null`. A root commit (no parent) also yields `baseline: null`.
+   * Feeds the rendered-markdown history view, which needs before/after text
+   * rather than the patch `diffFileAtCommit` returns.
+   */
+  async fileContentsAtCommit(
+    workspaceId: string,
+    relativePath: string,
+    sha: string,
+  ): Promise<{ baseline: string | null; current: string | null }> {
+    assertValidRelativePath(relativePath);
+    if (!/^[a-f0-9]{7,40}$/i.test(sha)) {
+      throw new WorkflowValidationError('invalid commit sha');
+    }
+    const repoRelativePath = this.stripRepoPrefix(relativePath);
+    return this.mutex.run(workspaceId, async () => {
+      const current = await this.readFileAtRef(workspaceId, sha, repoRelativePath);
+      let baseline: string | null;
+      try {
+        baseline = await this.readFileAtRef(workspaceId, `${sha}^`, repoRelativePath);
+      } catch (err) {
+        // `readFileAtRef` maps "path absent at ref" to null but propagates an
+        // unresolvable ref. `<sha>^` on a root commit is exactly that (git
+        // reports it as "invalid object name '<sha>^'", or "unknown/bad
+        // revision" in other codepaths), and it legitimately means "no parent
+        // side" — fold it into null. Anything else stays fatal.
+        const stderr =
+          (err as { stderr?: string }).stderr ?? (err instanceof Error ? err.message : String(err));
+        if (/invalid object name|unknown revision|bad revision/i.test(stderr)) baseline = null;
+        else throw err;
+      }
+      return { baseline, current };
+    });
+  }
+
   async diffFileBetweenBranches(
     workspaceId: string,
     relativePath: string,

@@ -54,6 +54,7 @@ function makeGit(overrides: Partial<GitContextValue> = {}): GitContextValue {
     revert: async () => makeAttr({ sha: 'revertsha1234567' }),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
     ...overrides,
   };
@@ -64,14 +65,15 @@ const workspace = {
   kbDirName: 'knowledge-base',
 } as unknown as WorkspaceContextValue;
 
-function renderWith(git: GitContextValue, onRevert: () => Promise<void> = async () => {}) {
+function renderWith(
+  git: GitContextValue,
+  onRevert: () => Promise<void> = async () => {},
+  filePath = 'knowledge-base/Knowledge/Foo.md',
+) {
   return render(
     <WorkspaceContext.Provider value={workspace}>
       <GitContext.Provider value={git}>
-        <FileHistoryPanel
-          filePath="knowledge-base/Knowledge/Foo.md"
-          onRevertCompleted={onRevert}
-        />
+        <FileHistoryPanel filePath={filePath} onRevertCompleted={onRevert} />
       </GitContext.Provider>
     </WorkspaceContext.Provider>,
   );
@@ -95,7 +97,33 @@ describe('FileHistoryPanel', () => {
     expect(await screen.findByText(/Nothing has been saved to this file/i)).toBeInTheDocument();
   });
 
-  it('loads the diff when a commit is selected', async () => {
+  it('renders a markdown file\'s save as a rendered-markdown diff', async () => {
+    const fetchFileAtChange = vi.fn(async () => ({
+      baseline: '# Old title\n\nshared paragraph\n',
+      current: '# New title\n\nshared paragraph\n',
+    }));
+    const history = [makeAttr({ sha: 'aaaaaaa0000000000', subject: 'edit' })];
+    renderWith(
+      makeGit({
+        fetchFileHistory: async () => history,
+        fetchFileAtChange,
+      }),
+    );
+    fireEvent.click(await screen.findByText('edit'));
+    await waitFor(() =>
+      expect(fetchFileAtChange).toHaveBeenCalledWith(
+        'knowledge-base/Knowledge/Foo.md',
+        'aaaaaaa0000000000',
+      ),
+    );
+    // Rendered markdown, not raw text: both headings appear as real <h1>
+    // elements (removed side in red, added side in green).
+    expect(await screen.findByRole('heading', { name: 'New title' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Old title' })).toBeInTheDocument();
+    expect(screen.getByText('shared paragraph')).toBeInTheDocument();
+  });
+
+  it('loads the raw diff when a non-markdown file\'s commit is selected', async () => {
     const fetchFileDiff = vi.fn(async () => '--- a\n+++ b\n@@ -1 +1 @@\n-foo\n+bar\n');
     const history = [makeAttr({ sha: 'aaaaaaa0000000000', subject: 'edit' })];
     renderWith(
@@ -103,12 +131,14 @@ describe('FileHistoryPanel', () => {
         fetchFileHistory: async () => history,
         fetchFileDiff,
       }),
+      async () => {},
+      'knowledge-base/Knowledge/data.csv',
     );
     const row = await screen.findByText('edit');
     fireEvent.click(row);
     await waitFor(() =>
       expect(fetchFileDiff).toHaveBeenCalledWith(
-        'knowledge-base/Knowledge/Foo.md',
+        'knowledge-base/Knowledge/data.csv',
         'aaaaaaa0000000000',
       ),
     );
@@ -121,6 +151,20 @@ describe('FileHistoryPanel', () => {
       makeGit({
         fetchFileHistory: async () => history,
         fetchFileDiff: async () => '',
+      }),
+      async () => {},
+      'knowledge-base/Knowledge/data.csv',
+    );
+    fireEvent.click(await screen.findByText('edit'));
+    expect(await screen.findByText(/No file changes in this save/i)).toBeInTheDocument();
+  });
+
+  it('renders the empty state for a markdown save where the file is absent on both sides', async () => {
+    const history = [makeAttr({ sha: 'aaaaaaa0000000000', subject: 'edit' })];
+    renderWith(
+      makeGit({
+        fetchFileHistory: async () => history,
+        fetchFileAtChange: async () => ({ baseline: null, current: null }),
       }),
     );
     fireEvent.click(await screen.findByText('edit'));

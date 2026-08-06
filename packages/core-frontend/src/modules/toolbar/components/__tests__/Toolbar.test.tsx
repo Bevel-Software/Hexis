@@ -106,6 +106,7 @@ function renderToolbar(overrides?: {
     revert: async () => makeCommit(),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
     ...overrides?.git,
   };

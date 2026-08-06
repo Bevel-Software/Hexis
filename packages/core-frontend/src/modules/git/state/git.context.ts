@@ -57,6 +57,16 @@ export interface GitContextValue {
   fetchFileHistory(path: string, limit?: number): Promise<CommitAttribution[]>;
   fetchFileDiff(path: string, sha: string): Promise<string>;
   /**
+   * Full before/after contents of `path` at one commit (`sha^` vs `sha`);
+   * null on a side means the file is absent there. The history panel uses
+   * this to render markdown changes as a red/green rendered-markdown diff
+   * instead of the raw patch `fetchFileDiff` returns.
+   */
+  fetchFileAtChange(
+    path: string,
+    sha: string,
+  ): Promise<{ baseline: string | null; current: string | null }>;
+  /**
    * Unified diff of `path` between two branches. Read-only; nothing is
    * checked out or written. `fromBranch` and `toBranch` must be names from
    * `branches` (local or origin-only). Empty string means the file is

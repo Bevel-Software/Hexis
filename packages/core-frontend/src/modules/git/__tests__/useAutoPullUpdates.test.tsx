@@ -54,6 +54,7 @@ function makeGit(
     }),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
     ...overrides,
   };

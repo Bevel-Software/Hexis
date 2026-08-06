@@ -9,6 +9,7 @@ import {
   createBranch as apiCreateBranch,
   deleteBranch as apiDeleteBranch,
   fetchBranches,
+  fetchFileAtChange,
   fetchFileComparison,
   fetchFileDiff,
   fetchFileHistory,
@@ -282,6 +283,18 @@ export function useGitState(workspaceId: string | null): GitContextValue {
     [],
   );
 
+  const fetchFileAtChangeCb = useCallback(
+    async (path: string, sha: string): Promise<{ baseline: string | null; current: string | null }> => {
+      const wid = workspaceIdRef.current;
+      // Null-on-both-sides is a meaningful payload ("absent at this commit"),
+      // so don't fake one when there's no workspace — reject so the panel
+      // surfaces its error state instead of an empty diff.
+      if (!wid) throw new Error('No active workspace.');
+      return fetchFileAtChange(wid, path, sha);
+    },
+    [],
+  );
+
   const fetchFileComparisonCb = useCallback(
     async (path: string, fromBranch: string, toBranch: string): Promise<string> => {
       const wid = workspaceIdRef.current;
@@ -313,6 +326,7 @@ export function useGitState(workspaceId: string | null): GitContextValue {
       revert,
       fetchFileHistory: fetchFileHistoryCb,
       fetchFileDiff: fetchFileDiffCb,
+      fetchFileAtChange: fetchFileAtChangeCb,
       fetchFileComparison: fetchFileComparisonCb,
     }),
     [
@@ -329,6 +343,7 @@ export function useGitState(workspaceId: string | null): GitContextValue {
       revert,
       fetchFileHistoryCb,
       fetchFileDiffCb,
+      fetchFileAtChangeCb,
       fetchFileComparisonCb,
     ],
   );

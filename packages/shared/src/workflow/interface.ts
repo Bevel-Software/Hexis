@@ -175,6 +175,17 @@ export interface IWorkflowService {
    * Used by the File viewer's History tab.
    */
   showFileAtChange(workspaceId: string, path: string, sha: string): Promise<string>;
+  /**
+   * Full file contents on both sides of one change: `baseline` at `<sha>^`
+   * (null when the file — or the parent commit — doesn't exist there),
+   * `current` at `<sha>` (null when absent). Used by the File viewer's
+   * History tab to render markdown changes as a rendered-markdown diff.
+   */
+  fileAtChange(
+    workspaceId: string,
+    path: string,
+    sha: string,
+  ): Promise<{ baseline: string | null; current: string | null }>;
 
   // ── File locks (new — currently NotImplementedWorkflowError) ──────────────
 

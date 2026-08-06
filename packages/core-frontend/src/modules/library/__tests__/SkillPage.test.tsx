@@ -118,6 +118,7 @@ const git = {
   }),
   fetchFileHistory: async () => [],
   fetchFileDiff: async () => '',
+  fetchFileAtChange: async () => ({ baseline: null, current: null }),
   fetchFileComparison: async () => '',
 } as GitContextValue;
 

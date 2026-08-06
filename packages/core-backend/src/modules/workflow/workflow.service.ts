@@ -498,6 +498,19 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
+   * Before/after file contents for one commit (`<sha>^` vs `<sha>`). Powers
+   * the rendered-markdown history view; `showFileAtChange` keeps serving the
+   * raw-patch view for non-markdown files.
+   */
+  fileAtChange(
+    workspaceId: string,
+    path: string,
+    sha: string,
+  ): Promise<{ baseline: string | null; current: string | null }> {
+    return this.git.fileContentsAtCommit(workspaceId, path, sha);
+  }
+
+  /**
    * Resolve write permission for `targetPath` against the access tree at
    * `HEAD` of `branch`. Throws `AccessDeniedError` on denial with the
    * eligible-writers payload attached. Bootstrap-friendly: when no rules are
