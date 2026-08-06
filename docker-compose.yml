@@ -47,6 +47,25 @@ services:
     # exactly the split we want.
     expose:
       - "3001"
+    # A NAME ON ITS OWN (`- GIT_TOKEN`) is a pass-through: the value reaches the
+    # container when the operator sets it, and the variable simply does not
+    # exist when they do not. Everything optional is written that way on
+    # purpose, for two reasons.
+    #
+    # It keeps the deployment UI honest. An orchestrator that reads this file
+    # turns every `${VAR}` it finds into a variable you must fill in or leave
+    # blank — and then refuses to let you delete it, because the file still
+    # names it. A pass-through has no `${VAR}` to find, so the settings that
+    # are collected on the SETUP SCREEN stop being presented as deployment
+    # configuration you forgot.
+    #
+    # And it keeps `${VAR:-}` from lying. That form defines the variable as an
+    # empty string, which is a value; a pass-through leaves it genuinely unset.
+    # The app treats both as absent, so this is belt and braces rather than
+    # load-bearing — but "unset" is what is meant, so it is what is written.
+    #
+    # Variables that are genuinely REQUIRED keep their `${VAR}` reference, so
+    # the operator is still prompted for them.
     environment:
       - NODE_ENV=production
       - PORT=3001
@@ -54,8 +73,8 @@ services:
       # Bitbucket, Azure DevOps, self-hosted): GIT_TOKEN is the Basic-auth
       # password and GIT_USERNAME the Basic username (host-specific — see
       # .env.example).
-      - GIT_TOKEN=${GIT_TOKEN:-}
-      - GIT_USERNAME=${GIT_USERNAME:-}
+      - GIT_TOKEN
+      - GIT_USERNAME
       - JWT_SECRET=${JWT_SECRET}
       # The deployment owner. REQUIRED: always an admin whatever the sign-in
       # method, and the initial Admin written into a freshly seeded KB.
@@ -66,29 +85,34 @@ services:
       # while password login is enabled.
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       # Generic OIDC single sign-on; the method appears once all three are set.
-      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}
-      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
-      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
-      - OIDC_SCOPES=${OIDC_SCOPES:-}
-      - OIDC_PROVIDER_LABEL=${OIDC_PROVIDER_LABEL:-}
+      # Also settable on the setup screen, which shows the redirect URI.
+      - OIDC_ISSUER_URL
+      - OIDC_CLIENT_ID
+      - OIDC_CLIENT_SECRET
+      - OIDC_SCOPES
+      - OIDC_PROVIDER_LABEL
       # Reverse-proxy hop count. Required behind a proxy (Coolify, Traefik,
       # nginx) or every request looks like it came from the proxy — which
       # collapses the per-IP login rate limit onto one bucket.
-      - TRUST_PROXY=${TRUST_PROXY:-}
+      - TRUST_PROXY
       # Tenant slug branded into every credential prefix. Default `bevel`
       # keeps pre-existing keys/tokens valid — change it only for a fresh deploy.
       - TENANT_ID=${TENANT_ID:-bevel}
       - LOGIN_PASSWORD=${LOGIN_PASSWORD:-true}
       # SSO allow-list (part of the OIDC config above). SSO auto-provisions, so
       # against a multi-tenant issuer this is the only signup boundary.
-      - ALLOWED_EMAIL_DOMAINS=${ALLOWED_EMAIL_DOMAINS:-}
-      - KB_REPO_URL=${KB_REPO_URL:-}
-      - KB_DIR_NAME=${KB_DIR_NAME:-}
+      - ALLOWED_EMAIL_DOMAINS
+      # The knowledge base. Left unset, an admin supplies these on the setup
+      # screen at first sign-in — where the credentials can be tested against
+      # the real host before they are saved.
+      - KB_REPO_URL
+      - KB_DIR_NAME
       # Branch model. Runtime only now — the frontend is served these over
       # /api/config instead of having them compiled in, so one image runs
-      # anywhere and renaming a branch no longer needs a rebuild.
-      - DEFAULT_BRANCH=${DEFAULT_BRANCH:-}
-      - PROTECTED_BRANCHES=${PROTECTED_BRANCHES:-}
+      # anywhere and renaming a branch no longer needs a rebuild. Left unset,
+      # they are collected on the setup screen.
+      - DEFAULT_BRANCH
+      - PROTECTED_BRANCHES
       # 32-byte key (base64 or hex) encrypting secrets-vault values + MCP
       # OAuth client secrets/tokens.
       - SECRETS_ENC_KEY=${SECRETS_ENC_KEY}
