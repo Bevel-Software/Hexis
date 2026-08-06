@@ -822,7 +822,7 @@ describe('SkillPage — deciding on a change', () => {
     // request number and branches filled in, with a Copy button beside it.
     expect(screen.getByText(/ask your agent to resolve it/i)).toBeInTheDocument();
     expect(
-      screen.getByText(/Change request #7 .* its branch "suggestions\/olga\/newsletter" conflicts/),
+      screen.getByText(/Change request #7 can no longer be applied[\s\S]*`suggestions\/olga\/newsletter`/),
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument();
   });
