@@ -943,8 +943,16 @@ function FileTreeNode({
 // contributed explorer items.)
 
 export function FileExplorer() {
-  const { fileTree, kbDirName, dispatchUpload, uploadError, clearUploadError, pendingUploads } =
-    useWorkspace();
+  const {
+    fileTree,
+    kbDirName,
+    dispatchUpload,
+    uploadError,
+    clearUploadError,
+    uploadNotice,
+    clearUploadNotice,
+    pendingUploads,
+  } = useWorkspace();
   const [dragOver, setDragOver] = useState(false);
   // Download is now a per-path permission (resolved server-side from the
   // access tree's `download:` verb), so there's no global preflight gate
@@ -1159,6 +1167,27 @@ export function FileExplorer() {
             title="Dismiss"
             aria-label="Dismiss upload error"
             onClick={clearUploadError}
+          >
+            <X size={12} />
+          </IconButton>
+        </div>
+      )}
+      {/* Not an error: the upload LANDED, on the suggestions branch. Saying
+          so is load-bearing — nothing appears in the tree where the user
+          dropped the files, and silence there reads as a failed upload. */}
+      {uploadNotice && (
+        <div
+          role="status"
+          className="flex items-start gap-1 px-2 py-1 text-xs text-ink bg-wait-soft border-b border-line shrink-0"
+        >
+          <span className="flex-1" title={uploadNotice}>
+            {uploadNotice}
+          </span>
+          <IconButton
+            size={18}
+            title="Dismiss"
+            aria-label="Dismiss upload notice"
+            onClick={clearUploadNotice}
           >
             <X size={12} />
           </IconButton>

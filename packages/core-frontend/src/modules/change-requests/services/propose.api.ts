@@ -1,4 +1,4 @@
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, type PullRequestSummary } from '@bevel-software/platform-shared';
 import { createBranch } from '../../git/services/git.api';
 import { getOrCreateWorkspace, writeFile } from '../../workspace/services/workspace.api';
 import { openChangeRequest } from '../../pr/services/pr-open.api';
@@ -55,33 +55,60 @@ export interface ProposeKnowledgeChangeInput {
 export async function proposeKnowledgeChange(
   input: ProposeKnowledgeChangeInput,
 ): Promise<{ branch: string }> {
-  const branch = knowledgeSuggestionBranchFor(input.userEmail);
+  const target = await ensureKnowledgeSuggestionWorkspace(input.userEmail);
+  await writeFile(
+    target.workspaceId,
+    `${target.kbDirName}/${input.repoRelativePath}`,
+    input.content,
+  );
+  await ensureKnowledgeChangeRequest(target, input.userName);
+  return { branch: target.branch };
+}
+
+/**
+ * The caller's personal suggestions workspace, ready to be written to.
+ * Splitting the propose flow in two lets writes of ANY shape ride it — a
+ * typed proposal writes one file between these calls, an upload into a folder
+ * the caller may not write streams many.
+ */
+export interface KnowledgeSuggestionTarget {
+  branch: string;
+  workspaceId: string;
+  kbDirName: string;
+  /** The caller's open request on this branch, or null when the write must open one. */
+  existingCr: PullRequestSummary | null;
+}
+
+export async function ensureKnowledgeSuggestionWorkspace(
+  userEmail: string,
+): Promise<KnowledgeSuggestionTarget> {
+  const branch = knowledgeSuggestionBranchFor(userEmail);
 
   const mine = await listMyChangeRequests();
-  const existing = mine.find((c) => c.state === 'open' && c.branch === branch) ?? null;
+  const existingCr = mine.find((c) => c.state === 'open' && c.branch === branch) ?? null;
 
-  if (!existing) {
+  if (!existingCr) {
     try {
       await createBranch(defaultWorkspaceId(), branch, DEFAULT_BRANCH);
     } catch {
       // Branch may already exist from an earlier (merged/cancelled) round —
-      // reuse it; the change request below is what makes it reviewable again.
+      // reuse it; the change request is what makes it reviewable again.
     }
   }
 
   const { workspace } = await getOrCreateWorkspace(branch);
-  await writeFile(
-    workspace.id,
-    `${workspace.kbDirName}/${input.repoRelativePath}`,
-    input.content,
-  );
+  return { branch, workspaceId: workspace.id, kbDirName: workspace.kbDirName, existingCr };
+}
 
-  if (!existing) {
-    await openChangeRequest({
-      sourceBranch: branch,
-      targetBranch: DEFAULT_BRANCH,
-      title: `Changes from ${input.userName} — Knowledge`,
-    });
-  }
-  return { branch };
+/** Open the caller's one Knowledge change request, unless it already exists. */
+export async function ensureKnowledgeChangeRequest(
+  target: KnowledgeSuggestionTarget,
+  userName: string,
+): Promise<void> {
+  if (target.existingCr) return;
+  await openChangeRequest({
+    sourceBranch: target.branch,
+    targetBranch: DEFAULT_BRANCH,
+    title: `Changes from ${userName} — Knowledge`,
+  });
 }

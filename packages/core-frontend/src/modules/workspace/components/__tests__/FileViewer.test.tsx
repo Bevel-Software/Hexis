@@ -237,6 +237,8 @@ function ViewerHarness({
     pendingFileContent,
     setActiveTabContent: captureTyped ? (v: string) => setOpenFileContent(v) : () => {},
     uploadError: null,
+    uploadNotice: null,
+    clearUploadNotice: () => {},
     isUploading: false,
     uploadProgress: null,
     pendingUploads: new Map(),
