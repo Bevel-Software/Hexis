@@ -8,6 +8,8 @@ import { fetchPrDetail } from '../../pr/services/pr-detail.api';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
 import { changeAuthorName } from '../utils/author';
+import { conflictResolutionPrompt } from '../utils/conflict';
+import { ConflictHelp } from './ConflictHelp';
 import { useDefaultBranchFile } from '../hooks/useFileOnBranch';
 import { diffLines, type DiffLine } from '../utils/diff';
 
@@ -274,8 +276,11 @@ export function ChangeRequestDialog({
         {blocked && (
           <Banner tone="wait" role="alert" className="mx-8 mt-4">
             <b className="font-semibold">Can't apply</b> — files changed after {firstName} wrote
-            this, so there is no honest before and after to apply. {firstName} has to propose it
-            again against the current text.
+            this, so there is no honest before and after to apply. It has to be redone against
+            the current text.
+            <div className="mt-2.5">
+              <ConflictHelp prompt={conflictResolutionPrompt(cr)} />
+            </div>
           </Banner>
         )}
 

@@ -818,6 +818,13 @@ describe('SkillPage — deciding on a change', () => {
     ).toBeInTheDocument();
     // A change that cannot land must not keep offering the button that fails.
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+    // The way out is handed over ready to paste: the exact agent prompt,
+    // request number and branches filled in, with a Copy button beside it.
+    expect(screen.getByText(/ask your agent to resolve it/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Change request #7 .* its branch "suggestions\/olga\/newsletter" conflicts/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument();
   });
 
   /**

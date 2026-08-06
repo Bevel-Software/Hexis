@@ -31,6 +31,7 @@ import { skillPanelId, skillTabId } from './tab-ids';
 import { SkillFilePane } from './SkillFilePane';
 import { SkillFileEditor } from './SkillFileEditor';
 import { ChangeBox } from '../../../change-requests/components/ChangeBox';
+import { conflictResolutionPrompt } from '../../../change-requests/utils/conflict';
 
 /**
  * One skill, as a page — the prototype's skill item (line 1964), which says of
@@ -508,6 +509,7 @@ export function SkillPage() {
               diff={fileDiff}
               upToDate={fileDiff !== null && fileDiff.length === 0}
               blocked={blockedCrs.has(cr.number)}
+              conflictPrompt={conflictResolutionPrompt(cr)}
               // A conflict already speaks through `blocked`; repeating it as a
               // refusal line would say the same thing twice in one box.
               refusal={

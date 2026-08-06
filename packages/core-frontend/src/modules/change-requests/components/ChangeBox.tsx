@@ -3,6 +3,7 @@ import '../change-requests.css';
 import { Button, Surface } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { collapseUnchanged, type DiffLine } from '../utils/diff';
+import { ConflictHelp } from './ConflictHelp';
 
 export interface ChangeBoxProps {
   /** File the proposal is against, relative to the skill folder. */
@@ -29,6 +30,11 @@ export interface ChangeBoxProps {
    * question honestly.
    */
   blocked?: boolean;
+  /**
+   * The ready-to-paste prompt that asks the user's agent to resolve the
+   * conflict (see `conflictResolutionPrompt`). Rendered only while `blocked`.
+   */
+  conflictPrompt?: string | null;
   /**
    * Why the last apply did not land, in the words the server used. Distinct
    * from `blocked`: a conflict withdraws Approve because retrying cannot help,
@@ -83,6 +89,7 @@ export function ChangeBox({
   diff,
   upToDate = false,
   blocked = false,
+  conflictPrompt = null,
   refusal = null,
   owner,
   busy,
@@ -93,7 +100,6 @@ export function ChangeBox({
   onOpenFull,
 }: ChangeBoxProps) {
   const who = mine ? 'You' : author;
-  const first = author.split(' ')[0];
   // Name the step. "Approving…" and "Applying…" are different waits with
   // different lengths, and a single "Working…" over both makes the slower one
   // look hung.
@@ -143,9 +149,10 @@ export function ChangeBox({
             </span>
             <span className="w-full text-meta text-ink-muted">
               {mine
-                ? 'Redo it against the current text and propose again.'
-                : `${first} has to redo it against the current text and propose again. It cannot be approved as it stands.`}
+                ? 'It has to be redone against the current text before it can land.'
+                : `It cannot be approved as it stands — it has to be redone against the current text.`}
             </span>
+            {conflictPrompt && <ConflictHelp prompt={conflictPrompt} />}
           </>
         ) : (
           <>

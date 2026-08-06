@@ -8,6 +8,7 @@ import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../hooks/useCrFileDiffs';
 import { useDefaultBranchFile } from '../hooks/useFileOnBranch';
 import { changeAuthorName, formatWhen } from '../utils/author';
+import { conflictResolutionPrompt } from '../utils/conflict';
 import { ChangeBox } from './ChangeBox';
 import { ChangeRequestDialog } from './ChangeRequestDialog';
 
@@ -126,6 +127,7 @@ export function FileChangeBoxes({
             diff={fileDiff}
             upToDate={fileDiff !== null && fileDiff.length === 0}
             blocked={blockedCrs.has(cr.number)}
+            conflictPrompt={conflictResolutionPrompt(cr)}
             // A conflict already speaks through `blocked`; repeating it as a
             // refusal line would say the same thing twice in one box.
             refusal={
