@@ -100,7 +100,9 @@ describe('CoreConfig — the deployment owner', () => {
   it('still accepts the legacy encryption-key names', () => {
     delete process.env.SECRETS_ENC_KEY;
     process.env.CONNECTOR_CONFIG_ENC_KEY = 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=';
-    expect(() => new CoreConfig()).not.toThrow();
+    // Not just "does not throw": the legacy name has to actually supply the
+    // key, or an existing deployment boots and then cannot decrypt anything.
+    expect(new CoreConfig().secretsEncKey).toBe('kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=');
   });
 
   it('ignores a leftover SEED_ADMIN_EMAILS instead of failing on it', () => {

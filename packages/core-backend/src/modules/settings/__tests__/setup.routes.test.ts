@@ -10,13 +10,33 @@ import type { IAdminAccessService } from '../../admin/admin.interface.js';
 const ENC_KEY = 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=';
 
 let server: HttpServer | null = null;
+
+/**
+ * These suites clear the KB variables so `settings.resolve` falls through to
+ * the stored layer. They are RESTORED afterwards rather than left deleted: the
+ * repo `.env` is loaded into `process.env` by the vitest config, so a suite
+ * that runs later in the same worker would otherwise see a different
+ * environment than the one it was written against.
+ */
+const KB_ENV = ['KB_REPO_URL', 'GIT_TOKEN', 'GIT_USERNAME', 'KB_DIR_NAME'] as const;
+let savedEnv: Partial<Record<(typeof KB_ENV)[number], string | undefined>> = {};
+
+beforeEach(() => {
+  savedEnv = {};
+  for (const k of KB_ENV) {
+    savedEnv[k] = process.env[k];
+    delete process.env[k];
+  }
+});
+
 afterEach(() => {
   server?.close();
   server = null;
-});
-
-beforeEach(() => {
-  for (const k of ['KB_REPO_URL', 'GIT_TOKEN', 'GIT_USERNAME', 'KB_DIR_NAME']) delete process.env[k];
+  for (const k of KB_ENV) {
+    const original = savedEnv[k];
+    if (original === undefined) delete process.env[k];
+    else process.env[k] = original;
+  }
 });
 
 /** Mount the setup router on a throwaway port and hand back its base URL. */
@@ -92,6 +112,73 @@ describe('POST /setup/test-connection — what may reach git', () => {
       kbRepoUrl: 'https://example.com/acme/kb.git',
     });
     expect(res.status).toBe(403);
+  });
+});
+
+/**
+ * The stored token is deliberately unreadable — `describe()` omits it — so an
+ * endpoint that would send it to a caller-named host hands it straight back.
+ */
+describe('POST /setup/test-connection — where the saved token may go', () => {
+  it('refuses to test a different repository with the saved token', async () => {
+    const { base, settings } = listen();
+    await settings.save(
+      { kbRepoUrl: 'https://example.com/acme/kb.git', gitToken: 'ghp_verysecret' },
+      null,
+    );
+    const res = await post(base, '/api/setup/test-connection', {
+      kbRepoUrl: 'https://attacker.example/collector.git',
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/access token for that repository/i);
+  });
+
+  it('still lets an admin re-test the repository that IS configured', async () => {
+    const { base, settings } = listen();
+    await settings.save(
+      { kbRepoUrl: 'https://127.0.0.1:1/acme/kb.git', gitToken: 'ghp_verysecret' },
+      null,
+    );
+    // No credentials in the body: the saved pair is used together, which is the
+    // "does the token I saved last week still work?" case.
+    const res = await post(base, '/api/setup/test-connection', {});
+    // Port 1 refuses instantly — reaching a connection error proves the request
+    // got past the guards and ran git, rather than being rejected up front.
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(false);
+  });
+
+  it('accepts a different repository when the request brings its own token', async () => {
+    const { base, settings } = listen();
+    await settings.save(
+      { kbRepoUrl: 'https://example.com/acme/kb.git', gitToken: 'ghp_verysecret' },
+      null,
+    );
+    const res = await post(base, '/api/setup/test-connection', {
+      kbRepoUrl: 'https://127.0.0.1:1/other/kb.git',
+      gitToken: 'ghp_its_own',
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
+/**
+ * The arguments the route builds have to be ones git actually accepts —
+ * `--end-of-options` among them. A rejected FLAG and a refused CONNECTION look
+ * alike from the outside (`ok: false`), so this aims at a port nothing listens
+ * on: reaching a connection error proves git parsed the command line.
+ */
+describe('POST /setup/test-connection — the command git is given', () => {
+  it('builds a command git accepts', async () => {
+    const { base } = listen();
+    const res = await post(base, '/api/setup/test-connection', {
+      kbRepoUrl: 'https://127.0.0.1:1/acme/kb.git',
+      gitToken: 'ghp_whatever',
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).not.toMatch(/unknown option|usage: git/i);
   });
 });
 

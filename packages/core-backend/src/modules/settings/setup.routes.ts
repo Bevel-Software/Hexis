@@ -104,20 +104,45 @@ export function createSetupRoutes(
    */
   router.post('/setup/test-connection', requireAdmin, async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const pick = (key: string): string => {
-      const supplied = body[key];
-      return typeof supplied === 'string' && supplied.trim()
-        ? supplied.trim()
-        : settings.resolve(key);
+    const supplied = (key: string): string | null => {
+      const value = body[key];
+      return typeof value === 'string' && value.trim() ? value.trim() : null;
     };
-    const url = pick('kbRepoUrl');
-    const token = pick('gitToken');
-    const username = pick('gitUsername') || 'x-access-token';
+    const url = supplied('kbRepoUrl') ?? settings.resolve('kbRepoUrl');
+    // Unlike the token, the username is not a secret and carries a default —
+    // it is which name the host expects beside the token, not a credential.
+    const username =
+      supplied('gitUsername') ?? (settings.resolve('gitUsername') || 'x-access-token');
 
     if (!url) {
       res.status(400).json({ ok: false, error: 'Enter the repository URL first.' });
       return;
     }
+
+    /**
+     * THE CONFIGURED TOKEN ONLY EVER GOES TO THE CONFIGURED REPOSITORY.
+     *
+     * The stored token is deliberately unreadable — `describe()` omits it, so
+     * an admin can replace it but never see it. Falling back to it for whatever
+     * URL the request names would hand that value straight back: point the test
+     * at a host you control, read it out of the request. Admin-gated, but the
+     * whole point of not returning it is that being an admin is not the same as
+     * being allowed to hold it.
+     *
+     * So a request that names a DIFFERENT repository has to bring its own
+     * credential. Testing what is already configured — the "does the token I
+     * saved last week still work?" case — is unaffected.
+     */
+    const suppliedToken = supplied('gitToken');
+    const testingConfiguredRepo = url === settings.resolve('kbRepoUrl');
+    if (!suppliedToken && !testingConfiguredRepo) {
+      res.status(400).json({
+        ok: false,
+        error: 'Enter the access token for that repository — the saved one is only used with the repository it was saved for.',
+      });
+      return;
+    }
+    const token = suppliedToken ?? (testingConfiguredRepo ? settings.resolve('gitToken') : '');
     // The SAME rule the setting is validated by, applied before the value ever
     // reaches git. Without it this endpoint is argument injection: a value
     // beginning `--upload-pack=` makes git run a command of the caller's
