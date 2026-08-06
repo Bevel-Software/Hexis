@@ -27,15 +27,12 @@ COPY packages/core-frontend/ packages/core-frontend/
 COPY apps/server/ apps/server/
 COPY apps/web/ apps/web/
 
-# Branch model, baked into the frontend bundle at build time. The shared branch
-# registry reads these off `process.env` and Vite statically replaces them
-# (apps/web/vite.config.ts `define`), so they must be present as ENV during
-# `vite build` — the runtime `environment:` block in docker-compose is too late
-# for the frontend. Unset → empty ENV → the registry falls back to its defaults.
-ARG DEFAULT_BRANCH
-ARG PROTECTED_BRANCHES
-ENV DEFAULT_BRANCH=${DEFAULT_BRANCH}
-ENV PROTECTED_BRANCHES=${PROTECTED_BRANCHES}
+# NOTE: the branch model is deliberately NOT a build arg any more. It used to
+# have to be present during `vite build` because the values were substituted
+# into the frontend bundle — which made the image deployment-specific and meant
+# renaming a branch required a rebuild. The browser is now served them by
+# `GET /api/config` at boot, so this image runs against any deployment and the
+# runtime `environment:` block is the only place they are set.
 
 # Build shared + core-backend (tsc → dist), then the SPA (Vite). `pnpm --filter`
 # routes through pnpm's workspace binary links.

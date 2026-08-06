@@ -11,6 +11,7 @@ import { BrowserRouter, Navigate, Routes, Route, useLocation } from 'react-route
 import { AuthContext } from '../modules/auth/state/auth.context';
 import { useAuthState } from '../modules/auth/hooks/useAuthState';
 import { LoginScreen } from '../modules/auth/components/LoginScreen';
+import { SetupGate } from '../modules/setup/components/SetupGate';
 import { WorkspaceContext } from '../modules/workspace/state/workspace.context';
 import { useWorkspaceState } from '../modules/workspace/hooks/useWorkspaceState';
 import { GitContext } from '../modules/git/state/git.context';
@@ -458,7 +459,13 @@ export function AuthGate({ children }: { children: ReactNode }) {
 function AppShell() {
   return (
     <AuthGate>
-      <AuthenticatedApp />
+      {/* Inside the auth gate, outside everything else: setup asks for a
+          repository URL and an access token, so it is not public — and the
+          surfaces behind it all read from a workspace that cannot exist until
+          it is finished. */}
+      <SetupGate>
+        <AuthenticatedApp />
+      </SetupGate>
     </AuthGate>
   );
 }

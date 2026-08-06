@@ -16,7 +16,10 @@ import {
 import { suggestPrincipals } from '../../access/api';
 
 /** The default-branch workspace id — roles are managed there (admin status derives from it). */
-const ROLES_WORKSPACE_ID = encodeURIComponent(DEFAULT_BRANCH);
+// A function, not a constant: the branch model arrives from `/api/config`
+// during boot, and a module-scope capture would freeze this at the empty
+// string that exists before it.
+const rolesWorkspaceId = () => encodeURIComponent(DEFAULT_BRANCH);
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -398,7 +401,7 @@ function RoleCard({
     }
     const myReq = ++suggestReq.current;
     const t = setTimeout(() => {
-      suggestPrincipals(ROLES_WORKSPACE_ID, q)
+      suggestPrincipals(rolesWorkspaceId(), q)
         .then((res) => {
           if (myReq !== suggestReq.current) return;
           // People only; drop anyone already a member (server or optimistic).

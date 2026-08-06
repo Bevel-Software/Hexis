@@ -15,7 +15,7 @@ export interface IKbSeedService {
    * work runs at most once per process.
    *
    * - **Empty remote** → full seed: all template files (incl. the sample
-   *   ontology) committed to every protected branch. Requires `SEED_ADMIN_EMAILS`
+   *   ontology) committed to every protected branch. Uses `ADMIN_EMAIL`
    *   (a repo with no Admin is unusable), otherwise throws.
    * - **Existing remote** → create only the protected branches that don't exist
    *   yet, off an existing one. No file changes here — per-branch base files are

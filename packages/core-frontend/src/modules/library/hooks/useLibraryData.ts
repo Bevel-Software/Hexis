@@ -3,7 +3,7 @@ import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { fetchFileAccessBatch } from '../../access/api';
 import { listToolSecrets, type ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import {
-  DEFAULT_WORKSPACE_ID,
+  defaultWorkspaceId,
   getSkill,
   listMyChangeRequests,
   listOpenChangeRequests,
@@ -69,7 +69,7 @@ export function useLibraryData(): LibraryData {
       const [ownership, crs, mine, details] = await Promise.all([
         skills.length
           ? fetchFileAccessBatch(
-              DEFAULT_WORKSPACE_ID,
+              defaultWorkspaceId(),
               skills.map((s) => `${s.path}/SKILL.md`),
             ).catch(() => ({ results: {} as Record<string, boolean> }))
           : Promise.resolve({ results: {} as Record<string, boolean> }),

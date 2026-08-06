@@ -24,7 +24,7 @@ const apiMock = vi.hoisted(() => ({
   approvePrFile: vi.fn(),
 }));
 vi.mock('../services/library.api', () => ({
-  DEFAULT_WORKSPACE_ID: 'target-company-state',
+  defaultWorkspaceId: () => 'target-company-state',
   getSkill: apiMock.getSkill,
   getSkillFile: apiMock.getSkillFile,
   readFileOnBranch: apiMock.readFileOnBranch,

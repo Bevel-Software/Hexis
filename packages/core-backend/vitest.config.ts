@@ -52,6 +52,7 @@ export default defineConfig({
     },
   },
   test: {
+    setupFiles: ['./src/test-setup.ts'],
     include: ['src/**/__tests__/**/*.test.ts'],
     exclude: [
       '**/node_modules/**',

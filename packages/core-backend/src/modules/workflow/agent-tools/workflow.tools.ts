@@ -7,7 +7,9 @@ import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
 
-const PROTECTED_INLINE = [...PROTECTED_BRANCHES].map((b) => `\`${b}\``).join(' / ');
+// A function, not a constant: the branch model is applied during boot, and a
+// module-scope capture would freeze this at the empty set that exists before it.
+const protectedInline = () => [...PROTECTED_BRANCHES].map((b) => `\`${b}\``).join(' / ');
 
 // Output sub-schemas for the git-aliased workflow payloads (Branch, Change,
 // ChangeRequestComment, …). Defined once and referenced by the individual tool
@@ -268,7 +270,7 @@ export function registerWorkflowTools(
     name: 'create_branch',
     description:
       'Create a new unprotected draft named `name`, forked from the existing branch `branch`. The ' +
-      `backend rejects protected names (${PROTECTED_INLINE}) and filesystem-invalid names — surface ` +
+      `backend rejects protected names (${protectedInline()}) and filesystem-invalid names — surface ` +
       'those errors verbatim. Convention: `<email-localpart>/<kebab-slug>`. Does NOT switch the ' +
       'agent onto the new draft.',
     // `branch` here is the fork BASE — its own meaning — so skip the generic
