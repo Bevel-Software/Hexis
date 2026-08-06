@@ -286,6 +286,15 @@ export interface AppRegistry {
   /** Extra rows in the explorer's Pinned section (see {@link ExplorerItemDef}). */
   explorerItems: ExplorerItemDef[];
   /**
+   * How many unread items the gear menu's badge should show, if anything is
+   * counting. CORE COUNTS NOTHING: the feedback inbox behind that badge is an
+   * enterprise module, and core polled its endpoint every thirty seconds
+   * regardless — a guaranteed 404 on every core deployment, forever, filling
+   * the console of the one screen an operator looks at when something is
+   * wrong. Absent means no badge and, more to the point, no request.
+   */
+  adminUnreadCount?: (since: string | null) => Promise<number>;
+  /**
    * Static override of the change-request port. Overrides that need runtime
    * state (e.g. the chat dispatch) should instead shadow
    * {@link CrCreationPortContext} from one of the `providers` wrappers.
