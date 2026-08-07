@@ -279,8 +279,7 @@ export function GroupsSidebar({
             onClick={onFinishSetup}
             className="mt-2 rounded-sm border-t border-line px-2.5 pt-3.5 text-left text-meta text-ink-faint hover:text-ink"
           >
-            {attentionCount} {attentionCount === 1 ? 'integration needs' : 'integrations need'} setup
-            — finish now
+            {attentionCount} {attentionCount === 1 ? 'integration needs' : 'integrations need'} setup. Finish now
           </button>
         )}
     </>

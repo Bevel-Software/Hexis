@@ -836,7 +836,7 @@ function FileTreeNode({
         )}
         style={{ paddingLeft }}
         onClick={() => suggestions.open(entry.relativePath, suggestedCr)}
-        title="Proposed by you — opens the change request"
+        title="Proposed by you: opens the change request"
       >
         <CaretSlot show={false} />
         <span className="truncate">{entry.name}</span>

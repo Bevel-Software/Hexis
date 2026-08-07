@@ -73,7 +73,7 @@ export function AppSwitcher() {
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="flex min-w-0 items-center gap-1 px-1.5 py-1 rounded hover:bg-hover text-ink"
-        title={activeApp ? `Switch app — currently ${activeApp.label}` : 'Switch app'}
+        title={activeApp ? `Switch app. Currently ${activeApp.label}` : 'Switch app'}
         aria-label="Switch app"
         aria-haspopup="menu"
         aria-expanded={open}

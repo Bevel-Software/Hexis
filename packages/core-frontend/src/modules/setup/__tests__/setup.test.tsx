@@ -171,7 +171,7 @@ describe('SetupScreen', () => {
     ]);
     const token = screen.getByLabelText('Access token');
     expect(token).toHaveValue('');
-    expect(token).toHaveAttribute('placeholder', 'Saved — type to replace');
+    expect(token).toHaveAttribute('placeholder', 'Saved. Type to replace');
   });
 
   /**

@@ -32,7 +32,7 @@ export interface PersonalAddDialogProps {
  */
 export function PersonalAddDialog({ name, existingSkills, onClose }: PersonalAddDialogProps) {
   const toast = useLibraryToast();
-  const prompt = `Help me build a new skill or tool at Bevel. Keep it to myself for now — it goes in my own list, not a group.`;
+  const prompt = `Help me build a new skill or tool at Bevel. Keep it to myself for now. It goes in my own list, not a group.`;
 
   async function copyPrompt() {
     const copied = await copyToClipboard(prompt);
@@ -56,7 +56,7 @@ export function PersonalAddDialog({ name, existingSkills, onClose }: PersonalAdd
       }
     >
       <p className="text-ui text-ink-muted">
-        {`It lands in ${name} — yours alone until you add it to a group.`}
+        {`It lands in ${name}. Yours alone until you add it to a group.`}
       </p>
 
       <NewSkillPanel destination={{ personal: true }} existingSkills={existingSkills} onCreated={onClose} />

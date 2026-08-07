@@ -313,7 +313,7 @@ function BranchPicker({ label, value, branches, onChange }: BranchPickerProps) {
   const valueIsProtected = !!value && (
     branches.find((b) => b.name === value)?.isProtected ?? false
   );
-  const valueDisplay = value ? protectedBranchDisplayName(value) ?? value : '— pick —';
+  const valueDisplay = value ? protectedBranchDisplayName(value) ?? value : 'Select…';
 
   return (
     <div ref={ref} className="relative flex-1 min-w-0">

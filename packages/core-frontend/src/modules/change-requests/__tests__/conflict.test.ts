@@ -4,7 +4,7 @@ import { conflictResolutionPrompt } from '../utils/conflict';
 
 const cr = {
   number: 12,
-  title: 'Changes from Razvan — Knowledge',
+  title: 'Changes from Razvan. Knowledge',
   branch: 'suggestions/razvan/knowledge',
   base: 'main',
 } as PullRequestSummary;
@@ -34,7 +34,7 @@ describe('conflictResolutionPrompt', () => {
   });
 });
 
-describe('conflictResolutionPrompt — untrusted metadata', () => {
+describe('conflictResolutionPrompt: untrusted metadata', () => {
   /**
    * Two constraints that rule each other's easy fix out. Lossy sanitising
    * breaks REAL refs — git accepts `feature@v2`, and an agent sent to

@@ -1,6 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { groupOfPath } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
 import { useToolPage } from '../../hooks/useToolPage';
 import { LIBRARY_ROOT } from '../../routes/library-paths';
@@ -81,7 +80,6 @@ export function ToolPage() {
   }
 
   const tool = page.tool;
-  const group = groupOfPath(tool.path);
 
   return (
     <Article>
@@ -101,9 +99,6 @@ export function ToolPage() {
       <header className="mt-4 flex items-start gap-4">
         <ToolLogo slug={tool.slug} name={tool.name} size="lg" className="mt-1" />
         <div className="min-w-0 flex-1">
-          <p className="text-label font-semibold uppercase text-ink-faint">
-            {group ? `Tool · ${group}` : 'Tool'}
-          </p>
           <h1 className="text-display font-semibold text-ink">{tool.name}</h1>
           {page.detail?.description && (
             <p className="mt-1.5 max-w-[56ch] text-lede text-ink-muted">

@@ -130,7 +130,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('RootLanding — the one-time greeting', () => {
+describe('RootLanding: the one-time greeting', () => {
   it('sends a brand-new account to the welcome page', () => {
     mount(landingRoutes);
     expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
@@ -446,7 +446,7 @@ describe('ConnectAgentPill', () => {
     );
   });
 
-  it('the × concludes — same field as Done — and the pill goes', async () => {
+  it('the × concludes: same field as Done. And the pill goes', async () => {
     mountPill();
     await userEvent.click(screen.getByRole('button', { name: /^Dismiss/ }));
     expect(authFetchMock).toHaveBeenCalledWith(

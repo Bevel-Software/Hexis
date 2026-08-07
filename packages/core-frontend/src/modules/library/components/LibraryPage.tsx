@@ -74,7 +74,7 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
         <div>
           <h1 className="text-display font-semibold">{headingFor(filter)}</h1>
           <p className="mt-0.5 text-ui text-ink-muted">
-            {visible.length} {visible.length === 1 ? 'item' : 'items'}
+            {data.loading ? '…' : `${visible.length} ${visible.length === 1 ? 'item' : 'items'}`}
           </p>
         </div>
         <TextField

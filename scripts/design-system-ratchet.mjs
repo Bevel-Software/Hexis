@@ -40,6 +40,9 @@ const RULES = {
   // \b silently made this rule match nothing.
   'off-scale-font-size': /\btext-\[[0-9.]+px\]/g,
   'bare-rounded': /\brounded(?![-\w[])/g,
+  // Status colours must come from the tokens (danger/ok/wait + -soft), not raw Tailwind.
+  'raw-status-palette':
+    /\b(?:text|bg|border|ring|divide|placeholder|from|via|to|outline|decoration|shadow|accent|caret|fill|stroke)-(?:red|rose|pink|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia)-\d{2,3}\b/g,
 };
 
 /** Files the design system itself owns — they legitimately hold raw values. */

@@ -207,7 +207,7 @@ describe('Toolbar', () => {
     expect(toggleChat).toHaveBeenCalledTimes(1);
   });
 
-  it('renders the profile trigger but NO branch picker — the core toolbar carries only registry items', () => {
+  it('renders the profile trigger but NO branch picker. The core toolbar carries only registry items', () => {
     renderToolbar();
     expect(screen.getByRole('button', { name: 'Test User' })).toBeInTheDocument();
     // The branch switcher left the core toolbar: it is an enterprise

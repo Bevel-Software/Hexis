@@ -39,7 +39,7 @@ export function ReviewPanelSurface() {
     <button
       type="button"
       onClick={() => setReviewPanelOpen(true)}
-      className="absolute bottom-4 right-4 z-20 flex items-center gap-2 px-3 py-2 rounded-full shadow-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-medium"
+      className="absolute bottom-4 right-4 z-20 flex items-center gap-2 px-3 py-2 rounded-full shadow-lg bg-ok hover:bg-ok/90 text-white text-xs font-medium"
       title="Review the agent's pending changes"
     >
       <Eye size={14} />

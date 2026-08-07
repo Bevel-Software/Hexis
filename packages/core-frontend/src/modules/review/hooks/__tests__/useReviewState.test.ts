@@ -27,7 +27,7 @@ function mkSession(paths: string[]): ReviewSession {
   return { branchName: 'main', baselineRef: '', createdAt: '', changes: paths.map(mkChange) };
 }
 
-describe('useReviewState — optimistic reject', () => {
+describe('useReviewState: optimistic reject', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });

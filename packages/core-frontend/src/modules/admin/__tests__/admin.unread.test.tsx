@@ -44,7 +44,7 @@ afterEach(() => vi.unstubAllGlobals());
  * seconds anyway — a guaranteed 404 on every core deployment, forever, filling
  * the console of the one screen an operator opens when something is wrong.
  */
-describe('AdminProvider — the unread badge', () => {
+describe('AdminProvider: the unread badge', () => {
   it('makes no request at all when nothing is counting', async () => {
     renderWith(makeRegistry({}));
     await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('0'));

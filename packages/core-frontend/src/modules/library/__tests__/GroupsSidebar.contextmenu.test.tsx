@@ -45,7 +45,7 @@ const nav = () => screen.getByRole('navigation', { name: 'Library groups' });
 const rightClick = (el: Element, at = { clientX: 120, clientY: 240 }) =>
   fireEvent.contextMenu(el, at);
 
-describe('GroupsSidebar — right-click', () => {
+describe('GroupsSidebar: right-click', () => {
   it('reports a group row with its filter, its name and the pointer', () => {
     const { onContextMenu } = renderSidebar();
     const gtm = screen.getByRole('button', { name: /^GTM/ });
@@ -153,7 +153,7 @@ describe('GroupsSidebar — right-click', () => {
     expect(event.defaultPrevented).toBe(false);
   });
 
-  it('still navigates on a left click — the menu changes nothing about selection', () => {
+  it('still navigates on a left click. The menu changes nothing about selection', () => {
     const { onSelect, onContextMenu } = renderSidebar();
     fireEvent.click(screen.getByRole('button', { name: /^GTM/ }));
     expect(onSelect).toHaveBeenCalledWith({ kind: 'group', group: 'GTM' });

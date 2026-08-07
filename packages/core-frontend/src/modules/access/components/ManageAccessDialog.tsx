@@ -693,7 +693,7 @@ export function ManageAccessDialog({
         // picked (e.g. only "Can download"): record it as a failure so the chip
         // stays visible and the user is told why, rather than a no-op clear.
         if (isEveryoneRole(principal) && verbsForPrincipal.length === 0) {
-          failures.push(`${label}: "Everyone" can only be granted read access — select "Can read".`);
+          failures.push(`${label}: "Everyone" can only be granted read access. Select "Can read".`);
           continue;
         }
         for (const verb of verbsForPrincipal) {
@@ -1001,7 +1001,7 @@ export function ManageAccessDialog({
           // membership, the everyone policy, or admin rescue).
           <span
             className="shrink-0 text-detail text-ink-faint"
-            title="Granted via a role or policy — manage it there"
+            title="Granted via a role or policy. Manage it there"
           >
             {summarizeVerbs(p.verbs)}
           </span>
@@ -1305,7 +1305,7 @@ export function ManageAccessDialog({
             {directRows.length === 0 ? (
               <p className="py-2 text-ui text-ink-muted">
                 {inheritedRows.length > 0
-                  ? 'No one is granted directly here — everyone below inherits access from a parent folder.'
+                  ? 'No one is granted directly here. Everyone below inherits access from a parent folder.'
                   : 'No explicit grants at this path.'}
               </p>
             ) : (

@@ -119,18 +119,18 @@ beforeEach(() => {
   libraryMock.getSkill.mockReset().mockResolvedValue({ allowedTools: [] });
 });
 
-describe('ToolPage — frame', () => {
-  it('loads, then shows the kicker with the group, the title, the lede and the ownerline', async () => {
+describe('ToolPage: frame', () => {
+  it('loads, then shows the title, the lede and the ownerline, with no kicker', async () => {
     renderPage();
     expect(screen.getByText('Loading…')).toBeInTheDocument();
 
     expect(await screen.findByRole('heading', { name: 'heyreach', level: 1 })).toBeInTheDocument();
-    expect(screen.getByText('Tool · GTM')).toBeInTheDocument();
+    expect(screen.queryByText(/Tool · /)).toBeNull();
     expect(await screen.findByText('Runs LinkedIn outreach campaigns.')).toBeInTheDocument();
     expect(screen.getByText('Managed by the Admins.')).toBeInTheDocument();
   });
 
-  it('drops the group from the kicker for a legacy ungrouped path', async () => {
+  it('shows no kicker for a legacy ungrouped path either', async () => {
     secretsMock.listToolSecrets.mockResolvedValue([
       { ...GITHUB, slug: 'slack', name: 'slack', path: 'Tools/slack.tool' },
     ]);
@@ -138,7 +138,7 @@ describe('ToolPage — frame', () => {
     renderPage({ slug: 'slack' });
 
     await screen.findByRole('heading', { name: 'slack', level: 1 });
-    expect(screen.getByText('Tool')).toBeInTheDocument();
+    expect(screen.queryByText(/^Tool$/)).toBeNull();
     expect(screen.queryByText(/Tool · /)).toBeNull();
   });
 
@@ -187,7 +187,7 @@ describe('ToolPage — frame', () => {
   });
 });
 
-describe('ToolPage — capabilities', () => {
+describe('ToolPage: capabilities', () => {
   it('lists each capability, falling back to its name when it has no description', async () => {
     renderPage();
     expect(
@@ -206,7 +206,7 @@ describe('ToolPage — capabilities', () => {
   });
 });
 
-describe('ToolPage — powers these skills', () => {
+describe('ToolPage: powers these skills', () => {
   it('links each matching skill at the reserved skill route', async () => {
     libraryMock.listSkills.mockResolvedValue([
       { name: 'outreach', description: '', path: 'Groups/GTM/outreach' },
@@ -241,7 +241,7 @@ describe('ToolPage — powers these skills', () => {
   });
 });
 
-describe('ToolPage — connection', () => {
+describe('ToolPage: connection', () => {
   it('says there is nothing to set up when the tool declares no variables', async () => {
     renderPage();
     expect(await screen.findByText('Nothing to set up')).toBeInTheDocument();
@@ -275,7 +275,7 @@ describe('ToolPage — connection', () => {
   });
 });
 
-describe('ToolPage — manage access', () => {
+describe('ToolPage: manage access', () => {
   it('offers none, to anyone, including an admin', async () => {
     // Access is decided at the GROUP. A tool inherits its folder's rules, so an
     // editor here would either duplicate the group's or quietly write a
@@ -287,7 +287,7 @@ describe('ToolPage — manage access', () => {
   });
 });
 
-describe('ToolPage — OAuth round-trip', () => {
+describe('ToolPage: OAuth round-trip', () => {
   it('announces a successful sign-in and consumes the fragment', async () => {
     window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach#authorized=sec_1');
     renderPage();

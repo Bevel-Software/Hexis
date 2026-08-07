@@ -73,7 +73,7 @@ export function SkillFileEditor({
 
   async function submit() {
     if (unchanged) {
-      setError('Nothing changed yet — edit the text first.');
+      setError('Nothing changed yet: edit the text first.');
       return;
     }
     setBusy(true);
@@ -119,7 +119,7 @@ export function SkillFileEditor({
       <div className="flex flex-wrap items-center gap-2 border-t border-line px-3 py-2.5">
         <span className="mr-auto text-meta text-ink-faint">
           {mode === 'edit'
-            ? 'Saves for everyone — agents pick it up the next time they connect.'
+            ? 'Saves for everyone. Agents pick it up the next time they connect.'
             : `Nothing changes until ${owner} approves it.`}
         </span>
         <Button variant="quiet" size="sm" onClick={onCancel} disabled={busy}>

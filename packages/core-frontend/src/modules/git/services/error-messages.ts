@@ -23,7 +23,7 @@ export const NO_SHARED_HISTORY_RECOVERY_PROMPT = (head: string, base: string): s
     `My draft "${head}" can't be proposed because it doesn't share history with "${base}".`,
     'It was likely started from an unrelated point or outside the app.',
     'Please investigate which protected branch it should have been forked from,',
-    'then either recreate the draft on top of that branch or rebase it onto the right starting point —',
+    'then either recreate the draft on top of that branch or rebase it onto the right starting point:',
     "whichever preserves my edits. Then I'll share the changes again.",
   ].join(' ');
 };
@@ -76,7 +76,7 @@ export function parseGitError(err: unknown): GitErrorInfo {
 function friendlyNoSharedHistoryMessage(base: string): string {
   const baseName = protectedBranchDisplayName(base) ?? base;
   return (
-    `This draft doesn't share history with the ${baseName} — it was likely started ` +
+    `This draft doesn't share history with the ${baseName}. It was likely started ` +
     `from an unrelated point or outside the app. The assistant can investigate and ` +
     `move your edits onto the right starting point so you can share them.`
   );
@@ -131,7 +131,7 @@ export function friendlyGitError(err: unknown): string {
     const [, branch, action] = protectedMatch;
     switch (action) {
       case 'creating a protected branch':
-        return `The name "${branch}" is reserved — it's an official version.`;
+        return `The name "${branch}" is reserved: it's an official version.`;
       case 'deleting a protected branch':
         return `"${branch}" is an official version and can't be deleted.`;
       case 'opening a PR from a protected branch':

@@ -16,7 +16,7 @@ const FIELDS: Record<
 > = {
   kbRepoUrl: {
     label: 'Repository address',
-    help: 'Where your knowledge base is stored. Copy the address from your repository page — GitHub, GitLab, Bitbucket and Azure DevOps all work. A brand-new empty repository is fine.',
+    help: 'Where your knowledge base is stored. Copy the address from your repository page. GitHub, GitLab, Bitbucket and Azure DevOps all work. A brand-new empty repository is fine.',
     placeholder: 'https://github.com/acme/knowledge-base.git',
   },
   gitToken: {
@@ -30,13 +30,13 @@ const FIELDS: Record<
     // expects beside a token, so it is filled in automatically and only
     // surfaces under Advanced for hosts we cannot recognise.
     label: 'Token username',
-    help: 'A fixed value the git host expects next to the token — not your account name. Filled in automatically for known hosts; only change it for a self-hosted server.',
+    help: 'A fixed value the git host expects next to the token. Not your account name. Filled in automatically for known hosts; only change it for a self-hosted server.',
     placeholder: 'x-access-token',
     advanced: true,
   },
   kbDirName: {
     label: 'Folder name',
-    help: 'What the knowledge base folder is called. Cosmetic — leave it as it is.',
+    help: 'What the knowledge base folder is called. Cosmetic. Leave it as it is.',
     placeholder: 'knowledge-base',
     advanced: true,
   },
@@ -48,13 +48,13 @@ const FIELDS: Record<
   },
   protectedBranches: {
     label: 'Branches that need approval',
-    help: 'Nobody can change these directly — edits arrive as a request someone approves. Separate several with commas. The main branch has to be one of them.',
+    help: 'Nobody can change these directly. Edits arrive as a request someone approves. Separate several with commas. The main branch has to be one of them.',
     placeholder: 'main',
     advanced: true,
   },
   oidcIssuerUrl: {
     label: 'Provider address',
-    help: 'From your identity provider — Entra, Okta, Google Workspace, Auth0 and others all publish one.',
+    help: 'From your identity provider. Entra, Okta, Google Workspace, Auth0 and others all publish one.',
     placeholder: 'https://login.microsoftonline.com/<tenant>/v2.0',
   },
   oidcClientId: {
@@ -79,7 +79,7 @@ const FIELDS: Record<
   },
   allowedEmailDomains: {
     label: 'Allowed email domains',
-    help: 'Only people with an address at these domains can sign in this way. Separate several with commas. Leave blank to allow any address — safe with a provider that only serves your organisation, risky with one that does not.',
+    help: 'Only people with an address at these domains can sign in this way. Separate several with commas. Leave blank to allow any address. Safe with a provider that only serves your organisation, risky with one that does not.',
     placeholder: 'example.com',
   },
 };
@@ -98,7 +98,7 @@ const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[]
     id: 'knowledge-base',
     title: 'Knowledge base',
     blurb:
-      'Where everything is stored. Connect a git repository — an empty one is fine, it will be set up for you — and test it; the rest fills itself in.',
+      'Where everything is stored. Connect a git repository. An empty one is fine, it will be set up for you. And test it; the rest fills itself in.',
   },
   {
     id: 'sign-in',
@@ -312,7 +312,7 @@ export function SetupScreen({ settings, onSaved }: Props) {
             placeholder={
               // A configured secret has no value to show, so the field says
               // what leaving it blank means instead.
-              setting.secret && setting.configured ? 'Saved — type to replace' : copy.placeholder
+              setting.secret && setting.configured ? 'Saved. Type to replace' : copy.placeholder
             }
             value={draft[setting.key] ?? (setting.secret ? '' : (setting.value ?? ''))}
             onChange={(e) => set(setting.key, e.target.value)}
@@ -457,7 +457,7 @@ export function SetupScreen({ settings, onSaved }: Props) {
                       >
                         {test.ok
                           ? test.empty
-                            ? 'Connected. The repository is empty — it will be set up for you on first use.'
+                            ? 'Connected. The repository is empty. It will be set up for you on first use.'
                             : `Connected. Found ${test.branches?.length ?? 0} branch${
                                 test.branches?.length === 1 ? '' : 'es'
                               }.`

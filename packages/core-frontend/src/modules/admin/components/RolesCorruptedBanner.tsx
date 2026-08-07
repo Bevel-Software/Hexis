@@ -61,7 +61,7 @@ export function RolesCorruptedBanner() {
           disabled={running}
           leadingIcon={running ? <Loader2 size={12} className="animate-spin" /> : undefined}
         >
-          {running ? 'Recovering…' : 'Bevel Recovery — only press if you are from Bevel'}
+          {running ? 'Recovering…' : 'Bevel Recovery. Only press if you are from Bevel'}
         </Button>
       </div>
       {rolesConfigErrors.length > 0 && (

@@ -20,7 +20,7 @@ import { ensureKnowledgeSuggestionWorkspace } from '../services/propose.api';
 
 const rae = { email: 'reader@example.com', id: 'u9-1234-abcd' };
 
-describe('ensureKnowledgeSuggestionWorkspace — branch reuse', () => {
+describe('ensureKnowledgeSuggestionWorkspace: branch reuse', () => {
   beforeEach(() => {
     gitApi.createBranch.mockReset();
     gitApi.deleteBranch.mockReset();

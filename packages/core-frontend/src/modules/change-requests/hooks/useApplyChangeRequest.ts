@@ -194,7 +194,7 @@ export function useApplyChangeRequest(opts: {
           timeoutRef.current = setTimeout(() => {
             if (runningRef.current !== cr.number) return;
             fail(cr.number, {
-              reason: 'Applying is taking longer than expected — reload to check whether it landed.',
+              reason: 'Applying is taking longer than expected. Reload to check whether it landed.',
               conflicts: false,
             });
           }, APPLY_RESULT_TIMEOUT_MS);

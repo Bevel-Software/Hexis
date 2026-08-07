@@ -133,7 +133,7 @@ export function LibraryCard({
             <span className="truncate font-semibold text-wait">
               {pending.mine
                 ? 'Waiting on approval'
-                : `From ${pending.authorName} — waiting on you`}
+                : `From ${pending.authorName}: waiting on you`}
             </span>
           )}
           {footNote && (

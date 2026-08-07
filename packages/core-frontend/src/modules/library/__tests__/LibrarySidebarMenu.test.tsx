@@ -157,7 +157,7 @@ async function openMenuOn(name: RegExp | string) {
   return row;
 }
 
-describe('Library sidebar — right-click, end to end', () => {
+describe('Library sidebar: right-click, end to end', () => {
   beforeEach(() => {
     dataMock.useLibraryData.mockReturnValue(CATALOG);
     groupsMock.listGroups.mockResolvedValue(GROUPS);

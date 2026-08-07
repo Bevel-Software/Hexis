@@ -72,7 +72,7 @@ describe('SidebarToggle', () => {
   });
 });
 
-describe('SidebarFrame — collapsed', () => {
+describe('SidebarFrame: collapsed', () => {
   it('stays reachable while showing', () => {
     const aside = frame();
     expect(aside).not.toHaveAttribute('inert');
@@ -122,7 +122,7 @@ describe('SidebarFrame — collapsed', () => {
   });
 });
 
-describe('SidebarFrame — resize', () => {
+describe('SidebarFrame: resize', () => {
   function grip() {
     render(
       <SidebarFrame label="Library groups">
@@ -182,7 +182,7 @@ describe('SidebarFrame — resize', () => {
  * how the lock used to outlive the drag that set it and leave the entire app
  * un-selectable under a resize cursor with no way back.
  */
-describe('SidebarFrame — drag cleanup', () => {
+describe('SidebarFrame: drag cleanup', () => {
   beforeEach(() => {
     document.body.style.cursor = '';
     document.body.style.userSelect = '';

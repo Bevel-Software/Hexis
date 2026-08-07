@@ -188,7 +188,7 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
                 : selected ? review.rejectOne(selected.path) : Promise.resolve(),
             )
           }
-          title={applyToAll ? 'Delete every pending change — restore the originals' : 'Delete this change — restore the original'}
+          title={applyToAll ? 'Delete every pending change. Restore the originals' : 'Delete this change. Restore the original'}
           className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium text-ink hover:text-red-700 hover:bg-red-100 disabled:opacity-40"
         >
           <Trash2 size={12} />
@@ -224,7 +224,7 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
           <button
             type="button"
             onClick={onClose}
-            title="Close review — changes stay pending"
+            title="Close review: changes stay pending"
             aria-label="Close review"
             className="ml-1 p-1 rounded text-ink-muted hover:text-ink hover:bg-hover shrink-0"
           >

@@ -197,7 +197,7 @@ async function openAliceMenu(
  * menu. The menus are `fixed` now, which means the placement is computed
  * rather than inherited, and has to keep up with everything that moves it.
  */
-describe('ManageAccessDialog — where an open menu is placed', () => {
+describe('ManageAccessDialog: where an open menu is placed', () => {
   it('escapes the dialog body by going fixed, at coordinates measured off the trigger', async () => {
     const user = userEvent.setup();
     menuHeight = 150;

@@ -37,7 +37,7 @@ function mkBranch(name: string): BranchInfo {
   return { name, isProtected: false, ahead: 0, behind: 0, hasRemote: true };
 }
 
-describe('useGitState — optimistic deleteBranch', () => {
+describe('useGitState: optimistic deleteBranch', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Status fetch isn't what these tests care about; resolve it so the

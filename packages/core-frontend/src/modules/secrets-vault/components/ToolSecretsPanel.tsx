@@ -35,7 +35,7 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
         {tool.setup?.kind !== 'oauth-manual' && (
           <p className="text-detail text-ink-muted">
             {tool.setup?.kind === 'open' ? (
-              <>No setup needed — this server is open and needs no credentials.</>
+              <>No setup needed: this server is open and needs no credentials.</>
             ) : (
               <>
                 This tool declares no <Chip>variables</Chip>. Add a <Chip>variables</Chip> block to
@@ -68,7 +68,7 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
       {userVars.length > 0 && (
         <VarGroup
           title="Set by you"
-          hint="Your own value — not shared with other users."
+          hint="Your own value: not shared with other users."
           slug={tool.slug}
           vars={userVars}
           editable

@@ -219,7 +219,7 @@ export function AdminRolesPage() {
 
   if (!isAdmin) {
     return (
-      <PageShell title="Roles & Members" width="4xl">
+      <PageShell title="Roles & Members">
         <div className="text-sm text-ink-muted">
           Admins only. Ask an admin if you need a role or membership changed.
         </div>
@@ -230,7 +230,7 @@ export function AdminRolesPage() {
   return (
     <PageShell
       title="Roles & Members"
-      width="4xl"
+     
       actions={<NewRoleControl onCreate={createOptimistic} />}
     >
       {loading && roster.length === 0 ? (

@@ -230,7 +230,7 @@ function ToolCard({ tool }: { tool: UtcpTool }) {
               </div>
             ) : (
               <p className="text-xs text-ink-muted leading-snug">
-                Transport <code>{tool.tool_call_template?.call_template_type ?? 'unknown'}</code> — invoke it with a UTCP
+                Transport <code>{tool.tool_call_template?.call_template_type ?? 'unknown'}</code>. Invoke it with a UTCP
                 client (or via the MCP server at <code>/api/mcp</code>), not a plain HTTP request.
               </p>
             )}
@@ -338,7 +338,7 @@ export function ToolsExplorerPage() {
 
         <div className="bg-white border border-line rounded-lg p-3 space-y-2">
           <label className="block text-xs font-medium text-ink">
-            Browse as a specific external API key (<code>{'<tenant>_…'}</code>) — optional
+            Browse as a specific external API key (<code>{'<tenant>_…'}</code>). Optional
           </label>
           <div className="flex gap-2">
             <input

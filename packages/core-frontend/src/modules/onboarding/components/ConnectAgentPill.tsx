@@ -58,7 +58,7 @@ function RoutedConnectAgentPill() {
   function dismiss() {
     onboarding.markDone();
     const said =
-      'Reminder dismissed — the setup lives in your profile menu, under External agent access.';
+      'Reminder dismissed: the setup lives in your profile menu, under External agent access.';
     // Said twice, on purpose, because the pill is about to unmount from under
     // the pointer AND from under keyboard focus. The toast is the visible
     // receipt but only exists inside the Library's provider; the live region
@@ -109,7 +109,7 @@ function RoutedConnectAgentPill() {
       </button>
       <button
         type="button"
-        aria-label="Dismiss — the setup stays in your profile menu, under External agent access"
+        aria-label="Dismiss: the setup stays in your profile menu, under External agent access"
         title="Dismiss"
         onClick={dismiss}
         className={cn(

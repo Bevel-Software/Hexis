@@ -96,7 +96,7 @@ export function NewSkillPanel({
       if (created.direct) {
         // Straight into the new skill's page, editor open: an empty SKILL.md
         // is an invitation to write, not a page to admire.
-        toast(`Created ${trimmed} — opening it.`, 'ok');
+        toast(`Created ${trimmed}: opening it.`, 'ok');
         navigate(pathForSkill(trimmed), { state: { startEditing: true } });
       } else {
         // A proposal has no page yet — the skill exists only on the author's

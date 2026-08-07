@@ -26,7 +26,7 @@ import { AddToGroupDialog } from '../components/AddToGroupDialog';
 
 const ADD_PROMPT =
   'Help me build a new skill or tool and add it to the GTM group at Bevel. ' +
-  'I run it, so it goes in directly — no review step.';
+  'I run it, so it goes in directly. No review step.';
 
 function workspace(kbDirName: string | null) {
   return { workspaceId: 'target-company-state', kbDirName } as unknown as WorkspaceContextValue;
@@ -111,7 +111,7 @@ describe('AddToGroupDialog', () => {
     expect(screen.getByRole('heading', { name: 'Add a skill or tool to GTM' })).toBeInTheDocument();
     expect(
       screen.getByText(
-        'Two ways in. Either way it joins GTM — everyone in the group gets it the next time their agent connects.',
+        'Two ways in. Either way it joins GTM. Everyone in the group gets it the next time their agent connects.',
       ),
     ).toBeInTheDocument();
   });

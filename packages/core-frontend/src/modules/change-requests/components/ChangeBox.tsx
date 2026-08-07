@@ -162,7 +162,7 @@ export function ChangeBox({
             <span className="w-full text-meta text-ink-muted">
               {mine
                 ? 'It has to be redone against the current text before it can land.'
-                : `It cannot be approved as it stands — it has to be redone against the current text.`}
+                : `It cannot be approved as it stands. It has to be redone against the current text.`}
             </span>
             {conflictPrompt && <ConflictHelp prompt={conflictPrompt} />}
           </>
@@ -193,7 +193,7 @@ export function ChangeBox({
             </span>
             {!busy && (
               <span className="text-meta text-ink-faint">
-                {canDecide ? 'You decide — you own this.' : `Waiting on ${owner ?? 'the owner'}`}
+                {canDecide ? 'You decide. You own this.' : `Waiting on ${owner ?? 'the owner'}`}
               </span>
             )}
             {/* What the server said, verbatim. The gate names the files and the

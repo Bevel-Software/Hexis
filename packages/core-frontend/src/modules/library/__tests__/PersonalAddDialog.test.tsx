@@ -98,10 +98,10 @@ describe('PersonalAddDialog', () => {
     const { field } = renderDialog();
     expect(field()).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
-    expect(screen.getByText(/yours alone until you add it to a group/)).toBeInTheDocument();
+    expect(screen.getByText(/Yours alone until you add it to a group/)).toBeInTheDocument();
   });
 
-  it('creates the skill as PERSONAL — destination resolution belongs to the api layer', async () => {
+  it('creates the skill as PERSONAL. Destination resolution belongs to the api layer', async () => {
     // The dialog does not know (or guess) the personal folder's name: it
     // says `personal: true`, and `createEmptySkill` ensures the folder via
     // the provisioning endpoint before the write.
@@ -119,7 +119,7 @@ describe('PersonalAddDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('creates it directly — a skill of your own is never sent for review', async () => {
+  it('creates it directly: a skill of your own is never sent for review', async () => {
     // The whole point of the personal list: the ensured personal folder's
     // access.md names the creator as owner, so there is nobody to review it
     // and nothing to wait for.

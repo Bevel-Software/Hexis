@@ -71,7 +71,7 @@ describe('KbPageHeader', () => {
 
   // `canWrite` is `boolean | null`, and null means "not known yet". Treating it
   // as false would flicker the button out on every file open.
-  it('hides Edit only on a hard false — null still renders it', () => {
+  it('hides Edit only on a hard false. Null still renders it', () => {
     const { unmount } = renderHeader({ canWrite: false });
     expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
     unmount();
@@ -120,7 +120,7 @@ describe('KbPageHeader', () => {
 
   // Copying a reference to this page is one errand, and Share owns it. Two
   // menus offering near-identical copies is how someone pastes the wrong one.
-  it('does not repeat Copy path in the overflow — Share owns copying a reference', async () => {
+  it('does not repeat Copy path in the overflow. Share owns copying a reference', async () => {
     const user = userEvent.setup();
     renderHeader();
     await user.click(screen.getByRole('button', { name: 'More actions' }));

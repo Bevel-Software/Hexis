@@ -91,7 +91,7 @@ describe('LibraryCard', () => {
   it('says a proposed skill is in review, and who it is between', () => {
     card({ pending: { authorName: 'Ali Raza', mine: false } });
     expect(screen.getByText('In review')).toBeInTheDocument();
-    expect(screen.getByText(/From Ali Raza — waiting on you/)).toBeInTheDocument();
+    expect(screen.getByText(/From Ali Raza: waiting on you/)).toBeInTheDocument();
 
     cleanup();
     card({ pending: { authorName: 'Ali Raza', mine: true } });

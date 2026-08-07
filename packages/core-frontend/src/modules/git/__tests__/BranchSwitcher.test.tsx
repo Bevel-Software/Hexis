@@ -183,7 +183,7 @@ describe('BranchSwitcher dropdown', () => {
 // (the orphan-cleanup mental model). Now the picker also offers delete for
 // drafts authored by the current user (per `<email-localpart>/...` naming),
 // and routes the destructive remote-delete through a confirm dialog.
-describe('BranchSwitcher — author-can-delete affordance', () => {
+describe('BranchSwitcher: author-can-delete affordance', () => {
   beforeEach(() => {
     vi.mocked(fetchFileAccess).mockResolvedValue({
       canRead: true,
@@ -274,7 +274,7 @@ describe('BranchSwitcher — author-can-delete affordance', () => {
 // teammates' drafts AND unprefixed CLI branches with no author. Backend gate
 // at `GitService.deleteBranch` is the authoritative check; this suite covers
 // the UI surface only.
-describe('BranchSwitcher — admin-can-delete affordance', () => {
+describe('BranchSwitcher: admin-can-delete affordance', () => {
   beforeEach(() => {
     vi.mocked(fetchFileAccess).mockResolvedValue({
       canRead: true,

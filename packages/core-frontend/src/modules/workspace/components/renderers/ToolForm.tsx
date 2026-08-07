@@ -116,9 +116,9 @@ export function ToolForm({
 
       <Field label="Type">
         <select className={inputCls} disabled={readOnly} value={type} onChange={(e) => setBody({ type: e.target.value })}>
-          <option value="inline">inline — tools embedded in this file</option>
-          <option value="http">http — URL returning a UTCP manual</option>
-          <option value="mcp">mcp — remote MCP server</option>
+          <option value="inline">inline: tools embedded in this file</option>
+          <option value="http">http: URL returning a UTCP manual</option>
+          <option value="mcp">mcp: remote MCP server</option>
         </select>
       </Field>
 

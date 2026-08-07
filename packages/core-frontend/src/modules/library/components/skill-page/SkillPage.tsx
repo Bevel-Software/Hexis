@@ -204,7 +204,7 @@ export function SkillPage() {
    */
   const applying = useApplyChangeRequest({
     onApplied() {
-      toast('Approved — the skill now reads with that change.');
+      toast('Approved: the skill now reads with that change.');
       setRevision((r) => r + 1);
       data.reload();
       // The pane renders `skill.body`, which this hook holds and the merge just
@@ -219,7 +219,7 @@ export function SkillPage() {
       // leaves the failed button live and clickable.
       if (refusal.conflicts) {
         setBlockedCrs((s) => (s.has(number) ? s : new Set(s).add(number)));
-        toast('Blocked — the file changed after this was written.', 'danger');
+        toast('Blocked: the file changed after this was written.', 'danger');
       }
     },
   });
@@ -307,7 +307,7 @@ export function SkillPage() {
     await writeFile(workspace.id, `${workspace.kbDirName}/${fileRepoPath}`, content);
     setEditing(false);
     setRevision((r) => r + 1);
-    toast('Saved — the skill now reads with your change.');
+    toast('Saved: the skill now reads with your change.');
     data.reload();
   }
 
@@ -323,7 +323,7 @@ export function SkillPage() {
     });
     setEditing(false);
     setRevision((r) => r + 1);
-    toast(`Sent to ${ownerName} — nothing changes until they approve it.`);
+    toast(`Sent to ${ownerName}: nothing changes until they approve it.`);
     data.reload();
   }
 
@@ -383,7 +383,6 @@ export function SkillPage() {
     );
   }
 
-  const group = groupOfPath(skill.path);
 
   // The change-request dialog is a full-screen surface, not a layer over this
   // page — rendering both would leave the page's dock and tabs live
@@ -410,9 +409,6 @@ export function SkillPage() {
       {backLink}
 
       <header className="mt-4">
-        <p className="text-label font-semibold uppercase text-ink-faint">
-          {group ? `Skill · ${group}` : 'Skill'}
-        </p>
         <div className="flex items-center gap-3">
           <h1 className="text-display font-semibold text-ink">{skill.name}</h1>
           {owned && (
@@ -515,7 +511,7 @@ export function SkillPage() {
                     onClick={() => setEditing(true)}
                     title={
                       ownCr
-                        ? 'Continue your open proposal — edits update the same change request'
+                        ? 'Continue your open proposal. Edits update the same change request'
                         : "You can't edit this file directly — propose a change for its owners to approve"
                     }
                   >
@@ -622,7 +618,7 @@ function IntegrationsSection({
               <div className="min-w-0">
                 <b className="block text-detail font-semibold text-ink">{t.name}</b>
                 <small className="block text-meta text-ink-faint">
-                  {status.state === 'ok' ? 'Connected — nothing to do' : status.text}
+                  {status.state === 'ok' ? 'Connected. Nothing to do' : status.text}
                 </small>
               </div>
               <div className="ml-auto flex shrink-0 items-center gap-2">

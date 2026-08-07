@@ -101,7 +101,7 @@ export function FileChangeBoxes({
       {applied && (
         <Banner role="status" tone="ok" aria-live="polite" className="mt-3">
           <div className="flex items-center gap-2">
-            <span className="flex-1">Applied — the file now reads with that change.</span>
+            <span className="flex-1">Applied: the file now reads with that change.</span>
             <Button variant="quiet" size="sm" title="Dismiss" onClick={() => setApplied(false)}>
               Dismiss
             </Button>

@@ -183,7 +183,7 @@ export function PullRequestsForMe() {
 
       {expanded && (
         <div className="flex flex-col gap-px overflow-y-auto pb-1.5">
-          {error && <div className="px-1.5 py-2 text-meta text-danger">{error}</div>}
+          {error && <div className="pl-[25px] pr-1.5 py-2 text-meta text-danger">{error}</div>}
           {!error &&
             prs.map((pr) => <PrRow key={pr.number} pr={pr} onOpen={() => setOpenCr(pr)} />)}
         </div>
@@ -228,7 +228,7 @@ function PrRow({ pr, onOpen }: { pr: PullRequestSummary; onOpen(): void }) {
           onOpen();
         }
       }}
-      className="group block cursor-pointer rounded-sm px-[7px] py-1.5 transition-colors hover:bg-hover"
+      className="group block cursor-pointer rounded-sm pl-[25px] pr-[7px] py-1.5 transition-colors hover:bg-hover"
       title={pr.title}
     >
       <div className="flex min-w-0 gap-1.5 text-ui text-ink-muted group-hover:text-ink">
