@@ -31,7 +31,7 @@ export interface NewSkillPanelProps {
 }
 
 /**
- * "Start an empty SKILL.md" — the first of the two doors in both add-dialogs.
+ * "Start an empty SKILL.md", the admin-only first path in both add dialogs.
  *
  * This used to be a link that opened the destination folder in the workspace
  * and left you there. Opening a folder is not creating a skill: you still had
