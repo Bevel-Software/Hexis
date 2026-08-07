@@ -1,12 +1,5 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-  type ReactNode,
-} from 'react';
+import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode,  } from 'react';
+import { LibraryContext } from './library-context';
 import { groupOfPath, isPersonalGroupFolder } from '@bevel-software/platform-shared';
 
 /**
@@ -90,7 +83,6 @@ export interface LibraryContextValue extends LibraryData {
   reloadGroups(): void;
 }
 
-const LibraryContext = createContext<LibraryContextValue | null>(null);
 
 export function LibraryProvider({ children }: { children: ReactNode }) {
   const data = useLibraryData();
@@ -212,17 +204,6 @@ export function useLibrary(): LibraryContextValue {
   const value = useContext(LibraryContext);
   if (!value) throw new Error('useLibrary must be used inside a LibraryProvider');
   return value;
-}
-
-/**
- * The catalog's reload signal, tolerating an absent provider. For leaf
- * components (dialog panels) that only need to ANNOUNCE "the catalog
- * changed" — outside a provider (component tests, future embeddings) the
- * announcement has no audience, and that is fine.
- */
-export function useLibraryReload(): () => void {
-  const value = useContext(LibraryContext);
-  return value?.reload ?? (() => {});
 }
 
 /**

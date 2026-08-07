@@ -451,7 +451,7 @@ export function SkillPage() {
         id={skillPanelId(tabsId)}
         aria-labelledby={skillTabId(tabsId, active)}
       >
-      {editing && editorBase !== null ? (
+      {editing && editorBase !== null && fileAccess.canWrite !== null ? (
         <SkillFileEditor
           file={active}
           base={editorBase}
@@ -493,7 +493,11 @@ export function SkillPage() {
            * fork, never a silent restart from the published text.
            */
           actions={
-            fileAccess.canWrite !== false
+            // Only a RESOLVED verdict earns a button: `null` (lookup in
+            // flight) briefly shows no action rather than an Edit that might
+            // open the wrong mode — a writer's text must never ride the
+            // proposal path just because they clicked before the ACL answered.
+            fileAccess.canWrite === true
               ? rawOnMain !== null && (
                   <Button
                     variant="outline"
@@ -504,7 +508,7 @@ export function SkillPage() {
                     Edit
                   </Button>
                 )
-              : rawOnMain !== null && (
+              : fileAccess.canWrite === false && rawOnMain !== null && (
                   <Button
                     variant="outline"
                     size="tiny"

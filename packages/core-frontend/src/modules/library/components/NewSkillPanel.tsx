@@ -4,7 +4,7 @@ import { Button, Surface, TextField } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
 import { pathForSkill } from '../routes/library-paths';
 import { createEmptySkill } from '../services/library.api';
-import { useLibraryReload } from '../state/library-data';
+import { useLibraryReload } from '../state/library-context';
 import { useLibraryToast } from '../state/toast.context';
 
 /**

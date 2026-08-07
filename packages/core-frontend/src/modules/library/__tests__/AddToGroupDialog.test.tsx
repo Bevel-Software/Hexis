@@ -34,7 +34,12 @@ function workspace(kbDirName: string | null) {
 
 function LocationProbe() {
   const location = useLocation();
-  return <div aria-label="href">{location.pathname}</div>;
+  return (
+    <>
+      <div aria-label="href">{location.pathname}</div>
+      <div aria-label="router-state">{JSON.stringify(location.state)}</div>
+    </>
+  );
 }
 
 function renderDialog(
@@ -177,9 +182,14 @@ describe('AddToGroupDialog: starting an empty SKILL.md', () => {
       ),
     );
     // Lands on the new skill's own LIBRARY page — never bounced to the
-    // Knowledge app — with the editor handed the open signal.
+    // Knowledge app — with the editor handed the open signal IN ROUTER
+    // STATE. Asserted by field, so a renamed or dropped flag fails here
+    // rather than silently landing on a read-only page.
     await waitFor(() =>
       expect(href()).toBe('/skills-and-tools/skills/weekly-report'),
+    );
+    expect(screen.getByLabelText('router-state')).toHaveTextContent(
+      JSON.stringify({ startEditing: true }),
     );
     expect(onClose).toHaveBeenCalledTimes(1);
   });
