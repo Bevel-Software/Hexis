@@ -318,7 +318,7 @@ function NewRoleControl({
             if (e.key === 'Escape') reset();
           }}
           placeholder="Role name"
-          className="text-xs px-2 py-1 border border-line rounded focus:outline-none focus:border-accent w-48"
+          className="text-xs px-2 py-1 border border-line rounded focus:outline-none focus:border-accent w-48 max-w-full min-w-0"
           aria-label="New role name"
         />
         <button
@@ -613,14 +613,14 @@ function RoleCard({
                   }
                 }}
                 disabled={busy}
-                className="text-base font-semibold px-2 py-1 border border-line rounded focus:outline-none focus:border-accent"
+                className="text-base font-semibold px-2 py-1 border border-line rounded focus:outline-none focus:border-accent min-w-0"
                 aria-label="Role name"
               />
               <button
                 type="button"
                 onClick={submitRename}
                 disabled={busy}
-                className="p-1 rounded hover:bg-hover text-ink-muted disabled:opacity-50"
+                className="p-1 rounded hover:bg-hover text-ink-muted disabled:opacity-50 shrink-0"
                 aria-label="Save name"
               >
                 {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
@@ -632,7 +632,7 @@ function RoleCard({
                   setRenaming(false);
                 }}
                 disabled={busy}
-                className="p-1 rounded hover:bg-hover text-ink-muted"
+                className="p-1 rounded hover:bg-hover text-ink-muted shrink-0"
                 aria-label="Cancel rename"
               >
                 <X size={14} />
@@ -693,17 +693,17 @@ function RoleCard({
             return (
               <span
                 key={email}
-                className="inline-flex items-center gap-1.5 pl-1 pr-1.5 py-1 bg-sunken border border-line rounded-full text-xs text-ink"
+                className="inline-flex max-w-full items-center gap-1.5 pl-1 pr-1.5 py-1 bg-sunken border border-line rounded-full text-xs text-ink"
               >
-                <span className="w-5 h-5 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center">
+                <span className="w-5 h-5 shrink-0 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center">
                   {initials(email)}
                 </span>
-                <span className="truncate max-w-[14rem]">{email}</span>
+                <span className="min-w-0 truncate max-w-[14rem]">{email}</span>
                 <button
                   type="button"
                   onClick={() => handleRemoveMember(email)}
                   disabled={busy || renamePending || isLastAdminMember}
-                  className="rounded-full p-0.5 text-ink-faint hover:text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:hover:text-ink-faint disabled:hover:bg-transparent"
+                  className="shrink-0 rounded-full p-0.5 text-ink-faint hover:text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:hover:text-ink-faint disabled:hover:bg-transparent"
                   title={
                     isLastAdminMember
                       ? 'Admin must keep at least one member'
@@ -720,8 +720,11 @@ function RoleCard({
       </div>
 
       {/* Add member — with people autocomplete (Manage Access suggest source). */}
+      {/* The input is capped rather than fixed-width, and its wrapper may shrink,
+          so the row fits the card on a narrow viewport instead of pushing the
+          Add button past the card border. */}
       <div className="mt-3 flex items-center gap-1.5">
-        <div className="relative">
+        <div className="relative flex-1 min-w-0 max-w-[16rem]">
           <input
             type="email"
             value={memberEmail}
@@ -738,12 +741,12 @@ function RoleCard({
             }}
             placeholder="Add member by email"
             disabled={busy || renamePending}
-            className="text-xs px-2 py-1 border border-line rounded focus:outline-none focus:border-accent w-64"
+            className="text-xs px-2 py-1 border border-line rounded focus:outline-none focus:border-accent w-full min-w-0"
             aria-label="Member email"
             autoComplete="off"
           />
           {showSuggest && suggestions.length > 0 && (
-            <ul className="absolute z-10 mt-1 w-72 max-h-56 overflow-auto bg-white border border-line rounded shadow-lg py-1">
+            <ul className="absolute z-10 mt-1 w-full sm:w-72 max-h-56 overflow-auto bg-white border border-line rounded shadow-lg py-1">
               {suggestions.map((p) => (
                 <li key={p.email}>
                   <button
@@ -770,7 +773,7 @@ function RoleCard({
           type="button"
           onClick={() => submitAddMember()}
           disabled={busy || renamePending}
-          className="px-3 py-1 text-xs rounded border border-line hover:bg-hover disabled:opacity-50 flex items-center gap-1"
+          className="shrink-0 px-3 py-1 text-xs rounded border border-line hover:bg-hover disabled:opacity-50 flex items-center gap-1"
         >
           {busy && <Loader2 size={12} className="animate-spin" />}
           Add

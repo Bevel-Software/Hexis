@@ -514,10 +514,14 @@ export function ManageAccessDialog({
       const key = `u:${u.email.toLowerCase()}`;
       let row = rows.get(key);
       if (!row) {
+        const label = u.name || u.email;
         row = {
           key,
-          label: u.name || u.email,
-          sub: u.email,
+          label,
+          // Only a real display name earns the second line — a nameless user
+          // would otherwise render the same email twice, burning a row of the
+          // scarce width on a duplicate.
+          sub: label.toLowerCase() === u.email.toLowerCase() ? undefined : u.email,
           isRole: false,
           isYou: u.email.toLowerCase() === myEmail,
           principal: { kind: 'user', email: u.email, displayName: u.name || u.email },
@@ -956,7 +960,11 @@ export function ManageAccessDialog({
   const renderRow = (p: PrincipalRow) => {
     const tone = avatarTone(p.label);
     return (
-      <div key={p.key} className="flex items-center gap-3 py-2">
+      // Wrapping, with a floor under the name block: on a narrow panel the meta
+      // cluster (via… / verbs / Remove) drops to its own line rather than
+      // squeezing the name to zero width — which left the `Role` badge sitting
+      // on top of the "via …" label and pushed Remove off the panel's edge.
+      <div key={p.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
         {p.isRole ? (
           <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-sunken text-detail font-bold text-ink-muted">
             {initials(p.label)}
@@ -969,8 +977,8 @@ export function ManageAccessDialog({
             {initials(p.label)}
           </span>
         )}
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
+        <div className="min-w-36 flex-1">
+          <div className="flex min-w-0 items-center gap-1.5">
             <span className="truncate text-ui font-medium text-ink">{p.label}</span>
             {p.isYou && <span className="shrink-0 text-ui text-ink-faint">(you)</span>}
             {p.isRole && (
@@ -984,14 +992,16 @@ export function ManageAccessDialog({
         {canManage && p.manage === 'inherited' ? (
           // Inherited from a parent folder — read-only here. Leaf folder name only
           // (full path on hover); Remove opens the "Remove from parent?" flow.
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="ml-auto flex max-w-full shrink-0 items-center gap-2">
             <span
-              className="max-w-40 truncate text-detail italic text-ink-faint"
+              className="min-w-0 max-w-40 truncate text-detail italic text-ink-faint"
               title={p.ancestors.map(folderPath).join(', ')}
             >
               via {p.ancestors.map(folderLabel).join(', ')}
             </span>
-            <span className="text-detail text-ink-faint">{summarizeVerbs(p.verbs)}</span>
+            <span className="whitespace-nowrap text-detail text-ink-faint">
+              {summarizeVerbs(p.verbs)}
+            </span>
             <Button variant="danger" size="tiny" disabled={busy} onClick={() => doRevoke(p)}>
               Remove
             </Button>
@@ -1000,13 +1010,13 @@ export function ManageAccessDialog({
           // No file-backed grant to remove here — managed elsewhere (a group's
           // membership, the everyone policy, or admin rescue).
           <span
-            className="shrink-0 text-detail text-ink-faint"
+            className="ml-auto shrink-0 text-detail text-ink-faint"
             title="Granted via a role or policy. Manage it there"
           >
             {summarizeVerbs(p.verbs)}
           </span>
         ) : canManage ? (
-          <div className="shrink-0">
+          <div className="ml-auto shrink-0">
             <Button
               variant="quiet"
               size="sm"
@@ -1067,7 +1077,9 @@ export function ManageAccessDialog({
             )}
           </div>
         ) : (
-          <span className="shrink-0 text-detail text-ink-muted">{summarizeVerbs(p.verbs)}</span>
+          <span className="ml-auto shrink-0 text-detail text-ink-muted">
+            {summarizeVerbs(p.verbs)}
+          </span>
         )}
       </div>
     );
@@ -1092,11 +1104,15 @@ export function ManageAccessDialog({
 
         {governed && canManage && (
           <div className="mt-3">
-            <div className="relative flex items-stretch gap-1.5">
-              <div className="relative min-w-0 flex-1">
+            {/* `items-start`, not `items-stretch`: the buttons are `rounded-full`,
+                so stretching them to match the chip box turned Share into a
+                circle the moment a chip wrapped the box onto a second line.
+                `flex-wrap` lets them drop below the box rather than crushing it. */}
+            <div className="relative flex flex-wrap items-start gap-1.5">
+              <div className="relative min-w-48 flex-1">
                 {/* A TextField that grew chips: same border, radius and focus
                     treatment as the primitive, wrapped so the chips can wrap. */}
-                <div className="flex h-full w-full flex-wrap items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2 py-1 focus-within:border-transparent focus-within:outline-2 focus-within:-outline-offset-1 focus-within:outline-accent">
+                <div className="flex w-full flex-wrap items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2 py-1 focus-within:border-transparent focus-within:outline-2 focus-within:-outline-offset-1 focus-within:outline-accent">
                   {pickedChips.map((c) => {
                     const label = c.kind === 'role' ? c.role : c.displayName || c.email;
                     return (
@@ -1175,7 +1191,7 @@ export function ManageAccessDialog({
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-full max-w-44"
+                  className="max-w-44"
                   onClick={() => setVerbOpen((o) => !o)}
                   trailingIcon={<ChevronDown size={14} className="shrink-0" />}
                 >
@@ -1295,7 +1311,13 @@ export function ManageAccessDialog({
                   </div>
                 </div>
                 {canManage && (
-                  <Button variant="danger" size="tiny" disabled={busy} onClick={removePublicRead}>
+                  <Button
+                    variant="danger"
+                    size="tiny"
+                    className="shrink-0"
+                    disabled={busy}
+                    onClick={removePublicRead}
+                  >
                     Remove
                   </Button>
                 )}
