@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { activeAppId, useAppRegistry, type AppDef } from '../../../core/registry';
+import { activeAppId, useActiveAppId, useAppRegistry, type AppDef } from '../../../core/registry';
 
 const MENU_ID = 'app-switcher-menu';
 
@@ -32,7 +32,13 @@ export function AppSwitcher() {
     () => [...registry.apps].sort((a, b) => (a.order ?? 100) - (b.order ?? 100)),
     [registry],
   );
-  const activeId = activeAppId(apps, location.pathname);
+  // The shell's answer first: it folds in surfaces that CLAIM an app beyond
+  // the path-prefix rule (a skill page at its canonical /workspace URL claims
+  // Skills & Tools — see AppClaimContext). The local computation is the
+  // fallback for standalone renders, where the context is undefined and the
+  // prefix rule is all there is.
+  const shellActiveId = useActiveAppId();
+  const activeId = shellActiveId ?? activeAppId(apps, location.pathname);
   // Named next to the brand so the toolbar answers "which app am I in?"
   // without opening the menu. Undefined on the standalone settings pages,
   // where no app is active and the trigger is the brand alone.
