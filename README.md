@@ -219,11 +219,4 @@ can be left unset and configured in the app at first sign-in (env always wins).
 | `apps/server` | standalone core backend shell |
 | `apps/web` | standalone core SPA shell (Vite) |
 
-## Part of the Bevel platform
-
-This repo is the open-source base of the Bevel platform. The commercial
-platform layers chat/agents, connectors, routines, the knowledge-graph system
-and more on top of the extension points exposed here (`CorePorts`,
-`ServerExtensions`, workflow lifecycle hooks, and the frontend `AppRegistry`).
-
 License: [Apache-2.0](LICENSE)
