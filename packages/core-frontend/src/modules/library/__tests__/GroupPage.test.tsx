@@ -27,6 +27,12 @@ const groupsMock = vi.hoisted(() => ({
   reconcileJoinRequest: vi.fn(),
   requestGroupAccess: vi.fn(),
 }));
+const libApiMock = vi.hoisted(() => ({ removeLibraryItem: vi.fn() }));
+vi.mock('../services/library.api', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  removeLibraryItem: libApiMock.removeLibraryItem,
+}));
+
 vi.mock('../services/groups.api', () => ({
   listGroups: groupsMock.listGroups,
   listJoinRequests: groupsMock.listJoinRequests,
@@ -171,6 +177,29 @@ describe('GroupPage', () => {
     groupsMock.listJoinRequests.mockResolvedValue([]);
     groupsMock.reconcileJoinRequest.mockResolvedValue(false);
     groupsMock.requestGroupAccess.mockResolvedValue(undefined);
+  });
+
+  it('lets a group MANAGER remove a skill, behind a confirm that says who loses it', async () => {
+    groupsMock.listGroups.mockResolvedValue([gtm({ canWrite: true })]);
+    libApiMock.removeLibraryItem.mockResolvedValue(undefined);
+    renderGroup('GTM');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove outreach' }));
+    expect(await screen.findByText(/Everyone here loses it/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+
+    // The skill FOLDER, repo-relative — the recursive delete under it runs
+    // per-file through the same ACL gate that governs editing the group.
+    await waitFor(() =>
+      expect(libApiMock.removeLibraryItem).toHaveBeenCalledWith('Groups/GTM/outreach'),
+    );
+    expect(await screen.findByText(/Removed outreach from GTM/)).toBeInTheDocument();
+  });
+
+  it('offers no remove affordance to a non-manager', async () => {
+    renderGroup('GTM'); // gtm() defaults to canWrite: false
+    await screen.findByText('outreach');
+    expect(screen.queryByRole('button', { name: 'Remove outreach' })).toBeNull();
   });
 
   it("shows only the group's own skills and tools", async () => {

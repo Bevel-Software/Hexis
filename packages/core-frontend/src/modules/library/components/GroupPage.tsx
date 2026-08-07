@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
+import { useLibraryToast } from '../state/toast.context';
 import {
   decodeGroupSegment,
   pathForGroupsIndex,
@@ -13,7 +14,8 @@ import { GroupJoinRequests } from './GroupJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
-import { BandControls, GroupBreadcrumb, GroupItemSections, PageNote } from './group-page-parts';
+import { BandControls, GroupBreadcrumb, GroupItemSections, PageNote, RemoveLibraryItemDialog,
+} from './group-page-parts';
 import { PageActions } from './PageActions';
 import { copyToClipboard } from '../utils/clipboard';
 import { LockedGroupView } from './LockedGroupView';
@@ -40,6 +42,7 @@ export function GroupPage() {
   const params = useParams();
   const group = decodeGroupSegment(params.group ?? '');
   const data = useLibrary();
+  const toast = useLibraryToast();
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
   const [addOpen, setAddOpen] = useState(false);
@@ -98,6 +101,9 @@ export function GroupPage() {
     const timer = window.setTimeout(() => setRefreshState('idle'), 4000);
     return () => window.clearTimeout(timer);
   }, [refreshState]);
+
+  /** The card being removed, while its confirm dialog is up. */
+  const [removing, setRemoving] = useState<LibraryItem | null>(null);
 
   const summary = useMemo(
     () => data.groupSummaries.find((g) => g.name === group) ?? null,
@@ -264,6 +270,10 @@ export function GroupPage() {
         skillItems={shownSkills}
         toolItems={toolItems}
         onOpen={openItem}
+        // Removal is the GROUP MANAGER's verb — the same canWrite that lets
+        // them answer join requests. The backend's per-path gate enforces it
+        // for real; this only decides who sees the affordance.
+        onRemove={summary?.canWrite ? setRemoving : undefined}
         emptySkills={
           filterOn
             ? 'Nothing in this band needs you right now.'
@@ -313,6 +323,20 @@ export function GroupPage() {
           // ids are global, so the collision that matters is with any of them.
           existingSkills={allSkillNames}
           onClose={() => setAddOpen(false)}
+        />
+      )}
+
+      {removing && (
+        <RemoveLibraryItemDialog
+          item={removing}
+          place={group}
+          onClose={() => setRemoving(null)}
+          onRemoved={() => {
+            toast(`Removed ${removing.name} from ${group}.`);
+            // Catalog for the card, group index for the counts.
+            data.reload();
+            data.reloadGroups();
+          }}
         />
       )}
 
