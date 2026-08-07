@@ -1,12 +1,192 @@
 # Bevel core — skill & tool management
 
-The open-source core of the Bevel platform: a **git-backed knowledge workspace** with
-branches / change requests / file locks / live updates (SSE), **skills**, **tool
-manuals** (UTCP), a **secrets vault**, **role-based access control**, a **Library**
-UI, and a remote **MCP server** (with its own OAuth 2.1 authorization server) so
-external agents like Claude Code can work against the knowledge base.
+The open-source core of the Bevel platform: a **git-backed knowledge workspace**
+your whole team — and their AI agents — work in together.
 
-Monorepo layout:
+- **Knowledge lives in a git repo you own**, on any git host. The app gives it
+  branches, change requests with owner approval, file locks, and live updates —
+  no provider PRs, no lock-in.
+- **Skills & tools Library**: reusable agent skills (`SKILL.md` folders), tool
+  manuals (UTCP), and an encrypted secrets vault, organised into groups with
+  role-based access control.
+- **A remote MCP server** (with its own OAuth 2.1 authorization server), so
+  external agents like Claude Code connect to the knowledge base and work with
+  the same permissions model as people do.
+
+## Run it in 5 minutes (Docker)
+
+You need: [Docker](https://docs.docker.com/get-docker/) with Compose, and an
+**empty git repository** on any host (GitHub, GitLab, Bitbucket, Azure DevOps,
+self-hosted) to hold your knowledge base — the app seeds it with a starter
+template on first run.
+
+```sh
+git clone https://github.com/Bevel-Software/skill-and-tool-management.git
+cd skill-and-tool-management
+cp .env.example .env
+```
+
+Open `.env` and fill in the **four required values** (everything else can wait):
+
+```sh
+ADMIN_EMAIL=you@example.com     # the deployment owner — always an admin
+ADMIN_PASSWORD=pick-something   # your sign-in password (checked from env, never stored)
+JWT_SECRET=…                    # generate with the command below
+SECRETS_ENC_KEY=…               # generate with the command below
+```
+
+Generate the two secrets (run twice, paste one result into each):
+
+```sh
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+# no Node installed? docker run --rm node:22-slim node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+
+Then start everything (Postgres + the app):
+
+```sh
+docker compose up -d
+```
+
+Open **http://localhost:3001** and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+
+### First sign-in: the setup screen
+
+The app asks for the things it could not guess, and **tests them against the
+real host before saving**:
+
+1. **Knowledge-base repo** — the https clone URL of that empty repository.
+2. **Git credential** — a token with read/write access to it (for GitHub: a
+   fine-grained personal access token with *Contents: read & write* on that one
+   repo is enough).
+3. **Branch model** — which branch is the default and which are protected
+   (changes to protected branches only land through approved change requests).
+   The repository's real branches are offered as suggestions; for an empty repo
+   the default (`main`) is fine.
+
+Since the repo is empty, the app initialises it from the bundled template and
+writes a `roles.yaml` whose first Admin is you. That's it — you're in the
+workspace. Head to **Skills & Tools** to make your first group and skill, and to
+**Connect** (in the app menu) to hook up an agent over MCP.
+
+Prefer configuring by environment instead of the setup screen? Every one of
+those values has an env var (`KB_REPO_URL`, `GIT_TOKEN`, `DEFAULT_BRANCH`, …) —
+anything set in the environment wins over the setup screen. See
+[`.env.example`](.env.example).
+
+## Local development (run from source)
+
+You need: **Node 22** (`.nvmrc`; the engine range is `>=22 <23`),
+**pnpm 10**, **git ≥ 2.41**, and a Postgres 17 — the bundled one is fine:
+
+```sh
+docker compose up -d db        # just the database
+pnpm install
+pnpm build                     # builds the packages the apps import
+cp .env.example .env           # fill the same four required values;
+                               # the default DATABASE_URL already points at the bundled db
+pnpm dev                       # backend on :3001, Vite dev server on :5173
+```
+
+Open **http://localhost:5173** (the dev server proxies to the backend). Useful
+commands: `pnpm test`, `pnpm typecheck`, `pnpm lint`.
+
+Migrations run automatically on boot — there is no separate migrate step, in
+dev or in production.
+
+## Deploy on your own server
+
+The same compose file is production-ready. Two ways to expose it:
+
+**Behind a reverse proxy** (Coolify, Traefik, nginx — recommended):
+
+```sh
+docker compose -f docker-compose.yml up -d
+```
+
+The explicit `-f` skips `docker-compose.override.yml`, so the app publishes
+**no host port** — your proxy reaches it on port `3001` over the compose
+network. This is deliberate: a fixed published port makes every redeploy fail
+with `port is already allocated`, because the replacement container starts
+while the outgoing one still holds it.
+
+**Directly exposed** (no proxy): plain `docker compose up -d` publishes
+`:3001`; use `APP_PORT=8080 docker compose up -d` for a different host port.
+
+Add these to `.env` for production:
+
+```sh
+PUBLIC_BACKEND_URL=https://bevel.your-domain.com   # public origin — OAuth redirects are built from it
+PUBLIC_FRONTEND_URL=https://bevel.your-domain.com  # same origin: the backend serves the SPA
+TRUST_PROXY=1                                      # behind a proxy: hop count, so rate limits see real client IPs
+```
+
+Worth knowing:
+
+- **State that survives redeploys**: Postgres data plus three app volumes
+  (workspace clones, diff-review backups, tool-chain spill files) are named
+  volumes — a redeploy or image rebuild loses nothing. Back up the `pgdata`
+  volume and your knowledge-base git repo; everything else is derivable.
+- **Health**: `GET /api/health`. First boot can take a minute or two — it runs
+  migrations and seeds the knowledge-base repo.
+- **Single sign-on**: set `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` /
+  `OIDC_CLIENT_SECRET` (any spec-compliant provider) or configure it on the
+  setup screen, which shows you the redirect URI to register. For SSO-only
+  deployments set `LOGIN_PASSWORD=false` and drop `ADMIN_PASSWORD`. If your
+  issuer is multi-tenant (Google, Entra `common`), set
+  `ALLOWED_EMAIL_DOMAINS` — SSO auto-provisions accounts, and that list is the
+  only signup boundary.
+
+## Environment reference
+
+The four **required** values, then the rest. Everything marked *setup screen*
+can be left unset and configured in the app at first sign-in (env always wins).
+[`.env.example`](.env.example) documents every variable in full.
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `ADMIN_EMAIL` | yes | Deployment owner: always an admin, and the initial Admin of a freshly seeded KB |
+| `ADMIN_PASSWORD` | with password login | Bootstrap sign-in password — checked against the env, never stored. Not needed when `LOGIN_PASSWORD=false` |
+| `JWT_SECRET` | yes | Signs login sessions + OAuth state |
+| `SECRETS_ENC_KEY` | yes | 32-byte key (base64/hex) encrypting vault secrets + MCP OAuth tokens |
+| `DATABASE_URL` | see note | Postgres connection string. Unset under compose, the app builds it from the `POSTGRES_*` values the bundled db was created with |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | no | Credentials for the bundled database (applied only when its volume is first created) |
+| `KB_REPO_URL` | setup screen | https clone/push URL of the knowledge-base repo, on any git host |
+| `GIT_TOKEN` / `GIT_USERNAME` | setup screen | Git credential (HTTP Basic password / host-specific username — see `.env.example` for per-host usernames) |
+| `DEFAULT_BRANCH` / `PROTECTED_BRANCHES` | setup screen | Branch model. Runtime-only: served to the frontend over `/api/config`, so one build runs anywhere |
+| `PUBLIC_BACKEND_URL` / `PUBLIC_FRONTEND_URL` | production | Public origins for OAuth redirects + post-login bounces |
+| `TRUST_PROXY` | behind a proxy | Reverse-proxy hop count, so `req.ip` and the login rate limit see the real client |
+| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | no | Generic OIDC SSO; the login method appears once all three are set |
+| `ALLOWED_EMAIL_DOMAINS` | with multi-tenant SSO | Signup allow-list for SSO auto-provisioning |
+| `LOGIN_PASSWORD` | no | `false` hides password login and rejects the endpoint |
+| `PORT` | no | Backend port (default 3001) |
+| `KB_DIR_NAME` | no | Directory name of the KB clone inside each workspace |
+| `TENANT_ID` | no | Slug branding credential prefixes (default `bevel`) |
+| `KB_TEMPLATE_DIR` | no | Overrides the packaged KB seed template |
+| `ONTOLOGY_SESSION_BLOCK` | no | Ontology-session touch tracking toggle (default on) |
+
+## Troubleshooting
+
+- **`port is already allocated` on redeploy** — you're behind a proxy but ran
+  compose without `-f docker-compose.yml`, so the override published a host
+  port. Deploy with the explicit `-f` (see above).
+- **Changed `POSTGRES_PASSWORD` but can't connect** — Postgres applies those
+  values only when its data volume is **first** created. In dev,
+  `docker compose down -v` resets it; in production, change the password in
+  the database itself.
+- **`pnpm install` fails on Node version** — the engine range is strict
+  (`>=22 <23`) because of a native dependency's ABI. `nvm use` picks up
+  `.nvmrc`.
+- **Setup screen rejects the git token** — the token needs read *and* write
+  (push) access to the KB repository; the setup screen's test tells you which
+  half failed. On GitHub, fine-grained tokens also need the repo explicitly
+  selected.
+- **Changed `ADMIN_PASSWORD` and nothing happened** — it's read once at
+  startup; restart the app container.
+- **App unhealthy right after first start** — give it the `start_period`
+  (~90s): first boot runs migrations and seeds the KB repo before answering.
+
+## Repository layout
 
 | Path | What it is |
 | --- | --- |
@@ -15,67 +195,6 @@ Monorepo layout:
 | `packages/core-frontend` | `@bevel-software/platform-core-frontend` — the core UI, published as raw TS/TSX source |
 | `apps/server` | standalone core backend shell |
 | `apps/web` | standalone core SPA shell (Vite) |
-
-## Quickstart
-
-Requirements: Node 22 (`.nvmrc`), pnpm 10, git ≥ 2.41, a Postgres 17 database.
-
-```sh
-# 1. Postgres (or bring your own and set DATABASE_URL)
-docker compose up -d db
-
-# 2. Install + build
-pnpm install
-pnpm build
-
-# 3. Configure
-cp .env.example .env   # then fill in: DATABASE_URL (or the POSTGRES_* knobs
-                       # if you use the Postgres docker-compose ships), JWT_SECRET,
-                       # SECRETS_ENC_KEY, ADMIN_EMAIL — plus ADMIN_PASSWORD
-                       # unless you set LOGIN_PASSWORD=false. The knowledge-base
-                       # repo and its token are asked for on the setup screen at
-                       # first sign-in, where they can be tested before saving.
-
-# 4. Run (backend :3001 + Vite dev server :5173)
-pnpm dev
-```
-
-Or run the whole thing in Docker: `docker compose up` (Postgres + the app serving
-the built SPA on :3001). Use `APP_PORT=8080 docker compose up` for a different
-host port.
-
-**Behind a reverse proxy** (Coolify, Traefik, nginx), deploy with an explicit
-`-f docker-compose.yml`. That skips `docker-compose.override.yml`, so the app
-publishes no host port and the proxy reaches it on port 3001 over the compose
-network. Publishing a fixed host port instead makes every redeploy fail with
-`port is already allocated`, because the replacement container starts while the
-outgoing one still holds it.
-
-## Environment variables (core subset)
-
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `DATABASE_URL` | yes* | Postgres connection string. Wins over the `POSTGRES_*` knobs — set it to use a database you already have |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | when no `DATABASE_URL` | Credentials the connection string is built from when `DATABASE_URL` is unset, and the ones the bundled database is created with. URL-encoded, so special characters in the password are safe. Applied to the database only when its volume is first initialised |
-| `JWT_SECRET` | yes | Signs login sessions + OAuth state |
-| `ADMIN_EMAIL` | yes | The deployment owner: always an admin (whatever the sign-in method), and the initial Admin of a freshly seeded KB |
-| `ADMIN_PASSWORD` | with password login | Password half of the bootstrap credential — checked against the env, never stored. Not needed when `LOGIN_PASSWORD=false` |
-| `KB_REPO_URL` | setup screen | https clone/push URL of the knowledge-base repo (any git host). Leave unset and an admin supplies it on first sign-in |
-| `GIT_TOKEN` / `GIT_USERNAME` | setup screen | Git credential (Basic password / host-specific username). Also settable on first sign-in, where it can be tested against the host |
-| `SECRETS_ENC_KEY` | yes | 32-byte key (base64/hex) encrypting vault secrets + MCP OAuth tokens |
-| `KB_DIR_NAME` | no | Directory name of the KB clone inside each workspace |
-| `DEFAULT_BRANCH` / `PROTECTED_BRANCHES` | setup screen | Branch model. Runtime only — the frontend fetches it from `/api/config`, so one build serves any deployment. Settable on first sign-in, where the repository's real branches are offered |
-| `PORT` | no | Backend port (default 3001) |
-| `PUBLIC_BACKEND_URL` / `PUBLIC_FRONTEND_URL` | prod | Public origins for OAuth redirects + bounces |
-| `TENANT_ID` | no | Slug branding every credential prefix (default `bevel`) |
-| `ALLOWED_EMAIL_DOMAINS` | no | SSO allow-list, settable on the setup screen beside the SSO settings it guards. SSO auto-provisions, so against a multi-tenant issuer this is the only thing limiting who can sign themselves up. Not applied to admin-created accounts or password login |
-| `LOGIN_PASSWORD` | no | `false` hides password login and rejects `/api/auth/login` |
-| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | no | Generic OIDC single sign-on; the method appears once all three are set. Also settable on the setup screen, which shows the redirect URI to register |
-| `TRUST_PROXY` | behind a proxy | Reverse-proxy hop count, so `req.ip` and the per-IP login rate limit see the real client |
-| `KB_TEMPLATE_DIR` | no | Overrides the packaged KB seed template |
-| `ONTOLOGY_SESSION_BLOCK` | no | Ontology-session touch tracking toggle (default on) |
-
-See `.env.example` for the full commented list.
 
 ## Part of the Bevel platform
 
