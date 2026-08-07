@@ -1,0 +1,34 @@
+/**
+ * Elevation tokens — separated from `./tokens.css` because shadows are the
+ * ONE token family Tailwind v4 does not make retargetable by default.
+ *
+ * A plain `@theme` shadow token inlines its literal into the generated
+ * utility at build time:
+ *
+ *   @theme { --shadow-overlay: 0 18px 55px rgba(55,53,47,.16); }
+ *   ->  .shadow-overlay { --tw-shadow: 0 18px 55px var(--tw-shadow-color, rgba(...)) }
+ *
+ * ...so re-declaring `--shadow-overlay` in a narrower scope does nothing —
+ * the utility never reads it. Routing through `@theme inline` + a plain
+ * custom property fixes that:
+ *
+ *   .shadow-overlay { --tw-shadow: var(--elevation-overlay) }
+ *
+ * ...which any scope can override. Verified by compiling tailwindcss 4.3.3.
+ *
+ * Nothing overrides these today (the app is light-only, and dark mode is
+ * explicitly out of scope). This shape costs nothing now and is the only
+ * thing that makes a future theme possible without touching call sites.
+ */
+
+:root {
+  /* deep, diffuse — modals, popovers, anything floating over the page */
+  --elevation-overlay: 0 18px 55px rgba(55, 53, 47, 0.16);
+  /* barely-there — the hairline lift that separates a card from canvas */
+  --elevation-card: 0 1px 2px rgba(55, 53, 47, 0.05);
+}
+
+@theme inline {
+  --shadow-overlay: var(--elevation-overlay);
+  --shadow-card: var(--elevation-card);
+}

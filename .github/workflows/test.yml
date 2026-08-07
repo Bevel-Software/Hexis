@@ -2,7 +2,7 @@ name: Test
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
 
 jobs:
@@ -28,3 +28,13 @@ jobs:
       - run: pnpm build
 
       - run: pnpm test
+
+      # Design-system ratchet. The UI is migrating onto semantic tokens, so a
+      # hard ban would fail against the remaining ~520 off-system call sites.
+      # This only fails when the count goes UP — i.e. when new off-system
+      # values are introduced. slate is already at 0, so for that rule the
+      # ratchet is a hard ban. Needed because `--color-slate-*: initial`
+      # fails silently:
+      # Tailwind emits no rule for an unknown utility, so a stale class is a
+      # no-op rather than a build error.
+      - run: pnpm ds:check

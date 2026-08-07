@@ -8,7 +8,9 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
     "lint": "eslint .",
-    "release": "pnpm build && pnpm changeset publish"
+    "release": "pnpm build && pnpm changeset publish",
+    "ds:check": "node scripts/design-system-ratchet.mjs",
+    "ds:baseline": "node scripts/design-system-ratchet.mjs --update"
   },
   "engines": {
     "node": ">=22 <23"

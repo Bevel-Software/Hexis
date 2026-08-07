@@ -1,3 +1,5 @@
+import { branchSegment } from '../git/branchAuthor.js';
+
 /**
  * Top-level layout of the KB repo (inside the `KB_DIR_NAME` clone).
  *
@@ -6,19 +8,25 @@
  *
  *   <kbDirName>/
  *   ├── KnowledgeBase/   ← all team ontologies live here (the knowledge graph)
+ *   ├── Groups/          ← one folder per group; each holds BOTH skills and tools
  *   ├── Data/            ← agent-produced records; parsed like KnowledgeBase/
  *   ├── Agents/          ← .agent files — agent role configurations (not the graph)
  *   ├── Pipelines/       ← .pipeline files — execution-layer processes (not the graph)
- *   ├── Skills/          ← reusable agent skills (NOT part of the graph)
- *   ├── Tools/           ← user-authored tool manuals (*.tool; not the graph)
  *   ├── roles.yaml       ← identity → role mapping
  *   └── access.md        ← repo-root access-control rules
  *
+ * RESERVED IS NOT THE SAME AS CREATED. Core seeds the first two only
+ * (`CORE_REQUIRED_DIRS`); `Data/`, `Agents/` and `Pipelines/` scaffold an
+ * agentic execution layer that a distribution layers on. Their names stay here
+ * regardless, because reserving a name is what stops a KB that HAS the folder
+ * from having it treated as ordinary content — the file tree would otherwise
+ * fold it into Knowledge as a stray directory.
+ *
  * These names are the single source of truth for both sides of the app:
  *  - Backend: the graph parser discovers ontologies under the
- *    {@link ONTOLOGY_ROOTS} (`KnowledgeBase/` and `Data/`); `Skills/`,
- *    `Tools/`, `Agents/`, `Pipelines/` (and anything else at the root) are
- *    ignored by parsing, validation, and the diagram.
+ *    {@link ONTOLOGY_ROOTS} (`KnowledgeBase/` and `Data/`); `Groups/`,
+ *    `Agents/`, `Pipelines/` (and anything else at the root) are ignored by
+ *    parsing, validation, and the diagram.
  *  - Frontend: the file tree renders these root folders as distinct
  *    top-level sections.
  *
@@ -28,16 +36,76 @@
 /** Folder under the repo root that contains all team ontologies. */
 export const KNOWLEDGE_BASE_DIR = 'KnowledgeBase';
 
-/** Folder under the repo root that holds reusable agent skills (not graph nodes). */
-export const SKILLS_DIR = 'Skills';
+/**
+ * Folder under the repo root that holds the groups.
+ *
+ *   Groups/<Group>/<skill>/SKILL.md   a skill
+ *   Groups/<Group>/<name>.tool        a tool manual
+ *   Groups/<Group>/access.md          who can read/write the whole group
+ *
+ * One folder is one group. Skills and tools live TOGETHER inside it because
+ * they share a single access boundary: a tool a group cannot read is a skill
+ * that group cannot run, so splitting them across two roots meant maintaining
+ * the same permission twice and letting them drift.
+ *
+ * A group is not a registry of unique names — it is a folder. The same
+ * integration may exist in several groups as separate files (`Everyone/
+ * notion.tool` and `Finance/notion.tool`), each with its own credentials and
+ * its own access rule. That duplication is the design, not an accident.
+ */
+export const GROUPS_DIR = 'Groups';
 
 /**
- * Folder under the repo root that holds user-authored tool manuals (`*.tool`
- * files). Each `.tool` is a UTCP manual (inline / http / mcp) that the MCP/UTCP
- * endpoint loads for any user who can read it (access-controlled like Skills).
- * Not part of the knowledge graph.
+ * The reserved name prefix marking a personal folder under `Groups/` —
+ * `Groups/personal-<user-id>/` is where a person's own skills live: created
+ * implicitly on their first personal skill, private by default (its seeded
+ * `access.md` names only its owner), and never listed as a group.
+ *
+ * The marker is STRUCTURAL on purpose: every surface that enumerates groups
+ * (catalog scan, sidebar, counts) filters on the name alone, with no access
+ * lookup needed, and the group-creation endpoint refuses names carrying the
+ * prefix — so a regular group can never squat on someone's personal folder.
  */
-export const TOOLS_DIR = 'Tools';
+export const PERSONAL_GROUP_PREFIX = 'personal-';
+
+/**
+ * The one personal folder name for a user — keyed to the STABLE user id, not
+ * the email: emails change, and a folder keyed to one would be orphaned the
+ * day it does. Ids are opaque, so the name carries no PII into git history
+ * (which this platform never rewrites). `branchSegment` is THE segment
+ * sanitizer — the id lands in the folder name exactly as it lands in the
+ * user's suggestion-branch names, so the two spellings can never disagree.
+ */
+export function personalGroupFolderName(userId: string): string {
+  return `${PERSONAL_GROUP_PREFIX}${branchSegment(userId)}`;
+}
+
+/** Whether a `Groups/` child is somebody's personal folder. */
+export function isPersonalGroupFolder(folderName: string): boolean {
+  return folderName.startsWith(PERSONAL_GROUP_PREFIX);
+}
+
+/**
+ * The group a repo-root-relative path belongs to, or `null` for content that
+ * sits outside any group.
+ *
+ *   Groups/GTM/heyreach-campaign/SKILL.md → 'GTM'
+ *   Groups/GTM/heyreach.tool              → 'GTM'
+ *   Groups/loose-skill/SKILL.md           → null    (no group folder)
+ *   KnowledgeBase/Product/…               → null    (not a group root)
+ *
+ * Returns null rather than throwing because a group is a property SOME paths
+ * have. Callers bucket by it; nothing requires it. An ungrouped skill is a
+ * real, supported state — the prototype calls those "yours alone".
+ */
+export function groupOfPath(repoRelativePath: string): string | null {
+  const segments = repoRelativePath.split('/').filter(Boolean);
+  if (segments[0] !== GROUPS_DIR) return null;
+  // Needs a segment for the group AND at least one below it, otherwise
+  // `Groups/GTM` (the folder itself) would report itself as being in a group,
+  // and a loose `Groups/slack.tool` would report a group named "slack.tool".
+  return segments.length >= 3 ? (segments[1] ?? null) : null;
+}
 
 /**
  * Folder under the repo root for agent-produced records (pipeline instances,
@@ -69,7 +137,7 @@ export const ONTOLOGY_MARKERS = new Set([KNOWLEDGE_DIR, NODETYPE_DIR]);
 
 /**
  * A named ontology id, or `null` for the neutral bucket — content that belongs
- * to no named ontology (root config, `Skills/`, root-level `Knowledge/`, etc.).
+ * to no named ontology (root config, `Groups/`, root-level `Knowledge/`, etc.).
  * The named id is the repo-root-relative path of the ontology directory,
  * e.g. `KnowledgeBase/Product` or `KnowledgeBase/IT Architecture`.
  */

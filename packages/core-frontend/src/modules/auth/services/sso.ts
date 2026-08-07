@@ -29,9 +29,55 @@ export interface LoginProviders {
   sso: SsoProvider[];
 }
 
-/** Kick off a provider's OAuth round-trip. */
+/**
+ * Where a deep link waits out the SSO round-trip. Session storage, not the
+ * OAuth `state` param: the backend never needs to see it, and per-tab scoping
+ * with same-tab retrieval is exactly the lifetime a "put me back where I was
+ * going" note should have.
+ */
+export const POST_LOGIN_REDIRECT_KEY = 'bevel_post_login_redirect';
+
+/**
+ * Kick off a provider's OAuth round-trip.
+ *
+ * The redirect leaves the page entirely, and with it the URL the person was
+ * trying to open — password login keeps it (no navigation happens), but SSO
+ * comes back to a fixed `/auth/<key>/callback` and the deep link someone
+ * clicked in Slack would die in the round-trip. Stash it here; the far side
+ * (`RootLanding`) puts them back — after the first-visit welcome, if this is
+ * the one sign-in that shows it.
+ */
 export function startSsoLogin(provider: SsoProvider): void {
+  const { pathname, search, hash } = window.location;
+  try {
+    if (pathname !== '/' && !pathname.startsWith('/auth/')) {
+      sessionStorage.setItem(POST_LOGIN_REDIRECT_KEY, `${pathname}${search}${hash}`);
+    } else {
+      // A plain front-door sign-in must not inherit a stale note from an
+      // earlier round-trip in this tab.
+      sessionStorage.removeItem(POST_LOGIN_REDIRECT_KEY);
+    }
+  } catch {
+    // Storage denied (private mode, policy) — the deep link just won't
+    // survive the round-trip, which is where we started.
+  }
   window.location.href = provider.startPath;
+}
+
+/**
+ * The stashed deep link, taken (read-and-cleared). Only ever an in-app path:
+ * anything not starting with a single `/` is discarded, so nothing that ends
+ * up in storage can turn the post-login hop into an off-site redirect.
+ */
+export function takePostLoginRedirect(): string | null {
+  try {
+    const raw = sessionStorage.getItem(POST_LOGIN_REDIRECT_KEY);
+    if (raw !== null) sessionStorage.removeItem(POST_LOGIN_REDIRECT_KEY);
+    if (!raw || !raw.startsWith('/') || raw.startsWith('//')) return null;
+    return raw;
+  } catch {
+    return null;
+  }
 }
 
 /**

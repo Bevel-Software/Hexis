@@ -1,6 +1,14 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import { useState, useCallback, useContext, useEffect, useMemo, useRef } from 'react';
+import { isProtectedBranch, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { useEventBus, canonicalizeWorkspaceId } from '../../workflow/state/event-bus.context';
+import { AuthContext } from '../../auth/state/auth.context';
+import { fetchFileAccess } from '../../access/api';
+import {
+  ensureKnowledgeSuggestionWorkspace,
+  ensureKnowledgeChangeRequest,
+  type KnowledgeSuggestionTarget,
+} from '../../change-requests/services/propose.api';
+import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../core/events';
 import type {
   OpenTab,
   PendingEntry,
@@ -96,7 +104,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeTabPath, setActiveTabPath] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<UploadError | null>(null);
+  const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  // Who is signed in — the suggestion-routed upload needs an author for the
+  // branch name and the change request. Read nullable (not `useAuth`, which
+  // throws) so the hook keeps working in harnesses with no auth provider;
+  // no user simply means no suggestion routing.
+  const authUser = useContext(AuthContext)?.user ?? null;
   const [fsRevision, setFsRevision] = useState(0);
   const [persistenceBranch, setPersistenceBranchState] = useState<string | null>(null);
 
@@ -459,6 +473,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   }, [workspaceId, refreshFileTree, bumpFs]);
 
   const clearUploadError = useCallback(() => setUploadError(null), []);
+  const clearUploadNotice = useCallback(() => setUploadNotice(null), []);
 
   // Pending overlay: files/dirs the user dropped but whose server commits
   // haven't echoed back yet. The ref holds the mutable working set the
@@ -498,9 +513,57 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     if (changed) flushPending();
   }, [flushPending]);
 
+  /**
+   * Should this upload land on the caller's suggestions branch instead of
+   * here? Yes exactly when this branch is protected, the target folder is
+   * inside the KB clone, and the per-path ACL says the caller may not write
+   * it — the same three short-circuits as `useFileAccess`: drafts are
+   * free-for-all, and paths outside the KB are the user's own workspace.
+   * (The branch is recovered from the workspace id, which is the encoded
+   * branch name for every branch workspace.)
+   */
+  const resolveSuggestionRouting = useCallback(
+    async (targetDirectory: string): Promise<KnowledgeSuggestionTarget | null> => {
+      if (!workspaceId || !kbDirName || !authUser) return null;
+      if (!isProtectedBranch(decodeURIComponent(workspaceId))) return null;
+      const prefix = `${kbDirName}/`;
+      if (!targetDirectory.startsWith(prefix)) return null;
+      const repoRelative = targetDirectory.slice(prefix.length);
+      if (!repoRelative) return null;
+      const access = await fetchFileAccess(workspaceId, repoRelative);
+      if (access.canWrite) return null;
+      return ensureKnowledgeSuggestionWorkspace(authUser);
+    },
+    [workspaceId, kbDirName, authUser],
+  );
+
   const activeUploadsRef = useRef(0);
   const dispatchUpload = useCallback(async (input: UploadInput, targetDirectory: string) => {
     if (!workspaceId) return;
+
+    // ── Suggestion routing ──
+    // An upload into a KB folder the caller may NOT write neither fails nor
+    // forces its way in: it lands on their personal suggestions branch and
+    // surfaces as a change request — the same review path a typed proposal
+    // takes. Resolved up front, because every byte below has to land in the
+    // right workspace. If the access question itself cannot be answered,
+    // upload normally: the backend's write gate stays the authority and
+    // refuses with its own words.
+    let suggestion: KnowledgeSuggestionTarget | null = null;
+    try {
+      suggestion = await resolveSuggestionRouting(targetDirectory);
+    } catch (err) {
+      console.warn('[workspace] suggestion routing check failed:', err);
+    }
+    const uploadWorkspaceId = suggestion?.workspaceId ?? workspaceId;
+    // No optimistic tree overlay for a suggestion-routed upload: the files
+    // will never appear in THIS branch's tree — they surface as suggestion
+    // rows instead (announced optimistically below, so they show the moment
+    // the bytes land rather than when the server's diff catches up).
+    const optimistic = suggestion === null;
+    const suggestionPrefix = suggestion ? `${suggestion.kbDirName}/` : null;
+    /** Repo-relative paths of the files that LANDED on the suggestions branch. */
+    const suggestedRepoPaths: string[] = [];
     // Pin the workspace at dispatch time. A folder upload can take seconds;
     // if the user switches branches mid-flight, the trailing state
     // mutations (setUploadError / setIsUploading / setFileTree via
@@ -512,6 +575,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const isCurrent = () => workspaceIdRef.current === dispatchWorkspaceId;
 
     setUploadError(null);
+    setUploadNotice(null);
     activeUploadsRef.current += 1;
     setIsUploading(true);
 
@@ -569,18 +633,27 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
 
     const uploadOne = async (file: File, relativePath: string): Promise<void> => {
       const path = fullPath(relativePath);
-      addPending({ fullPath: path, type: 'file' });
-      // Pre-register the file's directory ancestors so the dropped
-      // structure flashes in immediately, before any commits land.
-      for (const ancestor of fileAncestors) {
-        const ancestorFull = fullPath(ancestor);
-        if (!pendingUploadsRef.current.has(ancestorFull)) {
-          addPending({ fullPath: ancestorFull, type: 'directory' });
+      if (optimistic) {
+        addPending({ fullPath: path, type: 'file' });
+        // Pre-register the file's directory ancestors so the dropped
+        // structure flashes in immediately, before any commits land.
+        for (const ancestor of fileAncestors) {
+          const ancestorFull = fullPath(ancestor);
+          if (!pendingUploadsRef.current.has(ancestorFull)) {
+            addPending({ fullPath: ancestorFull, type: 'directory' });
+          }
         }
       }
       try {
-        await uploadFile(workspaceId, path, file, { defer: isBatch });
+        await uploadFile(uploadWorkspaceId, path, file, { defer: isBatch });
         uploaded += 1;
+        if (suggestion) {
+          suggestedRepoPaths.push(
+            suggestionPrefix && path.startsWith(suggestionPrefix)
+              ? path.slice(suggestionPrefix.length)
+              : path,
+          );
+        }
         setProgress();
         // Don't remove the pending entry here — the server commit has
         // landed but the file tree hasn't been refreshed yet, so removing
@@ -614,7 +687,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       if (item.kind === 'dir') {
         discoveredDirs.add(item.relativePath);
         const dirFull = fullPath(item.relativePath);
-        if (!pendingUploadsRef.current.has(dirFull)) {
+        if (optimistic && !pendingUploadsRef.current.has(dirFull)) {
           addPending({ fullPath: dirFull, type: 'directory' });
         }
         return;
@@ -669,7 +742,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         for (const rel of emptyDirs) {
           const path = fullPath(rel);
           try {
-            await createDirectoryApi(workspaceId, path, { defer: isBatch });
+            await createDirectoryApi(uploadWorkspaceId, path, { defer: isBatch });
             if (isBatch) deferredDirsQueued = true;
           } catch (err) {
             recordError(path, err);
@@ -688,9 +761,42 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // queued one or more deferred dir-create commits that need pushing.
       if (isBatch && !firstError && (uploaded > 0 || deferredDirsQueued)) {
         try {
-          await flushBatch(workspaceId, targetDirectory || '.');
+          await flushBatch(uploadWorkspaceId, targetDirectory || '.');
         } catch (err) {
           recordError(targetDirectory || '.', err);
+        }
+      }
+
+      // Suggestion-routed upload: the files are committed and pushed on the
+      // caller's suggestions branch — now make sure the change request that
+      // carries them to the owners exists, tell every listener the request
+      // list changed (the tree's suggestion rows come from it), and say
+      // where the files went. Silence here would be indistinguishable from
+      // a failed upload: nothing appears where the user dropped them.
+      if (suggestion && !firstError && (uploaded > 0 || deferredDirsQueued)) {
+        try {
+          const cr = await ensureKnowledgeChangeRequest(suggestion, authUser?.name ?? 'Someone');
+          // Announce the rows OPTIMISTICALLY: the client just committed these
+          // files, and the server's touched-path diff can trail the background
+          // commit worker by many seconds. The provider merges this until a
+          // real fetch covers the paths.
+          if (cr && suggestedRepoPaths.length > 0) {
+            const touched = new Set([...cr.touchedNodePaths, ...suggestedRepoPaths]);
+            window.dispatchEvent(
+              new CustomEvent(SUGGESTIONS_OPTIMISTIC_EVENT, {
+                detail: { ...cr, touchedNodePaths: [...touched] },
+              }),
+            );
+          }
+          window.dispatchEvent(new Event(PR_STALE_EVENT));
+          if (isCurrent()) {
+            setUploadNotice(
+              "You can't write to that folder, so the upload became a suggestion: " +
+                'it is now a change request for the folder’s owners to review.',
+            );
+          }
+        } catch (err) {
+          recordError('change request', err);
         }
       }
     } catch (err) {
@@ -739,6 +845,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   }, [
     workspaceId, refreshFileTree, bumpFs,
     addPending, removePending, clearPendingMatching,
+    resolveSuggestionRouting, authUser,
   ]);
 
   const deleteEntry = useCallback(async (relativePath: string) => {
@@ -1276,6 +1383,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setActiveTabContent,
     fsRevision,
     uploadError,
+    uploadNotice,
+    clearUploadNotice,
     isUploading,
     uploadProgress,
     pendingUploads,
@@ -1305,7 +1414,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   }), [
     workspaceId, kbDirName, fileTree, openTabs, activeTab, dirtyTabFilenames,
     openFilePath, openFileContent, openFileSavedContent, hasUnsavedFileChanges, pendingFileContent,
-    setHasUnsavedFileChanges, setActiveTabContent, fsRevision, uploadError, isUploading, uploadProgress, pendingUploads, refreshFileTree, bumpFs,
+    setHasUnsavedFileChanges, setActiveTabContent, fsRevision, uploadError, uploadNotice, clearUploadNotice, isUploading, uploadProgress, pendingUploads, refreshFileTree, bumpFs,
     addTab, closeTab, activateTab, reorderTab, closeAllTabs, hydrateTabs,
     createFile, createDirectory, unzipHere, uploadFiles, dispatchUpload, clearUploadError,
     deleteEntry, moveEntry, saveFile, reloadTabFromDisk,

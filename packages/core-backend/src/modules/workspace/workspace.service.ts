@@ -147,10 +147,25 @@ export class WorkspaceService implements IWorkspaceService {
 
   constructor(
     private readonly workspacesRoot: string,
-    private readonly kbRepoUrl: string,
+    /**
+     * The KB remote. A GETTER is read per-clone, so a repository supplied
+     * through the setup screen takes effect without restarting the process; a
+     * plain string is still accepted for callers that have nothing to vary.
+     *
+     * `kbDirName` stays a plain string on purpose — it is threaded into a
+     * dozen other services at construction, so making it live only here would
+     * buy an inconsistency rather than a feature.
+     */
+    kbRepoUrl: string | (() => string),
     private readonly kbDirName: string,
-    private readonly gitUsername: string = 'x-access-token',
-  ) {}
+    gitUsername: string | (() => string) = 'x-access-token',
+  ) {
+    this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
+    this.gitUsername = typeof gitUsername === 'function' ? gitUsername : () => gitUsername;
+  }
+
+  private readonly kbRepoUrl: () => string;
+  private readonly gitUsername: () => string;
 
   setDiffService(diffService: IDiffService): void {
     this.diffService = diffService;
@@ -185,10 +200,10 @@ export class WorkspaceService implements IWorkspaceService {
       // Username is provider-specific (GitHub `x-access-token`, GitLab `oauth2`, …); the token is
       // always the Basic-auth password, which every major host accepts.
       args.push(
-        '-c', `credential.helper=!f() { echo "username=${this.gitUsername}"; echo "password=$GITHUB_TOKEN"; }; f`,
+        '-c', `credential.helper=!f() { echo "username=${this.gitUsername()}"; echo "password=$GITHUB_TOKEN"; }; f`,
       );
     }
-    args.push(this.kbRepoUrl, targetDir);
+    args.push(this.kbRepoUrl(), targetDir);
     return args;
   }
 
@@ -819,13 +834,36 @@ export class WorkspaceService implements IWorkspaceService {
     }
   }
 
-  async writeFile(workspaceId: string, relativePath: string, content: string): Promise<void> {
+  async writeFile(
+    workspaceId: string,
+    relativePath: string,
+    content: string,
+    options?: { failIfExists?: boolean },
+  ): Promise<void> {
     assertValidRelativePath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    await fs.writeFile(absolutePath, content, 'utf-8');
+    try {
+      // `wx` makes create-if-absent ATOMIC at the fs level — an exists-check
+      // followed by a plain write would let two concurrent creators (or a
+      // stale client whose file list predates the file) both pass the check
+      // and silently replace each other's content.
+      await fs.writeFile(absolutePath, content, {
+        encoding: 'utf-8',
+        flag: options?.failIfExists ? 'wx' : 'w',
+      });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        const conflict: Error & { status?: number } = new Error(
+          `"${relativePath}" already exists.`,
+        );
+        conflict.status = 409;
+        throw conflict;
+      }
+      throw err;
+    }
     await this.diffService?.syncFromDisk(workspaceId, relativePath);
   }
 

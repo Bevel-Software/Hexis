@@ -8,7 +8,7 @@ import { WorkspaceContext, type UploadError, type WorkspaceContextValue } from '
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
-import { PrViewerContext, type PrViewerContextValue } from '../../../pr/state/pr-viewer.context';
+import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 
 // PullRequestsForMe pulls in router/git wiring we don't want to exercise here;
 // stub it so the toolbar can be tested in isolation.
@@ -57,27 +57,13 @@ function makeGit(): GitContextValue {
     deleteBranch: async () => {},
     pull: async () => {},
     fetchForkBase: async () => null,
-    revert: async () => ({ sha: 'a', authorName: 'n', authorEmail: 'e', subject: 's', committedAt: '2026-04-29T00:00:00Z' }),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
   };
 }
 
-function makePrViewer(): PrViewerContextValue {
-  return {
-    openPrNumber: null,
-    detail: null,
-    notFound: false,
-    selectedPath: null,
-    isLoading: false,
-    lastError: null,
-    openPr: () => {},
-    closeViewer: () => {},
-    selectPath: () => {},
-    refresh: async () => {},
-  };
-}
 
 interface RenderOptions {
   dispatchUpload?: ReturnType<typeof vi.fn>;
@@ -86,35 +72,73 @@ interface RenderOptions {
   uploadError?: UploadError | null;
   fileTree?: FileTreeEntry | null;
   createFile?: ReturnType<typeof vi.fn>;
+  deleteEntry?: ReturnType<typeof vi.fn>;
+  openFilePath?: string | null;
+  /** Workspace-relative paths with an open change request. */
+  openChangeRequestPaths?: string[];
+  /** The caller's own open requests: workspace-relative path → CR number. */
+  minePaths?: Map<string, number>;
 }
 
 function renderExplorer(opts: RenderOptions = {}) {
   const dispatchUpload = opts.dispatchUpload ?? vi.fn().mockResolvedValue(undefined);
   const clearUploadError = opts.clearUploadError ?? vi.fn();
   const createFile = opts.createFile ?? vi.fn().mockResolvedValue(undefined);
+  const deleteEntry = opts.deleteEntry ?? vi.fn().mockResolvedValue(undefined);
   // Distinguish "caller wants null tree" from "caller didn't pass anything".
   const fileTree = 'fileTree' in opts ? opts.fileTree ?? null : EMPTY_TREE;
   const workspace: WorkspaceContextValue = makeWorkspaceFixture({
     fileTree,
     uploadError: opts.uploadError ?? null,
     isUploading: opts.isUploading ?? false,
+    openFilePath: opts.openFilePath ?? null,
     refreshFileTree: async () => fileTree,
     dispatchUpload,
     clearUploadError,
     createFile,
+    deleteEntry,
   });
   return {
     dispatchUpload,
     clearUploadError,
     createFile,
+    deleteEntry,
     ...render(
       <MemoryRouter>
         <AuthContext.Provider value={makeAuth()}>
           <WorkspaceContext.Provider value={workspace}>
             <GitContext.Provider value={makeGit()}>
-              <PrViewerContext.Provider value={makePrViewer()}>
-                <FileExplorer />
-              </PrViewerContext.Provider>
+                <OpenChangeRequestsContext.Provider
+                  value={{
+                    paths: new Set(opts.openChangeRequestPaths ?? []),
+                    // A suggestion row resolves its request through forPath —
+                    // synthesize a summary for every minePaths entry so the
+                    // shared dialog has something to open.
+                    forPath: (p) => {
+                      const n = opts.minePaths?.get(p);
+                      return n === undefined
+                        ? []
+                        : ([
+                            {
+                              number: n,
+                              title: 'Suggested change',
+                              branch: 'suggestions/me/knowledge',
+                              base: 'main',
+                              state: 'open',
+                              createdAt: '2026-08-01T00:00:00.000Z',
+                              touchedNodePaths: [p],
+                              author: { login: 'user-x' },
+                              review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
+                              url: '',
+                            },
+                          ] as never);
+                    },
+                    minePaths: opts.minePaths ?? new Map(),
+                    mineNumbers: new Set(opts.minePaths?.values() ?? []),
+                  }}
+                >
+                  <FileExplorer />
+                </OpenChangeRequestsContext.Provider>
             </GitContext.Provider>
           </WorkspaceContext.Provider>
         </AuthContext.Provider>
@@ -130,6 +154,21 @@ function getFileInput(): HTMLInputElement {
 describe('FileExplorer toolbar', () => {
   beforeEach(() => {
     cleanup();
+  });
+
+  /**
+   * A `//` comment placed among JSX CHILDREN is not a comment — it is text,
+   * and it renders. TypeScript accepts it, the ratchet ignores it, and every
+   * existing test here queries by role or test id, so a four-line source
+   * comment once shipped to the top of the file tree in full view. The check
+   * is cheap and the failure mode is invisible to everything else.
+   */
+  it('renders no source comments as page text', () => {
+    // The whole container, not the root div: the comment that prompted this
+    // was a SIBLING of the tree inside the top-level fragment, so anything
+    // scoped to the tree itself would have walked straight past it.
+    const { container } = renderExplorer();
+    expect(container.textContent ?? '').not.toMatch(/\/\//);
   });
 
   it('renders the Add files button and the hidden file input', () => {
@@ -243,7 +282,7 @@ describe('FileExplorer toolbar', () => {
   it('routes root-level drag-and-drop through dispatchUpload (parity with the button)', async () => {
     const dispatchUpload = vi.fn().mockResolvedValue(undefined);
     renderExplorer({ dispatchUpload });
-    const aside = screen.getByRole('complementary');
+    const aside = screen.getByTestId('file-explorer-root');
     const file = new File(['drop'], 'dropped.md');
     await act(async () => {
       fireEvent.drop(aside, {
@@ -270,7 +309,7 @@ describe('FileExplorer toolbar', () => {
   });
 });
 
-describe('FileExplorer right-click — Download menu (per-path access)', () => {
+describe('FileExplorer right-click: Download menu (per-path access)', () => {
   beforeEach(() => {
     cleanup();
     mockAuthFetch.mockReset();
@@ -423,7 +462,7 @@ describe('FileExplorer right-click — Download menu (per-path access)', () => {
 // The fix introduces a tri-state `userIntent` that overrides auto-expand and
 // resets when the auto-expand trigger transitions. These tests would have
 // caught the original regression.
-describe('FileExplorer chevron collapse — userIntent vs autoExpanded', () => {
+describe('FileExplorer chevron collapse: userIntent vs autoExpanded', () => {
   beforeEach(() => {
     cleanup();
   });
@@ -458,9 +497,7 @@ describe('FileExplorer chevron collapse — userIntent vs autoExpanded', () => {
         <AuthContext.Provider value={makeAuth()}>
           <WorkspaceContext.Provider value={workspace}>
             <GitContext.Provider value={makeGit()}>
-              <PrViewerContext.Provider value={makePrViewer()}>
                 <FileExplorer />
-              </PrViewerContext.Provider>
             </GitContext.Provider>
           </WorkspaceContext.Provider>
         </AuthContext.Provider>
@@ -574,9 +611,8 @@ describe('FileExplorer chevron collapse — userIntent vs autoExpanded', () => {
 });
 
 // The KB level splits the well-known root folders into labelled top-level
-// sections. `Data/`, `Agents/` and `Pipelines/` get their own sections like
-// Skills/Tools — they must not fold into the Knowledge section.
-describe('FileExplorer sections — root folders', () => {
+// sections — with one deliberate exception, `Groups/`.
+describe('FileExplorer sections: root folders', () => {
   beforeEach(() => {
     cleanup();
   });
@@ -588,27 +624,59 @@ describe('FileExplorer sections — root folders', () => {
     children: [],
   });
 
-  it('renders Data, Agents and Pipelines as their own top-level sections', () => {
+  /**
+   * `Data/`, `Agents/` and `Pipelines/` are never created by core — a
+   * deployment that owns the agentic execution layer seeds them. When they ARE
+   * there they get their own sections, and in particular must not fold into
+   * Knowledge the way a stray content folder does.
+   */
+  it('renders Data, Agents and Pipelines as their own sections when present', () => {
     const tree: FileTreeEntry = {
       name: '.',
       relativePath: '.',
       type: 'directory',
-      children: [
-        dir('KnowledgeBase'),
-        dir('Data'),
-        dir('Agents'),
-        dir('Pipelines'),
-        dir('Skills'),
-        dir('Tools'),
-      ],
+      children: [dir('KnowledgeBase'), dir('Data'), dir('Agents'), dir('Pipelines')],
     };
     renderExplorer({ fileTree: tree });
     expect(screen.getByText('Knowledge')).toBeInTheDocument();
     expect(screen.getByText('Data')).toBeInTheDocument();
     expect(screen.getByText('Agents')).toBeInTheDocument();
     expect(screen.getByText('Pipelines')).toBeInTheDocument();
-    expect(screen.getByText('Skills')).toBeInTheDocument();
-    expect(screen.getByText('Tools')).toBeInTheDocument();
+  });
+
+  /**
+   * `Groups/` is the Skills & Tools app's storage, and that app presents it as
+   * groups, skills and tools. Listing it here offered a second, worse way in —
+   * raw markdown editing of a SKILL.md, on a folder whose access is managed
+   * from the group page.
+   *
+   * Not shown, and NOT folded into Knowledge either: it is a reserved root, so
+   * the "stray content folder" path must not pick it up. Both halves are
+   * asserted, because dropping it from the reserved set would still hide the
+   * section while quietly moving the whole folder under Knowledge.
+   */
+  it('never shows Groups in the knowledge view', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('KnowledgeBase'), dir('Groups')],
+    };
+    renderExplorer({ fileTree: tree });
+    expect(screen.getByText('Knowledge')).toBeInTheDocument();
+    expect(screen.queryByText('Groups')).not.toBeInTheDocument();
+  });
+
+  /** A KB whose only root is Groups still has a knowledge view — an empty one. */
+  it('does not fall back to the flat tree when Groups is the only root', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [dir('Groups')],
+    };
+    renderExplorer({ fileTree: tree });
+    expect(screen.queryByText('Groups')).not.toBeInTheDocument();
   });
 });
 
@@ -619,7 +687,7 @@ describe('FileExplorer sections — root folders', () => {
 // the same doomed create, which re-alerted, forever. The fix closes the
 // input (setCreating(null)) BEFORE the fallible create, so there's nothing
 // left to re-blur-submit.
-describe('FileExplorer create — no alert loop on a write-denied path', () => {
+describe('FileExplorer create: no alert loop on a write-denied path', () => {
   beforeEach(() => {
     cleanup();
   });
@@ -662,5 +730,191 @@ describe('FileExplorer create — no alert loop on a write-denied path', () => {
     } finally {
       alertSpy.mockRestore();
     }
+  });
+});
+
+// ── WP2: names and one caret, nothing else ──
+
+describe('FileExplorer rows: the prototype tree', () => {
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      { name: 'reports', relativePath: 'reports', type: 'directory', children: [] },
+      {
+        name: 'docs',
+        relativePath: 'docs',
+        type: 'directory',
+        children: [{ name: 'a.md', relativePath: 'docs/a.md', type: 'file' }],
+      },
+      { name: 'brief.md', relativePath: 'brief.md', type: 'file' },
+    ],
+  };
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+
+  // The folder icon repeated what the caret said and the file icon repeated
+  // what the extension said. Both are gone; the row is a name and a caret.
+  it('renders no folder or per-extension file icons', () => {
+    const { container } = renderExplorer({ fileTree: TREE });
+    // The iconify glyphs mounted as <svg> siblings of the name; lucide's
+    // Folder/FolderOpen did too. What survives in a row is at most the caret.
+    expect(container.querySelector('.iconify')).toBeNull();
+    const row = screen.getByText('brief.md').closest('button')!;
+    expect(row.querySelectorAll('svg')).toHaveLength(0);
+  });
+
+  it('gives a childless folder no caret and does not toggle it', async () => {
+    renderExplorer({ fileTree: TREE });
+    const empty = screen.getByText('reports').closest('button')!;
+    expect(empty.querySelectorAll('svg')).toHaveLength(0);
+    expect(empty).toHaveAttribute('aria-expanded');
+
+    const withKids = screen.getByText('docs').closest('button')!;
+    expect(withKids.querySelectorAll('svg')).toHaveLength(1);
+  });
+
+  it('marks directory rows with aria-expanded and the open file with aria-current', () => {
+    renderExplorer({ fileTree: TREE, openFilePath: 'docs/a.md' });
+    expect(screen.getByText('docs').closest('button')).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('a.md').closest('button')).toHaveAttribute('aria-current', 'true');
+    expect(screen.getByText('brief.md').closest('button')).toHaveAttribute('aria-current', 'false');
+  });
+
+  // The one prototype context-menu item the platform never had.
+  it('offers Copy path in the context menu and writes the entry path', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('brief.md'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
+    });
+    expect(writeText).toHaveBeenCalledWith('brief.md');
+  });
+
+  it('offers Copy path on a folder row too', () => {
+    renderExplorer({ fileTree: TREE });
+    fireEvent.contextMenu(screen.getByText('reports'));
+    expect(screen.getByRole('menuitem', { name: /Copy path/i })).toBeInTheDocument();
+  });
+
+  // MenuPanel is presentation only, so the dismissal is the caller's — and a
+  // menu you can only close by picking something is a keyboard trap.
+  it('closes the context menu on Escape and hands focus back to the row', async () => {
+    renderExplorer({ fileTree: TREE });
+    const row = screen.getByText('brief.md').closest('button')!;
+    fireEvent.contextMenu(screen.getByText('brief.md'));
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Escape' });
+    });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(row);
+  });
+
+  it('closes the context menu on an outside click', async () => {
+    renderExplorer({ fileTree: TREE });
+    fireEvent.contextMenu(screen.getByText('brief.md'));
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.mouseDown(document.body);
+    });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('still deletes from the context menu', async () => {
+    const deleteEntry = vi.fn(async () => {});
+    renderExplorer({ fileTree: TREE, deleteEntry });
+    fireEvent.contextMenu(screen.getByText('brief.md'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Delete/i }));
+    });
+    expect(deleteEntry).toHaveBeenCalledWith('brief.md');
+  });
+
+  // WP6: the tree consumes the SHARED, workspace-relative set. The two path
+  // spaces are joined in the provider; here the row just has to light up for
+  // the path the tree actually holds.
+  it('marks a row whose file has an open change request', () => {
+    renderExplorer({
+      fileTree: TREE,
+      openChangeRequestPaths: ['brief.md'],
+    });
+    const marked = screen.getByText('brief.md').closest('button')!;
+    expect(marked.querySelector('[title="Open change request"]')).not.toBeNull();
+    const unmarked = screen.getByText('docs').closest('button')!;
+    expect(unmarked.querySelector('[title="Open change request"]')).toBeNull();
+  });
+
+  /**
+   * The tree shows files from two places: this branch, and the caller's own
+   * open change requests. A proposed file that does not exist on the branch
+   * is synthesized in — coloured differently, and a click opens the change
+   * request, because there is no content on this branch to open.
+   */
+  it('shows my proposed-only file as a suggestion row that opens the change request', async () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+    });
+
+    // Synthesized into its real place in the tree, under `docs/`.
+    const row = screen
+      .getByTitle('Proposed by you: opens the change request')
+      .closest('button')!;
+    expect(row).toHaveTextContent('new-idea.md');
+    expect(row.className).toContain('text-accent');
+
+    // The click opens the SHARED change-request dialog — there is no content
+    // on this branch to open.
+    fireEvent.click(row);
+    expect(
+      await screen.findByRole('dialog', { name: /Change request: Suggested change/ }),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * "Not in the tree" is ambiguous: new on the suggestions branch, or FILTERED
+   * by the server (.bevelignore, read gates). The overlay may only resurrect
+   * the first — a proposal under a hidden root folder must not conjure that
+   * folder back into the sidebar.
+   */
+  it('does not synthesize a row under a root folder the server hid', () => {
+    renderExplorer({
+      fileTree: TREE,
+      // `Groups` is not in TREE — the server filtered it (bevelignored). The
+      // touched file underneath must NOT appear.
+      minePaths: new Map([['Groups/newsletter/SKILL.md', 12]]),
+    });
+    expect(screen.queryByTitle('Proposed by you: opens the change request')).toBeNull();
+    expect(screen.queryByText('Groups')).toBeNull();
+    expect(screen.queryByText('SKILL.md')).toBeNull();
+  });
+
+  it('keeps a file that exists on the branch as a normal row even when my request touches it', () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['brief.md', 12]]),
+    });
+
+    // Not synthesized, not recoloured — the branch's own file wins, and the
+    // open-request signal for it stays the amber dot (asserted above).
+    expect(screen.queryByTitle('Proposed by you: opens the change request')).toBeNull();
+    const row = screen.getByText('brief.md').closest('button')!;
+    expect(row.className).not.toContain('text-accent');
+    // A normal row opens the FILE, never the dialog.
+    fireEvent.click(row);
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });

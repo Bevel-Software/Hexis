@@ -2,19 +2,6 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import type { BranchInfo, CommitAttribution, WorkingTreeStatus } from '@bevel-software/platform-shared';
 
-// Mock the access API before importing the component tree — useFileAccess
-// fires a fetch in an effect on mount, and we don't want real network in tests.
-const accessMock = vi.hoisted(() => ({
-  result: { canWrite: true, eligible: { roles: ['Admin'], users: [] } } as {
-    canWrite: boolean;
-    eligible: { roles: string[]; users: { name: string; email: string }[] };
-  },
-}));
-vi.mock('../../access/api', () => ({
-  fetchFileAccess: vi.fn(async () => accessMock.result),
-  fetchFileAccessBatch: vi.fn(async () => ({ results: {} })),
-}));
-
 import { FileHistoryPanel } from '../components/FileHistoryPanel';
 import { GitContext, type GitContextValue } from '../state/git.context';
 import {
@@ -51,9 +38,9 @@ function makeGit(overrides: Partial<GitContextValue> = {}): GitContextValue {
     pull: async () => {},
     deleteBranch: async () => {},
     fetchForkBase: async () => null,
-    revert: async () => makeAttr({ sha: 'revertsha1234567' }),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
     ...overrides,
   };
@@ -64,14 +51,11 @@ const workspace = {
   kbDirName: 'knowledge-base',
 } as unknown as WorkspaceContextValue;
 
-function renderWith(git: GitContextValue, onRevert: () => Promise<void> = async () => {}) {
+function renderWith(git: GitContextValue, filePath = 'knowledge-base/Knowledge/Foo.md') {
   return render(
     <WorkspaceContext.Provider value={workspace}>
       <GitContext.Provider value={git}>
-        <FileHistoryPanel
-          filePath="knowledge-base/Knowledge/Foo.md"
-          onRevertCompleted={onRevert}
-        />
+        <FileHistoryPanel filePath={filePath} />
       </GitContext.Provider>
     </WorkspaceContext.Provider>,
   );
@@ -95,7 +79,33 @@ describe('FileHistoryPanel', () => {
     expect(await screen.findByText(/Nothing has been saved to this file/i)).toBeInTheDocument();
   });
 
-  it('loads the diff when a commit is selected', async () => {
+  it('renders a markdown file\'s save as a rendered-markdown diff', async () => {
+    const fetchFileAtChange = vi.fn(async () => ({
+      baseline: '# Old title\n\nshared paragraph\n',
+      current: '# New title\n\nshared paragraph\n',
+    }));
+    const history = [makeAttr({ sha: 'aaaaaaa0000000000', subject: 'edit' })];
+    renderWith(
+      makeGit({
+        fetchFileHistory: async () => history,
+        fetchFileAtChange,
+      }),
+    );
+    fireEvent.click(await screen.findByText('edit'));
+    await waitFor(() =>
+      expect(fetchFileAtChange).toHaveBeenCalledWith(
+        'knowledge-base/Knowledge/Foo.md',
+        'aaaaaaa0000000000',
+      ),
+    );
+    // Rendered markdown, not raw text: both headings appear as real <h1>
+    // elements (removed side in red, added side in green).
+    expect(await screen.findByRole('heading', { name: 'New title' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Old title' })).toBeInTheDocument();
+    expect(screen.getByText('shared paragraph')).toBeInTheDocument();
+  });
+
+  it('loads the raw diff when a non-markdown file\'s commit is selected', async () => {
     const fetchFileDiff = vi.fn(async () => '--- a\n+++ b\n@@ -1 +1 @@\n-foo\n+bar\n');
     const history = [makeAttr({ sha: 'aaaaaaa0000000000', subject: 'edit' })];
     renderWith(
@@ -103,12 +113,13 @@ describe('FileHistoryPanel', () => {
         fetchFileHistory: async () => history,
         fetchFileDiff,
       }),
+      'knowledge-base/Knowledge/data.csv',
     );
     const row = await screen.findByText('edit');
     fireEvent.click(row);
     await waitFor(() =>
       expect(fetchFileDiff).toHaveBeenCalledWith(
-        'knowledge-base/Knowledge/Foo.md',
+        'knowledge-base/Knowledge/data.csv',
         'aaaaaaa0000000000',
       ),
     );
@@ -122,80 +133,22 @@ describe('FileHistoryPanel', () => {
         fetchFileHistory: async () => history,
         fetchFileDiff: async () => '',
       }),
+      'knowledge-base/Knowledge/data.csv',
     );
     fireEvent.click(await screen.findByText('edit'));
     expect(await screen.findByText(/No file changes in this save/i)).toBeInTheDocument();
   });
 
-  it('calls revert and fires onRevertCompleted on success', async () => {
-    const onRevert = vi.fn();
-    const revert = vi.fn(async () => makeAttr({ sha: 'reverteddeadbeef' }));
+  it('renders the empty state for a markdown save where the file is absent on both sides', async () => {
     const history = [makeAttr({ sha: 'aaaaaaa0000000000', subject: 'edit' })];
     renderWith(
       makeGit({
         fetchFileHistory: async () => history,
-        revert,
+        fetchFileAtChange: async () => ({ baseline: null, current: null }),
       }),
-      onRevert,
     );
     fireEvent.click(await screen.findByText('edit'));
-    const undoButton = await screen.findByRole('button', { name: /Undo this save/i });
-    fireEvent.click(undoButton);
-    await waitFor(() => expect(revert).toHaveBeenCalledWith('aaaaaaa0000000000'));
-    await waitFor(() => expect(onRevert).toHaveBeenCalled());
+    expect(await screen.findByText(/No file changes in this save/i)).toBeInTheDocument();
   });
 
-  it.each(['current-company-state', 'target-company-state'] as const)(
-    'enables the undo button on protected branch %s when the user has write access',
-    async (branch) => {
-      // The historical gate was "protected branch → disabled." Revert is now
-      // gated by per-path write access (canWrite) instead — admins on a
-      // canonical branch can undo directly.
-      const history = [makeAttr({ sha: 'aaaaaaa0000000000', subject: 'edit' })];
-      renderWith(
-        makeGit({
-          status: {
-            branch,
-            hasUpstream: true,
-            unmergedFromUpstream: false,
-          },
-          fetchFileHistory: async () => history,
-        }),
-      );
-      fireEvent.click(await screen.findByText('edit'));
-      const undoButton = await screen.findByRole('button', { name: /Undo this save/i });
-      await waitFor(() => expect(undoButton).not.toBeDisabled());
-    },
-  );
-
-  it('disables the undo button when the user lacks write access on a protected branch', async () => {
-    // The revert gate is only consulted on protected branches — drafts are
-    // free-for-all (the backend's revertCommit skips the access check on
-    // non-protected branches, so the editor mirrors that by leaving the
-    // button enabled). Reproducing the disabled state requires a protected
-    // branch where the gate actually runs.
-    accessMock.result = {
-      canWrite: false,
-      eligible: { roles: ['Admin'], users: [] },
-    };
-    try {
-      const history = [makeAttr({ sha: 'aaaaaaa0000000000', subject: 'edit' })];
-      renderWith(
-        makeGit({
-          status: {
-            branch: 'current-company-state',
-            hasUpstream: true,
-            unmergedFromUpstream: false,
-          },
-          fetchFileHistory: async () => history,
-        }),
-      );
-      fireEvent.click(await screen.findByText('edit'));
-      const undoButton = await screen.findByRole('button', { name: /Undo this save/i });
-      await waitFor(() => expect(undoButton).toBeDisabled());
-      expect(undoButton.getAttribute('title')).toMatch(/don't have permission/i);
-    } finally {
-      accessMock.result = { canWrite: true, eligible: { roles: ['Admin'], users: [] } };
-    }
-  });
 });

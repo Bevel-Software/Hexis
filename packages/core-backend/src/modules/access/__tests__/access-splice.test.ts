@@ -199,6 +199,27 @@ describe('validatePrincipal — injection guard', () => {
     ).toThrow(AccessSpliceError);
   });
 
+  it.each([['\n'], ['\r'], ['\r\n'], [' '], ['']])(
+    'rejects a display name carrying the control char %j (frontmatter injection)',
+    (ch) => {
+      expect(() =>
+        validatePrincipal({
+          kind: 'user',
+          email: 'a@b.com',
+          // Interior, so `trim()` cannot quietly rescue it on the way through.
+          displayName: `Ali${ch}read:${ch}  - everyone`,
+        }),
+      ).toThrow(AccessSpliceError);
+    },
+  );
+
+  it('trims a SURROUNDING newline rather than rejecting, and renders the trimmed name', () => {
+    // The guard runs on the trimmed name and the trimmed name is what gets
+    // returned — so a stray edge newline can never reach a rendered line.
+    const p = validatePrincipal({ kind: 'user', email: 'a@b.com', displayName: '\n Ali \n' });
+    expect(p.kind === 'user' && p.displayName).toBe('Ali');
+  });
+
   it('rejects a group name with a colon (would forge a key)', () => {
     expect(() => validatePrincipal({ kind: 'role', role: 'write:\n  - everyone' })).toThrow(
       AccessSpliceError,

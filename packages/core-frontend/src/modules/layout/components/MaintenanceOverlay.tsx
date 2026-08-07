@@ -89,12 +89,12 @@ export function MaintenanceOverlay() {
 
   return (
     <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-4 bg-white/95 backdrop-blur-sm text-center px-6">
-      <Loader2 size={32} className="animate-spin text-bevel" />
+      <Loader2 size={32} className="animate-spin text-accent" />
       <div>
-        <p className="text-lg font-medium text-slate-800">
+        <p className="text-lg font-medium text-ink">
           We&rsquo;re installing an update
         </p>
-        <p className="mt-1 text-sm text-slate-600">
+        <p className="mt-1 text-sm text-ink-muted">
           This usually takes a minute or two. The page will refresh
           automatically as soon as everything is back.
         </p>

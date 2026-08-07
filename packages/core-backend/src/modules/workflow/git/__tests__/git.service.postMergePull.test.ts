@@ -215,7 +215,10 @@ describe('post-merge refresh of the target branch workspace', () => {
       .toBe(await gitOut(baseRepo, ['rev-parse', `origin/${BASE}`]));
     const feature = await fs.readFile(path.join(baseRepo, 'feature.md'), 'utf8');
     expect(feature.replace(/\r\n/g, '\n')).toBe('from the change request\n');
-  }, 60_000);
+    // 20 pull rounds racing a competitor fetch loop: seconds on Linux, but on
+    // Windows every round is a stack of process spawns contending with the
+    // rest of the suite, so the cap has to absorb full-parallel-run load.
+  }, 180_000);
 
   // The same config drift, one step earlier in the flow. `git fetch origin
   // <branch>` updates `refs/remotes/origin/<branch>` only *opportunistically* —

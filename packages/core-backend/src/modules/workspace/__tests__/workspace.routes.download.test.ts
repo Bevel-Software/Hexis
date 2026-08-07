@@ -7,6 +7,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import { AccessConfigError } from '../../access/access-errors.js';
+import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { ICreatorAccess } from '../../access/creator-access.js';
 import { FolderTooLargeError, type WorkspaceService } from '../workspace.service.js';
@@ -110,6 +111,8 @@ async function makeHarness(opts: {
     accessControl,
     'knowledge-base',
     stubCreatorAccess,
+    // Not exercised here — only `.bevelignore`'s tree visibility consults it.
+    { isAdmin: async () => false } as unknown as IAdminAccessService,
   ));
 
   const server = await new Promise<Server>((resolve) => {
@@ -219,6 +222,20 @@ describe('GET /workspace/:id/file/raw — ?download=1 gated on Download role', (
       `${h.baseUrl}/api/workspace/${WORKSPACE_ID}/file/raw?path=${encodeURIComponent('icon.svg')}`,
     );
     expect(inline.headers.get('content-type')).toBe('image/svg+xml');
+    // Inline keeps the real type so the image renderer's blob still paints,
+    // and is sandboxed so the same URL opened as a tab cannot run its own
+    // <script> against this origin.
+    expect(inline.headers.get('content-security-policy')).toBe('sandbox');
+  });
+
+  // Everything else served inline is passive, and a blanket sandbox on, say, a
+  // PDF would cost the viewer its own controls for nothing.
+  it('sandboxes only SVG — other inline files carry no CSP', async () => {
+    h = await makeHarness({ canDownload: true });
+    const res = await fetch(
+      `${h.baseUrl}/api/workspace/${WORKSPACE_ID}/file/raw?path=${encodeURIComponent('Knowledge/Foo.md')}`,
+    );
+    expect(res.headers.get('content-security-policy')).toBeNull();
   });
 });
 

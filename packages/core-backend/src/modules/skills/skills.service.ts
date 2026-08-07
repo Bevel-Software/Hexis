@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { parseDocument } from 'yaml';
-import { DEFAULT_BRANCH, SKILLS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, GROUPS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -63,7 +63,7 @@ export class SkillService implements ISkillService {
   }
 
   async getSkill(userEmail: string, name: string, file?: string): Promise<GetSkillResult> {
-    if (!isSafeName(name)) return { ok: false, error: 'not_found' };
+    if (!isSafeSkillName(name)) return { ok: false, error: 'not_found' };
     const found = (await this.scan()).find((s) => s.summary.name === name);
     if (!found) return { ok: false, error: 'not_found' };
 
@@ -103,8 +103,8 @@ export class SkillService implements ISkillService {
   }
 
   private async scanDisk(): Promise<ParsedSkill[]> {
-    // Ensure the default-branch clone exists, then scan its Skills/ dir. Any
-    // failure (no workspace, no Skills/ dir) degrades to an empty catalog — the
+    // Ensure the default-branch clone exists, then scan its Groups/ dir. Any
+    // failure (no workspace, no Groups/ dir) degrades to an empty catalog — the
     // manual/tools must never break because skills can't be read.
     let wsId: string;
     try {
@@ -112,18 +112,14 @@ export class SkillService implements ISkillService {
     } catch {
       return [];
     }
-    const root = path.join(
-      await this.workspaceService.getWorkspacePath(wsId),
-      this.kbDirName,
-      SKILLS_DIR,
-    );
+    const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
     // Skills may be grouped in category subfolders (each carrying its own
-    // access.md), so a SKILL.md can live at any depth under Skills/. Walk the
+    // access.md), so a SKILL.md can live at any depth under the root. Walk the
     // tree and treat every folder that directly contains a SKILL.md as a skill;
     // don't descend past it — its inner files are bundled assets, not nested
     // skills. The skill name is the leaf folder name; its path is the full
-    // Skills-relative folder (e.g. `Skills/Development/coding-guidelines`).
+    // repo-relative folder (e.g. `Groups/Development/coding-guidelines`).
     const out: ParsedSkill[] = [];
     const walk = async (dir: string, relFolder: string): Promise<void> => {
       let entries: import('node:fs').Dirent[];
@@ -146,7 +142,7 @@ export class SkillService implements ISkillService {
         // fall back to the folder name (a readdir entry, safe by construction)
         // to keep listing and lookup consistent.
         const declared = resolveDeclaredId(fm.frontmatter, path.basename(dir));
-        const name = isSafeName(declared) ? declared : path.basename(dir);
+        const name = isSafeSkillName(declared) ? declared : path.basename(dir);
         out.push({
           summary: { name, description: fm.description, version: fm.version, path: relFolder },
           body: fm.body,
@@ -160,7 +156,7 @@ export class SkillService implements ISkillService {
         await walk(path.join(dir, entry.name), `${relFolder}/${entry.name}`);
       }
     };
-    await walk(root, SKILLS_DIR);
+    await walk(path.join(kbRoot, GROUPS_DIR), GROUPS_DIR);
     // A skill's id (frontmatter `id`/`name`, else folder name) is how getSkill()
     // resolves it, so it must be unique. Sort by (name, path) for a deterministic
     // winner, then REFUSE later duplicates via the shared dedup — the same rule
@@ -181,8 +177,14 @@ export class SkillService implements ISkillService {
 
 // --- helpers ------------------------------------------------------------------
 
-/** Skill names are folder names; reject anything that could escape the folder. */
-function isSafeName(name: string): boolean {
+/**
+ * Skill names are folder names; reject anything that could escape the folder.
+ *
+ * Exported because the pending-skill surface resolves a name from a SKILL.md
+ * that is not on disk yet and must land on the SAME id the catalog will give it
+ * once merged — a second copy of this rule would drift.
+ */
+export function isSafeSkillName(name: string): boolean {
   return name.length > 0 && !name.includes('/') && !name.includes('\\') && name !== '.' && name !== '..';
 }
 
@@ -198,7 +200,13 @@ function scalarToString(value: unknown): string | undefined {
   return undefined;
 }
 
-function parseSkillFrontmatter(raw: string): {
+/**
+ * Exported for the pending-skill surface, which parses a SKILL.md read at a
+ * change request's ref rather than off disk. Same parser deliberately: a
+ * proposed skill must be described by the same rules that will describe it once
+ * it is released, or the card in review and the card after approval disagree.
+ */
+export function parseSkillFrontmatter(raw: string): {
   description: string;
   version?: string;
   allowedTools?: string[];

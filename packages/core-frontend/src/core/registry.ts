@@ -46,6 +46,17 @@ export interface PaneDef {
   maxSize?: string;
   /** Collapsible panes get collapse tracking + a toolbar toggle. */
   collapsible?: boolean;
+  /**
+   * Render this pane as the app's nav spine (`SidebarFrame`) instead of as a
+   * panel in the resizable group. At most one pane per app should set it.
+   *
+   * A sidebar is not a pane that happens to be on the left: its width is a
+   * shared, persisted preference that survives switching to an app with no
+   * panes at all (Skills & Tools has no pane group and the same sidebar), so
+   * it cannot live in a per-app panel layout. `defaultSize`/`minSize`/
+   * `maxSize` are ignored for it — the frame owns the range.
+   */
+  sidebar?: boolean;
 }
 
 /** A banner strip rendered above the main layout (order ascending). */
@@ -63,13 +74,16 @@ export interface AdminMenuItemHelpers {
 }
 
 /**
- * One row of the toolbar gear menu. Core rows (Skills & Tools, External
- * agent access, Secrets, Browse available tools, Roles & Members) are built
- * into AdminMenu and navigate to standalone routed pages; enterprise rows
- * are contributed here. A row either opens a dialog (`dialog` — mounted
- * persistently by AdminMenu, driven by an open flag, so existing dialog
- * components need no changes) or runs an action (`onSelect`, e.g. a
- * navigation).
+ * One row of the profile menu. Core rows (External agent access, Secrets,
+ * Browse available tools, Account, Roles & Members, User accounts) are built
+ * into ProfileMenu and navigate to standalone routed pages; enterprise rows
+ * are contributed here. A row opens a dialog (`dialog` — mounted persistently
+ * by ProfileMenu, driven by an open flag, so existing dialog components need
+ * no changes), runs an action (`onSelect`), or simply declares where it goes
+ * (`path`).
+ *
+ * Skills & Tools is NOT one of these. It is an `AppDef`, reached from the app
+ * switcher.
  */
 export interface AdminMenuItem {
   id: string;
@@ -79,6 +93,20 @@ export interface AdminMenuItem {
   section?: 'default' | 'admin';
   /** Merge position among core + registered rows of the same section. */
   order?: number;
+  /**
+   * Where this row goes, DECLARED rather than performed.
+   *
+   * `onSelect` can navigate too, but only by running code — which makes the
+   * destination invisible to anything that is not clicking. The settings nav
+   * needs to know a row's URL in order to render it as a link and mark it as
+   * current, and a closure cannot be asked. A row with a `path` is therefore
+   * the only kind the nav can show; `onSelect`-only rows stay dropdown-only,
+   * which is what keeps existing enterprise rows working untouched.
+   *
+   * Optional, and that is load-bearing: making it required would fail
+   * typecheck for every row the enterprise shell already contributes.
+   */
+  path?: string;
   onSelect?(helpers: AdminMenuItemHelpers): void;
   dialog?(props: { open: boolean; onClose(): void }): ReactElement;
 }
@@ -87,7 +115,7 @@ export interface AdminMenuItem {
  * An auxiliary surface mounted inside the FileViewer container (rendered on
  * every FileViewer return path, positioned via its own absolute styling).
  * The enterprise registry contributes the agent-review surface here; the
- * change-request viewer (PrViewer) is core and stays hard-mounted.
+ * change-request dialog (ChangeRequestDialog) is core and shared by every surface.
  */
 export interface FileViewerPanelDef {
   id: string;
@@ -241,7 +269,7 @@ export interface AppRegistry {
   viewerRoutes: RouteDef[];
   /**
    * Ordered wrappers applied INSIDE the core providers (workspace, git,
-   * auto-update, pr-viewer, admin, event bus) but OUTSIDE the layout, so they
+   * auto-update, admin, event bus) but OUTSIDE the layout, so they
    * can read core state and every pane sees them. `providers[0]` is outermost.
    */
   providers: Array<(children: ReactNode) => ReactElement>;
@@ -257,6 +285,15 @@ export interface AppRegistry {
   renderers: FileRendererDef[];
   /** Extra rows in the explorer's Pinned section (see {@link ExplorerItemDef}). */
   explorerItems: ExplorerItemDef[];
+  /**
+   * How many unread items the gear menu's badge should show, if anything is
+   * counting. CORE COUNTS NOTHING: the feedback inbox behind that badge is an
+   * enterprise module, and core polled its endpoint every thirty seconds
+   * regardless — a guaranteed 404 on every core deployment, forever, filling
+   * the console of the one screen an operator looks at when something is
+   * wrong. Absent means no badge and, more to the point, no request.
+   */
+  adminUnreadCount?: (since: string | null) => Promise<number>;
   /**
    * Static override of the change-request port. Overrides that need runtime
    * state (e.g. the chat dispatch) should instead shadow
@@ -295,6 +332,18 @@ export const ActiveAppIdContext = createContext<string | undefined>(undefined);
 export function useActiveAppId(): string | undefined {
   return useContext(ActiveAppIdContext);
 }
+
+/**
+ * Lets a surface rendered under ONE app's URL prefix claim ANOTHER app as
+ * active. The path-prefix rule in {@link activeAppId} answers for every
+ * ordinary location, but a canonical URL can put one app's surface under
+ * another's prefix — library item pages live at `/workspace/...` file URLs
+ * (see `WorkspaceItemGate`) — and the toolbar should highlight the app whose
+ * surface is actually on screen. Call with an app id while such a surface is
+ * mounted and with `null` on unmount; the shell holds the claim above the
+ * toolbar. No-op default so surfaces render unchanged outside the shell.
+ */
+export const AppClaimContext = createContext<(id: string | null) => void>(() => {});
 
 /** Convenience builder: fill in the empty defaults for unspecified fields. */
 export function makeRegistry(partial: Partial<AppRegistry>): AppRegistry {

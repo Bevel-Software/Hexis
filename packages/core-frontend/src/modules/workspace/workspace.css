@@ -1,0 +1,28 @@
+/**
+ * Workspace module — the CSS the components can't express in Tailwind.
+ *
+ * `library.css` is the precedent, and the rule is the same: a new module
+ * stylesheet is permitted ONLY for declarations a utility genuinely cannot
+ * carry. Every rule below has to say why it is here. Everything else in this
+ * module — the measure, the gutters, the tab chrome, the rows — is utilities
+ * and semantic tokens, and must stay that way.
+ */
+
+/* ── the tab strip's suppressed scrollbar ──
+   `scrollbar-width` has no Tailwind utility, and `::-webkit-scrollbar` is a
+   pseudo-ELEMENT: Tailwind's arbitrary-variant syntax can target pseudo-
+   classes but not a vendor scrollbar pseudo-element, so there is no
+   `[&::-webkit-scrollbar]:hidden` that works across both engines.
+
+   The strip still scrolls; it just does not draw a bar over the tab labels,
+   which at 12.5px would cover a third of the row. The affordance the bar
+   provided is replaced by scroll-into-view on activation (`EditorTabs`), so
+   an off-screen tab is never left off-screen — see `plans/05-knowledge-ui.md`
+   edge case 11. Do not ship one without the other. */
+.kb-tabstrip {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.kb-tabstrip::-webkit-scrollbar {
+  display: none;
+}

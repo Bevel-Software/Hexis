@@ -7,7 +7,7 @@ import {
   NO_SHARED_HISTORY_RECOVERY_PROMPT,
 } from '../error-messages';
 
-describe('friendlyGitError — translates raw backend git messages', () => {
+describe('friendlyGitError: translates raw backend git messages', () => {
   // The legacy "direct push to protected branch is not allowed" case is
   // retired with the access-at-lock-acquisition refactor: writing to the
   // official versions is allowed wherever the user has path-level access.
@@ -19,7 +19,7 @@ describe('friendlyGitError — translates raw backend git messages', () => {
       'Branch "target-company-state" is protected — opening a PR from a protected branch is not allowed.',
     );
     expect(friendlyGitError(err)).toBe(
-      'You can\'t propose changes from "target-company-state" — open the change request from a draft instead.',
+      'You can\'t propose changes from "target-company-state": open the change request from a draft instead.',
     );
   });
 
@@ -32,7 +32,7 @@ describe('friendlyGitError — translates raw backend git messages', () => {
       'Branch "target-company-state" is protected — creating a protected branch is not allowed.',
     );
     expect(friendlyGitError(err)).toBe(
-      'The name "target-company-state" is reserved — it\'s an official version.',
+      'The name "target-company-state" is reserved: it\'s an official version.',
     );
   });
 
@@ -82,7 +82,7 @@ describe('friendlyGitError — translates raw backend git messages', () => {
   });
 });
 
-describe('parseGitError — structured form for actionable UIs', () => {
+describe('parseGitError: structured form for actionable UIs', () => {
   it('returns kind="plain" for arbitrary errors', () => {
     const info = parseGitError(new Error('oops'));
     expect(info).toEqual({ kind: 'plain', message: 'oops' });

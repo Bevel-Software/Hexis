@@ -152,12 +152,6 @@ export interface IWorkflowService {
   /** Per-file history. Newest first; clamps to ≤ 100 entries. */
   listChangesForFile(workspaceId: string, path: string, limit?: number): Promise<Change[]>;
   /**
-   * Revert a single change by creating a new change that undoes it.
-   * Refused on protected branches; refused without write permission on the
-   * touched paths.
-   */
-  revertChange(workspaceId: string, user: AuthUser, sha: string): Promise<Change>;
-  /**
    * Diff of one file between two branches. Both names must resolve to a
    * known branch on this workspace (local head or remote-tracking). Returns
    * the raw unified diff body — empty when identical, includes the
@@ -175,6 +169,17 @@ export interface IWorkflowService {
    * Used by the File viewer's History tab.
    */
   showFileAtChange(workspaceId: string, path: string, sha: string): Promise<string>;
+  /**
+   * Full file contents on both sides of one change: `baseline` at `<sha>^`
+   * (null when the file — or the parent commit — doesn't exist there),
+   * `current` at `<sha>` (null when absent). Used by the File viewer's
+   * History tab to render markdown changes as a rendered-markdown diff.
+   */
+  fileAtChange(
+    workspaceId: string,
+    path: string,
+    sha: string,
+  ): Promise<{ baseline: string | null; current: string | null }>;
 
   // ── File locks (new — currently NotImplementedWorkflowError) ──────────────
 
@@ -255,8 +260,11 @@ export interface IWorkflowService {
   // ── Change Requests ───────────────────────────────────────────────────────
 
   listChangeRequests(opts?: { fresh?: boolean }): Promise<ChangeRequest[]>;
-  /** Change requests authored by the caller (hash-matched against the body marker). */
-  listChangeRequestsAuthoredBy(emailOrLogin: string): Promise<ChangeRequest[]>;
+  /** Change requests authored by the given user (matched on stored author identity). */
+  listChangeRequestsAuthoredBy(
+    emailOrLogin: string,
+    opts?: { fresh?: boolean },
+  ): Promise<ChangeRequest[]>;
   /** Change requests touching files the user has write permission on. */
   listChangeRequestsForUser(
     workspaceId: string,
@@ -322,6 +330,26 @@ export interface IWorkflowService {
     authorIdHash: string | null,
     workspaceId: string,
   ): Promise<FileApproval[]>;
+
+  /**
+   * Decline ONE file of an open change request: restore its merge-base
+   * version on the source branch so it drops out of the request's diff.
+   * Same permission as approving the file. When the last file is declined
+   * the request closes itself and its source branch is retired
+   * (`closed: true` in the result).
+   */
+  revertChangeRequestFile(
+    number: number,
+    user: AuthUser,
+    repoRelPath: string,
+  ): Promise<{ closed: boolean; remainingPaths: string[] }>;
+
+  /**
+   * Close an OPEN change request whose diff has emptied (authoritatively
+   * re-verified; a failed diff never closes) and retire its source branch.
+   * Returns true when this call closed it.
+   */
+  closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean>;
 
   /**
    * Reject a change request without merging. Authorized for the author or

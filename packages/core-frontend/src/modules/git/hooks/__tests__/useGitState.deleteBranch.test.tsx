@@ -23,9 +23,9 @@ vi.mock('../../services/git.api', () => ({
   deleteBranch: vi.fn(),
   pull: vi.fn(),
   fetchForkBase: vi.fn(),
-  revert: vi.fn(),
   fetchFileHistory: vi.fn(),
   fetchFileDiff: vi.fn(),
+  fetchFileAtChange: vi.fn(),
   fetchFileComparison: vi.fn(),
 }));
 
@@ -37,7 +37,7 @@ function mkBranch(name: string): BranchInfo {
   return { name, isProtected: false, ahead: 0, behind: 0, hasRemote: true };
 }
 
-describe('useGitState — optimistic deleteBranch', () => {
+describe('useGitState: optimistic deleteBranch', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Status fetch isn't what these tests care about; resolve it so the

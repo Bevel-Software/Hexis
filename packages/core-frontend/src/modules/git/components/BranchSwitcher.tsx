@@ -32,18 +32,36 @@ function slugifyDraftName(email: string, text: string): string {
 /**
  * Place the branch dropdown just below its trigger. Coordinates are
  * viewport-fixed because the panel is portaled to <body> (so the toolbar's
- * mobile `overflow` row can't clip it). The left edge is clamped to keep the
- * 288px-wide panel fully on screen on narrow phones.
+ * mobile `overflow` row can't clip it).
+ *
+ * The width is returned alongside the coordinates rather than fixed in the
+ * class list: on a phone narrower than the preferred 400px, clamping `left`
+ * alone would still push the right edge off screen, so the panel shrinks to
+ * whatever the viewport leaves between the two margins and `left` is clamped
+ * against that same width.
  */
-function computePanelPosition(triggerRect: DOMRect): { top: number; left: number } {
-  const PANEL_WIDTH = 400; // matches Tailwind w-[400px]
+function computePanelPosition(triggerRect: DOMRect): {
+  top: number;
+  left: number;
+  width: number;
+} {
+  const PREFERRED_WIDTH = 400;
   const MARGIN = 8; // min gap kept from the viewport edge
   const GAP = 4; // vertical gap below the trigger (matches the old top-8)
-  const maxLeft = window.innerWidth - PANEL_WIDTH - MARGIN;
+  const width = Math.min(PREFERRED_WIDTH, window.innerWidth - MARGIN * 2);
+  const maxLeft = window.innerWidth - width - MARGIN;
   const left = Math.max(MARGIN, Math.min(triggerRect.left, maxLeft));
-  return { top: triggerRect.bottom + GAP, left };
+  return { top: triggerRect.bottom + GAP, left, width };
 }
 
+/**
+ * The toolbar's branch picker: which shared draft you are on, and every way to
+ * leave it — switch, create, propose as a change request, delete.
+ *
+ * An enterprise contribution rather than core furniture, so it arrives through
+ * the registry's toolbar-item slot and the core build simply has no branch
+ * control.
+ */
 export function BranchSwitcher() {
   const git = useGit();
   const navigate = useNavigate();
@@ -87,7 +105,9 @@ export function BranchSwitcher() {
   // every open. The panel is portaled to `document.body` so the toolbar's mobile
   // second row (`overflow-x-auto`/`overflow-y-hidden`) can't clip it — an inline
   // absolutely-positioned child can't escape an `overflow-x-auto` ancestor.
-  const [panelPos, setPanelPos] = useState<{ top: number; left: number } | null>(null);
+  const [panelPos, setPanelPos] = useState<ReturnType<
+    typeof computePanelPosition
+  > | null>(null);
   // Derived from URL: branch the route is pointing at. Used to label the
   // picker "Switching to X…" while the per-branch workspace bootstrap is
   // resolving in the background. Under the per-branch workspace model the
@@ -181,6 +201,7 @@ export function BranchSwitcher() {
   // protected branch", which the share flow enforces server-side too.
   const canOpenPr = !!currentBranch && !currentBranch.isProtected;
 
+  /** Discard a draft, confirming first when the remote ref goes with it. */
   async function doDelete(name: string, hasRemote: boolean) {
     // Two reasons a branch reaches doDelete: (1) it's an orphan with no
     // remote counterpart (PR merged + remote head pruned — tidy-up, no
@@ -200,6 +221,11 @@ export function BranchSwitcher() {
     }
   }
 
+  /**
+   * Move to another branch. Under the per-branch workspace model the URL IS
+   * the switch — changing it triggers the bootstrap — so there is no git
+   * operation to perform here.
+   */
   function doSwitch(name: string) {
     // No-op when the user clicks the branch they're already on — otherwise a dirty
     // tree would pop the commit-first dialog for a switch that has nothing to do.
@@ -220,6 +246,11 @@ export function BranchSwitcher() {
     navigate(kbFileUrl(name, openFilePath ?? ''));
   }
 
+  /**
+   * Turn the typed "what are you changing?" sentence into a draft branch and
+   * navigate onto it. Creating and arriving are one gesture — a draft you
+   * cannot see yet would be a branch nobody asked for.
+   */
   async function doCreate() {
     const text = newBranchName.trim();
     if (!text) return;
@@ -239,6 +270,12 @@ export function BranchSwitcher() {
     }
   }
 
+  /**
+   * Propose the current draft against `base`, by handing off to whichever
+   * change-request port is registered rather than deciding here what
+   * "propose" means — enterprise routes it through the chat agent, core opens
+   * the dialog.
+   */
   function doOpenPr(base: string) {
     if (!currentBranch) return;
     // Hand off to the registered change-request port. The enterprise registry
@@ -294,7 +331,7 @@ export function BranchSwitcher() {
           }
           setError(null);
         }}
-        className="flex items-center gap-1.5 px-2 py-1 text-xs rounded hover:bg-slate-100 text-slate-700 disabled:opacity-60 disabled:cursor-not-allowed"
+        className="flex items-center gap-1.5 px-2 py-1 text-xs rounded hover:bg-hover text-ink disabled:opacity-60 disabled:cursor-not-allowed"
         title={branchLabel}
         // Stay clickable mid-switch so the user can re-pick a branch — the
         // switch is just URL navigation and re-navigating cancels cleanly.
@@ -303,7 +340,7 @@ export function BranchSwitcher() {
         disabled={git.availability === 'loading' && !git.status}
       >
         {switchingTo ? (
-          <Loader2 size={13} className="animate-spin text-slate-500" />
+          <Loader2 size={13} className="animate-spin text-ink-muted" />
         ) : (
           <GitBranch size={13} />
         )}
@@ -316,27 +353,27 @@ export function BranchSwitcher() {
       {open && panelPos && createPortal(
         <div
           ref={panelRef}
-          className="fixed z-50 w-[400px] bg-slate-100 border border-slate-300 rounded-lg shadow-xl overflow-hidden"
-          style={{ top: panelPos.top, left: panelPos.left }}
+          className="fixed z-50 bg-sunken border border-line-strong rounded-lg shadow-xl overflow-hidden"
+          style={{ top: panelPos.top, left: panelPos.left, width: panelPos.width }}
         >
           {!creating && !choosingTarget && (
             <>
               <button
-                className="flex items-center gap-2 w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-200/80"
+                className="flex items-center gap-2 w-full text-left px-3 py-2 text-sm text-ink hover:bg-hover"
                 onClick={() => setCreating(true)}
               >
                 <Plus size={14} />
                 Start a shared draft…
               </button>
               <button
-                className="flex items-center gap-2 w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-200/80 border-b border-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex items-center gap-2 w-full text-left px-3 py-2 text-sm text-ink hover:bg-hover border-b border-line-strong disabled:opacity-50 disabled:cursor-not-allowed"
                 onClick={() => setChoosingTarget(true)}
                 disabled={!canOpenPr}
                 title={
                   !currentBranch
                     ? 'No draft selected'
                     : currentBranch.isProtected
-                      ? "You can't propose changes from an official version — switch to a draft first"
+                      ? "You can't propose changes from an official version. Switch to a draft first"
                       : 'Pick where this change request should land'
                 }
               >
@@ -347,13 +384,13 @@ export function BranchSwitcher() {
           )}
 
           {choosingTarget && (
-            <div className="border-b border-slate-300">
+            <div className="border-b border-line-strong">
               <div className="flex items-center justify-between px-3 pt-2 pb-1">
-                <span className="text-[11px] text-slate-600 uppercase tracking-wide">
+                <span className="text-[11px] text-ink-muted uppercase tracking-wide">
                   Apply draft to…
                 </span>
                 <button
-                  className="text-[11px] text-slate-600 hover:text-slate-700"
+                  className="text-[11px] text-ink-muted hover:text-ink"
                   onClick={() => setChoosingTarget(false)}
                 >
                   Cancel
@@ -361,7 +398,7 @@ export function BranchSwitcher() {
               </div>
               <div className="max-h-48 overflow-y-auto">
                 {targetBranches.length === 0 && (
-                  <div className="px-3 py-2 text-xs text-slate-600">
+                  <div className="px-3 py-2 text-xs text-ink-muted">
                     No other branches to target.
                   </div>
                 )}
@@ -378,10 +415,10 @@ export function BranchSwitcher() {
                       className={`flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm ${
                         isDefaultTarget
                           ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
-                          : 'text-slate-700 hover:bg-slate-200/60'
+                          : 'text-ink hover:bg-hover'
                       }`}
                     >
-                      {b.isProtected && <Lock size={11} className="text-slate-600" />}
+                      {b.isProtected && <Lock size={11} className="text-ink-muted" />}
                       {displayName ? (
                         <span className="truncate flex-1" title={b.name}>
                           {displayName}
@@ -402,8 +439,8 @@ export function BranchSwitcher() {
           )}
 
           {creating && (
-            <div className="px-3 py-2 border-b border-slate-300 space-y-2">
-              <div className="text-[11px] text-slate-600">What are you changing?</div>
+            <div className="px-3 py-2 border-b border-line-strong space-y-2">
+              <div className="text-[11px] text-ink-muted">What are you changing?</div>
               <input
                 autoFocus
                 type="text"
@@ -417,7 +454,7 @@ export function BranchSwitcher() {
                     setNewBranchName('');
                   }
                 }}
-                className="w-full bg-white border border-slate-300 rounded px-2 py-1 text-xs focus:outline-none focus:border-slate-400"
+                className="w-full bg-white border border-line-strong rounded px-2 py-1 text-xs focus:outline-none focus:border-accent"
               />
               <div className="flex justify-end gap-1">
                 <button
@@ -425,7 +462,7 @@ export function BranchSwitcher() {
                     setCreating(false);
                     setNewBranchName('');
                   }}
-                  className="px-2 py-0.5 text-xs rounded hover:bg-slate-200 text-slate-700"
+                  className="px-2 py-0.5 text-xs rounded hover:bg-hover text-ink"
                 >
                   Cancel
                 </button>
@@ -442,7 +479,7 @@ export function BranchSwitcher() {
 
           <div className="max-h-64 overflow-y-auto">
             {git.branches.length === 0 && (
-              <div className="px-3 py-2 text-xs text-slate-600">No drafts yet.</div>
+              <div className="px-3 py-2 text-xs text-ink-muted">No drafts yet.</div>
             )}
             {git.branches.map((b) => {
               const current = isCurrentBranch(b);
@@ -470,14 +507,14 @@ export function BranchSwitcher() {
                 !b.isProtected && !current && (isOrphan || isAuthoredByMe || isAdmin);
               const deleteTitle = isOrphan
                 ? 'Delete this draft (no longer shared)'
-                : `Delete shared draft "${b.name}" — removes it for everyone`;
+                : `Delete shared draft "${b.name}": removes it for everyone`;
               return (
                 <div
                   key={b.name}
                   className={`flex items-stretch w-full text-sm group ${
                     current
-                      ? 'bg-slate-200/70 text-slate-900'
-                      : 'text-slate-700 hover:bg-slate-200/60'
+                      ? 'bg-line-strong text-ink'
+                      : 'text-ink hover:bg-hover'
                   }`}
                 >
                   <button
@@ -489,7 +526,7 @@ export function BranchSwitcher() {
                     }`}
                   >
                     {current ? <Check size={12} /> : <span className="w-3" />}
-                    {b.isProtected && <Lock size={11} className="text-slate-600" />}
+                    {b.isProtected && <Lock size={11} className="text-ink-muted" />}
                     <span className="truncate flex-1" title={b.name}>{b.name}</span>
                   </button>
                   {canDelete && (
@@ -500,7 +537,7 @@ export function BranchSwitcher() {
                       }}
                       title={deleteTitle}
                       aria-label={deleteTitle}
-                      className="px-2 text-slate-600 hover:text-red-600 hover:bg-slate-100/80 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                      className="px-2 text-ink-muted hover:text-red-600 hover:bg-hover opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
                     >
                       <Trash2 size={12} />
                     </button>
@@ -513,7 +550,7 @@ export function BranchSwitcher() {
           {error && (
             <div
               role="alert"
-              className="px-3 py-2 text-xs text-red-600 border-t border-slate-300"
+              className="px-3 py-2 text-xs text-red-600 border-t border-line-strong"
             >
               {error.message}
             </div>

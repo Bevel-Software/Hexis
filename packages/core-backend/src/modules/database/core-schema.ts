@@ -24,6 +24,19 @@ export const users = pgTable('users', {
    * until an admin (or the user, from their Account page) sets one.
    */
   passwordHash: text('password_hash'),
+  /**
+   * The one onboarding fact the server keeps: has this person concluded the
+   * connect-your-agent setup (the welcome page's Done, or the reminder
+   * pill's dismiss — one field, both doors). False drives the pill in every
+   * browser the account signs into; true ends it everywhere at once, which
+   * is exactly what localStorage could not promise.
+   *
+   * Existing accounts are NOT backfilled to true: the column simply defaults
+   * to false, so everyone is greeted once and anyone already connected
+   * clicks Done. A plain `ADD COLUMN` is worth more than the branching a
+   * backfill would need, and being shown the setup once costs a click.
+   */
+  onboardingDone: boolean('onboarding_done').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -435,3 +448,36 @@ export const sessionOntologyTouches = pgTable('session_ontology_touches', {
   // Backstop sweep of abandoned runs via `touched_at < cutoff`.
   byTouchedAt: index('session_ontology_touches_by_touched_at').on(t.touchedAt),
 }));
+
+/**
+ * Deployment-wide settings an admin can change from the setup screen, so a
+ * fresh install does not have to be told everything through the environment
+ * before it will boot.
+ *
+ * KEY/VALUE rather than typed columns: the set grows (the KB remote first, the
+ * branch model after it), and a migration per setting buys nothing when every
+ * value arrives from a text input anyway. Validation lives with the setting's
+ * definition, not in the column type.
+ *
+ * The ENVIRONMENT still wins over anything stored here — a row is a fallback,
+ * never an override. That is what lets an existing deployment adopt this table
+ * with no behaviour change, and stops a value typed once in a browser from
+ * quietly outranking the infrastructure config that is under review.
+ */
+export const deploymentSettings = pgTable('deployment_settings', {
+  key: text('key').primaryKey(),
+  /** Ciphertext when `encrypted`, plain text otherwise. */
+  value: text('value').notNull(),
+  /**
+   * Whether `value` is sealed with the secrets key. Stored per row rather than
+   * inferred from the key name so a reader never has to know the catalogue to
+   * know whether it is holding a secret.
+   */
+  encrypted: boolean('encrypted').default(false).notNull(),
+  /**
+   * Who last wrote it. `set null` on delete rather than cascade: erasing a
+   * person must not take the deployment's configuration with them.
+   */
+  updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});

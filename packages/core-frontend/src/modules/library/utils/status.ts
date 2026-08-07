@@ -10,7 +10,16 @@ import type { ToolSecrets, ToolVarStatus } from '../../secrets-vault/services/to
  * clean.
  */
 
-export type GemState = 'ok' | 'warn' | 'err' | 'off';
+/**
+ * Three states, and no fourth.
+ *
+ * There used to be an `off` — "not set up yet", drawn in grey. Grey reads as
+ * *disabled*, or as *not your problem*: an unconfigured integration looked like
+ * furniture next to the amber ones, when in fact it is the state that most
+ * needs somebody. Anything that needs a person is amber; anything that was
+ * working and stopped is red. Nothing that needs a person is grey.
+ */
+export type GemState = 'ok' | 'warn' | 'err';
 
 export interface AttentionStatus {
   state: GemState;
@@ -20,30 +29,36 @@ export interface AttentionStatus {
 
 const OK: AttentionStatus = { state: 'ok', text: 'Connected' };
 
-/** Severity order for aggregation: broken sign-in > not set up > user action pending. */
-const RANK: Record<GemState, number> = { ok: 0, warn: 1, off: 2, err: 3 };
+/** Severity order for aggregation: broken sign-in beats anything merely unset. */
+const RANK: Record<GemState, number> = { ok: 0, warn: 1, err: 2 };
 
+/**
+ * Two states, and the words for them: `Connected`, or `Needs <the thing>`.
+ *
+ * There is deliberately no middle. "Not set up yet", "Sign in again to keep
+ * this working" and "Needs your sign-in" were three ways of saying one thing —
+ * this does not work yet — in three different shapes, so a wall of cards read
+ * as several unrelated problems. Every unhealthy state now names what it wants
+ * in the same grammar, which is what makes the column scannable.
+ *
+ * A missing key is `warn`, not a quieter state of its own: it needs a person,
+ * and everything that needs a person looks the same colour.
+ */
 function varStatus(v: ToolVarStatus, canWrite: boolean): AttentionStatus {
+  const notSetUp: AttentionStatus = {
+    state: 'warn',
+    text: canWrite ? 'Needs setup: yours to set up' : 'Needs setup',
+  };
   if (v.oauth) {
-    if (!v.adminConfigured) {
-      return {
-        state: 'off',
-        text: canWrite ? 'Not set up yet — you maintain this integration' : 'Not set up yet',
-      };
-    }
-    if (v.authorized && v.needsReauth) return { state: 'err', text: 'Sign in again to keep this working' };
+    if (!v.adminConfigured) return notSetUp;
+    if (v.authorized && v.needsReauth) return { state: 'err', text: 'Needs signing in again' };
     if (!v.authorized) return { state: 'warn', text: 'Needs your sign-in' };
     return OK;
   }
   if (v.scope === 'user') {
     return v.userConfigured ? OK : { state: 'warn', text: 'Needs a key from you' };
   }
-  return v.adminConfigured
-    ? OK
-    : {
-        state: 'off',
-        text: canWrite ? 'Not set up yet — you maintain this integration' : 'Not set up yet',
-      };
+  return v.adminConfigured ? OK : notSetUp;
 }
 
 /** Aggregate connection state of one integration for the current user. */
@@ -81,27 +96,68 @@ export function neededToolsFor(
   });
 }
 
-/** A skill is ready when every integration it needs is fully connected. */
+/**
+ * A skill is ready when every integration it needs is fully connected.
+ *
+ * When it is not, the status NAMES the integration in the way — the prototype's
+ * `Needs {tool}` (line 1645). "Needs setup" told you a skill was blocked but
+ * not by what, which left the only next step as opening the skill to find out.
+ * The first unhealthy one is enough: fixing it either unblocks the skill or
+ * reveals the next name.
+ */
 export function skillStatus(neededTools: ToolSecrets[]): AttentionStatus {
-  const broken = neededTools.some((t) => toolStatus(t).state !== 'ok');
-  return broken ? { state: 'warn', text: 'Needs setup' } : { state: 'ok', text: 'Ready' };
+  const blocker = neededTools.find((t) => toolStatus(t).state !== 'ok');
+  return blocker ? { state: 'warn', text: `Needs ${blocker.name}` } : { state: 'ok', text: 'Ready' };
 }
 
 /* ── gallery filtering ── */
 
-export type LibraryCategory = 'skills' | 'integrations' | 'owned';
+/**
+ * What the sidebar has selected.
+ *
+ * Note there is no 'skills' / 'integrations' member. The design does not split
+ * the catalog by kind: a group owns its skills AND the tools those skills need,
+ * so filtering to "just tools" would show a group's integrations detached from
+ * the reason any of them are there. Kind is a property of a card, not a view.
+ */
+export type LibraryFilter =
+  | { kind: 'all' }
+  | { kind: 'owned' }
+  | { kind: 'group'; group: string }
+  /** Owned by someone, in no group — the prototype calls these "yours alone". */
+  | { kind: 'ungrouped' };
+
+/**
+ * What an empty view says.
+ *
+ * A SEARCH that found nothing is about the search, in every view — the shelf
+ * is not empty, your words just missed it. With no query the emptiness is
+ * about the view itself, and each view is empty for its own reason: "Owned by
+ * me" holds the things whose upkeep is yours, so its empty state says that,
+ * rather than reporting a failed match nobody attempted.
+ *
+ * Here rather than in `LibraryPage`, because a component file that also
+ * exports a plain function breaks fast refresh for the whole module.
+ */
+export function emptyMessageFor(filter: LibraryFilter, query: string): string {
+  if (query.trim()) return 'Nothing here matches yet.';
+  if (filter.kind === 'owned') return "You're not responsible for changes in any skills yet.";
+  return 'Nothing here matches yet.';
+}
 
 export interface LibraryFilterable {
   kind: 'skill' | 'integration';
   name: string;
   description: string;
   owned: boolean;
+  /** Folder group from the item's KB path, or null when it sits in none. */
+  group: string | null;
 }
 
-/** The chip + search filter from the mock: category narrows, query matches name/description. */
+/** Sidebar selection narrows; the query matches name/description within it. */
 export function filterLibraryItems<T extends LibraryFilterable>(
   items: T[],
-  category: LibraryCategory,
+  filter: LibraryFilter,
   query: string,
 ): T[] {
   const q = query.trim().toLowerCase();
@@ -109,8 +165,35 @@ export function filterLibraryItems<T extends LibraryFilterable>(
     if (q && !item.name.toLowerCase().includes(q) && !item.description.toLowerCase().includes(q)) {
       return false;
     }
-    if (category === 'skills') return item.kind === 'skill';
-    if (category === 'integrations') return item.kind === 'integration';
-    return item.owned;
+    switch (filter.kind) {
+      case 'all':
+        return true;
+      case 'owned':
+        return item.owned;
+      case 'group':
+        return item.group === filter.group;
+      case 'ungrouped':
+        return item.group === null;
+    }
   });
+}
+
+/**
+ * Group names present in the catalog, with how many items each holds.
+ *
+ * Sorted by name rather than by count so the sidebar does not reorder itself
+ * when a group gains an item — a nav that moves under the pointer is worse
+ * than one that buries the biggest group in the middle.
+ */
+export function groupCounts<T extends LibraryFilterable>(
+  items: T[],
+): { group: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    if (item.group === null) continue;
+    counts.set(item.group, (counts.get(item.group) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([group, count]) => ({ group, count }))
+    .sort((a, b) => a.group.localeCompare(b.group));
 }

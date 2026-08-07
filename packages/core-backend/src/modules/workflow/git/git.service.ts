@@ -22,6 +22,7 @@ import {
   assertValidBranchName,
   assertValidRelativePath,
   isBranchAuthoredBy,
+  isOwnSuggestionsBranch,
   isProtectedBranch,
   PROTECTED_BRANCHES,
 } from './branch-name.js';
@@ -607,7 +608,7 @@ export class GitService implements IGitService {
     workspaceId: string,
     name: string,
     user: AuthUser,
-    opts: { onlyIfNoRemote?: boolean } = {},
+    opts: { onlyIfNoRemote?: boolean; systemCleanup?: boolean } = {},
   ): Promise<void> {
     assertValidBranchName(name);
     if (isProtectedBranch(name)) {
@@ -622,7 +623,12 @@ export class GitService implements IGitService {
         );
       }
 
-      if (opts.onlyIfNoRemote) {
+      if (opts.systemCleanup) {
+        // Internal post-merge retirement (never reachable from a route): the
+        // merge that emptied this branch was itself authorized, so no
+        // authorship check — the protected-branch and checked-out guards
+        // above still hold.
+      } else if (opts.onlyIfNoRemote) {
         // Legacy orphan-cleanup path (PR merged + remote head pruned). Skip
         // the authorship check — callers prune any orphan they encounter,
         // not just their own — but keep the "refuse if origin still has the
@@ -642,7 +648,13 @@ export class GitService implements IGitService {
         // that predicate is the existing source of truth for `Admin`-role
         // membership inside the access model — no separate `isAdmin()` plumbing
         // needed.
-        const isAuthor = isBranchAuthoredBy(name, user.email);
+        // Two authorship conventions: `<localpart>/…` UI drafts, and the
+        // `suggestions/<who>-<id8>/…` namespace the propose flow files its
+        // branches under — a user resetting THEIR OWN suggestion bundle is
+        // deleting their own branch.
+        const isAuthor =
+          isBranchAuthoredBy(name, user.email) ||
+          isOwnSuggestionsBranch(name, { email: user.email, id: user.id });
         const isAdmin = this.accessControl
           ? await this.accessControl.canWrite(workspaceId, user.email, 'roles.yaml')
           : false;
@@ -1017,7 +1029,11 @@ export class GitService implements IGitService {
     });
   }
 
-  async push(workspaceId: string, user: AuthUser): Promise<void> {
+  async push(
+    workspaceId: string,
+    user: AuthUser,
+    opts?: { systemAuthorized?: boolean },
+  ): Promise<void> {
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
       const branch = await this.currentBranch(cwd);
@@ -1030,7 +1046,14 @@ export class GitService implements IGitService {
       // PR. Gate against `origin/<branch>` — the published state — for
       // protected pushes; that's defence-in-depth against local rebases or
       // `commit-tree` shenanigans that might bypass the commit-time gate.
-      if (isProtectedBranch(branch)) {
+      // `systemAuthorized` skips the gate for flows whose ENDPOINT is the
+      // authorization — group provisioning commits an access.md into a
+      // folder that does not exist at origin yet, which this gate can only
+      // ever read as "write: Admin". The provisioning service has already
+      // decided the write is legitimate (unused name, exclusive create);
+      // gating it here again just refuses every non-admin the product
+      // promised a group to.
+      if (isProtectedBranch(branch) && !opts?.systemAuthorized) {
         const touched = await this.unpushedTouchedPaths(cwd);
         await this.assertCanWriteAtRef(
           workspaceId,
@@ -1608,60 +1631,6 @@ export class GitService implements IGitService {
     });
   }
 
-  async revertCommit(
-    workspaceId: string,
-    user: AuthUser,
-    sha: string,
-  ): Promise<CommitAttribution> {
-    if (!/^[a-f0-9]{7,40}$/i.test(sha)) {
-      throw new WorkflowValidationError('invalid commit sha');
-    }
-    assertValidAuthor(user);
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
-      const branch = await this.currentBranch(cwd);
-
-      // Revert creates a new commit reversing `sha`. Same model as commit:
-      // gate only on protected branches; reverts on feature/draft branches
-      // are free (they produce a commit that would still need to merge via
-      // PR to affect canonical state).
-      if (isProtectedBranch(branch)) {
-        const { stdout: diffOut } = await this.git(cwd, [
-          'diff-tree', '--no-commit-id', '--name-only', '-r', sha,
-        ]);
-        const touched = diffOut.split('\n').map((s) => s.trim()).filter(Boolean);
-        await this.assertCanWriteAtRef(workspaceId, 'HEAD', user.email, touched);
-      }
-
-      await this.git(cwd, [
-        'revert',
-        '--no-edit',
-        `--author=${user.name} <${user.email}>`,
-        sha,
-      ]);
-
-      const { stdout } = await this.git(cwd, [
-        'log',
-        '-1',
-        '--pretty=format:%H%x00%an%x00%ae%x00%s%x00%aI',
-      ]);
-      const [headSha, authorName, authorEmail, subj, committedAt] = stdout.split('\x00');
-
-      // A revert may have touched roles.yaml or access.md — drop cached
-      // access state so the next gate read reflects the rolled-back tree.
-      // Mirrors the commit / pull paths.
-      this.accessControl?.invalidate(workspaceId);
-
-      return {
-        sha: headSha?.trim() ?? '',
-        authorName: authorName ?? '',
-        authorEmail: authorEmail ?? '',
-        subject: subj ?? '',
-        committedAt: committedAt?.trim() ?? new Date().toISOString(),
-      };
-    });
-  }
-
   async logForFile(
     workspaceId: string,
     relativePath: string,
@@ -1723,6 +1692,44 @@ export class GitService implements IGitService {
           { cause: err },
         );
       }
+    });
+  }
+
+  /**
+   * Full file contents on both sides of one commit: `baseline` is the file at
+   * `<sha>^` (the parent), `current` at `<sha>`. Null means the file is absent
+   * at that ref — added files have `baseline: null`, deleted files
+   * `current: null`. A root commit (no parent) also yields `baseline: null`.
+   * Feeds the rendered-markdown history view, which needs before/after text
+   * rather than the patch `diffFileAtCommit` returns.
+   */
+  async fileContentsAtCommit(
+    workspaceId: string,
+    relativePath: string,
+    sha: string,
+  ): Promise<{ baseline: string | null; current: string | null }> {
+    assertValidRelativePath(relativePath);
+    if (!/^[a-f0-9]{7,40}$/i.test(sha)) {
+      throw new WorkflowValidationError('invalid commit sha');
+    }
+    const repoRelativePath = this.stripRepoPrefix(relativePath);
+    return this.mutex.run(workspaceId, async () => {
+      const current = await this.readFileAtRef(workspaceId, sha, repoRelativePath);
+      let baseline: string | null;
+      try {
+        baseline = await this.readFileAtRef(workspaceId, `${sha}^`, repoRelativePath);
+      } catch (err) {
+        // `readFileAtRef` maps "path absent at ref" to null but propagates an
+        // unresolvable ref. `<sha>^` on a root commit is exactly that (git
+        // reports it as "invalid object name '<sha>^'", or "unknown/bad
+        // revision" in other codepaths), and it legitimately means "no parent
+        // side" — fold it into null. Anything else stays fatal.
+        const stderr =
+          (err as { stderr?: string }).stderr ?? (err instanceof Error ? err.message : String(err));
+        if (/invalid object name|unknown revision|bad revision/i.test(stderr)) baseline = null;
+        else throw err;
+      }
+      return { baseline, current };
     });
   }
 
@@ -1859,8 +1866,20 @@ export class GitService implements IGitService {
         this.git(cwd, ['diff', '-M', '-z', '--name-status', range]),
         this.git(cwd, ['diff', '-M', '-z', '--numstat', range]),
       ]);
-      const statuses = parseNameStatusZ(nameStatusOut);
-      const counts = parseNumstatZ(numstatOut);
+      let statuses = parseNameStatusZ(nameStatusOut);
+      let counts = parseNumstatZ(numstatOut);
+      // roles.yaml can NEVER change through a merge — `preserveBaseRolesYaml`
+      // restores the base copy onto the source branch before every merge — so
+      // listing it as "changed" claims something the merge will not do, and
+      // (worse) makes its approval a requirement for a change that cannot
+      // land. Filter it from the review surface entirely; the neutralisation
+      // reads the raw refs itself and is unaffected. Both lists are filtered
+      // IN STEP so the index-zip below stays aligned.
+      if (statuses.some((s) => s.path === 'roles.yaml')) {
+        const keep = statuses.map((s) => s.path !== 'roles.yaml');
+        statuses = statuses.filter((_, i) => keep[i]);
+        if (counts.length === keep.length) counts = counts.filter((_, i) => keep[i]);
+      }
 
       // `--name-status` and `--numstat` enumerate the same files in the same
       // order (same `-M` over the same range), so we zip by index. If the two
@@ -1924,7 +1943,76 @@ export class GitService implements IGitService {
       const { stdout } = await this.git(cwd, [
         'diff', '-M', '--name-only', `${baseRef}...${headRef}`,
       ]);
-      return stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+      return (
+        stdout
+          .split('\n')
+          .map((s) => s.trim())
+          .filter(Boolean)
+          // Same rule as `changedFilesForPr`: a roles.yaml change never
+          // survives a merge, so it is not a touched path for routing or
+          // summaries either.
+          .filter((p) => p !== 'roles.yaml')
+      );
+    });
+  }
+
+  /**
+   * The merge-base commit of a change request's two branches (their origin
+   * refs), or null when they share no history. This is the "before" the CR's
+   * three-dot diff is read against — the ref a per-file revert restores from,
+   * so the reverted file drops OUT of that same diff.
+   */
+  async mergeBaseForPr(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<string | null> {
+    assertValidBranchName(baseBranch);
+    assertValidBranchName(headBranch);
+    const cwd = await this.repoDir(workspaceId);
+    await this.fetchPrRefs(cwd, baseBranch, headBranch);
+    return this.mutex.run(workspaceId, async () => {
+      const baseRef = await this.resolveBranchRef(cwd, baseBranch);
+      const headRef = await this.resolveBranchRef(cwd, headBranch);
+      try {
+        const { stdout } = await this.git(cwd, ['merge-base', baseRef, headRef]);
+        return stdout.trim() || null;
+      } catch (err) {
+        // Exit 1 is git's specific "no common ancestor" answer; anything else
+        // is an infra failure that must not masquerade as it.
+        if ((err as { exitCode?: number }).exitCode === 1) return null;
+        throw err;
+      }
+    });
+  }
+
+  /**
+   * Restore one path in the working tree (and index) to its content at `ref`;
+   * a path ABSENT at `ref` is deleted — the revert of an added file is its
+   * removal. Byte-exact via git itself (`checkout <ref> -- <path>`), never a
+   * read-as-string round-trip that would mangle binary files. The caller owns
+   * committing the result (see `commitFile`).
+   */
+  async restorePathFromRef(
+    workspaceId: string,
+    ref: string,
+    repoRelativePath: string,
+  ): Promise<void> {
+    assertValidRelativePath(repoRelativePath);
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      let existsAtRef = true;
+      try {
+        await this.git(cwd, ['cat-file', '-e', `${ref}:${repoRelativePath}`]);
+      } catch {
+        existsAtRef = false;
+      }
+      if (existsAtRef) {
+        await this.git(cwd, ['checkout', ref, '--', repoRelativePath]);
+      } else {
+        // `--ignore-unmatch`: already gone from the tree is the desired state.
+        await this.git(cwd, ['rm', '--force', '--ignore-unmatch', '--quiet', '--', repoRelativePath]);
+      }
     });
   }
 

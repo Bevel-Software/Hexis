@@ -16,8 +16,11 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      'process.env.DEFAULT_BRANCH': JSON.stringify(env.DEFAULT_BRANCH ?? ''),
-      'process.env.PROTECTED_BRANCHES': JSON.stringify(env.PROTECTED_BRANCHES ?? ''),
+      // The branch model is NOT here any more. It used to be substituted into
+      // the bundle at build time, which meant one artifact per deployment and a
+      // rebuild to rename a branch; it now arrives from `GET /api/config`
+      // before the app renders (see `core/bootstrap.ts`).
+      //
       // Per-tenant demo expiry. Unset → the demo banner never renders.
       'process.env.DEMO_EXPIRY': JSON.stringify(env.DEMO_EXPIRY ?? ''),
     },
@@ -28,6 +31,17 @@ export default defineConfig(({ mode }) => {
     },
     envDir,
     server: {
+      // `core-frontend` is consumed through a workspace SYMLINK in
+      // node_modules, and that is the path Tailwind's `@source` scans (see
+      // `src/index.css`). The scanner reads through it fine on a cold start,
+      // but the file watcher does not follow symlinks by default — so a
+      // utility class written mid-session is never compiled, and the class
+      // lands in the DOM matching no rule at all. That failure is silent and
+      // looks like a design bug: `not-sr-only` vanished a name, and an
+      // entrance animation "just appeared" through three rounds of debugging
+      // because its hold never existed. Following the link costs a little
+      // watch overhead and buys back every one of those afternoons.
+      watch: { followSymlinks: true },
       proxy: {
         '/api': {
           target: 'http://127.0.0.1:3001',

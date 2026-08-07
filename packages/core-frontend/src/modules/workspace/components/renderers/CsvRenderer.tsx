@@ -102,13 +102,13 @@ export function CsvRenderer({
   return (
     <div className="flex flex-col h-full">
       {showStatusStrip && (
-        <div className="flex items-center gap-2 pb-2 mb-2 border-b border-slate-200 shrink-0">
+        <div className="flex items-center gap-2 pb-2 mb-2 border-b border-line shrink-0">
           {saveState === 'saving' && (
             <span
               role="status"
               aria-live="polite"
               aria-atomic="true"
-              className="text-xs text-slate-600"
+              className="text-xs text-ink-muted"
             >
               Saving…
             </span>
@@ -118,7 +118,7 @@ export function CsvRenderer({
               role="alert"
               aria-live="assertive"
               aria-atomic="true"
-              className="text-xs text-red-600"
+              className="text-xs text-danger"
             >
               Couldn't save your changes. Try again in a moment.
             </span>
@@ -129,7 +129,7 @@ export function CsvRenderer({
       {readOnly ? (
         <div className="flex-1 overflow-auto">
           {rows.length === 0 || columnCount === 0 ? (
-            <div className="flex items-center justify-center h-full text-slate-600 text-sm">
+            <div className="flex items-center justify-center h-full text-ink-muted text-sm">
               This file is empty.
             </div>
           ) : (
@@ -143,10 +143,10 @@ export function CsvRenderer({
                       return (
                         <Tag
                           key={cIdx}
-                          className={`border border-slate-200 px-2 py-1 align-top whitespace-pre-wrap ${
+                          className={`border border-line px-2 py-1 align-top whitespace-pre-wrap ${
                             rIdx === 0
-                              ? 'bg-slate-50 text-slate-900 font-medium text-left'
-                              : 'text-slate-700'
+                              ? 'bg-sunken text-ink font-medium text-left'
+                              : 'text-ink'
                           }`}
                         >
                           {cell}
@@ -161,7 +161,7 @@ export function CsvRenderer({
         </div>
       ) : (
         <textarea
-          className="flex-1 w-full bg-transparent text-sm text-slate-700 font-mono whitespace-pre-wrap break-words leading-relaxed resize-none outline-none"
+          className="flex-1 w-full bg-transparent text-sm text-ink font-mono whitespace-pre-wrap break-words leading-relaxed resize-none outline-none"
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}

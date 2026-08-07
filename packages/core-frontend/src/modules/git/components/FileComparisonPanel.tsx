@@ -211,9 +211,9 @@ export function FileComparisonPanel({ filePath, initialFrom, initialTo, refreshK
 
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-white">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-slate-200 shrink-0">
-        <GitCompare size={14} className="text-slate-600 shrink-0" />
-        <span className="text-xs text-slate-600 truncate flex-1 min-w-0">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-line shrink-0">
+        <GitCompare size={14} className="text-ink-muted shrink-0" />
+        <span className="text-xs text-ink-muted truncate flex-1 min-w-0">
           Compare versions of {filePath}
         </span>
         <button
@@ -222,13 +222,13 @@ export function FileComparisonPanel({ filePath, initialFrom, initialTo, refreshK
           disabled={loading || !fromBranch || !toBranch || fromBranch === toBranch}
           title="Refresh comparison"
           aria-label="Refresh comparison"
-          className="p-1 rounded text-slate-600 hover:text-slate-900 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+          className="p-1 rounded text-ink-muted hover:text-ink hover:bg-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
         >
           <RefreshCw size={12} className={loading ? 'animate-spin' : undefined} />
         </button>
       </div>
 
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-slate-200 shrink-0">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-line shrink-0">
         <BranchPicker
           label="From"
           value={fromBranch}
@@ -241,7 +241,7 @@ export function FileComparisonPanel({ filePath, initialFrom, initialTo, refreshK
           disabled={!fromBranch || !toBranch}
           title="Swap From and To"
           aria-label="Swap From and To"
-          className="p-1.5 rounded text-slate-600 hover:text-slate-900 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          className="p-1.5 rounded text-ink-muted hover:text-ink hover:bg-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
           <ArrowLeftRight size={14} />
         </button>
@@ -262,17 +262,17 @@ export function FileComparisonPanel({ filePath, initialFrom, initialTo, refreshK
 
       <div className="flex-1 overflow-auto">
         {(!fromBranch || !toBranch) && !loading && !error && (
-          <div className="flex items-center justify-center h-full px-6 text-xs text-slate-600 text-center">
+          <div className="flex items-center justify-center h-full px-6 text-xs text-ink-muted text-center">
             Pick two versions to compare.
           </div>
         )}
         {fromBranch && toBranch && fromBranch === toBranch && !loading && !error && (
-          <div className="flex items-center justify-center h-full px-6 text-xs text-slate-600 text-center">
+          <div className="flex items-center justify-center h-full px-6 text-xs text-ink-muted text-center">
             Pick two different versions to see what changed.
           </div>
         )}
         {loading && (
-          <div className="flex items-center gap-2 px-3 py-3 text-xs text-slate-600">
+          <div className="flex items-center gap-2 px-3 py-3 text-xs text-ink-muted">
             <Loader2 size={13} className="animate-spin" />
             Loading comparison…
           </div>
@@ -313,32 +313,32 @@ function BranchPicker({ label, value, branches, onChange }: BranchPickerProps) {
   const valueIsProtected = !!value && (
     branches.find((b) => b.name === value)?.isProtected ?? false
   );
-  const valueDisplay = value ? protectedBranchDisplayName(value) ?? value : '— pick —';
+  const valueDisplay = value ? protectedBranchDisplayName(value) ?? value : 'Select…';
 
   return (
     <div ref={ref} className="relative flex-1 min-w-0">
-      <div className="text-[10px] uppercase tracking-wide text-slate-600 mb-0.5">
+      <div className="text-[10px] uppercase tracking-wide text-ink-muted mb-0.5">
         {label}
       </div>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-1.5 px-2 py-1.5 text-xs rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-900 min-w-0"
+        className="w-full flex items-center gap-1.5 px-2 py-1.5 text-xs rounded bg-sunken hover:bg-hover border border-line-strong text-ink min-w-0"
         aria-haspopup="listbox"
         aria-expanded={open}
       >
-        {valueIsProtected && <Lock size={11} className="text-slate-600 shrink-0" />}
+        {valueIsProtected && <Lock size={11} className="text-ink-muted shrink-0" />}
         <span className="truncate flex-1 text-left">{valueDisplay}</span>
-        <ChevronDown size={12} className={`text-slate-600 transition-transform ${open ? 'rotate-180' : ''}`} />
+        <ChevronDown size={12} className={`text-ink-muted transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
 
       {open && (
         <div
           role="listbox"
-          className="absolute top-full left-0 right-0 z-40 mt-1 bg-slate-100 border border-slate-300 rounded-lg shadow-xl max-h-64 overflow-y-auto"
+          className="absolute top-full left-0 right-0 z-40 mt-1 bg-sunken border border-line-strong rounded-lg shadow-xl max-h-64 overflow-y-auto"
         >
           {branches.length === 0 && (
-            <div className="px-3 py-2 text-xs text-slate-600">No branches.</div>
+            <div className="px-3 py-2 text-xs text-ink-muted">No branches.</div>
           )}
           {branches.map((b) => {
             const display = protectedBranchDisplayName(b.name);
@@ -354,16 +354,16 @@ function BranchPicker({ label, value, branches, onChange }: BranchPickerProps) {
                 }}
                 className={`flex items-center gap-2 w-full text-left px-3 py-1.5 text-xs ${
                   isSelected
-                    ? 'bg-slate-200/80 text-slate-900'
-                    : 'text-slate-700 hover:bg-slate-200/60'
+                    ? 'bg-line-strong text-ink'
+                    : 'text-ink hover:bg-hover'
                 }`}
               >
-                {b.isProtected && <Lock size={11} className="text-slate-600 shrink-0" />}
+                {b.isProtected && <Lock size={11} className="text-ink-muted shrink-0" />}
                 <span className="truncate flex-1">
                   {display ?? <span className="font-mono">{b.name}</span>}
                 </span>
                 {display && (
-                  <span className="font-mono text-[10px] text-slate-600 shrink-0 truncate max-w-[40%]">
+                  <span className="font-mono text-[10px] text-ink-muted shrink-0 truncate max-w-[40%]">
                     {b.name}
                   </span>
                 )}

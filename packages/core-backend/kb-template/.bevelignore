@@ -11,7 +11,9 @@
 # Repo hygiene files that clutter the tree without being node content.
 .gitignore
 .gitattributes
-# README.md files are the base folders' own documentation — keep them visible.
+AGENTS.md
+# The pre-rename name. Listed so a knowledge base carrying both files hides
+# both — top-up adds AGENTS.md but never deletes the CLAUDE.md beside it.
 CLAUDE.md
 
 # Empty-folder placeholders used only for committing empty dirs.
@@ -19,3 +21,5 @@ CLAUDE.md
 
 **/access.md
 roles.yaml
+
+Groups/

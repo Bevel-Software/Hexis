@@ -88,6 +88,16 @@ export interface ICreatorAccess {
 }
 
 /**
+ * The splice-safe principal for a creator — exported because group
+ * provisioning (`GroupProvisionService`) writes the same `Name <email>`
+ * entries into the access.md files it seeds, and two spellings of the same
+ * person would read as two people.
+ */
+export function creatorPrincipal(creator: Creator): Principal {
+  return { kind: 'user', email: creator.email, displayName: safeDisplayName(creator) };
+}
+
+/**
  * `Name <email>`-safe display name: `validatePrincipal` rejects control
  * chars, `<`, `>`, and `#`, so strip those from the user's name and fall
  * back to the email local part (which the email regex already keeps free of
@@ -159,6 +169,11 @@ export class CreatorAccessService implements ICreatorAccess {
           warnSkipped(rel, err);
           return null;
         }
+        // NOTE: a direct group folder (`Groups/<Name>`) is no longer special
+        // here. Groups — and personal folders — are made by the dedicated
+        // provisioning endpoint (`GroupProvisionService`), which writes the
+        // full ownership template itself; this generic read-grant only covers
+        // ad-hoc folder creation elsewhere in the tree.
         return {
           kind: 'seed-access-md',
           wsRelPath: `${this.kbDirName}/${acc}/access.md`,
@@ -166,7 +181,12 @@ export class CreatorAccessService implements ICreatorAccess {
             try {
               // Idempotent merge into whatever is on disk by write time — a
               // concurrent creator's grant survives; ours lands next to it.
-              return spliceGrant(current, 'read', principal, { allowScalar: false }).text;
+              // `target: 'folder'` so a new-format access.md (body-governed)
+              // gets the grant in its FOLDER rules, never its self-frontmatter.
+              return spliceGrant(current, 'read', principal, {
+                allowScalar: false,
+                target: 'folder',
+              }).text;
             } catch (err) {
               warnSkipped(rel, err);
               return current;
@@ -249,7 +269,7 @@ export class CreatorAccessService implements ICreatorAccess {
   }
 
   private principalFor(creator: Creator): Principal {
-    return { kind: 'user', email: creator.email, displayName: safeDisplayName(creator) };
+    return creatorPrincipal(creator);
   }
 }
 

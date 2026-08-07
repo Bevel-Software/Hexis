@@ -10,7 +10,6 @@ import { WorkspaceContext, type WorkspaceContextValue, type OpenTab } from '../.
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
-import { PrViewerContext, type PrViewerContextValue } from '../../../pr/state/pr-viewer.context';
 
 function makeStatus(branch = 'alice/draft'): WorkingTreeStatus {
   return { branch, hasUpstream: true, unmergedFromUpstream: false };
@@ -29,9 +28,9 @@ function makeGit(overrides: Partial<GitContextValue> = {}): GitContextValue {
     deleteBranch: async () => {},
     pull: async () => {},
     fetchForkBase: async () => null,
-    revert: async () => ({ sha: 'a', authorName: 'n', authorEmail: 'e', subject: 's', committedAt: '2026-04-20T00:00:00.000Z' }),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
     ...overrides,
   };
@@ -105,18 +104,6 @@ function renderAt(
     login: async () => {},
     logout: () => {},
   };
-  const prViewer: PrViewerContextValue = {
-    openPrNumber: null,
-    detail: null,
-    notFound: false,
-    selectedPath: null,
-    isLoading: false,
-    lastError: null,
-    openPr: () => {},
-    closeViewer: () => {},
-    selectPath: () => {},
-    refresh: async () => {},
-  };
 
   function Tree({ children }: { children: ReactNode }) {
     return (
@@ -124,9 +111,7 @@ function renderAt(
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={git}>
             <ReviewContext.Provider value={review}>
-              <PrViewerContext.Provider value={prViewer}>
                 {children}
-              </PrViewerContext.Provider>
             </ReviewContext.Provider>
           </GitContext.Provider>
         </WorkspaceContext.Provider>

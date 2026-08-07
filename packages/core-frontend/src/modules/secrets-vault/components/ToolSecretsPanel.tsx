@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Check, Trash2, Lock, ShieldCheck, ExternalLink, KeyRound } from 'lucide-react';
+import { Badge, Banner, Button, TextField } from '../../../shared/components';
 import {
   type ToolSecrets,
   type ToolSetup,
@@ -18,6 +18,11 @@ import { startToolOAuth } from '../services/connect.api';
  *    the caller has write access to the `.tool` file (`tool.canWrite`).
  *  - "Set by you" (user scope) — the caller's own value.
  * Reused by the `.tool` editor sidebar and the Secrets page.
+ *
+ * Speaks the Library's status vocabulary — `Connected`, `Set`, `Needs …` —
+ * because a person arrives here FROM a card or a tool page that used those
+ * words, and the fix-it surface must not describe the same state differently.
+ * Values are write-only throughout: fields start empty, saving replaces.
  */
 export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onChanged: () => void }) {
   const adminVars = tool.variables.filter((v) => v.scope === 'admin');
@@ -25,17 +30,17 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
 
   if (tool.variables.length === 0) {
     return (
-      <div className="space-y-3">
+      <div className="flex flex-col gap-3">
         <SetupBanner setup={tool.setup} />
         {tool.setup?.kind !== 'oauth-manual' && (
-          <p className="text-[11px] text-slate-400">
+          <p className="text-detail text-ink-muted">
             {tool.setup?.kind === 'open' ? (
-              <>No setup needed — this server is open and needs no credentials.</>
+              <>No setup needed: this server is open and needs no credentials.</>
             ) : (
               <>
-                This tool declares no <code className="rounded bg-slate-100 px-1">variables</code>. Add a{' '}
-                <code className="rounded bg-slate-100 px-1">variables</code> block to the <code>.tool</code> file to make
-                its <code>{'${VAR}'}</code> placeholders configurable here.
+                This tool declares no <Chip>variables</Chip>. Add a <Chip>variables</Chip> block to
+                the <Chip>.tool</Chip> file to make its <Chip>{'${VAR}'}</Chip> placeholders
+                configurable here.
               </>
             )}
           </p>
@@ -45,7 +50,7 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
   }
 
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-3.5">
       <SetupBanner setup={tool.setup} />
       {adminVars.length > 0 && (
         <VarGroup
@@ -63,7 +68,7 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
       {userVars.length > 0 && (
         <VarGroup
           title="Set by you"
-          hint="Your own value — not shared with other users."
+          hint="Your own value: not shared with other users."
           slug={tool.slug}
           vars={userVars}
           editable
@@ -82,6 +87,13 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
   );
 }
 
+/** A `${VAR}`-style inline token, on the sunken well every code chip sits in. */
+function Chip({ children }: { children: React.ReactNode }) {
+  return (
+    <code className="rounded-sm bg-sunken px-1 py-0.5 font-mono text-meta text-ink">{children}</code>
+  );
+}
+
 /**
  * When a `type: mcp` server needs sign-in that auto-discovery COULDN'T set up
  * (typically the provider has no dynamic client registration — e.g. Google),
@@ -93,17 +105,13 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
 function SetupBanner({ setup }: { setup: ToolSetup | null }) {
   if (setup?.kind !== 'oauth-manual') return null;
   return (
-    <div className="rounded border border-amber-300 bg-amber-50 px-2.5 py-2">
-      <div className="flex items-center gap-1.5 text-[11px] font-semibold text-amber-800">
-        <KeyRound size={12} /> Sign-in setup needed
-      </div>
-      <p className="mt-1 text-[10px] leading-relaxed text-amber-700">
-        This server needs users to sign in, but Bevel couldn't set that up automatically. A tool writer must register an
-        OAuth client with the provider, declare it in the <code className="rounded bg-amber-100 px-1">.tool</code> file's{' '}
-        <code className="rounded bg-amber-100 px-1">variables</code> block, then set its client secret here.
-      </p>
-      {setup.reason && <p className="mt-1 text-[10px] italic text-amber-600">{setup.reason}</p>}
-    </div>
+    <Banner tone="wait" role="status">
+      <span className="font-semibold">Sign-in setup needed.</span> This server needs users to sign
+      in, but Bevel couldn&apos;t set that up automatically. A tool writer must register an OAuth
+      client with the provider, declare it in the <Chip>.tool</Chip> file&apos;s{' '}
+      <Chip>variables</Chip> block, then set its client secret here.
+      {setup.reason && <em className="mt-1 block text-detail">{setup.reason}</em>}
+    </Banner>
   );
 }
 
@@ -133,9 +141,9 @@ function VarGroup({
 }) {
   return (
     <div>
-      <h4 className="text-[11px] font-semibold text-slate-600">{title}</h4>
-      <p className="mb-1.5 text-[10px] text-slate-400">{hint}</p>
-      <ul className="space-y-1.5">
+      <h4 className="text-label uppercase text-ink-faint">{title}</h4>
+      <p className="mb-1.5 mt-0.5 text-detail text-ink-muted">{hint}</p>
+      <ul className="flex flex-col gap-1.5">
         {vars.map((v) =>
           v.oauth ? (
             <OAuthVarRow key={v.name} v={v} slug={slug} ownerCanWrite={ownerCanWrite} onChanged={onChanged} />
@@ -190,55 +198,59 @@ function VarRow({
   };
 
   return (
-    <li className="rounded border border-slate-200 px-2 py-1.5">
-      <div className="flex items-center gap-1.5">
-        <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[10px] text-slate-700">{`\${${v.name}}`}</code>
-        {isSet ? (
-          <span className="flex items-center gap-0.5 text-[10px] text-emerald-600">
-            <Check size={11} /> set
-          </span>
-        ) : (
-          <span className="text-[10px] text-amber-600">not set</span>
-        )}
-        {!editable && <Lock size={11} className="text-slate-400" aria-label="You cannot edit this" />}
+    <li className="rounded-lg border border-line bg-surface px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <Chip>{`\${${v.name}}`}</Chip>
+        <Badge tone={isSet ? 'ok' : 'wait'} size="xs" className="shrink-0">
+          {isSet ? 'Set' : 'Needs a key'}
+        </Badge>
         {editable && isSet && (
-          <button
-            onClick={() => void run(onDelete)}
+          <Button
+            variant="quiet"
+            size="tiny"
+            className="ml-auto"
             disabled={busy}
-            className="ml-auto rounded p-0.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-40"
-            aria-label="Remove secret"
+            onClick={() => void run(onDelete)}
           >
-            <Trash2 size={12} />
-          </button>
+            Remove
+          </Button>
         )}
       </div>
-      {v.label && <p className="mt-0.5 text-[10px] text-slate-400">{v.label}</p>}
+      {v.label && <p className="mt-1 text-detail text-ink-muted">{v.label}</p>}
       {editable && (
-        <div className="mt-1 flex gap-1">
-          <input
+        <div className="mt-1.5 flex gap-1.5">
+          {/* Write-only: starts empty even when a value exists; saving replaces
+              rather than reveals. */}
+          <TextField
             type="password"
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder={isSet ? 'Replace value…' : 'Enter value…'}
-            className="min-w-0 flex-1 rounded border border-slate-300 px-1.5 py-1 text-[11px] focus:border-slate-500 focus:outline-none"
+            aria-label={`Value for ${v.name}`}
+            className="min-w-0 flex-1"
           />
-          <button
-            onClick={() => void run(() => onSave(value))}
+          <Button
+            variant="primary"
+            size="sm"
             disabled={busy || !value}
-            className="rounded bg-slate-800 px-2 py-1 text-[11px] text-white disabled:opacity-40"
+            onClick={() => void run(() => onSave(value))}
           >
             Save
-          </button>
+          </Button>
         </div>
       )}
-      {error && <p className="mt-0.5 text-[10px] text-red-600">{error}</p>}
+      {error && (
+        <p role="alert" className="mt-1 text-detail text-danger">
+          {error}
+        </p>
+      )}
     </li>
   );
 }
 
 /**
  * An OAuth-backed variable — filled by signing in, not typing. Shows what the
- * token can do: connected (covers every declared scope), "new permissions needed"
+ * token can do: connected (covers every declared scope), needs signing in again
  * with the specific missing scopes listed, or not connected. The button opens the
  * provider consent screen via the tool-scoped start flow.
  *
@@ -291,72 +303,77 @@ function OAuthVarRow({
   };
 
   return (
-    <li className="rounded border border-slate-200 px-2 py-1.5">
-      <div className="flex items-center gap-1.5">
-        <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[10px] text-slate-700">{`\${${v.name}}`}</code>
-        {v.needsReauth ? (
-          <span className="text-[10px] text-amber-600">new permissions needed</span>
-        ) : v.authorized ? (
-          <span className="flex items-center gap-0.5 text-[10px] text-emerald-600">
-            <ShieldCheck size={11} /> connected
-          </span>
-        ) : (
-          <span className="text-[10px] text-amber-600">not connected</span>
-        )}
-        <button
-          onClick={() => void authorize()}
+    <li className="rounded-lg border border-line bg-surface px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <Chip>{`\${${v.name}}`}</Chip>
+        <Badge
+          tone={v.authorized && !v.needsReauth ? 'ok' : 'wait'}
+          size="xs"
+          className="shrink-0"
+        >
+          {v.needsReauth
+            ? 'Needs signing in again'
+            : v.authorized
+              ? 'Connected'
+              : 'Needs your sign-in'}
+        </Badge>
+        <Button
+          variant="outline"
+          size="tiny"
+          className="ml-auto"
           disabled={busy || !ownerConfigured}
           title={ownerConfigured ? undefined : "The tool owner hasn't finished the sign-in setup yet."}
-          className="ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-blue-600 hover:bg-blue-50 disabled:opacity-40"
+          onClick={() => void authorize()}
         >
-          <ExternalLink size={11} /> {v.authorized ? 'Reconnect' : 'Authorize'}
-        </button>
+          {v.authorized ? 'Reconnect' : 'Sign in'}
+        </Button>
       </div>
-      {v.label && <p className="mt-0.5 text-[10px] text-slate-400">{v.label}</p>}
+      {v.label && <p className="mt-1 text-detail text-ink-muted">{v.label}</p>}
       {v.needsReauth && v.missingScopes && v.missingScopes.length > 0 && (
-        <p className="mt-0.5 text-[10px] text-amber-600">
-          Missing: {v.missingScopes.join(', ')}
-        </p>
+        <p className="mt-1 text-detail text-wait">Missing: {v.missingScopes.join(', ')}</p>
       )}
       {!ownerConfigured && !ownerCanWrite && (
-        <p className="mt-0.5 text-[10px] text-amber-600">
+        <p className="mt-1 text-detail text-ink-muted">
           Waiting for the tool owner to finish the sign-in setup.
         </p>
       )}
       {ownerCanWrite && (
-        <div className="mt-1.5 border-t border-slate-100 pt-1.5">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-medium text-slate-500">Client secret</span>
-            {ownerConfigured ? (
-              <span className="flex items-center gap-0.5 text-[10px] text-emerald-600">
-                <Check size={11} /> set
-              </span>
-            ) : (
-              <span className="text-[10px] text-amber-600">not set</span>
-            )}
+        <div className="mt-2 border-t border-line pt-2">
+          <div className="flex items-center gap-2">
+            <span className="text-detail font-semibold text-ink-muted">Client secret</span>
+            <Badge tone={ownerConfigured ? 'ok' : 'wait'} size="xs">
+              {ownerConfigured ? 'Set' : 'Needs setup'}
+            </Badge>
           </div>
-          <p className="mt-0.5 text-[10px] text-slate-400">
-            From the OAuth app you registered with the provider — shared by everyone, users then sign in themselves.
+          <p className="mt-0.5 text-detail text-ink-muted">
+            From the OAuth app you registered with the provider. Shared by everyone, users then
+            sign in themselves.
           </p>
-          <div className="mt-1 flex gap-1">
-            <input
+          <div className="mt-1.5 flex gap-1.5">
+            <TextField
               type="password"
               value={secret}
               onChange={(e) => setSecret(e.target.value)}
               placeholder={ownerConfigured ? 'Replace client secret…' : 'Paste client secret…'}
-              className="min-w-0 flex-1 rounded border border-slate-300 px-1.5 py-1 text-[11px] focus:border-slate-500 focus:outline-none"
+              aria-label={`Client secret for ${v.name}`}
+              className="min-w-0 flex-1"
             />
-            <button
-              onClick={() => void saveSecret()}
+            <Button
+              variant="primary"
+              size="sm"
               disabled={busy || !secret}
-              className="rounded bg-slate-800 px-2 py-1 text-[11px] text-white disabled:opacity-40"
+              onClick={() => void saveSecret()}
             >
               Save
-            </button>
+            </Button>
           </div>
         </div>
       )}
-      {error && <p className="mt-0.5 text-[10px] text-red-600">{error}</p>}
+      {error && (
+        <p role="alert" className="mt-1 text-detail text-danger">
+          {error}
+        </p>
+      )}
     </li>
   );
 }

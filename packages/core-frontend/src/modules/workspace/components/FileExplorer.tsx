@@ -1,9 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef, createContext, useContext } from 'react';
 import {
-  Folder,
-  FolderOpen,
   ChevronRight,
-  ChevronDown,
   FilePlus,
   FolderPlus,
   FolderUp,
@@ -13,31 +10,73 @@ import {
   X,
   PackageOpen,
   Download,
+  Link2,
   Loader2,
   Pin,
   PinOff,
   Users,
 } from 'lucide-react';
-import { Icon } from '@iconify/react';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
 import {
   validateFilename,
   KNOWLEDGE_BASE_DIR,
-  SKILLS_DIR,
-  TOOLS_DIR,
   DATA_DIR,
+  GROUPS_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
-import { useWorkspace } from '../state/workspace.context';
-import { mergePendingIntoTree, findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
+import { useWorkspace, type PendingEntry } from '../state/workspace.context';
+import { mergePendingIntoTree, pathExistsInTree, findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
+import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
+import { PR_STALE_EVENT } from '../../../core/events';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useFileNav } from '../routing/kb-routes';
 import { authFetch } from '../../../lib/api';
-import { getFileIcon } from '../../../lib/utils';
+import { cn } from '../../../lib/utils';
+import { MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
+import { useDismissableMenu } from '../../../shared/components';
+import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { PullRequestsForMe } from '../../git/components/PullRequestsForMe';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useAppRegistry } from '../../../core/registry';
+
+/**
+ * The tree row — the prototype's `.trow` (proto:684-693), and token for token
+ * the same string as the Library sidebar's `rowClass`
+ * (`GroupsSidebar.tsx:68-72`). Two sidebars in one app should not read as two
+ * different products, and the only way to guarantee that is for both to be
+ * this one declaration.
+ *
+ * Names and one caret, nothing else. The folder icon repeated what the caret
+ * already said and the file icon repeated what the extension already said;
+ * both stood where the name should start (proto:3552-3559).
+ */
+const ROW_CLASS =
+  'flex w-full items-center gap-1.5 rounded-sm px-2.5 py-1.5 text-left text-ui transition-colors';
+const ROW_TONE = (current: boolean) =>
+  current ? 'bg-hover font-semibold text-ink' : 'text-ink-muted hover:bg-hover hover:text-ink';
+
+/** Indent: `10 + depth * 13` (proto:3561). */
+const indentFor = (depth: number) => 10 + depth * 13;
+
+/**
+ * The caret's slot — 13px wide, and rendered EMPTY for a file and for a
+ * childless folder. It is what keeps a file's name in line with its siblings'
+ * once the icons are gone: the indent is the tree, so it has to survive them
+ * (proto:3571-3572).
+ */
+function CaretSlot({ open, show }: { open?: boolean; show: boolean }) {
+  return (
+    <span className="flex h-3.5 w-3.5 flex-none items-center justify-center text-ink-faint">
+      {show && (
+        <ChevronRight
+          size={13}
+          className={cn('transition-transform duration-150', open && 'rotate-90')}
+        />
+      )}
+    </span>
+  );
+}
 
 // ── Pinned folders (client-side, localStorage) ──
 
@@ -73,6 +112,29 @@ const usePinned = () => useContext(PinnedContext);
 const ManageAccessContext = createContext<(entry: FileTreeEntry) => void>(() => {});
 const useManageAccess = () => useContext(ManageAccessContext);
 
+/**
+ * The tree shows files from TWO places: this branch, and the caller's own
+ * open change requests. A path in this controller is the second kind — it was
+ * synthesized into the tree from `minePaths` because it does not exist on the
+ * branch — and its row renders differently and opens the change request,
+ * because there is no content here to open.
+ *
+ * Context, not props, for the same reason as the two above: the tree is
+ * recursive, and every intermediate directory would otherwise have to carry
+ * a concern that only file rows have.
+ */
+interface SuggestionsController {
+  /** CR number for a synthesized suggestion-only path; null for real files. */
+  crFor(path: string): number | null;
+  /** Open the shared change-request dialog on the request this path belongs to. */
+  open(path: string, crNumber: number): void;
+}
+const SuggestionsContext = createContext<SuggestionsController>({
+  crFor: () => null,
+  open: () => {},
+});
+const useSuggestions = () => useContext(SuggestionsContext);
+
 /** Depth-first lookup of a tree entry by its exact relativePath. */
 function findEntryByPath(node: FileTreeEntry, path: string): FileTreeEntry | null {
   if (node.relativePath === path) return node;
@@ -96,6 +158,7 @@ function ContextMenu({
   onCreateFolder,
   onRename,
   onDownload,
+  returnFocusTo,
 }: {
   x: number;
   y: number;
@@ -106,26 +169,39 @@ function ContextMenu({
   onCreateFolder?: () => void;
   onRename?: () => void;
   onDownload?: () => void;
+  /** The row this menu was opened from — Escape hands focus back to it. */
+  returnFocusTo?: React.RefObject<HTMLElement | null>;
 }) {
   const { deleteEntry, unzipHere } = useWorkspace();
   const { isPinned, togglePin } = usePinned();
   const openManageAccess = useManageAccess();
   const pinned = isPinned(entry.relativePath);
-  const ref = useRef<HTMLDivElement>(null);
   const [unzipping, setUnzipping] = useState(false);
+  // Outside-click, Escape, and focus return — none of which `MenuPanel`
+  // provides (it is presentation only, by design).
+  const ref = useDismissableMenu<HTMLDivElement>({ open: true, onClose, returnFocusTo });
 
   // Only files whose name ends with `.zip` (case-insensitive) get the
   // extraction affordance — matches the OS shell-extension behavior users
   // already know from Windows Explorer / macOS Finder.
   const isZip = entry.type === 'file' && /\.zip$/i.test(entry.name);
 
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [onClose]);
+  // The one prototype context-menu item the platform has never had
+  // (proto:3948). The page-level `⋯ → Copy path` does not cover it: that only
+  // ever reaches the file you have open, never a folder row or an unopened
+  // one. A clipboard write can be refused outright (a non-secure origin), and
+  // a silent no-op is the worst possible answer to "copy this" — so a refusal
+  // surfaces the same way every other failure in this tree does.
+  const handleCopyPath = async () => {
+    try {
+      await navigator.clipboard.writeText(entry.relativePath);
+      onClose();
+    } catch (err) {
+      console.error('Failed to copy path:', err);
+      onClose();
+      alert(`Couldn't copy the path to the clipboard.\n\n${entry.relativePath}`);
+    }
+  };
 
   const handleDelete = async () => {
     onClose();
@@ -168,88 +244,73 @@ function ContextMenu({
   };
 
   return (
+    // Positioning stays with the caller — `MenuPanel` is presentation only, so
+    // the fixed-to-the-pointer wrapper is ours and the panel inside is the
+    // shared one.
     <div
       ref={ref}
-      className="fixed z-50 bg-slate-100 border border-slate-300 rounded-md shadow-xl py-1 min-w-[140px]"
+      className="fixed z-50"
       style={{ left: x, top: y }}
       onMouseDown={(e) => e.stopPropagation()}
     >
+    <MenuPanel role="menu" aria-label={`Actions for ${entry.name}`} className="min-w-[180px]">
       {onCreateFile && (
-        <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200/80"
-          onClick={() => { onCreateFile(); onClose(); }}
-        >
-          <FilePlus size={14} />
-          New file
-        </button>
+        <MenuItem role="menuitem" onClick={() => { onCreateFile(); onClose(); }}>
+          <span className="flex items-center gap-2"><FilePlus size={14} />New file</span>
+        </MenuItem>
       )}
       {onCreateFolder && (
-        <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200/80"
-          onClick={() => { onCreateFolder(); onClose(); }}
-        >
-          <FolderPlus size={14} />
-          New folder
-        </button>
+        <MenuItem role="menuitem" onClick={() => { onCreateFolder(); onClose(); }}>
+          <span className="flex items-center gap-2"><FolderPlus size={14} />New folder</span>
+        </MenuItem>
       )}
       {isZip && (
-        <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200/80 disabled:opacity-60 disabled:cursor-not-allowed"
-          onClick={handleUnzip}
-          disabled={unzipping}
-        >
-          <PackageOpen size={14} />
-          {unzipping ? 'Unzipping…' : 'Unzip here'}
-        </button>
+        <MenuItem role="menuitem" onClick={handleUnzip} disabled={unzipping}>
+          <span className="flex items-center gap-2">
+            <PackageOpen size={14} />
+            {unzipping ? 'Unzipping…' : 'Unzip here'}
+          </span>
+        </MenuItem>
       )}
       {onDownload && (
-        <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200/80"
-          onClick={() => { onDownload(); onClose(); }}
-        >
-          <Download size={14} />
-          {entry.type === 'directory' ? 'Download as zip' : 'Download'}
-        </button>
+        <MenuItem role="menuitem" onClick={() => { onDownload(); onClose(); }}>
+          <span className="flex items-center gap-2">
+            <Download size={14} />
+            {entry.type === 'directory' ? 'Download as zip' : 'Download'}
+          </span>
+        </MenuItem>
       )}
+      <MenuItem role="menuitem" onClick={handleCopyPath}>
+        <span className="flex items-center gap-2"><Link2 size={14} />Copy path</span>
+      </MenuItem>
       {!isRoot && (
         <>
-          <div className="my-1 border-t border-slate-200/70" />
-          <button
-            className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-bevel-deep font-medium hover:bg-slate-200/80"
-            onClick={() => { openManageAccess(entry); onClose(); }}
-          >
-            <Users size={14} />
-            Manage access
-          </button>
+          <div className="my-1 border-t border-line" />
+          <MenuItem role="menuitem" onClick={() => { openManageAccess(entry); onClose(); }}>
+            <span className="flex items-center gap-2"><Users size={14} />Manage access</span>
+          </MenuItem>
         </>
       )}
       {entry.type === 'directory' && !isRoot && (
-        <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200/80"
-          onClick={() => { togglePin(entry.relativePath); onClose(); }}
-        >
-          {pinned ? <PinOff size={14} /> : <Pin size={14} />}
-          {pinned ? 'Unpin' : 'Pin to top'}
-        </button>
+        <MenuItem role="menuitem" onClick={() => { togglePin(entry.relativePath); onClose(); }}>
+          <span className="flex items-center gap-2">
+            {pinned ? <PinOff size={14} /> : <Pin size={14} />}
+            {pinned ? 'Unpin' : 'Pin to top'}
+          </span>
+        </MenuItem>
       )}
       {!isRoot && onRename && (
-        <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200/80"
-          onClick={() => { onRename(); onClose(); }}
-        >
-          <Pencil size={14} />
-          Rename
-        </button>
+        <MenuItem role="menuitem" onClick={() => { onRename(); onClose(); }}>
+          <span className="flex items-center gap-2"><Pencil size={14} />Rename</span>
+        </MenuItem>
       )}
       {!isRoot && (
-        <button
-          className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-sm text-red-600 hover:bg-slate-200/80"
-          onClick={handleDelete}
-        >
-          <Trash2 size={14} />
-          Delete
-        </button>
+        // Danger tone comes from the primitive, not from a hand-written red.
+        <MenuItem role="menuitem" tone="danger" onClick={handleDelete}>
+          <span className="flex items-center gap-2"><Trash2 size={14} />Delete</span>
+        </MenuItem>
       )}
+    </MenuPanel>
     </div>
   );
 }
@@ -276,11 +337,9 @@ function InlineInput({
 
   return (
     <div className="w-full">
-      <input
+      <TextField
         autoFocus
-        className={`w-full bg-slate-100 text-slate-900 text-sm px-2 py-0.5 rounded border outline-none ${
-          error ? 'border-red-500' : 'border-slate-300 focus:border-slate-400'
-        }`}
+        className={cn('bg-sunken px-2 py-0.5 text-detail', error && 'border-danger')}
         placeholder={placeholder}
         value={value}
         onChange={(e) => setValue(e.target.value)}
@@ -293,10 +352,9 @@ function InlineInput({
           else onCancel();
         }}
         title={error ?? undefined}
+        aria-invalid={error ? true : undefined}
       />
-      {error && (
-        <div className="text-[11px] text-red-700 mt-0.5 px-1">{error}</div>
-      )}
+      {error && <div className="mt-0.5 px-1 text-meta text-danger">{error}</div>}
     </div>
   );
 }
@@ -326,11 +384,9 @@ function RenameInput({
 
   return (
     <div className="w-full">
-      <input
+      <TextField
         autoFocus
-        className={`w-full bg-slate-100 text-slate-900 text-sm px-2 py-0.5 rounded border outline-none ${
-          error ? 'border-red-500' : 'border-slate-300 focus:border-slate-400'
-        }`}
+        className={cn('bg-sunken px-2 py-0.5 text-detail', error && 'border-danger')}
         value={value}
         onClick={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.stopPropagation()}
@@ -351,10 +407,9 @@ function RenameInput({
           }
         }}
         title={error ?? undefined}
+        aria-invalid={error ? true : undefined}
       />
-      {error && (
-        <div className="text-[11px] text-red-700 mt-0.5 px-1">{error}</div>
-      )}
+      {error && <div className="mt-0.5 px-1 text-meta text-danger">{error}</div>}
     </div>
   );
 }
@@ -367,7 +422,6 @@ function FileTreeNode({
   entry,
   depth,
   initiallyExpanded,
-  accent,
   collapseChildren,
 }: {
   entry: FileTreeEntry;
@@ -376,14 +430,15 @@ function FileTreeNode({
   // The explorer's Knowledge/Skills roots use this so their own children start
   // collapsed regardless of depth (auto-reveal on deep links still wins).
   initiallyExpanded?: boolean;
-  // Green-tints the folder icon + label — used for the Knowledge / Skills roots.
-  accent?: boolean;
   // When set, this node's direct children start collapsed (so opening Knowledge
   // reveals the ontologies without cascading them all open).
   collapseChildren?: boolean;
 }) {
   const { openFilePath, createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
   const { openFile } = useFileNav();
+  // One shared fetch behind this — see `OpenChangeRequestsProvider`.
+  const openChangeRequests = useOpenChangeRequests();
+  const suggestions = useSuggestions();
 
   const handleDownload = useCallback(async () => {
     if (!workspaceId) return;
@@ -468,9 +523,14 @@ function FileTreeNode({
   const [dragging, setDragging] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
-  const paddingLeft = 12 + depth * 16;
+  const paddingLeft = indentFor(depth);
   const isRoot = entry.relativePath === '.';
   const isPending = pendingUploads.has(entry.relativePath);
+  // A folder with nothing in it doesn't get a caret, because there is nothing
+  // to open (proto:3565).
+  const hasChildren = (entry.children?.length ?? 0) > 0;
+  // Escape inside the context menu hands focus back to the row it came from.
+  const rowRef = useRef<HTMLButtonElement>(null);
 
   // Auto-expand a directory whenever the open file lives inside it (so
   // deep-link URLs reveal the file's row in the tree) or while files
@@ -578,9 +638,12 @@ function FileTreeNode({
     return (
       <div>
         <div
-          className={`flex items-center gap-1 w-full text-left py-1 px-2 text-sm text-slate-700 hover:bg-slate-100/70 rounded group transition-colors duration-150 ${
-            dragOver ? 'bg-slate-200/60 ring-1 ring-bevel/50' : ''
-          }`}
+          className={cn(
+            ROW_CLASS,
+            ROW_TONE(false),
+            'group',
+            dragOver && 'bg-hover text-ink ring-1 ring-accent/40',
+          )}
           style={{ paddingLeft, opacity: dragging ? 0.5 : isPending ? 0.6 : 1 }}
           draggable={!isRoot && !renaming && !isPending}
           onDragStart={handleDragStart}
@@ -591,19 +654,13 @@ function FileTreeNode({
           onContextMenu={handleContextMenu}
         >
           <button
-            className="flex items-center gap-1.5 flex-1 min-w-0"
-            onClick={() => setUserIntent(!isExpanded)}
+            ref={rowRef}
+            type="button"
+            aria-expanded={isExpanded}
+            className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+            onClick={() => { if (hasChildren) setUserIntent(!isExpanded); }}
           >
-            {isExpanded ? (
-              <ChevronDown size={14} className="text-slate-600 shrink-0" />
-            ) : (
-              <ChevronRight size={14} className="text-slate-600 shrink-0" />
-            )}
-            {isExpanded ? (
-              <FolderOpen size={14} className={`shrink-0 ${accent ? 'text-emerald-600' : 'text-slate-600'}`} />
-            ) : (
-              <Folder size={14} className={`shrink-0 ${accent ? 'text-emerald-600' : 'text-slate-600'}`} />
-            )}
+            <CaretSlot open={isExpanded} show={hasChildren} />
             {renaming ? (
               <RenameInput
                 currentName={entry.name}
@@ -627,13 +684,14 @@ function FileTreeNode({
                 onCancel={() => setRenaming(false)}
               />
             ) : (
-              <span className={`truncate ${accent ? 'text-emerald-700 font-medium' : ''}`}>{entry.name}</span>
+              <span className="truncate">{entry.name}</span>
             )}
           </button>
-          <div className="hidden group-hover:flex group-focus-within:flex items-center gap-0.5 shrink-0">
-            <button
-              className="p-0.5 rounded hover:bg-slate-200 text-slate-600 hover:text-slate-700"
+          <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex">
+            <IconButton
+              size={18}
               title="New file"
+              aria-label={`New file in ${entry.name}`}
               onClick={(e) => {
                 e.stopPropagation();
                 setUserIntent(true);
@@ -641,10 +699,11 @@ function FileTreeNode({
               }}
             >
               <FilePlus size={13} />
-            </button>
-            <button
-              className="p-0.5 rounded hover:bg-slate-200 text-slate-600 hover:text-slate-700"
+            </IconButton>
+            <IconButton
+              size={18}
               title="New folder"
+              aria-label={`New folder in ${entry.name}`}
               onClick={(e) => {
                 e.stopPropagation();
                 setUserIntent(true);
@@ -652,20 +711,19 @@ function FileTreeNode({
               }}
             >
               <FolderPlus size={13} />
-            </button>
+            </IconButton>
           </div>
           {isRoot && (
             <>
-              <button
-                type="button"
-                className="p-0.5 rounded hover:bg-slate-200 text-slate-600 hover:text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+              <IconButton
+                size={18}
                 title="Add files"
                 aria-label="Add files"
                 disabled={isUploading}
                 onClick={handleRootUploadClick}
               >
                 <Upload size={13} />
-              </button>
+              </IconButton>
               <input
                 ref={rootFileInputRef}
                 type="file"
@@ -675,16 +733,15 @@ function FileTreeNode({
                 data-testid="file-explorer-file-input"
                 onChange={handleRootFileChange}
               />
-              <button
-                type="button"
-                className="p-0.5 rounded hover:bg-slate-200 text-slate-600 hover:text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+              <IconButton
+                size={18}
                 title="Add folder"
                 aria-label="Add folder"
                 disabled={isUploading}
                 onClick={handleRootFolderClick}
               >
                 <FolderUp size={13} />
-              </button>
+              </IconButton>
               <input
                 ref={rootFolderInputRef}
                 type="file"
@@ -701,7 +758,10 @@ function FileTreeNode({
         {isExpanded && (
           <div>
             {creating && (
-              <div style={{ paddingLeft: paddingLeft + 34 }} className="py-0.5 px-2">
+              // Line the input up with the child rows it is about to join:
+              // one more indent step (13px), plus the caret slot (13px) and
+              // the row gap (6px) the child's name starts after.
+              <div style={{ paddingLeft: paddingLeft + 32 }} className="px-2 py-0.5">
                 <InlineInput
                   placeholder={creating === 'file' ? 'filename' : 'folder name'}
                   onSubmit={async (name) => {
@@ -751,24 +811,58 @@ function FileTreeNode({
             onCreateFolder={() => { setUserIntent(true); setCreating('directory'); }}
             onRename={() => setRenaming(true)}
             onDownload={handleDownload}
+            returnFocusTo={rowRef}
           />
         )}
       </div>
     );
   }
 
+  // A file from the caller's own open change request that does not exist on
+  // this branch. Its row is a LINK to the request, not a file: there is no
+  // content here to show, so clicking opens the change-request view, and none
+  // of the file affordances (rename, drag, download, context menu) apply —
+  // they would all 404 against a path this branch has never heard of. The
+  // accent colour is the tell that this is proposed, not present.
+  const suggestedCr = suggestions.crFor(entry.relativePath);
+  if (suggestedCr !== null) {
+    return (
+      <button
+        type="button"
+        className={cn(
+          ROW_CLASS,
+          'text-accent hover:bg-hover hover:text-accent-hover',
+          'focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ink-muted',
+        )}
+        style={{ paddingLeft }}
+        onClick={() => suggestions.open(entry.relativePath, suggestedCr)}
+        title="Proposed by you: opens the change request"
+      >
+        <CaretSlot show={false} />
+        <span className="truncate">{entry.name}</span>
+        <span
+          aria-hidden
+          className="ml-auto h-1.5 w-1.5 flex-none rounded-full bg-accent"
+        />
+      </button>
+    );
+  }
+
   const isActive = entry.relativePath === openFilePath;
-  const iconName = getFileIcon(entry.name);
 
   return (
     <>
       <button
-        className={`flex items-center gap-1.5 w-full text-left py-1 px-2 text-sm rounded transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-bevel/60 ${
-          isActive
-            ? 'bg-slate-200/80 text-slate-900'
-            : 'text-slate-600 hover:bg-slate-100/70 hover:text-slate-900'
-        } ${isPending ? 'cursor-progress' : ''}`}
-        style={{ paddingLeft: paddingLeft + 18, opacity: dragging ? 0.5 : isPending ? 0.6 : 1 }}
+        ref={rowRef}
+        type="button"
+        aria-current={isActive}
+        className={cn(
+          ROW_CLASS,
+          ROW_TONE(isActive),
+          'focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ink-muted',
+          isPending && 'cursor-progress',
+        )}
+        style={{ paddingLeft, opacity: dragging ? 0.5 : isPending ? 0.6 : 1 }}
         draggable={!renaming && !isPending}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
@@ -776,15 +870,15 @@ function FileTreeNode({
         onContextMenu={handleContextMenu}
         title={isPending ? 'Adding…' : undefined}
       >
+        {/* The pending spinner is the one glyph that survives the icon cull,
+            because it says something no other part of the row says. It takes
+            the caret's slot so the name never shifts when it appears. */}
         {isPending ? (
-          <Loader2 size={14} className="shrink-0 animate-spin text-slate-500" />
+          <span className="flex h-3.5 w-3.5 flex-none items-center justify-center">
+            <Loader2 size={13} className="animate-spin text-ink-faint" />
+          </span>
         ) : (
-          <Icon
-            icon={`material-icon-theme:${iconName}`}
-            width={16}
-            height={16}
-            className="shrink-0"
-          />
+          <CaretSlot show={false} />
         )}
         {renaming ? (
           <RenameInput
@@ -811,6 +905,15 @@ function FileTreeNode({
         ) : (
           <span className="truncate">{entry.name}</span>
         )}
+        {/* News about a file you are not looking at (proto:692). Amber, not
+            the tab dot's accent: on a tab the dot marks the file you have
+            open; here it marks one you do not. */}
+        {openChangeRequests.paths.has(entry.relativePath) && (
+          <span
+            title="Open change request"
+            className="ml-auto h-1.5 w-1.5 flex-none rounded-full bg-wait-dot"
+          />
+        )}
       </button>
       {contextMenu && (
         <ContextMenu
@@ -821,6 +924,7 @@ function FileTreeNode({
           onClose={() => setContextMenu(null)}
           onRename={() => setRenaming(true)}
           onDownload={handleDownload}
+          returnFocusTo={rowRef}
         />
       )}
     </>
@@ -841,7 +945,16 @@ function FileTreeNode({
 // contributed explorer items.)
 
 export function FileExplorer() {
-  const { fileTree, dispatchUpload, uploadError, clearUploadError, pendingUploads } = useWorkspace();
+  const {
+    fileTree,
+    kbDirName,
+    dispatchUpload,
+    uploadError,
+    clearUploadError,
+    uploadNotice,
+    clearUploadNotice,
+    pendingUploads,
+  } = useWorkspace();
   const [dragOver, setDragOver] = useState(false);
   // Download is now a per-path permission (resolved server-side from the
   // access tree's `download:` verb), so there's no global preflight gate
@@ -850,9 +963,67 @@ export function FileExplorer() {
   // and `handleDownload` shows the error.
   // Optimistic overlay: every dropped/picked file shows up in the tree
   // within a frame, even before its commit echoes back from the server.
-  const mergedTree = useMemo(
+  const serverTree = useMemo(
     () => (fileTree ? mergePendingIntoTree(fileTree, pendingUploads) : null),
     [fileTree, pendingUploads],
+  );
+
+  // The caller's own proposed files that do NOT exist on this branch — they
+  // live only on the personal suggestions branch behind an open change
+  // request. The tree shows them beside the branch's real files (synthesized
+  // below), coloured differently, and clicking one opens the request.
+  const openChangeRequests = useOpenChangeRequests();
+  const suggestionOnlyPaths = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!serverTree) return map;
+    /**
+     * "Not in the tree" has TWO causes, and only one earns a row: the file is
+     * new on the suggestions branch — or the server FILTERED it (.bevelignore,
+     * read gates). The client cannot evaluate those rules itself, but it can
+     * read their verdict off the tree: if the path's top-level folder under
+     * the repo root is absent, the whole subtree is hidden (a skill proposal
+     * under a bevelignored `Groups/` was the observed leak), so the overlay
+     * must not resurrect it. The known cost: a proposal that CREATES a new
+     * top-level root folder shows no row until it merges.
+     */
+    const hiddenRoot = (path: string): boolean => {
+      const prefix = kbDirName && path.startsWith(`${kbDirName}/`) ? `${kbDirName}/` : '';
+      const segments = path.slice(prefix.length).split('/');
+      if (segments.length < 2) return false; // directly under the repo root
+      return !pathExistsInTree(serverTree, `${prefix}${segments[0]}`);
+    };
+    for (const [path, crNumber] of openChangeRequests.minePaths) {
+      if (!pathExistsInTree(serverTree, path) && !hiddenRoot(path)) {
+        map.set(path, crNumber);
+      }
+    }
+    return map;
+  }, [serverTree, openChangeRequests, kbDirName]);
+
+  const mergedTree = useMemo(() => {
+    if (!serverTree || suggestionOnlyPaths.size === 0) return serverTree;
+    // Reuses the pending-upload synthesizer: same parent-directory creation,
+    // same sort order, and a real entry always wins over a synthesized one.
+    const asEntries = new Map<string, PendingEntry>();
+    for (const path of suggestionOnlyPaths.keys()) {
+      asEntries.set(path, { fullPath: path, type: 'file' });
+    }
+    return mergePendingIntoTree(serverTree, asEntries);
+  }, [serverTree, suggestionOnlyPaths]);
+
+  // A clicked suggestion row opens the SHARED change-request dialog on the
+  // request the path belongs to — the row is a link to the request, and the
+  // dialog is the one change-request view the app has.
+  const [openSuggestionCr, setOpenSuggestionCr] = useState<PullRequestSummary | null>(null);
+  const suggestionsController = useMemo<SuggestionsController>(
+    () => ({
+      crFor: (path) => suggestionOnlyPaths.get(path) ?? null,
+      open: (path, crNumber) => {
+        const cr = openChangeRequests.forPath(path).find((c) => c.number === crNumber) ?? null;
+        setOpenSuggestionCr(cr);
+      },
+    }),
+    [suggestionOnlyPaths, openChangeRequests],
   );
 
   // Pinned folders — a personal, client-side shortcut list surfaced at the top
@@ -895,14 +1066,24 @@ export function FileExplorer() {
   // Right-click → Manage access opens this sheet for the chosen entry.
   const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);
 
-  // KB content splits Knowledge (`KnowledgeBase/`), Data (`Data/`), Agents
-  // (`Agents/`), Pipelines (`Pipelines/`), Skills (`Skills/`) and Tools
-  // (`Tools/`) into separate top-level folders; surface them as labelled sections
-  // rather than a single flat root. The Knowledge section hoists `KnowledgeBase/`'s
-  // children and folds in any other top-level content folder (e.g. a stray
-  // `Legal/`); loose top-level files (access.md, roles.yaml) sit below a divider.
-  // Clones that predate the split (none of the well-known root dirs) fall back
-  // to the flat tree.
+  // KB content splits into separate top-level folders; surface them as labelled
+  // sections rather than a single flat root. The Knowledge section hoists
+  // `KnowledgeBase/`'s children and folds in any other top-level content folder
+  // (e.g. a stray `Legal/`); loose top-level files (access.md, roles.yaml) sit
+  // below a divider. Clones that predate the split (none of the well-known root
+  // dirs) fall back to the flat tree.
+  //
+  // `Groups/` is NOT among them. It is the Skills & Tools app's storage — one
+  // folder per group holding its skills and its tools — and that app presents
+  // it as groups, skills and tools rather than as files. Listing it here too
+  // offered a second, worse way in: raw markdown editing of a SKILL.md with
+  // none of the surrounding affordances, on a folder whose access is managed
+  // from the group page. Deep links into a group file still resolve; the
+  // folder just is not a browsing destination in Knowledge.
+  //
+  // `Data/`, `Agents/` and `Pipelines/` are rendered when PRESENT but never
+  // created by core (see `CORE_REQUIRED_DIRS`) — a deployment that owns the
+  // agentic execution layer seeds them, and this reads whatever is there.
   const sections = useMemo(() => {
     // Descend past the workspace / KB-clone wrapper levels to the node that
     // actually holds the well-known root dirs, then split that level.
@@ -914,17 +1095,20 @@ export function FileExplorer() {
     const data = findDir(DATA_DIR);
     const agents = findDir(AGENTS_DIR);
     const pipelines = findDir(PIPELINES_DIR);
-    const skills = findDir(SKILLS_DIR);
-    const tools = findDir(TOOLS_DIR);
-    if (!knowledgeBase && !data && !agents && !pipelines && !skills && !tools) return null;
+    // Groups counts toward "is this a split layout?" even though it is never
+    // rendered: its presence proves the split just as well as the others, and
+    // without it a KB whose only root is Groups would fail this check, fall
+    // back to the flat tree, and show the folder that way instead.
+    const groups = findDir(GROUPS_DIR);
+    if (!knowledgeBase && !data && !agents && !pipelines && !groups) return null;
     // Any other top-level content folder (e.g. a stray `Legal/`) folds into Knowledge.
     const otherDirs = kids.filter(
       (c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name),
     );
-    // Present Knowledge, Data, Agents, Pipelines, Skills and Tools as named
-    // roots. Knowledge is synthetic so it can relabel `KnowledgeBase` and
-    // absorb the stray content folders; it reuses KnowledgeBase's own path so
-    // file ops on the row still resolve.
+    // Present Knowledge, Data and Groups as named roots. Knowledge is
+    // synthetic so it can relabel `KnowledgeBase` and absorb the stray
+    // content folders; it reuses KnowledgeBase's own path so file ops on the
+    // row still resolve.
     const knowledge: FileTreeEntry | null = knowledgeBase
       ? {
           ...knowledgeBase,
@@ -939,15 +1123,11 @@ export function FileExplorer() {
     const pipelinesRoot: FileTreeEntry | null = pipelines
       ? { ...pipelines, name: PIPELINES_DIR }
       : null;
-    const skillsRoot: FileTreeEntry | null = skills ? { ...skills, name: SKILLS_DIR } : null;
-    const toolsRoot: FileTreeEntry | null = tools ? { ...tools, name: TOOLS_DIR } : null;
     return {
       knowledge,
       data: dataRoot,
       agents: agentsRoot,
       pipelines: pipelinesRoot,
-      skills: skillsRoot,
-      tools: toolsRoot,
       looseFiles: kids.filter((c) => c.type === 'file'),
     };
   }, [mergedTree]);
@@ -971,9 +1151,18 @@ export function FileExplorer() {
 
   return (
     <>
-    <aside
-      className={`h-full w-full min-w-0 flex flex-col bg-white overflow-hidden ${
-        dragOver ? 'ring-2 ring-inset ring-bevel/40' : ''
+    {/* No background, no border, no width: this is the CONTENTS of the app's
+        one sidebar, and `SidebarFrame` is the sidebar. It used to be
+        `bg-white` against the Library's `bg-sidebar`, which is how two navs in
+        one app ended up looking like two apps. */}
+    <div
+      // The drop target. It was findable as `role="complementary"` while this
+      // was the `<aside>`; the aside is `SidebarFrame`'s now, and a second
+      // complementary nested inside the first would be a lie about the page's
+      // landmarks.
+      data-testid="file-explorer-root"
+      className={`h-full w-full min-w-0 flex flex-col overflow-hidden ${
+        dragOver ? 'ring-2 ring-inset ring-accent/40' : ''
       }`}
       onDrop={handleDrop}
       onDragOver={(e) => {
@@ -988,60 +1177,81 @@ export function FileExplorer() {
       {uploadError && (
         <div
           role="alert"
-          className="flex items-start gap-1 px-2 py-1 text-xs text-red-700 bg-red-50 border-b border-red-200 shrink-0"
+          className="flex items-start gap-1 px-2 py-1 text-xs text-danger bg-danger-soft border-b border-danger/30 shrink-0"
         >
           <span className="flex-1 truncate" title={uploadError.reason}>
             Couldn't add {uploadError.filename}: {uploadError.reason}
           </span>
-          <button
-            type="button"
-            onClick={clearUploadError}
-            className="p-0.5 rounded hover:bg-red-100 text-red-600 hover:text-red-800 shrink-0"
+          <IconButton
+            size={18}
+            tone="danger"
             title="Dismiss"
             aria-label="Dismiss upload error"
+            onClick={clearUploadError}
           >
             <X size={12} />
-          </button>
+          </IconButton>
+        </div>
+      )}
+      {/* Not an error: the upload LANDED, on the suggestions branch. Saying
+          so is load-bearing — nothing appears in the tree where the user
+          dropped the files, and silence there reads as a failed upload. */}
+      {uploadNotice && (
+        <div
+          role="status"
+          className="flex items-start gap-1 px-2 py-1 text-xs text-ink bg-wait-soft border-b border-line shrink-0"
+        >
+          <span className="flex-1" title={uploadNotice}>
+            {uploadNotice}
+          </span>
+          <IconButton
+            size={18}
+            title="Dismiss"
+            aria-label="Dismiss upload notice"
+            onClick={clearUploadNotice}
+          >
+            <X size={12} />
+          </IconButton>
         </div>
       )}
       <PinnedContext.Provider value={pinnedController}>
       <ManageAccessContext.Provider value={setAccessTarget}>
-      <div className="flex-1 overflow-y-auto py-1 min-h-0">
-        <div className="px-3 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-          Pinned
-        </div>
+      <SuggestionsContext.Provider value={suggestionsController}>
+      <div className="flex-1 overflow-y-auto min-h-0">
+        {/* "Company Context", not "Pinned". The mechanism is pinning; the
+            SECTION is the handful of places this company actually works out
+            of. A label naming the mechanism tells you how the rows got there,
+            which nobody is wondering — the useful heading says what they are.
+
+            Same padding as the Library's `SectionLabel`, because it is the
+            same thing: a heading over a list of places. */}
+        <div className="px-2.5 pb-1.5 text-label uppercase text-ink-faint">Company Context</div>
         {pinnedEntries.map((e) => (
           <FileTreeNode key={`pin:${e.relativePath}`} entry={e} depth={0} collapseChildren />
         ))}
         {explorerItems.map(({ id, Component }) => (
           <Component key={id} tree={mergedTree} />
         ))}
-        <div className="mx-3 my-2 border-t border-slate-100" />
+        <div className="mx-3 my-2 border-t border-line" />
         {!mergedTree ? (
-          <div className="px-3 py-4 text-xs text-slate-600">Loading...</div>
+          <div className="px-3 py-4 text-xs text-ink-muted">Loading...</div>
         ) : sections ? (
           <>
             {sections.knowledge && (
-              <FileTreeNode entry={sections.knowledge} depth={0} accent collapseChildren />
+              <FileTreeNode entry={sections.knowledge} depth={0} collapseChildren />
             )}
             {sections.data && (
-              <FileTreeNode entry={sections.data} depth={0} accent collapseChildren />
+              <FileTreeNode entry={sections.data} depth={0} collapseChildren />
             )}
             {sections.agents && (
-              <FileTreeNode entry={sections.agents} depth={0} accent collapseChildren />
+              <FileTreeNode entry={sections.agents} depth={0} collapseChildren />
             )}
             {sections.pipelines && (
-              <FileTreeNode entry={sections.pipelines} depth={0} accent collapseChildren />
-            )}
-            {sections.skills && (
-              <FileTreeNode entry={sections.skills} depth={0} accent collapseChildren />
-            )}
-            {sections.tools && (
-              <FileTreeNode entry={sections.tools} depth={0} accent collapseChildren />
+              <FileTreeNode entry={sections.pipelines} depth={0} collapseChildren />
             )}
             {sections.looseFiles.length > 0 && (
               <>
-                <div className="mx-3 my-2 border-t border-slate-100" />
+                <div className="mx-3 my-2 border-t border-line" />
                 {sections.looseFiles.map((c) => (
                   <FileTreeNode key={c.relativePath} entry={c} depth={0} />
                 ))}
@@ -1052,14 +1262,28 @@ export function FileExplorer() {
           <FileTreeNode entry={mergedTree} depth={0} />
         )}
       </div>
+      </SuggestionsContext.Provider>
       </ManageAccessContext.Provider>
       </PinnedContext.Provider>
       <PullRequestsForMe />
-    </aside>
+    </div>
+    {openSuggestionCr && (
+      <ChangeRequestDialog
+        cr={openSuggestionCr}
+        onClose={() => setOpenSuggestionCr(null)}
+        onResolved={() => {
+          setOpenSuggestionCr(null);
+          window.dispatchEvent(new Event(PR_STALE_EVENT));
+        }}
+      />
+    )}
     {accessTarget && (
       <ManageAccessDialog
         key={accessTarget.relativePath}
         entry={accessTarget}
+        // The dialog is keyed on the path, so pointing it at a parent remounts
+        // it against that folder — the whole retarget is this one setter.
+        onManageAncestor={setAccessTarget}
         onClose={() => setAccessTarget(null)}
       />
     )}

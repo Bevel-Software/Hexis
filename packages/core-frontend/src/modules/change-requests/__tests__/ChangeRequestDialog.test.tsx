@@ -1,0 +1,176 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import type { FileApprovalState, PullRequestSummary } from '@bevel-software/platform-shared';
+
+/**
+ * The dialog's degenerate state: a request whose detail reports ZERO files.
+ * Real on dev — a branch whose changes have since landed on the target (or
+ * whose only change was roles.yaml, which the review surface filters). The
+ * old rendering was a blank file pill over an eternal "Loading…", which reads
+ * as a hang; the dialog must state the truth and withdraw the Apply button.
+ */
+
+const detailMock = vi.hoisted(() => ({ fetchPrDetail: vi.fn() }));
+vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: detailMock.fetchPrDetail }));
+
+vi.mock('../services/change-requests.api', () => ({
+  readFileOnBranch: vi.fn(async () => 'branch copy'),
+}));
+const approvalsApi = vi.hoisted(() => ({ approvePrFile: vi.fn(), revertPrFile: vi.fn() }));
+vi.mock('../../pr/services/pr-approvals.api', () => ({
+  approvePrFile: approvalsApi.approvePrFile,
+  revertPrFile: approvalsApi.revertPrFile,
+  unapprovePrFile: vi.fn(),
+}));
+vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: vi.fn() }));
+
+import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
+
+const CR: PullRequestSummary = {
+  number: 12,
+  title: 'Customer hypotheses — 2026-07-31 – 2026-08-06',
+  authorId: 'abc',
+  author: { login: 'user-abc', name: 'Ali' },
+  appAuthor: { name: 'Ali' },
+  branch: 'ali.raza/customer-hypotheses-2026-08-07',
+  base: 'main',
+  state: 'open',
+  createdAt: '2026-08-07T00:00:00.000Z',
+  touchedNodePaths: [],
+  review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
+  url: '/change-requests/12',
+} as unknown as PullRequestSummary;
+
+beforeEach(() => {
+  detailMock.fetchPrDetail.mockReset();
+});
+
+describe('ChangeRequestDialog: a request with no remaining changes', () => {
+  it('says so instead of a blank pill over an eternal Loading, and hides Apply', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...CR,
+      body: '',
+      headSha: 'h',
+      baseSha: 'b',
+      files: [],
+      comments: [],
+      approvals: [],
+      mergeableInBevel: true,
+      mergeBlockedReasons: [],
+      mergeWarnings: [],
+      viewerCanBypassMerge: false,
+      viewerCanCancel: true,
+    });
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    expect(
+      await screen.findByText(/doesn't change anything anymore/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+    expect(screen.queryByText(/not touched by this request/)).not.toBeInTheDocument();
+  });
+
+  it('still renders the normal grid while the detail is loading', () => {
+    detailMock.fetchPrDetail.mockReturnValue(new Promise(() => {}));
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    // No premature "changes nothing" claim before the detail answers.
+    expect(screen.queryByText(/doesn't change anything anymore/)).not.toBeInTheDocument();
+  });
+});
+
+const approval = (over: Partial<FileApprovalState>): FileApprovalState => ({
+  path: 'Docs/a.md',
+  eligibleApprovers: { roles: ['Admin'], users: [] },
+  approvedBy: [],
+  isApproved: false,
+  viewerCanApprove: false,
+  ...over,
+});
+
+function detailWith(approvals: FileApprovalState[]) {
+  return {
+    ...CR,
+    body: '',
+    headSha: 'h',
+    baseSha: 'b',
+    files: approvals.map((a) => ({
+      path: a.path,
+      status: 'modified' as const,
+      additions: 1,
+      deletions: 0,
+      isBinary: false,
+      sha: '',
+      rawUrl: '',
+    })),
+    comments: [],
+    approvals,
+    mergeableInBevel: true,
+    mergeBlockedReasons: [],
+    mergeWarnings: ['Waiting on approval for Docs/a.md from Admin.'],
+    viewerCanBypassMerge: false,
+    viewerCanCancel: false,
+  };
+}
+
+describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
+  it('hides Apply when a file is neither approved nor approvable by the viewer', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([approval({ viewerCanApprove: false, isApproved: false })]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    // The waiting line takes the button's place — naming who is being waited on.
+    expect(await screen.findByText(/Waiting on approval for Docs\/a\.md/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
+  });
+
+  it('shows Apply when every file is approved or approvable by the viewer', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({ path: 'Docs/a.md', isApproved: true }),
+        approval({ path: 'Docs/b.md', viewerCanApprove: true }),
+      ]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    expect(await screen.findByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
+  });
+
+  it('Accept file records the approval and the badge takes its place', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([approval({ viewerCanApprove: true })]),
+    );
+    approvalsApi.approvePrFile.mockResolvedValue([
+      approval({ viewerCanApprove: true, isApproved: true }),
+    ]);
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept file' }));
+    expect(await screen.findByText('Accepted')).toBeInTheDocument();
+    expect(approvalsApi.approvePrFile).toHaveBeenCalledWith(12, 'Docs/a.md');
+    expect(screen.queryByRole('button', { name: 'Accept file' })).not.toBeInTheDocument();
+  });
+
+  it('Revert asks first; reverting the last file resolves the dialog', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([approval({ viewerCanApprove: true })]),
+    );
+    approvalsApi.revertPrFile.mockResolvedValue({ closed: true, remainingPaths: [] });
+    const onResolved = vi.fn();
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={onResolved} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Revert file' }));
+    // Nothing sent yet — the second click is the verdict.
+    expect(approvalsApi.revertPrFile).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Revert this file?' }));
+
+    await waitFor(() => expect(approvalsApi.revertPrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
+    await waitFor(() => expect(onResolved).toHaveBeenCalled());
+  });
+
+  it('offers no verbs to a viewer who cannot approve the file', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(detailWith([approval({})]));
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    await screen.findByText(/Waiting on approval/);
+    expect(screen.queryByRole('button', { name: 'Accept file' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Revert file' })).not.toBeInTheDocument();
+  });
+});

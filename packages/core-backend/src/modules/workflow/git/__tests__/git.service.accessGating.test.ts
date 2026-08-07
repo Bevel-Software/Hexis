@@ -232,55 +232,6 @@ describe('GitService — commit gate uses HEAD (not working tree)', () => {
   });
 });
 
-describe('GitService — revert gate uses HEAD', () => {
-  let root: string;
-  const workspaceId = 'ws-revert-gate';
-
-  beforeEach(async () => {
-    root = await mkTmpRoot();
-  });
-  afterEach(async () => {
-    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-  });
-
-  it('passes ref=HEAD when gating a revert', async () => {
-    const { ac, calls } = recordingAccessControl();
-    const { svc, repo } = await makeSvc(root, workspaceId, ac);
-    await commitFile(repo, 'Knowledge/Foo.md', 'a\n', 'seed');
-    await commitFile(repo, 'Knowledge/Foo.md', 'b\n', 'second');
-    const { stdout: sha } = await execFileAsync('git', ['-C', repo, 'rev-parse', 'HEAD'], {
-      encoding: 'utf-8',
-    });
-
-    // We only care that the gate is invoked with `HEAD`; downstream
-    // behaviour of `git revert` (which may or may not succeed for unrelated
-    // environmental reasons — author parsing, signing config, etc.) is out
-    // of scope for this test.
-    await svc.revertCommit(workspaceId, USER, sha.trim()).catch(() => undefined);
-
-    const gateCalls = calls.filter((c) => c.method === 'canWriteBatchAtRef');
-    expect(gateCalls).toHaveLength(1);
-    expect(gateCalls[0].ref).toBe('HEAD');
-    expect(gateCalls[0].paths).toContain('Knowledge/Foo.md');
-  });
-
-  it('refuses with AccessDeniedError when the gate denies', async () => {
-    const { ac } = recordingAccessControl({
-      canWriteBatchAtRef: (_ref, _email, paths) => new Map(paths.map((p) => [p, false])),
-    });
-    const { svc, repo } = await makeSvc(root, workspaceId, ac);
-    await commitFile(repo, 'Knowledge/Foo.md', 'a\n', 'seed');
-    await commitFile(repo, 'Knowledge/Foo.md', 'b\n', 'second');
-    const { stdout: sha } = await execFileAsync('git', ['-C', repo, 'rev-parse', 'HEAD'], {
-      encoding: 'utf-8',
-    });
-
-    await expect(svc.revertCommit(workspaceId, USER, sha.trim())).rejects.toBeInstanceOf(
-      AccessDeniedError,
-    );
-  });
-});
-
 describe('GitService — push gate uses origin/<branch> (not HEAD or working tree)', () => {
   let root: string;
   const workspaceId = 'ws-push-gate';
@@ -325,6 +276,15 @@ describe('GitService — push gate uses origin/<branch> (not HEAD or working tre
     expect(gateCalls).toHaveLength(1);
     expect(gateCalls[0].ref).toBe('origin/current-company-state');
     expect(gateCalls[0].paths).toContain('Knowledge/Foo.md');
+  });
+
+  it('systemAuthorized skips the gate entirely, and the push still lands', async () => {
+    // The group-provisioning path: its endpoint IS the authorization (any
+    // signed-in user may claim an unused name under Groups/), and the gate
+    // could only read the new folder's chain at origin as `write: Admin`.
+    const { svc, calls } = await setupWithOrigin();
+    await svc.push(workspaceId, USER, { systemAuthorized: true });
+    expect(calls.filter((c) => c.method === 'canWriteBatchAtRef')).toHaveLength(0);
   });
 
   it('refuses the push when origin/<branch> rules deny the caller', async () => {

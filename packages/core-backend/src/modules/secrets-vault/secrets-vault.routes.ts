@@ -34,13 +34,51 @@ function redirectUriFor(publicBackendUrl: string): string {
 }
 
 /**
+ * Is this a SAME-ORIGIN path we're willing to bounce the browser back to after a
+ * sign-in? The callback builds `${publicFrontendUrl}${dest}#…`, so anything that
+ * survives this check gets concatenated onto our own origin — which makes every
+ * rule here an open-redirect rule, not a formatting preference:
+ *  - must start with a single `/` — `//evil.com` is a protocol-relative URL and
+ *    `https://evil.com` an absolute one; both would leave our origin entirely.
+ *  - no `\` — WHATWG folds a backslash to a slash for http(s), so `/\evil.com`
+ *    is `//evil.com` by another spelling.
+ *  - no `#` — the callback appends its own fragment; a caller-supplied one would
+ *    swallow the `#authorized=…`/`#error=…` the landing page reads.
+ *  - no CR/LF — never let a caller-controlled string reach a `Location` header
+ *    with a line break in it (response splitting).
+ *  - ≤512 chars — a signed `state` rides in the provider's authorize URL, and
+ *    some providers cap its length; this keeps the round-trip inside every
+ *    budget without needing to know each provider's limit.
+ * Exported for the route tests: this predicate IS the security boundary, so it
+ * is pinned by a unit table rather than only exercised end-to-end.
+ */
+export function isSafeReturnPath(returnTo: unknown): returnTo is string {
+  return (
+    typeof returnTo === 'string' &&
+    returnTo.length <= 512 &&
+    returnTo.startsWith('/') &&
+    !returnTo.startsWith('//') &&
+    !returnTo.includes('\\') &&
+    !returnTo.includes('#') &&
+    !/[\r\n]/.test(returnTo)
+  );
+}
+
+/**
  * Authenticated Secrets Vault CRUD + OAuth start. Every route is scoped to
  * `req.userId` — secrets are private per user. Mounted behind the JWT middleware.
  */
 export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.Router {
   const { secretsVault, toolManualService, accessControl } = deps;
   const router = express.Router();
-  const defaultWs = workspaceIdForBranch(DEFAULT_BRANCH);
+  // A FUNCTION, not a constant. Routers are constructed at boot, and on a
+  // deployment configured through the setup screen the branch model does not
+  // exist yet at that moment — `DEFAULT_BRANCH` is still ''. The live binding
+  // updates when setup applies the model, but only reads INSIDE a function
+  // body see it; a construction-time capture would keep handing an empty
+  // workspace id to the access resolver until the next restart ("Invalid
+  // workspace ID" on every /secrets/tools call).
+  const defaultWs = () => workspaceIdForBranch(DEFAULT_BRANCH);
 
   // The vault key = the exact key UTCP looks the var up under (doubles underscores
   // in the manual namespace), so storage and resolution agree for snake_case ids.
@@ -165,7 +203,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
           path: m.path,
           type: m.type,
           setup: m.setup ?? null,
-          canWrite: await accessControl.canWrite(defaultWs, email, m.path),
+          canWrite: await accessControl.canWrite(defaultWs(), email, m.path),
           variables: (m.variables ?? []).map((v) => {
             const key = varKey(m.name, v.name);
             const st = statusByKey.get(key);
@@ -290,7 +328,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       if (found.variable.scope !== 'admin') {
         return void res.status(422).json({ error: 'This variable is set by each user, not the tool owner.' });
       }
-      if (!(await accessControl.canWrite(defaultWs, email, found.manual.path))) {
+      if (!(await accessControl.canWrite(defaultWs(), email, found.manual.path))) {
         return void res.status(403).json({ error: 'You need write access to this tool to set its shared secrets.' });
       }
       const body = req.body ?? {};
@@ -343,7 +381,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       if (!found.variable.oauth) {
         return void res.status(422).json({ error: 'This variable is not an OAuth sign-in.' });
       }
-      if (!(await accessControl.canWrite(defaultWs, email, found.manual.path))) {
+      if (!(await accessControl.canWrite(defaultWs(), email, found.manual.path))) {
         return void res.status(403).json({ error: 'You need write access to this tool to set its client secret.' });
       }
       const clientSecret = (req.body ?? {}).clientSecret;
@@ -369,7 +407,9 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
 
   // Start sign-in for a tool's OAuth-backed variable. Provisions the caller's row
   // from the owner-set secret and returns the provider consent URL; the callback
-  // bounces back to /connect (via `r` in the signed state).
+  // bounces back to wherever the flow started (via `r` in the signed state) — an
+  // optional `{ returnTo }` body when the caller asks for a specific page, else
+  // /connect, which is where every caller came from before `returnTo` existed.
   router.post('/secrets/tools/:slug/vars/:var/oauth/start', async (req, res) => {
     const userId = req.userId;
     const email = req.userEmail;
@@ -395,11 +435,17 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         // on the next sign-in. The secret/clientId/addresses stay owner-pinned.
         scopes: found.variable.oauth.scopes,
       });
+      // The return path is signed INTO the state (HMAC-SHA256) rather than kept
+      // in a query param or a cookie: the callback arrives un-authenticated from
+      // the provider, so the state is the only thing it can trust. An absent or
+      // unsafe `returnTo` falls back to the legacy `'connect'` marker, which
+      // keeps a body-less start byte-identical to what it produced before.
+      const returnTo: unknown = (req.body ?? {}).returnTo;
       const state = signState(deps.stateSecret, {
         u: userId,
         i: id,
         n: randomBytes(8).toString('hex'),
-        r: 'connect',
+        r: isSafeReturnPath(returnTo) ? returnTo : 'connect',
       });
       const consentUrl = new URL(url);
       consentUrl.searchParams.set('state', state);
@@ -416,7 +462,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
     try {
       const found = await findManualVar(email, req.params.slug, req.params.var);
       if (!found) return void res.status(404).json({ error: 'Tool or variable not found' });
-      if (!(await accessControl.canWrite(defaultWs, email, found.manual.path))) {
+      if (!(await accessControl.canWrite(defaultWs(), email, found.manual.path))) {
         return void res.status(403).json({ error: 'You need write access to this tool to remove its shared secrets.' });
       }
       await secretsVault.removeShared(varKey(found.manual.name, found.variable.name));
@@ -456,16 +502,21 @@ export function createSecretsVaultPublicRoutes(deps: SecretsVaultRoutesDeps): ex
     const code = typeof req.query.code === 'string' ? req.query.code : '';
     const stateRaw = typeof req.query.state === 'string' ? req.query.state : '';
     // The landing page depends on where the flow started (the `r` field in the
-    // signed state): a tool-var sign-in returns to /connect, the standalone
-    // Secrets page to /secrets. Pre-verification errors can't know `r`, so they
-    // fall back to /secrets.
+    // signed state): an explicit same-origin path returns there, the legacy
+    // `'connect'` marker to /connect, the standalone Secrets page to /secrets.
+    // Pre-verification errors can't know `r`, so they fall back to /secrets.
     const back = (frag: string, dest = '/secrets') =>
       res.redirect(`${deps.publicFrontendUrl}${dest}#${frag}`);
     if (!code || !stateRaw) return void back(`error=${encodeURIComponent('Invalid OAuth callback.')}`);
 
     const state = verifyState(deps.stateSecret, stateRaw);
     if (!state) return void back(`error=${encodeURIComponent('OAuth state mismatch.')}`);
-    const dest = state.r === 'connect' ? '/connect' : '/secrets';
+    // Re-validated HERE even though `r` was validated on the way in and is
+    // HMAC-signed: this is the line that concatenates a stored string onto our
+    // public origin and hands it to the browser as a `Location`. Defense in
+    // depth — the check costs nothing, and it means an open redirect would need
+    // BOTH the signing key and a validation bug, not either one.
+    const dest = isSafeReturnPath(state.r) ? state.r : state.r === 'connect' ? '/connect' : '/secrets';
 
     try {
       await secretsVault.completeOAuth(state.u, state.i, code, redirectUriFor(deps.publicBackendUrl));
@@ -494,7 +545,12 @@ interface OAuthState {
   i: string; // secret id
   n: string; // nonce
   iat: number; // issued-at (epoch ms)
-  r?: string; // return path hint ('connect' → land on /connect; else /secrets)
+  /**
+   * Return path hint: a same-origin path (`isSafeReturnPath`) → land there; the
+   * legacy marker `'connect'` → /connect; anything else (incl. absent) →
+   * /secrets. Signed, so the callback can trust it — but re-validated anyway.
+   */
+  r?: string;
 }
 
 const OAUTH_STATE_MAX_AGE_MS = 10 * 60_000;

@@ -7,6 +7,35 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 /**
+ * The Postgres connection string: `DATABASE_URL` if given, otherwise built
+ * from the `POSTGRES_*` parts.
+ *
+ * The composition lives HERE rather than in docker-compose because expressing
+ * it there needed a nested default — `${DATABASE_URL:-postgresql://${POSTGRES_USER:-…}…}`
+ * — and deployment UIs that scan compose with a regex rather than a YAML
+ * parser truncate that at the first closing brace, offering the operator a
+ * variable whose value is the fragment `postgresql://${POSTGRES_USER:-bevel`.
+ * A malformed connection string presented as configuration is worse than no
+ * configuration at all.
+ *
+ * It is also the better home for it: the parts are URL-ENCODED, which shell
+ * interpolation cannot do — a password containing `@`, `/` or `:` silently
+ * produced an unparseable URL, and "check your password" is not the error
+ * anyone got.
+ */
+export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  const explicit = (env.DATABASE_URL || '').trim();
+  if (explicit) return explicit;
+  const user = encodeURIComponent(env.POSTGRES_USER || 'bevel');
+  const password = encodeURIComponent(env.POSTGRES_PASSWORD || 'bevel');
+  // `localhost` suits a local `pnpm dev`; compose passes the service name.
+  const host = (env.POSTGRES_HOST || 'localhost').trim();
+  const port = (env.POSTGRES_PORT || '5432').trim();
+  const database = encodeURIComponent(env.POSTGRES_DB || 'bevel');
+  return `postgresql://${user}:${password}@${host}:${port}/${database}`;
+}
+
+/**
  * Configuration for the CORE platform: the git-backed workspace/workflow,
  * skills, tools, secrets vault, access control, and the MCP surface. Contains
  * NO LLM, connector, or SSO-provider settings — those live on the enterprise
@@ -44,16 +73,31 @@ export class CoreConfig {
   readonly spillRoot: string;
   readonly jwtSecret: string;
   /**
-   * Bootstrap admin credential, checked directly against the environment at
-   * login time (never stored). Lets a fresh deployment sign in before any
-   * account exists; that admin (or any user with the Admin role in
-   * `roles.yaml`) then creates per-user accounts from Roles & Members.
-   * Remove EITHER variable and the credential stops working immediately —
-   * accounts created in the database are unaffected. The email is also
-   * always recognized as an admin (see AdminAccessService), so a fresh KB
-   * whose `roles.yaml` doesn't list it yet is still administrable.
+   * The deployment's owner. REQUIRED — three separate jobs rest on it, and a
+   * deployment without one has no way to be administered:
+   *
+   *  - always recognized as an admin (see AdminAccessService), whatever the
+   *    sign-in method, so a KB whose `roles.yaml` does not list them yet is
+   *    still administrable;
+   *  - written as the sole Admin into the `roles.yaml` generated when an EMPTY
+   *    KB remote is seeded (this replaced `SEED_ADMIN_EMAILS`, which asked for
+   *    the same answer a second time);
+   *  - half of the bootstrap password credential below.
    */
   readonly adminEmail: string;
+  /**
+   * Password half of the bootstrap credential, checked directly against the
+   * environment at login time (never stored) so a fresh deployment can sign in
+   * before any account exists. Captured ONCE here, so changing or unsetting it
+   * takes effect on the next restart rather than at once — accounts in the
+   * database are unaffected either way.
+   *
+   * Required only when password login is ENABLED. An SSO-only deployment
+   * (`LOGIN_PASSWORD=false`) would otherwise have to mint a shared password
+   * the server is configured to reject — an unused credential someone still
+   * has to store and rotate. The admin identity above is required either way,
+   * so "there is always an identifiable admin" holds regardless.
+   */
   readonly adminPassword: string;
   /**
    * Generic OIDC single sign-on (any spec-compliant provider: Entra, Okta,
@@ -90,13 +134,6 @@ export class CoreConfig {
    */
   readonly kbTemplateDir: string;
   /**
-   * Admin emails written into the generated `roles.yaml` when a fresh KB repo is
-   * seeded. Comma/whitespace-separated. A freshly-seeded repo with no Admin is
-   * unusable (access resolution requires ≥1 Admin), so seeding an EMPTY remote
-   * fails fast when this is empty. Not needed once the remote is already seeded.
-   */
-  readonly seedAdminEmails: string[];
-  /**
    * Ontology-session boundary kill-switch. When true (default), an agent run
    * that has read across more than one ontology can no longer write. A no-op on
    * a single-ontology KB. Set `ONTOLOGY_SESSION_BLOCK=false` to disable.
@@ -115,10 +152,24 @@ export class CoreConfig {
    */
   readonly loginPasswordEnabled: boolean;
   /**
-   * Optional allow-list of email domains. When non-empty, ONLY emails whose
-   * domain matches (exactly, or as a subdomain) may log in via ANY method
-   * (shared-password or SSO). Comma/whitespace-separated; empty (default)
-   * allows any email. A leading `@` or `.` on an entry is tolerated, so
+   * Optional allow-list of email domains for SSO — part of the OIDC
+   * configuration, and only meaningful alongside it.
+   *
+   * SSO AUTO-PROVISIONS: `loginWithSso` upserts the account on first sign-in,
+   * with no admin approval step. Against a single-tenant issuer the issuer is
+   * already the boundary and this is belt-and-braces; against a multi-tenant
+   * one (Google, the Entra `common` endpoint, Auth0 with social connections)
+   * it is the ONLY boundary — without it, anyone the issuer will authenticate
+   * provisions themselves into the deployment.
+   *
+   * Deliberately NOT applied to the other two entry points. An account an
+   * admin created is vetted by the act of creating it, and password login can
+   * only reach an account that already exists — so a check there would gate
+   * nothing while being able to lock out a bootstrap admin whose own address
+   * sits outside the list.
+   *
+   * Comma/whitespace-separated; empty (default) allows any email. Matches the
+   * domain exactly or as a subdomain, and a leading `@` or `.` is tolerated:
    * `ALLOWED_EMAIL_DOMAINS=bevel.software, example.com` works as expected.
    */
   readonly allowedEmailDomains: string[];
@@ -127,8 +178,12 @@ export class CoreConfig {
    * secrets: the secrets-vault values and the MCP OAuth client secrets/tokens.
    * Read from `SECRETS_ENC_KEY`, falling back to the legacy
    * `CONNECTOR_CONFIG_ENC_KEY` → `SHAREPOINT_TOKEN_ENC_KEY` chain so existing
-   * deploys keep decrypting without re-keying. Empty = secret values can't be
-   * saved (a clear error surfaces only when a secret is actually written/read).
+   * deploys keep decrypting without re-keying.
+   *
+   * REQUIRED. It used to be optional, with the failure surfacing only when
+   * somebody wrote a secret — which now includes the git token typed into the
+   * setup screen, so an unset key turns the first-run flow into a dead end at
+   * the last step. Refusing to boot names the variable instead.
    */
   readonly secretsEncKey: string;
   /**
@@ -160,7 +215,7 @@ export class CoreConfig {
 
   constructor() {
     this.port = parseInt(process.env.PORT || '3001', 10);
-    this.databaseUrl = process.env.DATABASE_URL || 'postgresql://bevel:bevel@localhost:5432/bevel';
+    this.databaseUrl = resolveDatabaseUrl();
     this.nodeEnv = process.env.NODE_ENV || 'development';
     this.tenantId = (process.env.TENANT_ID || 'bevel').trim().toLowerCase();
     if (!/^[a-z0-9]+$/.test(this.tenantId)) {
@@ -171,11 +226,41 @@ export class CoreConfig {
     this.workspacesRoot = process.env.WORKSPACES_ROOT || path.resolve(process.cwd(), 'workspaces');
     this.backupsRoot = process.env.BACKUPS_ROOT || path.resolve(this.workspacesRoot, '..', 'backups');
     this.spillRoot = process.env.SPILL_ROOT || path.resolve(this.workspacesRoot, '..', 'tool-chain-spills');
-    this.jwtSecret = process.env.JWT_SECRET || '';
+    // Required, and checked BEFORE the auth routes it signs for are ever
+    // mounted. Empty, the first login attempt fails deep inside the JWT library
+    // with a message about a missing key — a boot error naming the variable is
+    // the same information, hours earlier.
+    this.jwtSecret = (process.env.JWT_SECRET || '').trim();
+    if (!this.jwtSecret) {
+      throw new Error(
+        'JWT_SECRET is required — it signs login sessions. Generate one with: ' +
+          `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`,
+      );
+    }
+    // Parsed here rather than beside the other toggles below: whether the
+    // bootstrap PASSWORD is required depends on it.
+    this.loginPasswordEnabled =
+      (process.env.LOGIN_PASSWORD ?? 'true').trim().toLowerCase() !== 'false';
     this.adminEmail = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
     this.adminPassword = process.env.ADMIN_PASSWORD || '';
-    if (this.adminEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.adminEmail)) {
+    if (!this.adminEmail) {
+      throw new Error(
+        'ADMIN_EMAIL is required — the address that owns this deployment. It is ' +
+          'always treated as an admin (whatever the sign-in method) and is written ' +
+          'as the initial Admin when an empty knowledge-base repo is seeded.',
+      );
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.adminEmail)) {
       throw new Error(`ADMIN_EMAIL is not a valid email: "${this.adminEmail}"`);
+    }
+    // Only when password login can actually be used. An SSO-only deployment
+    // has no use for this value and should not have to hold one.
+    if (this.loginPasswordEnabled && !this.adminPassword) {
+      throw new Error(
+        'ADMIN_PASSWORD is required while password login is enabled — it is the ' +
+          'credential that signs in before any account exists. Set it, or set ' +
+          'LOGIN_PASSWORD=false if this deployment signs in through SSO only.',
+      );
     }
     this.oidcIssuerUrl = (process.env.OIDC_ISSUER_URL || '').trim().replace(/\/+$/, '');
     this.oidcClientId = (process.env.OIDC_CLIENT_ID || '').trim();
@@ -190,15 +275,14 @@ export class CoreConfig {
         throw new Error(`OIDC_ISSUER_URL is not a valid URL: "${this.oidcIssuerUrl}"`);
       }
     }
-    // No default: the KB repo is deployment-specific, and a wrong fallback
-    // would surface much later as a confusing clone failure. Fail at boot.
+    // No default, and no longer fatal when absent: an unconfigured deployment
+    // boots into the setup screen, where an admin supplies it (and where the
+    // value can be verified against the real remote before it is saved). What
+    // stays fatal is a value that is present and WRONG — see
+    // `validateKbIdentity` — because that surfaces later as a confusing clone
+    // failure instead of a clear one now.
     this.kbRepoUrl = (process.env.KB_REPO_URL || '').trim();
-    if (this.kbRepoUrl === '') {
-      throw new Error(
-        'KB_REPO_URL is required — the https clone/push URL of the git repository that stores your knowledge base.',
-      );
-    }
-    this.kbDirName = process.env.KB_DIR_NAME || 'knowledge-base';
+    this.kbDirName = (process.env.KB_DIR_NAME || '').trim();
     // Provider-neutral git token: operators can set GIT_TOKEN (or the legacy
     // GITHUB_TOKEN / GH_TOKEN). Normalize onto GITHUB_TOKEN — the name the
     // credential helper and every `$GITHUB_TOKEN` read + redaction use — so all
@@ -218,14 +302,8 @@ export class CoreConfig {
     // Default: the `kb-template/` folder shipped inside this package (works
     // both from src/ and compiled dist/ — see assets.ts).
     this.kbTemplateDir = process.env.KB_TEMPLATE_DIR || defaultKbTemplateDir();
-    this.seedAdminEmails = (process.env.SEED_ADMIN_EMAILS || '')
-      .split(/[\s,]+/)
-      .map((e) => e.trim().toLowerCase())
-      .filter((e) => e.length > 0);
     this.ontologySessionBlock =
       (process.env.ONTOLOGY_SESSION_BLOCK ?? 'true').trim().toLowerCase() !== 'false';
-    this.loginPasswordEnabled =
-      (process.env.LOGIN_PASSWORD ?? 'true').trim().toLowerCase() !== 'false';
     this.allowedEmailDomains = (process.env.ALLOWED_EMAIL_DOMAINS || '')
       .split(/[\s,]+/)
       .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
@@ -236,6 +314,13 @@ export class CoreConfig {
       process.env.SHAREPOINT_TOKEN_ENC_KEY ||
       ''
     ).trim();
+    if (!this.secretsEncKey) {
+      throw new Error(
+        'SECRETS_ENC_KEY is required — it encrypts the secrets vault, the MCP OAuth ' +
+          'tokens and the git credential saved from the setup screen. Generate one ' +
+          `with: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`,
+      );
+    }
     this.internalTokenSecret = (process.env.INTERNAL_TOKEN_SECRET || '').trim();
     this.trustProxy = (process.env.TRUST_PROXY || '').trim();
     this.publicBackendUrl = (process.env.PUBLIC_BACKEND_URL || `http://localhost:${this.port}`)
@@ -255,14 +340,6 @@ export class CoreConfig {
         new URL(value);
       } catch {
         throw new Error(`${name} is not a valid URL: "${value}"`);
-      }
-    }
-
-    // Validate format now so a typo surfaces at boot, not at first-seed time.
-    // Emptiness is NOT an error here: an already-seeded remote never needs it.
-    for (const email of this.seedAdminEmails) {
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        throw new Error(`SEED_ADMIN_EMAILS contains an invalid email: "${email}"`);
       }
     }
 
@@ -289,25 +366,28 @@ export class CoreConfig {
     return `${this.tenantId}-mcp_`;
   }
 
+  /**
+   * Validate the KB-identity inputs THAT WERE SUPPLIED. Absent is fine — the
+   * setup screen collects them — but a present-and-malformed value fails at
+   * boot rather than later, as a clone error nobody can read.
+   */
   private validateKbIdentity(): void {
-    // Validate the two KB-identity inputs up front: `kbRepoUrl` (the clone/push
-    // URL) must be a valid https URL, and `kbDirName` (the dir the clone lives
-    // under in each workspace) must be a single safe path segment. A bad value
-    // in either otherwise surfaces much later as a confusing clone/path failure.
-    let parsed: URL;
-    try {
-      parsed = new URL(this.kbRepoUrl);
-    } catch {
-      throw new Error(`KB_REPO_URL is not a valid URL: ${this.kbRepoUrl}`);
-    }
-    if (parsed.protocol !== 'https:') {
-      throw new Error(`KB_REPO_URL must use https://: ${this.kbRepoUrl}`);
+    if (this.kbRepoUrl) {
+      let parsed: URL;
+      try {
+        parsed = new URL(this.kbRepoUrl);
+      } catch {
+        throw new Error(`KB_REPO_URL is not a valid URL: ${this.kbRepoUrl}`);
+      }
+      if (parsed.protocol !== 'https:') {
+        throw new Error(`KB_REPO_URL must use https://: ${this.kbRepoUrl}`);
+      }
     }
 
     // Joined with workspace paths via path.join — separators or ".." would let it
     // escape the workspace dir.
+    if (!this.kbDirName) return;
     if (
-      !this.kbDirName ||
       this.kbDirName === '.' ||
       this.kbDirName === '..' ||
       this.kbDirName.includes('/') ||

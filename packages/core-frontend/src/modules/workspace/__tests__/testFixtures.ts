@@ -26,6 +26,8 @@ export function makeWorkspaceFixture(
     setPersistenceBranch: () => {},
     fsRevision: 0,
     uploadError: null,
+    uploadNotice: null,
+    clearUploadNotice: () => {},
     isUploading: false,
     uploadProgress: null,
     pendingUploads: new Map(),

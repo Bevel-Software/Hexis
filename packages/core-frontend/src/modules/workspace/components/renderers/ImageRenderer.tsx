@@ -32,7 +32,7 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
 
   if (!objectUrl) {
     return (
-      <div className="flex items-center justify-center h-full text-slate-600 text-sm">
+      <div className="flex items-center justify-center h-full text-ink-muted text-sm">
         Loading image...
       </div>
     );
@@ -43,7 +43,7 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
       <img
         src={objectUrl}
         alt={filePath}
-        className="max-w-full max-h-full object-contain rounded"
+        className="max-w-full max-h-full object-contain rounded-xs"
       />
     </div>
   );

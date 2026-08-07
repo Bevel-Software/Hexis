@@ -167,7 +167,7 @@ export function ExternalAgentAccessPage() {
   return (
     <>
       <PageShell title="External agent access" padded={false}>
-        <div className="flex border-b border-slate-200 px-4 shrink-0" role="tablist">
+        <div className="flex border-b border-line px-4 shrink-0" role="tablist">
           {(
             [
               ['agent', 'Your agent'],
@@ -181,8 +181,8 @@ export function ExternalAgentAccessPage() {
               onClick={() => setTab(id)}
               className={`px-3 py-2 text-xs font-medium border-b-2 -mb-px ${
                 tab === id
-                  ? 'border-bevel text-slate-900'
-                  : 'border-transparent text-slate-500 hover:text-slate-800'
+                  ? 'border-accent text-ink'
+                  : 'border-transparent text-ink-muted hover:text-ink'
               }`}
             >
               {name}
@@ -192,8 +192,8 @@ export function ExternalAgentAccessPage() {
 
         {tab === 'agent' && (
           <div className="px-4 py-3 space-y-4">
-            <p className="text-xs text-slate-600 leading-snug">
-              Connect your own agent — Claude Code, Claude Desktop, Cursor and similar. No key
+            <p className="text-xs text-ink-muted leading-snug">
+              Connect your own agent: Claude Code, Claude Desktop, Cursor and similar. No key
               needed: the first time the agent connects, your browser opens so you can sign in and
               choose which tools to share with it. Everything it saves appears under your name.
             </p>
@@ -201,7 +201,7 @@ export function ExternalAgentAccessPage() {
               to="/connect"
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center justify-center gap-1.5 rounded border border-slate-200 px-2 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
+              className="flex items-center justify-center gap-1.5 rounded border border-line px-2 py-1.5 text-xs text-ink hover:bg-hover"
             >
               <Wrench size={12} />
               Configure your tools
@@ -213,16 +213,16 @@ export function ExternalAgentAccessPage() {
               rows={2}
             />
             <div>
-              <div className="text-xs font-medium text-slate-700 mb-1">claude.ai / Claude Desktop</div>
-              <p className="text-[11px] text-slate-600 mb-1 leading-snug">
+              <div className="text-xs font-medium text-ink mb-1">claude.ai / Claude Desktop</div>
+              <p className="text-[11px] text-ink-muted mb-1 leading-snug">
                 Settings → Connectors → Add custom connector, then paste this URL. When asked to
                 authorize, your browser opens this app to finish connecting.
               </p>
               <CopyBlock label={null} value={`${window.location.origin}/api/mcp`} rows={1} />
             </div>
             <div>
-              <div className="text-xs font-medium text-slate-700 mb-1">Other agents (JSON config)</div>
-              <p className="text-[11px] text-slate-600 mb-1 leading-snug">
+              <div className="text-xs font-medium text-ink mb-1">Other agents (JSON config)</div>
+              <p className="text-[11px] text-ink-muted mb-1 leading-snug">
                 Works with Cursor, Windsurf, Cline, and most clients that load servers from a JSON
                 config and support signing in.
               </p>
@@ -243,12 +243,12 @@ export function ExternalAgentAccessPage() {
                 rows={9}
               />
             </div>
-            <p className="text-[11px] text-slate-500 leading-snug">
+            <p className="text-[11px] text-ink-muted leading-snug">
               Running an unattended pipeline or CI agent that can't open a browser? Use the{' '}
               <button
                 type="button"
                 onClick={() => setTab('autonomous')}
-                className="underline text-slate-600 hover:text-slate-900"
+                className="underline text-ink-muted hover:text-ink"
               >
                 Autonomous agents
               </button>{' '}
@@ -259,15 +259,15 @@ export function ExternalAgentAccessPage() {
 
         {tab === 'autonomous' && (
           <div className="px-4 py-3 space-y-4">
-            <p className="text-xs text-slate-600 leading-snug">
+            <p className="text-xs text-ink-muted leading-snug">
               For autonomous agents and pipelines (CI, scheduled jobs) that can't open a browser to
               sign in. Create an external API key and give it to the agent. Each key carries your
-              identity, so any saves the agent makes appear under your name — and it only gets the
+              identity, so any saves the agent makes appear under your name. And it only gets the
               tools you've already connected on the Connect your tools page.
             </p>
 
-            <div className="border border-slate-200 rounded p-3 space-y-2">
-              <label htmlFor={labelInputId} className="block text-xs font-medium text-slate-700">
+            <div className="border border-line rounded p-3 space-y-2">
+              <label htmlFor={labelInputId} className="block text-xs font-medium text-ink">
                 Create an external API key
               </label>
               <div className="flex gap-2">
@@ -277,7 +277,7 @@ export function ExternalAgentAccessPage() {
                   onChange={(e) => setLabel(e.target.value)}
                   placeholder="e.g. Claude Code on my laptop"
                   maxLength={MAX_LABEL_LEN}
-                  className="flex-1 bg-white border border-slate-200 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-slate-300"
+                  className="flex-1 bg-white border border-line rounded px-2 py-1.5 text-sm focus:outline-none focus:border-accent"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && canSubmit) handleCreate();
                   }}
@@ -285,7 +285,7 @@ export function ExternalAgentAccessPage() {
                 <button
                   onClick={handleCreate}
                   disabled={!canSubmit}
-                  className="px-3 py-1.5 text-sm rounded bg-bevel hover:bg-bevel-deep text-white disabled:opacity-50 disabled:hover:bg-bevel"
+                  className="px-3 py-1.5 text-sm rounded bg-accent hover:bg-accent-hover text-white disabled:opacity-50 disabled:hover:bg-accent"
                 >
                   {creating ? 'Creating…' : 'Create key'}
                 </button>
@@ -298,18 +298,18 @@ export function ExternalAgentAccessPage() {
             </div>
 
             <div className="space-y-2">
-              <div className="text-xs font-medium text-slate-700">Your external API keys</div>
+              <div className="text-xs font-medium text-ink">Your external API keys</div>
               {loadError && (
                 <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">
                   {loadError}
                 </div>
               )}
               {loading ? (
-                <div className="text-xs text-slate-600">Loading…</div>
+                <div className="text-xs text-ink-muted">Loading…</div>
               ) : keys.length === 0 ? (
-                <div className="text-xs text-slate-600">No external API keys yet.</div>
+                <div className="text-xs text-ink-muted">No external API keys yet.</div>
               ) : (
-                <ul className="divide-y divide-slate-200 border border-slate-200 rounded">
+                <ul className="divide-y divide-line border border-line rounded">
                   {sortedKeys.map((k) => {
                     const revoked = k.revokedAt !== null;
                     const usage = !revoked ? k.llmUsage : undefined;
@@ -326,7 +326,7 @@ export function ExternalAgentAccessPage() {
                       >
                         <div className="flex-1 min-w-0">
                           <div className="font-medium truncate">{k.label}</div>
-                          <div className="text-[11px] text-slate-600">
+                          <div className="text-[11px] text-ink-muted">
                             Created {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
                             {revoked && ' · Disconnected'}
                           </div>
@@ -334,7 +334,7 @@ export function ExternalAgentAccessPage() {
                             <div className="mt-1 max-w-xs">
                               <div
                                 className={`flex items-center justify-between text-[11px] ${
-                                  overCap ? 'text-red-600' : 'text-slate-600'
+                                  overCap ? 'text-red-600' : 'text-ink-muted'
                                 }`}
                               >
                                 <span>Model usage today</span>
@@ -342,9 +342,9 @@ export function ExternalAgentAccessPage() {
                                   {used.toLocaleString()} / {cap.toLocaleString()} tokens
                                 </span>
                               </div>
-                              <div className="mt-0.5 h-1 rounded bg-slate-100 overflow-hidden">
+                              <div className="mt-0.5 h-1 rounded bg-sunken overflow-hidden">
                                 <div
-                                  className={`h-full ${overCap ? 'bg-red-500' : 'bg-bevel'}`}
+                                  className={`h-full ${overCap ? 'bg-red-500' : 'bg-accent'}`}
                                   style={{ width: `${pct}%` }}
                                 />
                               </div>
@@ -354,7 +354,7 @@ export function ExternalAgentAccessPage() {
                         {revoked ? (
                           <button
                             onClick={() => setPendingDelete({ id: k.id, label: k.label })}
-                            className="text-xs px-2 py-1 rounded text-red-600 hover:bg-red-50 border border-slate-200"
+                            className="text-xs px-2 py-1 rounded text-red-600 hover:bg-red-50 border border-line"
                             title="Permanently delete this disconnected key and its usage history."
                           >
                             Delete
@@ -362,7 +362,7 @@ export function ExternalAgentAccessPage() {
                         ) : (
                           <button
                             onClick={() => handleDisconnect(k.id)}
-                            className="text-xs px-2 py-1 rounded text-slate-700 hover:bg-slate-100 border border-slate-200"
+                            className="text-xs px-2 py-1 rounded text-ink hover:bg-hover border border-line"
                             title="Disconnect this external API key. The external agent using it will lose access."
                           >
                             Disconnect
@@ -389,7 +389,7 @@ export function ExternalAgentAccessPage() {
             <button
               onClick={() => setPendingDelete(null)}
               disabled={deleting}
-              className="px-3 py-1.5 text-sm rounded text-slate-700 hover:bg-slate-100 border border-slate-200 disabled:opacity-50"
+              className="px-3 py-1.5 text-sm rounded text-ink hover:bg-hover border border-line disabled:opacity-50"
             >
               Cancel
             </button>
@@ -403,7 +403,7 @@ export function ExternalAgentAccessPage() {
           </>
         }
       >
-        <p className="text-xs text-slate-700 leading-snug">
+        <p className="text-xs text-ink leading-snug">
           Permanently delete{' '}
           <span className="font-medium">&ldquo;{pendingDelete?.label}&rdquo;</span>? This removes it
           and its usage history for good.
@@ -412,19 +412,19 @@ export function ExternalAgentAccessPage() {
 
       {reveal && (
         <div
-          className="fixed inset-0 z-[60] bg-slate-900/40 flex items-center justify-center p-4"
+          className="fixed inset-0 z-[60] bg-scrim flex items-center justify-center p-4"
           onClick={(e) => e.stopPropagation()}
         >
           <div
             role="alertdialog"
             aria-modal="true"
-            className="bg-white border border-slate-200 rounded-lg shadow-xl w-full max-w-xl max-h-[90vh] overflow-y-auto"
+            className="bg-white border border-line rounded-lg shadow-xl w-full max-w-xl max-h-[90vh] overflow-y-auto"
           >
-            <div className="px-4 py-3 border-b border-slate-200">
+            <div className="px-4 py-3 border-b border-line">
               <h3 className="text-sm font-semibold">Save this external API key now</h3>
             </div>
             <div className="px-4 py-3 space-y-3">
-              <p className="text-xs text-slate-700 leading-snug">
+              <p className="text-xs text-ink leading-snug">
                 This is the only time you'll see the full key. If you lose it, disconnect it and create a new one.
               </p>
               <div className="relative">
@@ -432,12 +432,12 @@ export function ExternalAgentAccessPage() {
                   readOnly
                   value={reveal.plaintext}
                   rows={2}
-                  className="w-full font-mono text-xs bg-slate-50 border border-slate-200 rounded px-2 py-1.5 pr-10 resize-none"
+                  className="w-full font-mono text-xs bg-sunken border border-line rounded px-2 py-1.5 pr-10 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
                 />
                 <button
                   onClick={() => copy(reveal.plaintext)}
-                  className="absolute top-1.5 right-1.5 p-1 rounded hover:bg-slate-100 text-slate-600"
+                  className="absolute top-1.5 right-1.5 p-1 rounded hover:bg-hover text-ink-muted"
                   aria-label="Copy external API key"
                   title="Copy to clipboard"
                 >
@@ -445,22 +445,22 @@ export function ExternalAgentAccessPage() {
                 </button>
               </div>
               <div>
-                <div className="text-xs font-medium text-slate-700 mb-1">
+                <div className="text-xs font-medium text-ink mb-1">
                   Connect Claude Code
                 </div>
                 <textarea
                   readOnly
                   value={`claude mcp add --transport http knowledge-base ${window.location.origin}/api/mcp --header "Authorization: Bearer ${reveal.plaintext}"`}
                   rows={3}
-                  className="w-full font-mono text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-1.5 resize-none"
+                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
                 />
               </div>
               <div>
-                <div className="text-xs font-medium text-slate-700 mb-1">
+                <div className="text-xs font-medium text-ink mb-1">
                   Connect Langdock
                 </div>
-                <ol className="text-[11px] text-slate-600 mb-1 leading-snug list-decimal pl-4 space-y-0.5">
+                <ol className="text-[11px] text-ink-muted mb-1 leading-snug list-decimal pl-4 space-y-0.5">
                   <li>In Langdock, open your workspace settings and go to MCP servers → Add server.</li>
                   <li>Choose <span className="font-medium">HTTP</span> (Streamable HTTP) as the transport.</li>
                   <li>Give it a name (e.g. <span className="font-medium">Bevel</span>), paste the URL below into the server URL field, and add the Authorization header under custom headers.</li>
@@ -470,15 +470,15 @@ export function ExternalAgentAccessPage() {
                   readOnly
                   value={`URL: ${window.location.origin}/api/mcp\nHeader name: Authorization\nHeader value: Bearer ${reveal.plaintext}`}
                   rows={3}
-                  className="w-full font-mono text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-1.5 resize-none"
+                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
                 />
               </div>
               <div>
-                <div className="text-xs font-medium text-slate-700 mb-1">
+                <div className="text-xs font-medium text-ink mb-1">
                   Other agents (JSON config)
                 </div>
-                <p className="text-[11px] text-slate-600 mb-1 leading-snug">
+                <p className="text-[11px] text-ink-muted mb-1 leading-snug">
                   Works with Claude Desktop, Cursor, Windsurf, Cline, and most clients that load servers from a JSON config.
                 </p>
                 <textarea
@@ -499,17 +499,17 @@ export function ExternalAgentAccessPage() {
                     2,
                   )}
                   rows={11}
-                  className="w-full font-mono text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-1.5 resize-none"
+                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
                 />
               </div>
             </div>
-            <div className="flex justify-end px-4 py-3 border-t border-slate-200">
+            <div className="flex justify-end px-4 py-3 border-t border-line">
               <button
                 onClick={() => setReveal(null)}
-                className="px-3 py-1.5 text-sm rounded bg-bevel hover:bg-bevel-deep text-white"
+                className="px-3 py-1.5 text-sm rounded bg-accent hover:bg-accent-hover text-white"
               >
-                Done — I've saved it
+                Done: I've saved it
               </button>
             </div>
           </div>
@@ -526,10 +526,10 @@ function CopyBlock({ label, value, rows }: { label: string | null; value: string
   return (
     <div>
       <div className="flex items-center justify-between mb-1">
-        {label !== null && <div className="text-xs font-medium text-slate-700">{label}</div>}
+        {label !== null && <div className="text-xs font-medium text-ink">{label}</div>}
         <button
           onClick={() => copy(value)}
-          className="ml-auto p-1 rounded hover:bg-slate-100 text-slate-600"
+          className="ml-auto p-1 rounded hover:bg-hover text-ink-muted"
           aria-label={label ? `Copy: ${label}` : 'Copy to clipboard'}
           title="Copy to clipboard"
         >
@@ -540,7 +540,7 @@ function CopyBlock({ label, value, rows }: { label: string | null; value: string
         readOnly
         value={value}
         rows={rows}
-        className="w-full font-mono text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-1.5 resize-none"
+        className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
         onFocus={(e) => e.currentTarget.select()}
       />
     </div>

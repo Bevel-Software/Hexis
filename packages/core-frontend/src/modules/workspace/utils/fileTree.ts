@@ -3,19 +3,22 @@ import {
   DATA_DIR,
   KNOWLEDGE_BASE_DIR,
   PIPELINES_DIR,
-  SKILLS_DIR,
-  TOOLS_DIR,
+  GROUPS_DIR,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
 import type { PendingEntry } from '../state/workspace.context';
 
+// RESERVED is not the same as CREATED (see kb-layout.ts): core only seeds
+// KnowledgeBase/ and Groups/, but every reserved name renders as its own root
+// when present — a distribution that owns the execution layer seeds Data/,
+// Agents/ and Pipelines/, and a KB that has them must not see them folded
+// into Knowledge as stray content.
 export const KB_ROOT_DIRS = new Set([
   KNOWLEDGE_BASE_DIR,
   DATA_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
-  SKILLS_DIR,
-  TOOLS_DIR,
+  GROUPS_DIR,
 ]);
 
 /**

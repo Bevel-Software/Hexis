@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useWorkspace } from '../state/workspace.context';
 import { WorkspaceApiError } from '../services/workspace.api';
@@ -10,6 +10,7 @@ import {
   fetchNodeWorkspacePath,
   fetchNodeId,
 } from '../routing/kb-routes';
+import { Banner, Button, Surface } from '../../../shared/components';
 import { FileViewer } from './FileViewer';
 
 type SyncError =
@@ -286,107 +287,111 @@ export function FileRoute() {
 
   if (error?.kind === 'dirty') {
     return (
-      <div className="h-full w-full flex items-center justify-center bg-white px-6">
-        <div className="max-w-md text-center space-y-3">
-          <h2 className="text-slate-900 text-base font-medium">
-            Save your changes before opening this link
-          </h2>
-          <p className="text-slate-600 text-sm">
-            This link is on{' '}
-            <span className="font-mono text-slate-900">{error.target}</span>, but you have
-            unsaved changes on{' '}
-            <span className="font-mono text-slate-900">{error.current}</span>. Save the
-            files below first (Ctrl/Cmd+S, or click <span className="font-medium">Save</span>{' '}
-            in the editor toolbar) — that releases the lock and auto-commits and auto-pushes
-            your changes — then this link will open.
-          </p>
-          {error.dirtyFilenames.length > 0 && (
-            <div className="text-left bg-slate-50 border border-slate-200 rounded px-3 py-2 text-xs text-slate-700">
-              <div className="font-medium text-slate-900 mb-1">Unsaved files:</div>
-              <ul className="list-disc pl-5 space-y-0.5">
-                {error.dirtyFilenames.map((name) => (
-                  <li key={name} className="font-mono">{name}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      </div>
+      <ErrorScreen title="Save your changes before opening this link">
+        <p className="text-ui text-ink-muted">
+          This link is on{' '}
+          <span className="font-mono text-ink">{error.target}</span>, but you have
+          unsaved changes on{' '}
+          <span className="font-mono text-ink">{error.current}</span>. Save the
+          files below first (Ctrl/Cmd+S, or click <span className="font-medium">Save</span>{' '}
+          in the editor toolbar). That releases the lock and auto-commits and auto-pushes
+          your changes: then this link will open.
+        </p>
+        {error.dirtyFilenames.length > 0 && (
+          <Surface tone="sunken" radius="md" elevation="none" className="px-3 py-2 text-left text-detail text-ink">
+            <div className="mb-1 font-medium text-ink">Unsaved files:</div>
+            <ul className="list-disc space-y-0.5 pl-5">
+              {error.dirtyFilenames.map((name) => (
+                <li key={name} className="font-mono">{name}</li>
+              ))}
+            </ul>
+          </Surface>
+        )}
+      </ErrorScreen>
     );
   }
 
   if (error?.kind === 'file-missing') {
     return (
-      <div className="h-full w-full flex items-center justify-center bg-white px-6">
-        <div className="max-w-md text-center space-y-3">
-          <h2 className="text-slate-900 text-base font-medium">File not found</h2>
-          <p className="text-slate-600 text-sm">
-            <span className="font-mono text-slate-900">{error.path}</span> doesn't exist on{' '}
-            <span className="font-mono text-slate-900">{branchFromUrl}</span>.
-          </p>
-          <p className="text-slate-600 text-xs">
-            It may have been renamed or removed, or this link may be from a different branch.
-          </p>
-        </div>
-      </div>
+      <ErrorScreen title="File not found">
+        <p className="text-ui text-ink-muted">
+          <span className="font-mono text-ink">{error.path}</span> doesn't exist on{' '}
+          <span className="font-mono text-ink">{branchFromUrl}</span>.
+        </p>
+        <p className="text-meta text-ink-faint">
+          It may have been renamed or removed, or this link may be from a different branch.
+        </p>
+      </ErrorScreen>
     );
   }
 
   if (error?.kind === 'file-denied') {
     const denyName = error.path.slice(error.path.lastIndexOf('/') + 1);
     return (
-      <div className="h-full w-full flex items-center justify-center bg-white px-6">
-        <div role="alert" className="max-w-md text-center space-y-3">
-          <h2 className="text-slate-900 text-base font-medium">
-            You don&apos;t have access to this file
-          </h2>
-          <p className="text-slate-600 text-sm">
-            <span className="font-mono text-slate-900">{denyName}</span> is restricted. Ask an
-            owner to grant you read access.
-          </p>
-          {/* Retry re-runs addTab, which re-checks access server-side — a user
-              who was just granted access recovers in place. No tab exists for
-              the denied file (denied tabs auto-close). */}
-          <button
-            type="button"
-            onClick={() => retryLoad(error.path)}
-            disabled={retrying}
-            className="inline-flex items-center justify-center rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {retrying ? 'Retrying…' : 'Retry'}
-          </button>
-        </div>
-      </div>
+      <ErrorScreen title={"You don't have access to this file"} role="alert">
+        {/* `note`, not `alert` — `ErrorScreen` already carries the alert on
+            the box this sits inside, and two nested live regions announce the
+            same sentence twice. This one is here for its `danger` tone. */}
+        <Banner role="note" tone="danger" className="text-left">
+          <span className="font-mono">{denyName}</span> is restricted. Ask an owner to grant
+          you read access.
+        </Banner>
+        {/* Retry re-runs addTab, which re-checks access server-side — a user
+            who was just granted access recovers in place. No tab exists for
+            the denied file (denied tabs auto-close). */}
+        <Button onClick={() => retryLoad(error.path)} disabled={retrying}>
+          {retrying ? 'Retrying…' : 'Retry'}
+        </Button>
+      </ErrorScreen>
     );
   }
 
   if (error?.kind === 'file-load-failed') {
     return (
-      <div className="h-full w-full flex items-center justify-center bg-white px-6">
-        <div className="max-w-md text-center space-y-3">
-          <h2 className="text-slate-900 text-base font-medium">Couldn't load this file</h2>
-          <p className="text-slate-600 text-sm">
-            Something went wrong reading{' '}
-            <span className="font-mono text-slate-900">{error.path}</span>.
-          </p>
-          <p className="text-slate-600 text-xs font-mono">{error.message}</p>
-          {/* Only offer Retry when we have a concrete file to re-fetch. A hydrate
-              failure with no deeplinked path leaves `error.path` empty, and
-              `retryLoad('')` is a no-op — so the button would be dead. */}
-          {error.path && (
-            <button
-              type="button"
-              onClick={() => retryLoad(error.path)}
-              disabled={retrying}
-              className="inline-flex items-center justify-center rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {retrying ? 'Retrying…' : 'Retry'}
-            </button>
-          )}
-        </div>
-      </div>
+      <ErrorScreen title="Couldn't load this file">
+        <p className="text-ui text-ink-muted">
+          Something went wrong reading{' '}
+          <span className="font-mono text-ink">{error.path}</span>.
+        </p>
+        <p className="font-mono text-meta text-ink-faint">{error.message}</p>
+        {/* Only offer Retry when we have a concrete file to re-fetch. A hydrate
+            failure with no deeplinked path leaves `error.path` empty, and
+            `retryLoad('')` is a no-op — so the button would be dead. */}
+        {error.path && (
+          <Button onClick={() => retryLoad(error.path)} disabled={retrying}>
+            {retrying ? 'Retrying…' : 'Retry'}
+          </Button>
+        )}
+      </ErrorScreen>
     );
   }
 
   return <FileViewer />;
+}
+
+/**
+ * One frame for the four full-screen states this route can end in.
+ *
+ * They said the same thing four different ways before — four copies of the
+ * centring, four hand-rolled buttons, four type scales. Every sentence they
+ * carried is preserved verbatim, including the dirty-branch explanation;
+ * only the chrome is shared.
+ */
+function ErrorScreen({
+  title,
+  role,
+  children,
+}: {
+  title: string;
+  role?: 'alert';
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex h-full w-full items-center justify-center bg-canvas px-6">
+      <div role={role} className="max-w-md space-y-3 text-center">
+        <h2 className="text-head text-ink">{title}</h2>
+        {children}
+      </div>
+    </div>
+  );
 }

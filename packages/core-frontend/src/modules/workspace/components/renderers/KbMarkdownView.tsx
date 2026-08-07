@@ -1,4 +1,4 @@
-import { useMemo, useState, type Ref } from 'react';
+import { Suspense, lazy, useMemo, useState, type Ref } from 'react';
 import { Link2, Check } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -8,7 +8,14 @@ import rehypeSanitize from 'rehype-sanitize';
 import rehypeSlug from 'rehype-slug';
 import { parseFrontmatter, labelFor } from '../../utils/frontmatter';
 import { escapeSpacesInLinkDestinations } from '../../../../shared/markdown/Markdown';
-import { MermaidDiagram } from './MermaidDiagram';
+/**
+ * Mermaid's eager core is ~151 KB gzip and is only needed by documents that
+ * actually contain a ```mermaid fence — a small minority. Loading it lazily
+ * keeps it out of the initial payload for every other page.
+ */
+const MermaidDiagram = lazy(() =>
+  import('./MermaidDiagram').then((m) => ({ default: m.MermaidDiagram })),
+);
 
 // A frontmatter value that is a single markdown link, e.g.
 // `nodeType: [Process](../../NodeTypes/Process.md)` (parseFrontmatter strips
@@ -67,7 +74,7 @@ function CopyAnchorButton({ url }: { url: string }) {
       }}
       // `align-middle` keeps it on the heading baseline; hidden until the
       // heading is hovered (or the button is focused for keyboard users).
-      className="ml-1.5 inline-flex align-middle p-0.5 rounded text-slate-400 no-underline opacity-0 transition-opacity hover:bg-slate-100 hover:text-slate-700 focus:opacity-100 group-hover/anchor:opacity-100"
+      className="ml-1.5 inline-flex align-middle p-0.5 rounded-xs text-ink-faint no-underline opacity-0 transition-opacity hover:bg-hover hover:text-ink focus:opacity-100 group-hover/anchor:opacity-100"
       title={copied ? 'Link copied' : 'Copy link to this heading'}
       aria-label="Copy link to this heading"
     >
@@ -99,7 +106,7 @@ function FrontmatterValue({
           e.preventDefault();
           onOpenFile(href);
         }}
-        className="text-bevel hover:text-bevel-deep hover:underline cursor-pointer"
+        className="text-accent hover:text-accent-hover hover:underline cursor-pointer"
       >
         {label}
       </a>
@@ -122,11 +129,11 @@ function FrontmatterPanel({
   if (entries.length === 0) return null;
 
   return (
-    <div className="mb-4 rounded-lg border border-slate-300 bg-slate-100/70 divide-y divide-slate-200/60">
+    <div className="mb-4 rounded-lg border border-line-strong bg-sunken divide-y divide-line">
       {entries.map(([key, value]) => (
         <div key={key} className="flex items-start gap-3 px-3 py-2 text-xs">
-          <span className="shrink-0 text-slate-600 w-28">{labelFor(key)}</span>
-          <span className="text-slate-900 break-words">
+          <span className="shrink-0 text-ink-muted w-28">{labelFor(key)}</span>
+          <span className="text-ink break-words">
             {Array.isArray(value) ? (
               value.join(', ')
             ) : (
@@ -161,8 +168,20 @@ interface KbMarkdownViewProps {
    * rehype-slug anchor id. Omit it (e.g. in the embed) to hide the buttons.
    */
   headingLink?: (slug: string) => string;
-  /** Optional scroll container ref (used by the file viewer for deep-link scroll). */
+  /** Optional container ref (used by the file viewer for deep-link scroll). */
   containerRef?: Ref<HTMLDivElement>;
+  /**
+   * Whether this view owns a scroller. `true` (the default) keeps the
+   * `flex-1 overflow-auto` box every caller relied on before the Knowledge
+   * document column existed — the Atlassian embed and the library's detail
+   * dialog still do.
+   *
+   * The file viewer passes `false`: inside `KbDocumentShell` the COLUMN
+   * scrolls, and a nested scroller there would break the measure (the
+   * document would scroll inside a fixed-height well) and hide the shell's
+   * scroll events from the file lock's activity listener.
+   */
+  scroll?: boolean;
   className?: string;
 }
 
@@ -173,7 +192,7 @@ interface KbMarkdownViewProps {
  * frontmatter panel, with navigation injected via `onOpenFile` so it carries no
  * dependency on workspace routing or context.
  */
-export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, containerRef, className }: KbMarkdownViewProps) {
+export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, containerRef, scroll = true, className }: KbMarkdownViewProps) {
   const { data: frontmatter, body } = useMemo(() => parseFrontmatter(source), [source]);
   // CommonMark rejects unescaped spaces in link destinations, so a KB link like
   // `[Foo](Some File.md)` would render as plain text. Wrap space-bearing
@@ -258,7 +277,11 @@ export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, 
           child.props.className.includes('language-mermaid')
         ) {
           const code = String(child.props.children).replace(/\n$/, '');
-          return <MermaidDiagram code={code} />;
+          return (
+            <Suspense fallback={<pre {...props}>{children}</pre>}>
+              <MermaidDiagram code={code} />
+            </Suspense>
+          );
         }
         return <pre {...props}>{children}</pre>;
       },
@@ -266,7 +289,10 @@ export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, 
   }, [onOpenFile, onOpenNodeId, headingLink]);
 
   return (
-    <div className={`flex-1 overflow-auto ${className ?? ''}`} ref={containerRef}>
+    <div
+      className={`${scroll ? 'flex-1 overflow-auto' : 'min-w-0'} ${className ?? ''}`}
+      ref={containerRef}
+    >
       <FrontmatterPanel data={frontmatter} onOpenFile={onOpenFile} />
       <div className="prose prose-sm max-w-none">
         <Markdown

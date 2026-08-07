@@ -4,6 +4,7 @@ import { ResizableThreePaneLayout } from './ResizableThreePaneLayout';
 import { MobileChatLayout } from './MobileChatLayout';
 import type { LayoutController } from '../state/layout.context';
 import type { PaneDef } from '../../../core/registry';
+import { TOOLBAR_STACK_QUERY } from '../breakpoints';
 
 interface AppLayoutProps {
   /** Optional now that the Toolbar lives above the app surfaces in the shell. */
@@ -16,18 +17,29 @@ interface AppLayoutProps {
    * on unmount (app switched away → no panes to toggle).
    */
   onController?: (controller: LayoutController | null) => void;
+  /**
+   * Pinned above the sidebar's content. Supplied by the shell (the
+   * composition root), so this module never names a domain component — see
+   * `SidebarFrame`'s `header`.
+   */
+  sidebarHeader?: ReactNode;
   // Legacy named slots, kept as a convenience/compat signature.
   explorer?: ReactNode;
   viewer?: ReactNode;
   chat?: ReactNode;
 }
 
-// Tailwind's `md` breakpoint. Below this width the three-pane layout is
-// unusable, so we swap in the chat-first mobile layout.
-const MOBILE_QUERY = '(max-width: 767px)';
-
+/**
+ * Picks the layout the viewport can actually hold: the resizable three-pane
+ * split, or the chat-first mobile one once the panes stop fitting side by
+ * side.
+ *
+ * The swap is conditional on a 'chat' pane existing at all — a core-only build
+ * has no chat to pin full-screen, so it stays on the resizable layout at every
+ * width rather than falling into a mobile layout with an empty main pane.
+ */
 export function AppLayout(props: AppLayoutProps) {
-  const isMobile = useMediaQuery(MOBILE_QUERY);
+  const isMobile = useMediaQuery(TOOLBAR_STACK_QUERY);
   // The mobile layout pins the chat pane full-screen, so it only makes sense
   // when a 'chat' pane is registered at all; without one (core-only builds)
   // the resizable layout is used at every width.

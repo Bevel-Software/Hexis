@@ -1,254 +1,138 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import '../library.css';
-import { LoadoutProvider, useLoadout, type LoadoutKind } from '../state/loadout';
-import { LibraryToastProvider, useLibraryToast } from '../state/toast';
-import { useLibraryData } from '../hooks/useLibraryData';
-import {
-  filterLibraryItems,
-  neededToolsFor,
-  skillStatus,
-  toolStatus,
-  type AttentionStatus,
-  type LibraryCategory,
-} from '../utils/status';
-import { LibraryCard } from './LibraryCard';
-import { LoadoutSidebar, type LoadoutRow } from './LoadoutSidebar';
-import { DetailDialog, type DetailTarget } from './DetailDialog';
-import { flyParticles } from './particles';
+import { useLibrary, type LibraryItem } from '../state/library-data';
+import { urlForItemFile } from '../routes/library-paths';
+import { useWorkspace } from '../../workspace/state/workspace.context';
+import { emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
+import { Banner, TextField } from '../../../shared/components';
+import { GroupItemSections } from './group-page-parts';
+import { PendingSkillReview } from './PendingSkillReview';
 
 /**
- * The Library — the core skills / integrations / loadout view (the Skills &
- * Tools app surface at `/skills-and-tools`, registered in the core shell).
- * Game-style visual direction from
- * the approved mock `mocks/mock-a2-game-library.html`: teal accent, status
- * gems, tilting cards, loadout sidebar with particle flight. All data is real
- * (skills catalog, secrets-vault connection status, workflow change
- * requests); only the loadout itself is a documented client-side stub.
+ * The Library gallery — the card grid at `/skills-and-tools/everything` and its
+ * filtered views (`/owned`, and a group's cards).
+ *
+ * This is CONTENT only: the sidebar, the flex shell and the data live in
+ * `LibraryLayout` + `LibraryProvider` above it. The filter arrives as a prop
+ * because the URL owns selection now — there is no `useState<LibraryFilter>`
+ * anywhere, so a deep link, the back button and the sidebar can never disagree
+ * about what is selected.
+ *
+ * Two things it does not have, and won't:
+ *
+ *  - the LOADOUT. It came from a retired mock; the prototype has no such
+ *    concept, and it was a documented client-side stub, so nothing persisted
+ *    was lost. Its rail is now the group nav.
+ *  - Skills / Integrations filter chips. Groups are the structure, and a group
+ *    owns its skills AND the tools they need, so splitting the catalog by kind
+ *    showed a group's integrations detached from the reason they exist.
  */
-export function LibraryPage() {
-  return (
-    <LoadoutProvider>
-      <LibraryToastProvider>
-        <LibraryPageInner />
-      </LibraryToastProvider>
-    </LoadoutProvider>
-  );
+
+/** The h1 names what the sidebar has selected, so the two never disagree. */
+function headingFor(filter: LibraryFilter): string {
+  switch (filter.kind) {
+    case 'all':
+      return 'Everything';
+    case 'owned':
+      return 'Owned by me';
+    case 'ungrouped':
+      return 'Yours alone';
+    case 'group':
+      return filter.group;
+  }
 }
 
-interface GalleryItem {
-  kind: 'skill' | 'integration';
-  id: string;
-  name: string;
-  description: string;
-  owned: boolean;
-  status: AttentionStatus;
-}
-
-function LibraryPageInner() {
-  const data = useLibraryData();
-  const loadout = useLoadout();
-  const toast = useLibraryToast();
+export function LibraryPage({ filter }: { filter: LibraryFilter }) {
+  const data = useLibrary();
   const navigate = useNavigate();
-  const [category, setCategory] = useState<LibraryCategory>('skills');
+  const { kbDirName } = useWorkspace();
   const [query, setQuery] = useState('');
-  const [detail, setDetail] = useState<DetailTarget | null>(null);
-
-  const items: GalleryItem[] = useMemo(() => {
-    const skillItems: GalleryItem[] = data.skills.map((s) => ({
-      kind: 'skill',
-      id: s.name,
-      name: s.name,
-      description: s.description,
-      owned: data.ownedSkills.has(s.name),
-      status: skillStatus(
-        neededToolsFor({ allowedTools: data.allowedToolsBySkill.get(s.name) }, data.tools),
-      ),
-    }));
-    const toolItems: GalleryItem[] = data.tools.map((t) => ({
-      kind: 'integration',
-      id: t.slug,
-      name: t.name,
-      // The browser tool surface exposes no human description for a `.tool`
-      // manual yet (see report) — the card stays clean, detail lives in ⓘ.
-      description: '',
-      owned: t.canWrite,
-      status: toolStatus(t),
-    }));
-    return [...skillItems, ...toolItems];
-  }, [data.skills, data.tools, data.ownedSkills, data.allowedToolsBySkill]);
+  /** The proposed skill being reviewed, if the reader opened one. */
+  const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
 
   const visible = useMemo(
-    () => filterLibraryItems(items, category, query),
-    [items, category, query],
+    () => filterLibraryItems(data.items, filter, query),
+    [data.items, filter, query],
   );
 
-  const counts = useMemo(
-    () => ({
-      skills: items.filter((i) => i.kind === 'skill').length,
-      integrations: items.filter((i) => i.kind === 'integration').length,
-      owned: items.filter((i) => i.owned).length,
-    }),
-    [items],
-  );
-
-  const rows: LoadoutRow[] = useMemo(() => {
-    const byKey = new Map(items.map((i) => [`${i.kind}:${i.id}`, i]));
-    const pick = (kind: LoadoutKind, ids: string[]) =>
-      ids
-        .map((id) => byKey.get(`${kind}:${id}`))
-        .filter((i): i is GalleryItem => i !== undefined)
-        .map((i) => ({ kind, id: i.id, name: i.name, status: i.status }));
-    return [...pick('skill', loadout.skills), ...pick('integration', loadout.integrations)];
-  }, [items, loadout.skills, loadout.integrations]);
-
-  const attentionCount = rows.filter((r) => r.status.state !== 'ok').length;
-
-  function toggleItem(item: GalleryItem, fromRect?: DOMRect) {
-    const added = loadout.toggle(item.kind, item.id);
-    if (added) {
-      toast(
-        item.status.state === 'ok'
-          ? `${item.name} added — ready to go`
-          : `${item.name} added — needs a quick sign-in`,
-      );
-      if (fromRect) flyParticles(fromRect, item.kind, item.id);
+  /**
+   * Both kinds open a PAGE now — the skill page landed alongside the tool one.
+   * A PROPOSED skill is the exception: it has no page, because the skill page
+   * reads the default branch and the skill is not on it yet. Its card opens the
+   * change request instead, which is the only thing there is to read.
+   */
+  function openItem(item: LibraryItem) {
+    if (item.pending) {
+      setReviewing(item);
+      return;
     }
+    if (kbDirName) navigate(urlForItemFile(kbDirName, item.path));
   }
-
-  function openDetail(item: GalleryItem) {
-    if (item.kind === 'skill') {
-      const skill = data.skills.find((s) => s.name === item.id);
-      if (skill) setDetail({ kind: 'skill', skill, owned: item.owned });
-    } else {
-      const tool = data.tools.find((t) => t.slug === item.id);
-      if (tool) setDetail({ kind: 'integration', tool });
-    }
-  }
-
-  const chip = (cat: LibraryCategory, label: string, count: number) => (
-    <button
-      key={cat}
-      type="button"
-      aria-pressed={category === cat}
-      className={`flex items-center gap-1.5 rounded-full border px-4 py-1.5 text-[12.5px] font-semibold transition-all ${
-        category === cat
-          ? 'border-[#7fd0c4] bg-gradient-to-br from-[#e6f7f4] to-[#d5f1ec] text-[#0f766e] shadow-[0_2px_10px_rgba(13,148,136,0.22)]'
-          : 'border-slate-200 bg-white text-slate-500 hover:border-[#7fd0c4] hover:text-slate-800'
-      }`}
-      onClick={() => setCategory(cat)}
-    >
-      {label}
-      <span
-        className={`rounded-full px-1.5 text-[10.5px] font-bold ${
-          category === cat ? 'bg-[#0d948826]' : 'bg-slate-900/5'
-        }`}
-      >
-        {count}
-      </span>
-    </button>
-  );
 
   return (
-    <div className="flex h-full min-h-0 bg-[#eef1f6] text-slate-800">
-      <LoadoutSidebar
-        rows={rows}
-        onOpen={(row) => {
-          const item = items.find((i) => i.kind === row.kind && i.id === row.id);
-          if (item) openDetail(item);
-        }}
-        onRemove={(row) => loadout.remove(row.kind, row.id)}
-        attentionCount={attentionCount}
-        onFinishSetup={() => navigate('/connect')}
-      />
-
-      <main
-        className="min-w-0 flex-1 overflow-y-auto px-8 py-6"
-        style={{
-          background:
-            'radial-gradient(900px 500px at 85% -10%, rgba(13,148,136,.08), transparent 60%), radial-gradient(700px 500px at -10% 110%, rgba(59,130,246,.06), transparent 55%)',
-        }}
-      >
-        <div className="mb-1 flex items-center gap-4">
-          <div>
-            <h1 className="text-[26px] font-bold tracking-tight">Library</h1>
-            <div className="text-[13px] text-slate-500">
-              Click a card to add it to your loadout · open a card's details for more.
-            </div>
-          </div>
-          <div className="ml-auto flex w-64 items-center gap-2 rounded-[11px] border border-slate-200 bg-white px-3.5 py-2 shadow-[0_1px_4px_rgba(22,35,58,0.05)]">
-            <input
-              className="w-full bg-transparent text-[13px] outline-none placeholder:text-slate-400"
-              placeholder="Search the library…"
-              aria-label="Search the library"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-          </div>
+    <>
+      <div className="flex items-start gap-4">
+        <div>
+          <h1 className="text-display font-semibold">{headingFor(filter)}</h1>
+          <p className="mt-0.5 text-ui text-ink-muted">
+            {data.loading ? '…' : `${visible.length} ${visible.length === 1 ? 'item' : 'items'}`}
+          </p>
         </div>
+        <TextField
+          className="ml-auto w-64"
+          placeholder="Search the library…"
+          aria-label="Search the library"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      </div>
 
-        <div className="mb-5 mt-4 flex gap-2">
-          {chip('skills', 'Skills', counts.skills)}
-          {chip('integrations', 'Integrations', counts.integrations)}
-          {chip('owned', 'Owned by me', counts.owned)}
+      <div className="mt-5" />
+
+      {data.error ? (
+        <Banner role="alert" tone="danger">
+          {data.error}
+          <button type="button" className="ml-3 font-semibold underline" onClick={data.reload}>
+            Try again
+          </button>
+        </Banner>
+      ) : data.loading ? (
+        <div className="py-16 text-center text-ui text-ink-faint">Loading the library…</div>
+      ) : visible.length === 0 ? (
+        <div className="py-16 text-center text-ui text-ink-faint">
+          {emptyMessageFor(filter, query)}
         </div>
+      ) : (
+        // Skills and tools, split — the same two bands a group page has.
+        // One undifferentiated grid made you read every card's body to learn
+        // what kind of thing it was; the heading does that now, once, for a
+        // whole band. A band with nothing in it is dropped rather than shown
+        // empty: this is a search result, not an inventory of what could be.
+        <div className="pb-14">
+          <GroupItemSections
+            skillItems={visible.filter((i) => i.kind === 'skill')}
+            toolItems={visible.filter((i) => i.kind === 'integration')}
+            onOpen={openItem}
+            hideEmpty
+            emptySkills=""
+          />
+        </div>
+      )}
 
-        {data.error ? (
-          <div className="rounded-xl border border-[#f3c4c4] bg-[#fdecec] px-4 py-3 text-sm text-[#c53030]">
-            {data.error}
-            <button type="button" className="ml-3 font-bold underline" onClick={data.reload}>
-              Try again
-            </button>
-          </div>
-        ) : data.loading ? (
-          <div className="py-16 text-center text-sm text-slate-400">Loading the library…</div>
-        ) : visible.length === 0 ? (
-          <div className="py-16 text-center text-sm text-slate-400">Nothing here matches yet.</div>
-        ) : (
-          <div className="lib-grid grid grid-cols-[repeat(auto-fill,minmax(228px,1fr))] gap-5 pb-14">
-            {visible.map((item) => (
-              <LibraryCard
-                key={`${item.kind}:${item.id}`}
-                kind={item.kind}
-                id={item.id}
-                name={item.name}
-                description={item.description}
-                owned={item.owned}
-                status={item.status}
-                picked={loadout.isIn(item.kind, item.id)}
-                onToggle={(rect) => toggleItem(item, rect)}
-                onInfo={() => openDetail(item)}
-              />
-            ))}
-          </div>
-        )}
-      </main>
-
-      {detail && (
-        <DetailDialog
-          target={detail}
-          tools={data.tools}
-          skills={data.skills}
-          allowedToolsBySkill={data.allowedToolsBySkill}
-          crs={data.crs}
-          myCrNumbers={data.myCrNumbers}
-          inLoadout={
-            detail.kind === 'skill'
-              ? loadout.isIn('skill', detail.skill.name)
-              : loadout.isIn('integration', detail.tool.slug)
-          }
-          onToggleLoadout={() => {
-            const item = items.find(
-              (i) =>
-                i.kind === (detail.kind === 'skill' ? 'skill' : 'integration') &&
-                i.id === (detail.kind === 'skill' ? detail.skill.name : detail.tool.slug),
-            );
-            if (item) toggleItem(item);
+      {reviewing && (
+        <PendingSkillReview
+          item={reviewing}
+          onClose={() => setReviewing(null)}
+          onResolved={() => {
+            setReviewing(null);
+            // The skill leaves the review shelf and joins the catalog by the
+            // same reload — one load answers both, so the card cannot appear
+            // twice in the frame between them.
+            data.reload();
           }}
-          onClose={() => setDetail(null)}
-          onDataChanged={data.reload}
         />
       )}
-    </div>
+    </>
   );
 }

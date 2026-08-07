@@ -24,7 +24,7 @@ function KindIcon({ kind }: { kind: PendingChange['kind'] }) {
   switch (kind) {
     case 'added': return <FilePlus2 size={size} className="text-emerald-600" />;
     case 'deleted': return <FileX2 size={size} className="text-red-600" />;
-    case 'renamed': return <ArrowRightLeft size={size} className="text-bevel" />;
+    case 'renamed': return <ArrowRightLeft size={size} className="text-accent" />;
     case 'modified': return <FileEdit size={size} className="text-amber-600" />;
   }
 }
@@ -49,20 +49,20 @@ export function ReviewFileRow({ change, active, busy, onSelect, onAccept, onReje
       }}
       className={`group flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors border ${
         active
-          ? 'bg-slate-100 border-slate-300'
-          : 'bg-white border-transparent hover:bg-slate-100 hover:border-slate-200'
+          ? 'bg-sunken border-line-strong'
+          : 'bg-white border-transparent hover:bg-hover hover:border-line'
       }`}
     >
       <KindIcon kind={kind} />
 
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5 text-xs text-slate-900 truncate">
+        <div className="flex items-center gap-1.5 text-xs text-ink truncate">
           <span className="truncate font-mono" title={path}>{path}</span>
-          <span className="text-[10px] uppercase tracking-wider text-slate-600 shrink-0">
+          <span className="text-[10px] uppercase tracking-wider text-ink-muted shrink-0">
             {kindLabel(kind)}
           </span>
         </div>
-        <div className="flex items-center gap-2 text-[10px] text-slate-600 mt-0.5">
+        <div className="flex items-center gap-2 text-[10px] text-ink-muted mt-0.5">
           {oldPath && kind === 'renamed' && (
             <span className="font-mono truncate" title={oldPath}>from {oldPath}</span>
           )}
@@ -89,9 +89,9 @@ export function ReviewFileRow({ change, active, busy, onSelect, onAccept, onReje
             e.stopPropagation();
             onReject();
           }}
-          title="Reject — restore the original"
+          title="Reject: restore the original"
           aria-label={`Reject change to ${path}`}
-          className="p-1 rounded text-slate-600 hover:text-red-700 hover:bg-red-100 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="p-1 rounded text-ink-muted hover:text-red-700 hover:bg-red-100 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <X size={13} />
         </button>
@@ -102,9 +102,9 @@ export function ReviewFileRow({ change, active, busy, onSelect, onAccept, onReje
             e.stopPropagation();
             onAccept();
           }}
-          title="Accept — keep this change"
+          title="Accept: keep this change"
           aria-label={`Accept change to ${path}`}
-          className="p-1 rounded text-slate-600 hover:text-emerald-700 hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="p-1 rounded text-ink-muted hover:text-emerald-700 hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <Check size={13} />
         </button>

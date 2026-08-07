@@ -60,7 +60,7 @@ export function MarkdownDiffViewer({ payload }: { payload: FileDiffPayload }) {
   if (data.tooLarge || data.lines.length > MAX_RENDERED_LINES) {
     const shown = data.tooLarge ? data.rawLineCount : data.lines.length;
     return (
-      <div className="h-full flex items-center justify-center text-xs text-slate-600 px-6 text-center">
+      <div className="h-full flex items-center justify-center text-xs text-ink-muted px-6 text-center">
         Diff is too large to render ({shown.toLocaleString()} lines).
         Accept or reject from the file list.
       </div>
@@ -163,14 +163,14 @@ function FrontmatterDiffPanel({
   };
 
   return (
-    <div className="mb-4 rounded-lg border border-slate-300 bg-slate-100/70 divide-y divide-slate-200/60">
+    <div className="mb-4 rounded-lg border border-line-strong bg-sunken divide-y divide-line">
       {visible.map((key) => {
         const oldVal = formatValue(oldData[key]);
         const newVal = formatValue(newData[key]);
         const changed = oldVal !== newVal;
         return (
           <div key={key} className="flex items-start gap-3 px-3 py-2 text-xs">
-            <span className="shrink-0 text-slate-600 w-28">{labelFor(key)}</span>
+            <span className="shrink-0 text-ink-muted w-28">{labelFor(key)}</span>
             {changed ? (
               <div className="flex-1 space-y-1 break-words">
                 {oldVal && (
@@ -181,7 +181,7 @@ function FrontmatterDiffPanel({
                 )}
               </div>
             ) : (
-              <span className="text-slate-900 break-words">{oldVal}</span>
+              <span className="text-ink break-words">{oldVal}</span>
             )}
           </div>
         );

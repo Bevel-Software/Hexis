@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { IGNORE_FILENAME } from './bevel-ignore.js';
+import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import {
@@ -9,8 +11,7 @@ import {
   KNOWLEDGE_BASE_DIR,
   KNOWLEDGE_DIR,
   PIPELINES_DIR,
-  SKILLS_DIR,
-  TOOLS_DIR,
+  GROUPS_DIR,
 } from '@bevel-software/platform-shared';
 import { branchForWorkspaceId, FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import type { WorkspaceService } from './workspace.service.js';
@@ -48,6 +49,7 @@ export function createWorkspaceRoutes(
   accessControl: IAccessControl,
   kbDirName: string,
   creatorAccess: ICreatorAccess,
+  adminAccess: IAdminAccessService,
 ): express.Router {
   const router = express.Router();
 
@@ -463,25 +465,44 @@ export function createWorkspaceRoutes(
       // The structural top-level folders are always shown as folders, even to
       // a user who can't read into them. Their existence isn't sensitive
       // (every KB has them), and keeping them visible lets the explorer render
-      // its Knowledge/Skills section view instead of collapsing to an empty
-      // flat tree. `KnowledgeBase/`, `Data/`, `Agents/`, `Pipelines/`,
-      // `Skills/` + `Tools/` are the current layout; a ROOT-LEVEL `Knowledge/`
-      // is the legacy pre-split layout's knowledge root (kb-layout.ts calls it
-      // the neutral bucket) and gets the same treatment so legacy clones don't
-      // collapse. Only the folders themselves are forced visible — their
-      // contents stay gated by the verdict above.
+      // its Knowledge/Groups section view instead of collapsing to an empty
+      // flat tree. A ROOT-LEVEL `Knowledge/` is the legacy pre-split layout's
+      // knowledge root (kb-layout.ts calls it the neutral bucket) and gets the
+      // same treatment so legacy clones don't collapse. Only the folders
+      // themselves are forced visible — their contents stay gated by the
+      // verdict above.
       const structuralRoots = new Set([
         KNOWLEDGE_BASE_DIR,
         DATA_DIR,
         AGENTS_DIR,
         PIPELINES_DIR,
-        SKILLS_DIR,
-        TOOLS_DIR,
+        GROUPS_DIR,
         KNOWLEDGE_DIR,
       ]);
       for (const wp of wsRelPaths) {
         const rel = toKbRelative(wp, kbDirName);
         if (rel !== null && structuralRoots.has(rel)) verdict.set(wp, true);
+      }
+
+      // `.bevelignore` is ADMIN-ONLY. It is the file that decides what the file
+      // tree and the agent view show at all, so it is deployment configuration
+      // rather than knowledge — and it sits alone in being visible: its
+      // siblings (`.gitignore`, `roles.yaml`, `access.md`, `AGENTS.md`) are
+      // already hidden from every reader by the shipped ignore rules. Somebody
+      // who cannot act on it gains a puzzle; somebody who can needs to reach it.
+      //
+      // Read permission is deliberately NOT the lever. Everyone can read it —
+      // it has to be readable to be applied — so hiding it is a listing
+      // decision, made here, rather than an ACL fiction maintained in a file.
+      //
+      // Resolved through `AdminAccessService` rather than by asking whether
+      // this caller can write `roles.yaml` in THIS workspace: admin is settled
+      // on the default branch precisely so that editing `roles.yaml` on your
+      // own branch cannot promote you, and the same reasoning applies to
+      // anything gated on being an admin.
+      const ignoreFiles = wsRelPaths.filter((wp) => path.basename(wp) === IGNORE_FILENAME);
+      if (ignoreFiles.length > 0 && !(await adminAccess.isAdmin(userEmail))) {
+        for (const wp of ignoreFiles) verdict.set(wp, false);
       }
       return verdict;
     };
@@ -565,16 +586,25 @@ export function createWorkspaceRoutes(
         '.xlsx':
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       };
-      // SVG is active web content (it can carry <script>). Inline view
-      // already trusts the source (the workspace owns its bytes), but a
-      // saved-to-disk SVG that's later re-opened in a browser tab would
-      // execute its scripts under the file:// origin — so when the user
-      // explicitly downloads, force octet-stream to defang it.
+      // SVG is active web content (it can carry <script>), and it is active in
+      // BOTH directions: a saved-to-disk SVG re-opened later runs its scripts
+      // under the file:// origin, so a download is forced to octet-stream.
       const downloadMime = ext === '.svg' ? 'application/octet-stream' : (mimeTypes[ext] || 'application/octet-stream');
       res.setHeader('Content-Type', wantsDownload ? downloadMime : (mimeTypes[ext] || 'application/octet-stream'));
       // Block MIME-sniffing so a misdeclared file can't be promoted to
       // active content by the browser.
       res.setHeader('X-Content-Type-Options', 'nosniff');
+      // …and inline is a DOCUMENT the moment somebody opens this URL in a tab
+      // directly, where those scripts would run under THIS
+      // origin with this user's session — stored XSS for anyone who can write
+      // a file into the workspace. `sandbox` drops the document into a unique
+      // origin with scripting off. It applies to documents only, so the
+      // renderers' fetch → blob → <img> path is untouched, and that path is
+      // why the type stays `image/svg+xml`: browsers do not sniff SVG, and an
+      // octet-stream blob would simply not render.
+      if (!wantsDownload && ext === '.svg') {
+        res.setHeader('Content-Security-Policy', 'sandbox');
+      }
       if (wantsDownload) {
         // RFC 5987 UTF-8 filename encoding so unicode + spaces round-trip;
         // CR/LF stripped to block header injection via a crafted path.
@@ -840,7 +870,7 @@ export function createWorkspaceRoutes(
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
-    const { content } = req.body as { content?: string };
+    const { content, ifAbsent } = req.body as { content?: string; ifAbsent?: boolean };
     if (content === undefined) {
       res.status(400).json({ error: 'content is required in body' });
       return;
@@ -861,7 +891,13 @@ export function createWorkspaceRoutes(
       const plan = await creatorAccess.planForCreate(id, user, filePath, 'file');
       if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
       const toWrite = plan?.kind === 'frontmatter' ? plan.apply(content) : content;
-      await withLock(id, user, filePath, () => workspaceService.writeFile(id, filePath, toWrite));
+      // `ifAbsent` = exclusive create: the service's `wx` write turns a
+      // concurrent or stale create against an existing file into a 409
+      // instead of a silent replace. `withLock`'s failure arm releases
+      // without committing, so the refusal leaves no trace.
+      await withLock(id, user, filePath, () =>
+        workspaceService.writeFile(id, filePath, toWrite, { failIfExists: ifAbsent === true }),
+      );
       res.json({ status: 'written' });
     } catch (err) {
       sendError(res, err);

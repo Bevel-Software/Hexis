@@ -18,6 +18,7 @@
 // package; emits an empty runtime module.
 import './html-extensions';
 
+export { loadServerConfig, renderConfigFailure } from './core/bootstrap';
 export { CoreAppShell, AuthGate } from './core/CoreAppShell';
 export * from './core/registry';
 export * from './core/events';

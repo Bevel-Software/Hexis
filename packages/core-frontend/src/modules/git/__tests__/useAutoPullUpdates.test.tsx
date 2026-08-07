@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
-import type { BranchInfo, CommitAttribution, FileTreeEntry, WorkingTreeStatus } from '@bevel-software/platform-shared';
+import type { BranchInfo, FileTreeEntry, WorkingTreeStatus } from '@bevel-software/platform-shared';
 import { useAutoPullUpdates } from '../hooks/useAutoPullUpdates';
 import type { GitContextValue } from '../state/git.context';
 import type { WorkspaceContextValue } from '../../workspace/state/workspace.context';
@@ -45,15 +45,9 @@ function makeGit(
     deleteBranch: async () => {},
     pull: async () => {},
     fetchForkBase: async () => null,
-    revert: async (): Promise<CommitAttribution> => ({
-      authorName: '',
-      authorEmail: '',
-      sha: '',
-      subject: '',
-      committedAt: '',
-    }),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
     ...overrides,
   };

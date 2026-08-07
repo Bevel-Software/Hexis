@@ -136,7 +136,7 @@ export function useFileAccess(
 
 /**
  * Render-helper for the "you don't have permission to edit this file" copy.
- * Used by the AccessRestrictedBanner and as a tooltip on disabled save
+ * Used as a tooltip on disabled save
  * buttons.
  */
 export function formatEligible(eligible: AccessEligible): string {

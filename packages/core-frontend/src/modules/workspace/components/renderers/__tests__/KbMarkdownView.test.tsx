@@ -87,9 +87,25 @@ describe('KbMarkdownView', () => {
 
   it('renders inline HTML details blocks (Source of Information)', () => {
     const onOpenFile = vi.fn();
-    const src = `# Goal\nThe goal.\n\n<details><summary>Source of Information</summary>\n\n1. PROD-1 — goal (2026-06-09)\n\n</details>\n`;
+    const src = `# Goal\nThe goal.\n\n<details><summary>Source of Information</summary>\n\n1. PROD-1. Goal (2026-06-09)\n\n</details>\n`;
     render(<KbMarkdownView source={src} onOpenFile={onOpenFile} />);
     // rehype-raw turns the <details> into a real element rather than literal text.
     expect(screen.getByText('Source of Information').tagName.toLowerCase()).toBe('summary');
+  });
+
+  // WP1: the file viewer's document column is the scroller, so the view must be
+  // able to surrender its own. The DEFAULT keeps it — the Atlassian embed and
+  // the library's detail dialog both mount this view outside a document column
+  // and would lose their scrollbar if the default flipped.
+  it('owns a scroller by default', () => {
+    const { container } = render(<KbMarkdownView source={'Body.\n'} onOpenFile={vi.fn()} />);
+    expect((container.firstElementChild as HTMLElement).className).toContain('overflow-auto');
+  });
+
+  it('surrenders its scroller when scroll={false}', () => {
+    const { container } = render(
+      <KbMarkdownView source={'Body.\n'} onOpenFile={vi.fn()} scroll={false} />,
+    );
+    expect((container.firstElementChild as HTMLElement).className).not.toContain('overflow-auto');
   });
 });

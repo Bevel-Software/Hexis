@@ -72,11 +72,32 @@ export async function getConnectPending(): Promise<ConnectPending> {
   return (await res.json()) as ConnectPending;
 }
 
-/** Start a tool-scoped OAuth sign-in for one of a tool's OAuth-backed variables. */
-export async function startToolOAuth(slug: string, varName: string): Promise<string> {
+/**
+ * Start a tool-scoped OAuth sign-in for one of a tool's OAuth-backed variables.
+ *
+ * `returnTo` is where the provider round-trip should deposit the browser — a
+ * same-origin PATH, signed into the OAuth state server-side and re-validated at
+ * the callback, so it cannot be turned into an open redirect. Pass the BARE
+ * path: the validator rejects `#`, and the callback appends `#authorized=…` /
+ * `#error=…` itself.
+ *
+ * The body is sent ONLY when a `returnTo` is given, which is what keeps the
+ * `/connect` call sites byte-identical to their pre-`returnTo` behavior (no
+ * body ⇒ the server's legacy `'connect'` destination).
+ */
+export async function startToolOAuth(
+  slug: string,
+  varName: string,
+  opts?: { returnTo?: string },
+): Promise<string> {
+  const init: RequestInit = { method: 'POST' };
+  if (opts?.returnTo) {
+    init.headers = { 'Content-Type': 'application/json' };
+    init.body = JSON.stringify({ returnTo: opts.returnTo });
+  }
   const res = await authFetch(
     `/api/secrets/tools/${encodeURIComponent(slug)}/vars/${encodeURIComponent(varName)}/oauth/start`,
-    { method: 'POST' },
+    init,
   );
   if (!res.ok) await fail(res, "Couldn't start sign-in.");
   return ((await res.json()) as { url: string }).url;

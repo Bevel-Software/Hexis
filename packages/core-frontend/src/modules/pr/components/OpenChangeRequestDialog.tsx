@@ -107,7 +107,7 @@ export function OpenChangeRequestDialog({
             type="button"
             onClick={onClose}
             disabled={busy}
-            className="px-3 py-1.5 text-xs rounded hover:bg-slate-100 text-slate-700 disabled:opacity-50"
+            className="px-3 py-1.5 text-xs rounded hover:bg-hover text-ink disabled:opacity-50"
           >
             Cancel
           </button>
@@ -123,16 +123,16 @@ export function OpenChangeRequestDialog({
       }
     >
       <div className="flex flex-col gap-3 text-sm">
-        <p className="text-xs text-slate-600">
+        <p className="text-xs text-ink-muted">
           Propose your shared draft{' '}
-          <span className="font-mono font-medium text-slate-700">
+          <span className="font-mono font-medium text-ink">
             {sourceBranch}
           </span>{' '}
           as a change request. Approvers can review it before it's applied.
         </p>
 
         <label className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-slate-700">
+          <span className="text-xs font-medium text-ink">
             What did you change?
           </span>
           <input
@@ -144,29 +144,29 @@ export function OpenChangeRequestDialog({
               if (e.key === 'Enter') void submit();
             }}
             placeholder="e.g. Add owner to Checkout process"
-            className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-slate-400"
+            className="w-full bg-white border border-line-strong rounded px-2 py-1.5 text-sm focus:outline-none focus:border-accent"
           />
         </label>
 
         <label className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-slate-700">
+          <span className="text-xs font-medium text-ink">
             Anything approvers should know?{' '}
-            <span className="font-normal text-slate-500">(optional)</span>
+            <span className="font-normal text-ink-muted">(optional)</span>
           </span>
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             rows={3}
-            className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-slate-400 resize-y"
+            className="w-full bg-white border border-line-strong rounded px-2 py-1.5 text-sm focus:outline-none focus:border-accent resize-y"
           />
         </label>
 
         <label className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-slate-700">Apply to</span>
+          <span className="text-xs font-medium text-ink">Apply to</span>
           <select
             value={targetBranch}
             onChange={(e) => setTargetBranch(e.target.value)}
-            className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-slate-400"
+            className="w-full bg-white border border-line-strong rounded px-2 py-1.5 text-sm focus:outline-none focus:border-accent"
           >
             {targets.length === 0 && (
               <option value={targetBranch}>

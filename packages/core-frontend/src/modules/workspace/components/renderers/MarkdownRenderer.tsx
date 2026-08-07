@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { KbMarkdownView } from './KbMarkdownView';
+import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
 import {
   useFileNav,
   useNodeIdNav,
@@ -70,6 +71,7 @@ export function MarkdownRenderer({
   // rendered content is in the DOM.
   const location = useLocation();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState(content);
   // savedContent is the on-disk baseline; falls back to content when the
   // caller doesn't track a separate saved version (single-file legacy).
@@ -202,16 +204,20 @@ export function MarkdownRenderer({
   // surface (mid-save spinner or an error message), so view mode stays clean.
   const showStatusStrip = saveState === 'saving' || (saveState === 'error' && saveError);
 
+  useAutoGrowTextarea(textareaRef, value, !readOnly);
+
   return (
-    <div className="flex flex-col h-full">
+    // Auto-height, not `h-full`: `KbDocumentShell` is the scroller now, and a
+    // document has no natural height — it is as tall as it is.
+    <div className="flex min-w-0 flex-col">
       {showStatusStrip && (
-        <div className="flex items-center gap-2 pb-2 mb-2 border-b border-slate-200 shrink-0">
+        <div className="flex items-center gap-2 pb-2 mb-2 border-b border-line shrink-0">
           {saveState === 'saving' && (
             <span
               role="status"
               aria-live="polite"
               aria-atomic="true"
-              className="text-xs text-slate-600"
+              className="text-xs text-ink-muted"
             >
               Saving…
             </span>
@@ -221,7 +227,7 @@ export function MarkdownRenderer({
               role="alert"
               aria-live="assertive"
               aria-atomic="true"
-              className="text-xs text-red-600"
+              className="text-xs text-danger"
             >
               Couldn't save your changes. Try again in a moment.
             </span>
@@ -236,10 +242,17 @@ export function MarkdownRenderer({
           onOpenNodeId={openNodeId}
           headingLink={headingLink}
           containerRef={scrollContainerRef}
+          // The document column scrolls; this view does not. See the prop's
+          // docstring — the embed and the library dialog keep the default.
+          scroll={false}
         />
       ) : (
         <textarea
-          className="flex-1 w-full bg-transparent text-sm text-slate-700 font-mono whitespace-pre-wrap break-words leading-relaxed resize-none outline-none"
+          ref={textareaRef}
+          // Grows with its content so the column keeps the only scrollbar on
+          // the page — see `useAutoGrowTextarea`. `min-h-[50vh]` is the empty
+          // file's height, so a new document is a page rather than a slot.
+          className="w-full min-h-[50vh] resize-none overflow-hidden bg-transparent text-sm text-ink font-mono whitespace-pre-wrap break-words leading-relaxed outline-none"
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}

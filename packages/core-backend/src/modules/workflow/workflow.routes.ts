@@ -266,17 +266,6 @@ export function createWorkflowRoutes(
     }
   });
 
-  router.post('/workspace/:id/workflow/changes/:sha/revert', async (req, res) => {
-    const user = await requireUser(req, res);
-    if (!user) return;
-    try {
-      res.json(await workflow.revertChange(req.params.id, user, req.params.sha));
-    } catch (err) {
-      const { status, body } = toHttpError(err);
-      res.status(status).json(body);
-    }
-  });
-
   router.get('/workspace/:id/workflow/compare-file', async (req, res) => {
     if (!(await requireUser(req, res))) return;
     const pathParam = typeof req.query.path === 'string' ? req.query.path : '';
@@ -306,6 +295,23 @@ export function createWorkflowRoutes(
     try {
       const diff = await workflow.showFileAtChange(req.params.id, pathParam, sha);
       res.json({ diff });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.get('/workspace/:id/workflow/file-at-change', async (req, res) => {
+    if (!(await requireUser(req, res))) return;
+    const pathParam = typeof req.query.path === 'string' ? req.query.path : '';
+    const sha = typeof req.query.sha === 'string' ? req.query.sha : '';
+    if (!pathParam || !sha) {
+      res.status(400).json({ error: 'path and sha are required' });
+      return;
+    }
+    try {
+      const { baseline, current } = await workflow.fileAtChange(req.params.id, pathParam, sha);
+      res.json({ baseline, current });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -431,8 +437,12 @@ export function createWorkflowRoutes(
   router.get('/workflow/change-requests/mine', async (req, res) => {
     const user = await requireUser(req, res);
     if (!user) return;
+    // `?fresh=1` bypasses the 30s list cache — event-driven refreshes (a
+    // proposal or suggestion-routed upload just landed) ask because they KNOW
+    // the list changed, and a cached answer would hide their own change.
+    const fresh = isTruthyQuery(req.query.fresh);
     try {
-      res.json(await workflow.listChangeRequestsAuthoredBy(user.email));
+      res.json(await workflow.listChangeRequestsAuthoredBy(user.email, { fresh }));
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -497,7 +507,7 @@ export function createWorkflowRoutes(
           // blip when the caller's workspace isn't yet provisioned.
         }
       }
-      const detail = await workflow.getChangeRequestDetail(num, {
+      let detail = await workflow.getChangeRequestDetail(num, {
         fresh,
         workspaceId,
         viewerEmail,
@@ -506,10 +516,57 @@ export function createWorkflowRoutes(
         res.status(404).json({ error: 'change request not found' });
         return;
       }
+      // Lazy reconcile (the join-requests pattern): an OPEN request whose
+      // diff has emptied — everything it proposed has since landed, been
+      // reverted, or been undone on its branch — closes itself on
+      // observation and its branch retires. The close re-verifies the
+      // emptiness authoritatively and never fires on a failed diff.
+      if (detail.state === 'open' && detail.files.length === 0 && req.userId) {
+        try {
+          const user = await authService.getUserById(req.userId);
+          if (user && (await workflow.closeEmptyChangeRequest(num, user))) {
+            detail =
+              (await workflow.getChangeRequestDetail(num, {
+                fresh: true,
+                workspaceId,
+                viewerEmail,
+              })) ?? detail;
+          }
+        } catch (err) {
+          console.warn(`[cr] lazy empty-close of #${num} failed (non-fatal):`, err);
+        }
+      }
       res.json(detail);
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
+    }
+  });
+
+  /**
+   * Decline ONE file of a change request: restore its merge-base version on
+   * the source branch, dropping it from the request's diff. Takes the same
+   * permission as approving the file. When the last file is declined the
+   * request closes itself and its branch retires (`closed: true`).
+   */
+  router.post('/workflow/change-requests/:number/files/revert', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const body = (req.body ?? {}) as { path?: string };
+    if (typeof body.path !== 'string' || !body.path) {
+      res.status(400).json({ error: 'path is required' });
+      return;
+    }
+    try {
+      res.json(await workflow.revertChangeRequestFile(num, user, body.path));
+    } catch (err) {
+      const { status, body: errBody } = toHttpError(err);
+      res.status(status).json(errBody);
     }
   });
 

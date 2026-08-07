@@ -9,10 +9,14 @@ import {
   type ReactNode,
 } from 'react';
 import { useAuth } from '../../auth/state/auth.context';
-import { fetchAdminAccess, fetchUnreadCount } from '../services/admin.api';
+import { fetchAdminAccess } from '../services/admin.api';
+import { useAppRegistry } from '../../../core/registry';
 import { getRolesHealth, recoverRoles } from '../services/roles.api';
 
-interface AdminContextValue {
+// Exported because it is already the return type of `useAdmin()`, so it was
+// public in everything but name — and a consumer providing this context (a
+// test, or a host app supplying its own admin state) has to be able to say so.
+export interface AdminContextValue {
   isAdmin: boolean;
   /** Number of feedback rows submitted after `lastSeen` (or total if null). */
   unreadCount: number;
@@ -50,6 +54,9 @@ const POLL_INTERVAL_MS = 30_000;
 export function AdminProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const email = user?.email ?? null;
+  // Undefined on a core deployment, which is what keeps the badge — and its
+  // poll — from existing at all.
+  const countUnread = useAppRegistry().adminUnreadCount;
 
   const [isAdmin, setIsAdmin] = useState(false);
   const [lastSeen, setLastSeen] = useState<string | null>(null);
@@ -145,18 +152,20 @@ export function AdminProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refresh = useCallback(() => {
-    if (!isAdmin) return;
-    fetchUnreadCount(lastSeenRef.current).then(setUnreadCount).catch(() => {
+    if (!isAdmin || !countUnread) return;
+    countUnread(lastSeenRef.current).then(setUnreadCount).catch(() => {
       // Swallow — a transient failure shouldn't blank the badge. Next poll
       // will resync.
     });
-  }, [isAdmin]);
+  }, [isAdmin, countUnread]);
 
   // Poll while admin + tab is visible. Re-run on visibility change so a tab
   // returning to the foreground gets a fresh count immediately instead of
   // waiting up to 30s.
   useEffect(() => {
-    if (!isAdmin) return;
+    // Nothing to count on a core deployment — see `adminUnreadCount`. Bailing
+    // here is what stops the thirty-second 404.
+    if (!isAdmin || !countUnread) return;
     let timer: ReturnType<typeof setInterval> | null = null;
 
     function start() {

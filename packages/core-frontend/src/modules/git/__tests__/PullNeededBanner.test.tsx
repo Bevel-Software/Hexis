@@ -58,9 +58,9 @@ function makeGit(
     deleteBranch: async () => {},
     pull: async () => {},
     fetchForkBase: async () => null,
-    revert: async () => ({ authorName: '', authorEmail: '', sha: '', subject: '', committedAt: '' }),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
     ...overrides,
   };
@@ -132,7 +132,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('PullNeededBanner — gating', () => {
+describe('PullNeededBanner: gating', () => {
   it('renders nothing when availability is not ready', () => {
     const { container } = renderWith(makeGit({ availability: 'loading', status: null }));
     expect(container.firstChild).toBeNull();
@@ -180,7 +180,7 @@ describe('PullNeededBanner — gating', () => {
   });
 });
 
-describe('PullNeededBanner — protected branch (auto-update failed retry)', () => {
+describe('PullNeededBanner: protected branch (auto-update failed retry)', () => {
   it('calls git.pull() and does NOT invoke the change-request port on retry', async () => {
     const pull = vi.fn(async () => {});
     const { resolvePullIssue } = renderWith(
@@ -333,7 +333,7 @@ describe('PullNeededBanner — protected branch (auto-update failed retry)', () 
   });
 });
 
-describe('PullNeededBanner — workspace refresh after successful pull', () => {
+describe('PullNeededBanner: workspace refresh after successful pull', () => {
   // Under the multi-tab model, the post-pull reconciliation moved from a
   // single-file openFile/closeFile shuffle to a `bumpFsRevision()` call:
   // the active tab eagerly refetches, inactive non-dirty tabs invalidate,
@@ -399,7 +399,7 @@ describe('PullNeededBanner — workspace refresh after successful pull', () => {
   });
 });
 
-describe('PullNeededBanner — feature branch (agent flow, REGRESSION)', () => {
+describe('PullNeededBanner: feature branch (agent flow, REGRESSION)', () => {
   // CRITICAL: feature-branch behavior must remain the port hand-off flow.
   // Conflicts can happen when the user has local commits, and an interactive
   // resolution (the enterprise agent) earns its keep there. Direct pull on

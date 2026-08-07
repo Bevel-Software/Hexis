@@ -1,7 +1,7 @@
 import type { CallTemplate } from '@utcp/sdk';
 
 /**
- * Tool manuals — user-authored `*.tool` files under `Tools/` in the DEFAULT
+ * Tool manuals — user-authored `*.tool` files under `Groups/` in the DEFAULT
  * branch KB. Each is a UTCP *manual* (a pointer to where tools come from), not a
  * flattened tool list. Access-controlled exactly like Skills (default-deny ACL
  * on the `.tool` file path). The MCP/UTCP endpoint serves every manual a user
@@ -95,9 +95,16 @@ export interface ToolManualDescriptor {
    * catalog; namespacing doubles underscores in vault keys (`utcpNamespacedKey`).
    */
   name: string;
-  /** Repo-root-relative path of the `.tool` file (e.g. `Tools/weather.tool`). */
+  /** Repo-root-relative path of the `.tool` file (e.g. `Groups/Everyone/weather.tool`). */
   path: string;
   type: ToolManualType;
+  /**
+   * Optional one-line prose from the frontmatter, for humans browsing the
+   * catalog. PURELY COSMETIC — a malformed value is ignored rather than
+   * skipping the file (see `normalizeToolManual`), because a bad sentence must
+   * never take a working integration offline.
+   */
+  description?: string;
   /** For `http`/`mcp`: the endpoint URL (may contain `${VAR}` refs). */
   url?: string;
   httpMethod?: 'GET' | 'POST';
@@ -134,6 +141,8 @@ export interface ToolManualSummary {
   name: string;
   path: string;
   type: ToolManualType;
+  /** The frontmatter `description`, when the file declares a usable one. */
+  description?: string;
   /** Declared `${VAR}` scopes; empty when none declared. */
   variables?: ToolVariable[];
   /** `false` ⇒ local-only (not served to remote agents); absent/`true` ⇒ remote-capable. */
@@ -142,9 +151,48 @@ export interface ToolManualSummary {
   setup?: ToolManualSetup;
 }
 
+/** One thing an `inline` manual's embedded tool list says the assistant can do. */
+export interface ToolCapability {
+  name: string;
+  description: string | null;
+}
+
+/**
+ * A single tool manual for the BROWSER tool page (`GET /api/tools/:slug`): the
+ * summary plus the two human-facing fields the catalog listing has no use for.
+ * Both are normalized to `null` rather than left optional — the page renders a
+ * definite "nothing here" state, so an absent field and an empty one are the
+ * same thing to it.
+ */
+export interface ToolManualDetail extends Omit<ToolManualSummary, 'description'> {
+  description: string | null;
+  /**
+   * What the tool actually exposes, derived from an `inline` manual's embedded
+   * `tools`. `http`/`mcp` manuals resolve their tools at call time (a network
+   * round-trip this endpoint deliberately does not make), so they report `[]`.
+   */
+  capabilities: ToolCapability[];
+}
+
 export interface IToolManualService {
   /** The `.tool` manuals the user can read, as summaries. */
   listAccessible(userEmail: string): Promise<ToolManualSummary[]>;
+  /**
+   * One readable `.tool` by slug, with its description + capabilities, for the
+   * browser tool page. `null` when no such slug exists OR the caller can't read
+   * it — the two are deliberately indistinguishable (fail-closed: a 404 must not
+   * confirm that a tool the caller can't see exists).
+   */
+  getDetail(userEmail: string, slug: string): Promise<ToolManualDetail | null>;
+
+  /**
+   * Every manual in the catalog, UNFILTERED by access — the mirror of
+   * `skillService.listSkills(undefined)`. For caller-INDEPENDENT counting only
+   * (the group index's "N tools", which a non-member is allowed to see as a
+   * number). Never surface a name, path or description from this to someone
+   * who cannot read the file; `listAccessible` is the surface for that.
+   */
+  listAllSummaries(): Promise<ToolManualSummary[]>;
   /**
    * Validated UTCP manual call-templates for the user's accessible `.tool`s —
    * one per file, ready for a UTCP client to `registerManual`. Each is validated

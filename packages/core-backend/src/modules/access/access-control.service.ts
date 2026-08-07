@@ -157,7 +157,7 @@ export interface UserEntry {
 
 export type ParsedEntry = RoleEntry | UserEntry;
 
-interface AccessFile {
+export interface AccessFile {
   /** repo-relative POSIX path — e.g. `access.md`, `Knowledge/Sales/access.md`. */
   path: string;
   /** repo-relative POSIX directory — `''` for root. */
@@ -353,6 +353,16 @@ export function extractFrontmatter(
   return { ok: false, error: 'unterminated frontmatter — no closing `---` found' };
 }
 
+/** The text AFTER the closing frontmatter fence ('' when there is no fence). */
+export function bodyAfterFrontmatter(text: string): string {
+  const lines = text.split(/\r?\n/);
+  if (lines.length === 0 || lines[0].trim() !== '---') return '';
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === '---') return lines.slice(i + 1).join('\n');
+  }
+  return '';
+}
+
 // ---------------------------------------------------------------------------
 // Canonicalisation
 // ---------------------------------------------------------------------------
@@ -488,18 +498,86 @@ export function parseRolesYaml(
   return { ok: true, index };
 }
 
-function parseAccessFile(
+/**
+ * Does an `access.md` body declare access rules — i.e. is the file in the NEW
+ * (body-governs-the-folder) format?
+ *
+ * The two-format story: historically the FRONTMATTER carried the folder's
+ * rules and the file could not govern itself. The new format follows the
+ * convention every other file uses — frontmatter is about the FILE (who may
+ * read/write `access.md` itself), and the content (the body) is the folder's
+ * rules. The compat rule, applied per file: **when the body is not parsable as
+ * rules, the frontmatter is resolved for the folder as before.**
+ *
+ * "Parsable as rules" is deliberately shallow — the body YAML-parses to a
+ * mapping that names at least one known verb. A prose body (the repo-root
+ * README-style file) fails the YAML parse or carries no verb key and stays
+ * legacy. A body that DOES name a verb has claimed to be rules: shape errors
+ * inside it (a scalar verb, a malformed entry) are then hard parse ERRORS of
+ * the file, never a silent fallback to the frontmatter — falling back would
+ * let a typo in the body hand the folder to the frontmatter's (possibly
+ * `read: everyone`) self-rules.
+ */
+export function accessMdDeclaresBodyRules(text: string): boolean {
+  const body = bodyAfterFrontmatter(text);
+  if (!body.trim()) return false;
+  const parsed = parseYamlSubset(body);
+  if (!parsed.ok) return false;
+  const root = parsed.value;
+  if (root == null || typeof root !== 'object' || Array.isArray(root)) return false;
+  return Object.keys(root as Record<string, YamlValue>).some((k) => KNOWN_VERBS_SET.has(k));
+}
+
+/**
+ * The access verbs an `access.md` declares FOR ITSELF — its frontmatter, and
+ * only in the new format (body-governed). A legacy file cannot govern itself:
+ * its frontmatter IS the folder's rules, so returning them as own-entries
+ * would double-apply them at the file scope.
+ *
+ * Parsed forgivingly (like node frontmatter): the new-format frontmatter may
+ * carry non-access keys, and a typo there must not make the file unreadable.
+ */
+export function accessMdSelfEntries(text: string): Record<Verb, ParsedEntry[]> | null {
+  if (!accessMdDeclaresBodyRules(text)) return null;
+  return parseOwnAccessEntries(text);
+}
+
+/**
+ * Parse one `access.md`'s FOLDER rules into its per-verb entry lists.
+ *
+ * Two formats (see {@link accessMdDeclaresBodyRules}): when the body declares
+ * rules, the body is parsed (new format — frontmatter then governs the file
+ * itself via {@link accessMdSelfEntries}); otherwise the frontmatter is parsed
+ * (legacy format), exactly as before.
+ *
+ * Exported so read-only surfaces can report WHERE rules are declared without
+ * reimplementing the parse (see `access-declarations.ts`). Exporting changes
+ * nothing about resolution — this is the same function the resolver builds its
+ * model from, so a display of declarations can never drift from the rules that
+ * are actually enforced.
+ */
+export function parseAccessFile(
   text: string,
   relativePath: string,
 ): { ok: true; file: AccessFile; warnings: string[] } | { ok: false; errors: string[] } {
-  const fm = extractFrontmatter(text);
-  if (!fm.ok) return { ok: false, errors: [`${relativePath}: ${fm.error}`] };
-  const parsed = parseYamlSubset(fm.frontmatter);
+  const bodyFormat = accessMdDeclaresBodyRules(text);
+  let ruleSource: string;
+  if (bodyFormat) {
+    ruleSource = bodyAfterFrontmatter(text);
+  } else {
+    const fm = extractFrontmatter(text);
+    if (!fm.ok) return { ok: false, errors: [`${relativePath}: ${fm.error}`] };
+    ruleSource = fm.frontmatter;
+  }
+  const parsed = parseYamlSubset(ruleSource);
   if (!parsed.ok) return { ok: false, errors: [`${relativePath}: ${parsed.error}`] };
 
   const root = parsed.value;
   if (root == null || typeof root !== 'object' || Array.isArray(root)) {
-    return { ok: false, errors: [`${relativePath}: frontmatter must be a mapping`] };
+    return {
+      ok: false,
+      errors: [`${relativePath}: ${bodyFormat ? 'body' : 'frontmatter'} must be a mapping`],
+    };
   }
 
   const errors: string[] = [];
@@ -1222,6 +1300,22 @@ export class AccessControlService implements IAccessControl {
     return hasPermissionResolved(model, 'download', userEmail, relativePath, own);
   }
 
+  async canOwnerBatch(
+    workspaceId: string,
+    userEmail: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean>> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    // Parallel own-entries reads, memoized — same shape as `canWriteBatch`.
+    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const result = new Map<string, boolean>();
+    relativePaths.forEach((p, i) => {
+      result.set(p, hasPermissionResolved(model, 'owner', userEmail, p, owns[i]));
+    });
+    return result;
+  }
+
   async canOwner(
     workspaceId: string,
     userEmail: string,
@@ -1601,23 +1695,25 @@ export class AccessControlService implements IAccessControl {
   }
 
   /**
-   * Read the access verbs a node file declares in its own frontmatter from the
-   * working tree. Returns null when the file has no per-file access config
-   * (the common case). `access.md` and `roles.yaml` are skipped — `access.md`
-   * frontmatter governs its directory (handled by the dir chain), not itself,
-   * and `roles.yaml` is not a node.
+   * Read the access verbs a file declares FOR ITSELF from the working tree.
+   * Returns null when the file has no per-file access config (the common
+   * case). `roles.yaml` is never a node; an `access.md` governs itself only
+   * in the new (body-governed) format, where its frontmatter is self-access —
+   * see {@link accessMdSelfEntries}. A legacy `access.md` still yields null:
+   * its frontmatter IS the folder rules the dir chain already applies.
    */
   private async readOwnEntries(
     repoDir: string,
     relativePath: string,
   ): Promise<OwnEntries | null> {
-    if (isAccessMdPath(relativePath) || relativePath === 'roles.yaml') return null;
+    if (relativePath === 'roles.yaml') return null;
     let text: string;
     try {
       text = await fs.readFile(path.join(repoDir, relativePath), 'utf-8');
     } catch {
       return null;
     }
+    if (isAccessMdPath(relativePath)) return accessMdSelfEntries(text);
     return parseOwnAccessEntries(text);
   }
 
@@ -1632,9 +1728,10 @@ export class AccessControlService implements IAccessControl {
     ref: string,
     relativePath: string,
   ): Promise<OwnEntries | null> {
-    if (isAccessMdPath(relativePath) || relativePath === 'roles.yaml') return null;
+    if (relativePath === 'roles.yaml') return null;
     const text = await this.showAtRef(repoDir, ref, relativePath);
     if (text === null) return null;
+    if (isAccessMdPath(relativePath)) return accessMdSelfEntries(text);
     return parseOwnAccessEntries(text);
   }
 
@@ -1654,14 +1751,15 @@ export class AccessControlService implements IAccessControl {
     const result = new Map<string, OwnEntries | null>();
     const wanted: string[] = [];
     for (const p of relativePaths) {
-      if (isAccessMdPath(p) || p === 'roles.yaml') result.set(p, null);
+      if (p === 'roles.yaml') result.set(p, null);
       else if (!wanted.includes(p)) wanted.push(p);
     }
     if (wanted.length === 0) return result;
     const texts = await catFileBatch(repoDir, wanted.map((p) => `${ref}:${p}`));
     wanted.forEach((p, i) => {
       const text = texts[i];
-      result.set(p, text === null ? null : parseOwnAccessEntries(text));
+      if (text === null) result.set(p, null);
+      else result.set(p, isAccessMdPath(p) ? accessMdSelfEntries(text) : parseOwnAccessEntries(text));
     });
     return result;
   }

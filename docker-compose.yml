@@ -29,43 +29,105 @@ services:
   app:
     build:
       context: .
-      args:
-        # Baked into the image and returned by GET /api/health so deploys can
-        # be confirmed by sha, e.g. `GIT_SHA=$(git rev-parse HEAD) docker
-        # compose build`. Unset → health reports 'unknown'.
-        GIT_SHA: ${GIT_SHA:-}
-        # Branch model — must be build args (not just runtime env below)
-        # because they're baked into the frontend bundle at `vite build` time.
-        # Keep these in sync with the runtime values below so the server-side
-        # checks match the bundled frontend.
-        DEFAULT_BRANCH: ${DEFAULT_BRANCH:-}
-        PROTECTED_BRANCHES: ${PROTECTED_BRANCHES:-}
-    ports:
-      - "3001:3001"
+      # No `args:` block. The image still accepts a GIT_SHA build arg — the
+      # Dockerfile declares it, and `GET /api/health` reports whatever it was
+      # given (`unknown` otherwise) — but naming it here made every deployment
+      # UI that reads this file ask for a value nobody sets by hand. CI passes
+      # it directly: `--build-arg GIT_SHA=$(git rev-parse HEAD)`.
+    # NO host port is published here, deliberately. A reverse proxy (Coolify,
+    # Traefik, nginx) reaches the container on this port over the compose
+    # network, and publishing a FIXED host port alongside that breaks every
+    # redeploy: the replacement container starts while the outgoing one still
+    # holds the port, and Docker refuses it with "port is already allocated".
+    #
+    # `docker compose up` with no `-f` still publishes it — that is what
+    # `docker-compose.override.yml` is for, and Compose merges it
+    # automatically. Passing `-f docker-compose.yml` (as orchestrators do)
+    # skips the override and leaves the container unpublished, which is
+    # exactly the split we want.
+    expose:
+      - "3001"
+    # A NAME ON ITS OWN (`- GIT_TOKEN`) is a pass-through: the value reaches the
+    # container when the operator sets it, and the variable simply does not
+    # exist when they do not. Everything optional is written that way on
+    # purpose, for two reasons.
+    #
+    # It keeps the deployment UI honest. An orchestrator that reads this file
+    # turns every interpolated reference it finds into a variable you must fill
+    # in or leave blank — and then refuses to let you delete it, because the
+    # file still names it. A pass-through leaves nothing to find, so the
+    # settings collected on the SETUP SCREEN stop being presented as deployment
+    # configuration you forgot.
+    #
+    # And it keeps the empty-default form from lying. That form defines the
+    # variable as an empty string, which is a value; a pass-through leaves it
+    # genuinely unset. The app treats both as absent, so this is belt and
+    # braces rather than load-bearing — but "unset" is what is meant, so it
+    # is what is written.
+    #
+    # Variables that are genuinely REQUIRED keep an interpolated reference, so
+    # the operator is still prompted for them.
     environment:
       - NODE_ENV=production
       - PORT=3001
+      # The commit this build came from, reported by `GET /api/health`.
+      # Coolify injects SOURCE_COMMIT for git-based deploys — but only into the
+      # environment it hands compose, so without a pass-through here it never
+      # reached the container and health reported 'unknown' on every hosted
+      # deploy. `version.ts` has named this fallback all along; this is what
+      # makes it true. Nothing to fill in: absent, health still says 'unknown'.
+      #
+      # LEAVE COOLIFY'S "Include Source Commit in Build" OFF. It controls
+      # BUILD-time availability, and turning it on defeats layer caching across
+      # commits — the setting says so itself, and adds that SOURCE_COMMIT "will
+      # still be available at runtime" either way. Runtime is all we need:
+      # `version.ts` reads it from the process environment when the server
+      # starts, not from anything baked into the image.
+      - SOURCE_COMMIT
       # Git host credential. The KB can live on any git server (GitHub, GitLab,
       # Bitbucket, Azure DevOps, self-hosted): GIT_TOKEN is the Basic-auth
       # password and GIT_USERNAME the Basic username (host-specific — see
       # .env.example).
-      - GIT_TOKEN=${GIT_TOKEN}
-      - GIT_USERNAME=${GIT_USERNAME:-}
+      - GIT_TOKEN
+      - GIT_USERNAME
       - JWT_SECRET=${JWT_SECRET}
-      - TEST_PASSWORD=${TEST_PASSWORD}
+      # The deployment owner. REQUIRED: always an admin whatever the sign-in
+      # method, and the initial Admin written into a freshly seeded KB.
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-}
+      # Bootstrap password credential — checked against the environment at login
+      # time and never stored. Read ONCE at startup, so changing or unsetting it
+      # takes effect when the container restarts, not before. Required only
+      # while password login is enabled.
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # Generic OIDC single sign-on; the method appears once all three are set.
+      # Also settable on the setup screen, which shows the redirect URI.
+      - OIDC_ISSUER_URL
+      - OIDC_CLIENT_ID
+      - OIDC_CLIENT_SECRET
+      - OIDC_SCOPES
+      - OIDC_PROVIDER_LABEL
+      # Reverse-proxy hop count. Required behind a proxy (Coolify, Traefik,
+      # nginx) or every request looks like it came from the proxy — which
+      # collapses the per-IP login rate limit onto one bucket.
+      - TRUST_PROXY
       # Tenant slug branded into every credential prefix. Default `bevel`
       # keeps pre-existing keys/tokens valid — change it only for a fresh deploy.
       - TENANT_ID=${TENANT_ID:-bevel}
       - LOGIN_PASSWORD=${LOGIN_PASSWORD:-true}
-      - ALLOWED_EMAIL_DOMAINS=${ALLOWED_EMAIL_DOMAINS:-}
-      - KB_REPO_URL=${KB_REPO_URL}
-      - KB_DIR_NAME=${KB_DIR_NAME}
-      # Initial Admin(s) for a freshly-seeded KB — REQUIRED to seed an empty
-      # repo, ignored once it's populated.
-      - SEED_ADMIN_EMAILS=${SEED_ADMIN_EMAILS:-}
-      # Branch model (backend runtime). Must match the build args above.
-      - DEFAULT_BRANCH=${DEFAULT_BRANCH}
-      - PROTECTED_BRANCHES=${PROTECTED_BRANCHES}
+      # SSO allow-list (part of the OIDC config above). SSO auto-provisions, so
+      # against a multi-tenant issuer this is the only signup boundary.
+      - ALLOWED_EMAIL_DOMAINS
+      # The knowledge base. Left unset, an admin supplies these on the setup
+      # screen at first sign-in — where the credentials can be tested against
+      # the real host before they are saved.
+      - KB_REPO_URL
+      - KB_DIR_NAME
+      # Branch model. Runtime only now — the frontend is served these over
+      # /api/config instead of having them compiled in, so one image runs
+      # anywhere and renaming a branch no longer needs a rebuild. Left unset,
+      # they are collected on the setup screen.
+      - DEFAULT_BRANCH
+      - PROTECTED_BRANCHES
       # 32-byte key (base64 or hex) encrypting secrets-vault values + MCP
       # OAuth client secrets/tokens.
       - SECRETS_ENC_KEY=${SECRETS_ENC_KEY}
@@ -73,8 +135,34 @@ services:
       # serves the SPA itself, so both default to this container's origin.
       - PUBLIC_BACKEND_URL=${PUBLIC_BACKEND_URL:-http://localhost:3001}
       - PUBLIC_FRONTEND_URL=${PUBLIC_FRONTEND_URL:-http://localhost:3001}
-      # Mirrors the db service's POSTGRES_* knobs (in-network hostname `db`).
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-bevel}:${POSTGRES_PASSWORD:-bevel}@db:5432/${POSTGRES_DB:-bevel}
+      # The database. Set DATABASE_URL to point at a Postgres you already have;
+      # left unset, the app builds one from the POSTGRES_* values below, which
+      # are the same ones the bundled `db` service is created with.
+      #
+      # The composition moved INTO the app (`resolveDatabaseUrl`) rather than
+      # being written here as a nested default. Expressing it in compose needed
+      # an interpolated default containing further interpolations, and a
+      # deployment UI that scans this file with a regex rather than a YAML
+      # parser cuts that at the first closing brace — offering the operator a
+      # DATABASE_URL whose value is a truncated fragment. Doing it in code
+      # also lets the parts be URL-encoded, which shell interpolation cannot:
+      # a password containing `@` or `/` used to produce an unparseable URL.
+      # NEITHER of these interpolates, and that is the whole point. A
+      # deployment UI that reads this file creates a managed variable for every
+      # interpolated reference it finds — and then will not let you delete it,
+      # because the file still names it. A bare name (pass-through) and a
+      # literal value both leave it nothing to create.
+      #
+      # So: DATABASE_URL passes through when the operator sets it, and the host
+      # of the bundled database is written literally, because it is not a
+      # choice — inside this compose network the service is called `db`. To
+      # point at a Postgres somewhere else, set DATABASE_URL; that is what it
+      # is for, and it reaches the container by the line below.
+      - DATABASE_URL
+      - POSTGRES_HOST=db
+      - POSTGRES_USER=${POSTGRES_USER:-bevel}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-bevel}
+      - POSTGRES_DB=${POSTGRES_DB:-bevel}
     # node:22-slim ships neither curl nor wget; Node 22's global fetch probes.
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

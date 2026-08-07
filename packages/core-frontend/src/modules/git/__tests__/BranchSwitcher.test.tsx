@@ -3,7 +3,6 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type {
   BranchInfo,
-  CommitAttribution,
   WorkingTreeStatus,
 } from '@bevel-software/platform-shared';
 
@@ -30,16 +29,6 @@ import {
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
 
-function makeAttr(): CommitAttribution {
-  return {
-    sha: 'abcdef1234567890',
-    authorName: 'Alice',
-    authorEmail: 'alice@example.com',
-    subject: 's',
-    committedAt: '2026-04-29T00:00:00Z',
-  };
-}
-
 function makeStatus(overrides: Partial<WorkingTreeStatus> = {}): WorkingTreeStatus {
   return {
     branch: 'alice/draft',
@@ -62,9 +51,9 @@ function makeGit(overrides: Partial<GitContextValue> = {}): GitContextValue {
     deleteBranch: async () => {},
     pull: async () => {},
     fetchForkBase: async () => null,
-    revert: async () => makeAttr(),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
     ...overrides,
   };
@@ -167,6 +156,26 @@ describe('BranchSwitcher dropdown', () => {
 
     expect(screen.queryByText(PANEL_ANCHOR)).toBeNull();
   });
+
+  // Clamping `left` alone is not enough to keep the panel on screen: on a
+  // phone narrower than the panel there is no left edge that fits a fixed
+  // 400px, so the width has to give too.
+  it.each([375, 320])('keeps the panel inside a %ipx viewport', (viewport) => {
+    const testWindow = window as typeof window & {
+      happyDOM: { setInnerWidth(value: number): void };
+    };
+    testWindow.happyDOM.setInnerWidth(viewport);
+
+    renderSwitcher();
+    fireEvent.click(screen.getByTitle('Your active shared draft'));
+
+    const panel = screen.getByText(PANEL_ANCHOR).closest('div.fixed') as HTMLElement;
+    const MARGIN = 8;
+    const left = Number.parseFloat(panel.style.left);
+    const width = Number.parseFloat(panel.style.width);
+    expect(left).toBeGreaterThanOrEqual(MARGIN);
+    expect(left + width).toBeLessThanOrEqual(viewport - MARGIN);
+  });
 });
 
 // Delete affordance: a freshly-published draft has `hasRemote: true`, which
@@ -174,7 +183,7 @@ describe('BranchSwitcher dropdown', () => {
 // (the orphan-cleanup mental model). Now the picker also offers delete for
 // drafts authored by the current user (per `<email-localpart>/...` naming),
 // and routes the destructive remote-delete through a confirm dialog.
-describe('BranchSwitcher — author-can-delete affordance', () => {
+describe('BranchSwitcher: author-can-delete affordance', () => {
   beforeEach(() => {
     vi.mocked(fetchFileAccess).mockResolvedValue({
       canRead: true,
@@ -216,7 +225,7 @@ describe('BranchSwitcher — author-can-delete affordance', () => {
     // destructive-action warning, not just "delete".
     expect(
       screen.getByLabelText(
-        'Delete shared draft "alice/my-draft" — removes it for everyone',
+        'Delete shared draft "alice/my-draft": removes it for everyone',
       ),
     ).toBeInTheDocument();
   });
@@ -234,7 +243,7 @@ describe('BranchSwitcher — author-can-delete affordance', () => {
     fireEvent.click(screen.getByTitle('Your active shared draft'));
     expect(
       screen.queryByLabelText(
-        'Delete shared draft "bob/other-draft" — removes it for everyone',
+        'Delete shared draft "bob/other-draft": removes it for everyone',
       ),
     ).toBeNull();
   });
@@ -265,7 +274,7 @@ describe('BranchSwitcher — author-can-delete affordance', () => {
 // teammates' drafts AND unprefixed CLI branches with no author. Backend gate
 // at `GitService.deleteBranch` is the authoritative check; this suite covers
 // the UI surface only.
-describe('BranchSwitcher — admin-can-delete affordance', () => {
+describe('BranchSwitcher: admin-can-delete affordance', () => {
   beforeEach(() => {
     vi.mocked(fetchFileAccess).mockResolvedValue({
       canRead: true,
@@ -303,7 +312,7 @@ describe('BranchSwitcher — admin-can-delete affordance', () => {
     // `findBy` waits for the admin-status fetch to resolve and re-render.
     expect(
       await screen.findByLabelText(
-        'Delete shared draft "bob/other-draft" — removes it for everyone',
+        'Delete shared draft "bob/other-draft": removes it for everyone',
       ),
     ).toBeInTheDocument();
   });
@@ -321,7 +330,7 @@ describe('BranchSwitcher — admin-can-delete affordance', () => {
     fireEvent.click(screen.getByTitle('Your active shared draft'));
     expect(
       await screen.findByLabelText(
-        'Delete shared draft "fix/some-cli-branch" — removes it for everyone',
+        'Delete shared draft "fix/some-cli-branch": removes it for everyone',
       ),
     ).toBeInTheDocument();
   });
