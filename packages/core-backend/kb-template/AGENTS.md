@@ -3,6 +3,11 @@
 This is a git-backed knowledge base. You are the primary agent responsible for
 maintaining it.
 
+> **This file is managed by the platform.** Every server restart replaces it
+> with the current template, so edits made here are overwritten. Deployment- or
+> team-specific conventions belong in files of your own — anywhere under
+> `KnowledgeBase/`, linked from wherever they are needed.
+
 **There is no required format for knowledge.** Write markdown the way the
 subject wants to be written: prose, tables, checklists, diagrams, whatever
 serves the reader. Nothing here parses your files into a schema or rejects a
