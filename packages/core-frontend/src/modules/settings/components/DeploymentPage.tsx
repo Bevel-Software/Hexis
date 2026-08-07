@@ -61,12 +61,6 @@ export function DeploymentPage() {
 
   return (
     <PageShell title="Deployment" width="4xl">
-      <p className="max-w-[62ch] text-detail text-ink-muted">
-        Where your knowledge, skills and tools live, the branch model, and single sign-on: the
-        same form as first-run setup, editable whenever something changes. Values set in the
-        environment stay locked here; change them where they are set.
-      </p>
-
       {!loaded && <div className="mt-6 text-sm text-ink-muted">Loading…</div>}
 
       {/* A failed fetch never clears `status`, so a refresh that breaks
