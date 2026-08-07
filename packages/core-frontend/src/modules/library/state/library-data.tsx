@@ -215,6 +215,17 @@ export function useLibrary(): LibraryContextValue {
 }
 
 /**
+ * The catalog's reload signal, tolerating an absent provider. For leaf
+ * components (dialog panels) that only need to ANNOUNCE "the catalog
+ * changed" — outside a provider (component tests, future embeddings) the
+ * announcement has no audience, and that is fine.
+ */
+export function useLibraryReload(): () => void {
+  const value = useContext(LibraryContext);
+  return value?.reload ?? (() => {});
+}
+
+/**
  * How many of a group's integrations need setup — the amber count on the
  * sidebar row and the group page's banner, computed from one place so the two
  * can never disagree.

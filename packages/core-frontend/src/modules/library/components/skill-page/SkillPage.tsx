@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   DEFAULT_BRANCH,
   groupOfPath,
@@ -13,6 +13,7 @@ import { kbFileUrl, resolveRelativePath, useNodeIdNav } from '../../../workspace
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { useFileAccess } from '../../../access/hooks/useFileAccess';
 import { proposeChange, suggestionBranchFor } from '../../services/library.api';
+import { getOrCreateWorkspace, writeFile } from '../../../workspace/services/workspace.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
 import { useApplyChangeRequest } from '../../../change-requests/hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
@@ -176,7 +177,15 @@ export function SkillPage() {
 
   /** Bumped after every write so the branch reads re-run against fresh content. */
   const [revision, setRevision] = useState(0);
-  const [editing, setEditing] = useState(false);
+  /**
+   * Creation hands off straight into the editor: `NewSkillPanel` navigates
+   * here with `startEditing` in the router state, so the person who just made
+   * an empty skill lands with the cursor in it instead of on an empty page.
+   */
+  const location = useLocation();
+  const [editing, setEditing] = useState(
+    Boolean((location.state as { startEditing?: boolean } | null)?.startEditing),
+  );
   const [busyCr, setBusyCr] = useState<number | null>(null);
   /**
    * Change requests a merge attempt has REFUSED as unmergeable. Git is the only
@@ -257,12 +266,15 @@ export function SkillPage() {
    * the page failed to recognise would open a second one against the same
    * branch.
    */
+  const canEditDirectly = fileAccess.canWrite === true;
   const ownBranchBase = useFileOnBranch(
-    editing && ownCr ? ownCr.branch : null,
+    editing && !canEditDirectly && ownCr ? ownCr.branch : null,
     skillPath ? fileRepoPath : null,
     revision,
   );
-  const editorBase = ownCr ? ownBranchBase : rawOnMain;
+  // A direct edit always bases on the default branch — the file as everyone
+  // reads it. Only the propose flow stacks on the caller's own branch copy.
+  const editorBase = !canEditDirectly && ownCr ? ownBranchBase : rawOnMain;
 
   const openInEditor = useCallback(
     (wsRelative: string) => navigate(kbFileUrl(DEFAULT_BRANCH, wsRelative)),
@@ -283,6 +295,21 @@ export function SkillPage() {
         : `${window.location.origin}${window.location.pathname}#${slug}`,
     [kbDirName, skillPath, active],
   );
+
+  /**
+   * The writer's submit: straight onto the default branch. One `writeFile` is
+   * a complete save — the route acquires the file lock (where the ACL gate
+   * runs), writes, and releases into the commit queue — so this is the same
+   * save the Knowledge editor performs, minus the app switch.
+   */
+  async function saveDirect(content: string) {
+    const { workspace } = await getOrCreateWorkspace(DEFAULT_BRANCH);
+    await writeFile(workspace.id, `${workspace.kbDirName}/${fileRepoPath}`, content);
+    setEditing(false);
+    setRevision((r) => r + 1);
+    toast('Saved — the skill now reads with your change.');
+    data.reload();
+  }
 
   async function submitProposal(content: string) {
     if (!user) throw new Error('Sign in to propose a change.');
@@ -428,9 +455,10 @@ export function SkillPage() {
         <SkillFileEditor
           file={active}
           base={editorBase}
+          mode={canEditDirectly ? 'edit' : 'propose'}
           owner={ownerName}
           onCancel={() => setEditing(false)}
-          onSubmit={submitProposal}
+          onSubmit={canEditDirectly ? saveDirect : submitProposal}
         />
       ) : (
         <SkillFilePane
@@ -449,10 +477,14 @@ export function SkillPage() {
            * where, for anyone without a write grant, it ended in AccessDenied
            * after they had navigated away and typed the change. The trap was
            * never the button; it was offering it to people it would refuse.
-           * So now the file bar asks the per-file access resolver and shows
-           * exactly one of the two: `Edit` (to the Knowledge editor, which
-           * this pane now visually matches) when the caller may write the
-           * file, `Propose changes` when they may not.
+           * So the file bar asks the per-file access resolver and shows
+           * exactly one of the two — and BOTH now open the same editor in
+           * place, right over the rendered file. What differs is what
+           * submitting does: a writer's Save lands on the default branch, a
+           * proposal lands on the author's suggestion branch as a change
+           * request. Edit used to leave for the Knowledge app; being bounced
+           * to a different surface to change the file you are reading was
+           * the last piece of that old trap.
            *
            * One open proposal per person per SKILL, still — but proposing
            * again while yours is open is not refused anymore: it opens the
@@ -462,12 +494,12 @@ export function SkillPage() {
            */
           actions={
             fileAccess.canWrite !== false
-              ? kbDirName && (
+              ? rawOnMain !== null && (
                   <Button
                     variant="outline"
                     size="tiny"
-                    onClick={() => openInEditor(`${kbDirName}/${fileRepoPath}`)}
-                    title="Open this file in the Knowledge editor"
+                    onClick={() => setEditing(true)}
+                    title="Edit this file in place"
                   >
                     Edit
                   </Button>

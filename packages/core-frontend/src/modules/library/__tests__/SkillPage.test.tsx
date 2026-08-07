@@ -23,6 +23,8 @@ const apiMock = vi.hoisted(() => ({
   cancelPullRequest: vi.fn(),
   fetchPrDetail: vi.fn(),
   approvePrFile: vi.fn(),
+  getOrCreateWorkspace: vi.fn(),
+  writeFile: vi.fn(),
 }));
 vi.mock('../services/library.api', () => ({
   defaultWorkspaceId: () => 'target-company-state',
@@ -35,6 +37,12 @@ vi.mock('../services/library.api', () => ({
   // the very lookup these tests are checking.
   suggestionBranchFor: (email: string, skill: string) =>
     `suggestions/${email.split('@')[0]}/${skill}`,
+}));
+// The workspace write path — what a writer's in-place Save goes through.
+vi.mock('../../workspace/services/workspace.api', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  getOrCreateWorkspace: apiMock.getOrCreateWorkspace,
+  writeFile: apiMock.writeFile,
 }));
 // The change-request module's reads — the branch-file read feeds the editor
 // base and the per-request diffs.
@@ -481,6 +489,38 @@ describe('SkillPage', () => {
       'target-company-state',
       'Skills/newsletter/SKILL.md',
     );
+  });
+
+  it('Edit opens the editor IN PLACE, and Save writes straight to the default branch', async () => {
+    // The page must never bounce a writer to the Knowledge app: the same
+    // inline editor the propose flow uses opens over the rendered file, and
+    // submitting is a plain default-branch write — no change request.
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    apiMock.getOrCreateWorkspace.mockResolvedValue({
+      workspace: { id: 'target-company-state', kbDirName: 'knowledge-base' },
+    });
+    apiMock.writeFile.mockResolvedValue(undefined);
+    renderPage(true);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const box = await screen.findByRole('textbox', { name: 'Edit SKILL.md' });
+    fireEvent.change(box, { target: { value: 'rewritten body' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(apiMock.writeFile).toHaveBeenCalledWith(
+        'target-company-state',
+        'knowledge-base/Skills/newsletter/SKILL.md',
+        'rewritten body',
+      ),
+    );
+    expect(await screen.findByText(/Saved — the skill now reads with your change/)).toBeInTheDocument();
+    // Direct means DIRECT: nothing rode the proposal path.
+    expect(apiMock.proposeChange).not.toHaveBeenCalled();
   });
 
   /**

@@ -176,11 +176,10 @@ describe('AddToGroupDialog: starting an empty SKILL.md', () => {
         }),
       ),
     );
-    // Lands ON the new file, not on the folder that holds it.
+    // Lands on the new skill's own LIBRARY page — never bounced to the
+    // Knowledge app — with the editor handed the open signal.
     await waitFor(() =>
-      expect(href()).toBe(
-        '/workspace/target-company-state/knowledge-base/Groups/GTM/weekly-report/SKILL.md',
-      ),
+      expect(href()).toBe('/skills-and-tools/skills/weekly-report'),
     );
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -251,12 +250,9 @@ describe('AddToGroupDialog for a non-writer', () => {
         expect.objectContaining({ canWrite: false }),
       ),
     );
-    // Their own branch, because that is where the file actually is.
-    await waitFor(() =>
-      expect(href()).toBe(
-        '/workspace/suggestions%2Fjuan%2Fweekly-report/knowledge-base/Groups/GTM/weekly-report/SKILL.md',
-      ),
-    );
-    expect(await screen.findByText(/sent for review/)).toBeInTheDocument();
+    // A proposal has no page yet, so the dialog does NOT navigate — the group
+    // page stays put, and the new skill appears on it as an "In review" card.
+    expect(await screen.findByText(/sent to the group's owners for review/)).toBeInTheDocument();
+    expect(href()).toBe('/skills-and-tools/groups/GTM');
   });
 });
