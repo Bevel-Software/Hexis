@@ -359,19 +359,7 @@ export function SkillPage() {
     </Button>
   );
 
-  // Same frame as the other two branches: the way out is on screen while the
-  // skill loads, not only once it has, and the column does not jump when the
-  // content arrives under it.
-  if (detail.loading) {
-    return (
-      <Article>
-        {backLink}
-        <p className="py-16 text-center text-ui text-ink-muted">Loading…</p>
-      </Article>
-    );
-  }
-
-  if (detail.error || !skill) {
+  if (!detail.loading && (detail.error || !skill)) {
     return (
       <Article>
         {backLink}
@@ -389,7 +377,7 @@ export function SkillPage() {
   // underneath it. It is the SHARED dialog, scoped to this skill: its folder
   // frames the file list, and the skill's own files always show so an owner
   // can read the untouched parts too.
-  if (compareCr) {
+  if (compareCr && skill) {
     return (
       <ChangeRequestDialog
         cr={compareCr}
@@ -404,14 +392,18 @@ export function SkillPage() {
     );
   }
 
+  // Loading deliberately falls through to this real page tree. The route
+  // already knows the skill name, `files` already contains SKILL.md, and
+  // keeping these exact nodes mounted prevents a blank handoff followed by a
+  // second layout when the detail request settles.
   return (
     <Article>
       {backLink}
 
       <header className="mt-4">
         <div className="flex items-center gap-3">
-          <h1 className="text-display font-semibold text-ink">{skill.name}</h1>
-          {owned && (
+          <h1 className="text-display font-semibold text-ink">{skill?.name ?? name}</h1>
+          {skill && owned && (
             <Badge tone="outline" size="xs" className="shrink-0 uppercase">
               Owner
             </Badge>
@@ -446,8 +438,16 @@ export function SkillPage() {
         role="tabpanel"
         id={skillPanelId(tabsId)}
         aria-labelledby={skillTabId(tabsId, active)}
+        aria-busy={detail.loading || raw === null || undefined}
       >
-      {editing && editorBase !== null && fileAccess.canWrite !== null ? (
+      {detail.loading ? (
+        <SkillFilePane
+          file={active}
+          raw={null}
+          suggestion={null}
+          headingLink={headingLink}
+        />
+      ) : editing && editorBase !== null && fileAccess.canWrite !== null ? (
         <SkillFileEditor
           file={active}
           base={editorBase}
@@ -463,7 +463,7 @@ export function SkillPage() {
           suggestion={null}
           onOpenLink={(href) => {
             if (!kbDirName) return;
-            openInEditor(resolveRelativePath(`${kbDirName}/${skill.path}/${active}`, href));
+            openInEditor(resolveRelativePath(`${kbDirName}/${skillPath}/${active}`, href));
           }}
           onOpenNodeId={openNodeId}
           headingLink={headingLink}
@@ -567,7 +567,7 @@ export function SkillPage() {
           the skill, so it is not about the selected tab. The boxes above only
           cover the file on screen, and without this a proposal to a file you
           are not looking at has no way to reach you. */}
-      {owned && <ChangeRequestDock crs={skillCrs} onSelect={setCompareCr} />}
+      {skill && owned && <ChangeRequestDock crs={skillCrs} onSelect={setCompareCr} />}
     </Article>
   );
 }

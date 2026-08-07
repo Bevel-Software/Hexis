@@ -563,15 +563,41 @@ describe('SkillPage', () => {
   });
 
   /**
-   * `getSkill` can take a while, and a page with no way out of it is a dead
-   * end — the error and loaded states both carry the link, so this one does too.
+   * Creation navigates before the first detail read settles. The route already
+   * carries enough identity to paint the skill page, so that interval must not
+   * be a blank column with a loading word floating in it.
    */
-  it('keeps the way back on screen while the skill is loading', async () => {
-    apiMock.getSkill.mockReturnValueOnce(new Promise(() => {}));
-    renderPage(false);
+  it('renders the new skill shell immediately while its first load is pending', async () => {
+    let resolveSkill!: (skill: typeof skillDetail) => void;
+    const pendingSkill = new Promise<typeof skillDetail>((resolve) => {
+      resolveSkill = resolve;
+    });
+    apiMock.getSkill.mockReturnValueOnce(pendingSkill);
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    renderPage(true, [], [], makeFakeBus(), { startEditing: true });
 
-    expect(await screen.findByText('Loading…')).toBeInTheDocument();
+    const heading = await screen.findByRole('heading', { name: 'newsletter' });
+    const skillTab = screen.getByRole('tab', { name: 'SKILL.md' });
+    const panel = screen.getByRole('tabpanel');
+    expect(skillTab).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTestId('file-pane-card')).toBeInTheDocument();
+    expect(screen.getByText('Loading…')).toBeInTheDocument();
+    expect(panel).toHaveAttribute('aria-busy', 'true');
     expect(screen.getByRole('button', { name: /All skills & tools/ })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveSkill(skillDetail);
+      await pendingSkill;
+    });
+    expect(await screen.findByRole('textbox', { name: 'Edit SKILL.md' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'newsletter' })).toBe(heading);
+    expect(screen.getByRole('tab', { name: 'SKILL.md' })).toBe(skillTab);
+    expect(screen.getByRole('tabpanel')).toBe(panel);
+    expect(panel).not.toHaveAttribute('aria-busy');
   });
 
   it('says so plainly when the skill cannot be loaded', async () => {
