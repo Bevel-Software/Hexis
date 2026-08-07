@@ -5,6 +5,7 @@ import {
   WorkspaceContext,
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
+import { AdminContext, type AdminContextValue } from '../../admin/state/admin.context';
 import { LibraryToastProvider } from '../state/toast';
 import { withAuth } from './auth-harness';
 
@@ -32,6 +33,19 @@ function workspace(kbDirName: string | null) {
   return { workspaceId: 'target-company-state', kbDirName } as unknown as WorkspaceContextValue;
 }
 
+function admin(isAdmin: boolean): AdminContextValue {
+  return {
+    isAdmin,
+    unreadCount: 0,
+    lastSeen: null,
+    markSeen: vi.fn(),
+    refresh: vi.fn(),
+    rolesConfigCorrupted: false,
+    rolesConfigErrors: [],
+    runRolesRecovery: vi.fn(),
+  };
+}
+
 function LocationProbe() {
   const location = useLocation();
   return (
@@ -46,33 +60,36 @@ function renderDialog(
   kbDirName: string | null = 'knowledge-base',
   canWrite = true,
   existingSkills: string[] = [],
+  isAdmin = true,
 ) {
   const onClose = vi.fn();
   render(
     <MemoryRouter initialEntries={['/skills-and-tools/groups/GTM']}>
-      <WorkspaceContext.Provider value={workspace(kbDirName)}>
-        <LibraryToastProvider>
-          {withAuth(
-            <>
-              <Routes>
-                <Route
-                  path="*"
-                  element={
-                    <AddToGroupDialog
-                      name="GTM"
-                      primaryPath="Groups/GTM"
-                      canWrite={canWrite}
-                      existingSkills={existingSkills}
-                      onClose={onClose}
-                    />
-                  }
-                />
-              </Routes>
-              <LocationProbe />
-            </>,
-          )}
-        </LibraryToastProvider>
-      </WorkspaceContext.Provider>
+      <AdminContext.Provider value={admin(isAdmin)}>
+        <WorkspaceContext.Provider value={workspace(kbDirName)}>
+          <LibraryToastProvider>
+            {withAuth(
+              <>
+                <Routes>
+                  <Route
+                    path="*"
+                    element={
+                      <AddToGroupDialog
+                        name="GTM"
+                        primaryPath="Groups/GTM"
+                        canWrite={canWrite}
+                        existingSkills={existingSkills}
+                        onClose={onClose}
+                      />
+                    }
+                  />
+                </Routes>
+                <LocationProbe />
+              </>,
+            )}
+          </LibraryToastProvider>
+        </WorkspaceContext.Provider>
+      </AdminContext.Provider>
     </MemoryRouter>,
   );
   return {
@@ -228,7 +245,7 @@ describe('AddToGroupDialog: starting an empty SKILL.md', () => {
 // The group page used to fork on `canWrite` into two different flows. It does
 // not any more: everybody gets THIS dialog, and the only thing role changes is
 // what the prompt says happens next — and, now, where the new file lands.
-describe('AddToGroupDialog for a non-writer', () => {
+describe('AddToGroupDialog for an admin non-writer', () => {
   it('offers the same dialog, and tells the truth about review', () => {
     renderDialog('knowledge-base', false);
     expect(
@@ -238,7 +255,7 @@ describe('AddToGroupDialog for a non-writer', () => {
     expect(screen.queryByText(/no review step/)).not.toBeInTheDocument();
   });
 
-  it('still offers both doors', () => {
+  it('still offers an admin both doors', () => {
     renderDialog('knowledge-base', false);
     expect(screen.getByRole('textbox', { name: 'Skill name' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
@@ -264,5 +281,31 @@ describe('AddToGroupDialog for a non-writer', () => {
     // page stays put, and the new skill appears on it as an "In review" card.
     expect(await screen.findByText(/sent to the group's owners for review/)).toBeInTheDocument();
     expect(href()).toBe('/skills-and-tools/groups/GTM');
+  });
+});
+
+describe('AddToGroupDialog for a non-admin', () => {
+  beforeEach(() => {
+    apiMock.createEmptySkill.mockClear();
+  });
+
+  it('removes empty skill creation even when the person can write the group', () => {
+    renderDialog('knowledge-base', true, [], false);
+
+    expect(screen.queryByText('Start an empty SKILL.md')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Skill name' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
+    expect(screen.getByText(/add it to GTM for everyone in the group/)).toBeInTheDocument();
+    expect(screen.queryByText(/Two ways in/)).not.toBeInTheDocument();
+  });
+
+  it('keeps only the reviewed agent path when the person cannot write the group', () => {
+    renderDialog('knowledge-base', false, [], false);
+
+    expect(screen.queryByText('Start an empty SKILL.md')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Skill name' })).not.toBeInTheDocument();
+    expect(screen.getByText(/change request for an owner to review/)).toBeInTheDocument();
+    expect(screen.getByText(/send it to the group as a change request/)).toBeInTheDocument();
+    expect(apiMock.createEmptySkill).not.toHaveBeenCalled();
   });
 });

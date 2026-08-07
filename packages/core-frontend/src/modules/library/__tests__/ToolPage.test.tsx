@@ -142,13 +142,16 @@ describe('ToolPage: frame', () => {
     expect(screen.queryByText(/Tool · /)).toBeNull();
   });
 
-  it('goes back to the gallery from the back link', async () => {
+  it("goes back to the tool's own group from the back link", async () => {
+    // Not the Library root: the reader opened this tool off its group page,
+    // and "back" should land where the tool lives. Derived from the path, so
+    // a deep link gets the same destination as a click.
     renderPage();
     await screen.findByRole('heading', { name: 'heyreach', level: 1 });
 
-    fireEvent.click(screen.getByRole('button', { name: '‹ All skills & tools' }));
+    fireEvent.click(screen.getByRole('button', { name: '‹ GTM' }));
     await waitFor(() =>
-      expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools'),
+      expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools/groups/GTM'),
     );
   });
 

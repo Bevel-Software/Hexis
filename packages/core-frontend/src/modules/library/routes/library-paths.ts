@@ -1,3 +1,4 @@
+import { groupOfPath, isPersonalGroupFolder } from '@bevel-software/platform-shared';
 import { matchPath } from 'react-router-dom';
 import type { LibraryFilter } from '../utils/status';
 
@@ -120,4 +121,28 @@ function decodeSegment(raw: string): string {
   } catch {
     return raw;
   }
+}
+
+/**
+ * Where an item's back link points: the page the item LIVES on.
+ *
+ * `‹ All skills & tools` used to be the one answer, and it stopped being
+ * true the day the Library's root became the all-groups index — a skill
+ * opened from its group page went "back" to a page the reader had never
+ * been on. The honest destination is derivable from the path alone: the
+ * group page for a grouped item, the personal page for a personal one, and
+ * the root only for the legacy shapes that live in neither.
+ */
+export function libraryHomeForItemPath(repoRelativePath: string): {
+  label: string;
+  path: string;
+} {
+  const group = groupOfPath(repoRelativePath);
+  if (group !== null && !isPersonalGroupFolder(group)) {
+    return { label: group, path: pathForGroup(group) };
+  }
+  if (group !== null) {
+    return { label: 'Yours', path: `${LIBRARY_ROOT}/yours` };
+  }
+  return { label: 'All skills & tools', path: LIBRARY_ROOT };
 }

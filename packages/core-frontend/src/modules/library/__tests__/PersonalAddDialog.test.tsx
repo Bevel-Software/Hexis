@@ -5,6 +5,7 @@ import {
   WorkspaceContext,
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
+import { AdminContext, type AdminContextValue } from '../../admin/state/admin.context';
 import { LibraryToastProvider } from '../state/toast';
 import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
 
@@ -35,36 +36,51 @@ const workspace = {
   kbDirName: 'knowledge-base',
 } as unknown as WorkspaceContextValue;
 
+function admin(isAdmin: boolean): AdminContextValue {
+  return {
+    isAdmin,
+    unreadCount: 0,
+    lastSeen: null,
+    markSeen: vi.fn(),
+    refresh: vi.fn(),
+    rolesConfigCorrupted: false,
+    rolesConfigErrors: [],
+    runRolesRecovery: vi.fn(),
+  };
+}
+
 function LocationProbe() {
   const location = useLocation();
   return <div aria-label="href">{location.pathname}</div>;
 }
 
-function renderDialog(existingSkills: string[] = []) {
+function renderDialog(existingSkills: string[] = [], isAdmin = true) {
   const onClose = vi.fn();
   render(
     <MemoryRouter initialEntries={['/skills-and-tools/yours']}>
-      <WorkspaceContext.Provider value={workspace}>
-        <LibraryToastProvider>
-          {withAuth(
-            <>
-              <Routes>
-                <Route
-                  path="*"
-                  element={
-                    <PersonalAddDialog
-                      name={TEST_PERSONAL_GROUP}
-                      existingSkills={existingSkills}
-                      onClose={onClose}
-                    />
-                  }
-                />
-              </Routes>
-              <LocationProbe />
-            </>,
-          )}
-        </LibraryToastProvider>
-      </WorkspaceContext.Provider>
+      <AdminContext.Provider value={admin(isAdmin)}>
+        <WorkspaceContext.Provider value={workspace}>
+          <LibraryToastProvider>
+            {withAuth(
+              <>
+                <Routes>
+                  <Route
+                    path="*"
+                    element={
+                      <PersonalAddDialog
+                        name={TEST_PERSONAL_GROUP}
+                        existingSkills={existingSkills}
+                        onClose={onClose}
+                      />
+                    }
+                  />
+                </Routes>
+                <LocationProbe />
+              </>,
+            )}
+          </LibraryToastProvider>
+        </WorkspaceContext.Provider>
+      </AdminContext.Provider>
     </MemoryRouter>,
   );
   return {
@@ -94,7 +110,7 @@ describe('PersonalAddDialog', () => {
     Reflect.deleteProperty(navigator, 'clipboard');
   });
 
-  it('offers both doors, not just the prompt', () => {
+  it('offers an admin both doors, not just the prompt', () => {
     const { field } = renderDialog();
     expect(field()).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
@@ -142,5 +158,16 @@ describe('PersonalAddDialog', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('already exists');
     expect(create()).toBeDisabled();
     await waitFor(() => expect(apiMock.createEmptySkill).not.toHaveBeenCalled());
+  });
+
+  it('gives a non-admin only the agent-assisted path', () => {
+    renderDialog([], false);
+
+    expect(screen.queryByText('Start an empty SKILL.md')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Skill name' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
+    expect(screen.getByText(/Tell your agent what you need/)).toBeInTheDocument();
+    expect(screen.getByText(/Yours alone until you add it to a group/)).toBeInTheDocument();
+    expect(apiMock.createEmptySkill).not.toHaveBeenCalled();
   });
 });
