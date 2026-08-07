@@ -36,8 +36,6 @@ import {
 import { MaintenanceOverlay } from '../modules/layout/components/MaintenanceOverlay';
 import { AdminProvider } from '../modules/admin/state/admin.context';
 import { RolesCorruptedBanner } from '../modules/admin/components/RolesCorruptedBanner';
-import { ReviewProvider } from '../modules/review/state/ReviewProvider';
-import { ReviewPanelSurface } from '../modules/review/components/ReviewPanelSurface';
 import { ConnectToolsPage } from '../modules/secrets-vault/components/ConnectToolsPage';
 import { SettingsLayout } from '../modules/settings/components/SettingsLayout';
 import { DeploymentPage } from '../modules/settings/components/DeploymentPage';
@@ -74,11 +72,10 @@ import { WorkspaceItemGate } from '../modules/library/routes/WorkspaceItemGate';
 /**
  * The registry-driven application shell for the core modules (workspace, git,
  * pr, access, auth, workflow/SSE, layout, secrets-vault, tools, toolbar,
- * library, review — the UI of the core diff backend — and the admin roles
- * page). Everything else — chat, connectors, routines, watchlist, voice,
- * embed, onboarding, admin LLM/feedback pages — is contributed through the
- * {@link AppRegistry} passed in (see `src/enterprise-registry.tsx` for the
- * current enterprise composition).
+ * library, and the admin roles page). Everything else — chat, connectors,
+ * routines, watchlist, voice, embed, onboarding, admin LLM/feedback pages —
+ * is contributed through the {@link AppRegistry} passed in (see
+ * `src/enterprise-registry.tsx` for the current enterprise composition).
  */
 
 /**
@@ -140,14 +137,18 @@ function AuthenticatedAppInner() {
   // Registry-provided wrappers (chat, onboarding-import, agent ports, …)
   // apply INSIDE the core providers below — so they can read workspace/git
   // state — but OUTSIDE the layout, so every pane (including registered ones)
-  // sees them. `providers[0]` ends up outermost. ReviewProvider is CORE (the
-  // UI of the core diff/pending-changes backend) and sits innermost — the
-  // same slot it occupied when it was registry-provided.
+  // sees them. `providers[0]` ends up outermost.
+  //
+  // The review-agent-changes surface (ReviewProvider + ReviewPanelSurface,
+  // over the diff backend's backup ledger) is deliberately NOT mounted: its
+  // ledger cannot yet tell an agent's direct edit apart from a proposal the
+  // agent made through a change request, so the panel double-reported
+  // suggestions and its verbs collided with the CR review flow. The module
+  // stays in the tree for when that distinction exists — a registry can also
+  // re-mount it via `providers` + `fileViewerPanels`.
   const chrome = registry.providers.reduceRight<ReactNode>(
     (children, wrap) => wrap(children),
-    <ReviewProvider>
-      <AppChrome />
-    </ReviewProvider>,
+    <AppChrome />,
   );
 
   return (
@@ -516,18 +517,14 @@ function AppShell() {
  * build adds to the app rather than reordering what core already put there.
  */
 export function CoreAppShell({ registry }: { registry: AppRegistry }) {
-  // Core contributions merge ahead of registry-contributed ones: the review
-  // file-viewer panel (core — it renders the pending-changes session served
-  // by the core diff backend at /api/workspace/:id/review*) and the core
+  // Core contributions merge ahead of registry-contributed ones: the core
   // apps (Knowledge + Skills & Tools) that the switcher and AppChrome read.
+  // The review file-viewer panel is no longer registered here — see the note
+  // on `chrome` above.
   const mergedRegistry = useMemo<AppRegistry>(
     () => ({
       ...registry,
       apps: [...CORE_APPS, ...registry.apps],
-      fileViewerPanels: [
-        { id: 'review', Component: ReviewPanelSurface },
-        ...registry.fileViewerPanels.filter((p) => p.id !== 'review'),
-      ],
     }),
     [registry],
   );
