@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
 
 /**
@@ -61,12 +61,20 @@ describe('DeploymentPage', () => {
     renderPage(admin(false));
     expect(screen.getByText(/Admins only/)).toBeInTheDocument();
     expect(screen.queryByText('Provider address')).toBeNull();
+    // Never fetched, not merely never rendered: the page already told them
+    // this is not theirs, so a request nothing renders is pure noise.
+    expect(apiMock.fetchSetupStatus).not.toHaveBeenCalled();
   });
 
-  it('offers a retry when the status cannot be loaded', async () => {
+  it('offers a retry when the status cannot be loaded, and the retry fetches again', async () => {
     apiMock.fetchSetupStatus.mockRejectedValueOnce(new Error('down'));
     renderPage(admin(true));
     expect(await screen.findByText(/Couldn't load the deployment settings/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    expect(apiMock.fetchSetupStatus).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(apiMock.fetchSetupStatus).toHaveBeenCalledTimes(2));
+    // The second answer (the beforeEach default) is the real settings.
+    expect(await screen.findByText('Provider address')).toBeInTheDocument();
   });
 });

@@ -33,6 +33,10 @@ export function DeploymentPage() {
   const [loaded, setLoaded] = useState(false);
 
   const refresh = useCallback(() => {
+    // Non-admins never fetch: the endpoint would answer them safely (status
+    // without settings), but this page has already told them it is not
+    // theirs — a request whose answer nothing renders is noise.
+    if (!isAdmin) return;
     fetchSetupStatus()
       .then((s) => {
         setStatus(s);
@@ -40,7 +44,7 @@ export function DeploymentPage() {
       })
       .catch(() => setFailed(true))
       .finally(() => setLoaded(true));
-  }, []);
+  }, [isAdmin]);
 
   useEffect(refresh, [refresh]);
 

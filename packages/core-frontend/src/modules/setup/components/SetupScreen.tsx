@@ -279,14 +279,23 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
       setStillMissing(result.complete || result.awaitingRestart ? [] : missing);
       if (result.awaitingRestart) {
         setNeedsRestart(true);
+        // The settings page still wants fresh status — the notice above says
+        // what the restart is for; the form should show what was saved.
+        if (variant === 'settings') onSaved();
         return;
       }
-      if (result.complete) {
+      if (result.complete && variant === 'setup') {
         // A FULL RELOAD, not just re-rendering the gate. The branch model the
         // browser holds was fetched before any of this existed, and every
         // module that reads it took its value then — so the app behind the
         // gate would build URLs for a branch called nothing. Reloading is the
         // one thing guaranteed to re-fetch it everywhere.
+        //
+        // SETUP MODE ONLY: on the settings page the app around the form is
+        // already running against a fetched branch model, and yanking the
+        // whole document out from under an admin who just pressed Save is
+        // not a refresh, it is a punishment. Rare branch-model edits there
+        // arrive with `restartRequired`, which the notice explains.
         window.location.reload();
         return;
       }

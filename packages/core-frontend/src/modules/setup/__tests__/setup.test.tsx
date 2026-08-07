@@ -17,6 +17,7 @@ vi.mock('../services/setup.api', async () => {
 });
 
 import { SetupGate } from '../components/SetupGate';
+import { SetupScreen } from '../components/SetupScreen';
 import { SettingsProblems, type SettingStatus } from '../services/setup.api';
 
 const KB = 'knowledge-base' as const;
@@ -437,6 +438,44 @@ describe('SetupScreen', () => {
     expect(api.saveSettings).toHaveBeenCalledWith(
       expect.objectContaining({ defaultBranch: 'main', protectedBranches: 'main' }),
     );
+  });
+
+  it('settings mode: a COMPLETE save refreshes in place, never reloads the document', async () => {
+    // In setup mode a complete save reloads the page (the gate's browser
+    // holds no branch model yet). On the Deployment page the app around the
+    // form is already running — a save must refetch status, not yank the
+    // document out from under the admin. `onSaved` being called at all is
+    // the distinguishing observable: the setup path reloads INSTEAD of
+    // calling it.
+    const onSaved = vi.fn();
+    render(<SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" />);
+    api.saveSettings.mockResolvedValue({
+      restartRequired: false,
+      complete: true,
+      settings: SETTINGS,
+    });
+
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  });
+
+  it('settings mode: an awaiting-restart save refreshes AND keeps the restart notice', async () => {
+    const onSaved = vi.fn();
+    render(<SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" />);
+    api.saveSettings.mockResolvedValue({
+      restartRequired: true,
+      complete: false,
+      awaitingRestart: true,
+      settings: SETTINGS,
+    });
+
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(await screen.findByText(/needs a restart/)).toBeInTheDocument();
   });
 
   it('derives the standard branch name on save when the repository is empty', async () => {
