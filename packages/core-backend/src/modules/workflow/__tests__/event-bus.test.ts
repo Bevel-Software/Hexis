@@ -348,6 +348,9 @@ describe('WorkflowEventBus', () => {
       ).not.toThrow();
       // …and the listeners after the bad one still ran.
       expect(after).toEqual(['fs-tree-changed']);
+      // The containment is LOGGED, not silent — a listener dying quietly
+      // would be undebuggable.
+      expect(warn).toHaveBeenCalledWith('[event-bus] onEmit listener threw:', 'bad listener');
       warn.mockRestore();
     });
   });

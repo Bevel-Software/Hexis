@@ -310,6 +310,14 @@ export function FileViewer() {
     try {
       await rejectPendingContent();
       setPendingDeferred(false);
+    } catch (err) {
+      // Reject WRITES — the baseline back over the agent's bytes — and a
+      // failed write must not read as "rejected". Same banner the save path
+      // uses. (Accept performs no write, so it has no failure to surface.)
+      setSaveError({
+        kind: 'generic',
+        message: `Couldn't reject the update: ${err instanceof Error ? err.message : String(err)}`,
+      });
     } finally {
       setIsSubmitting(false);
     }
