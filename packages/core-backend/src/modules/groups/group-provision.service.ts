@@ -101,9 +101,12 @@ export class GroupProvisionService {
   async createGroup(user: AuthUser, rawName: string): Promise<ProvisionedGroup> {
     const name = rawName.trim();
     if (!name) throw new GroupProvisionError('A group needs a name.', 422);
-    if (/[/\\]/.test(name) || name === '.' || name === '..' || name.startsWith('.')) {
+    // eslint-disable-next-line no-control-regex -- NUL and control chars are
+    // exactly what a filesystem path cannot carry; refusing them here keeps
+    // the refusal a 422 instead of the fs layer's 500.
+    if (/[/\\\u0000-\u001f\u007f]/.test(name) || name === '.' || name === '..' || name.startsWith('.')) {
       throw new GroupProvisionError(
-        'A group name can\'t contain / or \\, or start with a dot.',
+        'A group name can\'t contain / or \\ or control characters, or start with a dot.',
         422,
       );
     }

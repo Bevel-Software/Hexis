@@ -87,7 +87,7 @@ describe('GroupProvisionService.createGroup', () => {
   });
 
   it('refuses names the filesystem or the model cannot carry with 422', async () => {
-    for (const bad of ['', '  ', 'a/b', 'a\\b', '.', '..', '.hidden', 'personal-anything']) {
+    for (const bad of ['', '  ', 'a/b', 'a\\b', '.', '..', '.hidden', 'personal-anything', 'a\u0000b', 'a\tb']) {
       await expect(h.svc.createGroup(USER, bad)).rejects.toBeInstanceOf(GroupProvisionError);
       await expect(h.svc.createGroup(USER, bad)).rejects.toMatchObject({ status: 422 });
     }

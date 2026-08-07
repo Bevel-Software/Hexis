@@ -10,7 +10,7 @@ The add-skill dialogs' "open the folder in the workspace" link is replaced by
 a door that creates the skill: name it, and an empty `SKILL.md` (frontmatter
 fence, empty description) is written and opened. Writing into a group you
 manage lands directly; anyone else's creation rides the existing propose flow
-and arrives as a change request. The write is an exclusive create end to end
+and arrives as a change request. The write is an exclusive create end-to-end
 (fs flag `wx` behind a new `ifAbsent` option), so a stale catalog or a
 concurrent creator gets a 409 instead of silently emptying an existing skill.
 
