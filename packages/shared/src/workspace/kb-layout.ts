@@ -1,3 +1,5 @@
+import { branchSegment } from '../git/branchAuthor.js';
+
 /**
  * Top-level layout of the KB repo (inside the `KB_DIR_NAME` clone).
  *
@@ -52,6 +54,36 @@ export const KNOWLEDGE_BASE_DIR = 'KnowledgeBase';
  * its own access rule. That duplication is the design, not an accident.
  */
 export const GROUPS_DIR = 'Groups';
+
+/**
+ * The reserved name prefix marking a personal folder under `Groups/` —
+ * `Groups/personal-<user-id>/` is where a person's own skills live: created
+ * implicitly on their first personal skill, private by default (its seeded
+ * `access.md` names only its owner), and never listed as a group.
+ *
+ * The marker is STRUCTURAL on purpose: every surface that enumerates groups
+ * (catalog scan, sidebar, counts) filters on the name alone, with no access
+ * lookup needed, and the group-creation endpoint refuses names carrying the
+ * prefix — so a regular group can never squat on someone's personal folder.
+ */
+export const PERSONAL_GROUP_PREFIX = 'personal-';
+
+/**
+ * The one personal folder name for a user — keyed to the STABLE user id, not
+ * the email: emails change, and a folder keyed to one would be orphaned the
+ * day it does. Ids are opaque, so the name carries no PII into git history
+ * (which this platform never rewrites). `branchSegment` is THE segment
+ * sanitizer — the id lands in the folder name exactly as it lands in the
+ * user's suggestion-branch names, so the two spellings can never disagree.
+ */
+export function personalGroupFolderName(userId: string): string {
+  return `${PERSONAL_GROUP_PREFIX}${branchSegment(userId)}`;
+}
+
+/** Whether a `Groups/` child is somebody's personal folder. */
+export function isPersonalGroupFolder(folderName: string): boolean {
+  return folderName.startsWith(PERSONAL_GROUP_PREFIX);
+}
 
 /**
  * The group a repo-root-relative path belongs to, or `null` for content that

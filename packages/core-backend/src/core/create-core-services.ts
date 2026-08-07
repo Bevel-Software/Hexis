@@ -33,7 +33,7 @@ import { AccessControlService } from '../modules/access/access-control.service.j
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
-import { GroupIndexService, JoinRequestsService } from '../modules/groups/index.js';
+import { GroupIndexService, GroupProvisionService, JoinRequestsService } from '../modules/groups/index.js';
 import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
@@ -103,6 +103,7 @@ export interface CoreServices {
   pendingSkillsService: PendingSkillsService;
   toolManualService: ToolManualService;
   groupIndexService: GroupIndexService;
+  groupProvisionService: GroupProvisionService;
   joinRequestsService: JoinRequestsService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
@@ -380,6 +381,17 @@ export async function createCoreServices(
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
   const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
+  // Group provisioning — the one privileged door that brings `Groups/<name>/`
+  // folders into existence (named groups and personal folders alike). Commits
+  // INLINE through the same pipeline the pending-commits worker uses, so the
+  // folder's rules are at HEAD before the endpoint answers.
+  const groupProvisionService = new GroupProvisionService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    kbDirName,
+    eventBus,
+  );
 
   // Pending skills: the other half of the catalog — skills that exist only on
   // an open change request's branch. Built here rather than beside
@@ -648,6 +660,7 @@ export async function createCoreServices(
     pendingSkillsService,
     toolManualService,
     groupIndexService,
+    groupProvisionService,
     joinRequestsService,
     authService,
     authMiddleware,

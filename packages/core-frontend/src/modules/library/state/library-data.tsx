@@ -7,7 +7,19 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { groupOfPath } from '@bevel-software/platform-shared';
+import { groupOfPath, isPersonalGroupFolder } from '@bevel-software/platform-shared';
+
+/**
+ * The group a card files under — with personal folders mapped to `null`, the
+ * "yours alone" bucket. A personal folder (`Groups/personal-<id>/`) is where
+ * a person's own skills live; it is a place, not a group, and the only
+ * personal items a caller can ever read are their own (the folder's seeded
+ * access.md names nobody else), so `null` here always means "yours".
+ */
+function displayGroupOf(path: string): string | null {
+  const group = groupOfPath(path);
+  return group !== null && isPersonalGroupFolder(group) ? null : group;
+}
 import { useLibraryData, type LibraryData } from '../hooks/useLibraryData';
 import { listGroups, type GroupSummary } from '../services/groups.api';
 import {
@@ -116,7 +128,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: data.ownedSkills.has(s.name),
-      group: groupOfPath(s.path),
+      group: displayGroupOf(s.path),
       path: s.path,
       version: s.version,
       status: skillStatus(
@@ -140,7 +152,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: false,
-      group: groupOfPath(s.path),
+      group: displayGroupOf(s.path),
       path: s.path,
       version: s.version,
       status: { state: 'ok', text: 'In review' },
@@ -159,7 +171,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       // manual yet (see report) — the card stays clean; detail lives behind it.
       description: '',
       owned: t.canWrite,
-      group: groupOfPath(t.path),
+      group: displayGroupOf(t.path),
       path: t.path,
       status: toolStatus(t),
     }));

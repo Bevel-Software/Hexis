@@ -1,33 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import {
-  WorkspaceContext,
-  type WorkspaceContextValue,
-} from '../../workspace/state/workspace.context';
 
 /**
  * Making a group.
  *
- * A group IS a folder, so the whole feature is one `mkdir` under `Groups/` and
- * a navigation to the page that folder now has. What is worth testing is the
- * two ways it can go wrong before that call — a name that collides with a group
- * you cannot even see, and a name that would create a nested folder — plus the
- * fact that the caller lands somewhere real afterwards.
+ * A group comes from the dedicated provisioning endpoint — the server owns
+ * the folder, the seeded access.md and the commit. What is worth testing here
+ * is the two refusals the dialog can reach before the call — a name that
+ * collides with a group you cannot even see, and a name that would create a
+ * nested folder — plus the fact that the caller lands somewhere real
+ * afterwards, and that the server's own refusal is what the toast shows.
  */
 
-const wsMock = vi.hoisted(() => ({ createDirectory: vi.fn() }));
-vi.mock('../../workspace/services/workspace.api', () => ({
-  createDirectory: wsMock.createDirectory,
+const groupsMock = vi.hoisted(() => ({ createGroup: vi.fn() }));
+vi.mock('../services/groups.api', () => ({
+  createGroup: groupsMock.createGroup,
 }));
 
 import { NewGroupDialog } from '../components/NewGroupDialog';
 import { LibraryToastProvider } from '../state/toast';
-
-const workspace = {
-  workspaceId: 'target-company-state',
-  kbDirName: 'knowledge-base',
-} as unknown as WorkspaceContextValue;
 
 function LocationProbe() {
   const location = useLocation();
@@ -39,19 +31,17 @@ function renderDialog(existing: string[] = ['GTM', 'Finance']) {
   const onClose = vi.fn();
   render(
     <MemoryRouter initialEntries={['/skills-and-tools']}>
-      <WorkspaceContext.Provider value={workspace}>
-        <LibraryToastProvider>
-          <Routes>
-            <Route
-              path="*"
-              element={
-                <NewGroupDialog existing={existing} onClose={onClose} onCreated={onCreated} />
-              }
-            />
-          </Routes>
-          <LocationProbe />
-        </LibraryToastProvider>
-      </WorkspaceContext.Provider>
+      <LibraryToastProvider>
+        <Routes>
+          <Route
+            path="*"
+            element={
+              <NewGroupDialog existing={existing} onClose={onClose} onCreated={onCreated} />
+            }
+          />
+        </Routes>
+        <LocationProbe />
+      </LibraryToastProvider>
     </MemoryRouter>,
   );
   return {
@@ -65,8 +55,12 @@ function renderDialog(existing: string[] = ['GTM', 'Finance']) {
 
 describe('NewGroupDialog', () => {
   beforeEach(() => {
-    wsMock.createDirectory.mockReset();
-    wsMock.createDirectory.mockResolvedValue(undefined);
+    groupsMock.createGroup.mockReset();
+    // A folder name that DIFFERS from the input, so a dialog that navigates
+    // with the typed name instead of the server's answer fails here.
+    groupsMock.createGroup.mockImplementation(async (name: string) => ({
+      folder: `${name}-canonical`,
+    }));
   });
 
   it('will not create an unnamed group', () => {
@@ -79,15 +73,10 @@ describe('NewGroupDialog', () => {
     fireEvent.change(field(), { target: { value: '  Design  ' } });
     fireEvent.click(submit());
 
-    // Trimmed, and addressed through the KB dir — the resolver reads paths
-    // repo-relative, so the prefix is not optional.
-    await waitFor(() =>
-      expect(wsMock.createDirectory).toHaveBeenCalledWith(
-        expect.any(String),
-        'knowledge-base/Groups/Design',
-      ),
-    );
-    await waitFor(() => expect(pathname()).toBe('/skills-and-tools/groups/Design'));
+    // Trimmed — the endpoint owns everything after the name.
+    await waitFor(() => expect(groupsMock.createGroup).toHaveBeenCalledWith('Design'));
+    // The route is built from the SERVER's folder, not the typed name.
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools/groups/Design-canonical'));
     expect(onCreated).toHaveBeenCalledTimes(1);
   });
 
@@ -109,13 +98,17 @@ describe('NewGroupDialog', () => {
     expect(submit()).toBeDisabled();
   });
 
-  it('says so when the folder could not be created, and stays open', async () => {
-    wsMock.createDirectory.mockRejectedValue(new Error('nope'));
+  it("shows the server's own refusal and stays open", async () => {
+    // The server's check runs against the live tree (ours against a stale
+    // catalog), so ITS words are the ones worth showing.
+    groupsMock.createGroup.mockRejectedValue(
+      new Error('Group names starting with "personal-" are reserved.'),
+    );
     const { field, submit, onClose } = renderDialog();
-    fireEvent.change(field(), { target: { value: 'Design' } });
+    fireEvent.change(field(), { target: { value: 'personal-notes' } });
     fireEvent.click(submit());
 
-    expect(await screen.findByText(/Couldn't create that group/)).toBeInTheDocument();
+    expect(await screen.findByText(/reserved/)).toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,4 @@
-import { DEFAULT_BRANCH, type PullRequestSummary } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, GROUPS_DIR, type PullRequestSummary } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
 import { createBranch } from '../../git/services/git.api';
@@ -6,6 +6,7 @@ import { getOrCreateWorkspace, writeFile } from '../../workspace/services/worksp
 import { openChangeRequest } from '../../pr/services/pr-open.api';
 import { postPrComment } from '../../pr/services/pr-comments.api';
 import { branchSegment } from '../../change-requests/services/propose.api';
+import { ensurePersonalGroup } from './groups.api';
 
 /**
  * Library data access. Skills come from the browser skill routes
@@ -145,7 +146,9 @@ export interface ProposeChangeInput {
  * proposal that rewrites a step and its example touches two files and is one
  * decision, so it has to arrive as one thing to approve.
  */
-export async function proposeChange(input: ProposeChangeInput): Promise<{ branch: string }> {
+export async function proposeChange(
+  input: ProposeChangeInput,
+): Promise<{ branch: string; kbDirName: string }> {
   const branch = input.existingCr?.branch ?? suggestionBranchFor(input.userEmail, input.skillName);
 
   if (!input.existingCr) {
@@ -176,5 +179,101 @@ export async function proposeChange(input: ProposeChangeInput): Promise<{ branch
       description: input.note || undefined,
     });
   }
-  return { branch };
+  return { branch, kbDirName: workspace.kbDirName };
+}
+
+/**
+ * What a brand-new SKILL.md contains: the frontmatter fence, an empty
+ * `description`, and nothing else.
+ *
+ * Not zero bytes, and the difference matters. The catalog reads a skill's
+ * description straight out of this frontmatter (`skills.service.ts`
+ * `parseSkillFrontmatter`), so a file with no fence at all lists as a card with
+ * a blank subtitle and no visible hint that a description is a thing it could
+ * have. The fence is the shape of the thing; the emptiness inside it is the
+ * point. The skill's NAME is deliberately not written here — identity falls
+ * back to the folder name, and two places to change a skill's name is one place
+ * too many.
+ */
+export const EMPTY_SKILL_MD = '---\ndescription:\n---\n\n';
+
+export type CreateSkillInput = {
+  /** The skill's name, which becomes its folder name. */
+  name: string;
+  userEmail: string;
+  userName: string;
+} & (
+  | {
+      /** Repo-root-relative group folder the skill lands in — `Groups/GTM`. */
+      parentPath: string;
+      /** False (or unknown) routes the new file through a change request instead. */
+      canWrite: boolean;
+    }
+  | {
+      /**
+       * The skill is the caller's own: it lands in their personal folder
+       * (`Groups/personal-<id>/`), which the provisioning endpoint ensures —
+       * and commits — first. Always a direct write: the ensured folder's
+       * access.md names the caller as owner, so the write gate passes on its
+       * own, with no permission special-case anywhere.
+       */
+      personal: true;
+    }
+);
+
+export interface CreatedSkill {
+  /** Repo-root-relative path of the new `SKILL.md`. */
+  repoRelativePath: string;
+  /** Workspace-relative path — what the file route wants. */
+  workspacePath: string;
+  /** Where it landed: the default branch, or the author's suggestion branch. */
+  branch: string;
+  /** True when it went in directly; false when it arrived as a change request. */
+  direct: boolean;
+}
+
+/**
+ * Make a new, empty skill: `<parentPath>/<name>/SKILL.md`.
+ *
+ * The folder is not created separately — `writeFile` mkdir's the parents — so
+ * this is one round trip, and there is no window in which an empty skill folder
+ * exists without the file that makes it a skill.
+ *
+ * Where it lands depends on whether the caller may write the destination, which
+ * is the same fork the "add" dialogs already describe in words: an owner's skill
+ * goes straight onto the default branch, and everyone else's arrives on their
+ * suggestion branch with a change request open against it. Callers get `direct`
+ * back so they can say which of the two happened rather than guess.
+ */
+export async function createEmptySkill(input: CreateSkillInput): Promise<CreatedSkill> {
+  const parentPath =
+    'personal' in input
+      ? `${GROUPS_DIR}/${(await ensurePersonalGroup()).folder}`
+      : input.parentPath;
+  const repoRelativePath = `${parentPath}/${input.name}/SKILL.md`;
+
+  if (!('personal' in input) && !input.canWrite) {
+    const { branch, kbDirName } = await proposeChange({
+      skillName: input.name,
+      repoRelativePath,
+      content: EMPTY_SKILL_MD,
+      userEmail: input.userEmail,
+      userName: input.userName,
+    });
+    return {
+      repoRelativePath,
+      workspacePath: `${kbDirName}/${repoRelativePath}`,
+      branch,
+      direct: false,
+    };
+  }
+
+  const { workspace } = await getOrCreateWorkspace(DEFAULT_BRANCH);
+  const workspacePath = `${workspace.kbDirName}/${repoRelativePath}`;
+  // Exclusive create: the panel's collision check runs against a skill list
+  // that can be stale, so the backend must be the one to refuse a name that
+  // was claimed since — a plain write here would silently empty the existing
+  // SKILL.md. The 409 surfaces through the panel's normal error toast.
+  await writeFile(workspace.id, workspacePath, EMPTY_SKILL_MD, { ifAbsent: true });
+  return { repoRelativePath, workspacePath, branch: DEFAULT_BRANCH, direct: true };
 }

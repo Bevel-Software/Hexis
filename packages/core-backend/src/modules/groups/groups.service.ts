@@ -5,6 +5,7 @@ import {
   DEFAULT_BRANCH,
   GROUPS_DIR,
   groupOfPath,
+  isPersonalGroupFolder,
 } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
@@ -135,6 +136,10 @@ export class GroupIndexService implements IGroupIndexService {
     }
     for (const child of children) {
       if (!child.isDirectory() || child.name.startsWith('.')) continue;
+      // Personal folders live under Groups/ but are not groups: one exists
+      // per person, private by construction, and listing them would put a
+      // locked row per employee in everyone's index.
+      if (isPersonalGroupFolder(child.name)) continue;
       byName.set(child.name, [`${GROUPS_DIR}/${child.name}`]);
     }
     return byName;
