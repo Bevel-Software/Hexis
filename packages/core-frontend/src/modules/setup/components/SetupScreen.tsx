@@ -16,7 +16,7 @@ const FIELDS: Record<
 > = {
   kbRepoUrl: {
     label: 'Repository address',
-    help: 'Where your knowledge base is stored. Copy the address from your repository page. GitHub, GitLab, Bitbucket and Azure DevOps all work. A brand-new empty repository is fine.',
+    help: 'Where your knowledge, skills and tools are stored. Copy the address from your repository page: GitHub, GitLab, Bitbucket and Azure DevOps all work. A brand-new empty repository is fine.',
     placeholder: 'https://github.com/acme/knowledge-base.git',
   },
   gitToken: {
@@ -30,13 +30,13 @@ const FIELDS: Record<
     // expects beside a token, so it is filled in automatically and only
     // surfaces under Advanced for hosts we cannot recognise.
     label: 'Token username',
-    help: 'A fixed value the git host expects next to the token. Not your account name. Filled in automatically for known hosts; only change it for a self-hosted server.',
+    help: 'A fixed value the git host expects next to the token, not your account name. Filled in automatically for known hosts; only change it for a self-hosted server.',
     placeholder: 'x-access-token',
     advanced: true,
   },
   kbDirName: {
     label: 'Folder name',
-    help: 'What the knowledge base folder is called. Cosmetic. Leave it as it is.',
+    help: 'What the repository folder is called inside each workspace. Cosmetic; leave it as it is.',
     placeholder: 'knowledge-base',
     advanced: true,
   },
@@ -48,7 +48,7 @@ const FIELDS: Record<
   },
   protectedBranches: {
     label: 'Branches that need approval',
-    help: 'Nobody can change these directly. Edits arrive as a request someone approves. Separate several with commas. The main branch has to be one of them.',
+    help: 'Nobody can change these directly; edits arrive as a request someone approves. Separate several with commas. The main branch has to be one of them.',
     placeholder: 'main',
     advanced: true,
   },
@@ -79,7 +79,7 @@ const FIELDS: Record<
   },
   allowedEmailDomains: {
     label: 'Allowed email domains',
-    help: 'Only people with an address at these domains can sign in this way. Separate several with commas. Leave blank to allow any address. Safe with a provider that only serves your organisation, risky with one that does not.',
+    help: 'Only people with an address at these domains can sign in this way. Separate several with commas. Leave blank to allow any address: safe with a provider that only serves your organisation, risky with one that does not.',
     placeholder: 'example.com',
   },
 };
@@ -96,9 +96,9 @@ const REQUIRED_KEYS = ['kbRepoUrl', 'gitToken', 'defaultBranch', 'protectedBranc
 const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[] = [
   {
     id: 'knowledge-base',
-    title: 'Knowledge base',
+    title: 'Knowledge, skills & tools',
     blurb:
-      'Where everything is stored. Connect a git repository. An empty one is fine, it will be set up for you. And test it; the rest fills itself in.',
+      'Where everything lives, together in one git repository: knowledge, skills and tools. Connect one (an empty repository is fine, it will be set up for you) and test it; the rest fills itself in.',
   },
   {
     id: 'sign-in',
@@ -112,6 +112,15 @@ interface Props {
   settings: SettingStatus[];
   /** Re-read the status after a save, so the gate can let the app through. */
   onSaved(): void;
+  /**
+   * Where the screen is standing. `setup` (the default) is the first-run
+   * gate: full-page chrome, its own heading. `settings` is the SAME form
+   * embedded in the admin Deployment page — the host owns the chrome and the
+   * words around it, so the wrapper and heading stay out of the way. One
+   * component on purpose: the fields, the env-lock rule, the connection test
+   * and the restart banners must never drift between first run and later.
+   */
+  variant?: 'setup' | 'settings';
 }
 
 /**
@@ -130,7 +139,7 @@ interface Props {
  * silently outranking the infrastructure config someone is reviewing in a
  * repo, which is the same rule the server enforces.
  */
-export function SetupScreen({ settings, onSaved }: Props) {
+export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [problems, setProblems] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -194,7 +203,11 @@ export function SetupScreen({ settings, onSaved }: Props) {
         result.defaultBranch ||
         ['main', 'master', 'trunk'].find((name) => result.branches?.includes(name)) ||
         result.branches?.[0] ||
-        null;
+        // An EMPTY repository has no branch to report, but it will be seeded
+        // with whatever is configured here, so the conventional name is the
+        // right suggestion. Suggesting nothing was the one way "Connected"
+        // could still end, silently, in a save that did not finish setup.
+        (result.empty ? 'main' : null);
       if (result.ok && suggested) {
         setDraft((d) => ({
           ...d,
@@ -223,7 +236,9 @@ export function SetupScreen({ settings, onSaved }: Props) {
       const suggested =
         result.defaultBranch ||
         ['main', 'master', 'trunk'].find((name) => result.branches?.includes(name)) ||
-        result.branches?.[0];
+        result.branches?.[0] ||
+        // Same empty-repository rule as the visible test button above.
+        (result.empty ? 'main' : undefined);
       if (!suggested) return null;
       setTest(result);
       const derived: Record<string, string> = {};
@@ -264,14 +279,23 @@ export function SetupScreen({ settings, onSaved }: Props) {
       setStillMissing(result.complete || result.awaitingRestart ? [] : missing);
       if (result.awaitingRestart) {
         setNeedsRestart(true);
+        // The settings page still wants fresh status — the notice above says
+        // what the restart is for; the form should show what was saved.
+        if (variant === 'settings') onSaved();
         return;
       }
-      if (result.complete) {
+      if (result.complete && variant === 'setup') {
         // A FULL RELOAD, not just re-rendering the gate. The branch model the
         // browser holds was fetched before any of this existed, and every
         // module that reads it took its value then — so the app behind the
         // gate would build URLs for a branch called nothing. Reloading is the
         // one thing guaranteed to re-fetch it everywhere.
+        //
+        // SETUP MODE ONLY: on the settings page the app around the form is
+        // already running against a fetched branch model, and yanking the
+        // whole document out from under an admin who just pressed Save is
+        // not a refresh, it is a punishment. Rare branch-model edits there
+        // arrive with `restartRequired`, which the notice explains.
         window.location.reload();
         return;
       }
@@ -329,6 +353,18 @@ export function SetupScreen({ settings, onSaved }: Props) {
           </datalist>
         )}
         <p className="mt-1 text-meta text-ink-faint">{copy.help}</p>
+        {/* Only AFTER setup: on first run there is nothing yet to lose, so
+            the caution would be noise. Once a deployment is live, this field
+            is the one whose careless edit strands everything. */}
+        {variant === 'settings' && setting.key === 'kbRepoUrl' && (
+          <p className="mt-1.5 text-meta text-ink-muted">
+            <b className="font-semibold">
+              Only change this if the same repository was moved or renamed.
+            </b>{' '}
+            Pointing it at a different repository does not carry anything over: the knowledge,
+            skills and tools stay in the old one, and open change requests will stop working.
+          </p>
+        )}
         {problems[setting.key] && (
           <p id={`${setting.key}-problem`} role="alert" className="mt-1 text-meta text-danger">
             {problems[setting.key]}
@@ -344,14 +380,18 @@ export function SetupScreen({ settings, onSaved }: Props) {
   // it would scroll within. Being exactly the height of the root is what makes
   // the overflow this element's own to handle.
   return (
-    <div className="h-full overflow-y-auto bg-sunken px-6 py-12">
-      <div className="mx-auto w-full max-w-2xl">
-        <h1 className="text-display font-semibold text-ink">Set up this deployment</h1>
-        <p className="mt-2 max-w-[62ch] text-lede text-ink-muted">
-          One thing is needed before anyone can use it: somewhere to keep the knowledge base.
-          Connect a repository below, test it, and the rest fills itself in. Single sign-on is
-          optional and can wait.
-        </p>
+    <div className={variant === 'setup' ? 'h-full overflow-y-auto bg-sunken px-6 py-12' : ''}>
+      <div className={variant === 'setup' ? 'mx-auto w-full max-w-2xl' : 'w-full max-w-2xl'}>
+        {variant === 'setup' && (
+          <>
+            <h1 className="text-display font-semibold text-ink">Set up this deployment</h1>
+            <p className="mt-2 max-w-[62ch] text-lede text-ink-muted">
+              One thing is needed before anyone can use it: somewhere to keep your knowledge,
+              skills and tools. Connect a repository below, test it, and the rest fills itself in.
+              Single sign-on is optional and can wait.
+            </p>
+          </>
+        )}
 
         <div ref={noticeRef}>
           {error && (
@@ -365,14 +405,14 @@ export function SetupScreen({ settings, onSaved }: Props) {
               that silently failed. */}
           {needsRestart && (
             <Banner tone="wait" role="status" className="mt-6">
-              Saved. This deployment needs a restart to pick the branch settings up. Everything
+              Saved. This deployment needs a restart to pick the branch settings up; everything
               else is in place.
             </Banner>
           )}
 
           {stillMissing.length > 0 && (
             <Banner tone="wait" role="status" className="mt-6">
-              Saved what you filled in. But this deployment still needs{' '}
+              Saved what you filled in, but this deployment still needs{' '}
               <b className="font-semibold">{stillMissing.join(', ')}</b> before anyone can use it.
               Test the connection and the version fields fill themselves in.
             </Banner>
@@ -457,7 +497,7 @@ export function SetupScreen({ settings, onSaved }: Props) {
                       >
                         {test.ok
                           ? test.empty
-                            ? 'Connected. The repository is empty. It will be set up for you on first use.'
+                            ? 'Connected. The repository is empty; it will be set up for you on first use, and the version fields below are filled in with the standard name.'
                             : `Connected. Found ${test.branches?.length ?? 0} branch${
                                 test.branches?.length === 1 ? '' : 'es'
                               }.`
@@ -489,7 +529,7 @@ export function SetupScreen({ settings, onSaved }: Props) {
                     <summary className="cursor-pointer list-none text-detail font-medium text-ink-muted marker:hidden hover:text-ink">
                       Advanced
                       <span className="ml-1.5 text-meta text-ink-faint">
-                       : sensible defaults; open only if you need to change one
+                        (sensible defaults; open only if you need to change one)
                       </span>
                     </summary>
                     <div className="mt-4 space-y-6">

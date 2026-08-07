@@ -17,6 +17,7 @@ vi.mock('../services/setup.api', async () => {
 });
 
 import { SetupGate } from '../components/SetupGate';
+import { SetupScreen } from '../components/SetupScreen';
 import { SettingsProblems, type SettingStatus } from '../services/setup.api';
 
 const KB = 'knowledge-base' as const;
@@ -249,7 +250,7 @@ describe('SetupScreen', () => {
       ),
     );
     expect(screen.queryByRole('heading', { name: 'Single sign-on' })).toBeNull();
-    expect(screen.getByRole('heading', { name: 'Knowledge base' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Knowledge, skills & tools' })).toBeInTheDocument();
   });
 
   /**
@@ -405,7 +406,7 @@ describe('SetupScreen', () => {
    */
   it('keeps the connection test inside the knowledge-base card', async () => {
     await renderScreen();
-    const card = screen.getByRole('heading', { name: 'Knowledge base' }).closest('section');
+    const card = screen.getByRole('heading', { name: 'Knowledge, skills & tools' }).closest('section');
     expect(card).not.toBeNull();
     expect(card).toContainElement(screen.getByRole('button', { name: 'Test connection' }));
     // Above Advanced, because testing is what fills Advanced in.
@@ -439,22 +440,66 @@ describe('SetupScreen', () => {
     );
   });
 
-  it('still saves when the repository cannot name a branch either', async () => {
-    await renderScreen();
-    api.testConnection.mockResolvedValue({ ok: true, empty: true, branches: [], defaultBranch: null });
+  it('settings mode: a COMPLETE save refreshes in place, never reloads the document', async () => {
+    // In setup mode a complete save reloads the page (the gate's browser
+    // holds no branch model yet). On the Deployment page the app around the
+    // form is already running — a save must refetch status, not yank the
+    // document out from under the admin. `onSaved` being called at all is
+    // the distinguishing observable: the setup path reloads INSTEAD of
+    // calling it.
+    const onSaved = vi.fn();
+    render(<SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" />);
     api.saveSettings.mockResolvedValue({
       restartRequired: false,
-      complete: false,
+      complete: true,
       settings: SETTINGS,
     });
-    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS });
 
     await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
     await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
 
-    // Saved what it had, then said what remained — not a refusal up front.
-    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
-    expect(await screen.findByRole('status')).toHaveTextContent('Main branch');
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  });
+
+  it('settings mode: an awaiting-restart save refreshes AND keeps the restart notice', async () => {
+    const onSaved = vi.fn();
+    render(<SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" />);
+    api.saveSettings.mockResolvedValue({
+      restartRequired: true,
+      complete: false,
+      awaitingRestart: true,
+      settings: SETTINGS,
+    });
+
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(await screen.findByText(/needs a restart/)).toBeInTheDocument();
+  });
+
+  it('derives the standard branch name on save when the repository is empty', async () => {
+    await renderScreen();
+    api.testConnection.mockResolvedValue({ ok: true, empty: true, branches: [], defaultBranch: null });
+    api.saveSettings.mockResolvedValue({
+      restartRequired: false,
+      complete: true,
+      settings: SETTINGS,
+    });
+    api.fetchSetupStatus.mockResolvedValue({ complete: true, isAdmin: true, settings: SETTINGS });
+
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    // An EMPTY repository has no branch to report, but it will be seeded with
+    // whatever is configured — so the conventional name is derived and the
+    // save FINISHES setup, instead of succeeding into a "still needs Main
+    // branch" notice about a value the app could have supplied itself.
+    await waitFor(() =>
+      expect(api.saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ defaultBranch: 'main', protectedBranches: 'main' }),
+      ),
+    );
   });
 
   /**
