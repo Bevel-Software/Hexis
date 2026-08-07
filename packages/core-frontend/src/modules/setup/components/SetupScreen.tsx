@@ -16,7 +16,7 @@ const FIELDS: Record<
 > = {
   kbRepoUrl: {
     label: 'Repository address',
-    help: 'Where your knowledge base is stored. Copy the address from your repository page — GitHub, GitLab, Bitbucket and Azure DevOps all work. A brand-new empty repository is fine.',
+    help: 'Where your knowledge, skills and tools are stored. Copy the address from your repository page: GitHub, GitLab, Bitbucket and Azure DevOps all work. A brand-new empty repository is fine.',
     placeholder: 'https://github.com/acme/knowledge-base.git',
   },
   gitToken: {
@@ -30,13 +30,13 @@ const FIELDS: Record<
     // expects beside a token, so it is filled in automatically and only
     // surfaces under Advanced for hosts we cannot recognise.
     label: 'Token username',
-    help: 'A fixed value the git host expects next to the token — not your account name. Filled in automatically for known hosts; only change it for a self-hosted server.',
+    help: 'A fixed value the git host expects next to the token, not your account name. Filled in automatically for known hosts; only change it for a self-hosted server.',
     placeholder: 'x-access-token',
     advanced: true,
   },
   kbDirName: {
     label: 'Folder name',
-    help: 'What the knowledge base folder is called. Cosmetic — leave it as it is.',
+    help: 'What the repository folder is called inside each workspace. Cosmetic; leave it as it is.',
     placeholder: 'knowledge-base',
     advanced: true,
   },
@@ -48,13 +48,13 @@ const FIELDS: Record<
   },
   protectedBranches: {
     label: 'Branches that need approval',
-    help: 'Nobody can change these directly — edits arrive as a request someone approves. Separate several with commas. The main branch has to be one of them.',
+    help: 'Nobody can change these directly; edits arrive as a request someone approves. Separate several with commas. The main branch has to be one of them.',
     placeholder: 'main',
     advanced: true,
   },
   oidcIssuerUrl: {
     label: 'Provider address',
-    help: 'From your identity provider — Entra, Okta, Google Workspace, Auth0 and others all publish one.',
+    help: 'From your identity provider. Entra, Okta, Google Workspace, Auth0 and others all publish one.',
     placeholder: 'https://login.microsoftonline.com/<tenant>/v2.0',
   },
   oidcClientId: {
@@ -79,7 +79,7 @@ const FIELDS: Record<
   },
   allowedEmailDomains: {
     label: 'Allowed email domains',
-    help: 'Only people with an address at these domains can sign in this way. Separate several with commas. Leave blank to allow any address — safe with a provider that only serves your organisation, risky with one that does not.',
+    help: 'Only people with an address at these domains can sign in this way. Separate several with commas. Leave blank to allow any address: safe with a provider that only serves your organisation, risky with one that does not.',
     placeholder: 'example.com',
   },
 };
@@ -96,9 +96,9 @@ const REQUIRED_KEYS = ['kbRepoUrl', 'gitToken', 'defaultBranch', 'protectedBranc
 const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[] = [
   {
     id: 'knowledge-base',
-    title: 'Knowledge base',
+    title: 'Knowledge, skills & tools',
     blurb:
-      'Where everything is stored. Connect a git repository — an empty one is fine, it will be set up for you — and test it; the rest fills itself in.',
+      'Where everything lives, together in one git repository: knowledge, skills and tools. Connect one (an empty repository is fine, it will be set up for you) and test it; the rest fills itself in.',
   },
   {
     id: 'sign-in',
@@ -203,7 +203,11 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
         result.defaultBranch ||
         ['main', 'master', 'trunk'].find((name) => result.branches?.includes(name)) ||
         result.branches?.[0] ||
-        null;
+        // An EMPTY repository has no branch to report, but it will be seeded
+        // with whatever is configured here, so the conventional name is the
+        // right suggestion. Suggesting nothing was the one way "Connected"
+        // could still end, silently, in a save that did not finish setup.
+        (result.empty ? 'main' : null);
       if (result.ok && suggested) {
         setDraft((d) => ({
           ...d,
@@ -232,7 +236,9 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
       const suggested =
         result.defaultBranch ||
         ['main', 'master', 'trunk'].find((name) => result.branches?.includes(name)) ||
-        result.branches?.[0];
+        result.branches?.[0] ||
+        // Same empty-repository rule as the visible test button above.
+        (result.empty ? 'main' : undefined);
       if (!suggested) return null;
       setTest(result);
       const derived: Record<string, string> = {};
@@ -321,7 +327,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
             placeholder={
               // A configured secret has no value to show, so the field says
               // what leaving it blank means instead.
-              setting.secret && setting.configured ? 'Saved — type to replace' : copy.placeholder
+              setting.secret && setting.configured ? 'Saved. Type to replace' : copy.placeholder
             }
             value={draft[setting.key] ?? (setting.secret ? '' : (setting.value ?? ''))}
             onChange={(e) => set(setting.key, e.target.value)}
@@ -359,9 +365,9 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
           <>
             <h1 className="text-display font-semibold text-ink">Set up this deployment</h1>
             <p className="mt-2 max-w-[62ch] text-lede text-ink-muted">
-              One thing is needed before anyone can use it: somewhere to keep the knowledge base.
-              Connect a repository below, test it, and the rest fills itself in. Single sign-on is
-              optional and can wait.
+              One thing is needed before anyone can use it: somewhere to keep your knowledge,
+              skills and tools. Connect a repository below, test it, and the rest fills itself in.
+              Single sign-on is optional and can wait.
             </p>
           </>
         )}
@@ -378,14 +384,14 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
               that silently failed. */}
           {needsRestart && (
             <Banner tone="wait" role="status" className="mt-6">
-              Saved. This deployment needs a restart to pick the branch settings up — everything
+              Saved. This deployment needs a restart to pick the branch settings up; everything
               else is in place.
             </Banner>
           )}
 
           {stillMissing.length > 0 && (
             <Banner tone="wait" role="status" className="mt-6">
-              Saved what you filled in — but this deployment still needs{' '}
+              Saved what you filled in, but this deployment still needs{' '}
               <b className="font-semibold">{stillMissing.join(', ')}</b> before anyone can use it.
               Test the connection and the version fields fill themselves in.
             </Banner>
@@ -470,7 +476,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
                       >
                         {test.ok
                           ? test.empty
-                            ? 'Connected. The repository is empty — it will be set up for you on first use.'
+                            ? 'Connected. The repository is empty; it will be set up for you on first use, and the version fields below are filled in with the standard name.'
                             : `Connected. Found ${test.branches?.length ?? 0} branch${
                                 test.branches?.length === 1 ? '' : 'es'
                               }.`
@@ -502,7 +508,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
                     <summary className="cursor-pointer list-none text-detail font-medium text-ink-muted marker:hidden hover:text-ink">
                       Advanced
                       <span className="ml-1.5 text-meta text-ink-faint">
-                        — sensible defaults; open only if you need to change one
+                        (sensible defaults; open only if you need to change one)
                       </span>
                     </summary>
                     <div className="mt-4 space-y-6">

@@ -171,7 +171,7 @@ describe('SetupScreen', () => {
     ]);
     const token = screen.getByLabelText('Access token');
     expect(token).toHaveValue('');
-    expect(token).toHaveAttribute('placeholder', 'Saved — type to replace');
+    expect(token).toHaveAttribute('placeholder', 'Saved. Type to replace');
   });
 
   /**
@@ -249,7 +249,7 @@ describe('SetupScreen', () => {
       ),
     );
     expect(screen.queryByRole('heading', { name: 'Single sign-on' })).toBeNull();
-    expect(screen.getByRole('heading', { name: 'Knowledge base' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Knowledge, skills & tools' })).toBeInTheDocument();
   });
 
   /**
@@ -405,7 +405,7 @@ describe('SetupScreen', () => {
    */
   it('keeps the connection test inside the knowledge-base card', async () => {
     await renderScreen();
-    const card = screen.getByRole('heading', { name: 'Knowledge base' }).closest('section');
+    const card = screen.getByRole('heading', { name: 'Knowledge, skills & tools' }).closest('section');
     expect(card).not.toBeNull();
     expect(card).toContainElement(screen.getByRole('button', { name: 'Test connection' }));
     // Above Advanced, because testing is what fills Advanced in.
@@ -439,22 +439,28 @@ describe('SetupScreen', () => {
     );
   });
 
-  it('still saves when the repository cannot name a branch either', async () => {
+  it('derives the standard branch name on save when the repository is empty', async () => {
     await renderScreen();
     api.testConnection.mockResolvedValue({ ok: true, empty: true, branches: [], defaultBranch: null });
     api.saveSettings.mockResolvedValue({
       restartRequired: false,
-      complete: false,
+      complete: true,
       settings: SETTINGS,
     });
-    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS });
+    api.fetchSetupStatus.mockResolvedValue({ complete: true, isAdmin: true, settings: SETTINGS });
 
     await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
     await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
 
-    // Saved what it had, then said what remained — not a refusal up front.
-    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
-    expect(await screen.findByRole('status')).toHaveTextContent('Main branch');
+    // An EMPTY repository has no branch to report, but it will be seeded with
+    // whatever is configured — so the conventional name is derived and the
+    // save FINISHES setup, instead of succeeding into a "still needs Main
+    // branch" notice about a value the app could have supplied itself.
+    await waitFor(() =>
+      expect(api.saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ defaultBranch: 'main', protectedBranches: 'main' }),
+      ),
+    );
   });
 
   /**

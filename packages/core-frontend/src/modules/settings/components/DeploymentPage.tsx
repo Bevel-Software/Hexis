@@ -48,7 +48,7 @@ export function DeploymentPage() {
     return (
       <PageShell title="Deployment" width="4xl">
         <div className="text-sm text-ink-muted">
-          Admins only. Ask an admin if the sign-in method or the knowledge-base connection needs
+          Admins only. Ask an admin if the sign-in method or the repository connection needs
           changing.
         </div>
       </PageShell>
@@ -58,9 +58,9 @@ export function DeploymentPage() {
   return (
     <PageShell title="Deployment" width="4xl">
       <p className="max-w-[62ch] text-detail text-ink-muted">
-        The knowledge-base connection, the branch model, and single sign-on — the same form as
-        first-run setup, editable whenever something changes. Values set in the environment stay
-        locked here; change them where they are set.
+        Where your knowledge, skills and tools live, the branch model, and single sign-on: the
+        same form as first-run setup, editable whenever something changes. Values set in the
+        environment stay locked here; change them where they are set.
       </p>
 
       {!loaded && <div className="mt-6 text-sm text-ink-muted">Loading…</div>}
