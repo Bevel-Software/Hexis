@@ -2,7 +2,7 @@ import { DEFAULT_BRANCH, GROUPS_DIR, type PullRequestSummary } from '@bevel-soft
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
 import { createBranch } from '../../git/services/git.api';
-import { getOrCreateWorkspace, writeFile } from '../../workspace/services/workspace.api';
+import { deleteFile, getOrCreateWorkspace, writeFile } from '../../workspace/services/workspace.api';
 import { openChangeRequest } from '../../pr/services/pr-open.api';
 import { postPrComment } from '../../pr/services/pr-comments.api';
 import { branchSegment } from '../../change-requests/services/propose.api';
@@ -276,4 +276,16 @@ export async function createEmptySkill(input: CreateSkillInput): Promise<Created
   // SKILL.md. The 409 surfaces through the panel's normal error toast.
   await writeFile(workspace.id, workspacePath, EMPTY_SKILL_MD, { ifAbsent: true });
   return { repoRelativePath, workspacePath, branch: DEFAULT_BRANCH, direct: true };
+}
+
+/**
+ * Delete a skill folder or tool file from the default branch — the group
+ * manager's "remove from group". One call for both shapes: the backend's
+ * delete route recurses a folder into per-file lock+commit cycles, and every
+ * one of those locks runs the per-path ACL gate, so a caller who does not
+ * manage the group is refused by the same rule that governs editing it.
+ */
+export async function removeLibraryItem(repoRelativePath: string): Promise<void> {
+  const { workspace } = await getOrCreateWorkspace(DEFAULT_BRANCH);
+  await deleteFile(workspace.id, `${workspace.kbDirName}/${repoRelativePath}`);
 }
