@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
 import { useToolPage } from '../../hooks/useToolPage';
-import { LIBRARY_ROOT } from '../../routes/library-paths';
+import { libraryHomeForItemPath, LIBRARY_ROOT } from '../../routes/library-paths';
 import { readOAuthFragment } from '../../utils/oauth-fragment';
 import type { ToolCapability } from '../../services/tools.api';
 import type { LibrarySkillSummary } from '../../services/library.api';
@@ -41,9 +41,13 @@ export function ToolPage() {
     if (oauthOutcome) window.history.replaceState(null, '', window.location.pathname);
   }, [oauthOutcome]);
 
+  // Same rule as the skill page: back goes to the page the tool LIVES on —
+  // its group, or the personal page — never to a root the reader may not
+  // have come from. Falls back to the root while the tool is still loading.
+  const home = libraryHomeForItemPath(page.tool?.path ?? '');
   const backLink = (
-    <Button variant="quiet" size="sm" onClick={() => navigate(LIBRARY_ROOT)}>
-      ‹ All skills &amp; tools
+    <Button variant="quiet" size="sm" onClick={() => navigate(home.path)}>
+      {`‹ ${home.label}`}
     </Button>
   );
 

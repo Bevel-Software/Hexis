@@ -20,7 +20,7 @@ import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
 import { useDefaultBranchFile, useFileOnBranch } from '../../../change-requests/hooks/useFileOnBranch';
 import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast.context';
-import { LIBRARY_ROOT } from '../../routes/library-paths';
+import { libraryHomeForItemPath } from '../../routes/library-paths';
 import { changeAuthorName, formatWhen } from '../../../change-requests/utils/author';
 import { ownersTextOf } from '../../utils/group-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
@@ -353,9 +353,13 @@ export function SkillPage() {
     }
   }
 
+  // The page the skill lives on, not the Library root: "back" from a skill
+  // you opened off its group page must land on that group page. Derived from
+  // the path, so a deep link gets the same honest destination as a click.
+  const home = libraryHomeForItemPath(skillPath);
   const backLink = (
-    <Button variant="quiet" size="sm" onClick={() => navigate(LIBRARY_ROOT)}>
-      ‹ All skills &amp; tools
+    <Button variant="quiet" size="sm" onClick={() => navigate(home.path)}>
+      {`‹ ${home.label}`}
     </Button>
   );
 
