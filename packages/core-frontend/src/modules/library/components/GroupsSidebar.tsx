@@ -1,6 +1,7 @@
 import type { MouseEvent, ReactNode } from 'react';
 import { cn } from '../../../lib/utils';
 import type { LibraryFilter } from '../utils/status';
+import { ChalkArrow } from './group-page-parts';
 import { LockGlyph } from './LockGlyph';
 
 /**
@@ -268,19 +269,27 @@ export function GroupsSidebar({
           )}
           {/* The heading's `+` is hover-revealed, and a person with no groups
               yet is exactly the person who has not learned to hover it. While
-              the list holds only their own space, the way to a second place is
-              said in words, as a row where the second place would sit. It
-              stands down the moment a real group exists — this is a doorway
-              for an empty nav, not a permanent duplicate of the `+`. */}
-          {groups.length === 0 && (
-            <button
-              type="button"
-              onClick={onCreateGroup}
-              className="flex items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-hover hover:text-ink"
-            >
-              <span aria-hidden="true">+</span>
-              <span className="truncate">Create a group</span>
-            </button>
+              the workspace holds no groups AT ALL, the way to the first one is
+              said in words, as a row where it would sit — with a chalk arrow
+              from the empty space below, the same margin-note voice as the
+              empty group page. It stands down the moment any group exists,
+              readable or locked: a locked group means someone already created
+              one, and this is a doorway for an untouched workspace, not a
+              permanent duplicate of the `+`. */}
+          {groups.length === 0 && lockedGroups.length === 0 && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={onCreateGroup}
+                className="flex items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-hover hover:text-ink"
+              >
+                <span aria-hidden="true">+</span>
+                <span className="truncate">Create a group</span>
+              </button>
+              {/* Mirrored, so the tip points up-left at the row's words from
+                  the room an empty nav is guaranteed to have beneath it. */}
+              <ChalkArrow className="pointer-events-none absolute left-[22px] top-[30px] h-[52px] w-[64px] -scale-x-100 text-ink-faint" />
+            </div>
           )}
           {/* Locked groups, after the prototype's 14px `.navgap`. The gap is the
               whole statement: these are in the same list because they are in the

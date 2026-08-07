@@ -94,6 +94,11 @@ describe('GroupsSidebar', () => {
     expect(screen.queryByRole('button', { name: 'Create a group' })).not.toBeInTheDocument();
   });
 
+  it('stands the create CTA down when only locked groups exist — someone already created them', () => {
+    renderSidebar({ groups: [], lockedGroups: ['Ops'] });
+    expect(screen.queryByRole('button', { name: 'Create a group' })).not.toBeInTheDocument();
+  });
+
   it('marks the selected group current and leaves the others alone', () => {
     renderSidebar({ filter: { kind: 'group', group: 'GTM' } });
     expect(row(/^GTM/)).toHaveAttribute('aria-current', 'true');
