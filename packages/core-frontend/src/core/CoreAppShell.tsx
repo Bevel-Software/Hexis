@@ -57,6 +57,7 @@ import { setSidebarCollapsed } from '../modules/layout/state/sidebar';
 import {
   activeAppId,
   ActiveAppIdContext,
+  AppClaimContext,
   AppRegistryContext,
   CrCreationPortContext,
   SuggestedPromptSeedContext,
@@ -68,6 +69,7 @@ import {
   type CrCreationPort,
   type PaneDef,
 } from './registry';
+import { WorkspaceItemGate } from '../modules/library/routes/WorkspaceItemGate';
 
 /**
  * The registry-driven application shell for the core modules (workspace, git,
@@ -198,7 +200,11 @@ const CORE_APPS: AppDef[] = [
     path: KB_ROUTE_PREFIX,
     description: 'Browse and edit your knowledge base',
     order: 10,
-    element: <KnowledgeSurface />,
+    // The gate makes /workspace file URLs the CANONICAL address of library
+    // items: a default-branch URL into a skill folder or a `.tool` manual
+    // renders the skill/tool page; every other path falls through to the
+    // pane workspace unchanged.
+    element: <WorkspaceItemGate knowledge={<KnowledgeSurface />} />,
   },
   {
     id: 'skills-tools',
@@ -274,7 +280,10 @@ export function AppChrome() {
     () => [...registry.apps].sort((a, b) => (a.order ?? 100) - (b.order ?? 100)),
     [registry],
   );
-  const activeId = activeAppId(apps, location.pathname);
+  // A claimed app (a library item page at its canonical /workspace URL) wins
+  // over the prefix rule — the switcher highlights the surface on screen.
+  const [claimedApp, setClaimedApp] = useState<string | null>(null);
+  const activeId = claimedApp ?? activeAppId(apps, location.pathname);
 
   // A narrow sidebar can be opened from the toolbar, but it must not cover
   // the destination after the user chooses a group or file inside it.
@@ -291,6 +300,7 @@ export function AppChrome() {
 
   return (
     <ActiveAppIdContext.Provider value={activeId}>
+      <AppClaimContext.Provider value={setClaimedApp}>
       <LayoutContext.Provider value={paneController ?? NO_PANES_LAYOUT}>
         <PaneControllerContext.Provider value={setPaneController}>
           {/* Flex-col wrapper so the (conditional) banner strip takes its own
@@ -308,6 +318,7 @@ export function AppChrome() {
           </div>
         </PaneControllerContext.Provider>
       </LayoutContext.Provider>
+      </AppClaimContext.Provider>
     </ActiveAppIdContext.Provider>
   );
 }

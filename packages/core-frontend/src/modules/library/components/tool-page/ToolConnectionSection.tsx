@@ -107,7 +107,14 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
                   variant="quiet"
                   size="tiny"
                   className="mt-1.5"
-                  onClick={() => navigate(kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${tool.path}`))}
+                  // `rawFile` steps past the WorkspaceItemGate: this URL is
+                  // the tool page's own canonical address, and the button
+                  // wants the raw editor behind it.
+                  onClick={() =>
+                    navigate(kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${tool.path}`), {
+                      state: { rawFile: true },
+                    })
+                  }
                 >
                   Edit the tool file
                 </Button>

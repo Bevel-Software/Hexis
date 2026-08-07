@@ -20,7 +20,7 @@ import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
 import { useDefaultBranchFile, useFileOnBranch } from '../../../change-requests/hooks/useFileOnBranch';
 import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast.context';
-import { libraryHomeForItemPath } from '../../routes/library-paths';
+import { libraryHomeForItemPath, urlForSkillFile } from '../../routes/library-paths';
 import { changeAuthorName, formatWhen } from '../../../change-requests/utils/author';
 import { ownersTextOf } from '../../utils/group-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
@@ -53,9 +53,22 @@ import { isBinaryFile } from '../../../workspace/components/renderers';
  * `description` (and everything else the YAML says), exactly as the Knowledge
  * view would render the same file.
  */
-export function SkillPage() {
+export function SkillPage({
+  name: nameProp,
+  activeFile,
+}: {
+  /**
+   * Both provided when the page is mounted at its CANONICAL address — the
+   * skill file's own /workspace URL (see `WorkspaceItemGate`): `name` names
+   * the skill, `activeFile` the tab, and switching tabs NAVIGATES (each file
+   * has its own URL). Absent on the legacy `/skills-and-tools/skills/:name`
+   * mount, where the name comes from the route and tabs are local state.
+   */
+  name?: string;
+  activeFile?: string;
+} = {}) {
   const { name: rawName = '' } = useParams<{ name: string }>();
-  const name = safeDecode(rawName);
+  const name = nameProp ?? safeDecode(rawName);
   const navigate = useNavigate();
   const toast = useLibraryToast();
   const { kbDirName } = useWorkspace();
@@ -66,7 +79,8 @@ export function SkillPage() {
   // link inside a skill file navigates to that node, not to a dead span.
   const { openNodeId } = useNodeIdNav();
 
-  const [selected, setSelected] = useState('SKILL.md');
+  const [selectedState, setSelected] = useState('SKILL.md');
+  const selected = activeFile ?? selectedState;
   const [compareCr, setCompareCr] = useState<PullRequestSummary | null>(null);
   /** Ties the tabs to the panel they control; unique per mounted page. */
   const tabsId = useId();
@@ -438,7 +452,14 @@ export function SkillPage() {
         pending={pendingFiles}
         baseId={tabsId}
         onSelect={(f) => {
-          setSelected(f);
+          // At the canonical mount every file has its own URL — a tab switch
+          // is a navigation, so the address bar always names what is on
+          // screen and any tab can be deep-linked or shared.
+          if (activeFile !== undefined && skill && kbDirName) {
+            navigate(urlForSkillFile(kbDirName, skill.path, f));
+          } else {
+            setSelected(f);
+          }
           setEditing(false);
         }}
       />
