@@ -39,7 +39,9 @@ Groups/personal-<user-id>/…       one per person: their own skills, private
 Skills and tools live TOGETHER in a group because they share one access
 boundary: a tool a group cannot read is a skill that group cannot run.
 
-**Group folders are made through the app, not by writing files.** A new
+**Group folders are made through the app, not by writing files.** A group
+exists exactly when its folder carries an `access.md` — a bare directory
+under `Groups/` is not a group and is never listed. A new
 direct child of `Groups/` needs an `access.md` naming who runs it, and the
 write gate refuses a plain write into an unused name there — so do not try to
 create a group by writing a skill into `Groups/<new-name>/…`; it will be

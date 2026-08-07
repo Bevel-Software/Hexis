@@ -73,7 +73,12 @@ async function makeHarness(opts: HarnessOpts = {}) {
   const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-routes-'));
   tmpDirs.push(workspaceDir);
   const kbRoot = path.join(workspaceDir, KB);
+  // Both carry the access.md that makes a folder a group at all.
   await fs.mkdir(path.join(kbRoot, 'Groups', 'GTM'), { recursive: true });
+  await fs.writeFile(
+    path.join(kbRoot, 'Groups', 'GTM', 'access.md'),
+    '---\nread:\n  - everyone\n---\nread: []\n',
+  );
   await fs.mkdir(path.join(kbRoot, 'Groups', 'Finance'), { recursive: true });
   await fs.writeFile(
     path.join(kbRoot, 'Groups', 'Finance', 'access.md'),
