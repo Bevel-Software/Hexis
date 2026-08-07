@@ -1,5 +1,5 @@
 import type { RefObject } from 'react';
-import { FilePlus, FolderPlus, Link2, Users } from 'lucide-react';
+import { FilePlus, FolderPlus, Link2, Trash2, Users } from 'lucide-react';
 import { MenuItem, MenuPanel, useDismissableMenu } from '../../../shared/components';
 
 /**
@@ -14,12 +14,14 @@ import { MenuItem, MenuPanel, useDismissableMenu } from '../../../shared/compone
  * and the fixed wrapper is the caller's, exactly as in the file tree.
  *
  * The ITEMS differ, because the things differ. A group is not a file: there is
- * no Rename, no Delete and no Download here, because no endpoint stands behind
- * any of the three for a group, and a menu item that cannot do its job is worse
- * than one that is not there (the same call `PageActions` already makes about
- * Leave/Delete subscription). What carries over is the pairing that matters —
- * a create verb, a copy verb, and access below the rule — wearing the SAME
- * lucide glyphs the file tree gives each, so the two menus read as one product
+ * no Rename and no Download here, because no endpoint stands behind either for
+ * a group, and a menu item that cannot do its job is worse than one that is
+ * not there (the same call `PageActions` already makes about Leave
+ * subscription). Delete DOES have an endpoint now — `DELETE /api/groups/:name`,
+ * the owner's verb — so it appears exactly when the caller owns the group and
+ * not otherwise. What carries over is the pairing that matters — a create
+ * verb, a copy verb, and access below the rule — wearing the SAME lucide
+ * glyphs the file tree gives each, so the two menus read as one product
  * rather than two.
  *
  * Every action is optional, and an absent one is simply not rendered — the same
@@ -42,6 +44,8 @@ export interface GroupsSidebarMenuProps {
   onCopyLink?(): void;
   /** Absent when there is no folder behind the row to manage. */
   onManageAccess?(): void;
+  /** Opens the delete confirmation. Present ONLY for a group the caller owns. */
+  onDelete?(): void;
   /** The row this menu was opened from — Escape hands focus back to it. */
   returnFocusTo?: RefObject<HTMLElement | null>;
 }
@@ -55,6 +59,7 @@ export function GroupsSidebarMenu({
   onCreateGroup,
   onCopyLink,
   onManageAccess,
+  onDelete,
   returnFocusTo,
 }: GroupsSidebarMenuProps) {
   const ref = useDismissableMenu<HTMLDivElement>({ open: true, onClose, returnFocusTo });
@@ -125,6 +130,26 @@ export function GroupsSidebarMenu({
               <span className="flex items-center gap-2">
                 <Users size={14} />
                 Manage access
+              </span>
+            </MenuItem>
+          </>
+        )}
+        {onDelete && (
+          <>
+            {/* Destructive and last, below its own rule — the file tree's menu
+                puts Delete in the same place, so the gesture reads the same. */}
+            <div className="my-1 border-t border-line" />
+            <MenuItem
+              role="menuitem"
+              tone="danger"
+              onClick={() => {
+                onDelete();
+                onClose();
+              }}
+            >
+              <span className="flex items-center gap-2">
+                <Trash2 size={14} />
+                Delete group
               </span>
             </MenuItem>
           </>

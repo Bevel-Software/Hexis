@@ -101,6 +101,7 @@ const GROUPS: GroupSummary[] = [
     folders: ['Groups/GTM'],
     canRead: true,
     canWrite: true,
+    isOwner: false,
     skillCount: 1,
     toolCount: 1,
     owners: { roles: [], users: [{ name: 'Olga Ivanova', email: 'olga@bevel.software' }] },

@@ -30,6 +30,7 @@ const finance = (over: Partial<GroupSummary> = {}): GroupSummary => ({
   folders: ['Groups/Finance'],
   canRead: false,
   canWrite: false,
+  isOwner: false,
   skillCount: 2,
   toolCount: 1,
   owners: { roles: [], users: [{ name: 'Olga Ivanova', email: 'olga@bevel.software' }] },

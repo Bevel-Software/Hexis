@@ -23,10 +23,11 @@ import type {
 /**
  * Browser-facing (JWT) group routes, mounted behind `authMiddleware`:
  *
- *   GET  /api/groups                            → { groups: GroupSummary[] }
- *   POST /api/groups/:name/join-request         → { ok, number }  (opens a CR)
- *   GET  /api/groups/:name/join-requests        → { requests }    (managers)
- *   POST /api/groups/:name/join-requests/:n/reconcile → { closed }
+ *   GET    /api/groups                            → { groups: GroupSummary[] }
+ *   DELETE /api/groups/:name                      → { ok }          (owners)
+ *   POST   /api/groups/:name/join-request         → { ok, number }  (opens a CR)
+ *   GET    /api/groups/:name/join-requests        → { requests }    (managers)
+ *   POST   /api/groups/:name/join-requests/:n/reconcile → { closed }
  *
  * Enumeration is three verdicts per (caller, group), all of them ordinary
  * access resolution — no special cases, no side tables:
@@ -90,9 +91,10 @@ export function createGroupsRoutes(
       }
       const wsId = groupsWorkspaceId();
       const probes = probesFor(catalog);
-      const [readable, writable] = await Promise.all([
+      const [readable, writable, owned] = await Promise.all([
         accessControl.canReadBatch(wsId, email, probes),
         accessControl.canWriteBatch(wsId, email, probes),
+        accessControl.canOwnerBatch(wsId, email, probes),
       ]);
       // Fail closed on every verdict: a path missing from the map is denied.
       const any = (map: Map<string, boolean>, g: GroupCatalogEntry, probe: (f: string) => string) =>
@@ -114,6 +116,10 @@ export function createGroupsRoutes(
       for (const g of catalog) {
         const member = any(readable, g, memberProbe);
         const manager = any(writable, g, accessMdOf);
+        // The FOLDER verdict, owner-lists-only — the delete gate, mirrored
+        // here so the UI shows the verb to exactly the people the DELETE
+        // route will let through.
+        const owner = any(owned, g, memberProbe);
         const discoverable = member || any(readable, g, accessMdOf);
         if (!member && !manager && !discoverable) continue; // absent — fail closed
         const joinCr = member ? null : openJoinCr(mine, email, g.name);
@@ -122,6 +128,7 @@ export function createGroupsRoutes(
           folders: g.folders,
           canRead: member,
           canWrite: manager,
+          isOwner: owner,
           skillCount: g.skillCount,
           toolCount: g.toolCount,
           owners: g.owners,
@@ -196,6 +203,55 @@ export function createGroupsRoutes(
     } catch (err) {
       console.error('[groups] personal-folder ensure failed:', err);
       res.status(500).json({ error: 'Failed to prepare your personal folder' });
+    }
+  });
+
+  /**
+   * Delete a group — the OWNER's verb, and only theirs. Creating a group
+   * makes you the one who runs it; deleting it is the other end of that same
+   * promise, so the gate is the `owner` verdict on the folder (owner-lists
+   * only, no admin rescue) — a manager who merely writes the access.md, and
+   * an admin rescued into managing it, do not get it.
+   *
+   * Fail-closed like every other group surface: an unknown group and a group
+   * the caller does not own answer IDENTICALLY, so probing the endpoint can
+   * confirm nothing about what exists. The mechanism (park, one commit,
+   * rollback on refusal) lives in `GroupProvisionService.deleteGroup`.
+   */
+  router.delete('/groups/:name', async (req, res) => {
+    const email = req.userEmail;
+    if (!email) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    try {
+      const user = await resolveUser(req);
+      if (!user) {
+        res.status(401).json({ error: 'Unauthenticated' });
+        return;
+      }
+      // Case-sensitive, like `groupOfPath` — the group name IS the folder name.
+      const group = (await groupIndex.catalog()).find((g) => g.name === req.params.name);
+      const wsId = groupsWorkspaceId();
+      const ownerVerdicts = group
+        ? await Promise.all(
+            group.folders.map((f) => accessControl.canOwner(wsId, email, memberProbe(f))),
+          )
+        : [];
+      if (!group || !ownerVerdicts.some((v) => v === true)) {
+        res.status(404).json({ error: 'Unknown group', kind: 'unknown-group' });
+        return;
+      }
+      await provision.deleteGroup(user, group.name);
+      groupIndex.invalidate();
+      res.json({ ok: true });
+    } catch (err) {
+      if (err instanceof GroupProvisionError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+      console.error('[groups] delete failed:', err);
+      res.status(500).json({ error: 'Failed to delete the group' });
     }
   });
 

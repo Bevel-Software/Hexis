@@ -56,6 +56,13 @@ export interface GroupSummary {
    * reading still sees the group and gets the self-service way back in.
    */
   canWrite: boolean;
+  /**
+   * Per-caller: the caller holds the `owner` verb on the FOLDER — resolved
+   * from the `owner:` lists alone, no admin rescue. Deleting the group is the
+   * owner's verb (the DELETE route enforces the same verdict); managers who
+   * merely write the access.md do not get it.
+   */
+  isOwner: boolean;
   /** Caller-INDEPENDENT total (the group's whole content, not the caller's slice). */
   skillCount: number;
   toolCount: number;

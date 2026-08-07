@@ -125,6 +125,76 @@ describe('GroupProvisionService.createGroup', () => {
   });
 });
 
+describe('GroupProvisionService.deleteGroup', () => {
+  let h: Awaited<ReturnType<typeof makeHarness>>;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+
+  it('removes the whole folder in ONE folder-scoped commit, and drops the access cache', async () => {
+    await h.svc.createGroup(USER, 'GTM');
+    // A group with content — the delete takes the skills with the folder.
+    await fs.mkdir(path.join(h.dir, KB, 'Groups/GTM/outreach'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Groups/GTM/outreach/SKILL.md'), '# outreach\n');
+    h.commits.runPendingCommit.mockClear();
+    (h.accessControl.invalidate as ReturnType<typeof vi.fn>).mockClear();
+
+    await h.svc.deleteGroup(USER, 'GTM');
+
+    await expect(fs.stat(path.join(h.dir, KB, 'Groups/GTM'))).rejects.toThrow();
+    // No parked remnant either — the commit landed, so the bytes may go.
+    expect(await fs.readdir(path.join(h.dir, KB, 'Groups'))).toEqual([]);
+    // FOLDER-scoped (`git add -- <folder>` stages every deletion under it),
+    // inline, and `systemAuthorized` — the endpoint already authorized the
+    // delete (owner verdict), and the per-user push gate would re-read the
+    // very access.md this commit removes.
+    expect(h.commits.runPendingCommit).toHaveBeenCalledWith(
+      'ws-main',
+      DEFAULT_BRANCH,
+      `${KB}/Groups/GTM`,
+      USER,
+      { systemAuthorized: true },
+    );
+    expect(h.accessControl.invalidate).toHaveBeenCalledWith('ws-main');
+    expect(h.events.emit).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'fs-tree-changed' }),
+    );
+  });
+
+  it('refuses an unknown name — and a casing mismatch, which is the same thing — with 404', async () => {
+    await h.svc.createGroup(USER, 'GTM');
+    for (const name of ['Nope', 'gtm']) {
+      await expect(h.svc.deleteGroup(USER, name)).rejects.toMatchObject({ status: 404 });
+    }
+    expect(await fs.readdir(path.join(h.dir, KB, 'Groups'))).toEqual(['GTM']);
+  });
+
+  it('never deletes a personal folder through the group door', async () => {
+    await h.svc.ensurePersonalGroup(USER);
+    const folder = personalGroupFolderName(USER.id);
+    await expect(h.svc.deleteGroup(USER, folder)).rejects.toMatchObject({ status: 404 });
+    await expect(fs.stat(path.join(h.dir, KB, 'Groups', folder))).resolves.toBeDefined();
+  });
+
+  it('puts the folder back, content intact, when the commit is refused', async () => {
+    await h.svc.createGroup(USER, 'GTM');
+    await fs.mkdir(path.join(h.dir, KB, 'Groups/GTM/outreach'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Groups/GTM/outreach/SKILL.md'), '# outreach\n');
+    h.commits.runPendingCommit.mockRejectedValueOnce(new Error('push refused'));
+
+    await expect(h.svc.deleteGroup(USER, 'GTM')).rejects.toThrow('push refused');
+
+    // A failed delete is a NO-OP: origin still carries the group, so the
+    // working tree must too — bytes included, not just the folder shell.
+    expect(
+      await fs.readFile(path.join(h.dir, KB, 'Groups/GTM/outreach/SKILL.md'), 'utf-8'),
+    ).toBe('# outreach\n');
+    // And the retry goes through.
+    await expect(h.svc.deleteGroup(USER, 'GTM')).resolves.toBeUndefined();
+    await expect(fs.stat(path.join(h.dir, KB, 'Groups/GTM'))).rejects.toThrow();
+  });
+});
+
 describe('GroupProvisionService.ensurePersonalGroup', () => {
   it('creates the private personal folder once, then reports it as existing', async () => {
     const h = await makeHarness();

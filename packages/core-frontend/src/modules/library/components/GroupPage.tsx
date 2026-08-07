@@ -16,6 +16,7 @@ import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
 import { BandControls, GroupBreadcrumb, GroupItemSections, PageNote, RemoveLibraryItemDialog,
 } from './group-page-parts';
+import { DeleteGroupDialog } from './DeleteGroupDialog';
 import { PageActions } from './PageActions';
 import { copyToClipboard } from '../utils/clipboard';
 import { LockedGroupView } from './LockedGroupView';
@@ -104,6 +105,8 @@ export function GroupPage() {
 
   /** The card being removed, while its confirm dialog is up. */
   const [removing, setRemoving] = useState<LibraryItem | null>(null);
+  /** Whether the group's own delete confirmation is up. */
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const summary = useMemo(
     () => data.groupSummaries.find((g) => g.name === group) ?? null,
@@ -233,6 +236,10 @@ export function GroupPage() {
             onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
             onAdd={() => setAddOpen(true)}
             onCopyLink={() => copyToClipboard(window.location.href)}
+            // The OWNER's verb — `isOwner` is the same verdict the DELETE
+            // route enforces, so the item appears for exactly the people the
+            // backend will let through.
+            onDelete={summary?.isOwner ? () => setDeleteOpen(true) : undefined}
             addLabel={`Add a skill or tool to ${group}`}
           />
         </div>
@@ -323,6 +330,23 @@ export function GroupPage() {
           // ids are global, so the collision that matters is with any of them.
           existingSkills={allSkillNames}
           onClose={() => setAddOpen(false)}
+        />
+      )}
+
+      {deleteOpen && summary && (
+        <DeleteGroupDialog
+          name={group}
+          skillCount={summary.skillCount}
+          toolCount={summary.toolCount}
+          onClose={() => setDeleteOpen(false)}
+          onDeleted={() => {
+            toast(`Deleted ${group}.`);
+            // This page's place just ceased to exist — the index is the
+            // honest landing. Reloads follow so the sidebar agrees.
+            navigate(pathForGroupsIndex());
+            data.reload();
+            data.reloadGroups();
+          }}
         />
       )}
 

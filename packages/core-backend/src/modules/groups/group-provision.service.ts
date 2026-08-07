@@ -1,6 +1,7 @@
 /**
  * Group provisioning — the ONE privileged door for bringing a `Groups/<name>/`
- * folder into existence.
+ * folder into existence, and (via {@link GroupProvisionService.deleteGroup})
+ * for taking one back out of it.
  *
  * Creating a group is the single operation the access model cannot govern
  * from inside: the folder that will carry the rules does not exist yet, and
@@ -37,6 +38,7 @@ import {
   DEFAULT_BRANCH,
   GROUPS_DIR,
   PERSONAL_GROUP_PREFIX,
+  isPersonalGroupFolder,
   personalGroupFolderName,
   type AuthUser,
 } from '@bevel-software/platform-shared';
@@ -151,6 +153,81 @@ export class GroupProvisionService {
         throw err;
       }
       return { folder, created: true };
+    });
+  }
+
+  /**
+   * Delete `Groups/<name>/` — the whole folder, its skills and tools
+   * included, in ONE commit. MECHANISM only: the route owns the
+   * authorization (the caller must hold the `owner` verb on the folder;
+   * this service never re-derives it), exactly as `createGroup` leaves
+   * "any signed-in user" to its endpoint.
+   *
+   * Shape mirrors a provision run in reverse, with the same failure
+   * contract: the folder is PARKED (renamed to a dot-prefixed sibling the
+   * scanners ignore) rather than removed, the deletion is committed
+   * synchronously, and only a landed commit lets the parked bytes go. A
+   * refused commit renames the folder back, so a failed delete leaves the
+   * group exactly as it was — never half-gone on disk while origin still
+   * carries it.
+   *
+   * Serialised on the same per-name lock creations use, so a delete can
+   * never interleave with a re-creation of the same name.
+   */
+  async deleteGroup(user: AuthUser, rawName: string): Promise<void> {
+    const name = rawName.trim();
+    if (!name) throw new GroupProvisionError('A group needs a name.', 422);
+    if (isPersonalGroupFolder(name)) {
+      // Personal folders are not groups (the catalog never lists them), and
+      // nobody deletes somebody's private shelf through the group door.
+      throw new GroupProvisionError('Unknown group', 404);
+    }
+    return this.creations.run(`group:${name.toLowerCase()}`, async () => {
+      const existing = await this.existingFolder(name);
+      // Exact match only — the catalog hands the route the on-disk casing,
+      // so a mismatch means the group is gone (or was never there).
+      if (existing !== name) throw new GroupProvisionError('Unknown group', 404);
+
+      const wsId = await this.readyWorkspaceId();
+      const wsDir = await this.workspaceService.getWorkspacePath(wsId);
+      const groupsDir = path.join(wsDir, this.kbDirName, GROUPS_DIR);
+      const folderDir = path.join(groupsDir, name);
+      // Dot-prefixed ⇒ invisible to the group scanner and the collision
+      // check for the whole window the commit is in flight.
+      const parkedDir = path.join(groupsDir, `.${name}.deleting`);
+
+      await fs.rm(parkedDir, { recursive: true, force: true }); // a stale park from a crashed run
+      await fs.rename(folderDir, parkedDir);
+      try {
+        // Inline and `systemAuthorized`, for `provision`'s reasons in
+        // reverse: the gate reads rules at HEAD, and the endpoint has
+        // already authorized the delete (owner verdict), so the per-user
+        // push gate — which would re-read an access.md this very commit
+        // removes — is skipped for exactly this commit. `commitFile` is
+        // path-scoped (`git add -- <path>`), and a folder path stages every
+        // deletion under it: one commit, one removed group.
+        await this.commits.runPendingCommit(
+          wsId,
+          DEFAULT_BRANCH,
+          `${this.kbDirName}/${GROUPS_DIR}/${name}`,
+          user,
+          { systemAuthorized: true },
+        );
+      } catch (err) {
+        // The commit did not land: put the folder back, so a failed delete
+        // is a no-op rather than a group that exists at origin but not here.
+        try {
+          await fs.rename(parkedDir, folderDir);
+        } catch {
+          /* the park survives for the next attempt — better than masking the real error */
+        }
+        throw err;
+      }
+      await fs.rm(parkedDir, { recursive: true, force: true }).catch(() => {});
+      // The folder's rules left the access model — drop the resolver cache
+      // so the very next check runs against a tree without them.
+      this.accessControl.invalidate(wsId);
+      this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: DEFAULT_BRANCH });
     });
   }
 

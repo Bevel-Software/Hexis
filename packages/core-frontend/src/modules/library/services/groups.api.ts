@@ -35,6 +35,12 @@ export interface GroupSummary {
   canRead: boolean;
   /** Per-caller; true ⇒ may manage the group's access (admin-rescue applies). */
   canWrite: boolean;
+  /**
+   * Per-caller: holds the `owner` verb on the folder (owner-lists only, no
+   * admin rescue). Deleting the group is the owner's verb — the DELETE route
+   * enforces this same verdict, so it also decides who sees the affordance.
+   */
+  isOwner: boolean;
   /** The group's TOTALS, not the caller's slice. */
   skillCount: number;
   toolCount: number;
@@ -72,6 +78,20 @@ export async function createGroup(name: string): Promise<{ folder: string }> {
     throw new Error(body.error ?? "Couldn't create that group.");
   }
   return (await res.json()) as { folder: string };
+}
+
+/**
+ * Delete a group — the whole folder, skills and tools included, in one
+ * commit. Owner-gated server-side (the `owner` verdict on the folder); a
+ * refusal names the rule and is worth surfacing verbatim. Fail-closed: a
+ * group the caller doesn't own answers exactly like one that doesn't exist.
+ */
+export async function deleteGroup(name: string): Promise<void> {
+  const res = await authFetch(`/api/groups/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Couldn't delete that group.");
+  }
 }
 
 /**

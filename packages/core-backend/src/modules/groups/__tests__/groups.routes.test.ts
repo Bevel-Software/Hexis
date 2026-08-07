@@ -44,6 +44,8 @@ interface HarnessOpts {
   readable?: Record<string, string[]>;
   /** Paths the given email may write. */
   writable?: Record<string, string[]>;
+  /** Paths (the FOLDER, e.g. `Groups/GTM`) the given email OWNS. */
+  owner?: Record<string, string[]>;
   /** Open CRs `listChangeRequestsAuthoredBy` returns for any caller. */
   authoredCrs?: ChangeRequest[];
   /** Override the whole index (used to force the 500 path). */
@@ -97,6 +99,12 @@ async function makeHarness(opts: HarnessOpts = {}) {
     canWriteBatch: vi.fn(async (_w: string, email: string, paths: string[]) =>
       verdictFor(opts.writable, email, paths),
     ),
+    canOwnerBatch: vi.fn(async (_w: string, email: string, paths: string[]) =>
+      verdictFor(opts.owner, email, paths),
+    ),
+    canOwner: vi.fn(async (_w: string, email: string, p: string) =>
+      (opts.owner?.[email] ?? []).includes(p),
+    ),
     eligibleOwners: async () => ({ roles: [], users: [OLGA] }),
     eligibleWriters: async () => ({ roles: ['Admin'], users: [] }),
     eligibleReaders: async () => ({ restricted: true, roles: ['GTM Team'], users: [OLGA] }),
@@ -137,6 +145,13 @@ async function makeHarness(opts: HarnessOpts = {}) {
     reconcile: vi.fn(async () => false),
   } as unknown as JoinRequestsService;
 
+  // Provisioning MECHANISM is exercised by its own service tests; the routes
+  // here only need to prove what they hand it and when they refuse to.
+  const provision = {
+    createGroup: vi.fn(async () => ({ folder: 'GTM', created: true })),
+    deleteGroup: vi.fn(async () => undefined),
+  };
+
   app.use(
     '/api',
     createGroupsRoutes(
@@ -145,9 +160,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
       workflow,
       workspaceService,
       joinRequests,
-      // Provisioning is exercised by its own service tests; the routes here
-      // only need the parameter slot filled.
-      {} as never,
+      provision as never,
       KB,
       async (req) => (req.userEmail ? { ...ALI_USER, email: req.userEmail } : null),
     ),
@@ -164,6 +177,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
     workflow,
     workspaceService,
     joinRequests,
+    provision,
   };
 }
 
@@ -195,6 +209,7 @@ describe('/api/groups routes', () => {
     for (const [method, url] of [
       ['GET', '/api/groups'],
       ['POST', '/api/groups/GTM/join-request'],
+      ['DELETE', '/api/groups/GTM'],
     ] as const) {
       const res = await fetch(`${h.baseUrl}${url}`, { method });
       expect(res.status, `${method} ${url}`).toBe(401);
@@ -259,6 +274,67 @@ describe('/api/groups routes', () => {
     server = h.server;
     const { groups } = await listGroups(h.baseUrl);
     expect(groups[0]).toMatchObject({ name: 'GTM', canRead: true, hasRequested: false });
+  });
+
+  it('lists the owner verdict per caller — the folder verdict, not the manager one', async () => {
+    const h = await makeHarness({
+      readable: MEMBER_OF_BOTH,
+      owner: { [ALI]: ['Groups/GTM'] },
+    });
+    server = h.server;
+    const { groups } = await listGroups(h.baseUrl);
+    expect(groups.find((g) => g.name === 'GTM')).toMatchObject({ isOwner: true });
+    expect(groups.find((g) => g.name === 'Finance')).toMatchObject({ isOwner: false });
+  });
+
+  it('delete: 404 for unknown AND for a non-owner — a manager included (identical, fail-closed)', async () => {
+    // A MANAGER (write on the access.md) and a MEMBER, but not an owner:
+    // deletion is the owner's verb, and the refusal must not confirm the
+    // group exists.
+    const h = await makeHarness({
+      readable: MEMBER_OF_BOTH,
+      writable: { [ALI]: ['Groups/GTM/access.md'] },
+    });
+    server = h.server;
+    for (const name of ['Nope', 'GTM']) {
+      const res = await fetch(`${h.baseUrl}/api/groups/${name}`, { method: 'DELETE' });
+      expect(res.status, name).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Unknown group', kind: 'unknown-group' });
+    }
+    expect(h.provision.deleteGroup).not.toHaveBeenCalled();
+  });
+
+  it('delete: an OWNER deletes through the provision door, by the catalog name', async () => {
+    const h = await makeHarness({ owner: { [ALI]: ['Groups/GTM'] } });
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/groups/GTM`, { method: 'DELETE' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(h.provision.deleteGroup).toHaveBeenCalledWith(
+      expect.objectContaining({ email: ALI }),
+      'GTM',
+    );
+  });
+
+  it("delete: passes a provision refusal through with the service's own status and words", async () => {
+    const h = await makeHarness({ owner: { [ALI]: ['Groups/GTM'] } });
+    const { GroupProvisionError } = await import('../group-provision.service.js');
+    h.provision.deleteGroup.mockRejectedValueOnce(new GroupProvisionError('Unknown group', 404));
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/groups/GTM`, { method: 'DELETE' });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'Unknown group' });
+  });
+
+  it('delete: 500s with its own words when the mechanism fails', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const h = await makeHarness({ owner: { [ALI]: ['Groups/GTM'] } });
+    h.provision.deleteGroup.mockRejectedValueOnce(new Error('push refused'));
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/groups/GTM`, { method: 'DELETE' });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'Failed to delete the group' });
+    error.mockRestore();
   });
 
   it('join-request: 404 for unknown AND for undiscoverable (identical, fail-closed)', async () => {
