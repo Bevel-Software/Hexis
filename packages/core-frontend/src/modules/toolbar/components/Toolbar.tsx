@@ -9,8 +9,17 @@ import { useAppRegistry } from '../../../core/registry';
 import { SidebarToggle } from '../../layout/components/SidebarToggle';
 import { toggleSidebar, useSidebar } from '../../layout/state/sidebar';
 import { LIBRARY_ROOT } from '../../library/routes/library-paths';
+import { TOOLBAR_STACK_QUERY } from '../../layout/breakpoints';
 import { isSettingsNavPath } from '../../settings/settings-nav-items';
 
+/**
+ * The app's top bar: the nav toggle, the app switcher, and whatever the
+ * registry contributes beside them.
+ *
+ * It lives in the shell ABOVE the app surfaces rather than inside either one,
+ * which is why the nav toggle survives a switch between Knowledge and Skills &
+ * Tools instead of being re-mounted by each.
+ */
 export function Toolbar() {
   const registry = useAppRegistry();
   const location = useLocation();
@@ -39,7 +48,7 @@ export function Toolbar() {
   // Below the `md` breakpoint the registry item cluster (the enterprise
   // branch switcher, for one) does not fit alongside the toolbar essentials,
   // so it drops onto a second row instead of overflowing offscreen.
-  const isCompact = useMediaQuery('(max-width: 767px)');
+  const isCompact = useMediaQuery(TOOLBAR_STACK_QUERY);
   const hasSidebar =
     onLibrary || canToggleExplorer || (isSettingsNavPath(location.pathname) && !isCompact);
 

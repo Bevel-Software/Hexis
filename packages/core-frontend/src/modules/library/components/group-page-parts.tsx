@@ -98,6 +98,13 @@ export function GroupSection({
   );
 }
 
+/**
+ * The auto-filling card track a group's contents sit in.
+ *
+ * The track floor is `min(236px, 100%)` rather than a flat 236px so a
+ * container narrower than one card still gets a single column that fits,
+ * instead of one card overflowing its own grid on a phone.
+ */
 export function CardGrid({
   items,
   onOpen,
@@ -106,7 +113,12 @@ export function CardGrid({
   onOpen(item: LibraryItem): void;
 }) {
   return (
-    <div className={cn('grid gap-2.5', 'grid-cols-[repeat(auto-fill,minmax(236px,1fr))]')}>
+    <div
+      className={cn(
+        'grid gap-2.5',
+        'grid-cols-[repeat(auto-fill,minmax(min(236px,100%),1fr))]',
+      )}
+    >
       {items.map((item) => (
         // The change-request number is part of the key, not decoration: two
         // people can propose a skill of the same name into different groups,
@@ -204,6 +216,11 @@ export function GroupItemSections({
   );
 }
 
+/**
+ * The centred, quiet line a page shows when it has nothing else to say —
+ * empty, loading, or unreachable. One component so those three states are
+ * spaced and toned identically instead of each page inventing its own.
+ */
 export function PageNote({ children }: { children: ReactNode }) {
   return <div className="py-16 text-center text-ui text-ink-faint">{children}</div>;
 }

@@ -50,6 +50,9 @@ import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
 import { RootLanding } from '../modules/onboarding/components/RootLanding';
 import { ConnectAgentPill } from '../modules/onboarding/components/ConnectAgentPill';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
+import { useMediaQuery } from '../modules/layout/hooks/useMediaQuery';
+import { NARROW_QUERY } from '../modules/layout/breakpoints';
+import { setSidebarCollapsed } from '../modules/layout/state/sidebar';
 import {
   activeAppId,
   ActiveAppIdContext,
@@ -99,6 +102,14 @@ function AuthenticatedApp() {
   );
 }
 
+/**
+ * The signed-in app: builds the workspace, git, auto-pull and PR-viewer state
+ * and provides all of it to everything below.
+ *
+ * Split out from `AuthenticatedApp` so this half runs INSIDE the event-bus
+ * provider — these hooks subscribe to bus events, which a sibling of the
+ * provider could not reach.
+ */
 function AuthenticatedAppInner() {
   const registry = useAppRegistry();
   const workspaceState = useWorkspaceState();
@@ -237,9 +248,19 @@ function KnowledgeSurface() {
   );
 }
 
-function AppChrome() {
+/**
+ * Everything that frames the active app: the banner strip, the toolbar, and
+ * the surface the registry routes into.
+ *
+ * Exported for its tests rather than for composition — `ShellRoutes` is the
+ * only caller. It sits above the app surfaces because the toolbar does, and
+ * the toolbar has to outlive a route change to keep the nav toggle in one
+ * place across Knowledge and Skills & Tools.
+ */
+export function AppChrome() {
   const registry = useAppRegistry();
   const location = useLocation();
+  const narrow = useMediaQuery(NARROW_QUERY);
   const banners = useMemo(
     () =>
       [...CORE_BANNERS, ...registry.banners].sort(
@@ -254,6 +275,12 @@ function AppChrome() {
   );
   const activeId = activeAppId(apps, location.pathname);
 
+  // A narrow sidebar can be opened from the toolbar, but it must not cover
+  // the destination after the user chooses a group or file inside it.
+  useEffect(() => {
+    if (narrow) setSidebarCollapsed(true);
+  }, [location.pathname, narrow]);
+
   // Pane controller bridge: the toolbar sits OUTSIDE the active app's surface,
   // so the Knowledge pane layout reports its controller up here and the shell
   // provides it around toolbar + surface. While a pane-less app (Skills &
@@ -267,7 +294,7 @@ function AppChrome() {
         <PaneControllerContext.Provider value={setPaneController}>
           {/* Flex-col wrapper so the (conditional) banner strip takes its own
               height and the toolbar + active surface flex into the rest. */}
-          <div className="flex flex-col h-screen">
+          <div className="flex flex-col h-full">
             {banners.map((banner) => (
               <Fragment key={banner.id}>{banner.node}</Fragment>
             ))}
@@ -451,6 +478,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * The auth boundary. Nothing below it mounts until there is a session, so no
+ * downstream provider has to carry a "signed out" case.
+ */
 function AppShell() {
   return (
     <AuthGate>
@@ -465,6 +496,12 @@ function AppShell() {
   );
 }
 
+/**
+ * The package's entry point: hand it a registry and it is the whole app.
+ *
+ * Core contributions merge AHEAD of registry-contributed ones, so a downstream
+ * build adds to the app rather than reordering what core already put there.
+ */
 export function CoreAppShell({ registry }: { registry: AppRegistry }) {
   // Core contributions merge ahead of registry-contributed ones: the review
   // file-viewer panel (core — it renders the pending-changes session served

@@ -32,18 +32,36 @@ function slugifyDraftName(email: string, text: string): string {
 /**
  * Place the branch dropdown just below its trigger. Coordinates are
  * viewport-fixed because the panel is portaled to <body> (so the toolbar's
- * mobile `overflow` row can't clip it). The left edge is clamped to keep the
- * 288px-wide panel fully on screen on narrow phones.
+ * mobile `overflow` row can't clip it).
+ *
+ * The width is returned alongside the coordinates rather than fixed in the
+ * class list: on a phone narrower than the preferred 400px, clamping `left`
+ * alone would still push the right edge off screen, so the panel shrinks to
+ * whatever the viewport leaves between the two margins and `left` is clamped
+ * against that same width.
  */
-function computePanelPosition(triggerRect: DOMRect): { top: number; left: number } {
-  const PANEL_WIDTH = 400; // matches Tailwind w-[400px]
+function computePanelPosition(triggerRect: DOMRect): {
+  top: number;
+  left: number;
+  width: number;
+} {
+  const PREFERRED_WIDTH = 400;
   const MARGIN = 8; // min gap kept from the viewport edge
   const GAP = 4; // vertical gap below the trigger (matches the old top-8)
-  const maxLeft = window.innerWidth - PANEL_WIDTH - MARGIN;
+  const width = Math.min(PREFERRED_WIDTH, window.innerWidth - MARGIN * 2);
+  const maxLeft = window.innerWidth - width - MARGIN;
   const left = Math.max(MARGIN, Math.min(triggerRect.left, maxLeft));
-  return { top: triggerRect.bottom + GAP, left };
+  return { top: triggerRect.bottom + GAP, left, width };
 }
 
+/**
+ * The toolbar's branch picker: which shared draft you are on, and every way to
+ * leave it — switch, create, propose as a change request, delete.
+ *
+ * An enterprise contribution rather than core furniture, so it arrives through
+ * the registry's toolbar-item slot and the core build simply has no branch
+ * control.
+ */
 export function BranchSwitcher() {
   const git = useGit();
   const navigate = useNavigate();
@@ -87,7 +105,9 @@ export function BranchSwitcher() {
   // every open. The panel is portaled to `document.body` so the toolbar's mobile
   // second row (`overflow-x-auto`/`overflow-y-hidden`) can't clip it — an inline
   // absolutely-positioned child can't escape an `overflow-x-auto` ancestor.
-  const [panelPos, setPanelPos] = useState<{ top: number; left: number } | null>(null);
+  const [panelPos, setPanelPos] = useState<ReturnType<
+    typeof computePanelPosition
+  > | null>(null);
   // Derived from URL: branch the route is pointing at. Used to label the
   // picker "Switching to X…" while the per-branch workspace bootstrap is
   // resolving in the background. Under the per-branch workspace model the
@@ -181,6 +201,7 @@ export function BranchSwitcher() {
   // protected branch", which the share flow enforces server-side too.
   const canOpenPr = !!currentBranch && !currentBranch.isProtected;
 
+  /** Discard a draft, confirming first when the remote ref goes with it. */
   async function doDelete(name: string, hasRemote: boolean) {
     // Two reasons a branch reaches doDelete: (1) it's an orphan with no
     // remote counterpart (PR merged + remote head pruned — tidy-up, no
@@ -200,6 +221,11 @@ export function BranchSwitcher() {
     }
   }
 
+  /**
+   * Move to another branch. Under the per-branch workspace model the URL IS
+   * the switch — changing it triggers the bootstrap — so there is no git
+   * operation to perform here.
+   */
   function doSwitch(name: string) {
     // No-op when the user clicks the branch they're already on — otherwise a dirty
     // tree would pop the commit-first dialog for a switch that has nothing to do.
@@ -220,6 +246,11 @@ export function BranchSwitcher() {
     navigate(kbFileUrl(name, openFilePath ?? ''));
   }
 
+  /**
+   * Turn the typed "what are you changing?" sentence into a draft branch and
+   * navigate onto it. Creating and arriving are one gesture — a draft you
+   * cannot see yet would be a branch nobody asked for.
+   */
   async function doCreate() {
     const text = newBranchName.trim();
     if (!text) return;
@@ -239,6 +270,12 @@ export function BranchSwitcher() {
     }
   }
 
+  /**
+   * Propose the current draft against `base`, by handing off to whichever
+   * change-request port is registered rather than deciding here what
+   * "propose" means — enterprise routes it through the chat agent, core opens
+   * the dialog.
+   */
   function doOpenPr(base: string) {
     if (!currentBranch) return;
     // Hand off to the registered change-request port. The enterprise registry
@@ -316,8 +353,8 @@ export function BranchSwitcher() {
       {open && panelPos && createPortal(
         <div
           ref={panelRef}
-          className="fixed z-50 w-[400px] bg-sunken border border-line-strong rounded-lg shadow-xl overflow-hidden"
-          style={{ top: panelPos.top, left: panelPos.left }}
+          className="fixed z-50 bg-sunken border border-line-strong rounded-lg shadow-xl overflow-hidden"
+          style={{ top: panelPos.top, left: panelPos.left, width: panelPos.width }}
         >
           {!creating && !choosingTarget && (
             <>

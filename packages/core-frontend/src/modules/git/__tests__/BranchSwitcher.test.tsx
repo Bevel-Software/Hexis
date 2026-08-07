@@ -156,6 +156,26 @@ describe('BranchSwitcher dropdown', () => {
 
     expect(screen.queryByText(PANEL_ANCHOR)).toBeNull();
   });
+
+  // Clamping `left` alone is not enough to keep the panel on screen: on a
+  // phone narrower than the panel there is no left edge that fits a fixed
+  // 400px, so the width has to give too.
+  it.each([375, 320])('keeps the panel inside a %ipx viewport', (viewport) => {
+    const testWindow = window as typeof window & {
+      happyDOM: { setInnerWidth(value: number): void };
+    };
+    testWindow.happyDOM.setInnerWidth(viewport);
+
+    renderSwitcher();
+    fireEvent.click(screen.getByTitle('Your active shared draft'));
+
+    const panel = screen.getByText(PANEL_ANCHOR).closest('div.fixed') as HTMLElement;
+    const MARGIN = 8;
+    const left = Number.parseFloat(panel.style.left);
+    const width = Number.parseFloat(panel.style.width);
+    expect(left).toBeGreaterThanOrEqual(MARGIN);
+    expect(left + width).toBeLessThanOrEqual(viewport - MARGIN);
+  });
 });
 
 // Delete affordance: a freshly-published draft has `hasRemote: true`, which

@@ -316,13 +316,7 @@ export function ChangeRequestDialog({
         )}
 
         {/* The folder on the left, the file with the change marked in it on the
-            right — the same reading as version history.
-
-            NO responsive variants here, deliberately: the running app loads
-            ZERO `@media` rules (checked in the browser), so an `md:`-prefixed
-            class is dead text — the same trap the deleted slate palette was.
-            The overlay has a fixed max width anyway, so one split is the whole
-            story. */}
+            right — the same reading as version history. */}
         <div className="mt-4 grid min-h-0 flex-1 grid-cols-[13.5rem_minmax(0,1fr)] gap-7 px-8">
           <Surface
             tone="surface"
