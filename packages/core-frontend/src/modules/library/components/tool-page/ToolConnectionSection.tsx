@@ -76,7 +76,7 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
     <Button
       variant="primary"
       size="sm"
-      aria-label={`${actionable.v.scope === 'user' ? 'Add key' : 'Set key'} — ${
+      aria-label={`${actionable.v.scope === 'user' ? 'Add key' : 'Set key'}: ${
         actionable.v.label ?? actionable.v.name
       }`}
       onClick={() => setEdit((e) => ({ name: actionable.v.name, n: e.n + 1 }))}
@@ -98,7 +98,7 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
         <Banner tone="wait" role="status" className="mb-2.5">
           {tool.canWrite ? (
             <>
-              Sign-in setup needed — this server needs users to sign in, but Bevel couldn't set
+              Sign-in setup needed: this server needs users to sign in, but Bevel couldn't set
               that up automatically. Declare the OAuth provider in the tool file, then set its
               client secret below.
               {tool.setup?.reason && <em className="mt-1 block">{tool.setup.reason}</em>}
@@ -115,7 +115,7 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
             </>
           ) : (
             <>
-              Sign-in setup needed — ask the tool's owner to finish setting this up.
+              Sign-in setup needed: ask the tool's owner to finish setting this up.
               {tool.setup?.reason && <em className="mt-1 block">{tool.setup.reason}</em>}
             </>
           )}
@@ -135,7 +135,7 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
               </span>{' '}
               <span>
                 {missing
-                  .map(({ v, status }) => `${v.label ?? v.name} — ${status.text}`)
+                  .map(({ v, status }) => `${v.label ?? v.name}: ${status.text}`)
                   .join(' · ')}
               </span>
             </span>

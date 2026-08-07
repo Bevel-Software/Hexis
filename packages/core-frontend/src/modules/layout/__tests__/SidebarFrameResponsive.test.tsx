@@ -59,7 +59,7 @@ beforeEach(() => {
   setSidebarWidth(SIDEBAR_DEFAULT_WIDTH);
 });
 
-describe('SidebarFrame — narrow viewport', () => {
+describe('SidebarFrame: narrow viewport', () => {
   it('starts collapsed and genuinely removes the sidebar from interaction', () => {
     setViewportWidth(375);
     const aside = renderFrame();

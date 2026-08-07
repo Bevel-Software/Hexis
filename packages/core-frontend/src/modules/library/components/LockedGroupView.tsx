@@ -57,7 +57,7 @@ export function LockedGroupView({ group, onRequested, onUnlocked, onManage }: Lo
       await requestGroupAccess(group.name);
       setRequested(true);
       toast(
-        `Asked ${admins.length > 0 ? joinNames(firstNames(admins)) : 'the admins'} — you get its skills and tools if they let you in.`,
+        `Asked ${admins.length > 0 ? joinNames(firstNames(admins)) : 'the admins'}. You get its skills and tools if they let you in.`,
       );
       onRequested();
     } catch (err) {
@@ -72,7 +72,7 @@ export function LockedGroupView({ group, onRequested, onUnlocked, onManage }: Lo
         onUnlocked();
         return;
       }
-      toast("Couldn't send that — try again.", 'danger');
+      toast("Couldn't send that: try again.", 'danger');
       setRequesting(false);
     }
   }
@@ -107,7 +107,7 @@ export function LockedGroupView({ group, onRequested, onUnlocked, onManage }: Lo
         {pending ? (
           <Surface tone="sunken" radius="lg" elevation="none" padded className="max-w-lg">
             <p className="text-body">
-              {`Requested — ${adminsText} ${admins.length === 1 ? 'decides' : 'decide'} who joins.`}
+              {`Requested: ${adminsText} ${admins.length === 1 ? 'decides' : 'decide'} who joins.`}
             </p>
           </Surface>
         ) : (
@@ -137,7 +137,7 @@ export function LockedGroupView({ group, onRequested, onUnlocked, onManage }: Lo
 function countsLine(group: Pick<GroupSummary, 'skillCount' | 'toolCount'>): string {
   const skills = `${group.skillCount} ${group.skillCount === 1 ? 'skill' : 'skills'}`;
   const tools = `${group.toolCount} ${group.toolCount === 1 ? 'tool' : 'tools'}`;
-  return `${skills} · ${tools} — visible to members only.`;
+  return `${skills} · ${tools}. Visible to members only.`;
 }
 
 /**

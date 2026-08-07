@@ -131,7 +131,7 @@ export function ChangeBox({
           "what changed?" heading reads as a rendering failure. */}
       {upToDate ? null : binary ? (
         <p className="px-3.5 py-4 text-center text-detail text-ink-faint">
-          A binary file (an image, a document…) — there is no text to compare. Read the whole
+          A binary file (an image, a document…). There is no text to compare. Read the whole
           change to decide.
         </p>
       ) : diff === null ? (
@@ -157,12 +157,12 @@ export function ChangeBox({
         ) : blocked ? (
           <>
             <span className="text-detail font-semibold text-wait">
-              Blocked — these lines changed after this was written
+              Blocked: these lines changed after this was written
             </span>
             <span className="w-full text-meta text-ink-muted">
               {mine
                 ? 'It has to be redone against the current text before it can land.'
-                : `It cannot be approved as it stands — it has to be redone against the current text.`}
+                : `It cannot be approved as it stands. It has to be redone against the current text.`}
             </span>
             {conflictPrompt && <ConflictHelp prompt={conflictPrompt} />}
           </>
@@ -193,7 +193,7 @@ export function ChangeBox({
             </span>
             {!busy && (
               <span className="text-meta text-ink-faint">
-                {canDecide ? 'You decide — you own this.' : `Waiting on ${owner ?? 'the owner'}`}
+                {canDecide ? 'You decide. You own this.' : `Waiting on ${owner ?? 'the owner'}`}
               </span>
             )}
             {/* What the server said, verbatim. The gate names the files and the

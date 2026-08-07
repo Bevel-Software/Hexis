@@ -60,7 +60,7 @@ describe('toolStatus', () => {
     // Never grey. Grey read as "disabled" or "not your problem", when an
     // unconfigured integration is the state that most needs somebody.
     expect(toolStatus(t)).toEqual({ state: 'warn', text: 'Needs setup' });
-    expect(toolStatus(tool({ ...t, canWrite: true })).text).toBe('Needs setup — yours to set up');
+    expect(toolStatus(tool({ ...t, canWrite: true })).text).toBe('Needs setup: yours to set up');
   });
 });
 
@@ -100,7 +100,7 @@ describe('filterLibraryItems (sidebar selection + search)', () => {
     { kind: 'integration', name: 'GitHub', description: 'code and change requests', owned: true, group: null },
   ];
 
-  it('narrows to a group — skills and tools together, not split by kind', () => {
+  it('narrows to a group. Skills and tools together, not split by kind', () => {
     expect(filterLibraryItems(items, { kind: 'group', group: 'Everyone' }, '').map((i) => i.name)).toEqual([
       'Weekly newsletter',
       'Slack',

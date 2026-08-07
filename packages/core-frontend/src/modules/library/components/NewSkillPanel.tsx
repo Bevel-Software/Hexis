@@ -96,20 +96,20 @@ export function NewSkillPanel({
       if (created.direct) {
         // Straight into the new skill's page, editor open: an empty SKILL.md
         // is an invitation to write, not a page to admire.
-        toast(`Created ${trimmed} — opening it.`, 'ok');
+        toast(`Created ${trimmed}: opening it.`, 'ok');
         navigate(pathForSkill(trimmed), { state: { startEditing: true } });
       } else {
         // A proposal has no page yet — the skill exists only on the author's
         // branch. It appears right here as an "In review" card (the pending
         // shelf), which is also where its review happens.
-        toast(`Created ${trimmed} — sent to the group's owners for review.`, 'ok');
+        toast(`Created ${trimmed}: sent to the group's owners for review.`, 'ok');
       }
     } catch (err) {
       // The workspace API forwards the backend's own refusal (e.g. "You don't
       // have permission to write to …"), which is worth more than a generic
       // apology — it names the thing to go fix.
       const msg = err instanceof Error ? err.message : String(err);
-      toast(`Couldn't create that skill — ${msg}`, 'danger');
+      toast(`Couldn't create that skill: ${msg}`, 'danger');
       setBusy(false);
     }
   }

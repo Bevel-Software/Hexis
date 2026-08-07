@@ -183,7 +183,7 @@ describe('BranchSwitcher dropdown', () => {
 // (the orphan-cleanup mental model). Now the picker also offers delete for
 // drafts authored by the current user (per `<email-localpart>/...` naming),
 // and routes the destructive remote-delete through a confirm dialog.
-describe('BranchSwitcher — author-can-delete affordance', () => {
+describe('BranchSwitcher: author-can-delete affordance', () => {
   beforeEach(() => {
     vi.mocked(fetchFileAccess).mockResolvedValue({
       canRead: true,
@@ -225,7 +225,7 @@ describe('BranchSwitcher — author-can-delete affordance', () => {
     // destructive-action warning, not just "delete".
     expect(
       screen.getByLabelText(
-        'Delete shared draft "alice/my-draft" — removes it for everyone',
+        'Delete shared draft "alice/my-draft": removes it for everyone',
       ),
     ).toBeInTheDocument();
   });
@@ -243,7 +243,7 @@ describe('BranchSwitcher — author-can-delete affordance', () => {
     fireEvent.click(screen.getByTitle('Your active shared draft'));
     expect(
       screen.queryByLabelText(
-        'Delete shared draft "bob/other-draft" — removes it for everyone',
+        'Delete shared draft "bob/other-draft": removes it for everyone',
       ),
     ).toBeNull();
   });
@@ -274,7 +274,7 @@ describe('BranchSwitcher — author-can-delete affordance', () => {
 // teammates' drafts AND unprefixed CLI branches with no author. Backend gate
 // at `GitService.deleteBranch` is the authoritative check; this suite covers
 // the UI surface only.
-describe('BranchSwitcher — admin-can-delete affordance', () => {
+describe('BranchSwitcher: admin-can-delete affordance', () => {
   beforeEach(() => {
     vi.mocked(fetchFileAccess).mockResolvedValue({
       canRead: true,
@@ -312,7 +312,7 @@ describe('BranchSwitcher — admin-can-delete affordance', () => {
     // `findBy` waits for the admin-status fetch to resolve and re-render.
     expect(
       await screen.findByLabelText(
-        'Delete shared draft "bob/other-draft" — removes it for everyone',
+        'Delete shared draft "bob/other-draft": removes it for everyone',
       ),
     ).toBeInTheDocument();
   });
@@ -330,7 +330,7 @@ describe('BranchSwitcher — admin-can-delete affordance', () => {
     fireEvent.click(screen.getByTitle('Your active shared draft'));
     expect(
       await screen.findByLabelText(
-        'Delete shared draft "fix/some-cli-branch" — removes it for everyone',
+        'Delete shared draft "fix/some-cli-branch": removes it for everyone',
       ),
     ).toBeInTheDocument();
   });

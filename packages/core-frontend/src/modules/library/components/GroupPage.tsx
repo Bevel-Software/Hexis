@@ -249,8 +249,10 @@ export function GroupPage() {
         <Banner role="status" tone="wait" className="mt-4">
           <span>
             {`${attention} ${
-              attention === 1 ? 'integration needs' : 'integrations need'
-            } setup — connect them to unblock this group's skills.`}
+              attention === 1
+                ? 'integration needs setup: connect it'
+                : 'integrations need setup: connect them'
+            } to unblock this group's skills.`}
           </span>{' '}
           <Button variant="outline" size="tiny" onClick={() => navigate('/connect')}>
             Finish setup

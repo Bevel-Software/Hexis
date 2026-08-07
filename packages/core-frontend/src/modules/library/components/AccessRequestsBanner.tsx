@@ -64,7 +64,7 @@ export function AccessRequestsBanner({
                 className="flex flex-wrap items-center gap-2"
               >
                 <span className="min-w-0 flex-1 truncate">
-                  {proposal.label} — <span className="font-semibold">{proposal.verb}</span>
+                  {proposal.label}: <span className="font-semibold">{proposal.verb}</span>
                 </span>
                 <Button
                   variant="outline"

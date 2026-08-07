@@ -55,7 +55,7 @@ describe('ToolLogo', () => {
     expect(other).toMatch(/background-color/);
   });
 
-  it('stays out of the accessible name — the row already says the tool', () => {
+  it('stays out of the accessible name. The row already says the tool', () => {
     expect(mark('slack')).toHaveAttribute('aria-hidden', 'true');
     cleanup();
     expect(mark('heyreach')).toHaveAttribute('aria-hidden', 'true');

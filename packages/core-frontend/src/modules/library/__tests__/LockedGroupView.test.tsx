@@ -67,12 +67,12 @@ describe('LockedGroupView', () => {
     apiMock.requestGroupAccess.mockResolvedValue(undefined);
   });
 
-  it('states the group, who runs it, and how much is in it — and nothing else', () => {
+  it('states the group, who runs it, and how much is in it. And nothing else', () => {
     renderLocked();
     expect(screen.getByRole('heading', { name: 'Finance', level: 1 })).toBeInTheDocument();
     expect(screen.getByText('Locked')).toBeInTheDocument();
     expect(screen.getByText('Run by Olga Ivanova.')).toBeInTheDocument();
-    expect(screen.getByText('2 skills · 1 tool — visible to members only.')).toBeInTheDocument();
+    expect(screen.getByText('2 skills · 1 tool. Visible to members only.')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'All groups' })).toHaveAttribute(
       'href',
       '/skills-and-tools',
@@ -90,7 +90,7 @@ describe('LockedGroupView', () => {
 
   it('pluralises the counts line honestly', () => {
     renderLocked(finance({ skillCount: 1, toolCount: 0 }));
-    expect(screen.getByText('1 skill · 0 tools — visible to members only.')).toBeInTheDocument();
+    expect(screen.getByText('1 skill · 0 tools. Visible to members only.')).toBeInTheDocument();
   });
 
   it('asks once, disables while in flight, and flips to the Requested box', async () => {
@@ -110,7 +110,7 @@ describe('LockedGroupView', () => {
 
     release();
     expect(
-      await screen.findByText('Requested — Olga Ivanova decides who joins.'),
+      await screen.findByText('Requested: Olga Ivanova decides who joins.'),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole('button', { name: 'Subscribe to its skills and tools' }),
@@ -122,13 +122,13 @@ describe('LockedGroupView', () => {
     renderLocked();
     fireEvent.click(askButton());
     expect(
-      await screen.findByText('Asked Olga — you get its skills and tools if they let you in.'),
+      await screen.findByText('Asked Olga. You get its skills and tools if they let you in.'),
     ).toBeInTheDocument();
   });
 
   it('shows the Requested box with no button when the server already has one', () => {
     renderLocked(finance({ hasRequested: true }));
-    expect(screen.getByText('Requested — Olga Ivanova decides who joins.')).toBeInTheDocument();
+    expect(screen.getByText('Requested: Olga Ivanova decides who joins.')).toBeInTheDocument();
     expect(
       screen.queryByRole('button', { name: 'Subscribe to its skills and tools' }),
     ).not.toBeInTheDocument();
@@ -140,11 +140,11 @@ describe('LockedGroupView', () => {
     fireEvent.click(askButton());
     expect(
       await screen.findByText(
-        'Asked the admins — you get its skills and tools if they let you in.',
+        'Asked the admins. You get its skills and tools if they let you in.',
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByText('Requested — the workspace admins decide who joins.'),
+      screen.getByText('Requested: the workspace admins decide who joins.'),
     ).toBeInTheDocument();
   });
 
@@ -171,7 +171,7 @@ describe('LockedGroupView', () => {
     apiMock.requestGroupAccess.mockRejectedValue(new Error('boom'));
     const { onRequested } = renderLocked();
     fireEvent.click(askButton());
-    expect(await screen.findByText("Couldn't send that — try again.")).toBeInTheDocument();
+    expect(await screen.findByText("Couldn't send that: try again.")).toBeInTheDocument();
     expect(askButton()).not.toBeDisabled();
     expect(onRequested).not.toHaveBeenCalled();
   });

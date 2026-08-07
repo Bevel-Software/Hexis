@@ -52,7 +52,7 @@ export function RolesCorruptedBanner() {
       <div className="flex items-center gap-2">
         <ShieldAlert size={16} className="shrink-0" />
         <span className="flex-1 font-semibold">
-          Roles file corrupted — contact Bevel for assistance.
+          Roles file corrupted: contact Bevel for assistance.
         </span>
         <Button
           variant="danger"
@@ -61,7 +61,7 @@ export function RolesCorruptedBanner() {
           disabled={running}
           leadingIcon={running ? <Loader2 size={12} className="animate-spin" /> : undefined}
         >
-          {running ? 'Recovering…' : 'Bevel Recovery — only press if you are from Bevel'}
+          {running ? 'Recovering…' : 'Bevel Recovery. Only press if you are from Bevel'}
         </Button>
       </div>
       {rolesConfigErrors.length > 0 && (

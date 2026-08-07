@@ -165,7 +165,7 @@ const slackTool: ToolSecrets = {
 /** An open change request from someone else, touching SKILL.md. */
 const foreignCr = {
   number: 7,
-  title: 'Changes from Olga — newsletter',
+  title: 'Changes from Olga. Newsletter',
   author: { login: 'bevel-bot', name: 'Bevel Bot' },
   appAuthor: { name: 'Olga Martin' },
   branch: 'suggestions/olga/newsletter',
@@ -445,7 +445,7 @@ describe('SkillPage', () => {
     );
   });
 
-  it('shows the Owner badge to an owner — but never access', async () => {
+  it('shows the Owner badge to an owner. But never access', async () => {
     renderPage(true);
     await screen.findByRole('heading', { name: 'newsletter' });
 
@@ -529,7 +529,7 @@ describe('SkillPage', () => {
         'rewritten body',
       ),
     );
-    expect(await screen.findByText(/Saved — the skill now reads with your change/)).toBeInTheDocument();
+    expect(await screen.findByText(/Saved: the skill now reads with your change/)).toBeInTheDocument();
     // Direct means DIRECT: nothing rode the proposal path.
     expect(apiMock.proposeChange).not.toHaveBeenCalled();
   });
@@ -584,7 +584,7 @@ describe('SkillPage', () => {
   });
 });
 
-describe('SkillPage — proposing a change', () => {
+describe('SkillPage: proposing a change', () => {
   it('seeds the editor from the RAW file, so frontmatter survives a proposal', async () => {
     renderPage(false);
     fireEvent.click(await screen.findByRole('button', { name: 'Propose changes' }));
@@ -691,7 +691,7 @@ describe('SkillPage — proposing a change', () => {
   });
 });
 
-describe('SkillPage — deciding on a change', () => {
+describe('SkillPage: deciding on a change', () => {
   it("shows a non-owner the change box without a verdict, and names who decides", async () => {
     renderPage(false, [foreignCr]);
 
@@ -744,7 +744,7 @@ describe('SkillPage — deciding on a change', () => {
     renderPage(true, [foreignCr]);
 
     const approve = await screen.findByRole('button', { name: 'Approve' });
-    expect(screen.getByText('You decide — you own this.')).toBeInTheDocument();
+    expect(screen.getByText('You decide. You own this.')).toBeInTheDocument();
 
     fireEvent.click(approve);
 

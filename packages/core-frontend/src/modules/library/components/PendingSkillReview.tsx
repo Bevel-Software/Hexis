@@ -49,7 +49,7 @@ function standInFor(
 ): PullRequestSummary {
   return {
     number: pending.changeRequestNumber,
-    title: `New skill — ${item.name}`,
+    title: `New skill: ${item.name}`,
     author: { login: '', name: pending.authorName },
     appAuthor: { name: pending.authorName },
     branch: pending.branch,

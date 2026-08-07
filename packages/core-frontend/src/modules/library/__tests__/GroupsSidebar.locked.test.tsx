@@ -41,7 +41,7 @@ function renderSidebar(over: Partial<GroupsSidebarProps> = {}) {
 
 const nav = () => screen.getByRole('navigation', { name: 'Library groups' });
 
-describe('GroupsSidebar — locked groups', () => {
+describe('GroupsSidebar: locked groups', () => {
   it('names a locked row by its state, with no count in it', () => {
     renderSidebar();
     const finance = screen.getByRole('button', { name: 'Finance (locked)' });

@@ -47,7 +47,7 @@ const RANK: Record<GemState, number> = { ok: 0, warn: 1, err: 2 };
 function varStatus(v: ToolVarStatus, canWrite: boolean): AttentionStatus {
   const notSetUp: AttentionStatus = {
     state: 'warn',
-    text: canWrite ? 'Needs setup — yours to set up' : 'Needs setup',
+    text: canWrite ? 'Needs setup: yours to set up' : 'Needs setup',
   };
   if (v.oauth) {
     if (!v.adminConfigured) return notSetUp;

@@ -67,7 +67,7 @@ function renderDock() {
   );
 }
 
-describe('PullRequestsForMe — the change-request dock', () => {
+describe('PullRequestsForMe: the change-request dock', () => {
   beforeEach(() => {
     api.listPullRequestsForMe.mockReset();
   });

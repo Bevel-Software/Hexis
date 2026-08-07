@@ -97,7 +97,7 @@ export function buildResolveApplyConflictsPrompt(input: {
   return [
     `I tried to apply change request #${changeRequestNumber} into \`${base}\` and the two sides have differences that couldn't be reconciled automatically.${pathBlurb}`,
     '',
-    "Please look at each affected file, decide what the merged version should look like for the process to remain consistent, and apply your resolution to the change request's source branch. Then retry applying the change request. If you genuinely can't tell which version should win on a particular file, ask me about that specific case in plain language — but resolve everything you can on your own first.",
+    "Please look at each affected file, decide what the merged version should look like for the process to remain consistent, and apply your resolution to the change request's source branch. Then retry applying the change request. If you genuinely can't tell which version should win on a particular file, ask me about that specific case in plain language. But resolve everything you can on your own first.",
   ].join('\n');
 }
 
@@ -127,7 +127,7 @@ export function buildResolveRefreshConflictsPrompt(input: {
   return [
     `I tried to bring the latest \`${base}\` into change request #${changeRequestNumber} (so the diff reflects what would actually apply now) and the two sides have differences that couldn't be reconciled automatically.${pathBlurb}`,
     '',
-    "Please decide the merged version for each affected file so the change request stays coherent with the latest target, apply your resolution to the change request's source branch, then refresh again. If you can't tell which version should win on a particular file, ask me about that one case in plain language — but resolve everything you can on your own first.",
+    "Please decide the merged version for each affected file so the change request stays coherent with the latest target, apply your resolution to the change request's source branch, then refresh again. If you can't tell which version should win on a particular file, ask me about that one case in plain language. But resolve everything you can on your own first.",
   ].join('\n');
 }
 

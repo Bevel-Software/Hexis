@@ -102,7 +102,7 @@ describe('ToolConnectionSection', () => {
     renderSection(tool({ setup: OAUTH_MANUAL, canWrite: true }));
 
     expect(screen.getByRole('status')).toHaveTextContent(
-      /Sign-in setup needed — this server needs users to sign in/,
+      /Sign-in setup needed: this server needs users to sign in/,
     );
     expect(screen.getByText(OAUTH_MANUAL.reason!)).toBeInTheDocument();
 
@@ -117,7 +117,7 @@ describe('ToolConnectionSection', () => {
   it('tells everyone else to ask the owner, with no edit link', () => {
     renderSection(tool({ setup: OAUTH_MANUAL }));
     expect(screen.getByRole('status')).toHaveTextContent(
-      "Sign-in setup needed — ask the tool's owner to finish setting this up.",
+      "Sign-in setup needed: ask the tool's owner to finish setting this up.",
     );
     expect(screen.queryByRole('button', { name: 'Edit the tool file' })).toBeNull();
   });
@@ -184,7 +184,7 @@ describe('ToolConnectionSection', () => {
     const banner = screen.getByRole('status');
     // One configuration gap → the singular headline, not "needs 2 things".
     expect(banner).toHaveTextContent('This tool is not connected yet.');
-    expect(banner).toHaveTextContent('HeyReach API key — Needs a key from you');
+    expect(banner).toHaveTextContent('HeyReach API key: Needs a key from you');
     expect(banner).not.toHaveTextContent('Needs your sign-in');
   });
 
@@ -205,7 +205,7 @@ describe('ToolConnectionSection', () => {
     );
     // Named by its label, not its env var — and it says whose move it is.
     expect(screen.getByRole('status')).toHaveTextContent(
-      'HeyReach API key — Needs a key from you',
+      'HeyReach API key: Needs a key from you',
     );
   });
 
@@ -225,7 +225,7 @@ describe('ToolConnectionSection', () => {
       }),
     );
     expect(screen.queryByRole('textbox')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Add key — HeyReach API key' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add key: HeyReach API key' }));
     // The same editor the row's own button opens — one path, two doors.
     expect(screen.getByLabelText('Value for API_KEY')).toBeInTheDocument();
   });

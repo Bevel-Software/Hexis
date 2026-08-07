@@ -73,7 +73,7 @@ export function SkillFileEditor({
 
   async function submit() {
     if (unchanged) {
-      setError('Nothing changed yet — edit the text first.');
+      setError('Nothing changed yet: edit the text first.');
       return;
     }
     setBusy(true);
@@ -95,7 +95,7 @@ export function SkillFileEditor({
   return (
     <Surface tone="surface" radius="lg" elevation="card" className="mt-4 overflow-hidden">
       <div className="flex min-h-11 items-center gap-3 border-b border-line px-3.5 py-2">
-        <span className="truncate font-mono text-meta text-ink-muted">{file} — editing</span>
+        <span className="truncate font-mono text-meta text-ink-muted">{file}: editing</span>
       </div>
 
       {/* `rows` rather than a height class alone: the intrinsic row count is
@@ -119,7 +119,7 @@ export function SkillFileEditor({
       <div className="flex flex-wrap items-center gap-2 border-t border-line px-3 py-2.5">
         <span className="mr-auto text-meta text-ink-faint">
           {mode === 'edit'
-            ? 'Saves for everyone — agents pick it up the next time they connect.'
+            ? 'Saves for everyone. Agents pick it up the next time they connect.'
             : `Nothing changes until ${owner} approves it.`}
         </span>
         <Button variant="quiet" size="sm" onClick={onCancel} disabled={busy}>

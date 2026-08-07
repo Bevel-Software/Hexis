@@ -373,7 +373,7 @@ export function BranchSwitcher() {
                   !currentBranch
                     ? 'No draft selected'
                     : currentBranch.isProtected
-                      ? "You can't propose changes from an official version — switch to a draft first"
+                      ? "You can't propose changes from an official version. Switch to a draft first"
                       : 'Pick where this change request should land'
                 }
               >
@@ -507,7 +507,7 @@ export function BranchSwitcher() {
                 !b.isProtected && !current && (isOrphan || isAuthoredByMe || isAdmin);
               const deleteTitle = isOrphan
                 ? 'Delete this draft (no longer shared)'
-                : `Delete shared draft "${b.name}" — removes it for everyone`;
+                : `Delete shared draft "${b.name}": removes it for everyone`;
               return (
                 <div
                   key={b.name}

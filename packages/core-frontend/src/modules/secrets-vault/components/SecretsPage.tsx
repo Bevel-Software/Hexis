@@ -172,15 +172,15 @@ export function SecretsPage() {
 
       <details>
         <summary className="cursor-pointer text-detail font-semibold text-ink-muted">
-          Advanced — OAuth credentials
+          Advanced: OAuth credentials
         </summary>
         <div className="mt-3 flex flex-col gap-3.5">
           <p className="text-detail text-ink-muted">
-            OAuth secrets are per-user. Name the variable key exactly as the tool references it —{' '}
+            OAuth secrets are per-user. Name the variable key exactly as the tool references it{' '}
             <code className="rounded-sm bg-sunken px-1 py-0.5 font-mono text-meta text-ink">
               {'<Manual>_<VAR>'}
-            </code>{' '}
-            — then sign in to complete the flow.
+            </code>
+            , then sign in to complete the flow.
           </p>
           {oauthSecrets.length > 0 && (
             <ul className="flex flex-col gap-1.5">

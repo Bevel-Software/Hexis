@@ -73,11 +73,11 @@ beforeEach(() => {
   navMock.navigateExternal.mockReset();
 });
 
-describe('ToolVarRow — admin scope', () => {
+describe('ToolVarRow: admin scope', () => {
   it('shows the Set by an Admin chip and no controls to a non-writer', () => {
     renderRow(variable({ adminConfigured: true }));
     expect(screen.getByText('Set by an Admin')).toBeInTheDocument();
-    expect(screen.getByText('One value for the whole team — already handled')).toBeInTheDocument();
+    expect(screen.getByText('One value for the whole team. Already handled')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Replace' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
   });
@@ -129,7 +129,7 @@ describe('ToolVarRow — admin scope', () => {
   });
 });
 
-describe('ToolVarRow — user scope, typed value', () => {
+describe('ToolVarRow: user scope, typed value', () => {
   it('shows Connected when the caller has their own value', () => {
     renderRow(variable({ scope: 'user', userConfigured: true }));
     expect(screen.getByText('Connected')).toBeInTheDocument();
@@ -149,7 +149,7 @@ describe('ToolVarRow — user scope, typed value', () => {
   });
 });
 
-describe('ToolVarRow — oauth', () => {
+describe('ToolVarRow: oauth', () => {
   const signin = (over: Partial<ToolVarStatus> = {}) =>
     variable({
       name: 'SIGNIN',
@@ -228,7 +228,7 @@ describe('ToolVarRow — oauth', () => {
   });
 });
 
-describe('ToolVarRow — failures', () => {
+describe('ToolVarRow: failures', () => {
   it('reports a rejected write through onError and leaves the editor open', async () => {
     secretsMock.setAdminVar.mockRejectedValue(new Error('Forbidden'));
     const { onError, onChanged } = renderRow(variable({}), { canWrite: true });

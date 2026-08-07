@@ -306,7 +306,7 @@ export function ChangeRequestDialog({
 
         {blocked && (
           <Banner tone="wait" role="alert" className="mx-8 mt-4">
-            <b className="font-semibold">Can't apply</b> — files changed after {firstName} wrote
+            <b className="font-semibold">Can't apply</b>: files changed after {firstName} wrote
             this, so there is no honest before and after to apply. It has to be redone against
             the current text.
             <div className="mt-2.5">
@@ -373,10 +373,10 @@ export function ChangeRequestDialog({
               {selectedIsBinary ? (
                 <p className="py-6 text-center text-detail text-ink-faint">
                   {isAdded
-                    ? 'A new binary file (an image, a document…). There is no text to compare — apply the request to take it as proposed.'
+                    ? 'A new binary file (an image, a document…). There is no text to compare. Apply the request to take it as proposed.'
                     : touchesSelected
                       ? 'A binary file (an image, a document…) changed in this request. There is no text to compare.'
-                      : 'A binary file — no text to show, and this request does not touch it.'}
+                      : 'A binary file. No text to show, and this request does not touch it.'}
                 </p>
               ) : mdPayload !== null && !unreadable.has(selected) ? (
                 // An untouched file arrives here too and simply renders as a

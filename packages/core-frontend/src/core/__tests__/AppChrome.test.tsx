@@ -93,7 +93,7 @@ beforeEach(() => {
   setSidebarCollapsed(false);
 });
 
-describe('AppChrome — narrow navigation', () => {
+describe('AppChrome: narrow navigation', () => {
   it('closes a manually opened sidebar after a narrow-screen navigation', () => {
     renderChrome(375);
     expect(screen.getByRole('status', { name: 'sidebar state' })).toHaveTextContent(

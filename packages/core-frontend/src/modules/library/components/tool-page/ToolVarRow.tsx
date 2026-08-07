@@ -189,7 +189,7 @@ export function ToolVarRow({
     }
   } else if (variable.scope === 'admin') {
     if (variable.adminConfigured) {
-      description = 'One value for the whole team — already handled';
+      description = 'One value for the whole team. Already handled';
       meta.push(
         <Badge key="chip" tone="ok">
           Set by an Admin

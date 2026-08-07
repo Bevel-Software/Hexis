@@ -309,7 +309,7 @@ describe('FileExplorer toolbar', () => {
   });
 });
 
-describe('FileExplorer right-click — Download menu (per-path access)', () => {
+describe('FileExplorer right-click: Download menu (per-path access)', () => {
   beforeEach(() => {
     cleanup();
     mockAuthFetch.mockReset();
@@ -462,7 +462,7 @@ describe('FileExplorer right-click — Download menu (per-path access)', () => {
 // The fix introduces a tri-state `userIntent` that overrides auto-expand and
 // resets when the auto-expand trigger transitions. These tests would have
 // caught the original regression.
-describe('FileExplorer chevron collapse — userIntent vs autoExpanded', () => {
+describe('FileExplorer chevron collapse: userIntent vs autoExpanded', () => {
   beforeEach(() => {
     cleanup();
   });
@@ -612,7 +612,7 @@ describe('FileExplorer chevron collapse — userIntent vs autoExpanded', () => {
 
 // The KB level splits the well-known root folders into labelled top-level
 // sections — with one deliberate exception, `Groups/`.
-describe('FileExplorer sections — root folders', () => {
+describe('FileExplorer sections: root folders', () => {
   beforeEach(() => {
     cleanup();
   });
@@ -687,7 +687,7 @@ describe('FileExplorer sections — root folders', () => {
 // the same doomed create, which re-alerted, forever. The fix closes the
 // input (setCreating(null)) BEFORE the fallible create, so there's nothing
 // left to re-blur-submit.
-describe('FileExplorer create — no alert loop on a write-denied path', () => {
+describe('FileExplorer create: no alert loop on a write-denied path', () => {
   beforeEach(() => {
     cleanup();
   });
@@ -735,7 +735,7 @@ describe('FileExplorer create — no alert loop on a write-denied path', () => {
 
 // ── WP2: names and one caret, nothing else ──
 
-describe('FileExplorer rows — the prototype tree', () => {
+describe('FileExplorer rows: the prototype tree', () => {
   const TREE: FileTreeEntry = {
     name: '.',
     relativePath: '.',
@@ -871,7 +871,7 @@ describe('FileExplorer rows — the prototype tree', () => {
 
     // Synthesized into its real place in the tree, under `docs/`.
     const row = screen
-      .getByTitle('Proposed by you — opens the change request')
+      .getByTitle('Proposed by you: opens the change request')
       .closest('button')!;
     expect(row).toHaveTextContent('new-idea.md');
     expect(row.className).toContain('text-accent');
@@ -897,7 +897,7 @@ describe('FileExplorer rows — the prototype tree', () => {
       // touched file underneath must NOT appear.
       minePaths: new Map([['Groups/newsletter/SKILL.md', 12]]),
     });
-    expect(screen.queryByTitle('Proposed by you — opens the change request')).toBeNull();
+    expect(screen.queryByTitle('Proposed by you: opens the change request')).toBeNull();
     expect(screen.queryByText('Groups')).toBeNull();
     expect(screen.queryByText('SKILL.md')).toBeNull();
   });
@@ -910,7 +910,7 @@ describe('FileExplorer rows — the prototype tree', () => {
 
     // Not synthesized, not recoloured — the branch's own file wins, and the
     // open-request signal for it stays the amber dot (asserted above).
-    expect(screen.queryByTitle('Proposed by you — opens the change request')).toBeNull();
+    expect(screen.queryByTitle('Proposed by you: opens the change request')).toBeNull();
     const row = screen.getByText('brief.md').closest('button')!;
     expect(row.className).not.toContain('text-accent');
     // A normal row opens the FILE, never the dialog.

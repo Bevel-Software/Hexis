@@ -319,7 +319,7 @@ export function KbPageHeader({
               size="sm"
               onClick={onPropose}
               leadingIcon={<Pencil size={13} />}
-              title="You can't edit this file directly — propose a change for its owners to approve"
+              title="You can't edit this file directly. Propose a change for its owners to approve"
             >
               Propose changes
             </Button>

@@ -152,7 +152,7 @@ export async function ensureKnowledgeChangeRequest(
   const created = await openChangeRequest({
     sourceBranch: target.branch,
     targetBranch: DEFAULT_BRANCH,
-    title: `Changes from ${userName} — Knowledge`,
+    title: `Changes from ${userName}. Knowledge`,
   });
   // The endpoint returns the created request; treat an unexpected shape as
   // "no summary to announce" rather than a failure — the request exists.

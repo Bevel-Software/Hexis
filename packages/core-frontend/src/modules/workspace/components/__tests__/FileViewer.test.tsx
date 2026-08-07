@@ -723,7 +723,7 @@ describe('FileViewer', () => {
  * caller's personal suggestions branch as a change request, and the file on
  * this branch is untouched until an owner approves.
  */
-describe('FileViewer — proposing a change without write access', () => {
+describe('FileViewer: proposing a change without write access', () => {
   const reader = { id: 'u9', email: 'reader@example.com', name: 'Rae Reader' };
 
   function denyWrite() {
@@ -894,7 +894,7 @@ describe('FileViewer — proposing a change without write access', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Propose changes' }));
     const textarea = await screen.findByRole('textbox');
-    await user.type(textarea, ' — never mind');
+    await user.type(textarea, ': never mind');
     await user.click(screen.getByRole('button', { name: 'Discard' }));
 
     expect(proposeMock).not.toHaveBeenCalled();

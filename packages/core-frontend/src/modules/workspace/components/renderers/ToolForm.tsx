@@ -77,7 +77,7 @@ export function ToolForm({
   if (!model) {
     return (
       <p className="text-meta text-wait">
-        This file isn’t valid JSON/YAML — switch to Code to {readOnly ? 'view' : 'fix'} it.
+        This file isn’t valid JSON/YAML. Switch to Code to {readOnly ? 'view' : 'fix'} it.
       </p>
     );
   }
@@ -104,7 +104,7 @@ export function ToolForm({
 
   return (
     <div className="space-y-3">
-      <Field label="Id (the tool's stable name / secret namespace — lowercase snake_case)">
+      <Field label="Id (the tool's stable name / secret namespace. Lowercase snake_case)">
         <input
           className={inputCls}
           disabled={readOnly}
@@ -116,9 +116,9 @@ export function ToolForm({
 
       <Field label="Type">
         <select className={inputCls} disabled={readOnly} value={type} onChange={(e) => setBody({ type: e.target.value })}>
-          <option value="inline">inline — tools embedded in this file</option>
-          <option value="http">http — URL returning a UTCP manual</option>
-          <option value="mcp">mcp — remote MCP server</option>
+          <option value="inline">inline: tools embedded in this file</option>
+          <option value="http">http: URL returning a UTCP manual</option>
+          <option value="mcp">mcp: remote MCP server</option>
         </select>
       </Field>
 

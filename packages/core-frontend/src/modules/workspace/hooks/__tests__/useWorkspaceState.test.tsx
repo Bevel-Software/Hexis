@@ -320,7 +320,7 @@ describe('useWorkspaceState multi-tab', () => {
  * (or extends) their one Knowledge change request — the same review path a
  * typed proposal takes.
  */
-describe('dispatchUpload — suggestion routing', () => {
+describe('dispatchUpload: suggestion routing', () => {
   // `target-company-state` is protected in the test branch model, and the
   // workspace id IS the encoded branch name — which is how the hook recovers
   // the branch to ask "is this protected?".
@@ -364,7 +364,7 @@ describe('dispatchUpload — suggestion routing', () => {
     });
     proposeMocks.ensureKnowledgeChangeRequest.mockReset().mockResolvedValue({
       number: 12,
-      title: 'Changes from Rae Reader — Knowledge',
+      title: 'Changes from Rae Reader. Knowledge',
       branch: 'suggestions/reader/knowledge',
       base: 'target-company-state',
       state: 'open',

@@ -45,7 +45,7 @@ const dock = () => screen.getByRole('complementary', { name: /change requests fo
  * not the literal number, so raising either band later can't quietly restore
  * the bug.
  */
-describe('ChangeRequestDock — stacking band', () => {
+describe('ChangeRequestDock: stacking band', () => {
   it('paints below the anchored-dropdown band, so an open menu is never covered', async () => {
     const user = userEvent.setup();
     render(

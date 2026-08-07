@@ -60,7 +60,7 @@ describe('GroupsSidebarMenu', () => {
     expect(items()).toEqual(['Add a skill or tool', 'New group', 'Copy link', 'Manage access']);
   });
 
-  it('renders only the verbs it was given — an absent one is not a disabled one', () => {
+  it('renders only the verbs it was given. An absent one is not a disabled one', () => {
     // What a lens row gets: no folder behind it, so nothing to add to and no
     // access to manage.
     renderMenu({ onAdd: undefined, onManageAccess: undefined });

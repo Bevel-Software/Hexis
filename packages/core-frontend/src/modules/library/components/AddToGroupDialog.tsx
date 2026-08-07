@@ -55,7 +55,7 @@ export function AddToGroupDialog({
 
   // The only sentence in this dialog that varies by role.
   const landing = canWrite
-    ? 'I run it, so it goes in directly — no review step.'
+    ? 'I run it, so it goes in directly. No review step.'
     : 'I am not an owner, so send it to the group as a change request for review.';
   const prompt = `Help me build a new skill or tool and add it to the ${name} group at Bevel. ${landing}`;
 
@@ -82,7 +82,7 @@ export function AddToGroupDialog({
     >
       <p className="text-ui text-ink-muted">
         {canWrite
-          ? `Two ways in. Either way it joins ${name} — everyone in the group gets it the next time their agent connects.`
+          ? `Two ways in. Either way it joins ${name}. Everyone in the group gets it the next time their agent connects.`
           : `Two ways in. Either way it goes to ${name} as a change request, and an owner reviews it before it joins.`}
       </p>
 
@@ -99,7 +99,7 @@ export function AddToGroupDialog({
       </div>
 
       <p className="text-ui text-ink-muted">
-        {`Tell your agent what you need — it drafts the skill and adds it to ${name}.`}
+        {`Tell your agent what you need. It drafts the skill and adds it to ${name}.`}
       </p>
 
       <Surface tone="sunken" radius="md" elevation="none" padded className="mt-2.5">

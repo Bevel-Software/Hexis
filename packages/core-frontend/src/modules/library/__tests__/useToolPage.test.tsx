@@ -63,7 +63,7 @@ describe('useToolPage', () => {
     await waitFor(() => expect(result.current.detail).toEqual(DETAIL));
   });
 
-  it('reports notFound — not an error — when no accessible tool carries the slug', async () => {
+  it('reports notFound: not an error. When no accessible tool carries the slug', async () => {
     const { result } = renderHook(() => useToolPage('nope'));
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.notFound).toBe(true);

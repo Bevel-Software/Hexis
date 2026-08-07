@@ -161,7 +161,7 @@ export function FileHistoryPanel({ filePath }: Props) {
     <div className="flex-1 flex flex-col min-h-0 bg-white">
       <div className="flex items-center gap-2 px-3 py-2 border-b border-line shrink-0">
         <History size={14} className="text-ink-muted shrink-0" />
-        <span className="text-xs text-ink-muted truncate">Timeline — {filePath}</span>
+        <span className="text-xs text-ink-muted truncate">Timeline: {filePath}</span>
       </div>
 
       {error && (

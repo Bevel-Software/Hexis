@@ -87,7 +87,7 @@ describe('KbMarkdownView', () => {
 
   it('renders inline HTML details blocks (Source of Information)', () => {
     const onOpenFile = vi.fn();
-    const src = `# Goal\nThe goal.\n\n<details><summary>Source of Information</summary>\n\n1. PROD-1 — goal (2026-06-09)\n\n</details>\n`;
+    const src = `# Goal\nThe goal.\n\n<details><summary>Source of Information</summary>\n\n1. PROD-1. Goal (2026-06-09)\n\n</details>\n`;
     render(<KbMarkdownView source={src} onOpenFile={onOpenFile} />);
     // rehype-raw turns the <details> into a real element rather than literal text.
     expect(screen.getByText('Source of Information').tagName.toLowerCase()).toBe('summary');

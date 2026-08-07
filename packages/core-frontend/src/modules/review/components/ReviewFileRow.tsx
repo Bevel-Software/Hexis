@@ -89,7 +89,7 @@ export function ReviewFileRow({ change, active, busy, onSelect, onAccept, onReje
             e.stopPropagation();
             onReject();
           }}
-          title="Reject — restore the original"
+          title="Reject: restore the original"
           aria-label={`Reject change to ${path}`}
           className="p-1 rounded text-ink-muted hover:text-red-700 hover:bg-red-100 disabled:opacity-40 disabled:cursor-not-allowed"
         >
@@ -102,7 +102,7 @@ export function ReviewFileRow({ change, active, busy, onSelect, onAccept, onReje
             e.stopPropagation();
             onAccept();
           }}
-          title="Accept — keep this change"
+          title="Accept: keep this change"
           aria-label={`Accept change to ${path}`}
           className="p-1 rounded text-ink-muted hover:text-emerald-700 hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed"
         >

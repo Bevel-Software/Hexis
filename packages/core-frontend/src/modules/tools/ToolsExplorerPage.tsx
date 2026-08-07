@@ -230,7 +230,7 @@ function ToolCard({ tool }: { tool: UtcpTool }) {
               </div>
             ) : (
               <p className="text-xs text-ink-muted leading-snug">
-                Transport <code>{tool.tool_call_template?.call_template_type ?? 'unknown'}</code> — invoke it with a UTCP
+                Transport <code>{tool.tool_call_template?.call_template_type ?? 'unknown'}</code>. Invoke it with a UTCP
                 client (or via the MCP server at <code>/api/mcp</code>), not a plain HTTP request.
               </p>
             )}
@@ -241,7 +241,7 @@ function ToolCard({ tool }: { tool: UtcpTool }) {
               <CopyButton text={JSON.stringify(tool, null, 2)} />
             </div>
             <p className="text-[11px] text-ink-faint leading-snug mb-1.5">
-              The full tool definition served by <code>/api/agent/utcp</code> — inputs, outputs and the{' '}
+              The full tool definition served by <code>/api/agent/utcp</code>: inputs, outputs and the{' '}
               <code>tool_call_template</code> (endpoint, method, headers, body wrapping). Resolve{' '}
               <code>${'{API_URL}'}</code> to this server&apos;s origin and <code>${'{CONNECTION_KEY}'}</code> to your{' '}
               <code>{'<tenant>_…'}</code> key to call it from a script.
@@ -330,7 +330,7 @@ export function ToolsExplorerPage() {
               hears the nav assert one name and the page answer with another. */}
           <h1 className="text-lg font-semibold text-ink">Browse available tools</h1>
           <p className="text-sm text-ink-muted">
-            Every tool Bevel exposes to external agents — the same surface available over MCP at{' '}
+            Every tool Bevel exposes to external agents. The same surface available over MCP at{' '}
             <code className="text-ink-muted">/api/mcp</code>. Loaded with your session below; or browse as a specific
             external API key to see exactly what it can reach.
           </p>
@@ -338,7 +338,7 @@ export function ToolsExplorerPage() {
 
         <div className="bg-white border border-line rounded-lg p-3 space-y-2">
           <label className="block text-xs font-medium text-ink">
-            Browse as a specific external API key (<code>{'<tenant>_…'}</code>) — optional
+            Browse as a specific external API key (<code>{'<tenant>_…'}</code>). Optional
           </label>
           <div className="flex gap-2">
             <input

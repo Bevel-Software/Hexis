@@ -175,7 +175,7 @@ export async function proposeChange(
     await openChangeRequest({
       sourceBranch: branch,
       targetBranch: DEFAULT_BRANCH,
-      title: `Changes from ${input.userName} — ${input.skillName}`,
+      title: `Changes from ${input.userName}. ${input.skillName}`,
       description: input.note || undefined,
     });
   }

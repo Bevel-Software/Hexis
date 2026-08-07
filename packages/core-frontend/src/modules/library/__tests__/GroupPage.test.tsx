@@ -205,7 +205,7 @@ describe('GroupPage', () => {
     expect(
       await screen.findByRole('heading', { name: 'Add a skill or tool to GTM' }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/no review step/)).toBeInTheDocument();
+    expect(screen.getByText(/No review step/)).toBeInTheDocument();
   });
 
   it('opens the same add dialog for everyone else, and says review is coming', async () => {
@@ -231,7 +231,7 @@ describe('GroupPage', () => {
     renderGroup('GTM');
     expect(
       await screen.findByText(
-        "1 integration needs setup — connect them to unblock this group's skills.",
+        "1 integration needs setup: connect it to unblock this group's skills.",
       ),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Finish setup' }));
@@ -246,7 +246,7 @@ describe('GroupPage', () => {
     renderGroup('GTM');
     expect(
       await screen.findByText(
-        "2 integrations need setup — connect them to unblock this group's skills.",
+        "2 integrations need setup: connect them to unblock this group's skills.",
       ),
     ).toBeInTheDocument();
   });
@@ -261,7 +261,7 @@ describe('GroupPage', () => {
     expect(screen.getByText('No tools yet.')).toBeInTheDocument();
   });
 
-  it('keeps Share on an EMPTY group — the folder is what carries access, not the items', async () => {
+  it('keeps Share on an EMPTY group. The folder is what carries access, not the items', async () => {
     // Groups used to be derived from their items, which meant a group with
     // nothing in it had no folder to manage and silently lost its access
     // surface. `folders` now comes from the backend's readdir, so an empty

@@ -45,7 +45,7 @@ function renderSidebar(over: Partial<GroupsSidebarProps> = {}) {
 const row = (name: RegExp | string) => screen.getByRole('button', { name });
 
 describe('GroupsSidebar', () => {
-  it('leads with All groups — the Library opens there, so the nav starts there', () => {
+  it('leads with All groups. The Library opens there, so the nav starts there', () => {
     const { onOpenGroupsIndex } = renderSidebar();
     const rows = screen.getAllByRole('button');
     expect(rows[0]).toHaveAccessibleName('All groups');

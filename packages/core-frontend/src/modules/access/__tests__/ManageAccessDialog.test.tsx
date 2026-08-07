@@ -43,7 +43,7 @@ async function openAndUncheckEdit(user: ReturnType<typeof userEvent.setup>) {
   await user.click(editItems[editItems.length - 1]);
 }
 
-describe('ManageAccessDialog — unchecking an inherited verb on a mixed row', () => {
+describe('ManageAccessDialog: unchecking an inherited verb on a mixed row', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     api.suggestPrincipals.mockResolvedValue({ groups: [], people: [], peopleWithheld: false });
@@ -139,7 +139,7 @@ describe('ManageAccessDialog — unchecking an inherited verb on a mixed row', (
  * pin the same click would splice `access.md` on a draft — a rule that looks
  * written and governs nothing.
  */
-describe('ManageAccessDialog — which workspace the edit targets', () => {
+describe('ManageAccessDialog: which workspace the edit targets', () => {
   const PINNED = 'target-company-state';
 
   /** Alice, granted `write` directly here — one row, one editable checklist. */
@@ -212,7 +212,7 @@ describe('ManageAccessDialog — which workspace the edit targets', () => {
 // the reader could not tell which of the two lists was the rule set HERE, and
 // a merged inherited list threw away the only fact that makes an inherited
 // grant actionable — which folder to go and edit (proto:3625, 3637-3649).
-describe('ManageAccessDialog — naming the rules', () => {
+describe('ManageAccessDialog: naming the rules', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     api.suggestPrincipals.mockResolvedValue({ users: [], groups: [], peopleWithheld: false });

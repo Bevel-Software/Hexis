@@ -93,7 +93,7 @@ describe('GroupJoinRequests', () => {
     ).toBeInTheDocument();
   });
 
-  it('accepting GRANTS the one proposal on the default branch — it never merges', async () => {
+  it('accepting GRANTS the one proposal on the default branch. It never merges', async () => {
     renderBanner();
     fireEvent.click(await screen.findByRole('button', { name: 'Grant read to Ali Baba' }));
     await waitFor(() => expect(accessMock.grantAccess).toHaveBeenCalledTimes(1));
@@ -165,7 +165,7 @@ describe('GroupJoinRequests', () => {
     expect(container.textContent).not.toContain('asked to join');
   });
 
-  it('stays silent when the listing fails — a manager surface must not break the page', async () => {
+  it('stays silent when the listing fails. A manager surface must not break the page', async () => {
     groupsMock.listJoinRequests.mockRejectedValue(new Error('boom'));
     const { container } = render(
       <LibraryToastProvider>

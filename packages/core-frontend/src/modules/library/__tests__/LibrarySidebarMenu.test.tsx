@@ -157,7 +157,7 @@ async function openMenuOn(name: RegExp | string) {
   return row;
 }
 
-describe('Library sidebar — right-click, end to end', () => {
+describe('Library sidebar: right-click, end to end', () => {
   beforeEach(() => {
     dataMock.useLibraryData.mockReturnValue(CATALOG);
     groupsMock.listGroups.mockResolvedValue(GROUPS);
@@ -280,7 +280,7 @@ describe('Library sidebar — right-click, end to end', () => {
 
     // The pill itself, not `getByRole('status')` — the tree carries a second
     // live region (the route announcer), so the role alone is ambiguous.
-    const pill = await screen.findByText("Couldn't copy — open the row and copy its address.");
+    const pill = await screen.findByText("Couldn't copy: open the row and copy its address.");
     expect(pill).toBeInTheDocument();
     // And it has to LOOK like a failure. A refusal rendered on the same ink
     // plate as a confirmation is the silent no-op this test exists to prevent,
