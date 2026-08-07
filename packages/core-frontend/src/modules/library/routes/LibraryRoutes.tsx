@@ -8,6 +8,7 @@ import { GroupPage } from '../components/GroupPage';
 import { GroupsIndexPage } from '../components/GroupsIndexPage';
 import { PersonalGroupPage } from '../components/PersonalGroupPage';
 import { WelcomePage } from '../../onboarding/components/WelcomePage';
+import { WorkspaceItemRoute } from './WorkspaceItemRoute';
 import { decodeGroupSegment, LIBRARY_ROOT, urlForItemFile, urlForSkillFile } from './library-paths';
 
 /**
@@ -63,6 +64,16 @@ export function LibraryRoutes() {
             <Route path="groups" element={<Navigate to={LIBRARY_ROOT} replace />} />
             <Route path="groups/:group" element={<GroupPage />} />
 
+            {/* The canonical item addresses. This surface is mounted at TWO
+                shell paths (`/skills-and-tools/*` and, for default-branch
+                `Groups/` URLs, `/workspace/*` — see `isLibraryLocation` and
+                the shell's `CoreSurfaces`), and under the second the remainder
+                is `<branch>/<kbDir>/Groups/...`. Matching it HERE, inside the
+                layout route, is what makes a skill page share the exact
+                sidebar instance the reader browsed in with — one surface, not
+                a second implementation of it. Static siblings above outrank
+                the param, so no `/skills-and-tools` page is shadowed. */}
+            <Route path=":branch/*" element={<WorkspaceItemRoute />} />
           </Route>
 
           {/* LEGACY item addresses. The canonical URL of a skill or tool is
