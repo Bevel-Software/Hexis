@@ -113,9 +113,6 @@ const git = {
   deleteBranch: async () => {},
   pull: async () => {},
   fetchForkBase: async () => null,
-  revert: async () => ({
-    sha: 'a', authorName: 'n', authorEmail: 'e', subject: 's', committedAt: '2026-01-01T00:00:00Z',
-  }),
   fetchFileHistory: async () => [],
   fetchFileDiff: async () => '',
   fetchFileAtChange: async () => ({ baseline: null, current: null }),

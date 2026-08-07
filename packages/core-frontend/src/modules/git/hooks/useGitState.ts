@@ -16,7 +16,6 @@ import {
   fetchForkBase,
   fetchStatus,
   pull as apiPull,
-  revert as apiRevert,
 } from '../services/git.api';
 
 const STATUS_POLL_MS = 30_000;
@@ -254,17 +253,6 @@ export function useGitState(workspaceId: string | null): GitContextValue {
     return fetchForkBase(wid, branch);
   }, []);
 
-  const revert = useCallback(
-    async (sha: string): Promise<CommitAttribution> => {
-      const wid = workspaceIdRef.current;
-      if (!wid) throw new Error('No workspace loaded');
-      const attribution = await apiRevert(wid, sha);
-      await refreshStatus();
-      return attribution;
-    },
-    [refreshStatus],
-  );
-
   const fetchFileHistoryCb = useCallback(
     async (path: string, limit?: number): Promise<CommitAttribution[]> => {
       const wid = workspaceIdRef.current;
@@ -323,7 +311,6 @@ export function useGitState(workspaceId: string | null): GitContextValue {
       deleteBranch: deleteBranchCb,
       pull,
       fetchForkBase: fetchForkBaseCb,
-      revert,
       fetchFileHistory: fetchFileHistoryCb,
       fetchFileDiff: fetchFileDiffCb,
       fetchFileAtChange: fetchFileAtChangeCb,
@@ -340,7 +327,6 @@ export function useGitState(workspaceId: string | null): GitContextValue {
       deleteBranchCb,
       pull,
       fetchForkBaseCb,
-      revert,
       fetchFileHistoryCb,
       fetchFileDiffCb,
       fetchFileAtChangeCb,

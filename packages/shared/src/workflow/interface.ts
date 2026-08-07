@@ -152,12 +152,6 @@ export interface IWorkflowService {
   /** Per-file history. Newest first; clamps to ≤ 100 entries. */
   listChangesForFile(workspaceId: string, path: string, limit?: number): Promise<Change[]>;
   /**
-   * Revert a single change by creating a new change that undoes it.
-   * Refused on protected branches; refused without write permission on the
-   * touched paths.
-   */
-  revertChange(workspaceId: string, user: AuthUser, sha: string): Promise<Change>;
-  /**
    * Diff of one file between two branches. Both names must resolve to a
    * known branch on this workspace (local head or remote-tracking). Returns
    * the raw unified diff body — empty when identical, includes the

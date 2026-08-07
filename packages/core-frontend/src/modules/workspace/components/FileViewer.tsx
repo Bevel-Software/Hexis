@@ -65,8 +65,6 @@ export function FileViewer() {
     acceptPendingContent,
     rejectPendingContent,
     addTab,
-    refreshFileTree,
-    bumpFsRevision,
     reloadTabFromDisk,
   } = useWorkspace();
   // Chat decoupling: the suggested-prompt seed is an optional registry port
@@ -304,22 +302,6 @@ export function FileViewer() {
       setIsManualDirty(false);
     }
   }, [onProtectedBranch, isReviewingPending, proposeMode]);
-
-  const handleRevertCompleted = useCallback(async () => {
-    await refreshFileTree();
-    // A revert writes to the working tree, so the active tab's cached content
-    // is stale. Bump fs revision — the hook's invalidation effect refetches
-    // the active tab, and if the file no longer exists (e.g. revert of its
-    // creation), drops it from the tab list. The state→URL effect in
-    // FileRoute then updates the URL to the new active tab.
-    bumpFsRevision();
-    await git.refreshStatus();
-    // A revert writes to the working tree, so pending-review state may no
-    // longer match what's on disk. Refresh the session before switching tabs
-    // so the review panel reflects the reconciled paths.
-    await review.refresh();
-    setActiveTab('content');
-  }, [refreshFileTree, bumpFsRevision, git, review]);
 
   const handleAccept = useCallback(async () => {
     if (isSubmitting) return;
@@ -1062,10 +1044,7 @@ export function FileViewer() {
       {activeTab === 'history' && historyAvailable ? (
         <>
           <BackToDocument onBack={() => setActiveTab('content')} label="Version history" />
-          <FileHistoryPanel
-            filePath={openFilePath}
-            onRevertCompleted={handleRevertCompleted}
-          />
+          <FileHistoryPanel filePath={openFilePath} />
         </>
       ) : activeTab === 'compare' && historyAvailable ? (
         <>

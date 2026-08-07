@@ -58,7 +58,6 @@ function makeGit(
     deleteBranch: async () => {},
     pull: async () => {},
     fetchForkBase: async () => null,
-    revert: async () => ({ authorName: '', authorEmail: '', sha: '', subject: '', committedAt: '' }),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
     fetchFileAtChange: async () => ({ baseline: null, current: null }),
