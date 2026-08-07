@@ -113,7 +113,20 @@ export interface IGitService {
     user: AuthUser,
     req: ShareChangesRequest,
   ): Promise<CommitAttribution>;
-  push(workspaceId: string, user: AuthUser): Promise<void>;
+  push(
+    workspaceId: string,
+    user: AuthUser,
+    opts?: {
+      /**
+       * Skip the per-user protected-branch access gate for THIS push. Only
+       * for system-authorized flows whose endpoint is itself the
+       * authorization (group provisioning: any signed-in user may claim an
+       * unused name under `Groups/`, and the seeded access.md governs
+       * everything after). Never thread a raw user request into this.
+       */
+      systemAuthorized?: boolean;
+    },
+  ): Promise<void>;
   fetch(workspaceId: string): Promise<void>;
   pull(workspaceId: string): Promise<void>;
   diffStat(workspaceId: string, base?: string): Promise<string[]>;

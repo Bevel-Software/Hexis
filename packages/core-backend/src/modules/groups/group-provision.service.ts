@@ -53,6 +53,7 @@ export interface ProvisionCommitDriver {
     branch: string,
     targetPath: string,
     user: AuthUser,
+    opts?: { systemAuthorized?: boolean },
   ): Promise<void>;
 }
 
@@ -184,7 +185,14 @@ export class GroupProvisionService {
       // Inline, not enqueued: the gate reads rules at HEAD, so the folder is
       // only real once this commit lands. `runPendingCommit` is the same
       // commit+push (with pull-rebase recovery) the queue worker runs.
-      await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, wsRelPath, user);
+      // `systemAuthorized`: the push gate reads access at origin, where this
+      // folder does not exist yet and the root says `write: Admin` — the very
+      // rule this endpoint exists to carve through. The endpoint has already
+      // authorized the write (any signed-in user, unused name, exclusive
+      // create), so the per-user gate is skipped for exactly this commit.
+      await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, wsRelPath, user, {
+        systemAuthorized: true,
+      });
     } catch (err) {
       // The commit did not land: roll the seeded file back off the disk,
       // best-effort, so a retry doesn't find a half-made group and report

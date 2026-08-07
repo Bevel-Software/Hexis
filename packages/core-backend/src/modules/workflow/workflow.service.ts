@@ -807,6 +807,7 @@ export class WorkflowService implements IWorkflowService {
     branch: string,
     targetPath: string,
     user: AuthUser,
+    opts?: { systemAuthorized?: boolean },
   ): Promise<void> {
     const change = await this.git.commitFile(workspaceId, user, targetPath);
     if (!change) {
@@ -823,11 +824,11 @@ export class WorkflowService implements IWorkflowService {
       // and the worker's ladder takes over). Nothing to emit either way —
       // there's no new sha.
       if (await this.git.hasUnpushedCommits(workspaceId)) {
-        await this.pushWithRecovery(workspaceId, branch, targetPath, user);
+        await this.pushWithRecovery(workspaceId, branch, targetPath, user, opts);
       }
       return;
     }
-    await this.pushWithRecovery(workspaceId, branch, targetPath, user);
+    await this.pushWithRecovery(workspaceId, branch, targetPath, user, opts);
     this.events?.emit({
       kind: 'file-changed',
       workspaceId,
@@ -853,9 +854,10 @@ export class WorkflowService implements IWorkflowService {
     branch: string,
     targetPath: string,
     user: AuthUser,
+    opts?: { systemAuthorized?: boolean },
   ): Promise<void> {
     try {
-      await this.git.push(workspaceId, user);
+      await this.git.push(workspaceId, user, opts);
     } catch (firstPushErr) {
       const firstDetail = firstPushErr instanceof Error ? firstPushErr.message : String(firstPushErr);
       const looksLikeNonFastForward = /non-fast-forward|rejected|fetch first|updates were rejected/i.test(firstDetail);
@@ -864,7 +866,7 @@ export class WorkflowService implements IWorkflowService {
       if (looksLikeNonFastForward) {
         try {
           await this.git.pull(workspaceId);
-          await this.git.push(workspaceId, user);
+          await this.git.push(workspaceId, user, opts);
           recovered = true;
           console.log(
             `[workflow] non-fast-forward push recovered via pull --rebase for workspace=${workspaceId} branch=${branch} path=${targetPath}`,

@@ -1029,7 +1029,11 @@ export class GitService implements IGitService {
     });
   }
 
-  async push(workspaceId: string, user: AuthUser): Promise<void> {
+  async push(
+    workspaceId: string,
+    user: AuthUser,
+    opts?: { systemAuthorized?: boolean },
+  ): Promise<void> {
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
       const branch = await this.currentBranch(cwd);
@@ -1042,7 +1046,14 @@ export class GitService implements IGitService {
       // PR. Gate against `origin/<branch>` — the published state — for
       // protected pushes; that's defence-in-depth against local rebases or
       // `commit-tree` shenanigans that might bypass the commit-time gate.
-      if (isProtectedBranch(branch)) {
+      // `systemAuthorized` skips the gate for flows whose ENDPOINT is the
+      // authorization — group provisioning commits an access.md into a
+      // folder that does not exist at origin yet, which this gate can only
+      // ever read as "write: Admin". The provisioning service has already
+      // decided the write is legitimate (unused name, exclusive create);
+      // gating it here again just refuses every non-admin the product
+      // promised a group to.
+      if (isProtectedBranch(branch) && !opts?.systemAuthorized) {
         const touched = await this.unpushedTouchedPaths(cwd);
         await this.assertCanWriteAtRef(
           workspaceId,

@@ -78,10 +78,30 @@ export function LibraryLayout() {
 
   const filter = libraryFilterForPath(location.pathname);
 
-  const groups = useMemo(
-    () => groupCounts(items).map((g) => ({ ...g, attention: attentionOf(items, g.group) })),
-    [items],
-  );
+  /**
+   * The member rows: every group the caller can READ (or manages), whether or
+   * not anything is in it yet. Counts come from the catalog, membership does
+   * not — a freshly created group has no skills or tools, and deriving the
+   * rows from the items alone made it vanish from the very nav that says
+   * "Included in your MCP". Being in a group is what puts it in your MCP;
+   * having content is not. The catalog still contributes names the summaries
+   * miss (a per-file grant can surface one skill from an otherwise unreadable
+   * folder), so the two witnesses are merged rather than either winning.
+   */
+  const groups = useMemo(() => {
+    const counts = new Map(groupCounts(items).map((g) => [g.group, g.count]));
+    const names = new Set<string>(counts.keys());
+    for (const g of groupSummaries) {
+      if (g.canRead || g.canWrite) names.add(g.name);
+    }
+    return [...names]
+      .sort((a, b) => a.localeCompare(b))
+      .map((group) => ({
+        group,
+        count: counts.get(group) ?? 0,
+        attention: attentionOf(items, group),
+      }));
+  }, [items, groupSummaries]);
   /**
    * Groups the caller cannot get into, alphabetical.
    *

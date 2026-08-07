@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import {
@@ -231,6 +231,33 @@ describe('LibraryRoutes', () => {
     expect(screen.getByRole('heading', { name: 'Skills', level: 2 })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Tools', level: 2 })).toBeInTheDocument();
     expect(screen.getByRole('navigation', { name: 'Breadcrumb' })).toBeInTheDocument();
+  });
+
+  it('a group you are in appears in the nav even when it is EMPTY', async () => {
+    // Membership is what puts a group in your MCP; content is not. Deriving
+    // the member rows from catalog items alone made a freshly created group
+    // vanish from the very list headed "Included in your MCP".
+    groupsMock.listGroups.mockResolvedValue([
+      ...GROUPS,
+      {
+        name: 'Fresh',
+        folders: ['Groups/Fresh'],
+        canRead: true,
+        canWrite: true,
+        skillCount: 0,
+        toolCount: 0,
+        owners: { roles: [], users: [] },
+        writers: { roles: [], users: [] },
+        readers: { restricted: true, roles: [], users: [] },
+        hasRequested: false,
+        requestNumber: null,
+      },
+    ]);
+    renderAt('/skills-and-tools');
+    const nav = await screen.findByRole('navigation', { name: 'Library groups' });
+    // In the member half, with a zero count — never below the gap as locked.
+    expect(await within(nav).findByRole('button', { name: /^Fresh/ })).toBeInTheDocument();
+    expect(within(nav).queryByRole('button', { name: 'Fresh (locked)' })).toBeNull();
   });
 
   it('a sidebar group click navigates to /skills-and-tools/groups/<name>', async () => {

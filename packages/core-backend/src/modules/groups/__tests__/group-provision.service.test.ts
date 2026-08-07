@@ -72,11 +72,15 @@ describe('GroupProvisionService.createGroup', () => {
 
     // The commit ran INLINE — the gate reads at HEAD, so an async commit
     // would 403 the creator's very next write into the folder.
+    // `systemAuthorized`: the endpoint is the authorization — without it the
+    // push gate reads origin (where the folder does not exist) and refuses
+    // every non-admin the product promised a group to.
     expect(h.commits.runPendingCommit).toHaveBeenCalledWith(
       'ws-main',
       DEFAULT_BRANCH,
       `${KB}/Groups/GTM/access.md`,
       USER,
+      { systemAuthorized: true },
     );
     expect(h.accessControl.invalidate).toHaveBeenCalledWith('ws-main');
   });
