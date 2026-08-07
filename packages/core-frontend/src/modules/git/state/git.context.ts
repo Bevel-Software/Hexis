@@ -53,7 +53,6 @@ export interface GitContextValue {
    * `branch` is itself protected / can't be resolved.
    */
   fetchForkBase(branch: string): Promise<string | null>;
-  revert(sha: string): Promise<CommitAttribution>;
   fetchFileHistory(path: string, limit?: number): Promise<CommitAttribution[]>;
   fetchFileDiff(path: string, sha: string): Promise<string>;
   /**

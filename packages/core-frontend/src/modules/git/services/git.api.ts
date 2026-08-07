@@ -110,17 +110,6 @@ export async function fetchForkBase(
   return data.base;
 }
 
-export async function revert(
-  workspaceId: string,
-  sha: string,
-): Promise<CommitAttribution> {
-  return handleApiResponse(
-    await authFetch(`/api/workspace/${workspaceId}/workflow/changes/${encodeURIComponent(sha)}/revert`, {
-      method: 'POST',
-    }),
-  );
-}
-
 export async function fetchFileHistory(
   workspaceId: string,
   path: string,

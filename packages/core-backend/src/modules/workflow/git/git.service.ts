@@ -1620,60 +1620,6 @@ export class GitService implements IGitService {
     });
   }
 
-  async revertCommit(
-    workspaceId: string,
-    user: AuthUser,
-    sha: string,
-  ): Promise<CommitAttribution> {
-    if (!/^[a-f0-9]{7,40}$/i.test(sha)) {
-      throw new WorkflowValidationError('invalid commit sha');
-    }
-    assertValidAuthor(user);
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
-      const branch = await this.currentBranch(cwd);
-
-      // Revert creates a new commit reversing `sha`. Same model as commit:
-      // gate only on protected branches; reverts on feature/draft branches
-      // are free (they produce a commit that would still need to merge via
-      // PR to affect canonical state).
-      if (isProtectedBranch(branch)) {
-        const { stdout: diffOut } = await this.git(cwd, [
-          'diff-tree', '--no-commit-id', '--name-only', '-r', sha,
-        ]);
-        const touched = diffOut.split('\n').map((s) => s.trim()).filter(Boolean);
-        await this.assertCanWriteAtRef(workspaceId, 'HEAD', user.email, touched);
-      }
-
-      await this.git(cwd, [
-        'revert',
-        '--no-edit',
-        `--author=${user.name} <${user.email}>`,
-        sha,
-      ]);
-
-      const { stdout } = await this.git(cwd, [
-        'log',
-        '-1',
-        '--pretty=format:%H%x00%an%x00%ae%x00%s%x00%aI',
-      ]);
-      const [headSha, authorName, authorEmail, subj, committedAt] = stdout.split('\x00');
-
-      // A revert may have touched roles.yaml or access.md — drop cached
-      // access state so the next gate read reflects the rolled-back tree.
-      // Mirrors the commit / pull paths.
-      this.accessControl?.invalidate(workspaceId);
-
-      return {
-        sha: headSha?.trim() ?? '',
-        authorName: authorName ?? '',
-        authorEmail: authorEmail ?? '',
-        subject: subj ?? '',
-        committedAt: committedAt?.trim() ?? new Date().toISOString(),
-      };
-    });
-  }
-
   async logForFile(
     workspaceId: string,
     relativePath: string,

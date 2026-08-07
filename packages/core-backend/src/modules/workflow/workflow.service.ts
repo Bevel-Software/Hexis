@@ -480,10 +480,6 @@ export class WorkflowService implements IWorkflowService {
     return this.git.logForFile(workspaceId, path, limit);
   }
 
-  revertChange(workspaceId: string, user: AuthUser, sha: string): Promise<Change> {
-    return this.git.revertCommit(workspaceId, user, sha);
-  }
-
   compareFile(
     workspaceId: string,
     path: string,

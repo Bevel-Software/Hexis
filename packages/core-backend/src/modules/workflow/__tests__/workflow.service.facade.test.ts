@@ -139,7 +139,6 @@ function makeGit(): GitService {
     diffStat: vi.fn(),
     pendingChanges: vi.fn(),
     resolveForkBase: vi.fn(),
-    revertCommit: vi.fn(),
     logForFile: vi.fn(),
     diffFileAtCommit: vi.fn(),
     diffFileBetweenBranches: vi.fn(),
