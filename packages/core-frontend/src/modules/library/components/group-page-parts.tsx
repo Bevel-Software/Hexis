@@ -418,7 +418,11 @@ export function EmptySkillsNudge({
 }) {
   return (
     <div className="relative">
-      <ChalkArrow className="pointer-events-none absolute -top-[74px] right-9 h-[68px] w-[84px] text-ink-faint" />
+      {/* The offsets aim the TIP at the `+` icon-button's centre: from the
+          column's right edge that centre sits behind the `⋯` button and two
+          flex gaps (~54px), constant on every page that renders PageActions —
+          Share sits on the far side of `+`, so its presence moves nothing. */}
+      <ChalkArrow className="pointer-events-none absolute -top-[74px] right-[45px] h-[68px] w-[84px] text-ink-faint" />
       <p className="text-ui text-ink-faint">
         {lead} <EmptyStateAction onClick={onAction}>{actionLabel}</EmptyStateAction>
         {tail}
