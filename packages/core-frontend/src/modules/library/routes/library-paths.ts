@@ -1,4 +1,4 @@
-import { DEFAULT_BRANCH, groupOfPath, isPersonalGroupFolder } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, GROUPS_DIR, groupOfPath, isPersonalGroupFolder } from '@bevel-software/platform-shared';
 import { matchPath } from 'react-router-dom';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import type { LibraryFilter } from '../utils/status';
@@ -93,6 +93,29 @@ export function urlForItemFile(kbDirName: string, repoRelativePath: string): str
 /** The canonical URL of one file of a skill (default: its SKILL.md). */
 export function urlForSkillFile(kbDirName: string, skillPath: string, file = 'SKILL.md'): string {
   return urlForItemFile(kbDirName, `${skillPath}/${file}`);
+}
+
+/**
+ * Whether a location belongs to the LIBRARY surface — decided by URL SHAPE
+ * alone, never by catalog contents: `/skills-and-tools/...`, or a
+ * default-branch workspace URL under `Groups/`
+ * (`/workspace/<default>/<kbDir>/Groups/<group>/...`). KnowledgeBase paths go
+ * to the Knowledge surface, Groups paths to Skills & Tools — the two roots ARE
+ * the two apps. A shape rule means a just-created skill routes correctly
+ * before any catalog has heard of it.
+ *
+ * Non-default branches stay with Knowledge deliberately: the library pages
+ * speak the default branch, and a draft's file is reviewed raw.
+ */
+export function isLibraryLocation(pathname: string): boolean {
+  if (pathname === LIBRARY_ROOT || pathname.startsWith(`${LIBRARY_ROOT}/`)) return true;
+  const segments = pathname.split('/').filter(Boolean).map(decodeSegment);
+  return (
+    segments[0] === 'workspace' &&
+    segments[1] === DEFAULT_BRANCH &&
+    segments[3] === GROUPS_DIR &&
+    segments.length >= 6 // workspace/<branch>/<kbDir>/Groups/<group>/<item>
+  );
 }
 
 /**
