@@ -1,0 +1,72 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen } from '@testing-library/react';
+import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
+
+/**
+ * The deployment settings page — first-run setup with a permanent address.
+ * What is worth testing is the door itself: an admin gets the real form (with
+ * the same fields the setup gate shows), a non-admin gets told this is not
+ * theirs, and a failed status load offers a retry instead of a blank page.
+ * The form's own behaviour is covered by the setup suite — same component.
+ */
+
+const apiMock = vi.hoisted(() => ({ fetchSetupStatus: vi.fn() }));
+vi.mock('../../../setup/services/setup.api', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  fetchSetupStatus: apiMock.fetchSetupStatus,
+}));
+
+import { DeploymentPage } from '../DeploymentPage';
+
+function admin(isAdmin: boolean): AdminContextValue {
+  return { isAdmin } as AdminContextValue;
+}
+
+/** A settled status: setup is COMPLETE — this page exists for exactly then. */
+const COMPLETE_STATUS = {
+  complete: true,
+  awaitingRestart: false,
+  isAdmin: true,
+  settings: [
+    { key: 'kbRepoUrl', section: 'knowledge-base', source: 'saved', value: 'https://git.example.com/kb.git' },
+    { key: 'oidcIssuerUrl', section: 'sign-in', source: 'saved', value: '' },
+    { key: 'oidcClientId', section: 'sign-in', source: 'saved', value: '' },
+    { key: 'oidcClientSecret', section: 'sign-in', source: 'saved', value: '' },
+  ],
+};
+
+function renderPage(value: AdminContextValue) {
+  return render(
+    <AdminContext.Provider value={value}>
+      <DeploymentPage />
+    </AdminContext.Provider>,
+  );
+}
+
+describe('DeploymentPage', () => {
+  beforeEach(() => {
+    apiMock.fetchSetupStatus.mockReset();
+    apiMock.fetchSetupStatus.mockResolvedValue(COMPLETE_STATUS);
+  });
+
+  it('shows the setup form to an admin — AFTER setup is complete', async () => {
+    renderPage(admin(true));
+    // The single-sign-on fields are reachable again: the whole point of the page.
+    expect(await screen.findByText('Provider address')).toBeInTheDocument();
+    // And the same redirect-URI helper the setup screen shows.
+    expect(screen.getByText(/api\/auth\/oidc\/callback/)).toBeInTheDocument();
+  });
+
+  it('tells a non-admin this is not theirs, and never fetches the settings', () => {
+    renderPage(admin(false));
+    expect(screen.getByText(/Admins only/)).toBeInTheDocument();
+    expect(screen.queryByText('Provider address')).toBeNull();
+  });
+
+  it('offers a retry when the status cannot be loaded', async () => {
+    apiMock.fetchSetupStatus.mockRejectedValueOnce(new Error('down'));
+    renderPage(admin(true));
+    expect(await screen.findByText(/Couldn't load the deployment settings/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+});

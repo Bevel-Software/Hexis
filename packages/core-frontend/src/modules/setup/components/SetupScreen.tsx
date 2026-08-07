@@ -112,6 +112,15 @@ interface Props {
   settings: SettingStatus[];
   /** Re-read the status after a save, so the gate can let the app through. */
   onSaved(): void;
+  /**
+   * Where the screen is standing. `setup` (the default) is the first-run
+   * gate: full-page chrome, its own heading. `settings` is the SAME form
+   * embedded in the admin Deployment page — the host owns the chrome and the
+   * words around it, so the wrapper and heading stay out of the way. One
+   * component on purpose: the fields, the env-lock rule, the connection test
+   * and the restart banners must never drift between first run and later.
+   */
+  variant?: 'setup' | 'settings';
 }
 
 /**
@@ -130,7 +139,7 @@ interface Props {
  * silently outranking the infrastructure config someone is reviewing in a
  * repo, which is the same rule the server enforces.
  */
-export function SetupScreen({ settings, onSaved }: Props) {
+export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [problems, setProblems] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -344,14 +353,18 @@ export function SetupScreen({ settings, onSaved }: Props) {
   // it would scroll within. Being exactly the height of the root is what makes
   // the overflow this element's own to handle.
   return (
-    <div className="h-full overflow-y-auto bg-sunken px-6 py-12">
-      <div className="mx-auto w-full max-w-2xl">
-        <h1 className="text-display font-semibold text-ink">Set up this deployment</h1>
-        <p className="mt-2 max-w-[62ch] text-lede text-ink-muted">
-          One thing is needed before anyone can use it: somewhere to keep the knowledge base.
-          Connect a repository below, test it, and the rest fills itself in. Single sign-on is
-          optional and can wait.
-        </p>
+    <div className={variant === 'setup' ? 'h-full overflow-y-auto bg-sunken px-6 py-12' : ''}>
+      <div className={variant === 'setup' ? 'mx-auto w-full max-w-2xl' : 'w-full max-w-2xl'}>
+        {variant === 'setup' && (
+          <>
+            <h1 className="text-display font-semibold text-ink">Set up this deployment</h1>
+            <p className="mt-2 max-w-[62ch] text-lede text-ink-muted">
+              One thing is needed before anyone can use it: somewhere to keep the knowledge base.
+              Connect a repository below, test it, and the rest fills itself in. Single sign-on is
+              optional and can wait.
+            </p>
+          </>
+        )}
 
         <div ref={noticeRef}>
           {error && (
