@@ -10,10 +10,11 @@ import { AdminContext, type AdminContextValue } from '../../../admin/state/admin
  * The form's own behaviour is covered by the setup suite — same component.
  */
 
-const apiMock = vi.hoisted(() => ({ fetchSetupStatus: vi.fn() }));
+const apiMock = vi.hoisted(() => ({ fetchSetupStatus: vi.fn(), saveSettings: vi.fn() }));
 vi.mock('../../../setup/services/setup.api', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   fetchSetupStatus: apiMock.fetchSetupStatus,
+  saveSettings: apiMock.saveSettings,
 }));
 
 import { DeploymentPage } from '../DeploymentPage';
@@ -64,6 +65,30 @@ describe('DeploymentPage', () => {
     // Never fetched, not merely never rendered: the page already told them
     // this is not theirs, so a request nothing renders is pure noise.
     expect(apiMock.fetchSetupStatus).not.toHaveBeenCalled();
+  });
+
+  it('a failed refresh after an awaiting-restart save keeps the form AND the notice', async () => {
+    // The save landed; only the follow-up status fetch died. The page must
+    // not trade the confirmation of what was saved for a load error — the
+    // form stays mounted with its restart notice, and the banner above it
+    // says "refresh", not "load", with a retry.
+    apiMock.saveSettings.mockResolvedValue({
+      restartRequired: true,
+      complete: false,
+      awaitingRestart: true,
+      settings: COMPLETE_STATUS.settings,
+    });
+    renderPage(admin(true));
+    await screen.findByText('Provider address');
+    apiMock.fetchSetupStatus.mockRejectedValueOnce(new Error('down'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    expect(await screen.findByText(/needs a restart/)).toBeInTheDocument();
+    expect(await screen.findByText(/Couldn't refresh the deployment settings/)).toBeInTheDocument();
+    // Still the form, not a blank page: the last good settings render on.
+    expect(screen.getByText('Provider address')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
   });
 
   it('offers a retry when the status cannot be loaded, and the retry fetches again', async () => {

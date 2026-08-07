@@ -69,9 +69,17 @@ export function DeploymentPage() {
 
       {!loaded && <div className="mt-6 text-sm text-ink-muted">Loading…</div>}
 
+      {/* A failed fetch never clears `status`, so a refresh that breaks
+          AFTER a save leaves the form (and any restart notice inside it)
+          mounted below this banner — the failure costs a retry button, never
+          the confirmation of what was just saved. The copy tells the two
+          apart: nothing on screen yet is a load problem, a form still on
+          screen is a refresh problem. */}
       {loaded && (failed || !status?.settings) && (
         <Banner tone="danger" role="alert" className="mt-6">
-          Couldn&apos;t load the deployment settings.
+          {status?.settings
+            ? "Couldn't refresh the deployment settings."
+            : "Couldn't load the deployment settings."}
           <Button variant="outline" size="sm" className="ml-3" onClick={refresh}>
             Try again
           </Button>
