@@ -1,4 +1,4 @@
-# Bevel — skill & tool management
+# Bevel — skill, tool and knowledge management
 
 One place where your company's **AI skills, tools and knowledge** live —
 centrally managed, reviewed and access-controlled, and usable from **any AI
@@ -41,9 +41,10 @@ everything below gets you the same thing with none of the limits.
 We run it for you — hosting, upgrades, backups, SSO — and your team just signs
 in. Write to **[ali.raza@bevel.software](mailto:ali.raza@bevel.software)**.
 
-## Run it in 5 minutes (Docker)
+## Deploy it in 5 minutes (Docker)
 
-You need: [Docker](https://docs.docker.com/get-docker/) with Compose, and an
+You need: [Docker](https://docs.docker.com/get-docker/) with Compose on a
+server (or your laptop — one line below differs), and an
 **empty git repository** on any host (GitHub, GitLab, Bitbucket, Azure DevOps,
 self-hosted) to hold your knowledge base — the app seeds it with a starter
 template on first run.
@@ -70,13 +71,34 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 # no Node installed? docker run --rm node:22-slim node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
-Then start everything (Postgres + the app):
+For a public deployment, also set the origin values:
 
 ```sh
-docker compose up -d
+PUBLIC_BACKEND_URL=https://bevel.your-domain.com   # public origin — OAuth redirects are built from it
+PUBLIC_FRONTEND_URL=https://bevel.your-domain.com  # same origin: the backend serves the SPA
+TRUST_PROXY=1                                      # behind a proxy: hop count, so rate limits see real client IPs
 ```
 
-Open **http://localhost:3001** and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+Then start everything (Postgres + the app). **Behind a reverse proxy**
+(Coolify, Traefik, nginx — recommended):
+
+```sh
+docker compose -f docker-compose.yml up -d
+```
+
+The explicit `-f` skips `docker-compose.override.yml`, so the app publishes
+**no host port** — your proxy reaches it on port `3001` over the compose
+network. This is deliberate: a fixed published port makes every redeploy fail
+with `port is already allocated`, because the replacement container starts
+while the outgoing one still holds it.
+
+**Directly exposed** (no proxy): plain `docker compose up -d` publishes
+`:3001`; use `APP_PORT=8080 docker compose up -d` for a different host port.
+
+Open your domain and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+
+**Just trying it on your laptop?** Same steps, minus the origin values: plain
+`docker compose up -d`, then open **http://localhost:3001**.
 
 ### First sign-in: the setup screen
 
@@ -102,6 +124,22 @@ those values has an env var (`KB_REPO_URL`, `GIT_TOKEN`, `DEFAULT_BRANCH`, …) 
 anything set in the environment wins over the setup screen. See
 [`.env.example`](.env.example).
 
+Worth knowing in production:
+
+- **State that survives redeploys**: Postgres data plus three app volumes
+  (workspace clones, diff-review backups, tool-chain spill files) are named
+  volumes — a redeploy or image rebuild loses nothing. Back up the `pgdata`
+  volume and your knowledge-base git repo; everything else is derivable.
+- **Health**: `GET /api/health`. First boot can take a minute or two — it runs
+  migrations and seeds the knowledge-base repo.
+- **Single sign-on**: set `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` /
+  `OIDC_CLIENT_SECRET` (any spec-compliant provider) or configure it on the
+  setup screen, which shows you the redirect URI to register. For SSO-only
+  deployments set `LOGIN_PASSWORD=false` and drop `ADMIN_PASSWORD`. If your
+  issuer is multi-tenant (Google, Entra `common`), set
+  `ALLOWED_EMAIL_DOMAINS` — SSO auto-provisions accounts, and that list is the
+  only signup boundary.
+
 ## Local development (run from source)
 
 You need: **Node 22** (`.nvmrc`; the engine range is `>=22 <23`),
@@ -121,49 +159,6 @@ commands: `pnpm test`, `pnpm typecheck`, `pnpm lint`.
 
 Migrations run automatically on boot — there is no separate migrate step, in
 dev or in production.
-
-## Deploy on your own server
-
-The same compose file is production-ready. Two ways to expose it:
-
-**Behind a reverse proxy** (Coolify, Traefik, nginx — recommended):
-
-```sh
-docker compose -f docker-compose.yml up -d
-```
-
-The explicit `-f` skips `docker-compose.override.yml`, so the app publishes
-**no host port** — your proxy reaches it on port `3001` over the compose
-network. This is deliberate: a fixed published port makes every redeploy fail
-with `port is already allocated`, because the replacement container starts
-while the outgoing one still holds it.
-
-**Directly exposed** (no proxy): plain `docker compose up -d` publishes
-`:3001`; use `APP_PORT=8080 docker compose up -d` for a different host port.
-
-Add these to `.env` for production:
-
-```sh
-PUBLIC_BACKEND_URL=https://bevel.your-domain.com   # public origin — OAuth redirects are built from it
-PUBLIC_FRONTEND_URL=https://bevel.your-domain.com  # same origin: the backend serves the SPA
-TRUST_PROXY=1                                      # behind a proxy: hop count, so rate limits see real client IPs
-```
-
-Worth knowing:
-
-- **State that survives redeploys**: Postgres data plus three app volumes
-  (workspace clones, diff-review backups, tool-chain spill files) are named
-  volumes — a redeploy or image rebuild loses nothing. Back up the `pgdata`
-  volume and your knowledge-base git repo; everything else is derivable.
-- **Health**: `GET /api/health`. First boot can take a minute or two — it runs
-  migrations and seeds the knowledge-base repo.
-- **Single sign-on**: set `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` /
-  `OIDC_CLIENT_SECRET` (any spec-compliant provider) or configure it on the
-  setup screen, which shows you the redirect URI to register. For SSO-only
-  deployments set `LOGIN_PASSWORD=false` and drop `ADMIN_PASSWORD`. If your
-  issuer is multi-tenant (Google, Entra `common`), set
-  `ALLOWED_EMAIL_DOMAINS` — SSO auto-provisions accounts, and that list is the
-  only signup boundary.
 
 ## Environment reference
 
