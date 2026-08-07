@@ -50,7 +50,16 @@ export function WelcomePage() {
    * navigation that sets it (see `RootLanding`); the sidebar pill and a typed
    * URL do not. Everything ceremonial on this page hangs off this flag.
    */
-  const greeting = (useLocation().state as { greeting?: boolean } | null)?.greeting === true;
+  const routeState = useLocation().state as { greeting?: boolean; returnTo?: string | null } | null;
+  const greeting = routeState?.greeting === true;
+  /**
+   * Where the person was actually GOING when the sign-in interrupted them — a
+   * deep link that survived the SSO round-trip (see `RootLanding`). Present
+   * only on the greeting arrival, and it retargets both exits: a welcome that
+   * concluded by discarding the page someone was sent is a greeting that cost
+   * them the reason they came.
+   */
+  const returnTo = greeting ? (routeState?.returnTo ?? null) : null;
 
   /**
    * The entrance — and it belongs to the greeting alone.
@@ -207,18 +216,20 @@ export function WelcomePage() {
 
   // Both exits land in the same place — the person's own group. Whether you
   // connected an agent or walked past it, where you want to be next is your
-  // own shelf, not the whole company's catalog.
+  // own shelf, not the whole company's catalog. Unless a deep link brought
+  // them here: then both exits keep its promise instead.
   const yourGroup = pathForLibraryFilter({ kind: 'ungrouped' });
+  const exitTo = returnTo ?? yourGroup;
 
   /**
-   * Conclude the onboarding and leave for your own group. The toast says where
-   * the setup went, because a page that disappears for good on one click owes
-   * you the way back — and the pill is about to vanish with it.
+   * Conclude the onboarding and leave. The toast says where the setup went,
+   * because a page that disappears for good on one click owes you the way
+   * back — and the pill is about to vanish with it.
    */
   function done() {
     onboarding.markDone();
     toast('Done. Reopen the setup any time from your profile menu → External agent access.');
-    navigate(yourGroup);
+    navigate(exitTo);
   }
 
   return (
@@ -334,17 +345,17 @@ export function WelcomePage() {
           >
             Done
           </Button>
-          {/* The same destination Done goes to, and the same one the sidebar's
-              `Juan's Group` row goes to — one function builds all three, so
-              they cannot drift apart. "Your skills" over "your library": the
-              library is the whole company's, and this exit goes to the part of
-              it that is yours. */}
+          {/* The same destination Done goes to — one value drives both exits,
+              so they cannot drift apart. Ordinarily that is your own shelf
+              ("your skills" over "your library": the library is the whole
+              company's); when a deep link brought you here, both exits keep
+              its promise instead, and the label says so. */}
           <button
             type="button"
-            onClick={() => navigate(yourGroup)}
+            onClick={() => navigate(exitTo)}
             className="text-detail text-ink-faint transition-colors hover:text-ink"
           >
-            Go to your skills →
+            {returnTo ? 'Continue to your link →' : 'Go to your skills →'}
           </button>
         </div>
       </div>
