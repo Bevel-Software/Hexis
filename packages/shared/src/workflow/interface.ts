@@ -332,6 +332,26 @@ export interface IWorkflowService {
   ): Promise<FileApproval[]>;
 
   /**
+   * Decline ONE file of an open change request: restore its merge-base
+   * version on the source branch so it drops out of the request's diff.
+   * Same permission as approving the file. When the last file is declined
+   * the request closes itself and its source branch is retired
+   * (`closed: true` in the result).
+   */
+  revertChangeRequestFile(
+    number: number,
+    user: AuthUser,
+    repoRelPath: string,
+  ): Promise<{ closed: boolean; remainingPaths: string[] }>;
+
+  /**
+   * Close an OPEN change request whose diff has emptied (authoritatively
+   * re-verified; a failed diff never closes) and retire its source branch.
+   * Returns true when this call closed it.
+   */
+  closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean>;
+
+  /**
    * Reject a change request without merging. Authorized for the author or
    * for users with write permission to every changed file on the target
    * branch.

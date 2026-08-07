@@ -160,4 +160,37 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     );
     expect(paths).toEqual(['honest.md']);
   });
+
+  /**
+   * The per-file revert's two primitives: the merge-base a revert restores
+   * from, and the restore itself — byte-exact via git, with "absent at the
+   * merge-base" meaning deletion (the revert of an added file).
+   */
+  it('mergeBaseForPr + restorePathFromRef restore a modified file and delete an added one', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await runGit(repo, ['checkout', '-b', 'alice/feature']);
+    await fs.writeFile(path.join(repo, 'base.md'), 'rewritten\n');
+    await fs.writeFile(path.join(repo, 'added.md'), 'brand new\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'feature work']);
+    await runGit(repo, ['push', '-u', 'origin', 'alice/feature']);
+
+    const git = new GitService(
+      stubWorkspaceService(workspaceId, repo),
+      new WorkflowHooks(),
+      'knowledge-base',
+    );
+
+    const mergeBase = await git.mergeBaseForPr(workspaceId, 'current-company-state', 'alice/feature');
+    expect(mergeBase).toMatch(/^[0-9a-f]{40}$/);
+
+    await git.restorePathFromRef(workspaceId, mergeBase!, 'base.md');
+    // Normalized: a Windows dev box with core.autocrlf smudges the checkout
+    // to CRLF; the blob git commits back is what matters, not the smudge.
+    const restored = await fs.readFile(path.join(repo, 'base.md'), 'utf8');
+    expect(restored.replace(/\r\n/g, '\n')).toBe('base\n');
+
+    await git.restorePathFromRef(workspaceId, mergeBase!, 'added.md');
+    await expect(fs.access(path.join(repo, 'added.md'))).rejects.toThrow();
+  });
 });

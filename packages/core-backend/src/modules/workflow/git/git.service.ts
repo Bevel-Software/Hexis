@@ -1956,6 +1956,66 @@ export class GitService implements IGitService {
     });
   }
 
+  /**
+   * The merge-base commit of a change request's two branches (their origin
+   * refs), or null when they share no history. This is the "before" the CR's
+   * three-dot diff is read against — the ref a per-file revert restores from,
+   * so the reverted file drops OUT of that same diff.
+   */
+  async mergeBaseForPr(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<string | null> {
+    assertValidBranchName(baseBranch);
+    assertValidBranchName(headBranch);
+    const cwd = await this.repoDir(workspaceId);
+    await this.fetchPrRefs(cwd, baseBranch, headBranch);
+    return this.mutex.run(workspaceId, async () => {
+      const baseRef = await this.resolveBranchRef(cwd, baseBranch);
+      const headRef = await this.resolveBranchRef(cwd, headBranch);
+      try {
+        const { stdout } = await this.git(cwd, ['merge-base', baseRef, headRef]);
+        return stdout.trim() || null;
+      } catch (err) {
+        // Exit 1 is git's specific "no common ancestor" answer; anything else
+        // is an infra failure that must not masquerade as it.
+        if ((err as { exitCode?: number }).exitCode === 1) return null;
+        throw err;
+      }
+    });
+  }
+
+  /**
+   * Restore one path in the working tree (and index) to its content at `ref`;
+   * a path ABSENT at `ref` is deleted — the revert of an added file is its
+   * removal. Byte-exact via git itself (`checkout <ref> -- <path>`), never a
+   * read-as-string round-trip that would mangle binary files. The caller owns
+   * committing the result (see `commitFile`).
+   */
+  async restorePathFromRef(
+    workspaceId: string,
+    ref: string,
+    repoRelativePath: string,
+  ): Promise<void> {
+    assertValidRelativePath(repoRelativePath);
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      let existsAtRef = true;
+      try {
+        await this.git(cwd, ['cat-file', '-e', `${ref}:${repoRelativePath}`]);
+      } catch {
+        existsAtRef = false;
+      }
+      if (existsAtRef) {
+        await this.git(cwd, ['checkout', ref, '--', repoRelativePath]);
+      } else {
+        // `--ignore-unmatch`: already gone from the tree is the desired state.
+        await this.git(cwd, ['rm', '--force', '--ignore-unmatch', '--quiet', '--', repoRelativePath]);
+      }
+    });
+  }
+
   /** Fetch the two branches a CR spans so origin refs reflect the latest push. */
   private async fetchPrRefs(cwd: string, baseBranch: string, headBranch: string): Promise<void> {
     // Best-effort: a branch may be local-only (rare) or origin briefly

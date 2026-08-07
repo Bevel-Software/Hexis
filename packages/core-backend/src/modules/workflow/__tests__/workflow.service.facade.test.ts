@@ -472,3 +472,150 @@ describe('WorkflowService — file lock delegation', () => {
     expect(git.commitFile).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * The reviewer's per-file scalpel, and the empty-close it can trigger. All
+ * collaborators stubbed — what's under test is the orchestration: the auth
+ * predicate, the restore→commit→push order, the lock discipline, and the
+ * authoritative emptiness re-check before anything closes.
+ */
+describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest', () => {
+  const SUMMARY = { number: 7, base: 'main', branch: 'ali/x', state: 'open' };
+
+  function makeRevertGit(overrides: Record<string, unknown> = {}): GitService {
+    return Object.assign(makeGit(), {
+      pull: vi.fn().mockResolvedValue(undefined),
+      changedPathsForPr: vi.fn().mockResolvedValue(['Docs/a.md', 'Docs/b.md']),
+      mergeBaseForPr: vi.fn().mockResolvedValue('mb-sha'),
+      restorePathFromRef: vi.fn().mockResolvedValue(undefined),
+      commitFile: vi.fn().mockResolvedValue({}),
+      push: vi.fn().mockResolvedValue(undefined),
+      ...overrides,
+    }) as unknown as GitService;
+  }
+
+  function makeHarness(opts: {
+    git?: GitService;
+    canWriteAtRef?: boolean | null;
+    prState?: string;
+    updateRows?: unknown[];
+  } = {}) {
+    const git = opts.git ?? makeRevertGit();
+    const prs = makePrs();
+    (prs.getPr as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...SUMMARY,
+      state: opts.prState ?? 'open',
+    });
+    const access = makeAccessControl();
+    (access.canWriteAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(
+      opts.canWriteAtRef ?? true,
+    );
+    const fileLocks = makeFileLockService();
+    // The chainable stub answers SELECTs with [] (no open request rows) and
+    // UPDATE...returning with `updateRows` (default: one row = the close won).
+    const updateRows = opts.updateRows ?? [{ id: 1 }];
+    const chain: Record<string, unknown> = {};
+    Object.assign(chain, {
+      select: vi.fn(() => chain),
+      from: vi.fn(() => chain),
+      where: vi.fn(() => chain),
+      limit: vi.fn(async () => []),
+      update: vi.fn(() => chain),
+      set: vi.fn(() => chain),
+      returning: vi.fn(async () => updateRows),
+    });
+    const db = chain as unknown as Database;
+    const svc = new WorkflowService(db, git, prs, makeReviewWorkflow(), makeWorkspaceService(), access, fileLocks, makePendingCommits(), 'knowledge-base');
+    return { svc, git, prs, access, fileLocks, db: chain };
+  }
+
+  it('restores the merge-base copy on the source branch: restore, commit (validator skipped), push — under the file lock', async () => {
+    const { svc, git, prs, fileLocks } = makeHarness();
+    const result = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md');
+
+    expect(git.restorePathFromRef).toHaveBeenCalledWith('ali%2Fx', 'mb-sha', 'Docs/a.md');
+    expect(git.commitFile).toHaveBeenCalledWith(
+      'ali%2Fx',
+      expect.objectContaining({ email: 'alice@example.com' }),
+      'Docs/a.md',
+      expect.stringContaining('change request #7'),
+      true,
+    );
+    expect(git.push).toHaveBeenCalled();
+    expect(fileLocks.acquire).toHaveBeenCalledWith(
+      'ali%2Fx',
+      'ali/x',
+      'knowledge-base/Docs/a.md',
+      expect.anything(),
+    );
+    expect(fileLocks.release).toHaveBeenCalled();
+    expect(prs.invalidateDetailCache).toHaveBeenCalledWith(7);
+    // Both diffs answered two paths → one revert leaves one.
+    expect(result).toEqual({ closed: false, remainingPaths: ['Docs/a.md', 'Docs/b.md'] });
+  });
+
+  it('refuses a caller who could not approve the file — same permission, both verbs', async () => {
+    const { svc, git } = makeHarness({ canWriteAtRef: false });
+    await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md')).rejects.toMatchObject({
+      status: 403,
+    });
+    expect(git.restorePathFromRef).not.toHaveBeenCalled();
+    expect(git.push).not.toHaveBeenCalled();
+  });
+
+  it('refuses a path the request does not touch', async () => {
+    const { svc, git } = makeHarness();
+    await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/elsewhere.md')).rejects.toMatchObject({
+      status: 422,
+    });
+    expect(git.restorePathFromRef).not.toHaveBeenCalled();
+  });
+
+  it('refuses a request that is no longer open', async () => {
+    const { svc } = makeHarness({ prState: 'closed' });
+    await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md')).rejects.toMatchObject({
+      status: 422,
+    });
+  });
+
+  it('closes the request when the LAST file is reverted', async () => {
+    const git = makeRevertGit({
+      changedPathsForPr: vi
+        .fn()
+        // in order: the pre-revert list, the post-revert remainder, and the
+        // close path's own authoritative re-check.
+        .mockResolvedValueOnce(['Docs/a.md'])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]),
+    });
+    const { svc, db } = makeHarness({ git });
+    const result = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md');
+    expect(result).toEqual({ closed: true, remainingPaths: [] });
+    expect(db.update).toHaveBeenCalled();
+  });
+
+  it('closeEmptyChangeRequest never closes on a FAILED diff', async () => {
+    const git = makeRevertGit({
+      changedPathsForPr: vi.fn().mockRejectedValue(new Error('git down')),
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { svc, db } = makeHarness({ git });
+    await expect(svc.closeEmptyChangeRequest(7, makeUser())).resolves.toBe(false);
+    expect(db.update).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('closeEmptyChangeRequest leaves a request with real changes alone', async () => {
+    const { svc, db } = makeHarness();
+    await expect(svc.closeEmptyChangeRequest(7, makeUser())).resolves.toBe(false);
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it('closeEmptyChangeRequest closes an emptied request', async () => {
+    const git = makeRevertGit({ changedPathsForPr: vi.fn().mockResolvedValue([]) });
+    const { svc, db, prs } = makeHarness({ git });
+    await expect(svc.closeEmptyChangeRequest(7, makeUser())).resolves.toBe(true);
+    expect(db.update).toHaveBeenCalled();
+    expect(prs.invalidateDetailCache).toHaveBeenCalledWith(7);
+  });
+});
