@@ -107,6 +107,11 @@ export function GroupPage() {
     () => data.items.filter((i) => i.group === group),
     [data.items, group],
   );
+  /** For the add dialog's name check — global, because a skill's id is global. */
+  const allSkillNames = useMemo(
+    () => data.items.filter((i) => i.kind === 'skill').map((i) => i.name),
+    [data.items],
+  );
 
   const skillItems = groupItems.filter((i) => i.kind === 'skill');
   const toolItems = groupItems.filter((i) => i.kind === 'integration');
@@ -302,6 +307,9 @@ export function GroupPage() {
           name={group}
           primaryPath={primaryFolder}
           canWrite={summary.canWrite}
+          // Every skill, not just this group's: a skill's id is its name and
+          // ids are global, so the collision that matters is with any of them.
+          existingSkills={allSkillNames}
           onClose={() => setAddOpen(false)}
         />
       )}

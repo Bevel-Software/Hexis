@@ -480,10 +480,6 @@ export class WorkflowService implements IWorkflowService {
     return this.git.logForFile(workspaceId, path, limit);
   }
 
-  revertChange(workspaceId: string, user: AuthUser, sha: string): Promise<Change> {
-    return this.git.revertCommit(workspaceId, user, sha);
-  }
-
   compareFile(
     workspaceId: string,
     path: string,
@@ -495,6 +491,19 @@ export class WorkflowService implements IWorkflowService {
 
   showFileAtChange(workspaceId: string, path: string, sha: string): Promise<string> {
     return this.git.diffFileAtCommit(workspaceId, path, sha);
+  }
+
+  /**
+   * Before/after file contents for one commit (`<sha>^` vs `<sha>`). Powers
+   * the rendered-markdown history view; `showFileAtChange` keeps serving the
+   * raw-patch view for non-markdown files.
+   */
+  fileAtChange(
+    workspaceId: string,
+    path: string,
+    sha: string,
+  ): Promise<{ baseline: string | null; current: string | null }> {
+    return this.git.fileContentsAtCommit(workspaceId, path, sha);
   }
 
   /**

@@ -3,7 +3,6 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type {
   BranchInfo,
-  CommitAttribution,
   WorkingTreeStatus,
 } from '@bevel-software/platform-shared';
 
@@ -30,16 +29,6 @@ import {
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
 
-function makeAttr(): CommitAttribution {
-  return {
-    sha: 'abcdef1234567890',
-    authorName: 'Alice',
-    authorEmail: 'alice@example.com',
-    subject: 's',
-    committedAt: '2026-04-29T00:00:00Z',
-  };
-}
-
 function makeStatus(overrides: Partial<WorkingTreeStatus> = {}): WorkingTreeStatus {
   return {
     branch: 'alice/draft',
@@ -62,9 +51,9 @@ function makeGit(overrides: Partial<GitContextValue> = {}): GitContextValue {
     deleteBranch: async () => {},
     pull: async () => {},
     fetchForkBase: async () => null,
-    revert: async () => makeAttr(),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
     ...overrides,
   };

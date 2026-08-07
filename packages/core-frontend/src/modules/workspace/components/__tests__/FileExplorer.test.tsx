@@ -57,9 +57,9 @@ function makeGit(): GitContextValue {
     deleteBranch: async () => {},
     pull: async () => {},
     fetchForkBase: async () => null,
-    revert: async () => ({ sha: 'a', authorName: 'n', authorEmail: 'e', subject: 's', committedAt: '2026-04-29T00:00:00Z' }),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
   };
 }

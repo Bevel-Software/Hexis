@@ -9,13 +9,13 @@ import {
   createBranch as apiCreateBranch,
   deleteBranch as apiDeleteBranch,
   fetchBranches,
+  fetchFileAtChange,
   fetchFileComparison,
   fetchFileDiff,
   fetchFileHistory,
   fetchForkBase,
   fetchStatus,
   pull as apiPull,
-  revert as apiRevert,
 } from '../services/git.api';
 
 const STATUS_POLL_MS = 30_000;
@@ -253,17 +253,6 @@ export function useGitState(workspaceId: string | null): GitContextValue {
     return fetchForkBase(wid, branch);
   }, []);
 
-  const revert = useCallback(
-    async (sha: string): Promise<CommitAttribution> => {
-      const wid = workspaceIdRef.current;
-      if (!wid) throw new Error('No workspace loaded');
-      const attribution = await apiRevert(wid, sha);
-      await refreshStatus();
-      return attribution;
-    },
-    [refreshStatus],
-  );
-
   const fetchFileHistoryCb = useCallback(
     async (path: string, limit?: number): Promise<CommitAttribution[]> => {
       const wid = workspaceIdRef.current;
@@ -278,6 +267,18 @@ export function useGitState(workspaceId: string | null): GitContextValue {
       const wid = workspaceIdRef.current;
       if (!wid) return '';
       return fetchFileDiff(wid, path, sha);
+    },
+    [],
+  );
+
+  const fetchFileAtChangeCb = useCallback(
+    async (path: string, sha: string): Promise<{ baseline: string | null; current: string | null }> => {
+      const wid = workspaceIdRef.current;
+      // Null-on-both-sides is a meaningful payload ("absent at this commit"),
+      // so don't fake one when there's no workspace — reject so the panel
+      // surfaces its error state instead of an empty diff.
+      if (!wid) throw new Error('No active workspace.');
+      return fetchFileAtChange(wid, path, sha);
     },
     [],
   );
@@ -310,9 +311,9 @@ export function useGitState(workspaceId: string | null): GitContextValue {
       deleteBranch: deleteBranchCb,
       pull,
       fetchForkBase: fetchForkBaseCb,
-      revert,
       fetchFileHistory: fetchFileHistoryCb,
       fetchFileDiff: fetchFileDiffCb,
+      fetchFileAtChange: fetchFileAtChangeCb,
       fetchFileComparison: fetchFileComparisonCb,
     }),
     [
@@ -326,9 +327,9 @@ export function useGitState(workspaceId: string | null): GitContextValue {
       deleteBranchCb,
       pull,
       fetchForkBaseCb,
-      revert,
       fetchFileHistoryCb,
       fetchFileDiffCb,
+      fetchFileAtChangeCb,
       fetchFileComparisonCb,
     ],
   );

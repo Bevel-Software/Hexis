@@ -110,17 +110,6 @@ export async function fetchForkBase(
   return data.base;
 }
 
-export async function revert(
-  workspaceId: string,
-  sha: string,
-): Promise<CommitAttribution> {
-  return handleApiResponse(
-    await authFetch(`/api/workspace/${workspaceId}/workflow/changes/${encodeURIComponent(sha)}/revert`, {
-      method: 'POST',
-    }),
-  );
-}
-
 export async function fetchFileHistory(
   workspaceId: string,
   path: string,
@@ -143,6 +132,23 @@ export async function fetchFileDiff(
     await authFetch(`/api/workspace/${workspaceId}/workflow/show-file?${q.toString()}`),
   );
   return data.diff;
+}
+
+/**
+ * Full file contents on both sides of one commit (`sha^` vs `sha`). Null on a
+ * side means the file is absent there (added / deleted at this commit). Used
+ * by the history panel to render markdown diffs; `fetchFileDiff` keeps
+ * serving the raw patch for other file types.
+ */
+export async function fetchFileAtChange(
+  workspaceId: string,
+  path: string,
+  sha: string,
+): Promise<{ baseline: string | null; current: string | null }> {
+  const q = new URLSearchParams({ path, sha });
+  return handleApiResponse(
+    await authFetch(`/api/workspace/${workspaceId}/workflow/file-at-change?${q.toString()}`),
+  );
 }
 
 export async function fetchFileComparison(

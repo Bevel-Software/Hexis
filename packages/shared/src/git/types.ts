@@ -130,11 +130,6 @@ export interface IGitService {
    * count. Returns null if no protected branch can be reached.
    */
   resolveForkBase(workspaceId: string, branch: string): Promise<string | null>;
-  revertCommit(
-    workspaceId: string,
-    user: AuthUser,
-    sha: string,
-  ): Promise<CommitAttribution>;
   logForFile(
     workspaceId: string,
     relativePath: string,

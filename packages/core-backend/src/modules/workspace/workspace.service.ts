@@ -834,13 +834,36 @@ export class WorkspaceService implements IWorkspaceService {
     }
   }
 
-  async writeFile(workspaceId: string, relativePath: string, content: string): Promise<void> {
+  async writeFile(
+    workspaceId: string,
+    relativePath: string,
+    content: string,
+    options?: { failIfExists?: boolean },
+  ): Promise<void> {
     assertValidRelativePath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    await fs.writeFile(absolutePath, content, 'utf-8');
+    try {
+      // `wx` makes create-if-absent ATOMIC at the fs level — an exists-check
+      // followed by a plain write would let two concurrent creators (or a
+      // stale client whose file list predates the file) both pass the check
+      // and silently replace each other's content.
+      await fs.writeFile(absolutePath, content, {
+        encoding: 'utf-8',
+        flag: options?.failIfExists ? 'wx' : 'w',
+      });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        const conflict: Error & { status?: number } = new Error(
+          `"${relativePath}" already exists.`,
+        );
+        conflict.status = 409;
+        throw conflict;
+      }
+      throw err;
+    }
     await this.diffService?.syncFromDisk(workspaceId, relativePath);
   }
 

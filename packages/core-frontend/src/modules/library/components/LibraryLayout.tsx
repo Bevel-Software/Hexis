@@ -224,6 +224,9 @@ export function LibraryLayout() {
           name={addTo.name}
           primaryPath={addTo.primaryPath}
           canWrite={addTo.canWrite}
+          // Every skill, not just this group's: a skill's id is its name and
+          // ids are global, so that is the collision the create half must catch.
+          existingSkills={items.filter((i) => i.kind === 'skill').map((i) => i.name)}
           onClose={() => setAddTo(null)}
         />
       )}

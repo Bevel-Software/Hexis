@@ -152,12 +152,6 @@ export interface IWorkflowService {
   /** Per-file history. Newest first; clamps to ≤ 100 entries. */
   listChangesForFile(workspaceId: string, path: string, limit?: number): Promise<Change[]>;
   /**
-   * Revert a single change by creating a new change that undoes it.
-   * Refused on protected branches; refused without write permission on the
-   * touched paths.
-   */
-  revertChange(workspaceId: string, user: AuthUser, sha: string): Promise<Change>;
-  /**
    * Diff of one file between two branches. Both names must resolve to a
    * known branch on this workspace (local head or remote-tracking). Returns
    * the raw unified diff body — empty when identical, includes the
@@ -175,6 +169,17 @@ export interface IWorkflowService {
    * Used by the File viewer's History tab.
    */
   showFileAtChange(workspaceId: string, path: string, sha: string): Promise<string>;
+  /**
+   * Full file contents on both sides of one change: `baseline` at `<sha>^`
+   * (null when the file — or the parent commit — doesn't exist there),
+   * `current` at `<sha>` (null when absent). Used by the File viewer's
+   * History tab to render markdown changes as a rendered-markdown diff.
+   */
+  fileAtChange(
+    workspaceId: string,
+    path: string,
+    sha: string,
+  ): Promise<{ baseline: string | null; current: string | null }>;
 
   // ── File locks (new — currently NotImplementedWorkflowError) ──────────────
 

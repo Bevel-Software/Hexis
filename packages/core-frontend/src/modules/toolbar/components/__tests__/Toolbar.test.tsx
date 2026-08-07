@@ -70,13 +70,6 @@ function renderToolbar(overrides?: {
   const toggleExplorer = vi.fn();
   const toggleChat = vi.fn();
   const logout = vi.fn();
-  const makeCommit = () => ({
-    sha: 'abc',
-    authorName: 'n',
-    authorEmail: 'e',
-    subject: 's',
-    committedAt: '2026-04-20T00:00:00.000Z',
-  });
 
   const auth: AuthContextValue = {
     user: {
@@ -103,9 +96,9 @@ function renderToolbar(overrides?: {
     deleteBranch: async () => {},
     pull: async () => {},
     fetchForkBase: async () => null,
-    revert: async () => makeCommit(),
     fetchFileHistory: async () => [],
     fetchFileDiff: async () => '',
+    fetchFileAtChange: async () => ({ baseline: null, current: null }),
     fetchFileComparison: async () => '',
     ...overrides?.git,
   };

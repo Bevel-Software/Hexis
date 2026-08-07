@@ -44,10 +44,12 @@ async function seedWorkspace(
   await runGit(repo, ['init', '-b', 'feature-test']);
   await runGit(repo, ['config', 'user.email', 'test@bevel.local']);
   await runGit(repo, ['config', 'user.name', 'Test Runner']);
-  // Windows dev machines: a global `core.autocrlf=true` would rewrite the
-  // LF fixtures to CRLF on checkout (so byte-for-byte assertions fail), and
-  // the deep-path test blows MAX_PATH without `longpaths`. Both are no-ops
-  // on Linux/CI — they pin the repo to the behaviour the assertions assume.
+  // Repo-local so GitService's own git children (which run with the ambient
+  // env) see them too: autocrlf off keeps `git checkout` (discardPath) from
+  // rewriting the LF fixtures as CRLF under Git-for-Windows' system-level
+  // `core.autocrlf=true`; longpaths lifts Windows' 260-char MAX_PATH, which
+  // the deep-KB-path subject-truncation test exceeds. Both are no-ops on
+  // Linux/CI — they pin the repo to the behaviour the assertions assume.
   await runGit(repo, ['config', 'core.autocrlf', 'false']);
   await runGit(repo, ['config', 'core.longpaths', 'true']);
   // An initial commit so HEAD exists.

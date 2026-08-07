@@ -23,9 +23,9 @@ vi.mock('../../services/git.api', () => ({
   deleteBranch: vi.fn(),
   pull: vi.fn(),
   fetchForkBase: vi.fn(),
-  revert: vi.fn(),
   fetchFileHistory: vi.fn(),
   fetchFileDiff: vi.fn(),
+  fetchFileAtChange: vi.fn(),
   fetchFileComparison: vi.fn(),
 }));
 

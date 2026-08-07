@@ -1,8 +1,5 @@
-import { useNavigate } from 'react-router-dom';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Button, Dialog, Surface } from '../../../shared/components';
-import { useWorkspace } from '../../workspace/state/workspace.context';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
+import { NewSkillPanel } from './NewSkillPanel';
 import { useLibraryToast } from '../state/toast.context';
 import { COPIED_TOAST, COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 
@@ -18,6 +15,8 @@ export interface AddToGroupDialogProps {
    * the cautious sentence is true either way, the confident one is not.
    */
   canWrite: boolean | null;
+  /** Every skill name already in the catalog — the create half rejects collisions. */
+  existingSkills: string[];
   onClose(): void;
 }
 
@@ -25,11 +24,11 @@ export interface AddToGroupDialogProps {
  * "Add a skill or tool to {group}" — the writer's half of the group page.
  *
  * Two ways in, and NEITHER of them is an upload form. A skill is a folder
- * (`SKILL.md` plus whatever it needs), so the honest destinations are the
- * workspace, where you can build the folder, and the agent, which can write one
- * for you. The prototype's dropzone is deliberately not ported: there is no
- * upload endpoint behind it, and a dropzone that silently does nothing is worse
- * than a link that does something.
+ * (`SKILL.md` plus whatever it needs), so the honest doors are one that makes
+ * that folder for you and one that hands the job to the agent. The prototype's
+ * dropzone is deliberately not ported: there is no upload endpoint behind it,
+ * and a dropzone that silently does nothing is worse than a button that does
+ * something.
  *
  * The prompt is the actual product here. It is copy-pasteable into the agent
  * verbatim and it already knows the group, so nobody has to explain where the
@@ -45,9 +44,13 @@ export interface AddToGroupDialogProps {
  * to the KB, so there is no permission to gate on — the dialog hands you a
  * prompt and a link.
  */
-export function AddToGroupDialog({ name, primaryPath, canWrite, onClose }: AddToGroupDialogProps) {
-  const { kbDirName } = useWorkspace();
-  const navigate = useNavigate();
+export function AddToGroupDialog({
+  name,
+  primaryPath,
+  canWrite,
+  existingSkills,
+  onClose,
+}: AddToGroupDialogProps) {
   const toast = useLibraryToast();
 
   // The only sentence in this dialog that varies by role.
@@ -83,32 +86,11 @@ export function AddToGroupDialog({ name, primaryPath, canWrite, onClose }: AddTo
           : `Two ways in. Either way it goes to ${name} as a change request, and an owner reviews it before it joins.`}
       </p>
 
-      {/* Hidden while the workspace is still bootstrapping: without `kbDirName`
-          there is no correct KB URL to build, and a link to the wrong place is
-          worse than no link. */}
-      {kbDirName && (
-        <Surface
-          as="button"
-          type="button"
-          interactive
-          padded
-          radius="lg"
-          elevation="none"
-          tone="sunken"
-          className="mt-3.5 w-full text-left"
-          onClick={() => {
-            navigate(kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${primaryPath}`));
-            onClose();
-          }}
-        >
-          <span className="block text-strong font-semibold text-ink">
-            {`Open ${name} in the workspace`}
-          </span>
-          <span className="block text-detail text-ink-muted">
-            A skill is a folder: SKILL.md plus whatever it needs.
-          </span>
-        </Surface>
-      )}
+      <NewSkillPanel
+        destination={{ parentPath: primaryPath, canWrite }}
+        existingSkills={existingSkills}
+        onCreated={onClose}
+      />
 
       <div className="my-3.5 flex items-center gap-3">
         <span aria-hidden="true" className="h-px flex-1 bg-line" />

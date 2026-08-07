@@ -9,6 +9,7 @@ import {
 import type { LibraryData } from '../hooks/useLibraryData';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { GroupSummary } from '../services/groups.api';
+import { withAuth } from './auth-harness';
 
 /**
  * The group page: which view a caller gets, what the page says about who runs
@@ -141,12 +142,19 @@ function renderGroup(name: string, children?: ReactNode) {
       <WorkspaceContext.Provider value={workspace}>
         <LibraryToastProvider>
           <LibraryProvider>
-            <Routes>
-              <Route path="/skills-and-tools/groups/:group" element={<GroupPage />} />
-              <Route path="*" element={<div />} />
-            </Routes>
-            <LocationProbe />
-            {children}
+            {/* The add dialog's create half signs the new skill's change
+                request with the caller, so it reads `useAuth` — which throws
+                rather than returning null when nothing provides it. */}
+            {withAuth(
+              <>
+                <Routes>
+                  <Route path="/skills-and-tools/groups/:group" element={<GroupPage />} />
+                  <Route path="*" element={<div />} />
+                </Routes>
+                <LocationProbe />
+                {children}
+              </>,
+            )}
           </LibraryProvider>
         </LibraryToastProvider>
       </WorkspaceContext.Provider>

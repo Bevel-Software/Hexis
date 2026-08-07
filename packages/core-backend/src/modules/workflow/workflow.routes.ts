@@ -266,17 +266,6 @@ export function createWorkflowRoutes(
     }
   });
 
-  router.post('/workspace/:id/workflow/changes/:sha/revert', async (req, res) => {
-    const user = await requireUser(req, res);
-    if (!user) return;
-    try {
-      res.json(await workflow.revertChange(req.params.id, user, req.params.sha));
-    } catch (err) {
-      const { status, body } = toHttpError(err);
-      res.status(status).json(body);
-    }
-  });
-
   router.get('/workspace/:id/workflow/compare-file', async (req, res) => {
     if (!(await requireUser(req, res))) return;
     const pathParam = typeof req.query.path === 'string' ? req.query.path : '';
@@ -306,6 +295,23 @@ export function createWorkflowRoutes(
     try {
       const diff = await workflow.showFileAtChange(req.params.id, pathParam, sha);
       res.json({ diff });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.get('/workspace/:id/workflow/file-at-change', async (req, res) => {
+    if (!(await requireUser(req, res))) return;
+    const pathParam = typeof req.query.path === 'string' ? req.query.path : '';
+    const sha = typeof req.query.sha === 'string' ? req.query.sha : '';
+    if (!pathParam || !sha) {
+      res.status(400).json({ error: 'path and sha are required' });
+      return;
+    }
+    try {
+      const { baseline, current } = await workflow.fileAtChange(req.params.id, pathParam, sha);
+      res.json({ baseline, current });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

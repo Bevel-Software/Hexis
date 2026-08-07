@@ -55,6 +55,40 @@ export async function listGroups(): Promise<GroupSummary[]> {
 }
 
 /**
+ * Create a group — the dedicated provisioning endpoint, not a workspace
+ * write. The server owns name validation and the collision verdict (its
+ * check is against the live tree, ours against a stale catalog), commits the
+ * seeded `access.md` before answering, and refuses with its own words —
+ * worth surfacing verbatim.
+ */
+export async function createGroup(name: string): Promise<{ folder: string }> {
+  const res = await authFetch('/api/groups', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Couldn't create that group.");
+  }
+  return (await res.json()) as { folder: string };
+}
+
+/**
+ * Ensure the caller's personal folder (`Groups/personal-<id>/`) exists.
+ * Idempotent; the server answers only after the folder's access.md is
+ * COMMITTED, so a write into the folder may follow immediately.
+ */
+export async function ensurePersonalGroup(): Promise<{ folder: string; created: boolean }> {
+  const res = await authFetch('/api/groups/personal', { method: 'POST' });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Couldn't prepare your personal folder.");
+  }
+  return (await res.json()) as { folder: string; created: boolean };
+}
+
+/**
  * Thrown when a join request is refused because access already landed —
  * between the page load and the click. Not an error to show: the right
  * response is to reload the library and let the group appear unlocked.

@@ -1620,60 +1620,6 @@ export class GitService implements IGitService {
     });
   }
 
-  async revertCommit(
-    workspaceId: string,
-    user: AuthUser,
-    sha: string,
-  ): Promise<CommitAttribution> {
-    if (!/^[a-f0-9]{7,40}$/i.test(sha)) {
-      throw new WorkflowValidationError('invalid commit sha');
-    }
-    assertValidAuthor(user);
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
-      const branch = await this.currentBranch(cwd);
-
-      // Revert creates a new commit reversing `sha`. Same model as commit:
-      // gate only on protected branches; reverts on feature/draft branches
-      // are free (they produce a commit that would still need to merge via
-      // PR to affect canonical state).
-      if (isProtectedBranch(branch)) {
-        const { stdout: diffOut } = await this.git(cwd, [
-          'diff-tree', '--no-commit-id', '--name-only', '-r', sha,
-        ]);
-        const touched = diffOut.split('\n').map((s) => s.trim()).filter(Boolean);
-        await this.assertCanWriteAtRef(workspaceId, 'HEAD', user.email, touched);
-      }
-
-      await this.git(cwd, [
-        'revert',
-        '--no-edit',
-        `--author=${user.name} <${user.email}>`,
-        sha,
-      ]);
-
-      const { stdout } = await this.git(cwd, [
-        'log',
-        '-1',
-        '--pretty=format:%H%x00%an%x00%ae%x00%s%x00%aI',
-      ]);
-      const [headSha, authorName, authorEmail, subj, committedAt] = stdout.split('\x00');
-
-      // A revert may have touched roles.yaml or access.md — drop cached
-      // access state so the next gate read reflects the rolled-back tree.
-      // Mirrors the commit / pull paths.
-      this.accessControl?.invalidate(workspaceId);
-
-      return {
-        sha: headSha?.trim() ?? '',
-        authorName: authorName ?? '',
-        authorEmail: authorEmail ?? '',
-        subject: subj ?? '',
-        committedAt: committedAt?.trim() ?? new Date().toISOString(),
-      };
-    });
-  }
-
   async logForFile(
     workspaceId: string,
     relativePath: string,
@@ -1735,6 +1681,44 @@ export class GitService implements IGitService {
           { cause: err },
         );
       }
+    });
+  }
+
+  /**
+   * Full file contents on both sides of one commit: `baseline` is the file at
+   * `<sha>^` (the parent), `current` at `<sha>`. Null means the file is absent
+   * at that ref — added files have `baseline: null`, deleted files
+   * `current: null`. A root commit (no parent) also yields `baseline: null`.
+   * Feeds the rendered-markdown history view, which needs before/after text
+   * rather than the patch `diffFileAtCommit` returns.
+   */
+  async fileContentsAtCommit(
+    workspaceId: string,
+    relativePath: string,
+    sha: string,
+  ): Promise<{ baseline: string | null; current: string | null }> {
+    assertValidRelativePath(relativePath);
+    if (!/^[a-f0-9]{7,40}$/i.test(sha)) {
+      throw new WorkflowValidationError('invalid commit sha');
+    }
+    const repoRelativePath = this.stripRepoPrefix(relativePath);
+    return this.mutex.run(workspaceId, async () => {
+      const current = await this.readFileAtRef(workspaceId, sha, repoRelativePath);
+      let baseline: string | null;
+      try {
+        baseline = await this.readFileAtRef(workspaceId, `${sha}^`, repoRelativePath);
+      } catch (err) {
+        // `readFileAtRef` maps "path absent at ref" to null but propagates an
+        // unresolvable ref. `<sha>^` on a root commit is exactly that (git
+        // reports it as "invalid object name '<sha>^'", or "unknown/bad
+        // revision" in other codepaths), and it legitimately means "no parent
+        // side" — fold it into null. Anything else stays fatal.
+        const stderr =
+          (err as { stderr?: string }).stderr ?? (err instanceof Error ? err.message : String(err));
+        if (/invalid object name|unknown revision|bad revision/i.test(stderr)) baseline = null;
+        else throw err;
+      }
+      return { baseline, current };
     });
   }
 
