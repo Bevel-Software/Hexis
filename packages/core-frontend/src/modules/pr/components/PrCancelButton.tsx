@@ -18,9 +18,11 @@ interface Props {
  * double-click guard, dispatches the `bevel:pr-stale` refresh event), but with
  * red text-button styling so the primary purple Apply action stays the focus.
  *
- * Authority is server-computed via `detail.viewerCanCancel` (author OR admin on
- * the base). The button disables — not hides — when the viewer can't cancel,
- * so the affordance is discoverable but its absence-of-permission is explicit.
+ * Authority is server-computed via `detail.viewerCanCancel` (author, admin on
+ * the base, or write access to every changed file — the same set the reject
+ * route enforces). The button disables — not hides — when the viewer can't
+ * cancel, so the affordance is discoverable but its absence-of-permission is
+ * explicit.
  */
 export function PrCancelButton({ detail, onCancelled }: Props) {
   const [busy, setBusy] = useState(false);
@@ -35,7 +37,7 @@ export function PrCancelButton({ detail, onCancelled }: Props) {
   const allowed = detail.viewerCanCancel;
   const tooltip = allowed
     ? 'Cancel this change request without applying it'
-    : 'Only the author or an admin can cancel this change request';
+    : 'Only the author, an admin, or someone with edit access to every changed file can cancel this change request';
 
   async function runCancel() {
     if (cancellingRef.current) return;

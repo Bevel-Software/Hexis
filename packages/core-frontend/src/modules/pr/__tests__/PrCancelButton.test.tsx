@@ -61,7 +61,7 @@ describe('PrCancelButton', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('marks the button aria-disabled with the only-author-or-admin tooltip when viewerCanCancel is false', () => {
+  it('marks the button aria-disabled with the unauthorized tooltip when viewerCanCancel is false', () => {
     render(
       <PrCancelButton
         detail={detail({ viewerCanCancel: false })}
@@ -73,7 +73,7 @@ describe('PrCancelButton', () => {
     // for keyboard users and screen readers announce the unauthorized state.
     expect(btn).toHaveAttribute('aria-disabled', 'true');
     expect(btn).not.toBeDisabled();
-    expect(btn.getAttribute('title')).toMatch(/only the author or an admin/i);
+    expect(btn.getAttribute('title')).toMatch(/only the author, an admin, or someone with edit access/i);
     // Click should still be a no-op (component-level guard).
     fireEvent.click(btn);
     expect(cancelMock).not.toHaveBeenCalled();

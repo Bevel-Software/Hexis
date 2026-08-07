@@ -212,13 +212,14 @@ export interface PullRequestDetail extends PullRequestSummary {
   viewerCanBypassMerge: boolean;
   /**
    * True iff the viewer is allowed to cancel this change request: the PR is
-   * open AND the viewer is either its author (hash-matched against the body
-   * marker) or an admin (write on `roles.yaml` at `origin/<base>` — same
-   * predicate `viewerCanBypassMerge` uses). The frontend renders the Cancel
-   * button as disabled when this is false; the backend re-checks server-side
-   * on `POST /pr/:n/cancel`, so this is a UX hint, not a security boundary.
-   * False when no viewer was passed, the state isn't `open`, or the access
-   * tree can't be resolved.
+   * open AND the viewer is its author (hash-matched against the body marker),
+   * an admin (write on `roles.yaml` at `origin/<base>` — same predicate
+   * `viewerCanBypassMerge` uses), or holds write on every changed file at
+   * `origin/<base>` (the reject route's owner grant). The frontend renders
+   * the Cancel button as disabled when this is false; the backend re-checks
+   * server-side on the reject route, so this is a UX hint, not a security
+   * boundary. False when no viewer was passed, the state isn't `open`, or
+   * the access tree can't be resolved.
    */
   viewerCanCancel: boolean;
 }

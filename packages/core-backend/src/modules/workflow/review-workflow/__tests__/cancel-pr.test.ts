@@ -100,7 +100,7 @@ describe('ReviewWorkflowService.cancelPr', () => {
     ).rejects.toMatchObject({
       name: 'CancelAuthError',
       status: 403,
-      message: expect.stringMatching(/only the author or an admin/i),
+      message: expect.stringMatching(/only the author, an admin, or someone with edit access/i),
     });
     expect(updateReturning).not.toHaveBeenCalled();
   });
