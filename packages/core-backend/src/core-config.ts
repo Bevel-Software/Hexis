@@ -152,6 +152,18 @@ export class CoreConfig {
    */
   readonly loginPasswordEnabled: boolean;
   /**
+   * Public-demo lockdown, from `PUBLIC_DEMO=true` (default off). A shared
+   * demo signs strangers in side by side, and anywhere a visitor can WRITE is
+   * a place one visitor can plant content (a poisoned skill, a malicious
+   * `.tool`) that another visitor's agent will read and follow. The ACL
+   * already denies them everywhere except the two provisioning doors that
+   * deliberately bypass it — group creation and the personal folder — so this
+   * flag closes those two: both endpoints refuse with a visitor-facing
+   * message, and `/setup/status` reports the flag so the UI can explain
+   * itself instead of failing. Never set outside a public demo.
+   */
+  readonly publicDemo: boolean;
+  /**
    * Optional allow-list of email domains for SSO — part of the OIDC
    * configuration, and only meaningful alongside it.
    *
@@ -304,6 +316,7 @@ export class CoreConfig {
     this.kbTemplateDir = process.env.KB_TEMPLATE_DIR || defaultKbTemplateDir();
     this.ontologySessionBlock =
       (process.env.ONTOLOGY_SESSION_BLOCK ?? 'true').trim().toLowerCase() !== 'false';
+    this.publicDemo = (process.env.PUBLIC_DEMO ?? '').trim().toLowerCase() === 'true';
     this.allowedEmailDomains = (process.env.ALLOWED_EMAIL_DOMAINS || '')
       .split(/[\s,]+/)
       .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))

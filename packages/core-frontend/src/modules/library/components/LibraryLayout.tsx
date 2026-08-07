@@ -25,6 +25,8 @@ import { GroupsSidebarMenu } from './GroupsSidebarMenu';
 import { AddToGroupDialog } from './AddToGroupDialog';
 import { DeleteGroupDialog } from './DeleteGroupDialog';
 import { NewGroupDialog } from './NewGroupDialog';
+import { PublicDemoDialog } from './PublicDemoDialog';
+import { isPublicDemo } from '../../../core/bootstrap';
 
 /**
  * The shell every Library page renders inside: the group nav on the left, the
@@ -313,7 +315,13 @@ export function LibraryLayout() {
         />
       )}
 
-      {newGroupOpen && (
+      {newGroupOpen && isPublicDemo() && (
+        // The demo's answer to "New group": why it is off here, and where the
+        // real thing lives. The endpoint refuses independently — this is the
+        // honest face of that gate, not the gate.
+        <PublicDemoDialog onClose={() => setNewGroupOpen(false)} />
+      )}
+      {newGroupOpen && !isPublicDemo() && (
         <NewGroupDialog
           // Every name the workspace already knows, readable or not: creating
           // `Groups/GTM` when a locked `GTM` exists would not make a group, it

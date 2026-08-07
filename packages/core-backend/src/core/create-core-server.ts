@@ -170,6 +170,10 @@ export async function createCoreServer(
         defaultBranch: DEFAULT_BRANCH,
         protectedBranches: [...PROTECTED_BRANCHES],
       },
+      // Public-demo lockdown flag, so the UI explains disabled surfaces
+      // instead of failing at them. Discloses nothing: the demo says the
+      // same thing to every visitor in its own copy.
+      publicDemo: core.config.publicDemo,
     });
   });
 
@@ -353,6 +357,7 @@ export async function createCoreServer(
     core.groupProvisionService,
     core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
+    core.config.publicDemo,
   ));
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).

@@ -61,8 +61,31 @@ export function createGroupsRoutes(
   provision: GroupProvisionService,
   kbDirName: string,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
+  /**
+   * Public-demo lockdown (see `CoreConfig.publicDemo`): when true, both
+   * provisioning doors refuse. They are the only writes a visitor can reach —
+   * everything else is already ACL-denied — and on a shared demo a visitor's
+   * folder is where one visitor could plant tools for another visitor's
+   * agent to follow.
+   */
+  publicDemo = false,
 ): express.Router {
   const router = express.Router();
+
+  /** Answers for both provisioning doors while the public demo is locked. */
+  const refuseInDemo = (res: express.Response): boolean => {
+    if (!publicDemo) return false;
+    res.status(403).json({
+      error:
+        'This shared demo is read-only: creating groups and personal skills is ' +
+        'disabled so no visitor can change what other visitors (and their agents) see. ' +
+        'Bevel is open source — self-host it from ' +
+        'https://github.com/Bevel-Software/skill-and-tool-management and your own ' +
+        'deployment has no such limit.',
+      kind: 'public-demo',
+    });
+    return true;
+  };
 
   /** The folder-chain probe for MEMBERSHIP — the folder itself. */
   const memberProbe = (folder: string) => folder;
@@ -162,6 +185,7 @@ export function createGroupsRoutes(
    * `GroupProvisionService` for why this is an endpoint and not a write path.
    */
   router.post('/groups', async (req, res) => {
+    if (refuseInDemo(res)) return;
     const user = await resolveUser(req);
     if (!user) {
       res.status(401).json({ error: 'Unauthenticated' });
@@ -193,6 +217,7 @@ export function createGroupsRoutes(
    * write. Private by construction: its access.md names only the caller.
    */
   router.post('/groups/personal', async (req, res) => {
+    if (refuseInDemo(res)) return;
     const user = await resolveUser(req);
     if (!user) {
       res.status(401).json({ error: 'Unauthenticated' });

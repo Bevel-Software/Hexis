@@ -53,6 +53,8 @@ interface HarnessOpts {
   email?: string | null;
   skills?: SkillSummary[];
   tools?: ToolManualSummary[];
+  /** Public-demo lockdown — both provisioning doors refuse (see CoreConfig.publicDemo). */
+  publicDemo?: boolean;
 }
 
 function cr(over: Partial<ChangeRequest>): ChangeRequest {
@@ -168,6 +170,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
       provision as never,
       KB,
       async (req) => (req.userEmail ? { ...ALI_USER, email: req.userEmail } : null),
+      opts.publicDemo ?? false,
     ),
   );
 
@@ -472,6 +475,27 @@ describe('/api/groups routes', () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ closed: true });
+  });
+
+  it('public demo: BOTH provisioning doors refuse, and the provisioner is never touched', async () => {
+    // They are the only writes a visitor can reach — everything else is
+    // already ACL-denied — so refusing them is what "visitors write nowhere"
+    // means on the demo deployment.
+    const h = await makeHarness({ publicDemo: true });
+    server = h.server;
+    for (const path of ['/api/groups', '/api/groups/personal']) {
+      const res = await fetch(`${h.baseUrl}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Mine' }),
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string; kind: string };
+      expect(body.kind).toBe('public-demo');
+      // The refusal is the pitch: it must name the way OUT of the limit.
+      expect(body.error).toContain('github.com/Bevel-Software/skill-and-tool-management');
+    }
+    expect(h.provision.createGroup).not.toHaveBeenCalled();
   });
 
   it('500s with { error: "Failed to list groups" } when the index throws', async () => {

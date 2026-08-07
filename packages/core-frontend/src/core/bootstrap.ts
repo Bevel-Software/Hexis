@@ -3,6 +3,19 @@ import { configureBranchModel, validateBranchModel } from '@bevel-software/platf
 /** What `GET /api/config` serves. Unauthenticated — see the route's comment. */
 interface ServerConfig {
   branchModel: { defaultBranch: string; protectedBranches: string[] };
+  publicDemo?: boolean;
+}
+
+let publicDemo = false;
+
+/**
+ * Whether this deployment runs in public-demo lockdown (`CoreConfig.publicDemo`):
+ * visitors can write nowhere, and the provisioning doors (New group, personal
+ * folder) refuse. Set once by {@link loadServerConfig} before React renders, so
+ * a plain read is always current — no context needed.
+ */
+export function isPublicDemo(): boolean {
+  return publicDemo;
 }
 
 /**
@@ -41,6 +54,7 @@ export async function loadServerConfig(): Promise<void> {
    */
   const problem = validateBranchModel(config.branchModel);
   if (!problem) configureBranchModel(config.branchModel);
+  publicDemo = config.publicDemo === true;
 }
 
 /**
