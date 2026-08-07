@@ -14,6 +14,7 @@ describe('computeViewerCanCancel', () => {
         authorId: AUTHOR_HASH,
         viewerEmail: undefined,
         viewerCanBypassMerge: false,
+        viewerWritesAllFiles: false,
       }),
     ).toBe(false);
   });
@@ -25,6 +26,7 @@ describe('computeViewerCanCancel', () => {
         authorId: AUTHOR_HASH,
         viewerEmail: EMAIL,
         viewerCanBypassMerge: false,
+        viewerWritesAllFiles: false,
       }),
     ).toBe(true);
   });
@@ -36,6 +38,7 @@ describe('computeViewerCanCancel', () => {
         authorId: OTHER_AUTHOR_HASH,
         viewerEmail: EMAIL,
         viewerCanBypassMerge: true,
+        viewerWritesAllFiles: false,
       }),
     ).toBe(true);
   });
@@ -47,6 +50,7 @@ describe('computeViewerCanCancel', () => {
         authorId: AUTHOR_HASH,
         viewerEmail: EMAIL,
         viewerCanBypassMerge: true,
+        viewerWritesAllFiles: false,
       }),
     ).toBe(true);
   });
@@ -58,6 +62,7 @@ describe('computeViewerCanCancel', () => {
         authorId: AUTHOR_HASH,
         viewerEmail: EMAIL,
         viewerCanBypassMerge: false,
+        viewerWritesAllFiles: false,
       }),
     ).toBe(false);
   });
@@ -69,6 +74,7 @@ describe('computeViewerCanCancel', () => {
         authorId: OTHER_AUTHOR_HASH,
         viewerEmail: EMAIL,
         viewerCanBypassMerge: true,
+        viewerWritesAllFiles: false,
       }),
     ).toBe(false);
   });
@@ -80,6 +86,7 @@ describe('computeViewerCanCancel', () => {
         authorId: undefined,
         viewerEmail: EMAIL,
         viewerCanBypassMerge: false,
+        viewerWritesAllFiles: false,
       }),
     ).toBe(false);
   });
@@ -95,7 +102,44 @@ describe('computeViewerCanCancel', () => {
         authorId: AUTHOR_HASH,
         viewerEmail: '  Juan@Bevel.Software  ',
         viewerCanBypassMerge: false,
+        viewerWritesAllFiles: false,
       }),
     ).toBe(true);
+  });
+
+  it('returns true for a non-author, non-admin who writes EVERY changed file (the reject route’s third grant)', () => {
+    expect(
+      computeViewerCanCancel({
+        state: 'open',
+        authorId: OTHER_AUTHOR_HASH,
+        viewerEmail: EMAIL,
+        viewerCanBypassMerge: false,
+        viewerWritesAllFiles: true,
+      }),
+    ).toBe(true);
+  });
+
+  it('fails closed for an anonymous viewer even with the owner grant', () => {
+    expect(
+      computeViewerCanCancel({
+        state: 'open',
+        authorId: OTHER_AUTHOR_HASH,
+        viewerEmail: undefined,
+        viewerCanBypassMerge: false,
+        viewerWritesAllFiles: true,
+      }),
+    ).toBe(false);
+  });
+
+  it('terminal states refuse the owner grant too', () => {
+    expect(
+      computeViewerCanCancel({
+        state: 'merged',
+        authorId: OTHER_AUTHOR_HASH,
+        viewerEmail: EMAIL,
+        viewerCanBypassMerge: false,
+        viewerWritesAllFiles: true,
+      }),
+    ).toBe(false);
   });
 });

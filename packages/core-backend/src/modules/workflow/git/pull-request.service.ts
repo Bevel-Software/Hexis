@@ -381,6 +381,11 @@ export class PullRequestService implements IPullRequestService {
       authorId: summary.authorId,
       viewerEmail: opts.viewerEmail,
       viewerCanBypassMerge,
+      // The reject route's third grant (see `rejectChangeRequest`): write on
+      // every changed file at origin/<base>. Derived from the per-file
+      // `viewerCanApprove` flags — the SAME `canWriteBatchAtRef` predicate the
+      // route enforces — so the hint cannot drift from the enforcement.
+      viewerWritesAllFiles: approvals.length > 0 && approvals.every((a) => a.viewerCanApprove),
     });
 
     const detail: PullRequestDetail = {
@@ -426,23 +431,26 @@ export class PullRequestService implements IPullRequestService {
 }
 
 /**
- * Pure predicate for the cancel-button's enabled state. The viewer can cancel
- * iff the PR is open AND they're either the author (hash-match against the
- * stored author) or an admin (`viewerCanBypassMerge` is the proxy — same
- * `canWriteAtRef('roles.yaml')` predicate). Fail-closed defaults: missing
- * email → false.
+ * Pure predicate for the `viewerCanCancel` hint. The viewer can cancel iff
+ * the PR is open AND they're the author (hash-match against the stored
+ * author), an admin (`viewerCanBypassMerge` is the proxy — same
+ * `canWriteAtRef('roles.yaml')` predicate), or they hold write on EVERY
+ * changed file (`viewerWritesAllFiles`) — the reject route's full
+ * authorization set, mirrored exactly so the hint never claims less (or
+ * more) than the server enforces. Fail-closed: no viewer email → false,
+ * whatever the grants say.
  */
 export function computeViewerCanCancel(input: {
   state: PullRequestState;
   authorId: string | undefined;
   viewerEmail: string | undefined;
   viewerCanBypassMerge: boolean;
+  viewerWritesAllFiles: boolean;
 }): boolean {
   if (input.state !== 'open') return false;
-  const viewerIsAuthor = !!(
-    input.authorId && input.viewerEmail && input.authorId === hashEmail(input.viewerEmail)
-  );
-  return viewerIsAuthor || input.viewerCanBypassMerge;
+  if (!input.viewerEmail) return false;
+  const viewerIsAuthor = !!(input.authorId && input.authorId === hashEmail(input.viewerEmail));
+  return viewerIsAuthor || input.viewerCanBypassMerge || input.viewerWritesAllFiles;
 }
 
 export const __testing = {
