@@ -106,7 +106,8 @@ class CancelStateError extends WorkflowDomainError {
 class CancelAuthError extends WorkflowDomainError {
   constructor() {
     super(
-      "You can't cancel this change request — only the author or an admin can.",
+      "You can't cancel this change request — that takes being its author, an admin, " +
+        'or having edit access to every file it changes.',
       403,
     );
     this.name = 'CancelAuthError';

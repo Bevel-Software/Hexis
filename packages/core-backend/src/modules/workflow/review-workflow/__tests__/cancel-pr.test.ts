@@ -100,7 +100,10 @@ describe('ReviewWorkflowService.cancelPr', () => {
     ).rejects.toMatchObject({
       name: 'CancelAuthError',
       status: 403,
-      message: expect.stringMatching(/only the author or an admin/i),
+      // Names the FULL authorization set — the facade's owner grant
+      // (write on every changed file) included, so the refusal never
+      // undersells who could actually do this.
+      message: expect.stringMatching(/author, an admin, or having edit access to every file/i),
     });
     expect(updateReturning).not.toHaveBeenCalled();
   });
