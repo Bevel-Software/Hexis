@@ -1,17 +1,30 @@
-# Bevel core — skill & tool management
+# Bevel — skill & tool management
 
-The open-source core of the Bevel platform: a **git-backed knowledge workspace**
-your whole team — and their AI agents — work in together.
+One place where your company's **AI skills, tools and knowledge** live —
+centrally managed, reviewed and access-controlled, and usable from **any AI
+agent**. The open-source core of the Bevel platform.
 
-- **Knowledge lives in a git repo you own**, on any git host. The app gives it
-  branches, change requests with owner approval, file locks, and live updates —
-  no provider PRs, no lock-in.
-- **Skills & tools Library**: reusable agent skills (`SKILL.md` folders), tool
-  manuals (UTCP), and an encrypted secrets vault, organised into groups with
-  role-based access control.
-- **A remote MCP server** (with its own OAuth 2.1 authorization server), so
-  external agents like Claude Code connect to the knowledge base and work with
-  the same permissions model as people do.
+- **Every employee connects once, in minutes.** They add the workspace to
+  Claude Code, ChatGPT, Cursor or any MCP-capable agent with a single
+  connection key — and their agent can use exactly the skills, tools and
+  knowledge their role allows. No per-tool credentials handed around, no
+  per-agent setup projects.
+- **The company stays in control.** Skills, tool access and knowledge are
+  managed and reviewed in one place: every change has an author, a reviewer
+  and a way back — and the review rules apply to agents exactly as they apply
+  to people.
+- **Independent of any agent vendor.** Because the workspace speaks open
+  protocols, you can switch agent vendors on price and performance — or mix
+  them by task and role — without rebuilding what your agents know and can do.
+  The investment lives with you, not inside one vendor's walls. That is what
+  makes enterprise agent rollouts fast: onboard the next team, or the next
+  agent, instead of starting over.
+
+Under the hood, everything lives in a **git repository you own**, on any git
+host: skills (`SKILL.md` folders), tool manuals (UTCP) with an encrypted
+secrets vault, and knowledge — with branches, change requests with owner
+approval, role-based access, and a built-in remote MCP server (OAuth 2.1) that
+agents connect to.
 
 ## Try it first — the live demo
 
@@ -22,6 +35,11 @@ you through the whole loop: connect your own agent over MCP, have it build a
 sales deck from a skill, watch its proposed improvement arrive as a change
 request. The demo is shared and read-mostly (visitors propose, owners approve);
 everything below gets you the same thing with none of the limits.
+
+## Want a managed instance?
+
+We run it for you — hosting, upgrades, backups, SSO — and your team just signs
+in. Write to **[ali.raza@bevel.software](mailto:ali.raza@bevel.software)**.
 
 ## Run it in 5 minutes (Docker)
 
