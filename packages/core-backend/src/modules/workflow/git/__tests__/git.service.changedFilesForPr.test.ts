@@ -121,4 +121,43 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     expect(headSha).toMatch(/^[0-9a-f]{40}$/);
     expect(baseSha).not.toBe(headSha);
   });
+
+  /**
+   * roles.yaml can never change through a merge — `preserveBaseRolesYaml`
+   * restores the base copy onto the source before every merge — so the review
+   * surface must not list it as changed: the claim would be false, the empty
+   * diff reads as a bug, and its per-file approval would gate the merge on a
+   * change that cannot land. Counts stay aligned with the surviving files.
+   */
+  it('excludes roles.yaml from the changed-file list and the touched paths', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await runGit(repo, ['checkout', '-b', 'mallory/self-promote']);
+    await fs.writeFile(path.join(repo, 'roles.yaml'), 'roles:\n  Admin:\n    - mallory@x.com\n');
+    await fs.writeFile(path.join(repo, 'honest.md'), 'real change\nsecond line\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'work + attempted escalation']);
+    await runGit(repo, ['push', '-u', 'origin', 'mallory/self-promote']);
+
+    const git = new GitService(
+      stubWorkspaceService(workspaceId, repo),
+      new WorkflowHooks(),
+      'knowledge-base',
+    );
+
+    const files = await git.changedFilesForPr(
+      workspaceId,
+      'current-company-state',
+      'mallory/self-promote',
+    );
+    expect(files.map((f) => f.path)).toEqual(['honest.md']);
+    // The counts filter moved in step with the statuses filter.
+    expect(files[0].additions).toBe(2);
+
+    const paths = await git.changedPathsForPr(
+      workspaceId,
+      'current-company-state',
+      'mallory/self-promote',
+    );
+    expect(paths).toEqual(['honest.md']);
+  });
 });
