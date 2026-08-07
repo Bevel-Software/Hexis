@@ -333,6 +333,18 @@ export function useActiveAppId(): string | undefined {
   return useContext(ActiveAppIdContext);
 }
 
+/**
+ * Lets a surface rendered under ONE app's URL prefix claim ANOTHER app as
+ * active. The path-prefix rule in {@link activeAppId} answers for every
+ * ordinary location, but a canonical URL can put one app's surface under
+ * another's prefix — library item pages live at `/workspace/...` file URLs
+ * (see `WorkspaceItemGate`) — and the toolbar should highlight the app whose
+ * surface is actually on screen. Call with an app id while such a surface is
+ * mounted and with `null` on unmount; the shell holds the claim above the
+ * toolbar. No-op default so surfaces render unchanged outside the shell.
+ */
+export const AppClaimContext = createContext<(id: string | null) => void>(() => {});
+
 /** Convenience builder: fill in the empty defaults for unspecified fields. */
 export function makeRegistry(partial: Partial<AppRegistry>): AppRegistry {
   return { ...EMPTY_REGISTRY, ...partial };

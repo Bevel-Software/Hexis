@@ -6,8 +6,7 @@ import { useLibraryToast } from '../state/toast.context';
 import {
   decodeGroupSegment,
   pathForGroupsIndex,
-  pathForSkill,
-  pathForTool,
+  urlForItemFile,
 } from '../routes/library-paths';
 import { primaryFolderOf } from '../utils/group-summary';
 import { GroupJoinRequests } from './GroupJoinRequests';
@@ -139,7 +138,7 @@ export function GroupPage() {
       setReviewing(item);
       return;
     }
-    navigate(item.kind === 'integration' ? pathForTool(item.id) : pathForSkill(item.id));
+    if (kbDirName) navigate(urlForItemFile(kbDirName, item.path));
   }
 
   /**

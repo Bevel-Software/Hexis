@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -125,7 +126,9 @@ const TOOL_PAGE_STATE: ToolPageState = {
 /** Exposes the router's current pathname without a testid. */
 function LocationProbe() {
   const location = useLocation();
-  return <div aria-label="pathname">{location.pathname}</div>;
+  // Hash included so the OAuth-fragment redirect below is assertable; it is
+  // the empty string everywhere else.
+  return <div aria-label="pathname">{location.pathname}{location.hash}</div>;
 }
 
 /**
@@ -326,23 +329,33 @@ describe('LibraryRoutes', () => {
     );
   });
 
-  it('/skills-and-tools/tools/:slug renders the tool page', async () => {
-    renderAt('/skills-and-tools/tools/heyreach');
-    expect(await screen.findByRole('heading', { name: 'heyreach', level: 1 })).toBeInTheDocument();
-    expect(toolPageMock.useToolPage).toHaveBeenCalledWith('heyreach');
-    // An item page is not a filtered view of the catalog — no gallery row is lit.
-    expect(screen.getByRole('button', { name: /^Owned by me/ })).toHaveAttribute(
-      'aria-current',
-      'false',
+  it('/skills-and-tools/tools/:slug redirects to the canonical workspace URL, hash intact', async () => {
+    // The legacy address is the OAuth callback's landing target, so the
+    // redirect must carry the `#…` outcome fragment to the canonical page.
+    renderAt('/skills-and-tools/tools/heyreach#authorized');
+    await waitFor(() =>
+      expect(pathname()).toBe(
+        `/workspace/${DEFAULT_BRANCH}/knowledge-base/Groups/GTM/heyreach.tool#authorized`,
+      ),
     );
   });
 
-  it('an integration card opens the tool page instead of the dialog', async () => {
+  it("/skills-and-tools/skills/:name redirects to the skill's canonical workspace URL", async () => {
+    renderAt('/skills-and-tools/skills/outreach');
+    await waitFor(() =>
+      expect(pathname()).toBe(
+        `/workspace/${DEFAULT_BRANCH}/knowledge-base/Groups/GTM/outreach/SKILL.md`,
+      ),
+    );
+  });
+
+  it('an integration card navigates to the canonical workspace URL, not a dialog', async () => {
     renderAt('/skills-and-tools/everything');
     fireEvent.click(await screen.findByRole('button', { name: /^heyreach/ }));
 
-    await waitFor(() => expect(pathname()).toBe('/skills-and-tools/tools/heyreach'));
-    expect(await screen.findByRole('heading', { name: 'heyreach', level: 1 })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(pathname()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Groups/GTM/heyreach.tool`),
+    );
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 

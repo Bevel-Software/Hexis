@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, Surface, TextField } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
-import { pathForSkill } from '../routes/library-paths';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import { createEmptySkill } from '../services/library.api';
 import { useLibraryReload } from '../state/library-context';
 import { useLibraryToast } from '../state/toast.context';
@@ -97,7 +98,7 @@ export function NewSkillPanel({
         // Straight into the new skill's page, editor open: an empty SKILL.md
         // is an invitation to write, not a page to admire.
         toast(`Created ${trimmed}: opening it.`, 'ok');
-        navigate(pathForSkill(trimmed), { state: { startEditing: true } });
+        navigate(kbFileUrl(DEFAULT_BRANCH, created.workspacePath), { state: { startEditing: true } });
       } else {
         // A proposal has no page yet — the skill exists only on the author's
         // branch. It appears right here as an "In review" card (the pending

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import {
@@ -203,7 +204,8 @@ describe('AddToGroupDialog: starting an empty SKILL.md', () => {
     // STATE. Asserted by field, so a renamed or dropped flag fails here
     // rather than silently landing on a read-only page.
     await waitFor(() =>
-      expect(href()).toBe('/skills-and-tools/skills/weekly-report'),
+      // The canonical address: the new SKILL.md's own workspace URL.
+      expect(href()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Groups/GTM/weekly-report/SKILL.md`),
     );
     expect(screen.getByLabelText('router-state')).toHaveTextContent(
       JSON.stringify({ startEditing: true }),

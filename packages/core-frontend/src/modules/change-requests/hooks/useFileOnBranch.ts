@@ -36,8 +36,18 @@ export function useFileOnBranch(
   repoRelativePath: string | null,
   revision = 0,
 ): string | null {
-  const [file, setFile] = useState<{ key: string; content: string } | null>(null);
+  /**
+   * Answers are cached PER KEY, not as "the last one". The skill page's tabs
+   * make the path oscillate (SKILL.md → a bundled file → SKILL.md), and with a
+   * single-slot state the return leg found its key already in `asked` — so no
+   * refetch — while the slot held the other tab's answer: the hook returned
+   * null forever and the pane sat on "Loading…". A map keeps every settled
+   * answer addressable for as long as the page is mounted (bounded: one entry
+   * per file per revision).
+   */
+  const cache = useRef<Map<string, string>>(new Map());
   const asked = useRef<Set<string>>(new Set());
+  const [, arrived] = useState(0);
   const key = `${branch ?? ''}::${repoRelativePath ?? ''}::${revision}`;
 
   /**
@@ -49,19 +59,22 @@ export function useFileOnBranch(
    * how this shipped: the change-request view sat on "Loading…" while both
    * reads returned 200.)
    *
-   * Discarding a stale response is the KEY's job instead: a late answer for a
-   * path we have since navigated away from simply stops matching on read.
+   * A late answer needs no discarding at all anymore: it lands in the cache
+   * under its own key, and the read below simply doesn't look there.
    */
   useEffect(() => {
     if (!branch || !repoRelativePath || asked.current.has(key)) return;
     asked.current.add(key);
     readFileOnBranch(branch, repoRelativePath)
-      .then((content) => setFile({ key, content }))
+      .then((content) => {
+        cache.current.set(key, content);
+        arrived((n) => n + 1);
+      })
       .catch(() => {
         // Leave it unset rather than storing '': an empty string would diff as
         // "the whole file was deleted".
       });
   }, [branch, repoRelativePath, key]);
 
-  return file?.key === key ? file.content : null;
+  return cache.current.get(key) ?? null;
 }
