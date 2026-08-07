@@ -55,8 +55,8 @@ export function SetupGate({ children }: { children: ReactNode }) {
         <div className="max-w-[46ch] text-center">
           <h1 className="text-title font-semibold text-ink">Still being set up</h1>
           <p className="mt-2 text-body text-ink-muted">
-            An admin is connecting this deployment to its knowledge base. It will be ready shortly —
-            try again in a few minutes.
+            An admin is connecting this deployment to the place its knowledge, skills and tools
+            will live. It will be ready shortly; try again in a few minutes.
           </p>
         </div>
       </div>

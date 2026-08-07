@@ -40,6 +40,7 @@ import { ReviewProvider } from '../modules/review/state/ReviewProvider';
 import { ReviewPanelSurface } from '../modules/review/components/ReviewPanelSurface';
 import { ConnectToolsPage } from '../modules/secrets-vault/components/ConnectToolsPage';
 import { SettingsLayout } from '../modules/settings/components/SettingsLayout';
+import { DeploymentPage } from '../modules/settings/components/DeploymentPage';
 import { SecretsPage } from '../modules/secrets-vault/components/SecretsPage';
 import { AccountPage } from '../modules/auth/components/AccountPage';
 import { ExternalAgentAccessPage } from '../modules/toolbar/components/ExternalAgentAccessPage';
@@ -362,6 +363,7 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
         <Route path="/account" element={<AccountPage />} />
         <Route path="/external-agent-access" element={<ExternalAgentAccessPage />} />
         <Route path="/roles-and-members" element={<AdminRolesPage />} />
+        <Route path="/deployment" element={<DeploymentPage />} />
         <Route path="/user-accounts" element={<UserAccountsPage />} />
         <Route path="/tools" element={<ToolsExplorerPage />} />
       </Route>
