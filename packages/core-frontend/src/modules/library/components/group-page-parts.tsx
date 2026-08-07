@@ -270,7 +270,13 @@ export function GroupItemSections({
   onOpen(item: LibraryItem): void;
   /** See {@link CardGrid} — present only when the caller manages this place. */
   onRemove?(item: LibraryItem): void;
-  emptySkills: string;
+  /**
+   * A plain sentence, or an `EmptySkillsNudge`. A string still gets the band's
+   * standard paragraph; a node is trusted to bring its own — the nudge carries
+   * an absolutely-placed arrow, and wrapping it in a second `<p>` would nest
+   * flow content inside phrasing content.
+   */
+  emptySkills: ReactNode;
   emptyTools?: string;
   /**
    * Filter / refresh for the Skills band only. Tools deliberately gets none
@@ -300,7 +306,11 @@ export function GroupItemSections({
           controlsActive={skillControlsActive}
         >
           {skillItems.length === 0 ? (
-            <p className="text-ui text-ink-faint">{emptySkills}</p>
+            typeof emptySkills === 'string' ? (
+              <p className="text-ui text-ink-faint">{emptySkills}</p>
+            ) : (
+              emptySkills
+            )
           ) : (
             <CardGrid items={skillItems} onOpen={onOpen} onRemove={onRemove} />
           )}
@@ -327,6 +337,94 @@ export function GroupItemSections({
  */
 export function PageNote({ children }: { children: ReactNode }) {
   return <div className="py-16 text-center text-ui text-ink-faint">{children}</div>;
+}
+
+/**
+ * A hand-drawn arrow, chalk on the wall — the mark an empty page makes toward
+ * the control that fills it. Decorative on purpose: the sentence beside it
+ * carries the meaning, so the drawing is `aria-hidden`, takes no pointer, and
+ * inherits `currentColor` so it stays as faint as the ink around it.
+ */
+export function ChalkArrow({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      aria-hidden="true"
+      focusable="false"
+      viewBox="0 0 88 72"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {/* One loose curve from the words up toward the `+`, then the head. */}
+      <path d="M6 66 C 30 63, 53 51, 67 32 C 71 26, 74 19, 76 11" />
+      <path d="M65 17 L 76 11 L 79 24" />
+    </svg>
+  );
+}
+
+/**
+ * The inline verb inside an empty state's sentence — underlined, ink-strong
+ * against the faint prose around it, and a real `<button>` because it acts
+ * rather than navigates. One component so every empty state's doorway looks
+ * like the same kind of doorway.
+ */
+export function EmptyStateAction({
+  children,
+  onClick,
+}: {
+  children: ReactNode;
+  onClick(): void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded-xs font-semibold text-ink underline underline-offset-2 hover:text-ink-muted"
+    >
+      {children}
+    </button>
+  );
+}
+
+/**
+ * The empty Skills band as a doorway instead of a dead end. The sentence
+ * names the fact and hands over a link that DOES the thing — the same thing
+ * the title row's `+` does — while a chalk arrow points up at that `+`, so
+ * the page itself teaches where "add" lives. No separate tour, no overlay:
+ * the arrow exists only because this component only renders when the band is
+ * empty, and it leaves the moment the first skill arrives.
+ *
+ * The arrow overlaps the band heading on its way up. That is intended — it is
+ * background, not layout: absolutely placed, `pointer-events-none`, and faint
+ * enough to read as a margin note rather than a fourth piece of chrome.
+ */
+export function EmptySkillsNudge({
+  lead,
+  actionLabel,
+  tail,
+  onAction,
+}: {
+  /** The fact: "No skills yet." */
+  lead: string;
+  /** The doorway's words, e.g. "Add the first skill". */
+  actionLabel: string;
+  /** The rest of the sentence — usually pointing at the agent as the other door. */
+  tail: string;
+  /** Exactly what the title row's `+` does. One intent, two doors. */
+  onAction(): void;
+}) {
+  return (
+    <div className="relative">
+      <ChalkArrow className="pointer-events-none absolute -top-[74px] right-9 h-[68px] w-[84px] text-ink-faint" />
+      <p className="text-ui text-ink-faint">
+        {lead} <EmptyStateAction onClick={onAction}>{actionLabel}</EmptyStateAction>
+        {tail}
+      </p>
+    </div>
+  );
 }
 
 /**

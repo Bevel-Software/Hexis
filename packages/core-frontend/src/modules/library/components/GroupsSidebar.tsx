@@ -266,6 +266,22 @@ export function GroupsSidebar({
               attention > 0 ? 'pending' : 'count',
             ),
           )}
+          {/* The heading's `+` is hover-revealed, and a person with no groups
+              yet is exactly the person who has not learned to hover it. While
+              the list holds only their own space, the way to a second place is
+              said in words, as a row where the second place would sit. It
+              stands down the moment a real group exists — this is a doorway
+              for an empty nav, not a permanent duplicate of the `+`. */}
+          {groups.length === 0 && (
+            <button
+              type="button"
+              onClick={onCreateGroup}
+              className="flex items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-hover hover:text-ink"
+            >
+              <span aria-hidden="true">+</span>
+              <span className="truncate">Create a group</span>
+            </button>
+          )}
           {/* Locked groups, after the prototype's 14px `.navgap`. The gap is the
               whole statement: these are in the same list because they are in the
               same workspace, and below a break because you are not in them. */}

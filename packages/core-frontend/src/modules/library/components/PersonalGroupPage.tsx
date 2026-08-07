@@ -5,7 +5,8 @@ import { useLibrary, type LibraryItem } from '../state/library-data';
 import { useLibraryToast } from '../state/toast.context';
 import { pathForSkill, pathForTool } from '../routes/library-paths';
 import { personalGroupName } from '../utils/personal-group';
-import { GroupBreadcrumb, GroupItemSections, PageNote, RemoveLibraryItemDialog,
+import { EmptySkillsNudge, GroupBreadcrumb, GroupItemSections, PageNote,
+  RemoveLibraryItemDialog,
 } from './group-page-parts';
 import { PageActions } from './PageActions';
 import { PersonalAddDialog } from './PersonalAddDialog';
@@ -93,9 +94,17 @@ export function PersonalGroupPage() {
         // per-path gate agrees, since your personal folder names you as owner.
         onRemove={setRemoving}
         // An empty room should say what to do in it, not explain its own filing
-        // rule. "Anything your agent writes outside a group lands here" was
-        // true and told nobody how to make the first thing appear.
-        emptySkills="No skills of your own yet. Ask your agent to create skills."
+        // rule. The nudge's link opens the same add dialog the title row's `+`
+        // does, and its chalk arrow points at that `+` — the agent stays in the
+        // sentence as the other way a first skill appears.
+        emptySkills={
+          <EmptySkillsNudge
+            lead="No skills of your own yet."
+            actionLabel="Add the first skill"
+            tail=", or ask your agent to create one."
+            onAction={() => setAddOpen(true)}
+          />
+        }
         emptyTools="No sign-ins of your own yet."
       />
 

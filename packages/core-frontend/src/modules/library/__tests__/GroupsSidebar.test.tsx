@@ -83,6 +83,17 @@ describe('GroupsSidebar', () => {
     expect(onCreateGroup).toHaveBeenCalledTimes(1);
   });
 
+  it('spells out Create a group while the MCP list is empty — the `+` alone is hover-hidden', () => {
+    const { onCreateGroup } = renderSidebar({ groups: [] });
+    fireEvent.click(screen.getByRole('button', { name: 'Create a group' }));
+    expect(onCreateGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it('stands the create CTA down once a real group exists', () => {
+    renderSidebar(); // default fixture has three groups
+    expect(screen.queryByRole('button', { name: 'Create a group' })).not.toBeInTheDocument();
+  });
+
   it('marks the selected group current and leaves the others alone', () => {
     renderSidebar({ filter: { kind: 'group', group: 'GTM' } });
     expect(row(/^GTM/)).toHaveAttribute('aria-current', 'true');
