@@ -1866,8 +1866,20 @@ export class GitService implements IGitService {
         this.git(cwd, ['diff', '-M', '-z', '--name-status', range]),
         this.git(cwd, ['diff', '-M', '-z', '--numstat', range]),
       ]);
-      const statuses = parseNameStatusZ(nameStatusOut);
-      const counts = parseNumstatZ(numstatOut);
+      let statuses = parseNameStatusZ(nameStatusOut);
+      let counts = parseNumstatZ(numstatOut);
+      // roles.yaml can NEVER change through a merge — `preserveBaseRolesYaml`
+      // restores the base copy onto the source branch before every merge — so
+      // listing it as "changed" claims something the merge will not do, and
+      // (worse) makes its approval a requirement for a change that cannot
+      // land. Filter it from the review surface entirely; the neutralisation
+      // reads the raw refs itself and is unaffected. Both lists are filtered
+      // IN STEP so the index-zip below stays aligned.
+      if (statuses.some((s) => s.path === 'roles.yaml')) {
+        const keep = statuses.map((s) => s.path !== 'roles.yaml');
+        statuses = statuses.filter((_, i) => keep[i]);
+        if (counts.length === keep.length) counts = counts.filter((_, i) => keep[i]);
+      }
 
       // `--name-status` and `--numstat` enumerate the same files in the same
       // order (same `-M` over the same range), so we zip by index. If the two
@@ -1931,7 +1943,16 @@ export class GitService implements IGitService {
       const { stdout } = await this.git(cwd, [
         'diff', '-M', '--name-only', `${baseRef}...${headRef}`,
       ]);
-      return stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+      return (
+        stdout
+          .split('\n')
+          .map((s) => s.trim())
+          .filter(Boolean)
+          // Same rule as `changedFilesForPr`: a roles.yaml change never
+          // survives a merge, so it is not a touched path for routing or
+          // summaries either.
+          .filter((p) => p !== 'roles.yaml')
+      );
     });
   }
 

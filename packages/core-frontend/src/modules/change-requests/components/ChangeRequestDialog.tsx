@@ -315,6 +315,21 @@ export function ChangeRequestDialog({
           </Banner>
         )}
 
+        {/* A request that no longer changes anything — everything it proposed
+            has since landed on (or been removed from) the target, or its only
+            change was one the merge never takes (roles.yaml). The file grid
+            below would render a blank pill over an eternal "Loading…", which
+            reads as a hang; the truth is simpler and gets said instead. */}
+        {detail !== null && allFiles.length === 0 ? (
+          <div className="mt-4 min-h-0 flex-1 px-8">
+            <p className="mx-auto max-w-[52ch] py-10 text-center text-detail text-ink-faint">
+              This request doesn't change anything anymore. What it proposed is already part of
+              the current text, or has since been removed on its branch — there is nothing left
+              to review or apply. {firstName} can withdraw it.
+            </p>
+          </div>
+        ) : (
+        <>
         {/* The folder on the left, the file with the change marked in it on the
             right — the same reading as version history. */}
         <div className="mt-4 grid min-h-0 flex-1 grid-cols-[13.5rem_minmax(0,1fr)] gap-7 px-8">
@@ -397,6 +412,8 @@ export function ChangeRequestDialog({
             </div>
           </div>
         </div>
+        </>
+        )}
 
         {/* The verdict. Fixed to the bottom of the surface — a decision the
             reader has to scroll to find is one they will make without reading. */}
@@ -404,9 +421,11 @@ export function ChangeRequestDialog({
           <p className="mr-auto max-w-[52ch] text-meta text-ink-muted">
             {blocked
               ? `Nothing changes for anyone until ${firstName} proposes it again against the current text.`
-              : 'Every agent that connects after this picks it up. There is no staged rollout.'}
+              : detail !== null && allFiles.length === 0
+                ? 'Applying would change nothing, so the button stays away.'
+                : 'Every agent that connects after this picks it up. There is no staged rollout.'}
           </p>
-          {!blocked && (
+          {!blocked && !(detail !== null && allFiles.length === 0) && (
             <Button
               variant="primary"
               size="sm"
