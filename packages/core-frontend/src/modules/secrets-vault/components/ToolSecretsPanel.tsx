@@ -346,7 +346,7 @@ function OAuthVarRow({
             </Badge>
           </div>
           <p className="mt-0.5 text-detail text-ink-muted">
-            From the OAuth app you registered with the provider — shared by everyone, users then
+            From the OAuth app you registered with the provider. Shared by everyone, users then
             sign in themselves.
           </p>
           <div className="mt-1.5 flex gap-1.5">

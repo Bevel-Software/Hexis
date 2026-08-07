@@ -135,7 +135,7 @@ export function friendlyGitError(err: unknown): string {
       case 'deleting a protected branch':
         return `"${branch}" is an official version and can't be deleted.`;
       case 'opening a PR from a protected branch':
-        return `You can't propose changes from "${branch}" — open the change request from a draft instead.`;
+        return `You can't propose changes from "${branch}": open the change request from a draft instead.`;
     }
   }
 
@@ -155,7 +155,7 @@ export function friendlyGitError(err: unknown): string {
     // nonsense, so route that case to a dedicated message that names the
     // real recovery path (contact a repo admin to broaden access).
     if (eligible === 'none') {
-      return `You don't have permission to edit "${path}". Nobody currently has edit permission for this file — contact a repo admin to grant access or broaden the rules for this folder.`;
+      return `You don't have permission to edit "${path}". Nobody currently has edit permission for this file. Contact a repo admin to grant access or broaden the rules for this folder.`;
     }
     return `You don't have permission to edit "${path}". Editing is restricted to ${eligible}. Ask one of them to make the change, or to broaden access for this folder.`;
   }
@@ -194,7 +194,7 @@ export function friendlyGitError(err: unknown): string {
     return 'Keep the change request title to 256 characters or less.';
   }
   if (raw === 'PR head and base must differ') {
-    return "Your draft and the version you're proposing into are the same — nothing to request.";
+    return "Your draft and the version you're proposing into are the same. Nothing to request.";
   }
   if (raw.startsWith('Could not resolve a base branch for')) {
     return "Couldn't tell which official version this draft was started from. Share the draft first, then try again.";
@@ -213,7 +213,7 @@ export function friendlyGitError(err: unknown): string {
   // Cancel-change-request mappings. The backend throws CancelStateError /
   // CancelAuthError with these literal messages; treat them as equality keys.
   if (raw === 'This change request was already applied.') {
-    return "This change request was already applied — there's nothing to cancel.";
+    return "This change request was already applied. There's nothing to cancel.";
   }
   if (raw === 'This change request is already cancelled.') {
     return "This change request was already cancelled.";

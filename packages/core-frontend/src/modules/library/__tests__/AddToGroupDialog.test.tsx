@@ -130,7 +130,7 @@ describe('AddToGroupDialog', () => {
     renderDialog();
     fireEvent.click(screen.getByRole('button', { name: 'Copy prompt' }));
     expect(
-      await screen.findByText("Couldn't copy — select the prompt text instead."),
+      await screen.findByText("Couldn't copy: select the prompt text instead."),
     ).toBeInTheDocument();
     expect(screen.queryByText('Prompt copied.')).not.toBeInTheDocument();
   });

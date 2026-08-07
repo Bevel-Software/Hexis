@@ -59,7 +59,7 @@ export function NewGroupDialog({ existing, onClose, onCreated }: NewGroupDialogP
     } catch (err) {
       // The server's refusal names the problem (name taken, reserved
       // prefix…) — worth more than a generic apology.
-      const msg = err instanceof Error ? err.message : "Couldn't create that group — try again.";
+      const msg = err instanceof Error ? err.message : "Couldn't create that group. Try again.";
       toast(msg, 'danger');
       setBusy(false);
     }

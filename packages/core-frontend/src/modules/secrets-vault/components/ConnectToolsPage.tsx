@@ -280,7 +280,7 @@ export function ConnectToolsPage() {
               // every shared tool works without a personal credential, so the
               // user's only job is to finish.
               <Banner role="status" tone="ok">
-                You&apos;re all set — none of your tools need a personal sign-in or key. Click
+                You&apos;re all set: none of your tools need a personal sign-in or key. Click
                 “Finish &amp; return to your agent” above to complete the connection.
               </Banner>
             ) : (

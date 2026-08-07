@@ -231,7 +231,7 @@ describe('GroupPage', () => {
     renderGroup('GTM');
     expect(
       await screen.findByText(
-        "1 integration needs setup — connect them to unblock this group's skills.",
+        "1 integration needs setup: connect it to unblock this group's skills.",
       ),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Finish setup' }));
@@ -246,7 +246,7 @@ describe('GroupPage', () => {
     renderGroup('GTM');
     expect(
       await screen.findByText(
-        "2 integrations need setup — connect them to unblock this group's skills.",
+        "2 integrations need setup: connect them to unblock this group's skills.",
       ),
     ).toBeInTheDocument();
   });

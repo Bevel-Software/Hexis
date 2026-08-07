@@ -791,7 +791,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           window.dispatchEvent(new Event(PR_STALE_EVENT));
           if (isCurrent()) {
             setUploadNotice(
-              "You can't write to that folder, so the upload became a suggestion — " +
+              "You can't write to that folder, so the upload became a suggestion: " +
                 'it is now a change request for the folder’s owners to review.',
             );
           }

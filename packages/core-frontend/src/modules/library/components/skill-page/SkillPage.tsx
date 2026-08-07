@@ -512,7 +512,7 @@ export function SkillPage() {
                     title={
                       ownCr
                         ? 'Continue your open proposal. Edits update the same change request'
-                        : "You can't edit this file directly — propose a change for its owners to approve"
+                        : "You can't edit this file directly. Propose a change for its owners to approve"
                     }
                   >
                     Propose changes

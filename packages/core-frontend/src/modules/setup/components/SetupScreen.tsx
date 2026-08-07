@@ -365,14 +365,14 @@ export function SetupScreen({ settings, onSaved }: Props) {
               that silently failed. */}
           {needsRestart && (
             <Banner tone="wait" role="status" className="mt-6">
-              Saved. This deployment needs a restart to pick the branch settings up — everything
+              Saved. This deployment needs a restart to pick the branch settings up. Everything
               else is in place.
             </Banner>
           )}
 
           {stillMissing.length > 0 && (
             <Banner tone="wait" role="status" className="mt-6">
-              Saved what you filled in — but this deployment still needs{' '}
+              Saved what you filled in. But this deployment still needs{' '}
               <b className="font-semibold">{stillMissing.join(', ')}</b> before anyone can use it.
               Test the connection and the version fields fill themselves in.
             </Banner>
@@ -489,7 +489,7 @@ export function SetupScreen({ settings, onSaved }: Props) {
                     <summary className="cursor-pointer list-none text-detail font-medium text-ink-muted marker:hidden hover:text-ink">
                       Advanced
                       <span className="ml-1.5 text-meta text-ink-faint">
-                        — sensible defaults; open only if you need to change one
+                       : sensible defaults; open only if you need to change one
                       </span>
                     </summary>
                     <div className="mt-4 space-y-6">

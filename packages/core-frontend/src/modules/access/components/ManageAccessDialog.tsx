@@ -1238,7 +1238,7 @@ export function ManageAccessDialog({
             )}
             {pickedChips.some(isEveryoneRole) && (
               <p className="mt-1.5 text-detail text-ink-muted">
-                “Everyone” makes this {targetKind} publicly readable — it can only be granted read access.
+                “Everyone” makes this {targetKind} publicly readable: it can only be granted read access.
               </p>
             )}
             {mutateError && (
@@ -1291,7 +1291,7 @@ export function ManageAccessDialog({
                 <div className="min-w-0 flex-1">
                   <div className="text-ui text-ink">Anyone can read</div>
                   <div className="text-detail text-ink-muted">
-                    Public — every signed-in user can read this {targetKind}
+                    Public: every signed-in user can read this {targetKind}
                   </div>
                 </div>
                 {canManage && (
@@ -1439,14 +1439,14 @@ export function ManageAccessDialog({
                     >
                       {confirmRemove.ancestors.map(folderLabel).join(', ')}
                     </span>
-                    . Remove their {va} from the parent — which also removes it from other items in
-                    that folder — or restrict just this {targetKind} while leaving the parent grant
+                    . Remove their {va} from the parent: which also removes it from other items in
+                    that folder: or restrict just this {targetKind} while leaving the parent grant
                     intact.
                   </>
                 ) : (
                   <>
                     {confirmRemove.label}'s {va} here comes from a role or policy, not a grant on
-                    this {targetKind}. You can't remove it here — but you can restrict their {va} on
+                    this {targetKind}. You can't remove it here. But you can restrict their {va} on
                     just this {targetKind} by adding a block.
                   </>
                 )}
@@ -1476,7 +1476,7 @@ export function ManageAccessDialog({
             {confirmRemove.ancestors.length > 1 && (
               <>
                 <p className="text-detail text-ink-muted">
-                  Inherited from multiple folders — remove from one at a time:
+                  Inherited from multiple folders. Remove from one at a time:
                 </p>
                 {confirmRemove.ancestors.map((a) => (
                   <Button

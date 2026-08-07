@@ -193,7 +193,7 @@ export function ExternalAgentAccessPage() {
         {tab === 'agent' && (
           <div className="px-4 py-3 space-y-4">
             <p className="text-xs text-ink-muted leading-snug">
-              Connect your own agent — Claude Code, Claude Desktop, Cursor and similar. No key
+              Connect your own agent: Claude Code, Claude Desktop, Cursor and similar. No key
               needed: the first time the agent connects, your browser opens so you can sign in and
               choose which tools to share with it. Everything it saves appears under your name.
             </p>
@@ -262,7 +262,7 @@ export function ExternalAgentAccessPage() {
             <p className="text-xs text-ink-muted leading-snug">
               For autonomous agents and pipelines (CI, scheduled jobs) that can't open a browser to
               sign in. Create an external API key and give it to the agent. Each key carries your
-              identity, so any saves the agent makes appear under your name — and it only gets the
+              identity, so any saves the agent makes appear under your name. And it only gets the
               tools you've already connected on the Connect your tools page.
             </p>
 
@@ -509,7 +509,7 @@ export function ExternalAgentAccessPage() {
                 onClick={() => setReveal(null)}
                 className="px-3 py-1.5 text-sm rounded bg-accent hover:bg-accent-hover text-white"
               >
-                Done — I've saved it
+                Done: I've saved it
               </button>
             </div>
           </div>

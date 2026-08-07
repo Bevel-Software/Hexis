@@ -573,7 +573,7 @@ export function FileViewer() {
               setSaveError({
                 kind: 'generic',
                 message:
-                  "Couldn't load your open proposal, so the editor stayed closed — try again in a moment.",
+                  "Couldn't load your open proposal, so the editor stayed closed. Try again in a moment.",
               });
             }
             return;
@@ -964,7 +964,7 @@ export function FileViewer() {
       title={
         isEnteringPropose
           ? 'Checking for an open proposal…'
-          : "You can't edit this file directly — propose a change for its owners to approve"
+          : "You can't edit this file directly. Propose a change for its owners to approve"
       }
     >
       {isEnteringPropose ? 'Loading…' : 'Propose changes'}
@@ -1153,7 +1153,7 @@ export function FileViewer() {
             >
               <div className="flex items-center gap-2">
                 <span className="flex-1">
-                  Previewing agent's changes — accept to keep, reject to undo
+                  Previewing agent's changes: accept to keep, reject to undo
                 </span>
                 <Button
                   variant="quiet"

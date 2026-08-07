@@ -68,7 +68,7 @@ export function PersonalAddDialog({ name, existingSkills, onClose }: PersonalAdd
       </div>
 
       <p className="text-ui text-ink-muted">
-        Tell your agent what you need — it drafts the skill and puts it here.
+        Tell your agent what you need. It drafts the skill and puts it here.
       </p>
 
       <Surface tone="sunken" radius="md" elevation="none" padded className="mt-2.5">

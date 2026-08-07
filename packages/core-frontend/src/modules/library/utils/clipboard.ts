@@ -21,7 +21,7 @@ export async function copyToClipboard(text: string): Promise<boolean> {
 
 /** What a copy button tells the user, either way. */
 export const COPIED_TOAST = 'Prompt copied.';
-export const COPY_FAILED_TOAST = "Couldn't copy — select the prompt text instead.";
+export const COPY_FAILED_TOAST = "Couldn't copy: select the prompt text instead.";
 
 /**
  * The same pair for a LINK — the sidebar's `Copy link`. Separate strings
@@ -30,4 +30,4 @@ export const COPY_FAILED_TOAST = "Couldn't copy — select the prompt text inste
  * open the row and copy from the address bar.
  */
 export const LINK_COPIED_TOAST = 'Link copied.';
-export const LINK_COPY_FAILED_TOAST = "Couldn't copy — open the row and copy its address.";
+export const LINK_COPY_FAILED_TOAST = "Couldn't copy: open the row and copy its address.";

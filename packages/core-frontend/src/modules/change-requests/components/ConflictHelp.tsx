@@ -32,7 +32,7 @@ export function ConflictHelp({ prompt }: { prompt: string }) {
   return (
     <div className="w-full">
       <p className="text-meta text-ink-muted">
-        Fastest fix: ask your agent to resolve it — copy this prompt.
+        Fastest fix: ask your agent to resolve it. Copy this prompt.
       </p>
       <div className="mt-1.5 flex items-start gap-2 rounded-md border border-line bg-sunken p-2.5">
         <pre className="min-w-0 flex-1 select-text whitespace-pre-wrap break-words font-mono text-meta leading-relaxed text-ink">

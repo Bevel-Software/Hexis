@@ -306,7 +306,7 @@ export function ChangeRequestDialog({
 
         {blocked && (
           <Banner tone="wait" role="alert" className="mx-8 mt-4">
-            <b className="font-semibold">Can't apply</b> — files changed after {firstName} wrote
+            <b className="font-semibold">Can't apply</b>: files changed after {firstName} wrote
             this, so there is no honest before and after to apply. It has to be redone against
             the current text.
             <div className="mt-2.5">

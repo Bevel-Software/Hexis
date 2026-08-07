@@ -19,7 +19,7 @@ describe('friendlyGitError: translates raw backend git messages', () => {
       'Branch "target-company-state" is protected — opening a PR from a protected branch is not allowed.',
     );
     expect(friendlyGitError(err)).toBe(
-      'You can\'t propose changes from "target-company-state" — open the change request from a draft instead.',
+      'You can\'t propose changes from "target-company-state": open the change request from a draft instead.',
     );
   });
 

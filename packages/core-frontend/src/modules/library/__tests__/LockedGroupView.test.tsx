@@ -171,7 +171,7 @@ describe('LockedGroupView', () => {
     apiMock.requestGroupAccess.mockRejectedValue(new Error('boom'));
     const { onRequested } = renderLocked();
     fireEvent.click(askButton());
-    expect(await screen.findByText("Couldn't send that — try again.")).toBeInTheDocument();
+    expect(await screen.findByText("Couldn't send that: try again.")).toBeInTheDocument();
     expect(askButton()).not.toBeDisabled();
     expect(onRequested).not.toHaveBeenCalled();
   });

@@ -294,8 +294,8 @@ export function FileRoute() {
           unsaved changes on{' '}
           <span className="font-mono text-ink">{error.current}</span>. Save the
           files below first (Ctrl/Cmd+S, or click <span className="font-medium">Save</span>{' '}
-          in the editor toolbar) — that releases the lock and auto-commits and auto-pushes
-          your changes — then this link will open.
+          in the editor toolbar). That releases the lock and auto-commits and auto-pushes
+          your changes: then this link will open.
         </p>
         {error.dirtyFilenames.length > 0 && (
           <Surface tone="sunken" radius="md" elevation="none" className="px-3 py-2 text-left text-detail text-ink">

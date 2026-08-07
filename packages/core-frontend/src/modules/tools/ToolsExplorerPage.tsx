@@ -241,7 +241,7 @@ function ToolCard({ tool }: { tool: UtcpTool }) {
               <CopyButton text={JSON.stringify(tool, null, 2)} />
             </div>
             <p className="text-[11px] text-ink-faint leading-snug mb-1.5">
-              The full tool definition served by <code>/api/agent/utcp</code> — inputs, outputs and the{' '}
+              The full tool definition served by <code>/api/agent/utcp</code>: inputs, outputs and the{' '}
               <code>tool_call_template</code> (endpoint, method, headers, body wrapping). Resolve{' '}
               <code>${'{API_URL}'}</code> to this server&apos;s origin and <code>${'{CONNECTION_KEY}'}</code> to your{' '}
               <code>{'<tenant>_…'}</code> key to call it from a script.
@@ -330,7 +330,7 @@ export function ToolsExplorerPage() {
               hears the nav assert one name and the page answer with another. */}
           <h1 className="text-lg font-semibold text-ink">Browse available tools</h1>
           <p className="text-sm text-ink-muted">
-            Every tool Bevel exposes to external agents — the same surface available over MCP at{' '}
+            Every tool Bevel exposes to external agents. The same surface available over MCP at{' '}
             <code className="text-ink-muted">/api/mcp</code>. Loaded with your session below; or browse as a specific
             external API key to see exactly what it can reach.
           </p>

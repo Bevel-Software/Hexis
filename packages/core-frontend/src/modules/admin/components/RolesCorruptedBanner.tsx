@@ -52,7 +52,7 @@ export function RolesCorruptedBanner() {
       <div className="flex items-center gap-2">
         <ShieldAlert size={16} className="shrink-0" />
         <span className="flex-1 font-semibold">
-          Roles file corrupted — contact Bevel for assistance.
+          Roles file corrupted: contact Bevel for assistance.
         </span>
         <Button
           variant="danger"
