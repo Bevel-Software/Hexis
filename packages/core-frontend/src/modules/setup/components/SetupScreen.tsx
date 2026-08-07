@@ -353,6 +353,18 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
           </datalist>
         )}
         <p className="mt-1 text-meta text-ink-faint">{copy.help}</p>
+        {/* Only AFTER setup: on first run there is nothing yet to lose, so
+            the caution would be noise. Once a deployment is live, this field
+            is the one whose careless edit strands everything. */}
+        {variant === 'settings' && setting.key === 'kbRepoUrl' && (
+          <p className="mt-1.5 text-meta text-ink-muted">
+            <b className="font-semibold">
+              Only change this if the same repository was moved or renamed.
+            </b>{' '}
+            Pointing it at a different repository does not carry anything over: the knowledge,
+            skills and tools stay in the old one, and open change requests will stop working.
+          </p>
+        )}
         {problems[setting.key] && (
           <p id={`${setting.key}-problem`} role="alert" className="mt-1 text-meta text-danger">
             {problems[setting.key]}

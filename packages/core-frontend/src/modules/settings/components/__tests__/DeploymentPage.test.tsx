@@ -56,6 +56,11 @@ describe('DeploymentPage', () => {
     expect(await screen.findByText('Provider address')).toBeInTheDocument();
     // And the same redirect-URI helper the setup screen shows.
     expect(screen.getByText(/api\/auth\/oidc\/callback/)).toBeInTheDocument();
+    // Post-setup only: the caution against repointing a LIVE deployment at a
+    // different repository (first-run has nothing to lose yet).
+    expect(
+      screen.getByText(/Only change this if the same repository was moved or renamed/),
+    ).toBeInTheDocument();
   });
 
   it('tells a non-admin this is not theirs, and never fetches the settings', () => {
