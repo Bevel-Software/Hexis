@@ -157,7 +157,12 @@ export function CardGrid({
         // remove; declining it lives with the review.
         if (!onRemove || item.pending) return card;
         return (
-          <div key={key} className="group/removable relative">
+          // `grid`, not a plain block: the wrapper takes the card's place as
+          // the grid item, and only a grid (or flex) container stretches its
+          // child the way the outer grid stretched the bare card — without it
+          // the <button> shrinks to its content and the overlay floats in the
+          // leftover width, off the card's own edge.
+          <div key={key} className="group/removable relative grid">
             {card}
             <button
               type="button"
