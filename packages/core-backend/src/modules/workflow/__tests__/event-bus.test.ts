@@ -319,4 +319,36 @@ describe('WorkflowEventBus', () => {
       expect(bus.size()).toBe(0);
     });
   });
+
+  describe('onEmit — the server-side tap', () => {
+    it('sees every event, unfiltered by SSE scope, and unsubscribes cleanly', () => {
+      const bus = new WorkflowEventBus();
+      const seen: string[] = [];
+      const off = bus.onEmit((e) => seen.push(e.kind));
+      // A workspace-scoped event with NO matching SSE session still reaches
+      // the tap — scope filtering exists for sessions, not in-process
+      // consumers (write-time cache invalidation must never miss one).
+      bus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws-1', branch: 'main' });
+      expect(seen).toEqual(['fs-tree-changed']);
+      off();
+      bus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws-1', branch: 'main' });
+      expect(seen).toEqual(['fs-tree-changed']);
+    });
+
+    it('a throwing listener is contained — emit never propagates it', () => {
+      const bus = new WorkflowEventBus();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      bus.onEmit(() => {
+        throw new Error('bad listener');
+      });
+      const after: string[] = [];
+      bus.onEmit((e) => after.push(e.kind));
+      expect(() =>
+        bus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws-1', branch: 'main' }),
+      ).not.toThrow();
+      // …and the listeners after the bad one still ran.
+      expect(after).toEqual(['fs-tree-changed']);
+      warn.mockRestore();
+    });
+  });
 });

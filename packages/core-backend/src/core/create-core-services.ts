@@ -427,6 +427,22 @@ export async function createCoreServices(
     }
   });
 
+  // Subscriber B — WRITE-time freshness for the same three caches. The
+  // workspace routes emit `fs-tree-changed` the moment bytes hit a working
+  // tree; Subscriber A above fires only when the ASYNC commit lands. Between
+  // the two, "create a skill, reload the catalog" raced the commit pipeline
+  // and lost — the new skill's card stayed invisible until a refresh outlived
+  // the TTL. The catalogs scan the working tree anyway, so invalidating at
+  // write time makes the very next read see the file. No path filter: this
+  // event carries none, and a spurious drop only costs one re-scan.
+  eventBus.onEmit((event) => {
+    if (event.kind !== 'fs-tree-changed') return;
+    if (!('branch' in event) || event.branch !== DEFAULT_BRANCH) return;
+    toolManualService.invalidate();
+    skillService.invalidate();
+    groupIndexService.invalidate();
+  });
+
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the
   // default branch (no env allow-list).
   const adminAccess = new AdminAccessService(
