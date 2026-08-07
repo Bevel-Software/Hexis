@@ -13,6 +13,16 @@ your whole team — and their AI agents — work in together.
   external agents like Claude Code connect to the knowledge base and work with
   the same permissions model as people do.
 
+## Try it first — the live demo
+
+**[demo.bevel.software](https://demo.bevel.software/workspace/main/knowledge-base/KnowledgeBase/Start%20here.md)** —
+a public instance you can sign into with your Google account, populated with a
+fictional company's knowledge, skills and tools. The *Start here* page walks
+you through the whole loop: connect your own agent over MCP, have it build a
+sales deck from a skill, watch its proposed improvement arrive as a change
+request. The demo is shared and read-mostly (visitors propose, owners approve);
+everything below gets you the same thing with none of the limits.
+
 ## Run it in 5 minutes (Docker)
 
 You need: [Docker](https://docs.docker.com/get-docker/) with Compose, and an
