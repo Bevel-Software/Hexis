@@ -19,8 +19,9 @@ Groups/
 │   │   ├── SKILL.md        ← frontmatter (name, description) + instructions
 │   │   └── <bundled files> ← optional templates, scripts, checklists
 │   └── <tool_name>.tool    ← one manual per external API / MCP server
-└── <skill-name>/           ← ungrouped: in no group, owned by whoever made it
-    └── SKILL.md
+└── personal-<user-id>/     ← one per person: their own skills and tools,
+    └── <skill-name>/          private by default, never listed as a group
+        └── SKILL.md
 ```
 
 Skills are discovered **by name** regardless of nesting (`list_skills` /
@@ -29,8 +30,15 @@ Skills are discovered **by name** regardless of nesting (`list_skills` /
 ## What goes here
 
 - **One folder per group**, named the way the group reads to a human (`GTM`,
-  `Engineering`, `Everyone`). Give it an `access.md` — that file is the point
-  of the folder.
+  `Engineering`, `Everyone`). Groups are created through the app (or its API),
+  which seeds the folder's `access.md` — that file is the point of the folder:
+  it makes the group discoverable and names its creator as the one who runs
+  it. Names starting with `personal-` are reserved for the personal folders
+  below.
+- **One personal folder per person** (`personal-<user-id>/`), created
+  automatically the first time they make a skill of their own. Its `access.md`
+  names only its owner, so it is invisible to everyone else and never appears
+  in the group list. A personal skill moves into a group by moving its folder.
 - **One folder per skill**, holding a `SKILL.md` whose frontmatter declares
   `name:` (unique) and `description:` (when to use it). Quote the description
   if it contains a colon followed by a space — unquoted, that sequence breaks
