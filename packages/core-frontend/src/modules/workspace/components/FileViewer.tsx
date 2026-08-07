@@ -13,7 +13,6 @@ import { useCanonicalFileUrl } from '../routing/kb-routes';
 import { useReview } from '../../review/state/review.context';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { useFileAccess } from '../../access/hooks/useFileAccess';
-import { AccessRestrictedBanner } from '../../access/components/AccessRestrictedBanner';
 import { FileHistoryPanel } from '../../git/components/FileHistoryPanel';
 import { FileComparisonPanel } from '../../git/components/FileComparisonPanel';
 import {
@@ -990,12 +989,11 @@ export function FileViewer() {
   return (
     <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
       <PullNeededBanner />
-      {/* Hidden while proposing: "you don't have permission to edit" over an
-          open editor reads as a contradiction — the propose surface's own
-          notice (below) explains where the text is going instead. */}
-      {accessRestricted && !proposeMode && openFilePath && (
-        <AccessRestrictedBanner path={openFilePath} eligible={access.eligible} />
-      )}
+      {/* No "you don't have permission to edit" banner, deliberately: for a
+          reader the restriction is not news worth a stripe across every page —
+          the Propose changes affordance already says what they CAN do, and the
+          detailed who-may-edit copy still appears where it answers a question
+          (the disabled-save tooltip). */}
       {/* ONE column holds the tabs, the title and the text at the same width,
           so they share an edge and the page reads as a single centred block
           (proto:700-705). `editorContainerRef` goes to `scrollRef` because the
