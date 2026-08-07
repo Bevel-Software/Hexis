@@ -9,6 +9,7 @@ import { Badge, Banner, Button, Surface } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
+import { approvePrFile, revertPrFile } from '../../pr/services/pr-approvals.api';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
 import { changeAuthorName } from '../utils/author';
@@ -218,6 +219,81 @@ export function ChangeRequestDialog({
   );
   const touchesSelected = changedFiles.has(selected);
 
+  /** Per-file approval verdicts, straight from the detail. */
+  const approvalByPath = useMemo(
+    () => new Map((detail?.approvals ?? []).map((a) => [a.path, a])),
+    [detail],
+  );
+  const selectedApproval = approvalByPath.get(selected);
+
+  /**
+   * The old CR system's rule, restored: Apply exists only when every file is
+   * either already approved or approvable BY THIS VIEWER (they hold write on
+   * it, so their click completes the gate). Anything less and Apply was a
+   * button that walked into "Waiting on approval for …" — offering a verdict
+   * the viewer cannot actually deliver.
+   */
+  const canApply =
+    detail !== null &&
+    detail.approvals.length > 0 &&
+    detail.approvals.every((a) => a.isApproved || a.viewerCanApprove);
+
+  /** Accept / revert verbs — per file, the reviewer's scalpel. */
+  const [verbBusy, setVerbBusy] = useState<'accept' | 'revert' | null>(null);
+  const [confirmRevert, setConfirmRevert] = useState(false);
+  const [verbError, setVerbError] = useState<string | null>(null);
+  useEffect(() => {
+    // A different file is a different decision — reset the confirm step.
+    setConfirmRevert(false);
+    setVerbError(null);
+  }, [selected]);
+
+  async function acceptSelected() {
+    if (!detail || verbBusy) return;
+    setVerbBusy('accept');
+    setVerbError(null);
+    try {
+      const approvals = await approvePrFile(cr.number, selected);
+      setDetail((d) => (d ? { ...d, approvals } : d));
+    } catch (err) {
+      setVerbError(err instanceof Error ? err.message : "Couldn't accept this file.");
+    } finally {
+      setVerbBusy(null);
+    }
+  }
+
+  async function revertSelected() {
+    if (!detail || verbBusy) return;
+    setVerbBusy('revert');
+    setVerbError(null);
+    try {
+      const result = await revertPrFile(cr.number, selected);
+      if (result.closed) {
+        // That was the last file: the request closed itself and its branch
+        // is retired. The dialog's subject is gone — leave through the same
+        // door an apply does, so every list behind it refreshes.
+        onResolved();
+        return;
+      }
+      // The file is out of the diff; the branch copy we cached for it is
+      // stale. Refetch the detail and drop the cached read so a re-selection
+      // (via the scope's baseFiles) reads the restored content.
+      asked.current.delete(selected);
+      setBranchContents((c) => {
+        const next = { ...c };
+        delete next[selected];
+        return next;
+      });
+      setPicked(null);
+      setDetail(await fetchPrDetail(cr.number));
+    } catch (err) {
+      setVerbError(err instanceof Error ? err.message : "Couldn't revert this file.");
+    } finally {
+      setVerbBusy(null);
+      setConfirmRevert(false);
+    }
+  }
+
   /**
    * Apply = record the approvals the gate requires, then merge, then wait for
    * the merge to land. The POST only acks — see `useApplyChangeRequest` for
@@ -380,7 +456,66 @@ export function ChangeRequestDialog({
                     ? ' · what changes is marked'
                     : ' · not touched by this request'}
               </span>
+              {/* The reviewer's per-file verdict: take this file, or decline
+                  it. Both verbs carry the same permission (eligible approver),
+                  so they appear together or not at all. Revert rewrites the
+                  AUTHOR's branch — hence the explicit second click. */}
+              {touchesSelected && selectedApproval && (
+                <span className="ml-auto flex shrink-0 items-center gap-2">
+                  {selectedApproval.isApproved ? (
+                    <Badge tone="ok" size="xs">
+                      Accepted
+                    </Badge>
+                  ) : (
+                    selectedApproval.viewerCanApprove && (
+                      <Button
+                        variant="quiet"
+                        size="tiny"
+                        disabled={verbBusy !== null}
+                        onClick={() => void acceptSelected()}
+                      >
+                        {verbBusy === 'accept' ? 'Accepting…' : 'Accept file'}
+                      </Button>
+                    )
+                  )}
+                  {selectedApproval.viewerCanApprove &&
+                    (confirmRevert ? (
+                      <>
+                        <Button
+                          variant="danger"
+                          size="tiny"
+                          disabled={verbBusy !== null}
+                          onClick={() => void revertSelected()}
+                        >
+                          {verbBusy === 'revert' ? 'Reverting…' : 'Revert this file?'}
+                        </Button>
+                        <Button
+                          variant="quiet"
+                          size="tiny"
+                          disabled={verbBusy !== null}
+                          onClick={() => setConfirmRevert(false)}
+                        >
+                          Keep
+                        </Button>
+                      </>
+                    ) : (
+                      <Button
+                        variant="quiet"
+                        size="tiny"
+                        disabled={verbBusy !== null}
+                        onClick={() => setConfirmRevert(true)}
+                      >
+                        Revert file
+                      </Button>
+                    ))}
+                </span>
+              )}
             </div>
+            {verbError && (
+              <Banner tone="danger" role="alert" className="mb-2">
+                {verbError}
+              </Banner>
+            )}
             <div className="min-h-0 flex-1 overflow-y-auto">
               {/* The diff only needs the two file contents, so it renders as
                   soon as those arrive rather than waiting on the (slow) detail
@@ -421,11 +556,21 @@ export function ChangeRequestDialog({
           <p className="mr-auto max-w-[52ch] text-meta text-ink-muted">
             {blocked
               ? `Nothing changes for anyone until ${firstName} proposes it again against the current text.`
-              : detail !== null && allFiles.length === 0
-                ? 'Applying would change nothing, so the button stays away.'
-                : 'Every agent that connects after this picks it up. There is no staged rollout.'}
+              : detail === null
+                ? ''
+                : allFiles.length === 0
+                  ? 'Applying would change nothing, so the button stays away.'
+                  : canApply
+                    ? 'Every agent that connects after this picks it up. There is no staged rollout.'
+                    : detail.mergeWarnings[0] ??
+                      'Waiting on approval from the files’ owners — applying is theirs to do.'}
           </p>
-          {!blocked && !(detail !== null && allFiles.length === 0) && (
+          {/* Apply exists only when the viewer can actually deliver the
+              verdict: every file approved, or approvable by them (their click
+              records the missing approvals first — see useApplyChangeRequest).
+              Anyone else gets the waiting line above, not a button that walks
+              into the gate's refusal. */}
+          {!blocked && canApply && (
             <Button
               variant="primary"
               size="sm"
