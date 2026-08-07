@@ -10,9 +10,10 @@ agent**. The open-source core of the Bevel platform.
   knowledge their role allows. No per-tool credentials handed around, no
   per-agent setup projects.
 - **The company stays in control.** Skills, tool access and knowledge are
-  managed and reviewed in one place: every change has an author, a reviewer
-  and a way back — and the review rules apply to agents exactly as they apply
-  to people.
+  managed and reviewed in one place: every change has an author and a way
+  back, and anything proposed through a change request reaches its owners
+  for review before it lands — rules that apply to agents exactly as they
+  apply to people.
 - **Independent of any agent vendor.** Because the workspace speaks open
   protocols, you can switch agent vendors on price and performance — or mix
   them by task and role — without rebuilding what your agents know and can do.
@@ -59,7 +60,7 @@ Open `.env` and fill in the **four required values** (everything else can wait):
 
 ```sh
 ADMIN_EMAIL=you@example.com     # the deployment owner — always an admin
-ADMIN_PASSWORD=pick-something   # your sign-in password (checked from env, never stored)
+ADMIN_PASSWORD=pick-something   # sign-in password — only with password login; SSO-only deployments drop it (see below)
 JWT_SECRET=…                    # generate with the command below
 SECRETS_ENC_KEY=…               # generate with the command below
 ```
@@ -76,7 +77,6 @@ For a public deployment, also set the origin values:
 ```sh
 PUBLIC_BACKEND_URL=https://bevel.your-domain.com   # public origin — OAuth redirects are built from it
 PUBLIC_FRONTEND_URL=https://bevel.your-domain.com  # same origin: the backend serves the SPA
-TRUST_PROXY=1                                      # behind a proxy: hop count, so rate limits see real client IPs
 ```
 
 Then start everything (Postgres + the app). **Behind a reverse proxy**
@@ -86,6 +86,9 @@ Then start everything (Postgres + the app). **Behind a reverse proxy**
 docker compose -f docker-compose.yml up -d
 ```
 
+Also set `TRUST_PROXY` to your proxy hop count (`1` for a single proxy), so
+rate limits see real client IPs instead of the proxy's.
+
 The explicit `-f` skips `docker-compose.override.yml`, so the app publishes
 **no host port** — your proxy reaches it on port `3001` over the compose
 network. This is deliberate: a fixed published port makes every redeploy fail
@@ -94,6 +97,8 @@ while the outgoing one still holds it.
 
 **Directly exposed** (no proxy): plain `docker compose up -d` publishes
 `:3001`; use `APP_PORT=8080 docker compose up -d` for a different host port.
+Leave `TRUST_PROXY` unset here — with no proxy in front, trusting forwarded
+headers would let clients spoof their own address.
 
 Open your domain and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 
@@ -218,12 +223,5 @@ can be left unset and configured in the app at first sign-in (env always wins).
 | `packages/core-frontend` | `@bevel-software/platform-core-frontend` — the core UI, published as raw TS/TSX source |
 | `apps/server` | standalone core backend shell |
 | `apps/web` | standalone core SPA shell (Vite) |
-
-## Part of the Bevel platform
-
-This repo is the open-source base of the Bevel platform. The commercial
-platform layers chat/agents, connectors, routines, the knowledge-graph system
-and more on top of the extension points exposed here (`CorePorts`,
-`ServerExtensions`, workflow lifecycle hooks, and the frontend `AppRegistry`).
 
 License: [Apache-2.0](LICENSE)
