@@ -8,7 +8,7 @@ import { GroupsIndexPage } from '../components/GroupsIndexPage';
 import { PersonalGroupPage } from '../components/PersonalGroupPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
 import { SkillPage } from '../components/skill-page/SkillPage';
-import { WelcomePage } from '../../onboarding/components/WelcomePage';
+import { WelcomeRoute } from '../../onboarding/components/WelcomeRoute';
 import { LIBRARY_ROOT } from './library-paths';
 
 /**
@@ -45,7 +45,7 @@ export function LibraryRoutes() {
                 sidebar (and the pill's selected state) is on screen with it.
                 Auto-reached once, on first sign-in (see `RootLanding`);
                 reachable forever through the pill and by URL. */}
-            <Route path="welcome" element={<WelcomePage />} />
+            <Route path="welcome" element={<WelcomeRoute />} />
 
             <Route path="owned" element={<LibraryPage filter={{ kind: 'owned' }} />} />
 
