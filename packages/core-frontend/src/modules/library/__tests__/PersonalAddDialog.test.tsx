@@ -114,9 +114,8 @@ describe('PersonalAddDialog', () => {
         expect.objectContaining({ personal: true, name: 'scratch' }),
       ),
     );
-    await waitFor(() =>
-      expect(href()).toBe('/workspace/target-company-state/knowledge-base/Groups/scratch/SKILL.md'),
-    );
+    // The skill's own library page, editor invited open — not the Knowledge app.
+    await waitFor(() => expect(href()).toBe('/skills-and-tools/skills/scratch'));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

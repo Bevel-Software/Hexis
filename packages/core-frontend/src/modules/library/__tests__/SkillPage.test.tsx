@@ -7,6 +7,7 @@ import {
 } from '../../workspace/state/workspace.context';
 import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import { GitContext, type GitContextValue } from '../../git/state/git.context';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import type { PullRequestSummary, WorkflowEvent } from '@bevel-software/platform-shared';
 import { EventBusContext, type EventBusContextValue } from '../../workflow/state/event-bus.context';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
@@ -23,6 +24,8 @@ const apiMock = vi.hoisted(() => ({
   cancelPullRequest: vi.fn(),
   fetchPrDetail: vi.fn(),
   approvePrFile: vi.fn(),
+  getOrCreateWorkspace: vi.fn(),
+  writeFile: vi.fn(),
 }));
 vi.mock('../services/library.api', () => ({
   defaultWorkspaceId: () => 'target-company-state',
@@ -35,6 +38,12 @@ vi.mock('../services/library.api', () => ({
   // the very lookup these tests are checking.
   suggestionBranchFor: (email: string, skill: string) =>
     `suggestions/${email.split('@')[0]}/${skill}`,
+}));
+// The workspace write path — what a writer's in-place Save goes through.
+vi.mock('../../workspace/services/workspace.api', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  getOrCreateWorkspace: apiMock.getOrCreateWorkspace,
+  writeFile: apiMock.writeFile,
 }));
 // The change-request module's reads — the branch-file read feeds the editor
 // base and the per-request diffs.
@@ -226,10 +235,15 @@ function renderPage(
   crs: PullRequestSummary[] = [],
   mine: number[] = [],
   bus: EventBusContextValue = makeFakeBus(),
+  routerState?: Record<string, unknown>,
 ) {
   libraryMock.value = libraryValue(owned, crs, mine);
   return render(
-    <MemoryRouter initialEntries={['/skills-and-tools/skills/newsletter']}>
+    <MemoryRouter
+      initialEntries={[
+        { pathname: '/skills-and-tools/skills/newsletter', state: routerState ?? null },
+      ]}
+    >
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={git}>
@@ -481,6 +495,71 @@ describe('SkillPage', () => {
       'target-company-state',
       'Skills/newsletter/SKILL.md',
     );
+  });
+
+  it('Edit opens the editor IN PLACE, and Save writes straight to the default branch', async () => {
+    // The page must never bounce a writer to the Knowledge app: the same
+    // inline editor the propose flow uses opens over the rendered file, and
+    // submitting is a plain default-branch write — no change request.
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    apiMock.getOrCreateWorkspace.mockResolvedValue({
+      workspace: { id: 'target-company-state', kbDirName: 'knowledge-base' },
+    });
+    apiMock.writeFile.mockResolvedValue(undefined);
+    renderPage(true);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const box = await screen.findByRole('textbox', { name: 'Edit SKILL.md' });
+    fireEvent.change(box, { target: { value: 'rewritten body' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    // The write targets the DEFAULT branch's workspace by name — the branch
+    // is the contract, the workspace id merely derives from it.
+    await waitFor(() =>
+      expect(apiMock.getOrCreateWorkspace).toHaveBeenCalledWith(DEFAULT_BRANCH),
+    );
+    await waitFor(() =>
+      expect(apiMock.writeFile).toHaveBeenCalledWith(
+        'target-company-state',
+        'knowledge-base/Skills/newsletter/SKILL.md',
+        'rewritten body',
+      ),
+    );
+    expect(await screen.findByText(/Saved — the skill now reads with your change/)).toBeInTheDocument();
+    // Direct means DIRECT: nothing rode the proposal path.
+    expect(apiMock.proposeChange).not.toHaveBeenCalled();
+  });
+
+  it('arriving with startEditing in router state opens the editor without a click', async () => {
+    // The creation hand-off: NewSkillPanel navigates here with the flag, so
+    // the person who just made an empty skill lands with the cursor in it.
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    renderPage(true, [], [], makeFakeBus(), { startEditing: true });
+    expect(await screen.findByRole('textbox', { name: 'Edit SKILL.md' })).toBeInTheDocument();
+  });
+
+  it('shows NO action while the write verdict is still unresolved', async () => {
+    // A lookup that never answers models "in flight": an Edit shown on a
+    // guess could open the wrong editor mode — a writer's text must never
+    // ride the proposal path. The bar simply carries nothing until the ACL
+    // answers.
+    accessMock.fetchFileAccess.mockImplementation(() => new Promise(() => {}));
+    try {
+      renderPage(true);
+      await screen.findByRole('heading', { name: 'newsletter' });
+      expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Propose changes' })).toBeNull();
+    } finally {
+      accessMock.fetchFileAccess.mockImplementation(async () => accessMock.result);
+    }
   });
 
   /**

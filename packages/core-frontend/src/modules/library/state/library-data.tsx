@@ -1,12 +1,5 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-  type ReactNode,
-} from 'react';
+import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode,  } from 'react';
+import { LibraryContext } from './library-context';
 import { groupOfPath, isPersonalGroupFolder } from '@bevel-software/platform-shared';
 
 /**
@@ -90,7 +83,6 @@ export interface LibraryContextValue extends LibraryData {
   reloadGroups(): void;
 }
 
-const LibraryContext = createContext<LibraryContextValue | null>(null);
 
 export function LibraryProvider({ children }: { children: ReactNode }) {
   const data = useLibraryData();

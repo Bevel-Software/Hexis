@@ -2,8 +2,9 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, Surface, TextField } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
+import { pathForSkill } from '../routes/library-paths';
 import { createEmptySkill } from '../services/library.api';
+import { useLibraryReload } from '../state/library-context';
 import { useLibraryToast } from '../state/toast.context';
 
 /**
@@ -49,6 +50,7 @@ export function NewSkillPanel({
   onCreated,
 }: NewSkillPanelProps) {
   const { user } = useAuth();
+  const reloadLibrary = useLibraryReload();
   const navigate = useNavigate();
   const toast = useLibraryToast();
   const [name, setName] = useState('');
@@ -87,16 +89,21 @@ export function NewSkillPanel({
         userEmail: user.email,
         userName: user.name,
       });
-      // Say which of the two things happened rather than let the person infer
-      // it from the branch in the URL bar.
-      toast(
-        created.direct
-          ? `Created ${trimmed} — opening it.`
-          : `Created ${trimmed} — sent for review, and opened on your branch.`,
-        'ok',
-      );
+      // The library is where the result lives, whichever way it went — nobody
+      // is bounced to the Knowledge app to meet the thing they just made.
+      reloadLibrary();
       onCreated();
-      navigate(kbFileUrl(created.branch, created.workspacePath));
+      if (created.direct) {
+        // Straight into the new skill's page, editor open: an empty SKILL.md
+        // is an invitation to write, not a page to admire.
+        toast(`Created ${trimmed} — opening it.`, 'ok');
+        navigate(pathForSkill(trimmed), { state: { startEditing: true } });
+      } else {
+        // A proposal has no page yet — the skill exists only on the author's
+        // branch. It appears right here as an "In review" card (the pending
+        // shelf), which is also where its review happens.
+        toast(`Created ${trimmed} — sent to the group's owners for review.`, 'ok');
+      }
     } catch (err) {
       // The workspace API forwards the backend's own refusal (e.g. "You don't
       // have permission to write to …"), which is worth more than a generic

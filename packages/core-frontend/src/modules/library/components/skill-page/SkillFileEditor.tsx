@@ -3,12 +3,23 @@ import { Banner, Button, Surface } from '../../../../shared/components';
 
 interface SkillFileEditorProps {
   file: string;
-  /** The text as it stands now — what the proposal will be diffed against. */
+  /** The text as it stands now — what the submitted text will be diffed against. */
   base: string;
-  /** Who has to say yes, for the line under the editor. */
+  /**
+   * What submitting DOES — the same editor serves both verdicts of the
+   * per-file ACL:
+   *   - `propose`: the text lands on the caller's suggestion branch as a
+   *     change request; nothing moves until the owner approves.
+   *   - `edit`: the text saves straight to the default branch — the caller
+   *     may write the file, so there is nobody to wait on.
+   * The mode only changes the words (button, reassurance line): what gets
+   * submitted and how the diff is computed are identical.
+   */
+  mode: 'edit' | 'propose';
+  /** Who has to say yes — read only in `propose` mode, for the line under the editor. */
   owner: string;
   onCancel(): void;
-  /** Resolves when the proposal has landed on the author's branch. */
+  /** Resolves when the text has landed (on the branch, or on the default branch). */
   onSubmit(next: string): Promise<void>;
 }
 
@@ -28,6 +39,7 @@ interface SkillFileEditorProps {
 export function SkillFileEditor({
   file,
   base,
+  mode,
   owner,
   onCancel,
   onSubmit,
@@ -69,7 +81,13 @@ export function SkillFileEditor({
     try {
       await onSubmit(toFileEndings(text));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't send your change.");
+      setError(
+        err instanceof Error
+          ? err.message
+          : mode === 'edit'
+            ? "Couldn't save your change."
+            : "Couldn't send your change.",
+      );
       setBusy(false);
     }
   }
@@ -84,7 +102,7 @@ export function SkillFileEditor({
           what a textarea falls back to, so a class that fails to apply leaves a
           two-line box to edit a whole file in. */}
       <textarea
-        aria-label={`Propose changes to ${file}`}
+        aria-label={mode === 'edit' ? `Edit ${file}` : `Propose changes to ${file}`}
         spellCheck={false}
         rows={22}
         className="block max-h-[60vh] min-h-64 w-full resize-y bg-sunken px-6 py-4 font-mono text-detail leading-relaxed text-ink outline-none"
@@ -100,13 +118,15 @@ export function SkillFileEditor({
 
       <div className="flex flex-wrap items-center gap-2 border-t border-line px-3 py-2.5">
         <span className="mr-auto text-meta text-ink-faint">
-          Nothing changes until {owner} approves it.
+          {mode === 'edit'
+            ? 'Saves for everyone — agents pick it up the next time they connect.'
+            : `Nothing changes until ${owner} approves it.`}
         </span>
         <Button variant="quiet" size="sm" onClick={onCancel} disabled={busy}>
           Cancel
         </Button>
         <Button variant="primary" size="sm" onClick={() => void submit()} disabled={busy}>
-          {busy ? 'Sending…' : 'Propose changes'}
+          {mode === 'edit' ? (busy ? 'Saving…' : 'Save') : busy ? 'Sending…' : 'Propose changes'}
         </Button>
       </div>
     </Surface>
