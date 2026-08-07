@@ -746,7 +746,7 @@ function RoleCard({
             autoComplete="off"
           />
           {showSuggest && suggestions.length > 0 && (
-            <ul className="absolute z-10 mt-1 w-full sm:w-72 max-h-56 overflow-auto bg-white border border-line rounded shadow-lg py-1">
+            <ul className="absolute z-10 mt-1 w-full sm:w-72 max-w-full max-h-56 overflow-auto bg-white border border-line rounded shadow-lg py-1">
               {suggestions.map((p) => (
                 <li key={p.email}>
                   <button
