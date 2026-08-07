@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../auth/state/auth.context';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 import { useLibraryToast } from '../state/toast.context';
-import { pathForSkill, pathForTool } from '../routes/library-paths';
+import { urlForItemFile } from '../routes/library-paths';
+import { useWorkspace } from '../../workspace/state/workspace.context';
 import { personalGroupName } from '../utils/personal-group';
 import { GroupBreadcrumb, GroupItemSections, PageNote, RemoveLibraryItemDialog,
 } from './group-page-parts';
@@ -36,6 +37,7 @@ import { copyToClipboard } from '../utils/clipboard';
 export function PersonalGroupPage() {
   const data = useLibrary();
   const navigate = useNavigate();
+  const { kbDirName } = useWorkspace();
   const { user } = useAuth();
   const [addOpen, setAddOpen] = useState(false);
   const toast = useLibraryToast();
@@ -58,7 +60,7 @@ export function PersonalGroupPage() {
 
   /** Identical to the gallery's and the group page's — one behaviour per card. */
   function openItem(item: LibraryItem) {
-    navigate(item.kind === 'integration' ? pathForTool(item.id) : pathForSkill(item.id));
+    if (kbDirName) navigate(urlForItemFile(kbDirName, item.path));
   }
 
   if (items.length === 0 && data.loading) {

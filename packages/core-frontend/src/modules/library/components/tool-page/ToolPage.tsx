@@ -25,9 +25,19 @@ import { ToolLogo } from '../ToolLogo';
  *    would confirm the tool exists).
  *  - `tool.canWrite` — the owner-side affordances, from the per-file ACL.
  */
-export function ToolPage() {
+export function ToolPage({
+  slug: slugProp,
+}: {
+  /**
+   * Provided when the page is mounted at its canonical address — the `.tool`
+   * file's own /workspace URL (see `WorkspaceItemGate`). Absent on the legacy
+   * `/skills-and-tools/tools/:slug` mount, which now only hosts the redirect
+   * and the OAuth return.
+   */
+  slug?: string;
+} = {}) {
   const { slug: rawSlug = '' } = useParams<{ slug: string }>();
-  const slug = safeDecode(rawSlug);
+  const slug = slugProp ?? safeDecode(rawSlug);
   const navigate = useNavigate();
   const page = useToolPage(slug);
 

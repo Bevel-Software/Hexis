@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import {
@@ -131,7 +132,10 @@ describe('PersonalAddDialog', () => {
       ),
     );
     // The skill's own library page, editor invited open — not the Knowledge app.
-    await waitFor(() => expect(href()).toBe('/skills-and-tools/skills/scratch'));
+    // The canonical address: the new SKILL.md's own workspace URL.
+    await waitFor(() =>
+      expect(href()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Groups/scratch/SKILL.md`),
+    );
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

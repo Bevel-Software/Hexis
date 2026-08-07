@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import '../library.css';
 import { useLibrary, type LibraryItem } from '../state/library-data';
-import { pathForSkill, pathForTool } from '../routes/library-paths';
+import { urlForItemFile } from '../routes/library-paths';
+import { useWorkspace } from '../../workspace/state/workspace.context';
 import { emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
 import { GroupItemSections } from './group-page-parts';
@@ -45,6 +46,7 @@ function headingFor(filter: LibraryFilter): string {
 export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const data = useLibrary();
   const navigate = useNavigate();
+  const { kbDirName } = useWorkspace();
   const [query, setQuery] = useState('');
   /** The proposed skill being reviewed, if the reader opened one. */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
@@ -65,7 +67,7 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
       setReviewing(item);
       return;
     }
-    navigate(item.kind === 'integration' ? pathForTool(item.id) : pathForSkill(item.id));
+    if (kbDirName) navigate(urlForItemFile(kbDirName, item.path));
   }
 
   return (

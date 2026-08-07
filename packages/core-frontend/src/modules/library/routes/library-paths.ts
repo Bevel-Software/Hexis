@@ -1,5 +1,6 @@
-import { groupOfPath, isPersonalGroupFolder } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, groupOfPath, isPersonalGroupFolder } from '@bevel-software/platform-shared';
 import { matchPath } from 'react-router-dom';
+import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import type { LibraryFilter } from '../utils/status';
 
 /**
@@ -74,10 +75,32 @@ export function decodeGroupSegment(raw: string): string {
 }
 
 /**
- * The route for one tool. Four surfaces build this URL — the gallery card, the
- * Secrets page, the Connect page, and the tool page's own OAuth `returnTo` —
- * and the fourth is validated server-side, so a stray fragment or a missing
- * encode is a 400 rather than a broken link. One function, no drift.
+ * The CANONICAL URL of a library item: its workspace file URL on the default
+ * branch — `/workspace/main/<kbDir>/<repo path>`. One URL system for humans
+ * and agents: the address a card navigates to is the address an agent can
+ * derive from the repo path it already works with, and the Knowledge tree's
+ * link to the same file lands on the same page. `WorkspaceItemGate` is what
+ * makes these URLs render the library surface instead of the raw file view.
+ *
+ * For a skill, pass the FILE inside the folder (`<skillPath>/SKILL.md`, a
+ * reference doc, a script) — each file of a multi-file skill has its own URL,
+ * and the page opens on that tab. A bare skill-folder URL opens SKILL.md.
+ */
+export function urlForItemFile(kbDirName: string, repoRelativePath: string): string {
+  return kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${repoRelativePath}`);
+}
+
+/** The canonical URL of one file of a skill (default: its SKILL.md). */
+export function urlForSkillFile(kbDirName: string, skillPath: string, file = 'SKILL.md'): string {
+  return urlForItemFile(kbDirName, `${skillPath}/${file}`);
+}
+
+/**
+ * The LEGACY route for one tool — now a redirect to the canonical workspace
+ * URL (`urlForItemFile`), preserving any `#…` the OAuth callback appended.
+ * Still built in three places, deliberately: the Secrets and Connect pages
+ * link it by slug (they don't carry the repo path), and the tool page's own
+ * OAuth `returnTo` MUST stay this shape — the server validates it.
  *
  * Returns the BARE path: never append `#…` to it. The OAuth start route rejects
  * a `returnTo` containing `#`, and the callback is what puts the fragment on.
@@ -87,12 +110,9 @@ export function pathForTool(slug: string): string {
 }
 
 /**
- * The route for one skill. `:name` is the skill's folder name — the same id the
- * catalog, the card and `GET /api/skills/:name` all use — so the URL a card
- * navigates to is the URL the page fetches from, with no lookup table in
- * between. Encoded here rather than at each link site for the same reason
- * `pathForTool` is: three surfaces build it (gallery card, group card, the tool
- * page's "Powers these skills" chips).
+ * The LEGACY route for one skill — now a redirect to the canonical workspace
+ * URL. Kept so old links and name-only callers still land; new code should
+ * build `urlForSkillFile` from the catalog's path instead.
  */
 export function pathForSkill(name: string): string {
   return `${LIBRARY_ROOT}/skills/${encodeURIComponent(name)}`;
