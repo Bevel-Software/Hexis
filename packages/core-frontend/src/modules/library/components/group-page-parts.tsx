@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useId, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { Funnel, RotateCw, Trash2 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
@@ -351,6 +351,8 @@ export function PageNote({ children }: { children: ReactNode }) {
  * inherits `currentColor` so it stays as faint as the ink around it.
  */
 export function ChalkArrow({ className }: { className?: string }) {
+  // Colons stripped: `url(#…)` fragment references are unreliable with them.
+  const filterId = `chalk-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
   return (
     <svg
       className={className}
@@ -359,13 +361,41 @@ export function ChalkArrow({ className }: { className?: string }) {
       viewBox="0 0 88 72"
       fill="none"
       stroke="currentColor"
-      strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      {/* One loose curve from the words up toward the `+`, then the head. */}
-      <path d="M6 66 C 30 63, 53 51, 67 32 C 71 26, 74 19, 76 11" />
-      <path d="M65 17 L 76 11 L 79 24" />
+      <defs>
+        {/* What makes the line chalk instead of vector: a slow noise bends the
+            stroke the way a hand does, a fine noise frays its edge the way a
+            wall's tooth does, and a mid noise thins the ink where the chalk
+            skipped. Displacement can push ~2px past the paths, hence the
+            widened filter region. */}
+        <filter id={filterId} x="-15%" y="-15%" width="130%" height="130%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="1" seed="3" result="wobble" />
+          <feDisplacementMap in="SourceGraphic" in2="wobble" scale="2.5" result="bent" />
+          <feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="2" seed="11" result="grit" />
+          <feDisplacementMap in="bent" in2="grit" scale="1.4" result="rough" />
+          <feTurbulence type="fractalNoise" baseFrequency="0.3" numOctaves="3" seed="5" result="dust" />
+          <feColorMatrix
+            in="dust"
+            type="matrix"
+            values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.7 0.55"
+            result="patch"
+          />
+          <feComposite in="rough" in2="patch" operator="in" />
+        </filter>
+      </defs>
+      <g filter={`url(#${filterId})`}>
+        {/* One loose curve from the words up toward the `+` — tip stays at
+            (76,11), which is what the call sites' offsets aim — plus a short
+            second pass beside the shaft, the stroke a hand goes over twice. */}
+        <path strokeWidth="2.5" d="M6 66 C 30 63, 53 51, 67 32 C 71 26, 74 19, 76 11" />
+        <path strokeWidth="1.5" opacity="0.5" d="M17 64 C 34 61, 49 52.5, 61 40" />
+        {/* The head as two separate flicks, not a joined V: drawn strokes
+            land past each other at the tip, they do not meet in a corner. */}
+        <path strokeWidth="2.5" d="M64 18 Q 70.5 14, 76.4 10.6" />
+        <path strokeWidth="2.5" d="M79.6 24.6 Q 78.1 17.5, 76 10.7" />
+      </g>
     </svg>
   );
 }
