@@ -160,7 +160,9 @@ export function createGroupsRoutes(
       res.status(401).json({ error: 'Unauthenticated' });
       return;
     }
-    const { name } = req.body as { name?: string };
+    // `req.body` is undefined when no JSON body was sent at all — that is a
+    // 400, not a destructuring crash.
+    const { name } = (req.body ?? {}) as { name?: string };
     if (typeof name !== 'string') {
       res.status(400).json({ error: 'name is required in body' });
       return;

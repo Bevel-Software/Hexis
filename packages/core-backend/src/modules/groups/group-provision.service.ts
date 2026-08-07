@@ -44,6 +44,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { creatorPrincipal } from '../access/creator-access.js';
 import { spliceGrant } from '../access/access-splice.js';
+import { WorkspaceMutex } from '../workflow/git/mutex.js';
 
 /** Commit machinery the provision rides — the pending-commit pipeline, run inline. */
 export interface ProvisionCommitDriver {
@@ -74,6 +75,15 @@ export class GroupProvisionError extends Error {
 }
 
 export class GroupProvisionService {
+  /**
+   * Serialises creations by NORMALIZED (lowercased) folder name. The wx write
+   * arbitrates same-path races, but on a case-sensitive filesystem `GTM` and
+   * `gtm` are different paths — without this lock two concurrent requests
+   * could both pass the collision check and both land, breaking the
+   * case-insensitive uniqueness the check promises.
+   */
+  private readonly creations = new WorkspaceMutex();
+
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly commits: ProvisionCommitDriver,
@@ -105,12 +115,14 @@ export class GroupProvisionService {
         422,
       );
     }
-    const existing = await this.existingFolder(name);
-    if (existing !== null) {
-      throw new GroupProvisionError(`A group named "${existing}" already exists.`, 409);
-    }
-    await this.provision(user, name, groupAccessMd(user));
-    return { folder: name, created: true };
+    return this.creations.run(`group:${name.toLowerCase()}`, async () => {
+      const existing = await this.existingFolder(name);
+      if (existing !== null) {
+        throw new GroupProvisionError(`A group named "${existing}" already exists.`, 409);
+      }
+      await this.provision(user, name, groupAccessMd(user));
+      return { folder: name, created: true };
+    });
   }
 
   /**
@@ -119,11 +131,23 @@ export class GroupProvisionService {
    */
   async ensurePersonalGroup(user: AuthUser): Promise<ProvisionedGroup> {
     const folder = personalGroupFolderName(user.id);
-    if ((await this.existingFolder(folder)) !== null) {
-      return { folder, created: false };
-    }
-    await this.provision(user, folder, personalAccessMd(user));
-    return { folder, created: true };
+    return this.creations.run(`group:${folder.toLowerCase()}`, async () => {
+      if ((await this.existingFolder(folder)) !== null) {
+        return { folder, created: false };
+      }
+      try {
+        await this.provision(user, folder, personalAccessMd(user));
+      } catch (err) {
+        // ENSURE semantics even under a race the lock cannot see (another
+        // process, a checkout that appeared between check and write): the
+        // folder existing is this method's success case, never its error.
+        if (err instanceof GroupProvisionError && err.status === 409) {
+          return { folder, created: false };
+        }
+        throw err;
+      }
+      return { folder, created: true };
+    });
   }
 
   /** The taken name (in its on-disk casing) colliding with `name`, or null. */

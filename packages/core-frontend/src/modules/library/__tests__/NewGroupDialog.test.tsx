@@ -56,7 +56,11 @@ function renderDialog(existing: string[] = ['GTM', 'Finance']) {
 describe('NewGroupDialog', () => {
   beforeEach(() => {
     groupsMock.createGroup.mockReset();
-    groupsMock.createGroup.mockImplementation(async (name: string) => ({ folder: name }));
+    // A folder name that DIFFERS from the input, so a dialog that navigates
+    // with the typed name instead of the server's answer fails here.
+    groupsMock.createGroup.mockImplementation(async (name: string) => ({
+      folder: `${name}-canonical`,
+    }));
   });
 
   it('will not create an unnamed group', () => {
@@ -71,7 +75,8 @@ describe('NewGroupDialog', () => {
 
     // Trimmed — the endpoint owns everything after the name.
     await waitFor(() => expect(groupsMock.createGroup).toHaveBeenCalledWith('Design'));
-    await waitFor(() => expect(pathname()).toBe('/skills-and-tools/groups/Design'));
+    // The route is built from the SERVER's folder, not the typed name.
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools/groups/Design-canonical'));
     expect(onCreated).toHaveBeenCalledTimes(1);
   });
 

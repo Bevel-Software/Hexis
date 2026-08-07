@@ -95,6 +95,23 @@ describe('GroupProvisionService.createGroup', () => {
     await expect(fs.readdir(path.join(h.dir, KB, 'Groups'))).rejects.toThrow();
   });
 
+  it('serialises concurrent creations of one name in different casings — exactly one lands', async () => {
+    // On a case-sensitive filesystem `GTM` and `gtm` are different paths, so
+    // the wx writes alone would BOTH succeed; the per-name lock is what makes
+    // the case-insensitive uniqueness hold under concurrency.
+    const results = await Promise.allSettled([
+      h.svc.createGroup(USER, 'GTM'),
+      h.svc.createGroup(USER, 'gtm'),
+    ]);
+    const ok = results.filter((r) => r.status === 'fulfilled');
+    const refused = results.filter(
+      (r) => r.status === 'rejected' && (r.reason as GroupProvisionError).status === 409,
+    );
+    expect(ok).toHaveLength(1);
+    expect(refused).toHaveLength(1);
+    expect(await fs.readdir(path.join(h.dir, KB, 'Groups'))).toHaveLength(1);
+  });
+
   it('rolls the seeded file back when the commit fails, so a retry is not told "already exists"', async () => {
     h.commits.runPendingCommit.mockRejectedValueOnce(new Error('push refused'));
     await expect(h.svc.createGroup(USER, 'GTM')).rejects.toThrow('push refused');
@@ -126,6 +143,19 @@ describe('GroupProvisionService.ensurePersonalGroup', () => {
     expect(second).toEqual({ folder, created: false });
     // Idempotent for real: one write, one commit.
     expect(h.writeFile).toHaveBeenCalledTimes(1);
+    expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it('two concurrent ensures both succeed — one creates, the other reports existing', async () => {
+    const h = await makeHarness();
+    const folder = personalGroupFolderName(USER.id);
+    const [a, b] = await Promise.all([
+      h.svc.ensurePersonalGroup(USER),
+      h.svc.ensurePersonalGroup(USER),
+    ]);
+    expect([a.created, b.created].sort()).toEqual([false, true]);
+    expect(a.folder).toBe(folder);
+    expect(b.folder).toBe(folder);
     expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1);
   });
 });

@@ -50,10 +50,12 @@ export function NewGroupDialog({ existing, onClose, onCreated }: NewGroupDialogP
     if (!canCreate) return;
     setBusy(true);
     try {
-      await createGroup(trimmed);
+      // Navigate with the SERVER's folder name, not the typed one — the
+      // endpoint owns the canonical spelling of what it created.
+      const { folder } = await createGroup(trimmed);
       onCreated();
       onClose();
-      navigate(pathForGroup(trimmed));
+      navigate(pathForGroup(folder));
     } catch (err) {
       // The server's refusal names the problem (name taken, reserved
       // prefix…) — worth more than a generic apology.
