@@ -1,9 +1,21 @@
-import { useEffect, useState } from 'react';
+import { useContext, useEffect, useState } from 'react';
 import { Navigate } from 'react-router-dom';
-import { KB_ROUTE_PREFIX } from '../../workspace/routing/kb-routes';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { isPublicDemo } from '../../../core/bootstrap';
+import { KB_ROUTE_PREFIX, kbFileUrl } from '../../workspace/routing/kb-routes';
+import { WorkspaceContext } from '../../workspace/state/workspace.context';
 import { takePostLoginRedirect } from '../../auth/services/sso';
 import { useOnboarding } from '../state/onboarding';
 import { WELCOME_PATH } from '../paths';
+
+/**
+ * The public demo's front door is its guided tour, not an empty file tree:
+ * a first-time visitor landing on the bare domain has no idea what they are
+ * looking at, and this page exists to tell them. Demo-branch content
+ * knowledge, deliberately — the file is seeded on the demo workspace, and
+ * this constant lives only on the public-demo branch.
+ */
+const DEMO_HOME_FILE = 'KnowledgeBase/Start here.md';
 
 /**
  * Where `/` lands. For everyone, forever: Knowledge — except the ONE visit
@@ -32,6 +44,10 @@ import { WELCOME_PATH } from '../paths';
  */
 export function RootLanding() {
   const { shouldWelcome } = useOnboarding();
+  // Read tolerantly, not via useWorkspace(): this component's documented
+  // property is that it renders providerless (tests, bare ShellRoutes), and
+  // only the demo-home redirect needs the workspace at all.
+  const kbDirName = useContext(WorkspaceContext)?.kbDirName ?? null;
   const [stash, setStash] = useState<{ returnTo: string | null } | null>(null);
 
   // Taken in an effect, not a state initializer: the take CLEARS the stash,
@@ -50,5 +66,12 @@ export function RootLanding() {
   if (shouldWelcome) {
     return <Navigate to={WELCOME_PATH} state={{ greeting: true, returnTo: stash.returnTo }} replace />;
   }
-  return <Navigate to={stash.returnTo ?? KB_ROUTE_PREFIX} replace />;
+  if (stash.returnTo) return <Navigate to={stash.returnTo} replace />;
+  if (isPublicDemo()) {
+    // Hold for the workspace context rather than landing somewhere else and
+    // correcting — kbDirName resolves within the first round-trip.
+    if (kbDirName === null) return null;
+    return <Navigate to={kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${DEMO_HOME_FILE}`)} replace />;
+  }
+  return <Navigate to={KB_ROUTE_PREFIX} replace />;
 }

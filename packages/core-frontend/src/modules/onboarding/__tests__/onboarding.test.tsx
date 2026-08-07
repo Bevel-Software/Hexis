@@ -7,6 +7,10 @@ import { authValue } from '../../library/__tests__/auth-harness';
 import { LibraryToastProvider } from '../../library/state/toast';
 import { WelcomePage } from '../components/WelcomePage';
 import { ConnectAgentPill } from '../components/ConnectAgentPill';
+import {
+  WorkspaceContext,
+  type WorkspaceContextValue,
+} from '../../workspace/state/workspace.context';
 import { RootLanding } from '../components/RootLanding';
 import { POST_LOGIN_REDIRECT_KEY } from '../../auth/services/sso';
 import { WELCOME_PATH } from '../paths';
@@ -30,6 +34,10 @@ const { authFetchMock } = vi.hoisted(() => ({
   authFetchMock: vi.fn(async () => ({ ok: true, status: 200 }) as Response),
 }));
 vi.mock('../../../lib/api', () => ({ authFetch: authFetchMock }));
+
+// Public-demo flag — default off, flipped by the demo-home tests below.
+const bootstrapMock = vi.hoisted(() => ({ isPublicDemo: vi.fn(() => false) }));
+vi.mock('../../../core/bootstrap', () => ({ isPublicDemo: bootstrapMock.isPublicDemo }));
 
 /**
  * The `RequestInit` of a recorded `authFetch` call.
@@ -103,6 +111,7 @@ const landingRoutes = (
 beforeEach(() => {
   resetOnboardingForTests();
   authFetchMock.mockClear();
+  bootstrapMock.isPublicDemo.mockReturnValue(false);
   sessionStorage.clear();
 });
 
@@ -186,6 +195,42 @@ describe('RootLanding: the one-time greeting', () => {
     sessionStorage.setItem(POST_LOGIN_REDIRECT_KEY, '//evil.example/phish');
     mount(landingRoutes, doneUser());
     expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
+  });
+
+  /**
+   * The public demo's `/` is its guided tour: a stranger landing on the bare
+   * domain gets the page that explains the place, not an unexplained file
+   * tree. A carried deep link still wins — it is an intention, the tour is a
+   * default.
+   */
+  it('public demo: / lands on the Start here page', () => {
+    bootstrapMock.isPublicDemo.mockReturnValue(true);
+    const workspaceValue = { kbDirName: 'knowledge-base' } as unknown as WorkspaceContextValue;
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <AuthContext.Provider value={doneUser()}>
+          <WorkspaceContext.Provider value={workspaceValue}>
+            <LibraryToastProvider>
+              {landingRoutes}
+              <LocationProbe />
+            </LibraryToastProvider>
+          </WorkspaceContext.Provider>
+        </AuthContext.Provider>
+      </MemoryRouter>,
+    );
+    // Percent-encoded: `kbFileUrl` encodes each segment, and the router keeps
+    // the pathname exactly as navigated.
+    expect(screen.getByTestId('pathname')).toHaveTextContent(
+      '/workspace/target-company-state/knowledge-base/KnowledgeBase/Start%20here.md',
+    );
+  });
+
+  it('public demo: a carried deep link still beats the tour', () => {
+    bootstrapMock.isPublicDemo.mockReturnValue(true);
+    const DEEP = '/workspace/main/knowledge-base/Groups/Sales/create-sales-deck/SKILL.md';
+    sessionStorage.setItem(POST_LOGIN_REDIRECT_KEY, DEEP);
+    mount(landingRoutes, doneUser());
+    expect(screen.getByTestId('pathname')).toHaveTextContent(DEEP);
   });
 
   it('greets ONCE: after the welcome page has been seen, / goes to Knowledge', async () => {
