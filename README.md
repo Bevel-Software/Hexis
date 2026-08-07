@@ -1,21 +1,51 @@
-# Bevel core — skill & tool management
+# Bevel — skill, tool and knowledge management
 
-The open-source core of the Bevel platform: a **git-backed knowledge workspace**
-your whole team — and their AI agents — work in together.
+One place where your company's **AI skills, tools and knowledge** live —
+centrally managed, reviewed and access-controlled, and usable from **any AI
+agent**. The open-source core of the Bevel platform.
 
-- **Knowledge lives in a git repo you own**, on any git host. The app gives it
-  branches, change requests with owner approval, file locks, and live updates —
-  no provider PRs, no lock-in.
-- **Skills & tools Library**: reusable agent skills (`SKILL.md` folders), tool
-  manuals (UTCP), and an encrypted secrets vault, organised into groups with
-  role-based access control.
-- **A remote MCP server** (with its own OAuth 2.1 authorization server), so
-  external agents like Claude Code connect to the knowledge base and work with
-  the same permissions model as people do.
+- **Every employee connects once, in minutes.** They add the workspace to
+  Claude Code, ChatGPT, Cursor or any MCP-capable agent with a single
+  connection key — and their agent can use exactly the skills, tools and
+  knowledge their role allows. No per-tool credentials handed around, no
+  per-agent setup projects.
+- **The company stays in control.** Skills, tool access and knowledge are
+  managed and reviewed in one place: every change has an author and a way
+  back, and anything proposed through a change request reaches its owners
+  for review before it lands — rules that apply to agents exactly as they
+  apply to people.
+- **Independent of any agent vendor.** Because the workspace speaks open
+  protocols, you can switch agent vendors on price and performance — or mix
+  them by task and role — without rebuilding what your agents know and can do.
+  The investment lives with you, not inside one vendor's walls. That is what
+  makes enterprise agent rollouts fast: onboard the next team, or the next
+  agent, instead of starting over.
 
-## Run it in 5 minutes (Docker)
+Under the hood, everything lives in a **git repository you own**, on any git
+host: skills (`SKILL.md` folders), tool manuals (UTCP) with an encrypted
+secrets vault, and knowledge — with branches, change requests with owner
+approval, role-based access, and a built-in remote MCP server (OAuth 2.1) that
+agents connect to.
 
-You need: [Docker](https://docs.docker.com/get-docker/) with Compose, and an
+## Try it first — the live demo
+
+**[demo.bevel.software](https://demo.bevel.software/workspace/main/knowledge-base/KnowledgeBase/Start%20here.md)** —
+a public instance you can sign into with your Google account, populated with a
+fictional company's knowledge, skills and tools. The *Start here* page walks
+you through the whole loop: connect your own agent over MCP, have it build a
+sales deck from a skill, watch its proposed improvement arrive as a change
+request. The demo is shared and read-mostly (visitors propose, owners approve);
+everything below gets you the same thing with none of the limits.
+
+## Want a managed instance?
+
+We run it for you — hosting, upgrades, backups, SSO — and your team just signs
+in. Write to **[ali.raza@bevel.software](mailto:ali.raza@bevel.software)**.
+
+## Deploy it in 5 minutes (Docker)
+
+You need: [Docker](https://docs.docker.com/get-docker/) with Compose on a
+server (or your laptop — one line below differs), and an
 **empty git repository** on any host (GitHub, GitLab, Bitbucket, Azure DevOps,
 self-hosted) to hold your knowledge base — the app seeds it with a starter
 template on first run.
@@ -30,7 +60,7 @@ Open `.env` and fill in the **four required values** (everything else can wait):
 
 ```sh
 ADMIN_EMAIL=you@example.com     # the deployment owner — always an admin
-ADMIN_PASSWORD=pick-something   # your sign-in password (checked from env, never stored)
+ADMIN_PASSWORD=pick-something   # sign-in password — only with password login; SSO-only deployments drop it (see below)
 JWT_SECRET=…                    # generate with the command below
 SECRETS_ENC_KEY=…               # generate with the command below
 ```
@@ -42,13 +72,38 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 # no Node installed? docker run --rm node:22-slim node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
-Then start everything (Postgres + the app):
+For a public deployment, also set the origin values:
 
 ```sh
-docker compose up -d
+PUBLIC_BACKEND_URL=https://bevel.your-domain.com   # public origin — OAuth redirects are built from it
+PUBLIC_FRONTEND_URL=https://bevel.your-domain.com  # same origin: the backend serves the SPA
 ```
 
-Open **http://localhost:3001** and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+Then start everything (Postgres + the app). **Behind a reverse proxy**
+(Coolify, Traefik, nginx — recommended):
+
+```sh
+docker compose -f docker-compose.yml up -d
+```
+
+Also set `TRUST_PROXY` to your proxy hop count (`1` for a single proxy), so
+rate limits see real client IPs instead of the proxy's.
+
+The explicit `-f` skips `docker-compose.override.yml`, so the app publishes
+**no host port** — your proxy reaches it on port `3001` over the compose
+network. This is deliberate: a fixed published port makes every redeploy fail
+with `port is already allocated`, because the replacement container starts
+while the outgoing one still holds it.
+
+**Directly exposed** (no proxy): plain `docker compose up -d` publishes
+`:3001`; use `APP_PORT=8080 docker compose up -d` for a different host port.
+Leave `TRUST_PROXY` unset here — with no proxy in front, trusting forwarded
+headers would let clients spoof their own address.
+
+Open your domain and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+
+**Just trying it on your laptop?** Same steps, minus the origin values: plain
+`docker compose up -d`, then open **http://localhost:3001**.
 
 ### First sign-in: the setup screen
 
@@ -74,6 +129,22 @@ those values has an env var (`KB_REPO_URL`, `GIT_TOKEN`, `DEFAULT_BRANCH`, …) 
 anything set in the environment wins over the setup screen. See
 [`.env.example`](.env.example).
 
+Worth knowing in production:
+
+- **State that survives redeploys**: Postgres data plus three app volumes
+  (workspace clones, diff-review backups, tool-chain spill files) are named
+  volumes — a redeploy or image rebuild loses nothing. Back up the `pgdata`
+  volume and your knowledge-base git repo; everything else is derivable.
+- **Health**: `GET /api/health`. First boot can take a minute or two — it runs
+  migrations and seeds the knowledge-base repo.
+- **Single sign-on**: set `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` /
+  `OIDC_CLIENT_SECRET` (any spec-compliant provider) or configure it on the
+  setup screen, which shows you the redirect URI to register. For SSO-only
+  deployments set `LOGIN_PASSWORD=false` and drop `ADMIN_PASSWORD`. If your
+  issuer is multi-tenant (Google, Entra `common`), set
+  `ALLOWED_EMAIL_DOMAINS` — SSO auto-provisions accounts, and that list is the
+  only signup boundary.
+
 ## Local development (run from source)
 
 You need: **Node 22** (`.nvmrc`; the engine range is `>=22 <23`),
@@ -93,49 +164,6 @@ commands: `pnpm test`, `pnpm typecheck`, `pnpm lint`.
 
 Migrations run automatically on boot — there is no separate migrate step, in
 dev or in production.
-
-## Deploy on your own server
-
-The same compose file is production-ready. Two ways to expose it:
-
-**Behind a reverse proxy** (Coolify, Traefik, nginx — recommended):
-
-```sh
-docker compose -f docker-compose.yml up -d
-```
-
-The explicit `-f` skips `docker-compose.override.yml`, so the app publishes
-**no host port** — your proxy reaches it on port `3001` over the compose
-network. This is deliberate: a fixed published port makes every redeploy fail
-with `port is already allocated`, because the replacement container starts
-while the outgoing one still holds it.
-
-**Directly exposed** (no proxy): plain `docker compose up -d` publishes
-`:3001`; use `APP_PORT=8080 docker compose up -d` for a different host port.
-
-Add these to `.env` for production:
-
-```sh
-PUBLIC_BACKEND_URL=https://bevel.your-domain.com   # public origin — OAuth redirects are built from it
-PUBLIC_FRONTEND_URL=https://bevel.your-domain.com  # same origin: the backend serves the SPA
-TRUST_PROXY=1                                      # behind a proxy: hop count, so rate limits see real client IPs
-```
-
-Worth knowing:
-
-- **State that survives redeploys**: Postgres data plus three app volumes
-  (workspace clones, diff-review backups, tool-chain spill files) are named
-  volumes — a redeploy or image rebuild loses nothing. Back up the `pgdata`
-  volume and your knowledge-base git repo; everything else is derivable.
-- **Health**: `GET /api/health`. First boot can take a minute or two — it runs
-  migrations and seeds the knowledge-base repo.
-- **Single sign-on**: set `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` /
-  `OIDC_CLIENT_SECRET` (any spec-compliant provider) or configure it on the
-  setup screen, which shows you the redirect URI to register. For SSO-only
-  deployments set `LOGIN_PASSWORD=false` and drop `ADMIN_PASSWORD`. If your
-  issuer is multi-tenant (Google, Entra `common`), set
-  `ALLOWED_EMAIL_DOMAINS` — SSO auto-provisions accounts, and that list is the
-  only signup boundary.
 
 ## Environment reference
 
@@ -195,12 +223,5 @@ can be left unset and configured in the app at first sign-in (env always wins).
 | `packages/core-frontend` | `@bevel-software/platform-core-frontend` — the core UI, published as raw TS/TSX source |
 | `apps/server` | standalone core backend shell |
 | `apps/web` | standalone core SPA shell (Vite) |
-
-## Part of the Bevel platform
-
-This repo is the open-source base of the Bevel platform. The commercial
-platform layers chat/agents, connectors, routines, the knowledge-graph system
-and more on top of the extension points exposed here (`CorePorts`,
-`ServerExtensions`, workflow lifecycle hooks, and the frontend `AppRegistry`).
 
 License: [Apache-2.0](LICENSE)

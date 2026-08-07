@@ -22,6 +22,7 @@ import { AdminContext } from '../../../admin/state/admin.context';
 // one per section, one with a dialog — so the merge/gating/dialog mechanics
 // stay covered without importing enterprise modules.
 import {
+  ActiveAppIdContext,
   AppRegistryContext,
   makeRegistry,
   type AdminMenuItem,
@@ -64,8 +65,11 @@ function renderToolbar(overrides?: {
   layout?: Partial<LayoutController>;
   isAdmin?: boolean;
   toolbarItems?: ToolbarItemDef[];
-  /** Initial route — the Library sidebar toggle is path-gated. */
+  /** Initial route. */
   route?: string;
+  /** The shell-provided active app (see ActiveAppIdContext); the Library
+   *  sidebar toggle follows this, not the path. */
+  activeAppId?: string;
 }) {
   const toggleExplorer = vi.fn();
   const toggleChat = vi.fn();
@@ -132,8 +136,16 @@ function renderToolbar(overrides?: {
     clearError: () => {},
   };
 
+  const route = overrides?.route ?? '/';
+  const activeAppId =
+    overrides?.activeAppId ??
+    (route === '/skills-and-tools' || route.startsWith('/skills-and-tools/')
+      ? 'skills-tools'
+      : undefined);
+
   render(
-    <MemoryRouter initialEntries={[overrides?.route ?? '/']}>
+    <MemoryRouter initialEntries={[route]}>
+      <ActiveAppIdContext.Provider value={activeAppId}>
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={git}>
@@ -168,6 +180,7 @@ function renderToolbar(overrides?: {
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
+      </ActiveAppIdContext.Provider>
     </MemoryRouter>,
   );
 
@@ -284,12 +297,21 @@ describe('Toolbar', () => {
     // surface. The settings case is what catches anyone adding a second,
     // settings-specific toggle instead of reusing SidebarToggle.
     it.each([
-      ['the Library, by path', '/skills-and-tools', false],
-      ['Knowledge, by its sidebar pane', '/workspace/main', true],
-      ['both at once, without doubling up', '/skills-and-tools', true],
-      ['a settings page, by its route table', '/secrets', false],
-    ])('renders exactly one toggle on %s', (_name, route, canToggleExplorer) => {
-      renderToolbar({ route, layout: { canToggleExplorer } });
+      ['the Library, by active app', '/skills-and-tools', false, undefined],
+      ['Knowledge, by its sidebar pane', '/workspace/main', true, undefined],
+      ['both at once, without doubling up', '/skills-and-tools', true, undefined],
+      ['a settings page, by its route table', '/secrets', false, undefined],
+      // The regression this predicate change exists for: a skill page at its
+      // canonical /workspace URL claims Skills & Tools, and the toggle must
+      // follow the claim — the old path test made it vanish here.
+      [
+        'a canonical /workspace item URL, by the claimed app',
+        '/workspace/main/knowledge-base/Groups/Sales/create-sales-deck/SKILL.md',
+        false,
+        'skills-tools',
+      ],
+    ] as const)('renders exactly one toggle on %s', (_name, route, canToggleExplorer, activeAppId) => {
+      renderToolbar({ route, layout: { canToggleExplorer }, activeAppId });
       expect(screen.getAllByRole('button', { name: /(hide|show) sidebar/i })).toHaveLength(1);
       // The separate "file explorer" button is gone — it was this same button.
       expect(screen.queryByRole('button', { name: /file explorer/i })).toBeNull();

@@ -91,6 +91,21 @@ export class WorkflowEventBus {
   private nextId = 1;
   private readonly buffer: WorkflowEvent[] = [];
   private readonly subscribers = new Map<string, Subscriber>();
+  private readonly emitListeners = new Set<(event: WorkflowEvent) => void>();
+
+  /**
+   * Server-side tap: called for EVERY emitted event, before the per-session
+   * scope filtering (which exists for SSE fan-out, not for in-process
+   * consumers). The composition root uses this for write-time cache
+   * invalidation — the routes emit `fs-tree-changed` the moment bytes hit a
+   * working tree, long before the async commit reaches `FileChangeNotifier`.
+   * Best-effort like SSE dispatch: a throwing listener is logged, never
+   * propagated to the emitter. Returns the unsubscribe.
+   */
+  onEmit(listener: (event: WorkflowEvent) => void): () => void {
+    this.emitListeners.add(listener);
+    return () => this.emitListeners.delete(listener);
+  }
 
   /**
    * Stamp `payload` with `id` + `ts`, append to the ring buffer, then fan
@@ -107,6 +122,16 @@ export class WorkflowEventBus {
     this.buffer.push(event);
     if (this.buffer.length > BUFFER_CAPACITY) {
       this.buffer.shift();
+    }
+    for (const listener of this.emitListeners) {
+      try {
+        listener(event);
+      } catch (err) {
+        console.warn(
+          '[event-bus] onEmit listener threw:',
+          err instanceof Error ? err.message : err,
+        );
+      }
     }
     // Single-line emit log with all the fields most useful for tracing a
     // failed delivery: which event, which scope it'll filter on, and the

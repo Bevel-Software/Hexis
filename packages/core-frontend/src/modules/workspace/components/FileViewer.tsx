@@ -10,7 +10,6 @@ import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
 import { useCanonicalFileUrl } from '../routing/kb-routes';
-import { useReview } from '../../review/state/review.context';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { useFileAccess } from '../../access/hooks/useFileAccess';
 import { FileHistoryPanel } from '../../git/components/FileHistoryPanel';
@@ -71,7 +70,6 @@ export function FileViewer() {
   const seedSuggestedPrompt = useSuggestedPromptSeed();
   const { fileViewerPanels, renderers } = useAppRegistry();
   const git = useGit();
-  const review = useReview();
   // Hiding the tree buys margin, not line length (proto:709), and the pane
   // controller is the only thing that knows whether it is hidden.
   //
@@ -126,13 +124,6 @@ export function FileViewer() {
   // Keep the existing variable name so the rest of the file (legacy uses for
   // dirty-flag bookkeeping etc.) doesn't need to change.
   const onProtectedBranch = accessRestricted;
-  // `hasPendingReview` (the fact that a review session exists) suppresses the
-  // legacy single-file Accept/Reject banner below so the two review UIs don't
-  // compete. The review *surface* itself (badge + panel, with its own
-  // open-intent state) is no longer hard-mounted here — it's a registered
-  // panel (see `fileViewerPanels` / the enterprise ReviewPanelSurface), so
-  // the core viewer carries no review-UI dependency.
-  const hasPendingReview = !!review.session && review.session.changes.length > 0;
   // Registered auxiliary surfaces (e.g. the enterprise agent-review badge +
   // panel). Rendered on every return path exactly where the hard-mounted
   // review surface used to sit, inside this component's relative container so
@@ -319,6 +310,14 @@ export function FileViewer() {
     try {
       await rejectPendingContent();
       setPendingDeferred(false);
+    } catch (err) {
+      // Reject WRITES — the baseline back over the agent's bytes — and a
+      // failed write must not read as "rejected". Same banner the save path
+      // uses. (Accept performs no write, so it has no failure to surface.)
+      setSaveError({
+        kind: 'generic',
+        message: `Couldn't reject the update: ${err instanceof Error ? err.message : String(err)}`,
+      });
     } finally {
       setIsSubmitting(false);
     }
@@ -1138,10 +1137,8 @@ export function FileViewer() {
               </div>
             </Banner>
           )}
-          {/* Accept / Reject banner — hidden whenever a multi-file review
-              session exists, so the two review UIs never compete (regardless
-              of whether the multi-file panel is currently open). */}
-          {isReviewingPending && !hasPendingReview && (
+          {/* Accept / Reject banner for a single previewed agent update. */}
+          {isReviewingPending && (
             <Banner
               role="status"
               tone="neutral"
@@ -1226,28 +1223,6 @@ export function FileViewer() {
                   )}
                 </ul>
               )}
-            </Banner>
-          )}
-
-          {/* Review-action failure banner. Rejecting an agent change is
-              optimistic — the row leaves the panel immediately — so a
-              background commit/push failure would otherwise be silent. This
-              surfaces it (and survives the review panel optimistically
-              unmounting on a failed "Reject all"). */}
-          {review.lastError && (
-            <Banner
-              role="alert"
-              tone="danger"
-              icon={<AlertTriangle size={14} />}
-              aria-live="assertive"
-              className="mb-4 flex-none"
-            >
-              <div className="flex items-center gap-2">
-                <span className="flex-1 font-medium">{review.lastError}</span>
-                <Button variant="quiet" size="sm" title="Dismiss" onClick={() => review.clearError()}>
-                  Dismiss
-                </Button>
-              </div>
             </Banner>
           )}
 

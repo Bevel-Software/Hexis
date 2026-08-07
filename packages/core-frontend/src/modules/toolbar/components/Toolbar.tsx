@@ -5,10 +5,9 @@ import { ProfileMenu } from './ProfileMenu';
 import { AppSwitcher } from './AppSwitcher';
 import { useLayout } from '../../layout/state/layout.context';
 import { useMediaQuery } from '../../layout/hooks/useMediaQuery';
-import { useAppRegistry } from '../../../core/registry';
+import { useActiveAppId, useAppRegistry } from '../../../core/registry';
 import { SidebarToggle } from '../../layout/components/SidebarToggle';
 import { toggleSidebar, useSidebar } from '../../layout/state/sidebar';
-import { LIBRARY_ROOT } from '../../library/routes/library-paths';
 import { TOOLBAR_STACK_QUERY } from '../../layout/breakpoints';
 import { isSettingsNavPath } from '../../settings/settings-nav-items';
 
@@ -41,8 +40,11 @@ export function Toolbar() {
    * page — and a toggle there would point `aria-controls` at an element that
    * does not exist.
    */
-  const onLibrary =
-    location.pathname === LIBRARY_ROOT || location.pathname.startsWith(`${LIBRARY_ROOT}/`);
+  // By ACTIVE APP, not path prefix: a skill page at its canonical /workspace
+  // URL claims Skills & Tools (see AppClaimContext), and the toggle must
+  // follow the surface on screen — a path test here made the sidebar's own
+  // toggle vanish the moment a skill was opened.
+  const onLibrary = useActiveAppId() === 'skills-tools';
   const { collapsed: sidebarCollapsed } = useSidebar();
   const { isChatCollapsed, canToggleExplorer, canToggleChat, toggleChat } = useLayout();
   // Below the `md` breakpoint the registry item cluster (the enterprise

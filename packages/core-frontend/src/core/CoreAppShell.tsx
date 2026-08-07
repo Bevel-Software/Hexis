@@ -36,8 +36,6 @@ import {
 import { MaintenanceOverlay } from '../modules/layout/components/MaintenanceOverlay';
 import { AdminProvider } from '../modules/admin/state/admin.context';
 import { RolesCorruptedBanner } from '../modules/admin/components/RolesCorruptedBanner';
-import { ReviewProvider } from '../modules/review/state/ReviewProvider';
-import { ReviewPanelSurface } from '../modules/review/components/ReviewPanelSurface';
 import { ConnectToolsPage } from '../modules/secrets-vault/components/ConnectToolsPage';
 import { SettingsLayout } from '../modules/settings/components/SettingsLayout';
 import { DeploymentPage } from '../modules/settings/components/DeploymentPage';
@@ -69,16 +67,15 @@ import {
   type CrCreationPort,
   type PaneDef,
 } from './registry';
-import { WorkspaceItemGate } from '../modules/library/routes/WorkspaceItemGate';
+import { isLibraryLocation } from '../modules/library/routes/library-paths';
 
 /**
  * The registry-driven application shell for the core modules (workspace, git,
  * pr, access, auth, workflow/SSE, layout, secrets-vault, tools, toolbar,
- * library, review — the UI of the core diff backend — and the admin roles
- * page). Everything else — chat, connectors, routines, watchlist, voice,
- * embed, onboarding, admin LLM/feedback pages — is contributed through the
- * {@link AppRegistry} passed in (see `src/enterprise-registry.tsx` for the
- * current enterprise composition).
+ * library, and the admin roles page). Everything else — chat, connectors,
+ * routines, watchlist, voice, embed, onboarding, admin LLM/feedback pages —
+ * is contributed through the {@link AppRegistry} passed in (see
+ * `src/enterprise-registry.tsx` for the current enterprise composition).
  */
 
 /**
@@ -140,14 +137,18 @@ function AuthenticatedAppInner() {
   // Registry-provided wrappers (chat, onboarding-import, agent ports, …)
   // apply INSIDE the core providers below — so they can read workspace/git
   // state — but OUTSIDE the layout, so every pane (including registered ones)
-  // sees them. `providers[0]` ends up outermost. ReviewProvider is CORE (the
-  // UI of the core diff/pending-changes backend) and sits innermost — the
-  // same slot it occupied when it was registry-provided.
+  // sees them. `providers[0]` ends up outermost.
+  //
+  // The review-agent-changes surface (ReviewProvider + ReviewPanelSurface,
+  // over the diff backend's backup ledger) is deliberately NOT mounted: its
+  // ledger cannot yet tell an agent's direct edit apart from a proposal the
+  // agent made through a change request, so the panel double-reported
+  // suggestions and its verbs collided with the CR review flow. The module
+  // stays in the tree for when that distinction exists — a registry can also
+  // re-mount it via `providers` + `fileViewerPanels`.
   const chrome = registry.providers.reduceRight<ReactNode>(
     (children, wrap) => wrap(children),
-    <ReviewProvider>
-      <AppChrome />
-    </ReviewProvider>,
+    <AppChrome />,
   );
 
   return (
@@ -200,11 +201,7 @@ const CORE_APPS: AppDef[] = [
     path: KB_ROUTE_PREFIX,
     description: 'Browse and edit your knowledge base',
     order: 10,
-    // The gate makes /workspace file URLs the CANONICAL address of library
-    // items: a default-branch URL into a skill folder or a `.tool` manual
-    // renders the skill/tool page; every other path falls through to the
-    // pane workspace unchanged.
-    element: <WorkspaceItemGate knowledge={<KnowledgeSurface />} />,
+    element: <CoreSurfaces />,
   },
   {
     id: 'skills-tools',
@@ -212,9 +209,44 @@ const CORE_APPS: AppDef[] = [
     path: '/skills-and-tools',
     description: 'What your assistant can do, and what it connects to',
     order: 20,
-    element: <LibraryRoutes />,
+    element: <CoreSurfaces />,
   },
 ];
+
+/**
+ * BOTH core apps' route element — one component type at one route position,
+ * deliberately: React reconciles same-type elements across route matches, so
+ * crossing between `/skills-and-tools` and a canonical `/workspace` item URL
+ * keeps this component (and the library surface inside it) MOUNTED. A
+ * different element per app remounted the whole library on every skill click:
+ * the catalog refetched, the page flickered, and the sidebar was a second
+ * instance of itself.
+ *
+ * Which surface renders is decided by URL SHAPE (`isLibraryLocation`): the KB
+ * repo's two roots ARE the two apps — `KnowledgeBase/` paths get the pane
+ * workspace, default-branch `Groups/` paths get the library. The catalog is
+ * never consulted for the surface, so a just-created skill routes correctly
+ * before any reload. Router state `rawFile` steps past the shape rule to the
+ * raw file view (the tool page's "Edit the tool file"); it is state, not URL,
+ * so a shared link can never land there by accident.
+ *
+ * While the library renders under a `/workspace` URL it CLAIMS the Skills &
+ * Tools app (see {@link AppClaimContext}), so the switcher and the toolbar's
+ * sidebar toggle follow the surface on screen, not the URL prefix.
+ */
+function CoreSurfaces() {
+  const location = useLocation();
+  const claim = useContext(AppClaimContext);
+  const rawRequested = (location.state as { rawFile?: boolean } | null)?.rawFile === true;
+  const library = !rawRequested && isLibraryLocation(location.pathname);
+  const claimsSkills = library && location.pathname.startsWith(KB_ROUTE_PREFIX);
+  useEffect(() => {
+    if (!claimsSkills) return;
+    claim('skills-tools');
+    return () => claim(null);
+  }, [claimsSkills, claim]);
+  return library ? <LibraryRoutes /> : <KnowledgeSurface />;
+}
 
 /**
  * Setter through which the Knowledge surface's pane layout reports its
@@ -516,18 +548,14 @@ function AppShell() {
  * build adds to the app rather than reordering what core already put there.
  */
 export function CoreAppShell({ registry }: { registry: AppRegistry }) {
-  // Core contributions merge ahead of registry-contributed ones: the review
-  // file-viewer panel (core — it renders the pending-changes session served
-  // by the core diff backend at /api/workspace/:id/review*) and the core
+  // Core contributions merge ahead of registry-contributed ones: the core
   // apps (Knowledge + Skills & Tools) that the switcher and AppChrome read.
+  // The review file-viewer panel is no longer registered here — see the note
+  // on `chrome` above.
   const mergedRegistry = useMemo<AppRegistry>(
     () => ({
       ...registry,
       apps: [...CORE_APPS, ...registry.apps],
-      fileViewerPanels: [
-        { id: 'review', Component: ReviewPanelSurface },
-        ...registry.fileViewerPanels.filter((p) => p.id !== 'review'),
-      ],
     }),
     [registry],
   );
