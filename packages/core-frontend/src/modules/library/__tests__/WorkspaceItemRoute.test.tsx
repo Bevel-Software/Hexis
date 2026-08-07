@@ -142,17 +142,23 @@ describe('WorkspaceItemRoute', () => {
     expect(await screen.findByLabelText('tool-page')).toHaveTextContent('notion');
   });
 
-  it('holds the page slot while the catalog loads — a just-created skill resolves here', async () => {
+  it('resolves a skill from the URL alone — a just-created skill needs no catalog', async () => {
+    // The regression this exists for: right after "create empty skill" the
+    // catalog reload hasn't landed. Resolution is structural (the folder name
+    // IS the skill id), so the page opens instantly anyway.
     dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
-    renderAt(itemUrl('Groups/Sales/create-sales-deck/SKILL.md'));
-    expect(await screen.findByText('Loading…')).toBeInTheDocument();
-    // The surface never surrenders to the Knowledge view: the sidebar stays.
+    renderAt(itemUrl('Groups/Sales/brand-new-skill/SKILL.md'));
+    expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
+      'brand-new-skill::SKILL.md',
+    );
+    // …inside the library surface, never the Knowledge view.
     expect(screen.getByRole('button', { name: /^All groups/ })).toBeInTheDocument();
+  });
 
-    // The catalog reload lands (the created skill is in it now) → the page.
-    dataMock.useLibraryData.mockReturnValue(CATALOG);
-    renderAt(itemUrl('Groups/Sales/create-sales-deck/SKILL.md'));
-    expect(await screen.findByLabelText('skill-page')).toBeInTheDocument();
+  it("a `.tool` URL falls back to the filename slug when the catalog hasn't loaded", async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
+    renderAt(itemUrl('Groups/Support/notion.tool'));
+    expect(await screen.findByLabelText('tool-page')).toHaveTextContent('notion');
   });
 
   it("a Groups path that is no item lands on its group's page", async () => {

@@ -1,7 +1,7 @@
 import { Navigate, useParams } from 'react-router-dom';
-import { DEFAULT_BRANCH, GROUPS_DIR, groupOfPath } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, GROUPS_DIR } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { useLibrary, type LibraryItem } from '../state/library-data';
+import { useLibrary } from '../state/library-data';
 import { SkillPage } from '../components/skill-page/SkillPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
 import { LIBRARY_ROOT, pathForGroup } from './library-paths';
@@ -12,15 +12,18 @@ import { LIBRARY_ROOT, pathForGroup } from './library-paths';
  * same `LibraryLayout` route tree as every other library page, so the sidebar
  * is the one the reader already had and nothing remounts on the way in.
  *
- * Which URLs reach here is decided by SHAPE (`isLibraryLocation`), so the
- * catalog is only consulted for WHICH page, never for which surface: while it
- * loads, a quiet placeholder holds the slot — a skill created a moment ago
- * resolves as soon as the reload lands, instead of falling through to the
- * Knowledge view because the catalog hadn't heard of it yet.
+ * Resolution is STRUCTURAL, not a catalog lookup: under `Groups/<group>/`, a
+ * `*.tool` file is a tool page, any other direct FILE (an extension, no
+ * segments below it — `access.md`) belongs to the group page, and everything
+ * else is a skill FOLDER whose name is the skill's id — the same identity the
+ * old name-based route used. That is what makes a skill created a moment ago
+ * open instantly: its URL says everything the page needs, and `SkillPage`
+ * fetches the skill by name itself. Waiting on the catalog here raced every
+ * reload and lost (the just-created skill bounced to its group's page).
  *
- * A Groups path that resolves to no item once the catalog HAS answered (a
- * group's `access.md`, a loose file, a deleted skill) lands on its group's
- * page — the place that file belongs to.
+ * The catalog is consulted only to REFINE a tool's slug (a `.tool` may
+ * declare an explicit id different from its filename); the filename is the
+ * fallback, which is also the default the backend derives.
  */
 export function WorkspaceItemRoute() {
   const params = useParams<{ branch: string; '*': string }>();
@@ -38,43 +41,27 @@ export function WorkspaceItemRoute() {
   if (kbDirName !== null && segments[0] !== kbDirName) {
     return <Navigate to={LIBRARY_ROOT} replace />;
   }
-  const repoRel = segments.slice(1).join('/');
 
-  const target = classify(data.items, repoRel);
-  if (target?.kind === 'skill') {
-    return <SkillPage name={target.name} activeFile={target.file} />;
+  const [, , group, entry, ...rest] = segments;
+  if (!group || !entry) {
+    return <Navigate to={LIBRARY_ROOT} replace />;
   }
-  if (target?.kind === 'tool') {
-    return <ToolPage slug={target.slug} />;
-  }
-  if (data.loading || kbDirName === null) {
-    // The layout (and its sidebar) is already on screen — only the page slot
-    // waits for the catalog.
-    return <p className="py-10 text-center text-detail text-ink-faint">Loading…</p>;
-  }
-  const group = groupOfPath(repoRel);
-  return <Navigate to={group ? pathForGroup(group) : LIBRARY_ROOT} replace />;
-}
 
-type ItemTarget =
-  | { kind: 'skill'; name: string; file: string }
-  | { kind: 'tool'; slug: string };
-
-/** Longest-match resolution of a repo path to a catalog item. */
-function classify(items: LibraryItem[], repoRel: string): ItemTarget | null {
-  for (const item of items) {
-    if (item.kind === 'integration' && item.path === repoRel) {
-      return { kind: 'tool', slug: item.id };
-    }
-    if (item.kind === 'skill' && (repoRel === item.path || repoRel.startsWith(`${item.path}/`))) {
-      return {
-        kind: 'skill',
-        name: item.id,
-        file: repoRel === item.path ? 'SKILL.md' : repoRel.slice(item.path.length + 1),
-      };
-    }
+  if (rest.length === 0 && entry.toLowerCase().endsWith('.tool')) {
+    const repoRel = `${GROUPS_DIR}/${group}/${entry}`;
+    const catalogSlug = data.items.find(
+      (i) => i.kind === 'integration' && i.path === repoRel,
+    )?.id;
+    return <ToolPage slug={catalogSlug ?? entry.slice(0, -'.tool'.length)} />;
   }
-  return null;
+
+  // A direct FILE in the group folder (`access.md`, a stray upload) is the
+  // group's business, not a page of its own.
+  if (rest.length === 0 && /\.[a-z0-9]+$/i.test(entry)) {
+    return <Navigate to={pathForGroup(group)} replace />;
+  }
+
+  return <SkillPage name={entry} activeFile={rest.join('/') || 'SKILL.md'} />;
 }
 
 /** A malformed escape is a bad link, not a crash — fall back to the raw segment. */
