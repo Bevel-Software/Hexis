@@ -2010,8 +2010,13 @@ export class GitService implements IGitService {
       if (existsAtRef) {
         await this.git(cwd, ['checkout', ref, '--', repoRelativePath]);
       } else {
-        // `--ignore-unmatch`: already gone from the tree is the desired state.
-        await this.git(cwd, ['rm', '--force', '--ignore-unmatch', '--quiet', '--', repoRelativePath]);
+        // WORKING TREE only, never `git rm`: the follow-up `commitFile`
+        // stages via `git add -- <path>`, which can only stage a DELETION for
+        // a path the index still tracks. `git rm` dropped the index entry
+        // too, so the add matched nothing and the whole revert failed with
+        // "pathspec did not match any files". A tracked file missing from
+        // disk is exactly what `git add` records as deleted.
+        await fs.rm(path.join(cwd, repoRelativePath), { force: true });
       }
     });
   }
