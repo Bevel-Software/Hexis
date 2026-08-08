@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import type { FileApprovalState, PullRequestSummary } from '@bevel-software/platform-shared';
 
 /**
@@ -166,18 +166,35 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     await waitFor(() => expect(onResolved).toHaveBeenCalled());
   });
 
-  it("caps the author's description so a long one cannot crowd out the files", async () => {
+  it("folds a long description to one line: Read more opens it, Hide folds it back", async () => {
     // Agents write essays. The decision is made on the diff — the quote gets
-    // a bounded, self-scrolling box and the file grid keeps its space.
+    // one row by default and only what the reader asks for beyond it.
     detailMock.fetchPrDetail.mockResolvedValue({
       ...detailWith([approval({ isApproved: true })]),
       body: 'A 6-slide reading deck…\n'.repeat(80),
     });
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
-    const quote = await screen.findByText(/A 6-slide reading deck/);
-    const blockquote = quote.closest('blockquote')!;
-    expect(blockquote.className).toContain('max-h-');
-    expect(blockquote.className).toContain('overflow-y-auto');
+    const quote = (await screen.findByText(/A 6-slide reading deck/)).closest('blockquote')!;
+    expect(within(quote).getByText(/A 6-slide/).className).toContain('truncate');
+
+    fireEvent.click(within(quote).getByRole('button', { name: 'Read more' }));
+    expect(within(quote).getByText(/A 6-slide/).className).not.toContain('truncate');
+    // Even expanded, an essay scrolls within itself rather than pushing the
+    // file grid off screen.
+    expect(quote.className).toContain('overflow-y-auto');
+
+    fireEvent.click(within(quote).getByRole('button', { name: 'Hide' }));
+    expect(within(quote).getByText(/A 6-slide/).className).toContain('truncate');
+  });
+
+  it('a short description is just the line — no pointless Read more', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detailWith([approval({ isApproved: true })]),
+      body: 'Fixes a typo.',
+    });
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    await screen.findByText('Fixes a typo.');
+    expect(screen.queryByRole('button', { name: 'Read more' })).not.toBeInTheDocument();
   });
 
   it('offers no verbs to a viewer who cannot approve the file', async () => {
