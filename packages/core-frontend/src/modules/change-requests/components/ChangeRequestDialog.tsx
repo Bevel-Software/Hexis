@@ -319,6 +319,15 @@ export function ChangeRequestDialog({
   const author = changeAuthorName(cr);
   const firstName = author.split(' ')[0];
   const why = authorsReason(detail?.body);
+  const [whyExpanded, setWhyExpanded] = useState(false);
+  /**
+   * Whether the one-line view is actually hiding anything — a short reason
+   * with a pointless "Read more" beside it would be a button that does
+   * nothing visible. Length is a heuristic (true truncation depends on the
+   * viewport), erring toward showing the toggle: a newline always overflows a
+   * single line, and ~90 characters approximates one row of the quote.
+   */
+  const whyOverflows = !!why && (why.includes('\n') || why.length > 90);
 
   return (
     <div
@@ -354,14 +363,44 @@ export function ChangeRequestDialog({
             request carries no description — an empty quote block reads as the
             author having said nothing worth reading.
 
-            CAPPED, because agents write essays: the decision is made on the
-            diff below, and an unbounded description was crowding the file
-            grid (the dialog's one flexible region) down to a sliver. The
-            quote keeps its own scrollbar past ~a third of the surface, and
-            the files keep the rest. */}
+            ONE line by default, because agents write essays: the decision is
+            made on the diff below, and every line the description takes is a
+            line the file grid (the dialog's one flexible region) loses. Read
+            more opens the whole thing (self-scrolling past half the surface,
+            so even an essay never pushes the files off screen); Hide folds it
+            back to the line. */}
         {why && (
-          <blockquote className="mx-8 mt-5 max-h-[30vh] shrink-0 overflow-y-auto border-l-2 border-line-strong pl-4 text-body text-ink">
-            {why}
+          <blockquote
+            className={cn(
+              'mx-8 mt-5 shrink-0 border-l-2 border-line-strong pl-4 text-body text-ink',
+              whyExpanded && 'max-h-[50vh] overflow-y-auto',
+            )}
+          >
+            {whyExpanded ? (
+              <>
+                <span className="whitespace-pre-wrap">{why}</span>{' '}
+                <button
+                  type="button"
+                  className="text-detail font-medium text-ink-faint transition-colors hover:text-ink"
+                  onClick={() => setWhyExpanded(false)}
+                >
+                  Hide
+                </button>
+              </>
+            ) : (
+              <span className="flex items-baseline gap-3">
+                <span className="min-w-0 flex-1 truncate">{why}</span>
+                {whyOverflows && (
+                  <button
+                    type="button"
+                    className="shrink-0 text-detail font-medium text-ink-faint transition-colors hover:text-ink"
+                    onClick={() => setWhyExpanded(true)}
+                  >
+                    Read more
+                  </button>
+                )}
+              </span>
+            )}
           </blockquote>
         )}
 
