@@ -190,6 +190,11 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     const restored = await fs.readFile(path.join(repo, 'base.md'), 'utf8');
     expect(restored.replace(/\r\n/g, '\n')).toBe('base\n');
 
+    // Simulate the wreckage a previously-failed attempt leaves behind: a
+    // STAGED deletion (index entry gone). The restore must self-heal it —
+    // without the index realignment, the commit below fatals on `git add`.
+    await runGit(repo, ['rm', '--force', '--quiet', '--', 'added.md']);
+
     await git.restorePathFromRef(workspaceId, mergeBase!, 'added.md');
     await expect(fs.access(path.join(repo, 'added.md'))).rejects.toThrow();
 
