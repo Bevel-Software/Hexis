@@ -8,15 +8,22 @@ import { useEffect, useState } from 'react';
 import mammoth from 'mammoth/mammoth.browser.js';
 import { useWorkspace } from '../../state/workspace.context';
 import { authFetch } from '../../../../lib/api';
+import { sanitizeDocxHtml } from './sanitizeDocxHtml';
 import type { FileRendererProps } from './types';
 
 /**
  * Inline .docx viewer. Fetches the binary from `/api/workspace/:id/file/raw`,
- * runs it through mammoth's browser bundle to convert OOXML → HTML, then
- * drops the HTML straight into a Tailwind `prose` block. mammoth strips
- * scripts and unknown elements when it builds the HTML so the output is
- * safe to inject — the same approach `react-markdown` uses for sanitised
- * HTML in the markdown renderer.
+ * runs it through mammoth's browser bundle to convert OOXML → HTML, and
+ * renders the result in a Tailwind `prose` block.
+ *
+ * The HTML goes through {@link sanitizeDocxHtml} first, and that step is
+ * load-bearing rather than belt-and-braces. mammoth is a CONVERTER, not a
+ * sanitizer: it emits no `<script>` only because OOXML has no such element,
+ * while a hyperlink's target is copied verbatim from the document — so a
+ * crafted `.docx` can carry `href="javascript:…"` into THIS origin, where a
+ * single click would run it with the reader's session. The document is
+ * attacker-controlled input (anyone who can write to a folder can upload
+ * one), so it is sanitized like any other. See the sanitizer for the rules.
  *
  * View-only: there is no edit mode for binary office formats. The renderer
  * ignores `onSave` / `onValueChange` / `readOnly`.
@@ -48,7 +55,7 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
           value: string;
         };
         if (cancelled) return;
-        setHtml(result.value);
+        setHtml(sanitizeDocxHtml(result.value));
       } catch (e) {
         if (cancelled) return;
         setError(e instanceof Error ? e.message : String(e));
