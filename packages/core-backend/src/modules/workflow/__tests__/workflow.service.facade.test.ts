@@ -36,6 +36,7 @@ function makeWorkspaceService(): WorkspaceService {
     getWorkspacePath: vi.fn().mockResolvedValue('/tmp/ws'),
     sweepOrphanedWorkspaces: vi.fn().mockResolvedValue({ removed: [] }),
     getOrCreateForBranch: vi.fn(async (branch: string) => ({ id: encodeURIComponent(branch) })),
+    ensureRemotesFetched: vi.fn().mockResolvedValue(undefined),
     hasBootstrappedWorkspace: vi.fn().mockResolvedValue(false),
     deleteWorkspace: vi.fn().mockResolvedValue(undefined),
   } as unknown as WorkspaceService;
@@ -617,5 +618,53 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
     await expect(svc.closeEmptyChangeRequest(7, makeUser())).resolves.toBe(true);
     expect(db.update).toHaveBeenCalled();
     expect(prs.invalidateDetailCache).toHaveBeenCalledWith(7);
+  });
+});
+
+describe('WorkflowService — deleteChangeRequest (admin moderation verb)', () => {
+  function makeDeleteHarness(opts: { isAdmin?: boolean; prState?: string } = {}) {
+    const git = Object.assign(makeGit(), {
+      changedPathsForPr: vi.fn().mockResolvedValue(['Docs/a.md']),
+    }) as unknown as GitService;
+    const prs = makePrs();
+    (prs.getPr as ReturnType<typeof vi.fn>).mockResolvedValue({
+      number: 9,
+      base: 'main',
+      branch: 'mallory/spam',
+      state: opts.prState ?? 'open',
+    });
+    const access = makeAccessControl();
+    (access.canWriteAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(opts.isAdmin ?? false);
+    const chain: Record<string, unknown> = {};
+    Object.assign(chain, {
+      select: vi.fn(() => chain),
+      from: vi.fn(() => chain),
+      where: vi.fn(() => chain),
+      limit: vi.fn(async () => []),
+      update: vi.fn(() => chain),
+      set: vi.fn(() => chain),
+      returning: vi.fn(async () => [{ id: 1 }]),
+    });
+    const svc = new WorkflowService(chain as unknown as Database, git, prs, makeReviewWorkflow(), makeWorkspaceService(), access, makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    return { svc, prs, db: chain, access };
+  }
+
+  it('refuses a non-admin with 403 and touches nothing', async () => {
+    const { svc, db } = makeDeleteHarness({ isAdmin: false });
+    await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toMatchObject({ status: 403 });
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it('an admin closes the request (row flipped, cache dropped)', async () => {
+    const { svc, prs, db } = makeDeleteHarness({ isAdmin: true });
+    await svc.deleteChangeRequest(9, makeUser());
+    expect(db.update).toHaveBeenCalled();
+    expect(prs.invalidateDetailCache).toHaveBeenCalledWith(9);
+  });
+
+  it('refuses a merged request — applied history is not deletable', async () => {
+    const { svc, db } = makeDeleteHarness({ isAdmin: true, prState: 'merged' });
+    await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toMatchObject({ status: 422 });
+    expect(db.update).not.toHaveBeenCalled();
   });
 });

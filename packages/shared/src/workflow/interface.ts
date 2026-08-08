@@ -352,6 +352,13 @@ export interface IWorkflowService {
   closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean>;
 
   /**
+   * Delete a change request outright: close it and retire its source branch.
+   * Admin-only (write on `roles.yaml` at `origin/<base>`); refuses a merged
+   * request.
+   */
+  deleteChangeRequest(number: number, user: AuthUser): Promise<void>;
+
+  /**
    * Reject a change request without merging. Authorized for the author or
    * for users with write permission to every changed file on the target
    * branch.

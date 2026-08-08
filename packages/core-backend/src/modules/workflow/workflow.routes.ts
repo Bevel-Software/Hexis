@@ -544,6 +544,27 @@ export function createWorkflowRoutes(
   });
 
   /**
+   * Delete a change request outright — close it and retire its source
+   * branch. Admin-only; the moderation verb for a shared deployment.
+   */
+  router.delete('/workflow/change-requests/:number', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      await workflow.deleteChangeRequest(num, user);
+      res.json({ deleted: true });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
    * Decline ONE file of a change request: restore its merge-base version on
    * the source branch, dropping it from the request's diff. Takes the same
    * permission as approving the file. When the last file is declined the

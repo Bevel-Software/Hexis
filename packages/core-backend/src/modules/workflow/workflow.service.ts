@@ -1443,6 +1443,54 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
+   * DELETE a change request outright: close it (whatever its diff says) and
+   * retire its source branch — the request, its proposal, and the branch that
+   * carried it are gone in one verb. Admin-only, resolved the same way every
+   * other admin check here is (write on `roles.yaml` at `origin/<base>`,
+   * never a local ref): this is the moderation verb for a shared deployment,
+   * stronger than reject (which the author or the files' owners can do, and
+   * which leaves the branch for a second round).
+   */
+  async deleteChangeRequest(number: number, user: AuthUser): Promise<void> {
+    const summary = await this.prs.getPr(number);
+    if (!summary) throw new WorkflowDomainError('change request not found', 404);
+    if (summary.state === 'merged') {
+      throw new WorkflowDomainError('This change request has already been applied.', 422);
+    }
+
+    const ws = await this.workspaceService.getOrCreateForBranch(summary.base);
+    await this.workspaceService.ensureRemotesFetched(ws.id).catch(() => undefined);
+    const isAdmin = await this.accessControl.canWriteAtRef(
+      ws.id,
+      `origin/${summary.base}`,
+      user.email,
+      'roles.yaml',
+    );
+    if (isAdmin !== true) {
+      throw new WorkflowDomainError('Only an admin can delete a change request.', 403);
+    }
+
+    // Close first (idempotent: an already-closed request just skips to the
+    // branch retirement). Guarded on `open` so a concurrent merge wins.
+    const now = new Date();
+    const updated = await this.db
+      .update(changeRequests)
+      .set({ state: 'closed', closedAt: now, updatedAt: now })
+      .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
+      .returning({ id: changeRequests.id });
+    if (updated.length > 0) {
+      this.prs.invalidateDetailCache(number);
+      this.events?.emit({ kind: 'change-request-rejected', number });
+    } else {
+      const fresh = await this.prs.getPr(number);
+      if (fresh?.state === 'merged') {
+        throw new WorkflowDomainError('This change request has already been applied.', 422);
+      }
+    }
+    await this.retireMergedSourceBranch(number, summary.base, user);
+  }
+
+  /**
    * Close an open change request whose diff has EMPTIED — everything it
    * proposed has since landed on the target, been reverted, or been undone on
    * its own branch — and retire its source branch, exactly as a merge would
