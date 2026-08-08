@@ -166,6 +166,20 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     await waitFor(() => expect(onResolved).toHaveBeenCalled());
   });
 
+  it("caps the author's description so a long one cannot crowd out the files", async () => {
+    // Agents write essays. The decision is made on the diff — the quote gets
+    // a bounded, self-scrolling box and the file grid keeps its space.
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detailWith([approval({ isApproved: true })]),
+      body: 'A 6-slide reading deck…\n'.repeat(80),
+    });
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    const quote = await screen.findByText(/A 6-slide reading deck/);
+    const blockquote = quote.closest('blockquote')!;
+    expect(blockquote.className).toContain('max-h-');
+    expect(blockquote.className).toContain('overflow-y-auto');
+  });
+
   it('offers no verbs to a viewer who cannot approve the file', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(detailWith([approval({})]));
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);

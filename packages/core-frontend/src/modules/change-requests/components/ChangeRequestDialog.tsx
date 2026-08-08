@@ -352,9 +352,15 @@ export function ChangeRequestDialog({
 
         {/* Why, in the author's words. Omitted rather than faked when the
             request carries no description — an empty quote block reads as the
-            author having said nothing worth reading. */}
+            author having said nothing worth reading.
+
+            CAPPED, because agents write essays: the decision is made on the
+            diff below, and an unbounded description was crowding the file
+            grid (the dialog's one flexible region) down to a sliver. The
+            quote keeps its own scrollbar past ~a third of the surface, and
+            the files keep the rest. */}
         {why && (
-          <blockquote className="mx-8 mt-5 border-l-2 border-line-strong pl-4 text-body text-ink">
+          <blockquote className="mx-8 mt-5 max-h-[30vh] shrink-0 overflow-y-auto border-l-2 border-line-strong pl-4 text-body text-ink">
             {why}
           </blockquote>
         )}
