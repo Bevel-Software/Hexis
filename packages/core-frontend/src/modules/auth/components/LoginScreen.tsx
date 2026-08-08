@@ -131,6 +131,27 @@ export function LoginScreen() {
             {provider.label}
           </button>
         ))}
+
+        {/*
+          Single sign-on auto-provisions an account on first use, so the
+          address Google returns is stored here — and the button above says
+          "Single sign-on", not "Google", so nobody can infer that from it.
+          Say it before the click, not after, and name the erasure route in
+          the same breath (GDPR Art. 17) rather than burying it elsewhere.
+        */}
+        {ssoProviders.length > 0 && (
+          <p className="text-xs text-ink-muted text-center">
+            Signing in with Google saves your email address to this demo. To have it deleted,
+            email{' '}
+            <a
+              href="mailto:razvan.radulescu@bevel.software?subject=Delete%20my%20demo%20account"
+              className="text-accent hover:underline"
+            >
+              razvan.radulescu@bevel.software
+            </a>
+            .
+          </p>
+        )}
       </form>
     </div>
   );

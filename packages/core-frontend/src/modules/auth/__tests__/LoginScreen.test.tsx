@@ -71,6 +71,28 @@ describe('LoginScreen', () => {
     expect(screen.queryByLabelText(/Email/)).not.toBeInTheDocument();
   });
 
+  it('discloses that SSO stores the email address, with an erasure contact', async () => {
+    vi.mocked(fetchLoginProviders).mockResolvedValue({
+      password: true,
+      sso: [{ key: 'oidc', label: 'Single sign-on', startPath: '/api/auth/oidc/login' }],
+    });
+    renderScreen();
+    await waitFor(() => {
+      expect(screen.getByText(/saves your email address/i)).toBeInTheDocument();
+    });
+    expect(screen.getByRole('link', { name: 'razvan.radulescu@bevel.software' })).toHaveAttribute(
+      'href',
+      expect.stringContaining('mailto:razvan.radulescu@bevel.software'),
+    );
+  });
+
+  it('omits the SSO notice when no SSO provider is advertised', async () => {
+    vi.mocked(fetchLoginProviders).mockResolvedValue({ password: true, sso: [] });
+    renderScreen();
+    await waitFor(() => screen.getByRole('button', { name: 'Sign in' }));
+    expect(screen.queryByText(/saves your email address/i)).not.toBeInTheDocument();
+  });
+
   it('submits email + password through the auth context', async () => {
     vi.mocked(fetchLoginProviders).mockResolvedValue({ password: true, sso: [] });
     renderScreen();
