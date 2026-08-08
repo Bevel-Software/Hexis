@@ -5,11 +5,12 @@ import {
   type PullRequestSummary,
 } from '@bevel-software/platform-shared';
 import '../change-requests.css';
-import { Badge, Banner, Button, Surface } from '../../../shared/components';
+import { Banner, Button, Surface } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
-import { approvePrFile, revertPrFile } from '../../pr/services/pr-approvals.api';
+import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/pr-approvals.api';
+import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
 import { changeAuthorName } from '../utils/author';
@@ -19,6 +20,7 @@ import { useDefaultBranchFile } from '../hooks/useFileOnBranch';
 import { diffLines, type DiffLine } from '../utils/diff';
 import { isBinaryFile } from '../../workspace/components/renderers';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
+import { CrFileTree, type CrTreeFileState } from './CrFileTree';
 
 /**
  * Extra context for the file list — NOT a filter. The dialog always shows
@@ -224,7 +226,6 @@ export function ChangeRequestDialog({
     () => new Map((detail?.approvals ?? []).map((a) => [a.path, a])),
     [detail],
   );
-  const selectedApproval = approvalByPath.get(selected);
 
   /**
    * The old CR system's rule, restored: Apply exists only when every file is
@@ -238,36 +239,35 @@ export function ChangeRequestDialog({
     detail.approvals.length > 0 &&
     detail.approvals.every((a) => a.isApproved || a.viewerCanApprove);
 
-  /** Accept / revert verbs — per file, the reviewer's scalpel. */
-  const [verbBusy, setVerbBusy] = useState<'accept' | 'revert' | null>(null);
-  const [confirmRevert, setConfirmRevert] = useState(false);
+  /** Approve / revert verbs — per file, from the tree. */
+  const [verbBusy, setVerbBusy] = useState(false);
   const [verbError, setVerbError] = useState<string | null>(null);
   useEffect(() => {
-    // A different file is a different decision — reset the confirm step.
-    setConfirmRevert(false);
     setVerbError(null);
   }, [selected]);
 
-  async function acceptSelected() {
+  async function toggleApprove(path: string, approved: boolean) {
     if (!detail || verbBusy) return;
-    setVerbBusy('accept');
+    setVerbBusy(true);
     setVerbError(null);
     try {
-      const approvals = await approvePrFile(cr.number, selected);
+      const approvals = approved
+        ? await unapprovePrFile(cr.number, path)
+        : await approvePrFile(cr.number, path);
       setDetail((d) => (d ? { ...d, approvals } : d));
     } catch (err) {
-      setVerbError(err instanceof Error ? err.message : "Couldn't accept this file.");
+      setVerbError(err instanceof Error ? err.message : "Couldn't record that.");
     } finally {
-      setVerbBusy(null);
+      setVerbBusy(false);
     }
   }
 
-  async function revertSelected() {
+  async function revertFile(path: string) {
     if (!detail || verbBusy) return;
-    setVerbBusy('revert');
+    setVerbBusy(true);
     setVerbError(null);
     try {
-      const result = await revertPrFile(cr.number, selected);
+      const result = await revertPrFile(cr.number, path);
       if (result.closed) {
         // That was the last file: the request closed itself and its branch
         // is retired. The dialog's subject is gone — leave through the same
@@ -278,10 +278,10 @@ export function ChangeRequestDialog({
       // The file is out of the diff; the branch copy we cached for it is
       // stale. Refetch the detail and drop the cached read so a re-selection
       // (via the scope's baseFiles) reads the restored content.
-      asked.current.delete(selected);
+      asked.current.delete(path);
       setBranchContents((c) => {
         const next = { ...c };
-        delete next[selected];
+        delete next[path];
         return next;
       });
       setPicked(null);
@@ -289,8 +289,40 @@ export function ChangeRequestDialog({
     } catch (err) {
       setVerbError(err instanceof Error ? err.message : "Couldn't revert this file.");
     } finally {
-      setVerbBusy(null);
-      setConfirmRevert(false);
+      setVerbBusy(false);
+    }
+  }
+
+  /** The tree's per-file state, in the file list's order. */
+  const treeFiles: CrTreeFileState[] = useMemo(
+    () =>
+      allFiles.map((path) => ({
+        path,
+        changed: changedFiles.has(path),
+        added: addedFiles.includes(path),
+        approval: approvalByPath.get(path),
+      })),
+    [allFiles, changedFiles, addedFiles, approvalByPath],
+  );
+
+  /** The footer's verdicts: apply plainly, apply by covering, or wait. */
+  const allApproved =
+    detail !== null && detail.approvals.length > 0 && detail.approvals.every((a) => a.isApproved);
+
+  /** Admin-only: delete the request and its branch, with an armed confirm. */
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  async function deleteRequest() {
+    if (deleting) return;
+    setDeleting(true);
+    setVerbError(null);
+    try {
+      await deleteChangeRequest(cr.number);
+      onResolved();
+    } catch (err) {
+      setVerbError(err instanceof Error ? err.message : "Couldn't delete this change request.");
+      setDeleting(false);
+      setDeleteArmed(false);
     }
   }
 
@@ -342,7 +374,7 @@ export function ChangeRequestDialog({
         tone="surface"
         radius="2xl"
         elevation="overlay"
-        className="relative mx-auto mt-[4vh] mb-[4vh] flex h-[92vh] w-full max-w-5xl flex-col overflow-hidden"
+        className="relative mx-auto mt-[4vh] mb-[4vh] flex h-[92vh] w-full max-w-6xl flex-col overflow-hidden"
       >
         <div className="flex items-start gap-4 px-8 pt-7">
           <div className="min-w-0 flex-1">
@@ -453,42 +485,21 @@ export function ChangeRequestDialog({
         <>
         {/* The folder on the left, the file with the change marked in it on the
             right — the same reading as version history. */}
-        <div className="mt-4 grid min-h-0 flex-1 grid-cols-[13.5rem_minmax(0,1fr)] gap-7 px-8">
+        <div className="mt-4 grid min-h-0 flex-1 grid-cols-[17rem_minmax(0,1fr)] gap-7 px-8">
           <Surface
             tone="surface"
             radius="lg"
             elevation="none"
-            className="self-start overflow-y-auto p-2.5"
+            className="max-h-full self-start overflow-y-auto p-2"
           >
-            {allFiles.map((rel) => {
-              const added = addedFiles.includes(rel);
-              const on = selected === rel;
-              return (
-                <button
-                  key={rel}
-                  type="button"
-                  className={cn(
-                    'flex w-full items-center gap-2 rounded-sm px-2.5 py-1.5 text-left font-mono text-meta transition-colors',
-                    on ? 'bg-hover font-semibold text-ink' : 'text-ink-muted hover:bg-hover',
-                  )}
-                  onClick={() => setSelected(rel)}
-                >
-                  <span className="truncate">{rel}</span>
-                  {added ? (
-                    <Badge tone="ok" size="xs" className="ml-auto shrink-0">
-                      New
-                    </Badge>
-                  ) : (
-                    changedFiles.has(rel) && (
-                      <span
-                        className="ml-auto size-1.5 shrink-0 rounded-full bg-wait-dot"
-                        title="Changed in this request"
-                      />
-                    )
-                  )}
-                </button>
-              );
-            })}
+            <CrFileTree
+              files={treeFiles}
+              selected={selected}
+              onSelect={(p) => setSelected(p)}
+              onToggleApprove={(p, approved) => void toggleApprove(p, approved)}
+              onRevert={(p) => void revertFile(p)}
+              busy={verbBusy}
+            />
           </Surface>
 
           <div className="flex min-h-0 flex-col">
@@ -501,60 +512,6 @@ export function ChangeRequestDialog({
                     ? ' · what changes is marked'
                     : ' · not touched by this request'}
               </span>
-              {/* The reviewer's per-file verdict: take this file, or decline
-                  it. Both verbs carry the same permission (eligible approver),
-                  so they appear together or not at all. Revert rewrites the
-                  AUTHOR's branch — hence the explicit second click. */}
-              {touchesSelected && selectedApproval && (
-                <span className="ml-auto flex shrink-0 items-center gap-2">
-                  {selectedApproval.isApproved ? (
-                    <Badge tone="ok" size="xs">
-                      Accepted
-                    </Badge>
-                  ) : (
-                    selectedApproval.viewerCanApprove && (
-                      <Button
-                        variant="quiet"
-                        size="tiny"
-                        disabled={verbBusy !== null}
-                        onClick={() => void acceptSelected()}
-                      >
-                        {verbBusy === 'accept' ? 'Accepting…' : 'Accept file'}
-                      </Button>
-                    )
-                  )}
-                  {selectedApproval.viewerCanApprove &&
-                    (confirmRevert ? (
-                      <>
-                        <Button
-                          variant="danger"
-                          size="tiny"
-                          disabled={verbBusy !== null}
-                          onClick={() => void revertSelected()}
-                        >
-                          {verbBusy === 'revert' ? 'Reverting…' : 'Revert this file?'}
-                        </Button>
-                        <Button
-                          variant="quiet"
-                          size="tiny"
-                          disabled={verbBusy !== null}
-                          onClick={() => setConfirmRevert(false)}
-                        >
-                          Keep
-                        </Button>
-                      </>
-                    ) : (
-                      <Button
-                        variant="quiet"
-                        size="tiny"
-                        disabled={verbBusy !== null}
-                        onClick={() => setConfirmRevert(true)}
-                      >
-                        Revert file
-                      </Button>
-                    ))}
-                </span>
-              )}
             </div>
             {verbError && (
               <Banner tone="danger" role="alert" className="mb-2">
@@ -610,11 +567,40 @@ export function ChangeRequestDialog({
                     : detail.mergeWarnings[0] ??
                       'Waiting on approval from the files’ owners — applying is theirs to do.'}
           </p>
+          {/* Admins carry the moderation verb: delete the request AND its
+              branch, armed on the first click. `viewerCanBypassMerge` is the
+              server's admin verdict — the DELETE route re-checks it. */}
+          {!blocked && detail?.viewerCanBypassMerge && (
+            deleteArmed ? (
+              <>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  disabled={deleting}
+                  onClick={() => void deleteRequest()}
+                >
+                  {deleting ? 'Deleting…' : 'Really delete request and branch?'}
+                </Button>
+                <Button variant="quiet" size="sm" disabled={deleting} onClick={() => setDeleteArmed(false)}>
+                  Keep
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="quiet"
+                size="sm"
+                className="text-danger"
+                onClick={() => setDeleteArmed(true)}
+              >
+                Delete request
+              </Button>
+            )
+          )}
           {/* Apply exists only when the viewer can actually deliver the
-              verdict: every file approved, or approvable by them (their click
-              records the missing approvals first — see useApplyChangeRequest).
-              Anyone else gets the waiting line above, not a button that walks
-              into the gate's refusal. */}
+              verdict. All files approved → plain Apply. Some not yet approved
+              but every one of them approvable BY THIS VIEWER (write access) →
+              the same click, named for what it is: their authority covers the
+              missing approvals. Anyone else gets the waiting line above. */}
           {!blocked && canApply && (
             <Button
               variant="primary"
@@ -622,7 +608,7 @@ export function ChangeRequestDialog({
               disabled={applyBusy}
               onClick={() => applying.apply(cr)}
             >
-              {applyBusy ? applyLabel : 'Apply changes'}
+              {applyBusy ? applyLabel : allApproved ? 'Apply changes' : 'Bypass approval and apply'}
             </Button>
           )}
         </div>
