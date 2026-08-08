@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import type { FileApprovalState, PullRequestSummary } from '@bevel-software/platform-shared';
 
 /**
@@ -16,15 +16,21 @@ vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: detailMock.fe
 vi.mock('../services/change-requests.api', () => ({
   readFileOnBranch: vi.fn(async () => 'branch copy'),
 }));
-const approvalsApi = vi.hoisted(() => ({ approvePrFile: vi.fn(), revertPrFile: vi.fn() }));
+const approvalsApi = vi.hoisted(() => ({ approvePrFile: vi.fn(), revertPrFile: vi.fn(), unapprovePrFile: vi.fn() }));
 vi.mock('../../pr/services/pr-approvals.api', () => ({
   approvePrFile: approvalsApi.approvePrFile,
   revertPrFile: approvalsApi.revertPrFile,
-  unapprovePrFile: vi.fn(),
+  unapprovePrFile: approvalsApi.unapprovePrFile,
 }));
 vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: vi.fn() }));
+const cancelApi = vi.hoisted(() => ({ deleteChangeRequest: vi.fn() }));
+vi.mock('../../pr/services/pr-cancel.api', () => ({
+  cancelPullRequest: vi.fn(),
+  deleteChangeRequest: cancelApi.deleteChangeRequest,
+}));
 
 import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
+import { AuthContext } from '../../auth/state/auth.context';
 
 const CR: PullRequestSummary = {
   number: 12,
@@ -124,18 +130,32 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
   });
 
-  it('shows Apply when every file is approved or approvable by the viewer', async () => {
+  it('all files approved → plain Apply; approvable-but-unapproved → Bypass approval and apply', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(
       detailWith([
         approval({ path: 'Docs/a.md', isApproved: true }),
         approval({ path: 'Docs/b.md', viewerCanApprove: true }),
       ]),
     );
+    const first = render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    // One file still needs an approval the viewer's write access can cover —
+    // the button says what the click actually does.
+    expect(
+      await screen.findByRole('button', { name: 'Bypass approval and apply' }),
+    ).toBeInTheDocument();
+    first.unmount();
+
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({ path: 'Docs/a.md', isApproved: true }),
+        approval({ path: 'Docs/b.md', isApproved: true }),
+      ]),
+    );
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
     expect(await screen.findByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
   });
 
-  it('Accept file records the approval and the badge takes its place', async () => {
+  it('the tree row confirms in one click and shows the confirmed badge', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(
       detailWith([approval({ viewerCanApprove: true })]),
     );
@@ -143,13 +163,39 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
       approval({ viewerCanApprove: true, isApproved: true }),
     ]);
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Accept file' }));
-    expect(await screen.findByText('Accepted')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Docs/a.md' }));
     expect(approvalsApi.approvePrFile).toHaveBeenCalledWith(12, 'Docs/a.md');
-    expect(screen.queryByRole('button', { name: 'Accept file' })).not.toBeInTheDocument();
+    // The presplit anatomy: approval STATE lands as the inline green badge.
+    expect(await screen.findByRole('img', { name: /Confirmed by/ })).toBeInTheDocument();
   });
 
-  it('Revert asks first; reverting the last file resolves the dialog', async () => {
+  it("the viewer's own confirmation offers the withdraw action", async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({
+          viewerCanApprove: true,
+          isApproved: true,
+          approvedBy: [
+            { email: 'olga@bevel.software', name: 'Olga', approvedAt: '', isStale: false, isSelfApproval: false },
+          ],
+        }),
+      ]),
+    );
+    approvalsApi.unapprovePrFile.mockResolvedValue([approval({ viewerCanApprove: true })]);
+    render(
+      <AuthContext.Provider
+        value={{ user: { id: 'u1', email: 'olga@bevel.software', name: 'Olga' } } as never}
+      >
+        <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />
+      </AuthContext.Provider>,
+    );
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Withdraw your confirmation of Docs/a.md' }),
+    );
+    await waitFor(() => expect(approvalsApi.unapprovePrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
+  });
+
+  it('right-click reverts, with its own confirm; the last file resolves the dialog', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(
       detailWith([approval({ viewerCanApprove: true })]),
     );
@@ -157,13 +203,68 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     const onResolved = vi.fn();
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={onResolved} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Revert file' }));
-    // Nothing sent yet — the second click is the verdict.
+    fireEvent.contextMenu(await screen.findByTitle('Docs/a.md'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revert file…' }));
+    // Nothing sent yet — the armed second click is the verdict.
     expect(approvalsApi.revertPrFile).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Revert this file?' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Really revert this file?' }));
 
     await waitFor(() => expect(approvalsApi.revertPrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
     await waitFor(() => expect(onResolved).toHaveBeenCalled());
+  });
+
+  it('Delete request appears for admins only, arms, then deletes and resolves', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detailWith([approval({})]),
+      viewerCanBypassMerge: true,
+    });
+    cancelApi.deleteChangeRequest.mockResolvedValue(undefined);
+    const onResolved = vi.fn();
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={onResolved} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete request' }));
+    expect(cancelApi.deleteChangeRequest).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Really delete request and branch?' }));
+    await waitFor(() => expect(cancelApi.deleteChangeRequest).toHaveBeenCalledWith(12));
+    await waitFor(() => expect(onResolved).toHaveBeenCalled());
+  });
+
+  it('no Delete request for non-admins', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(detailWith([approval({})]));
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    await screen.findByText(/Waiting on approval/);
+    expect(screen.queryByRole('button', { name: 'Delete request' })).not.toBeInTheDocument();
+  });
+
+  it("folds a long description to one line: Read more opens it, Hide folds it back", async () => {
+    // Agents write essays. The decision is made on the diff — the quote gets
+    // one row by default and only what the reader asks for beyond it.
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detailWith([approval({ isApproved: true })]),
+      body: 'A 6-slide reading deck…\n'.repeat(80),
+    });
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    const quote = (await screen.findByText(/A 6-slide reading deck/)).closest('blockquote')!;
+    expect(within(quote).getByText(/A 6-slide/).className).toContain('truncate');
+
+    fireEvent.click(within(quote).getByRole('button', { name: 'Read more' }));
+    expect(within(quote).getByText(/A 6-slide/).className).not.toContain('truncate');
+    // Even expanded, an essay scrolls within itself rather than pushing the
+    // file grid off screen.
+    expect(quote.className).toContain('overflow-y-auto');
+
+    fireEvent.click(within(quote).getByRole('button', { name: 'Hide' }));
+    expect(within(quote).getByText(/A 6-slide/).className).toContain('truncate');
+  });
+
+  it('a short description is just the line — no pointless Read more', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue({
+      ...detailWith([approval({ isApproved: true })]),
+      body: 'Fixes a typo.',
+    });
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    await screen.findByText('Fixes a typo.');
+    expect(screen.queryByRole('button', { name: 'Read more' })).not.toBeInTheDocument();
   });
 
   it('offers no verbs to a viewer who cannot approve the file', async () => {

@@ -17,3 +17,14 @@ export async function cancelPullRequest(prNumber: number): Promise<CancelPrResul
     }),
   );
 }
+
+/**
+ * Delete a change request outright: close it AND retire its source branch.
+ * Admin-only — the server refuses everyone else; callers gate the button on
+ * `detail.viewerCanBypassMerge`, the same admin verdict.
+ */
+export async function deleteChangeRequest(prNumber: number): Promise<void> {
+  await handleApiResponse(
+    await authFetch(`/api/workflow/change-requests/${prNumber}`, { method: 'DELETE' }),
+  );
+}
