@@ -192,5 +192,21 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
 
     await git.restorePathFromRef(workspaceId, mergeBase!, 'added.md');
     await expect(fs.access(path.join(repo, 'added.md'))).rejects.toThrow();
+
+    // The chain that actually failed in production: committing the DELETION
+    // through commitFile, whose `git add -- <path>` can only stage it while
+    // the index still tracks the path — a `git rm`-based restore broke here
+    // with "pathspec did not match any files".
+    const committed = await git.commitFile(
+      workspaceId,
+      { id: 'u1', email: 'reviewer@x.com', name: 'Reviewer' },
+      'added.md',
+      'Revert added.md (declined in change request #1)',
+      true,
+    );
+    expect(committed).not.toBeNull();
+    await expect(
+      execFileAsync('git', ['-C', repo, 'cat-file', '-e', 'HEAD:added.md']),
+    ).rejects.toThrow();
   });
 });
