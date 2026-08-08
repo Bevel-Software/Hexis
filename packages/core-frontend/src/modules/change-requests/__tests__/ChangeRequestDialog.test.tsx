@@ -16,11 +16,11 @@ vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: detailMock.fe
 vi.mock('../services/change-requests.api', () => ({
   readFileOnBranch: vi.fn(async () => 'branch copy'),
 }));
-const approvalsApi = vi.hoisted(() => ({ approvePrFile: vi.fn(), revertPrFile: vi.fn() }));
+const approvalsApi = vi.hoisted(() => ({ approvePrFile: vi.fn(), revertPrFile: vi.fn(), unapprovePrFile: vi.fn() }));
 vi.mock('../../pr/services/pr-approvals.api', () => ({
   approvePrFile: approvalsApi.approvePrFile,
   revertPrFile: approvalsApi.revertPrFile,
-  unapprovePrFile: vi.fn(),
+  unapprovePrFile: approvalsApi.unapprovePrFile,
 }));
 vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: vi.fn() }));
 const cancelApi = vi.hoisted(() => ({ deleteChangeRequest: vi.fn() }));
@@ -30,6 +30,7 @@ vi.mock('../../pr/services/pr-cancel.api', () => ({
 }));
 
 import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
+import { AuthContext } from '../../auth/state/auth.context';
 
 const CR: PullRequestSummary = {
   number: 12,
@@ -154,7 +155,7 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     expect(await screen.findByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
   });
 
-  it('the tree checkbox approves in one click, and unapproves on the next', async () => {
+  it('the tree row confirms in one click and shows the confirmed badge', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(
       detailWith([approval({ viewerCanApprove: true })]),
     );
@@ -162,10 +163,36 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
       approval({ viewerCanApprove: true, isApproved: true }),
     ]);
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Approve Docs/a.md' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Docs/a.md' }));
     expect(approvalsApi.approvePrFile).toHaveBeenCalledWith(12, 'Docs/a.md');
-    // Approved: the same control now offers the takeback.
-    expect(await screen.findByRole('button', { name: 'Unapprove Docs/a.md' })).toBeInTheDocument();
+    // The presplit anatomy: approval STATE lands as the inline green badge.
+    expect(await screen.findByRole('img', { name: /Confirmed by/ })).toBeInTheDocument();
+  });
+
+  it("the viewer's own confirmation offers the withdraw action", async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({
+          viewerCanApprove: true,
+          isApproved: true,
+          approvedBy: [
+            { email: 'olga@bevel.software', name: 'Olga', approvedAt: '', isStale: false, isSelfApproval: false },
+          ],
+        }),
+      ]),
+    );
+    approvalsApi.unapprovePrFile.mockResolvedValue([approval({ viewerCanApprove: true })]);
+    render(
+      <AuthContext.Provider
+        value={{ user: { id: 'u1', email: 'olga@bevel.software', name: 'Olga' } } as never}
+      >
+        <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />
+      </AuthContext.Provider>,
+    );
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Withdraw your confirmation of Docs/a.md' }),
+    );
+    await waitFor(() => expect(approvalsApi.unapprovePrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
   });
 
   it('right-click reverts, with its own confirm; the last file resolves the dialog', async () => {

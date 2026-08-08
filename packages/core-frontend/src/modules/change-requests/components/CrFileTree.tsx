@@ -1,21 +1,36 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ChevronRight } from 'lucide-react';
-import type { FileApprovalState } from '@bevel-software/platform-shared';
-import { Badge } from '../../../shared/components';
+import {
+  ArrowRightLeft,
+  Check,
+  ChevronRight,
+  Clock,
+  File,
+  FileEdit,
+  FilePlus2,
+  FileX2,
+  X,
+} from 'lucide-react';
+import type { FileApprovalState, PrFileStatus } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 
 /**
- * The change request's files as a TREE — the same visual grammar as the
- * Knowledge sidebar (indent is the structure, a caret slot per row, quiet
- * rows), because a reviewer who lives in one tree should not have to learn a
- * second one here.
+ * The change request's files as a TREE — the Knowledge sidebar's visual
+ * grammar (indent is the structure, caret slots, quiet rows), carrying the
+ * OLD change-request view's row anatomy (bevel-platform-presplit
+ * `PrFileRow`), which got this right:
  *
- * The tree is also the review surface's fast path: every file the viewer may
- * approve carries a green check control on its row — approving is ONE click,
- * where it used to live behind selecting the file first — and a right-click
- * on a revertable file offers the destructive verb with its own confirm
- * step. Selection (which file the diff pane shows) stays a plain click on
- * the name.
+ *  - LEFT of the name: what HAPPENED to the file (added / removed / modified
+ *    kind icon, colour-coded), never a control.
+ *  - INLINE after the name: the approval STATE — green ✓ confirmed, amber
+ *    clock for outdated confirmations, grey clock waiting — with the
+ *    eligible approvers in the tooltip.
+ *  - RIGHT, revealed on hover: the ACTION for eligible viewers — a filled
+ *    green check to confirm the file, turning into an ✕ (withdraw) once
+ *    YOUR confirmation is the current one.
+ *
+ * Right-click a revertable file for the destructive verb, armed inside its
+ * own context menu. Selection (which file the diff shows) stays a plain
+ * click on the name.
  */
 
 export interface CrTreeFileState {
@@ -25,15 +40,19 @@ export interface CrTreeFileState {
   changed: boolean;
   /** Added by this request. */
   added: boolean;
+  /** Git status when changed (drives the kind icon). */
+  status?: PrFileStatus;
   approval?: FileApprovalState;
 }
 
 interface CrFileTreeProps {
   files: CrTreeFileState[];
   selected: string;
+  /** The viewer — whose own current confirmation the withdraw action needs. */
+  currentUserEmail: string;
   onSelect(path: string): void;
-  /** Toggle the viewer's approval of `path`. Only called when approvable. */
-  onToggleApprove(path: string, approved: boolean): void;
+  /** Confirm `path`, or withdraw the viewer's own confirmation of it. */
+  onToggleApprove(path: string, hasOwnApproval: boolean): void;
   /** Revert `path` on the source branch. Only called when approvable+changed. */
   onRevert(path: string): void;
   /** Disables the verbs while one is in flight. */
@@ -72,7 +91,15 @@ function buildTree(files: CrTreeFileState[]): TreeFolder {
 
 const indentFor = (depth: number) => 8 + depth * 13;
 
-export function CrFileTree({ files, selected, onSelect, onToggleApprove, onRevert, busy }: CrFileTreeProps) {
+export function CrFileTree({
+  files,
+  selected,
+  currentUserEmail,
+  onSelect,
+  onToggleApprove,
+  onRevert,
+  busy,
+}: CrFileTreeProps) {
   const tree = useMemo(() => buildTree(files), [files]);
   const [closed, setClosed] = useState<Set<string>>(new Set());
   const [menu, setMenu] = useState<{ path: string; x: number; y: number } | null>(null);
@@ -92,6 +119,7 @@ export function CrFileTree({ files, selected, onSelect, onToggleApprove, onRever
           })
         }
         selected={selected}
+        currentUserEmail={currentUserEmail}
         onSelect={onSelect}
         onToggleApprove={onToggleApprove}
         onContextMenu={(path, e) => {
@@ -121,6 +149,7 @@ function Level({
   closed,
   onToggleFolder,
   selected,
+  currentUserEmail,
   onSelect,
   onToggleApprove,
   onContextMenu,
@@ -131,8 +160,9 @@ function Level({
   closed: Set<string>;
   onToggleFolder(path: string): void;
   selected: string;
+  currentUserEmail: string;
   onSelect(path: string): void;
-  onToggleApprove(path: string, approved: boolean): void;
+  onToggleApprove(path: string, hasOwnApproval: boolean): void;
   onContextMenu(path: string, e: React.MouseEvent): void;
   busy: boolean;
 }) {
@@ -164,6 +194,7 @@ function Level({
                 closed={closed}
                 onToggleFolder={onToggleFolder}
                 selected={selected}
+                currentUserEmail={currentUserEmail}
                 onSelect={onSelect}
                 onToggleApprove={onToggleApprove}
                 onContextMenu={onContextMenu}
@@ -176,54 +207,31 @@ function Level({
       {folder.files.map((file) => {
         const name = file.path.slice(file.path.lastIndexOf('/') + 1);
         const on = selected === file.path;
-        const approvable = file.changed && file.approval?.viewerCanApprove === true;
-        const approved = file.approval?.isApproved === true;
+        const eligible = file.changed && file.approval?.viewerCanApprove === true;
+        // The withdraw action toggles YOUR current confirmation, nobody
+        // else's — stale rows stay for audit without arming it (presplit
+        // PrFileRow's rule, kept verbatim).
+        const email = currentUserEmail.trim().toLowerCase();
+        const hasOwnApproval =
+          !!email &&
+          !!file.approval?.approvedBy.some(
+            (a) => a.email.toLowerCase() === email && !a.isStale,
+          );
         return (
           <div
             key={file.path}
             role="treeitem"
             aria-selected={on}
             className={cn(
-              'group/row flex w-full items-center gap-1.5 rounded-sm py-1 pr-2 transition-colors',
+              'group/row flex w-full items-center gap-1.5 rounded-sm py-1 pr-1.5 transition-colors',
               on ? 'bg-hover' : 'hover:bg-hover',
             )}
-            style={{ paddingLeft: indentFor(depth) }}
+            style={{ paddingLeft: indentFor(depth) + 17 }}
             onContextMenu={(e) => {
-              if (approvable) onContextMenu(file.path, e);
+              if (eligible) onContextMenu(file.path, e);
             }}
           >
-            {/* The review fast path: the check IS the row's leading control.
-                Green when the file is approved; an empty ring inviting the
-                click when the viewer may approve it; a quiet dot when the
-                file changed but somebody else has to say yes. */}
-            {approvable ? (
-              <button
-                type="button"
-                disabled={busy}
-                aria-label={approved ? `Unapprove ${file.path}` : `Approve ${file.path}`}
-                title={approved ? 'Approved — click to take it back' : 'Approve this file'}
-                onClick={() => onToggleApprove(file.path, approved)}
-                className={cn(
-                  'flex h-4 w-4 flex-none items-center justify-center rounded-full border transition-colors',
-                  approved
-                    ? 'border-ok bg-ok text-white'
-                    : 'border-line-strong text-transparent hover:border-ok hover:text-ok',
-                )}
-              >
-                <Check size={11} strokeWidth={3} />
-              </button>
-            ) : (
-              <span className="flex h-4 w-4 flex-none items-center justify-center">
-                {file.changed &&
-                  (approved ? (
-                    <span title="Approved" className="flex h-4 w-4 items-center justify-center rounded-full border border-ok bg-ok text-white">
-                      <Check size={11} strokeWidth={3} />
-                    </span>
-                  ) : (
-                    <span className="size-1.5 rounded-full bg-wait-dot" title="Changed — awaiting its owners" />
-                  ))}
-              </span>
-            )}
+            <KindIcon status={file.changed ? file.status : undefined} />
             <button
               type="button"
               className={cn(
@@ -235,15 +243,96 @@ function Level({
             >
               {name}
             </button>
-            {file.added && (
-              <Badge tone="ok" size="xs" className="shrink-0">
-                New
-              </Badge>
+            <ApprovalStateBadge approval={file.changed ? file.approval : undefined} />
+            {eligible && (
+              <span className="flex flex-none items-center opacity-70 group-hover/row:opacity-100">
+                {hasOwnApproval ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    title="Withdraw your confirmation"
+                    aria-label={`Withdraw your confirmation of ${file.path}`}
+                    onClick={() => onToggleApprove(file.path, true)}
+                    className="rounded-sm p-1 text-ok transition-colors hover:bg-danger-soft hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <X size={12} />
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    title="Confirm this file"
+                    aria-label={`Confirm ${file.path}`}
+                    onClick={() => onToggleApprove(file.path, false)}
+                    className="rounded-sm bg-ok p-1 text-white transition-colors hover:opacity-85 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Check size={12} />
+                  </button>
+                )}
+              </span>
             )}
           </div>
         );
       })}
     </>
+  );
+}
+
+/** What happened to the file — presplit PrFileRow's kind icons, on core tokens. */
+function KindIcon({ status }: { status?: PrFileStatus }) {
+  const size = 13;
+  switch (status) {
+    case 'added':
+      return <FilePlus2 size={size} className="flex-none text-ok" />;
+    case 'removed':
+      return <FileX2 size={size} className="flex-none text-danger" />;
+    case 'renamed':
+    case 'copied':
+      return <ArrowRightLeft size={size} className="flex-none text-ink-muted" />;
+    case 'modified':
+    case 'changed':
+      return <FileEdit size={size} className="flex-none text-wait" />;
+    default:
+      // A scope file this request does not touch.
+      return <File size={size} className="flex-none text-ink-faint" />;
+  }
+}
+
+/**
+ * The approval STATE, inline after the name — presplit PrApprovalBadge:
+ * green ✓ confirmed, amber clock for outdated confirmations, grey clock
+ * waiting; nothing at all for files outside the gate (keeps the tree quiet).
+ */
+function ApprovalStateBadge({ approval }: { approval?: FileApprovalState }) {
+  if (!approval) return null;
+  const hasEligible =
+    approval.eligibleApprovers.roles.length > 0 || approval.eligibleApprovers.users.length > 0;
+  if (!hasEligible) return null;
+  const who = [
+    ...approval.eligibleApprovers.roles,
+    ...approval.eligibleApprovers.users.map((u) => u.name || u.email),
+  ].join(', ');
+  if (approval.isApproved) {
+    const label = `Confirmed by ${who}`;
+    return (
+      <span role="img" aria-label={label} title={label} className="flex-none text-ok">
+        <Check size={12} />
+      </span>
+    );
+  }
+  const stale = approval.approvedBy.some((a) => a.isStale);
+  const label = stale
+    ? 'Confirmation outdated — please re-confirm after the latest edits'
+    : `Waiting on ${who}`;
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      title={label}
+      className={cn('flex-none', stale ? 'text-wait' : 'text-ink-faint')}
+    >
+      <Clock size={12} />
+    </span>
   );
 }
 

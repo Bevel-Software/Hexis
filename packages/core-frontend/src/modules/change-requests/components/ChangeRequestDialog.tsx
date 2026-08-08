@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   type FileDiffPayload,
   type PullRequestDetail,
@@ -8,6 +8,7 @@ import '../change-requests.css';
 import { Banner, Button, Surface } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
+import { AuthContext } from '../../auth/state/auth.context';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
 import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/pr-approvals.api';
 import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
@@ -293,17 +294,21 @@ export function ChangeRequestDialog({
     }
   }
 
+  // Tolerant read (not useAuth): the dialog renders in tests without the
+  // provider, and the email only sharpens the withdraw affordance.
+  const viewerEmail = useContext(AuthContext)?.user?.email ?? '';
+
   /** The tree's per-file state, in the file list's order. */
-  const treeFiles: CrTreeFileState[] = useMemo(
-    () =>
-      allFiles.map((path) => ({
-        path,
-        changed: changedFiles.has(path),
-        added: addedFiles.includes(path),
-        approval: approvalByPath.get(path),
-      })),
-    [allFiles, changedFiles, addedFiles, approvalByPath],
-  );
+  const treeFiles: CrTreeFileState[] = useMemo(() => {
+    const statusByPath = new Map((detail?.files ?? []).map((f) => [f.path, f.status]));
+    return allFiles.map((path) => ({
+      path,
+      changed: changedFiles.has(path),
+      added: addedFiles.includes(path),
+      status: statusByPath.get(path),
+      approval: approvalByPath.get(path),
+    }));
+  }, [detail, allFiles, changedFiles, addedFiles, approvalByPath]);
 
   /** The footer's verdicts: apply plainly, apply by covering, or wait. */
   const allApproved =
@@ -495,6 +500,7 @@ export function ChangeRequestDialog({
             <CrFileTree
               files={treeFiles}
               selected={selected}
+              currentUserEmail={viewerEmail}
               onSelect={(p) => setSelected(p)}
               onToggleApprove={(p, approved) => void toggleApprove(p, approved)}
               onRevert={(p) => void revertFile(p)}
