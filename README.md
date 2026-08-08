@@ -1,4 +1,4 @@
-# Bevel — skill, tool and knowledge management
+# Hexis by Bevel — Git-backed skills, tools & context for AI agents
 
 One place where your company's **AI skills, tools and knowledge** live —
 centrally managed, reviewed and access-controlled, and usable from **any AI
