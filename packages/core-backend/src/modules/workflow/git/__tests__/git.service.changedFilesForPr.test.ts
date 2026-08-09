@@ -38,6 +38,14 @@ async function seedWorkspace(root: string, workspaceId: string) {
   const repo = path.join(workspaceDir, 'knowledge-base');
   await fs.mkdir(workspaceDir, { recursive: true });
   await runGit(root, ['clone', upstream, repo]);
+  // Repo-local identity, because `GitService` spawns its own git children
+  // with the AMBIENT env — `runGit`'s `GIT_COMMITTER_*` vars never reach
+  // them. A dev machine hides this behind a global git config; a CI runner
+  // has none, so anything committing through the service (here:
+  // `commitFile`) fails with "Committer identity unknown". Same reason
+  // `git.service.commitFile.test.ts` configures its fixture this way.
+  await runGit(repo, ['config', 'user.email', 'test@bevel.local']);
+  await runGit(repo, ['config', 'user.name', 'Test Runner']);
   return { upstream, repo };
 }
 
