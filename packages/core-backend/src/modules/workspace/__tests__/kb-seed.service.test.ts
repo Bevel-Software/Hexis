@@ -228,7 +228,14 @@ describe('KbSeedService', () => {
         'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
         // Same content, Windows endings — must read as "same", or the managed
         // refresh would commit churn on every boot forever.
-        'AGENTS.md': template.replace(/\n/g, '\r\n'),
+        //
+        // `\r?\n`, not `\n`: on a Windows checkout (`core.autocrlf=true`) the
+        // template already HAS CRLF, so converting every `\n` would produce
+        // `\r\r\n` — a file that differs from the template for real, failing
+        // this test for a reason that has nothing to do with what it asserts.
+        // Matching the optional `\r` normalizes first, so the fixture is
+        // exactly-CRLF on every platform.
+        'AGENTS.md': template.replace(/\r?\n/g, '\r\n'),
         '.bevelignore': 'AGENTS.md\n',
         '.gitignore': '',
         'access.md': 'CUSTOM ACCESS RULES',
