@@ -540,6 +540,19 @@ export function ChangeRequestDialog({
                 // An untouched file arrives here too and simply renders as a
                 // clean document — identical sides diff to all-same blocks —
                 // so the reader gets prose everywhere, marked or not.
+                //
+                // No link resolvers, deliberately. This dialog shows a diff of
+                // the CHANGE REQUEST's branch, while the navigation hooks
+                // resolve against the branch that is checked out — so wiring
+                // them through would send a reviewer to a different branch's
+                // copy of whatever they clicked, and an id-link to a node the
+                // change request itself creates would resolve to nothing with
+                // only a console warning. Links therefore render as inert
+                // anchors; everything else the KB pipeline brings (rendered
+                // details blocks, mermaid, sanitised HTML, escaped link
+                // destinations) applies here as it does in the document view.
+                // Navigating away from a modal mid-review would also lose the
+                // review context, so inert is the better default regardless.
                 <MarkdownDiffViewer payload={mdPayload} />
               ) : (
               <MarkedFile

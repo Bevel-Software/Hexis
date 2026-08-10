@@ -261,6 +261,10 @@ export function FileHistoryPanel({ filePath }: Props) {
                       No file changes in this save.
                     </div>
                   ) : (
+                    // No link resolvers: this is a diff of a PAST commit, and a
+                    // relative link in it has no meaningful "current" document
+                    // to resolve against — the target may have moved or stopped
+                    // existing since. Links render inert.
                     <MarkdownDiffViewer payload={mdPayload} />
                   )
                 )}

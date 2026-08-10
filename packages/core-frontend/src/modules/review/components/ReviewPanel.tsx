@@ -3,7 +3,12 @@ import { Check, Trash2, Eye, ChevronDown, X } from 'lucide-react';
 import type { PendingChange } from '@bevel-software/platform-shared';
 import { useReview } from '../state/review.context';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { useFileNav } from '../../workspace/routing/kb-routes';
+import {
+  useFileNav,
+  useNodeIdNav,
+  resolveRelativePath,
+  KB_ROUTE_PREFIX,
+} from '../../workspace/routing/kb-routes';
 import { ReviewFileRow } from './ReviewFileRow';
 import { DiffViewer } from './DiffViewer';
 import { MarkdownDiffViewer } from './MarkdownDiffViewer';
@@ -43,6 +48,29 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
   const review = useReview();
   const { refreshFileTree } = useWorkspace();
   const { openFile } = useFileNav();
+  // Links inside a rendered diff. Both resolvers navigate relative to
+  // `git.status.branch`, which is CORRECT here and only here: this panel
+  // reviews the agent's uncommitted changes on the branch you are already
+  // standing on, so "the diff's branch" and "the current branch" are the same
+  // thing. (The change-request dialog is not in that position, which is why it
+  // passes no resolvers — see the comment at its MarkdownDiffViewer call.)
+  const { openNodeId } = useNodeIdNav();
+  const diffPath = review.fileDiff?.path ?? '';
+  const openDiffLink = useCallback(
+    (href: string) => {
+      // Absolute workspace URLs carry their own branch; running them through
+      // resolveRelativePath would treat them as relative to the diffed file
+      // and mangle the path. Same guard as MarkdownRenderer's handleFileLink.
+      if (href.startsWith(`${KB_ROUTE_PREFIX}/`)) {
+        openFile(href);
+        return;
+      }
+      let decoded = href;
+      try { decoded = decodeURIComponent(href); } catch { /* leave as-is */ }
+      openFile(resolveRelativePath(diffPath, decoded));
+    },
+    [openFile, diffPath],
+  );
   const [busy, setBusy] = useState(false);
   // `busy` alone is not re-entrant-safe: two rapid clicks (or a click + a
   // keyboard activation of the same button) can both read `busy === false`
@@ -249,7 +277,11 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
         )}
         {!isLoadingDiff && fileDiff && !fileDiff.isBinary && (
           isMarkdownPath(fileDiff.path) ? (
-            <MarkdownDiffViewer payload={fileDiff} />
+            <MarkdownDiffViewer
+              payload={fileDiff}
+              onOpenFile={openDiffLink}
+              onOpenNodeId={openNodeId}
+            />
           ) : (
             <DiffViewer payload={fileDiff} />
           )
