@@ -5,3 +5,8 @@ workspaces/
 backups/
 tool-chain-spills/
 *.tsbuildinfo
+
+# Generated at build time by scripts/generate-license-notices.mjs. Not committed:
+# `pnpm licenses list` reports the optional platform binaries installed on the
+# current host, so a checked-in copy would read as dirty on any other OS.
+THIRD-PARTY-NOTICES.md

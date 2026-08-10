@@ -14,7 +14,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "src"
+    "src",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",

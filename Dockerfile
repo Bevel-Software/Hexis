@@ -40,6 +40,16 @@ RUN pnpm --filter @bevel-software/platform-shared run build
 RUN pnpm --filter @bevel-software/platform-core-backend run build
 RUN pnpm --filter @bevel-software/web run build
 
+# Third-party licence notices for the image. MIT/BSD/Apache all permit
+# redistribution only if their copyright notice ships with the distribution,
+# and Vite strips comments out of the bundle — so the notices are re-attached
+# as a file here. Generated rather than copied in: the file is .gitignore'd
+# because its content depends on which platform's optional binaries are
+# installed, and this stage is the one that resolved them. Also fails the build
+# outright on a denied licence (GPL/AGPL/…), so a bad dependency cannot ship.
+COPY scripts/ scripts/
+RUN node scripts/generate-license-notices.mjs
+
 # Stage 2: Production image
 FROM node:22-slim AS production
 
@@ -80,6 +90,11 @@ COPY --from=builder /app/packages/core-backend/kb-template packages/core-backend
 # The server shell (tsx runs TypeScript directly) + the built SPA it serves.
 COPY --from=builder /app/apps/server/src apps/server/src
 COPY --from=builder /app/apps/web/dist apps/web/dist
+
+# Attribution for every third-party package in the production graph, plus our
+# own licence. Both must be present in the shipped image, not just the repo.
+COPY --from=builder /app/THIRD-PARTY-NOTICES.md ./
+COPY LICENSE ./
 
 ENV NODE_ENV=production
 ENV PORT=3001

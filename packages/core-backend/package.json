@@ -22,7 +22,8 @@
     "dist",
     "src",
     "migrations",
-    "kb-template"
+    "kb-template",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "engines": {
     "node": ">=22 <23"
