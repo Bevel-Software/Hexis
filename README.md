@@ -51,8 +51,8 @@ self-hosted) to hold your knowledge base — the app seeds it with a starter
 template on first run.
 
 ```sh
-git clone https://github.com/Bevel-Software/skill-and-tool-management.git
-cd skill-and-tool-management
+git clone https://github.com/Bevel-Software/Hexis.git
+cd Hexis
 cp .env.example .env
 ```
 
