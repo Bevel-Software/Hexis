@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/hero-dark.svg">
-    <img src="docs/hero-light.svg" alt="Hexis by Bevel: git-backed skills, tools and context for AI agents" width="100%">
-  </picture>
+  <img src="docs/hero-light.svg" alt="Hexis by Bevel: git-backed skills, tools and context for AI agents" width="100%">
 </p>
 
 <p align="center">
