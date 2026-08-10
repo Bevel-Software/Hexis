@@ -7,6 +7,7 @@ import { useAuth } from '../../auth/state/auth.context';
 import { useLibraryToast } from '../../library/state/toast.context';
 import { copyToClipboard, COPY_FAILED_TOAST } from '../../library/utils/clipboard';
 import { pathForLibraryFilter } from '../../library/routes/library-paths';
+import { useAppRegistry } from '../../../core/registry';
 import { displayFirstName } from '../../library/utils/personal-group';
 import { setSidebarCollapsed } from '../../layout/state/sidebar';
 import { AGENT_CLIENTS, mcpUrlFromOrigin, type AgentClient } from '../agent-clients';
@@ -214,12 +215,20 @@ export function WelcomePage() {
     resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
   }
 
-  // Both exits land in the same place — the person's own group. Whether you
-  // connected an agent or walked past it, where you want to be next is your
-  // own shelf, not the whole company's catalog. Unless a deep link brought
-  // them here: then both exits keep its promise instead.
-  const yourGroup = pathForLibraryFilter({ kind: 'ungrouped' });
-  const exitTo = returnTo ?? yourGroup;
+  // Both exits land in the same place. Whether you connected an agent or
+  // walked past it, where you want to be next is somewhere you can start —
+  // by default your own shelf, not the whole company's catalog. A deep link
+  // still outranks it: someone who followed a link is owed that link.
+  //
+  // `welcomeExit` lets a distribution move that destination, because WHERE a
+  // new person should start is a property of the product. A deployment built
+  // around the knowledge graph would otherwise greet someone and then leave
+  // them in a surface they did not come for. The label travels with the path
+  // so the two cannot contradict each other.
+  const { welcomeExit } = useAppRegistry();
+  const defaultExit = { path: pathForLibraryFilter({ kind: 'ungrouped' }), label: 'Go to your skills' };
+  const exit = welcomeExit ?? defaultExit;
+  const exitTo = returnTo ?? exit.path;
 
   /**
    * Conclude the onboarding and leave. The toast says where the setup went,
@@ -346,16 +355,17 @@ export function WelcomePage() {
             Done
           </Button>
           {/* The same destination Done goes to — one value drives both exits,
-              so they cannot drift apart. Ordinarily that is your own shelf
-              ("your skills" over "your library": the library is the whole
-              company's); when a deep link brought you here, both exits keep
-              its promise instead, and the label says so. */}
+              so they cannot drift apart. Ordinarily that is wherever the
+              deployment says a new person should start (core: your own shelf
+              — "your skills" over "your library", since the library is the
+              whole company's); when a deep link brought you here, both exits
+              keep its promise instead, and the label says so. */}
           <button
             type="button"
             onClick={() => navigate(exitTo)}
             className="text-detail text-ink-faint transition-colors hover:text-ink"
           >
-            {returnTo ? 'Continue to your link →' : 'Go to your skills →'}
+            {returnTo ? 'Continue to your link →' : `${exit.label} →`}
           </button>
         </div>
       </div>
