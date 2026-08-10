@@ -5,3 +5,9 @@ workspaces/
 backups/
 tool-chain-spills/
 *.tsbuildinfo
+
+# Generated at build time by scripts/generate-license-notices.mjs. A ~500 KB
+# build artifact fully derived from the lockfile; generating it in the same step
+# that ships it keeps it matching the artifact. The output is deterministic
+# across platforms, so committing it with a drift check is a viable alternative.
+THIRD-PARTY-NOTICES.md

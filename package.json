@@ -4,11 +4,13 @@
   "type": "module",
   "scripts": {
     "dev": "pnpm --parallel -r run dev",
-    "build": "pnpm -r run build",
+    "build": "pnpm -r run build && node scripts/generate-license-notices.mjs",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
     "lint": "eslint .",
     "release": "pnpm build && pnpm changeset publish",
+    "notices": "node scripts/generate-license-notices.mjs",
+    "notices:check": "node scripts/generate-license-notices.mjs --check",
     "ds:check": "node scripts/design-system-ratchet.mjs",
     "ds:baseline": "node scripts/design-system-ratchet.mjs --update"
   },
