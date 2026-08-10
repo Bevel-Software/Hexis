@@ -27,7 +27,7 @@ secrets vault, and knowledge — with branches, change requests with owner
 approval, role-based access, and a built-in remote MCP server (OAuth 2.1) that
 agents connect to.
 
-[![Watch the demo video](https://img.youtube.com/vi/RjOWRz4E0ZU/maxresdefault.jpg)](https://youtu.be/RjOWRz4E0ZU?si=R7d8rT_P1YVxmQBO)
+[![Watch the demo video](docs/demo-video-thumbnail.jpg)](https://youtu.be/RjOWRz4E0ZU?si=R7d8rT_P1YVxmQBO)
 
 ## Try it first — the live demo
 
