@@ -30,20 +30,53 @@ agent**. The open-source core of the Bevel platform.
   makes enterprise agent rollouts fast: onboard the next team, or the next
   agent, instead of starting over.
 
-![A new skill is proposed to a group: the owner opens the change request, reviews the proposal, and accepts it](docs/demo-propose.gif)
-
-*A teammate proposes a new skill to the group. The owner sees exactly what is
-being added, approves it, and it becomes part of the group. Nothing reaches
-the agents without an owner's yes, and the same rule holds when the author is
-an agent.*
-
 Under the hood, everything lives in a **git repository you own**, on any git
 host: skills (`SKILL.md` folders), tool manuals (UTCP) with an encrypted
 secrets vault, and knowledge. You get branches, change requests with owner
 approval, role-based access, and a built-in remote MCP server (OAuth 2.1)
 that agents connect to.
 
-**[Watch the demo video](https://youtu.be/RjOWRz4E0ZU?si=R7d8rT_P1YVxmQBO)**
+## Contents
+
+- [See Hexis in action](#see-hexis-in-action)
+- [Try the live demo](#try-it-first-the-live-demo)
+- [Managed hosting](#want-a-managed-instance)
+- [Deploy with Docker](#deploy-it-in-5-minutes-docker)
+- [Local development](#local-development-run-from-source)
+- [Environment reference](#environment-reference)
+- [Troubleshooting](#troubleshooting)
+- [Repository layout](#repository-layout)
+
+[![Watch the full Hexis demo](docs/demo-video-thumbnail.jpg)](https://youtu.be/RjOWRz4E0ZU?si=R7d8rT_P1YVxmQBO)
+
+*Watch the full walkthrough: connect an agent, use company context, review
+proposed changes, and manage team access.*
+
+## See Hexis in action
+
+### Propose and approve skill changes
+
+Anyone can propose a new skill or improve an existing one. On protected
+branches, owners review the exact change and approve it before it becomes
+available to the team's agents.
+
+![A teammate proposes a skill and its owner reviews and approves the change request](docs/demo-propose.gif)
+
+### Use your team's skills in Claude
+
+Connect Claude to Hexis over MCP, then ask normally. Claude can discover and
+load the approved skill instructions and company context your role can access,
+without copying prompts between tools.
+
+![Claude uses approved team skills and company context through Hexis over MCP](docs/demo-claude-mcp.gif)
+
+### Share skills with the right people
+
+Add teammates to roles or grant access directly when needed. Everyone connects
+to the same workspace, while each person and their agent only sees what they
+are allowed to read.
+
+![An owner adds teammates to roles and manages access to shared company content](docs/demo-access.gif)
 
 ## Try it first: the live demo
 
