@@ -1,4 +1,4 @@
-# Bevel — skill, tool and knowledge management
+# Hexis by Bevel — Git-backed skills, tools & context for AI agents
 
 One place where your company's **AI skills, tools and knowledge** live —
 centrally managed, reviewed and access-controlled, and usable from **any AI
@@ -26,6 +26,8 @@ host: skills (`SKILL.md` folders), tool manuals (UTCP) with an encrypted
 secrets vault, and knowledge — with branches, change requests with owner
 approval, role-based access, and a built-in remote MCP server (OAuth 2.1) that
 agents connect to.
+
+[![Watch the demo video](docs/demo-video-thumbnail.jpg)](https://youtu.be/RjOWRz4E0ZU?si=R7d8rT_P1YVxmQBO)
 
 ## Try it first — the live demo
 

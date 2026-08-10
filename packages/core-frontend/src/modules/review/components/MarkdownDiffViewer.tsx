@@ -1,19 +1,35 @@
 import { useMemo } from 'react';
 import Markdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import remarkFrontmatter from 'remark-frontmatter';
 import type { FileDiffPayload } from '@bevel-software/platform-shared';
 import { computeDiff, type DiffLine } from '../../workspace/utils/diff';
 import { parseFrontmatter, labelFor, type FrontmatterData } from '../../workspace/utils/frontmatter';
+import { escapeSpacesInLinkDestinations } from '../../../shared/markdown/Markdown';
+import {
+  KB_REMARK_PLUGINS,
+  KB_DIFF_REHYPE_PLUGINS,
+  useKbMarkdownComponents,
+} from '../../workspace/components/renderers/kbMarkdownPipeline';
 
 const MAX_RENDERED_LINES = 5000;
 
-const MD_COMPONENTS = {
-  a: ({ href, children, ...props }: React.ComponentPropsWithoutRef<'a'>) =>
-    href && /^https?:\/\//i.test(href)
-      ? <a href={href} {...props} target="_blank" rel="noopener noreferrer">{children}</a>
-      : <a href={href} {...props}>{children}</a>,
-};
+interface MarkdownDiffViewerProps {
+  payload: FileDiffPayload;
+  /**
+   * Resolver for an internal `.md` link inside the diff. Omitted → such links
+   * render as inert anchors, which is the right default for a view of a PAST
+   * state: the file history panel shows a commit, and there is no meaningful
+   * "current" document for a relative link to resolve against.
+   *
+   * A caller that DOES pass one must bind it to the branch the diff is OF —
+   * the change request's branch, not whatever branch is checked out. The
+   * navigation hooks in `kb-routes` resolve against `git.status.branch`, so
+   * handing them through unbound would silently send a reviewer to a different
+   * branch's copy of the file they just clicked.
+   */
+  onOpenFile?: (href: string) => void;
+  /** Same contract as {@link onOpenFile}, for bare node-id links. */
+  onOpenNodeId?: (id: string) => void;
+}
 
 /**
  * Frontmatter-aware diff renderer for markdown files. Splits the diff into
@@ -21,8 +37,20 @@ const MD_COMPONENTS = {
  * key-by-key red/green panel (rather than raw `key: value` lines), and the
  * body as either a markdown-rendered preview with red/green change blocks or
  * a git-conflict-marker view for side-by-side text inspection.
+ *
+ * The body renders through the shared KB markdown pipeline
+ * (`kbMarkdownPipeline`), so a diff reads like the document it is a diff of:
+ * id-links, `<details>` blocks and mermaid diagrams behave as they do in the
+ * knowledge view rather than as raw text.
+ *
+ * Resolvers arrive as PROPS and no hook is called here. That is deliberate:
+ * this component renders inside the change-request dialog and the file-history
+ * panel, both of which are mounted in places (and tested in ways) that have no
+ * Router and no Git/Workspace context — and it is reachable from the embed
+ * routes, which sit outside those providers entirely. A `useNavigate()` in
+ * here would be a runtime crash in all three.
  */
-export function MarkdownDiffViewer({ payload }: { payload: FileDiffPayload }) {
+export function MarkdownDiffViewer({ payload, onOpenFile, onOpenNodeId }: MarkdownDiffViewerProps) {
   const data = useMemo(() => {
     const baseline = payload.baseline ?? '';
     const current = payload.current ?? '';
@@ -75,7 +103,11 @@ export function MarkdownDiffViewer({ payload }: { payload: FileDiffPayload }) {
           newData={data.newFrontmatter}
         />
       )}
-      <DiffPreview blocks={data.bodyBlocks} />
+      <DiffPreview
+        blocks={data.bodyBlocks}
+        onOpenFile={onOpenFile}
+        onOpenNodeId={onOpenNodeId}
+      />
     </div>
   );
 }
@@ -228,31 +260,57 @@ function groupDiffBlocks(lines: DiffLine[]): DisplayBlock[] {
   return result;
 }
 
-function DiffPreview({ blocks }: { blocks: DisplayBlock[] }) {
+function DiffPreview({
+  blocks,
+  onOpenFile,
+  onOpenNodeId,
+}: {
+  blocks: DisplayBlock[];
+  onOpenFile?: (href: string) => void;
+  onOpenNodeId?: (id: string) => void;
+}) {
+  // `'source'`: a diagram whose ```mermaid fence straddles a change boundary
+  // reaches the renderer truncated and cannot parse, so the error box would
+  // replace the red/green source — the only useful content in that block — on
+  // every EDITED diagram. Untouched ones sit whole inside a single unchanged
+  // fragment and still render as diagrams.
+  //
+  // No `headingLink`: a diff shows no copy-anchor buttons, and the slug ids
+  // they depend on are deliberately absent (see KB_DIFF_REHYPE_PLUGINS).
+  const components = useKbMarkdownComponents({
+    onOpenFile,
+    onOpenNodeId,
+    onMermaidError: 'source',
+  });
+
+  // Each block is parsed as a standalone document, so the space-escaping that
+  // makes `[Foo](Some File.md)` resolve has to be applied per fragment.
+  const fragment = (text: string) => (
+    <Markdown
+      remarkPlugins={KB_REMARK_PLUGINS}
+      rehypePlugins={KB_DIFF_REHYPE_PLUGINS}
+      components={components}
+    >
+      {escapeSpacesInLinkDestinations(text)}
+    </Markdown>
+  );
+
   return (
     <div className="prose prose-sm max-w-none">
       {blocks.map((block, i) => {
         if (block.type === 'same') {
-          return (
-            <Markdown key={i} remarkPlugins={[remarkGfm, remarkFrontmatter]} components={MD_COMPONENTS}>
-              {block.lines.join('\n')}
-            </Markdown>
-          );
+          return <div key={i}>{fragment(block.lines.join('\n'))}</div>;
         }
         return (
           <div key={i} className="my-2">
             {block.removed.length > 0 && (
               <div className="bg-red-50 border-l-2 border-red-700 px-3 py-1 rounded-sm">
-                <Markdown remarkPlugins={[remarkGfm, remarkFrontmatter]} components={MD_COMPONENTS}>
-                  {block.removed.join('\n')}
-                </Markdown>
+                {fragment(block.removed.join('\n'))}
               </div>
             )}
             {block.added.length > 0 && (
               <div className="bg-emerald-50 border-l-2 border-emerald-700 px-3 py-1 rounded-sm mt-1">
-                <Markdown remarkPlugins={[remarkGfm, remarkFrontmatter]} components={MD_COMPONENTS}>
-                  {block.added.join('\n')}
-                </Markdown>
+                {fragment(block.added.join('\n'))}
               </div>
             )}
           </div>

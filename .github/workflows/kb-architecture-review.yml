@@ -26,6 +26,19 @@ jobs:
       pull-requests: write
       issues: write
       statuses: write
+      # The agent's Review Policy will not hand out a go-ahead without green
+      # CI, and CI here is a CHECK RUN, not a commit status — two different
+      # APIs behind two different scopes. `statuses: write` covers the second
+      # (its own verdict, CodeRabbit's) and nothing at all of the first, so
+      # `gh pr checks` came back "Resource not accessible by integration" on
+      # every run whatever the build was doing, and the agent correctly
+      # bounced the PR for evidence it was not allowed to look at.
+      checks: read
+      # And `actions: read` beside it, because the agent asks BOTH questions:
+      # the check runs on a commit, and the workflow runs behind them. Granting
+      # only the first still left it reporting 403 on "Actions workflow runs"
+      # and caveating a go-ahead for evidence it could only half see.
+      actions: read
 
     steps:
       # Instant sign of life: react 👀 to the triggering comment so the author
