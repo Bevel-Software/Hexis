@@ -16,11 +16,13 @@
  * (see DENIED), because a build that would ship GPL/AGPL code must not
  * succeed. `--check` is the same gate without the writes, for PR CI.
  *
- * Deliberately NOT committed to git (see .gitignore). `pnpm licenses list`
- * reports the optional platform binaries that are installed on the CURRENT
- * host — @esbuild/win32-x64 here, @esbuild/linux-x64 in CI — so a committed
- * copy would show as dirty on whichever machine did not generate it. Always
- * generating means the file always matches the artifact being shipped.
+ * Not committed to git (see .gitignore): it is a ~500 KB build artifact fully
+ * derived from the lockfile, and generating it in the same step that ships it
+ * guarantees it describes the artifact actually being shipped. The output IS
+ * deterministic — byte-identical on Windows and Linux for the same lockfile —
+ * so committing it with a drift check is a viable alternative if the file is
+ * ever wanted in review. That determinism depends on `normalise()` below;
+ * without it, line endings alone changed the output between platforms.
  *
  * Usage:
  *   node scripts/generate-license-notices.mjs         # write notice files
@@ -99,10 +101,99 @@ function readLicenseData(filter) {
 }
 
 /**
- * Reduce an SPDX-ish expression to the single licence we ship under.
- * `A OR B` elects the most permissive allowed option; `A AND B` requires all
- * of them to be allowed and keeps the conjunction.
+ * Parse an SPDX expression into a tree. Splitting on OR/AND textually cannot
+ * work: `(MIT OR X) AND GPL-3.0-only` would match MIT and drop the mandatory
+ * GPL term entirely, letting copyleft through the gate. OR binds looser than
+ * AND in SPDX, so the grammar is
+ *   expr := and ( 'OR' and )* ;  and := term ( 'AND' term )* ;
+ *   term := IDENT | '(' expr ')'
+ * Returns null on anything it cannot parse, so callers fail closed.
  */
+function parseSpdx(expression) {
+  const tokens = expression.match(/\(|\)|[^\s()]+/g) ?? [];
+  let pos = 0;
+  const peek = () => tokens[pos];
+  const isOp = (word) => (peek() ?? '').toUpperCase() === word;
+
+  const parseExpr = () => {
+    const options = [parseAnd()];
+    while (isOp('OR')) {
+      pos += 1;
+      options.push(parseAnd());
+    }
+    return options.length === 1 ? options[0] : { op: 'OR', children: options };
+  };
+
+  const parseAnd = () => {
+    const parts = [parseTerm()];
+    while (isOp('AND')) {
+      pos += 1;
+      parts.push(parseTerm());
+    }
+    return parts.length === 1 ? parts[0] : { op: 'AND', children: parts };
+  };
+
+  const parseTerm = () => {
+    if (peek() === '(') {
+      pos += 1;
+      const inner = parseExpr();
+      if (peek() !== ')') return null;
+      pos += 1;
+      return inner;
+    }
+    const word = peek();
+    if (!word || word === ')' || isOp('AND') || isOp('OR')) return null;
+    pos += 1;
+    // `GPL-2.0+` and `... WITH Classpath-exception` attach to the preceding id.
+    if ((peek() ?? '').toUpperCase() === 'WITH') {
+      pos += 2;
+      return { id: `${word} WITH ${tokens[pos - 1]}` };
+    }
+    return { id: word };
+  };
+
+  const tree = parseExpr();
+  if (!tree || pos !== tokens.length) return null;
+  return tree;
+}
+
+/**
+ * Walk the tree bottom-up. A leaf is shippable only if it is allow-listed and
+ * not denied; AND requires EVERY operand (so a denied operand always sinks the
+ * whole node); OR picks the allowed branch that ranks most permissive. `rank`
+ * is the index into ALLOWED, so lower is more permissive.
+ */
+function evaluate(node) {
+  if (node.id) {
+    const ok = ALLOWED.includes(node.id) && !DENIED.test(node.id);
+    return { ok, license: node.id, rank: ALLOWED.indexOf(node.id), denied: DENIED.test(node.id) };
+  }
+
+  const results = node.children.map(evaluate);
+
+  if (node.op === 'AND') {
+    const ok = results.every((r) => r.ok);
+    return {
+      ok,
+      license: results.map((r) => r.license).join(' AND '),
+      rank: Math.max(...results.map((r) => r.rank)),
+      denied: results.some((r) => r.denied),
+    };
+  }
+
+  const viable = results.filter((r) => r.ok).sort((a, b) => a.rank - b.rank);
+  if (viable.length) return viable[0];
+  return {
+    ok: false,
+    license: results.map((r) => r.license).join(' OR '),
+    rank: -1,
+    // Only a denial if EVERY branch is denied — an unrecognised alternative
+    // means we simply could not classify it, which is a different problem.
+    denied: results.every((r) => r.denied),
+  };
+}
+
+/** Reduce an SPDX expression to the single licence we ship the package under. */
 function elect(expression, pkgName) {
   const raw = (expression ?? '').trim();
   if (!raw || raw === 'Unknown') {
@@ -112,27 +203,18 @@ function elect(expression, pkgName) {
       : { license: 'UNKNOWN', unresolved: true };
   }
 
-  const bare = raw.replace(/^\(|\)$/g, '').trim();
+  const tree = parseSpdx(raw);
+  if (!tree) return { license: raw, unresolved: true };
 
-  if (/\sOR\s/i.test(bare)) {
-    const options = bare.split(/\s+OR\s+/i).map((o) => o.trim());
-    for (const preferred of ALLOWED) {
-      if (options.includes(preferred)) {
-        return { license: preferred, note: `elected from \`${raw}\`` };
-      }
-    }
-    return { license: raw, denied: true };
+  const result = evaluate(tree);
+  if (!result.ok) {
+    return result.denied ? { license: raw, denied: true } : { license: raw, unresolved: true };
   }
 
-  if (/\sAND\s/i.test(bare)) {
-    const parts = bare.split(/\s+AND\s+/i).map((p) => p.trim());
-    const bad = parts.filter((p) => DENIED.test(p) || !ALLOWED.includes(p));
-    return bad.length ? { license: raw, denied: true } : { license: bare };
-  }
-
-  if (DENIED.test(bare)) return { license: bare, denied: true };
-  if (!ALLOWED.includes(bare)) return { license: bare, unresolved: true };
-  return { license: bare };
+  const normalised = raw.replace(/^\((.*)\)$/, '$1').trim();
+  return result.license === normalised
+    ? { license: result.license }
+    : { license: result.license, note: `elected from \`${raw}\`` };
 }
 
 /**
@@ -143,9 +225,21 @@ function elect(expression, pkgName) {
  */
 const BOILERPLATE = new Set(['Apache-2.0', 'MPL-2.0']);
 
+/**
+ * Licence texts are deduplicated by exact content, so line endings decide
+ * whether two copies of the same licence collapse into one block. They vary for
+ * reasons that have nothing to do with the licence: packages ship whichever
+ * ending their author committed, and git's autocrlf rewrites our own vendored
+ * texts to CRLF on a Windows checkout — which stopped them matching the LF
+ * copies shipped inside packages and emitted the same Apache-2.0 text twice.
+ * Normalising on read makes the dedupe content-correct and the output
+ * byte-identical on every platform.
+ */
+const normalise = (text) => text.replace(/\r\n/g, '\n').trim();
+
 const canonicalText = (license) => {
   try {
-    return readFileSync(join(ROOT, 'scripts', 'license-texts', `${license}.txt`), 'utf8').trim();
+    return normalise(readFileSync(join(ROOT, 'scripts', 'license-texts', `${license}.txt`), 'utf8'));
   } catch {
     return null;
   }
@@ -155,7 +249,7 @@ function readFileIfPresent(pkgPath, file) {
   try {
     const full = join(pkgPath, file);
     if (!statSync(full).isFile()) return null;
-    return readFileSync(full, 'utf8').trim() || null;
+    return normalise(readFileSync(full, 'utf8')) || null;
   } catch {
     return null;
   }
@@ -204,26 +298,40 @@ function readLicenseText(pkgPath, license) {
   return { text, synthesised };
 }
 
-/** Flatten pnpm's licence->packages map into one record per package. */
+/**
+ * Flatten pnpm's licence->packages map into one record per RESOLVED VERSION.
+ * pnpm reports `versions` and `paths` as parallel arrays, and 19 packages in
+ * this tree resolve to more than one version. Collapsing them into a single
+ * record would attribute every version using the licence file of whichever one
+ * happened to come first — and versions legitimately differ in copyright year,
+ * holder, or licence outright.
+ */
 function collect(data) {
   const packages = [];
   for (const [expression, entries] of Object.entries(data)) {
     for (const entry of entries) {
       const verdict = elect(expression === 'Unknown' ? null : expression, entry.name);
-      const { text, synthesised } = readLicenseText((entry.paths ?? [])[0] ?? '', verdict.license);
-      packages.push({
-        name: entry.name,
-        version: (entry.versions ?? []).join(', '),
-        declared: expression,
-        homepage: entry.homepage ?? '',
-        author: typeof entry.author === 'string' ? entry.author : '',
-        text,
-        synthesised,
-        ...verdict,
-      });
+      const versions = entry.versions ?? [];
+      const paths = entry.paths ?? [];
+      // Pair by index; fall back so a malformed entry still yields one record.
+      const count = Math.max(versions.length, paths.length, 1);
+
+      for (let i = 0; i < count; i += 1) {
+        const { text, synthesised } = readLicenseText(paths[i] ?? paths[0] ?? '', verdict.license);
+        packages.push({
+          name: entry.name,
+          version: versions[i] ?? versions.join(', '),
+          declared: expression,
+          homepage: entry.homepage ?? '',
+          author: typeof entry.author === 'string' ? entry.author : '',
+          text,
+          synthesised,
+          ...verdict,
+        });
+      }
     }
   }
-  return packages.sort((a, b) => a.name.localeCompare(b.name));
+  return packages.sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
 }
 
 function render(title, packages) {

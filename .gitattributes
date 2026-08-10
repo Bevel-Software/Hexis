@@ -1,0 +1,5 @@
+# Vendored licence texts are compared byte-for-byte against the licence files
+# packages ship (which are LF), so git must not rewrite their line endings on
+# checkout — CRLF here silently defeats the dedupe in
+# scripts/generate-license-notices.mjs.
+scripts/license-texts/*.txt text eol=lf
