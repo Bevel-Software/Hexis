@@ -306,6 +306,26 @@ export interface AppRegistry {
    * neither is provided the FileViewer hides its suggested-prompt buttons.
    */
   suggestedPromptSeed?: (prompt: string) => void;
+  /**
+   * Where the welcome page's exits go, and what the secondary one is called.
+   *
+   * The welcome page ends by sending a new person somewhere they can start,
+   * and WHERE that is, is a property of the product rather than of the page.
+   * Core sends them to their own skills shelf, because on a core deployment
+   * that is the product and a fresh knowledge base is empty. A distribution
+   * whose centre of gravity is the knowledge graph wants the opposite, and
+   * would otherwise greet every new user and then leave them in a surface
+   * they did not come for.
+   *
+   * Both exits use the value, so they cannot drift apart. A pending deep link
+   * still outranks it — someone who followed a link is owed that link, and
+   * onboarding must never eat an intention.
+   *
+   * The label travels WITH the path deliberately: "Go to your skills →"
+   * pointing at a knowledge base is a lie, and a caller changing one without
+   * the other is the likeliest way to produce it.
+   */
+  welcomeExit?: { path: string; label: string };
 }
 
 export const EMPTY_REGISTRY: AppRegistry = {

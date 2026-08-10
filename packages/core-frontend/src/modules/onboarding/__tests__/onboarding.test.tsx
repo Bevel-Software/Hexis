@@ -6,6 +6,7 @@ import { AuthContext } from '../../auth/state/auth.context';
 import { authValue } from '../../library/__tests__/auth-harness';
 import { LibraryToastProvider } from '../../library/state/toast';
 import { WelcomePage } from '../components/WelcomePage';
+import { AppRegistryContext, EMPTY_REGISTRY } from '../../../core/registry';
 import { ConnectAgentPill } from '../components/ConnectAgentPill';
 import { RootLanding } from '../components/RootLanding';
 import { POST_LOGIN_REDIRECT_KEY } from '../../auth/services/sso';
@@ -453,6 +454,78 @@ describe('WelcomePage', () => {
       expect.objectContaining({ method: 'POST' }),
     );
     expect(screen.getByTestId('pathname')).toHaveTextContent(DEEP);
+  });
+
+  /**
+   * `AppRegistry.welcomeExit` moves where a new person starts. WHERE that is,
+   * is a property of the product: core sends them to their own skills shelf,
+   * because on a core deployment that is the product and a fresh knowledge
+   * base is empty. A distribution built around the knowledge graph wants the
+   * opposite and would otherwise greet someone and then leave them in a
+   * surface they did not come for.
+   *
+   * The tests above deliberately mount WITHOUT a registry, so they pin the
+   * default: the seam must be invisible to a deployment that does not use it.
+   */
+  describe('welcomeExit', () => {
+    const mountWithExit = (
+      welcomeExit: { path: string; label: string } | undefined,
+      // Same shape `mount` accepts — `typeof greeted` would pin `state` to
+      // `{ greeting: boolean }` and reject the deep-link case below.
+      route: string | { pathname: string; state?: unknown } = greeted,
+    ) =>
+      mount(
+        <AppRegistryContext.Provider value={{ ...EMPTY_REGISTRY, welcomeExit }}>
+          <Routes>
+            <Route path={WELCOME_PATH} element={<WelcomePage />} />
+            <Route path="/skills-and-tools/yours" element={<div>your group</div>} />
+            <Route path="/workspace" element={<div>knowledge</div>} />
+          </Routes>
+        </AppRegistryContext.Provider>,
+        newUser(),
+        route,
+      );
+
+    it('sends both exits to the configured destination', async () => {
+      mountWithExit({ path: '/workspace', label: 'Go to your knowledge base' });
+      await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+      expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
+    });
+
+    /**
+     * The label travels WITH the path. "Go to your skills →" pointing at a
+     * knowledge base is a lie, and letting a caller set one without the other
+     * is the likeliest way to produce it.
+     */
+    it('labels the skip link with the configured destination', () => {
+      mountWithExit({ path: '/workspace', label: 'Go to your knowledge base' });
+      expect(
+        screen.getByRole('button', { name: /Go to your knowledge base/ }),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Go to your skills/ })).not.toBeInTheDocument();
+    });
+
+    it('falls back to the skills shelf when a registry sets nothing', async () => {
+      mountWithExit(undefined);
+      expect(screen.getByRole('button', { name: /Go to your skills/ })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+      expect(screen.getByTestId('pathname')).toHaveTextContent('/skills-and-tools/yours');
+    });
+
+    /**
+     * A deep link still outranks it. Someone who followed a link is owed that
+     * link, and no amount of deployment configuration may eat an intention.
+     */
+    it('does not override a carried deep link', async () => {
+      const DEEP = '/workspace/main/knowledge-base/KnowledgeBase/Start here.md';
+      mountWithExit(
+        { path: '/skills-and-tools/yours', label: 'Go to your skills' },
+        { pathname: WELCOME_PATH, state: { greeting: true, returnTo: DEEP } },
+      );
+      expect(screen.getByRole('button', { name: /Continue to your link/ })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+      expect(screen.getByTestId('pathname')).toHaveTextContent(DEEP);
+    });
   });
 });
 
