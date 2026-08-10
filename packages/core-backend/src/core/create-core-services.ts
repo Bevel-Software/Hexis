@@ -235,7 +235,15 @@ export async function createCoreServices(
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
   const spillStore = new SpillStore(config.spillRoot);
-  const accessControl = new AccessControlService(workspaceService, kbDirName);
+  // The deployment owner counts as Admin for the two hardcoded `write`
+  // rescues (`roles.yaml` and any `access.md`) — the SAME list
+  // `AdminAccessService` below is given, so the admin surfaces and the write
+  // gate cannot disagree about who the owner is. They did: the owner could
+  // open Roles & Members and then be refused the save, with the UI showing
+  // them as an admin and the gate saying "Eligible: Admin".
+  const accessControl = new AccessControlService(workspaceService, kbDirName, [
+    config.adminEmail,
+  ]);
   // Creator read-grant on creation: read is default-deny, so every surface
   // that creates KB files/folders (human routes, agent tools, upload apply)
   // consults this planner to keep creations visible to their creator.
