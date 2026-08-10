@@ -63,7 +63,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Bevel-Software/skill-and-tool-management.git",
+    "url": "git+https://github.com/Bevel-Software/Hexis.git",
     "directory": "packages/core-frontend"
   },
   "publishConfig": {
