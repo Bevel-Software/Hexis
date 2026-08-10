@@ -6,8 +6,8 @@
     </radialGradient>
   </defs>
 
-  <rect width="1600" height="400" fill="#0d1117"/>
-  <rect width="1600" height="400" fill="url(#glow)"/>
+  <rect width="1600" height="400" rx="28" fill="#0d1117"/>
+  <rect width="1600" height="400" rx="28" fill="url(#glow)"/>
 
   <!-- logo tile + wordmark -->
   <rect x="124" y="100" width="96" height="96" rx="22" fill="#1b76d0"/>
