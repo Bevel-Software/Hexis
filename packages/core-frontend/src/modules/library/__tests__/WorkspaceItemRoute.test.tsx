@@ -271,6 +271,26 @@ describe('WorkspaceItemRoute', () => {
       expect(screen.queryByLabelText('skill-page')).toBeNull();
     });
 
+    it('sends a bare CATEGORY folder to its group, not to a skill page', async () => {
+      // A category is not a skill, and `coding` names none. What tells it apart
+      // from a just-created skill the catalog hasn't caught up with is that the
+      // catalog knows skills UNDER it.
+      renderAt(itemUrl('Groups/Engineering/coding'));
+      await waitFor(() =>
+        expect(screen.getByLabelText('pathname')).toHaveTextContent(
+          '/skills-and-tools/groups/Engineering',
+        ),
+      );
+      expect(screen.queryByLabelText('skill-page')).toBeNull();
+    });
+
+    it('still opens a folder the catalog has no skills under — a stale new skill', async () => {
+      renderAt(itemUrl('Groups/Engineering/coding/brand-new-skill'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
+        'brand-new-skill::SKILL.md',
+      );
+    });
+
     it('does not let a prefix-sharing sibling claim a bundled file', async () => {
       // Ownership compares whole segments: `create-ticket-v2` shares a string
       // prefix with `create-ticket` and must not swallow its files.
@@ -312,6 +332,30 @@ describe('WorkspaceItemRoute', () => {
     renderAt(itemUrl('Groups/Sales/create-sales-deck/examples/SKILL.md'));
     expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
       'create-sales-deck::examples/SKILL.md',
+    );
+  });
+
+  /**
+   * A failed catalog is "we couldn't ask", not "no such item" — the same
+   * distinction GroupPage draws. Reading it as proof that nothing owns the
+   * file would bounce every bundled-file deep link to the group page during a
+   * transient outage, losing the URL; the skill detail comes from a different
+   * endpoint and can still answer.
+   */
+  it('keeps a bundled-file deep link on the skill page when the catalog failed', async () => {
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      loading: false,
+      error: "Couldn't load the catalog.",
+      skills: [],
+      tools: [],
+    });
+    // The file's own folder is the best available reading without a catalog
+    // (an asset nested deeper simply cannot be attributed) — the point is that
+    // the reader stays on a skill page instead of being bounced to the group.
+    renderAt(itemUrl('Groups/Sales/create-sales-deck/notes.md'));
+    expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
+      'create-sales-deck::notes.md',
     );
   });
 

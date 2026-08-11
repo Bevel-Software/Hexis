@@ -236,8 +236,10 @@ function renderPage(
   mine: number[] = [],
   bus: EventBusContextValue = makeFakeBus(),
   routerState?: Record<string, unknown>,
+  /** Catalog-state overrides — e.g. `{ loading: true }` for the early case. */
+  library?: Partial<LibraryContextValue>,
 ) {
-  libraryMock.value = libraryValue(owned, crs, mine);
+  libraryMock.value = { ...libraryValue(owned, crs, mine), ...library };
   return render(
     <MemoryRouter
       initialEntries={[
@@ -607,6 +609,25 @@ describe('SkillPage', () => {
     expect(
       await screen.findByText(/doesn't exist, or you don't have access to it/),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * The name can be PROVISIONAL. A URL the catalog hasn't answered for is
+   * resolved by reading the folder name, which is the skill's id only when no
+   * frontmatter declares one — so a failed fetch under a loading catalog is
+   * not evidence the skill is missing, just that we asked with the wrong name.
+   * GroupPage already refuses to decide this early; this is the same call.
+   */
+  it('does not cry "doesn\'t exist" while the catalog is still loading', async () => {
+    apiMock.getSkill.mockRejectedValueOnce(new Error('nope'));
+    renderPage(false, [], [], makeFakeBus(), undefined, { loading: true, items: [] });
+
+    // The lookup failed and the catalog has not answered — so we were possibly
+    // asking with the wrong name, and saying "doesn't exist" would be a guess.
+    await waitFor(() => expect(apiMock.getSkill).toHaveBeenCalled());
+    expect(
+      screen.queryByText(/doesn't exist, or you don't have access to it/),
+    ).not.toBeInTheDocument();
   });
 });
 

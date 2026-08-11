@@ -377,7 +377,12 @@ export function SkillPage({
     </Button>
   );
 
-  if (!detail.loading && (detail.error || !skill)) {
+  // `data.loading` joins the guard because the NAME may be provisional: when
+  // the catalog hasn't answered for a URL yet, the route resolves it by
+  // reading the folder name, which is the id only when no frontmatter declares
+  // one. Deciding "doesn't exist" before the catalog can correct that flashes
+  // it at somebody who is simply early — the call GroupPage already makes.
+  if (!detail.loading && !data.loading && (detail.error || !skill)) {
     return (
       <Article>
         {backLink}

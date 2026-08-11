@@ -91,18 +91,55 @@ export function WorkspaceItemRoute() {
   // already on screen around this.
   if (data.loading) return null;
 
-  // The catalog has spoken and no skill owns this file, so it is not a page:
-  // a group's `access.md`, a category folder's own `access.md`, a stray
-  // upload. That belongs to the group — at ANY depth, not just the group's
-  // top level.
-  if (/\.[a-z0-9]+$/i.test(last)) {
+  // An `error` is "we could not ask", NOT "there is no such item" — the same
+  // distinction GroupPage draws. A failed catalog must not be read as proof
+  // that nothing owns this file, or a transient outage would bounce every
+  // bundled-file deep link to the group page and lose the URL the reader
+  // opened. SkillPage fetches the detail through a DIFFERENT endpoint, so it
+  // can still succeed (or recover on retry) once we hand it a name.
+  const catalogSpoke = !data.error;
+
+  // A folder with catalog skills UNDER it is a category, not a skill. That is
+  // the discriminator between a category folder and a just-created skill whose
+  // catalog reload hasn't landed: the former has known descendants, the latter
+  // has none. A category has no page of its own; its group does.
+  if (catalogSpoke && !hasExtension(last) && containsCatalogSkill(data.items, repoRel)) {
     return <Navigate to={pathForGroup(group)} replace />;
   }
 
-  // A FOLDER the catalog doesn't know: most likely a skill whose reload hasn't
-  // landed yet (the catalog can be settled but stale). Its own name is the id
-  // — the same rule the backend applies when no frontmatter declares one.
-  return <SkillPage name={last} activeFile="SKILL.md" />;
+  // The catalog has spoken and no skill owns this FILE, so it is not a page:
+  // a group's `access.md`, a category folder's own `access.md`, a stray
+  // upload. That belongs to the group — at ANY depth, not just the group's
+  // top level.
+  if (catalogSpoke && hasExtension(last)) {
+    return <Navigate to={pathForGroup(group)} replace />;
+  }
+
+  // Nothing settled it: a stale catalog that hasn't caught up with a new
+  // skill, or one that failed to load. Read the URL structurally — a file
+  // belongs to the folder holding it, a bare folder names itself, which is
+  // the same rule the backend applies when no frontmatter declares an id.
+  return hasExtension(last) ? (
+    <SkillPage name={tail.length >= 2 ? tail[tail.length - 2]! : group} activeFile={last} />
+  ) : (
+    <SkillPage name={last} activeFile="SKILL.md" />
+  );
+}
+
+/** Whether a path segment names a file rather than a folder. */
+function hasExtension(segment: string): boolean {
+  return /\.[a-z0-9]+$/i.test(segment);
+}
+
+/**
+ * Whether the catalog knows any skill BELOW this path — i.e. whether it is a
+ * container. Only meaningful once the catalog has actually loaded.
+ */
+function containsCatalogSkill(
+  items: readonly { kind: string; path: string }[],
+  repoRel: string,
+): boolean {
+  return items.some((i) => i.kind === 'skill' && i.path.startsWith(`${repoRel}/`));
 }
 
 /**
