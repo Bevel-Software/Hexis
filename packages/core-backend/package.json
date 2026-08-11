@@ -1,6 +1,6 @@
 {
   "name": "@bevel-software/platform-core-backend",
-  "version": "0.7.1",
+  "version": "0.7.4",
   "description": "Open-source core backend of the Bevel platform: git-backed knowledge workspace, workflow (branches/change requests/locks/SSE), skills, tools, secrets vault, access control and the remote MCP surface.",
   "type": "module",
   "main": "./dist/index.js",

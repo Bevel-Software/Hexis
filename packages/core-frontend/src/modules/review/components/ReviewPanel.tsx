@@ -7,8 +7,12 @@ import {
   useFileNav,
   useNodeIdNav,
   resolveRelativePath,
+  stripJunkBeforeKbDir,
   KB_ROUTE_PREFIX,
 } from '../../workspace/routing/kb-routes';
+import { groupOfPath, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { cn } from '../../../lib/utils';
+import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { ReviewFileRow } from './ReviewFileRow';
 import { DiffViewer } from './DiffViewer';
 import { MarkdownDiffViewer } from './MarkdownDiffViewer';
@@ -16,6 +20,66 @@ import { BinaryChangePlaceholder } from './BinaryChangePlaceholder';
 
 function isMarkdownPath(p: string): boolean {
   return /\.md$/i.test(p);
+}
+
+/**
+ * Whether a review-session path is a skill or tool — anything under `Groups/`.
+ *
+ * The paths in a review session are WORKSPACE-relative: the diff module
+ * resolves them against the workspace directory, so they arrive carrying the
+ * KB clone as their first segment (`knowledge-base/Groups/GTM/x/SKILL.md`).
+ * `groupOfPath` wants them REPO-relative, and `stripJunkBeforeKbDir` does not
+ * get there on its own — it only drops junk BEFORE the kb dir and keeps the
+ * segment itself, so it returns an already-well-formed path unchanged. Asking
+ * `groupOfPath` about the workspace-relative form gets `null` for every path,
+ * group or not, which is a check that silently never fires.
+ *
+ * Exported so it can be tested directly. The behaviour it guards lives behind
+ * a dropdown the component tests cannot open, and a first attempt at covering
+ * it through the UI passed with the guard deleted.
+ */
+export function isGroupItemPath(path: string, kbDirName: string | null): boolean {
+  const withoutJunk = stripJunkBeforeKbDir(path, kbDirName);
+  const repoRelative =
+    kbDirName && withoutJunk.startsWith(`${kbDirName}/`)
+      ? withoutJunk.slice(kbDirName.length + 1)
+      : withoutJunk;
+  return groupOfPath(repoRelative) !== null;
+}
+
+/**
+ * Whether selecting `change` should also open its file beside the diff.
+ *
+ * The whole decision in one place, and exported, because the call site sits
+ * behind a dropdown the component harness cannot open — everything asserted
+ * about it through the UI passed with the guard deleted.
+ *
+ * Two reasons not to:
+ *   - DELETED: navigating to a missing path lands FileRoute on its
+ *     file-not-found state.
+ *   - a group item ON THE DEFAULT BRANCH: that URL is a library location, so
+ *     opening it switches the whole shell to Skills & Tools and the panel,
+ *     the diff and the review vanish because someone clicked a row in a list.
+ *
+ * The branch is part of it, and this is the easy half to get wrong: only the
+ * DEFAULT branch's `Groups/` URLs are library locations (`isLibraryLocation`
+ * tests `segments[1] === DEFAULT_BRANCH`). The same skill on a draft branch
+ * opens in Knowledge like any other file and switches nothing, so refusing to
+ * open it there would cost the context this call exists to give and buy
+ * nothing.
+ *
+ * `DEFAULT_BRANCH` is read here rather than captured at module scope — it is
+ * a live binding configured during boot.
+ */
+export function shouldOpenBesideDiff(input: {
+  kind: PendingChange['kind'];
+  path: string;
+  kbDirName: string | null;
+  branch: string | null;
+}): boolean {
+  if (input.kind === 'deleted') return false;
+  const switchesApp = input.branch === DEFAULT_BRANCH && isGroupItemPath(input.path, input.kbDirName);
+  return !switchesApp;
 }
 
 function basename(p: string): string {
@@ -46,7 +110,7 @@ function kindLabel(kind: PendingChange['kind']): string {
  */
 export function ReviewPanel({ onClose }: { onClose?: () => void }) {
   const review = useReview();
-  const { refreshFileTree } = useWorkspace();
+  const { refreshFileTree, kbDirName } = useWorkspace();
   const { openFile } = useFileNav();
   // Links inside a rendered diff. Both resolvers navigate relative to
   // `git.status.branch`, which is CORRECT here and only here: this panel
@@ -117,15 +181,23 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
     async (path: string) => {
       setPickerOpen(false);
       await selectPath(path);
-      // Also surface the file in the editor so the user can see context alongside
-      // the diff. Skip for deleted files — navigating to a missing path would
-      // land FileRoute on the file-not-found state.
+      // Also surface the file in the editor so the user can see context
+      // alongside the diff — unless doing so would take the reader somewhere
+      // they did not ask to go. See `shouldOpenBesideDiff`.
       const change = session?.changes.find((c) => c.path === path);
-      if (change && change.kind !== 'deleted') {
+      if (
+        change &&
+        shouldOpenBesideDiff({
+          kind: change.kind,
+          path,
+          kbDirName,
+          branch: session?.branchName ?? null,
+        })
+      ) {
         openFile(path);
       }
     },
-    [selectPath, openFile, session],
+    [selectPath, openFile, session, kbDirName],
   );
 
   const withBusy = useCallback(
@@ -277,12 +349,43 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
         )}
         {!isLoadingDiff && fileDiff && !fileDiff.isBinary && (
           isMarkdownPath(fileDiff.path) ? (
-            <MarkdownDiffViewer
-              payload={fileDiff}
-              onOpenFile={openDiffLink}
-              onOpenNodeId={openNodeId}
-            />
+            // Panel-width SCROLLER, measured INNER column.
+            //
+            // The scroller has to be the outer box: when the centred column
+            // scrolled instead, the gutters either side sat outside its hit
+            // area and the wheel did nothing over them — a dead margin on
+            // exactly the wide screens the measure exists for.
+            //
+            // With the outer scrolling, the inner column can carry the real
+            // Knowledge contract: `DOCUMENT_COLUMN` + `documentGutters`, which
+            // bundles the 40px sides AND the 110px bottom rhythm. Both now sit
+            // INSIDE the scroller, where they belong — the earlier version had
+            // to skip the gutters entirely because that bottom padding would
+            // have become permanent dead space below a child-owned scroll.
+            // The line lands at 800px, the same as the document two clicks
+            // away, rather than the 848px approximation.
+            //
+            // `scroll={false}` is what makes it possible: two nested
+            // `h-full overflow-auto` boxes leave the outer unable to scroll
+            // and stack both paddings.
+            //
+            // `roomy` is false — this panel covers the viewer, not the nav, so
+            // the file tree is still on screen beside it.
+            <div className="h-full overflow-auto bg-white">
+              <div className={cn(DOCUMENT_COLUMN, documentGutters(false))}>
+                <MarkdownDiffViewer
+                  payload={fileDiff}
+                  onOpenFile={openDiffLink}
+                  onOpenNodeId={openNodeId}
+                  scroll={false}
+                />
+              </div>
+            </div>
           ) : (
+            // Left full-bleed on purpose. This is the marked-SOURCE view for
+            // yaml, scripts and config, where a line is a line of code and
+            // wrapping it to a prose measure helps nobody — the same call
+            // `getRendererLayout` makes for those types in the file viewer.
             <DiffViewer payload={fileDiff} />
           )
         )}
