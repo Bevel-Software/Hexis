@@ -163,6 +163,14 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
   /** Answered, yet this process is still running on the old branch model. */
   const [needsRestart, setNeedsRestart] = useState(false);
   const noticeRef = useRef<HTMLDivElement>(null);
+  /**
+   * Which set of connection answers the screen is showing, bumped on every
+   * edit to one of them. A test result describes the answers as they were when
+   * the request left; if they changed while it was in flight, the result that
+   * comes back is evidence about values no longer on screen and must not be
+   * shown as if it were about the new ones.
+   */
+  const connectionEpoch = useRef(0);
 
   /**
    * What a field would save as, given a set of typed answers: what is in them,
@@ -180,6 +188,18 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
   const fromEnv = settings.filter((s) => s.source === 'env');
 
   /**
+   * Whether saving now would actually change this connection field: something
+   * non-blank was typed, and it is not the stored value typed back in. Secrets
+   * have no stored value to show, so any non-blank entry counts as a change —
+   * which is right, because it replaces the stored one.
+   */
+  const connectionKeyChanged = (key: string) => {
+    const typed = draft[key]?.trim();
+    if (!typed) return false;
+    return typed !== (settings.find((s) => s.key === key)?.value ?? '').trim();
+  };
+
+  /**
    * Whether THIS save has to stand behind the repository connection.
    *
    * On first run it always does: everything behind the gate reads from a
@@ -189,12 +209,17 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
    * re-prove, and refusing them over a token that expired somewhere else helps
    * nobody.
    *
+   * "Changes" means the value the save would store differs from the stored
+   * one — a field someone touched and then restored changes nothing, and a
+   * blank field means "leave it alone", not "clear it". Judging by "was it
+   * typed in" held saves hostage to edits that no longer exist.
+   *
    * There is nothing to prove until there is an address to prove it against; a
    * blank form is the server's to complain about, field by field.
    */
   const mustProveConnection =
     !!resolved('kbRepoUrl') &&
-    (variant === 'setup' || CONNECTION_KEYS.some((key) => key in draft));
+    (variant === 'setup' || CONNECTION_KEYS.some((key) => connectionKeyChanged(key)));
 
   /**
    * The host was asked about the answers currently on screen, and said no.
@@ -224,7 +249,12 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
       delete next[key];
       return next;
     });
-    if (CONNECTION_KEYS.includes(key)) setTest(null);
+    if (CONNECTION_KEYS.includes(key)) {
+      // Any in-flight test is now asking about values that are gone; the epoch
+      // bump makes its answer land as stale rather than as evidence.
+      connectionEpoch.current++;
+      setTest(null);
+    }
   }
 
   /**
@@ -266,19 +296,37 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
     result: ConnectionTest;
     derived: Record<string, string>;
   }> {
+    const epoch = connectionEpoch.current;
     const result = await testConnection(draft);
     // Read the answer BEFORE storing it, so a response that is not one at all
     // throws to the caller (which treats that as "could not ask") instead of
     // parking a value in state that every reader downstream has to defend
     // against.
     const suggested = result.ok ? suggestedBranch(result) : null;
-    setTest(result);
+    // The result describes the connection values captured above. If they were
+    // edited while the request was in flight, showing it would let the OLD
+    // values' success (or failure) stand in for the new ones — so it is
+    // returned to the caller, whose payload is the same snapshot, but never
+    // shown. `derived` is likewise computed against that snapshot, because it
+    // travels with the payload.
+    const stale = epoch !== connectionEpoch.current;
+    if (!stale) setTest(result);
     const derived: Record<string, string> = {};
     if (suggested) {
       if (!resolved('defaultBranch')) derived.defaultBranch = suggested;
       if (!resolved('protectedBranches')) derived.protectedBranches = suggested;
     }
-    if (Object.keys(derived).length > 0) setDraft((d) => ({ ...d, ...derived }));
+    if (!stale && suggested) {
+      // Re-check against the LATEST draft, not the snapshot: a branch name
+      // typed while the request was in flight is an answer, and a suggestion
+      // must never overwrite an answer.
+      setDraft((d) => {
+        const next = { ...d };
+        if (!resolvedIn(d, 'defaultBranch')) next.defaultBranch = suggested;
+        if (!resolvedIn(d, 'protectedBranches')) next.protectedBranches = suggested;
+        return next;
+      });
+    }
     return { result, derived };
   }
 

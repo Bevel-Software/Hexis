@@ -182,6 +182,47 @@ describe('SetupScreen', () => {
   });
 
   /**
+   * A test result describes the values it was asked about. Editing the address
+   * while the request is in flight means the answer that comes back is about
+   * values no longer on screen — it must not stand as evidence about the new
+   * ones, in either direction.
+   */
+  it('drops a test result that arrives after the connection was edited', async () => {
+    await renderScreen();
+    let answer!: (v: unknown) => void;
+    api.testConnection.mockReturnValue(new Promise((r) => (answer = r)));
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/old.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    // The answer now in flight is about old.git; this edit supersedes it.
+    await userEvent.type(screen.getByLabelText('Repository address'), '2');
+    answer({ ok: true, branches: ['main'] });
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Test connection' })).toBeEnabled(),
+    );
+    expect(screen.queryByText(/Connected/)).toBeNull();
+    // Nor do the old answer's branch suggestions fill the version fields.
+    expect(screen.getByLabelText('Main branch')).toHaveValue('');
+  });
+
+  /** A branch name typed while the test runs is an answer, not a blank to fill. */
+  it('does not overwrite a branch name typed while the test runs', async () => {
+    await renderScreen();
+    let answer!: (v: unknown) => void;
+    api.testConnection.mockReturnValue(new Promise((r) => (answer = r)));
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await userEvent.click(screen.getByText('Advanced'));
+    await userEvent.type(screen.getByLabelText('Main branch'), 'release');
+    answer({ ok: true, defaultBranch: 'main', branches: ['main', 'release'] });
+
+    expect(await screen.findByText(/Connected/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Main branch')).toHaveValue('release');
+    // The field nobody answered still gets the suggestion.
+    expect(screen.getByLabelText('Branches that need approval')).toHaveValue('main');
+  });
+
+  /**
    * The button is not the only way in. Pressing Save without ever pressing
    * Test used to store whatever was typed and open the gate on it, so the
    * first news of a wrong token was a broken app — the connection is proven
@@ -214,7 +255,6 @@ describe('SetupScreen', () => {
     await renderScreen();
     api.testConnection.mockRejectedValue(new Error('offline'));
     api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
-    api.fetchSetupStatus.mockResolvedValue({ complete: true, isAdmin: true });
 
     await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
     await userEvent.type(screen.getByLabelText('Access token'), 'ghp_x');
@@ -259,6 +299,32 @@ describe('SetupScreen', () => {
 
     expect(screen.getByRole('button', { name: 'Save and continue' })).toBeDisabled();
     expect(api.saveSettings).not.toHaveBeenCalled();
+  });
+
+  /**
+   * What gates a settings save is whether the CONNECTION would change, not
+   * whether a connection field was ever touched. Typing into the address and
+   * putting the stored value back changes nothing — the save must not be held
+   * behind a repository test for an edit that no longer exists.
+   */
+  it('settings mode: a field restored to its stored value does not gate the save', async () => {
+    const stored = SETTINGS.map((s) =>
+      s.key === 'kbRepoUrl'
+        ? { ...s, source: 'stored' as const, value: 'https://example.com/kb.git', configured: true }
+        : s.key === 'defaultBranch' || s.key === 'protectedBranches'
+          ? { ...s, source: 'stored' as const, value: 'main', configured: true }
+          : s,
+    );
+    render(<SetupScreen settings={stored} onSaved={vi.fn()} variant="settings" />);
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: stored });
+
+    const url = screen.getByLabelText('Repository address');
+    await userEvent.type(url, 'X');
+    await userEvent.type(url, '{backspace}');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
+    expect(api.testConnection).not.toHaveBeenCalled();
   });
 
   /** An empty repository is a supported starting point, not a failure. */
