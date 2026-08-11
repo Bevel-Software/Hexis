@@ -173,6 +173,21 @@ export async function createCoreServer(
     });
   });
 
+  // Close change requests whose source branch has been deleted. Not awaited:
+  // it fetches from origin, and a slow or unreachable remote must not hold up
+  // the server — nothing downstream depends on the result, and the requests it
+  // closes have been unusable since the branch went away, so landing a few
+  // seconds into uptime is soon enough. Errors are swallowed inside the sweep,
+  // which fails safe by closing nothing.
+  void core.workflowService
+    .closeChangeRequestsWithDeletedBranches()
+    .then((n) => {
+      if (n > 0) {
+        console.log(`[cr] closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
+      }
+    })
+    .catch((err) => console.warn('[cr] deleted-branch sweep failed:', err));
+
   // Overlay boot-time side effects (startup reconciles, periodic sweeps).
   await ext.onBoot?.(core);
 
