@@ -168,6 +168,93 @@ describe('WorkspaceItemRoute', () => {
     );
   });
 
+  /**
+   * A group may carry CATEGORY folders: `skills.service` walks until it finds
+   * a `SKILL.md` and treats that folder as the skill, so `Groups/Engineering/
+   * coding/create-ticket/SKILL.md` is a skill named `create-ticket`.
+   *
+   * Reading the first segment below the group asked for the category —
+   * "coding", which no skill answers to — so every nested skill listed
+   * perfectly and then reported "doesn't exist, or you don't have access to
+   * it" on click. Every fixture here used to be flat, which is exactly why
+   * that shipped.
+   */
+  describe('a skill nested under a category folder', () => {
+    const NESTED: LibraryData = {
+      ...CATALOG,
+      skills: [
+        { name: 'create-ticket', description: '', path: 'Groups/Engineering/coding/create-ticket' },
+        {
+          name: 'architecture-review',
+          description: '',
+          path: 'Groups/Engineering/review/architecture-review',
+        },
+      ],
+    };
+
+    beforeEach(() => {
+      dataMock.useLibraryData.mockReturnValue(NESTED);
+    });
+
+    it('resolves its SKILL.md to the folder holding it, not the category', async () => {
+      renderAt(itemUrl('Groups/Engineering/coding/create-ticket/SKILL.md'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
+        'create-ticket::SKILL.md',
+      );
+    });
+
+    it('resolves a bundled file below a category folder', async () => {
+      renderAt(itemUrl('Groups/Engineering/review/architecture-review/check-vocab.mjs'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
+        'architecture-review::check-vocab.mjs',
+      );
+    });
+
+    it('resolves a bare nested skill folder to SKILL.md', async () => {
+      renderAt(itemUrl('Groups/Engineering/coding/create-ticket'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
+        'create-ticket::SKILL.md',
+      );
+    });
+
+    it('resolves a nested SKILL.md with no catalog at all', async () => {
+      // The SKILL.md rule reads the URL alone, so the just-created case above
+      // keeps working at depth: the folder holding SKILL.md IS the skill.
+      dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
+      renderAt(itemUrl('Groups/Engineering/coding/brand-new-skill/SKILL.md'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
+        'brand-new-skill::SKILL.md',
+      );
+    });
+
+    it('resolves a `.tool` filed under a category folder', async () => {
+      // `walkFiles` finds manuals at ANY depth, so this is a real listed tool;
+      // matching only the group's top level listed it and 404'd the click.
+      renderAt(itemUrl('Groups/Engineering/coding/deploy.tool'));
+      expect(await screen.findByLabelText('tool-page')).toHaveTextContent('deploy');
+    });
+
+    it('does not let a prefix-sharing sibling claim a bundled file', async () => {
+      // Ownership compares whole segments: `create-ticket-v2` shares a string
+      // prefix with `create-ticket` and must not swallow its files.
+      dataMock.useLibraryData.mockReturnValue({
+        ...NESTED,
+        skills: [
+          ...NESTED.skills,
+          {
+            name: 'create-ticket-v2',
+            description: '',
+            path: 'Groups/Engineering/coding/create-ticket-v2',
+          },
+        ],
+      });
+      renderAt(itemUrl('Groups/Engineering/coding/create-ticket-v2/notes.md'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
+        'create-ticket-v2::notes.md',
+      );
+    });
+  });
+
   it('a non-default branch never renders an item page', async () => {
     renderAt(itemUrl('Groups/Sales/create-sales-deck/SKILL.md', 'razvan/some-draft'));
     await waitFor(() =>
