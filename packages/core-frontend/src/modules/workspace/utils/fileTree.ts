@@ -76,6 +76,10 @@ export function suggestedPages(tree: FileTreeEntry | null, limit: number): FileT
   while (level.length > 0 && pages.length < limit) {
     const next: FileTreeEntry[] = [];
     for (const entry of level) {
+      // Enough pages is enough work: without this, the last level scanned is
+      // walked to its end — every remaining sibling tested and pushed — for
+      // pages the final slice would throw away.
+      if (pages.length >= limit) break;
       // Dot-prefixed entries are the repository's own bookkeeping.
       if (entry.name.startsWith('.')) continue;
       if (entry.type === 'file') {

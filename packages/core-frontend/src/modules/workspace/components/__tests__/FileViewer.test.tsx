@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import type {
   BranchInfo,
@@ -172,6 +172,16 @@ function makeGit(status: WorkingTreeStatus): GitContextValue {
   };
 }
 
+/**
+ * Where the router currently stands. Opening a page from the empty state is
+ * navigation — the URL is the observable contract, and this makes it
+ * assertable without a route tree.
+ */
+function LocationEcho() {
+  const location = useLocation();
+  return <div data-testid="location">{location.pathname}</div>;
+}
+
 function ViewerHarness({
   initialContent = 'Base content',
   pendingValue = 'Agent version',
@@ -331,6 +341,7 @@ function ViewerHarness({
                     Inject pending
                   </button>
                   <FileViewer />
+                  <LocationEcho />
                 </OpenChangeRequestsContext.Provider>
             </ReviewContext.Provider>
           </GitContext.Provider>
@@ -986,11 +997,17 @@ describe('FileViewer: nothing open', () => {
   it('offers the pages nearest the top of the knowledge tree', async () => {
     render(<ViewerHarness filePath={null} fileTree={TREE} />);
     // Shallowest first, and the extension is not part of the name.
-    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeInTheDocument();
+    const shallow = await screen.findByRole('button', { name: /Handbook/ });
     // One level down, labelled with the folder that tells two like-named
     // pages apart.
     const deeper = screen.getByRole('button', { name: /Day one/ });
     expect(deeper).toHaveTextContent('Onboarding');
+    // "Nearest the top" is an ORDER, not just a membership: the top-level page
+    // renders before the one a folder down, and a regression to depth-first
+    // would flip exactly this.
+    expect(
+      shallow.compareDocumentPosition(deeper) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it('offers nothing that is not a document', async () => {
@@ -1004,11 +1021,21 @@ describe('FileViewer: nothing open', () => {
     expect(screen.queryByRole('button', { name: /access/ })).toBeNull();
   });
 
-  it('opens the page it suggested', async () => {
+  /**
+   * NAVIGATES, the same as clicking the file in the explorer — the URL is the
+   * canonical record of what is open, so refresh/share/back land on the page
+   * rather than on the empty state, and a failed load surfaces where every
+   * other open's does.
+   */
+  it('navigates to the page it suggested', async () => {
     const addTab = vi.fn(async () => true);
     render(<ViewerHarness filePath={null} fileTree={TREE} addTab={addTab} />);
     await userEvent.click(await screen.findByRole('button', { name: /Handbook/ }));
-    expect(addTab).toHaveBeenCalledWith('knowledge-base/KnowledgeBase/Handbook.md');
+    expect(screen.getByTestId('location')).toHaveTextContent(
+      /\/workspace\/.*\/knowledge-base\/KnowledgeBase\/Handbook\.md$/,
+    );
+    // Through the route, not around it.
+    expect(addTab).not.toHaveBeenCalled();
   });
 
   /** A knowledge base with nothing in it has nothing to suggest, and says so. */

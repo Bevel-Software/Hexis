@@ -302,8 +302,11 @@ export interface AppRegistry {
   crCreation?: CrCreationPort;
   /**
    * Static override of the suggested-prompt seeding callback (see
-   * {@link SuggestedPromptSeedContext} for the runtime-state variant). When
-   * neither is provided the FileViewer hides its suggested-prompt buttons.
+   * {@link SuggestedPromptSeedContext} for the runtime-state variant, and for
+   * why nothing in core consumes either any more — the Knowledge viewer's
+   * empty state offers real pages now, not prompts). Still public API: a
+   * registry-provided chat surface may hold it and seed from its own
+   * affordances.
    */
   suggestedPromptSeed?: (prompt: string) => void;
   /**

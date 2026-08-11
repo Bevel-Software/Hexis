@@ -9,7 +9,7 @@ import { Banner, Button, Surface } from '../../../shared/components';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
-import { useCanonicalFileUrl } from '../routing/kb-routes';
+import { useCanonicalFileUrl, useFileNav } from '../routing/kb-routes';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { useFileAccess } from '../../access/hooks/useFileAccess';
 import { FileHistoryPanel } from '../../git/components/FileHistoryPanel';
@@ -802,6 +802,11 @@ export function FileViewer() {
     () => suggestedPages(fileTree, SUGGESTION_LIMIT),
     [fileTree],
   );
+  // Opening a suggestion is NAVIGATION, the same as clicking the file in the
+  // explorer or a tab: the URL is the canonical record of what is open, and a
+  // refresh, share or back-press must land on the page — not on the empty
+  // state this button was clicked from.
+  const { openFile: navigateToFile } = useFileNav();
 
   // ALL open requests, not just the ones scoped to you — a colleague's request
   // on a file you can read but not write still belongs on this page.
@@ -842,14 +847,7 @@ export function FileViewer() {
                       elevation="none"
                       interactive
                       type="button"
-                      onClick={() => {
-                        // Same hand-off as the comparison opener above: a
-                        // rejected open has to say so, or the button reads as
-                        // one that does nothing.
-                        addTab(page.relativePath).catch((err) => {
-                          console.error('Failed to open page:', page.relativePath, err);
-                        });
-                      }}
+                      onClick={() => navigateToFile(page.relativePath)}
                       className="flex items-center gap-2.5 px-3 py-2"
                     >
                       <FileText size={15} className="shrink-0 text-ink-faint" aria-hidden />
@@ -859,8 +857,14 @@ export function FileViewer() {
                       {/* The folder it sits in — two pages can share a name,
                           and the one thing that tells them apart is where they
                           live. */}
+                      {/* Capped so a long folder name truncates instead of
+                          squeezing out the page title it is there to
+                          disambiguate — same contract as the comparison
+                          panel's path label. */}
                       {folder && (
-                        <span className="shrink-0 truncate text-meta text-ink-faint">{folder}</span>
+                        <span className="max-w-[40%] shrink-0 truncate text-meta text-ink-faint">
+                          {folder}
+                        </span>
                       )}
                     </Surface>
                   );
