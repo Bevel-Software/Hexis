@@ -393,8 +393,17 @@ export function useCrCreationPort(): CrCreationPort | null {
 }
 
 /**
- * Seeds the chat composer with a suggested prompt (FileViewer empty state).
- * Null → no chat surface registered → the suggested-prompt UI hides.
+ * Seeds the chat composer with a suggested prompt. Null → no chat surface is
+ * registered.
+ *
+ * NO CORE CONSUMER. It used to be the Knowledge viewer's empty state, which
+ * offered three canned questions for an assistant — on a deployment with no
+ * chat surface they never rendered, and on one with a chat surface they sent a
+ * reader looking at an empty page to go and ask something instead of opening
+ * one of the pages the file tree was already showing them. That empty state
+ * offers real documents now. The port stays because it is public API a
+ * registry may hold, and a chat surface that provides it is free to seed from
+ * its own affordances.
  */
 export const SuggestedPromptSeedContext = createContext<
   ((prompt: string) => void) | null

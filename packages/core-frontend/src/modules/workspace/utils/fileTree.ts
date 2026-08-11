@@ -42,6 +42,53 @@ export function findKbRoot(node: FileTreeEntry | null): FileTreeEntry | null {
   return null;
 }
 
+/** Documents, as opposed to the data, config and archives beside them. */
+const READABLE_PAGE = /\.(md|markdown)$/i;
+
+/**
+ * Pages worth offering to someone who has nothing open: the documents nearest
+ * the top of the knowledge tree, breadth-first, so the opening suggestion is a
+ * section heading rather than the fifth file inside the first folder.
+ *
+ * Scoped to exactly what the explorer browses under "Knowledge" —
+ * `KnowledgeBase/` plus any stray content folder. `Groups/` is the Skills &
+ * Tools app's storage and is not a browsing destination here, and the loose
+ * files at the root (`access.md`, `roles.yaml`) are how the deployment is
+ * configured, not something to read. A clone that predates the split has no
+ * named roots to scope to, so its whole tree is the knowledge.
+ *
+ * Fewer than `limit` — including none at all — is a legitimate answer for a
+ * knowledge base that is still empty; the caller says so rather than padding.
+ */
+export function suggestedPages(tree: FileTreeEntry | null, limit: number): FileTreeEntry[] {
+  const kbRoot = findKbRoot(tree);
+  const roots = kbRoot?.children
+    ? [
+        ...kbRoot.children.filter((c) => c.type === 'directory' && c.name === KNOWLEDGE_BASE_DIR),
+        ...kbRoot.children.filter((c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name)),
+      ]
+    : tree
+      ? [tree]
+      : [];
+
+  const pages: FileTreeEntry[] = [];
+  let level = roots;
+  while (level.length > 0 && pages.length < limit) {
+    const next: FileTreeEntry[] = [];
+    for (const entry of level) {
+      // Dot-prefixed entries are the repository's own bookkeeping.
+      if (entry.name.startsWith('.')) continue;
+      if (entry.type === 'file') {
+        if (READABLE_PAGE.test(entry.name)) pages.push(entry);
+      } else if (entry.name !== GROUPS_DIR) {
+        next.push(...(entry.children ?? []));
+      }
+    }
+    level = next;
+  }
+  return pages.slice(0, limit);
+}
+
 function findEntryByPath(tree: FileTreeEntry | null, relativePath: string): FileTreeEntry | null {
   if (!tree) return null;
   if (tree.relativePath === relativePath) return tree;

@@ -3,7 +3,11 @@ import { render, screen, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { useEffect, useState } from 'react';
-import type { BranchInfo, WorkingTreeStatus } from '@bevel-software/platform-shared';
+import type {
+  BranchInfo,
+  FileTreeEntry,
+  WorkingTreeStatus,
+} from '@bevel-software/platform-shared';
 
 // Mock the access API before importing the component tree — useFileAccess
 // fires a fetch in an effect on mount, and we don't want real network in tests.
@@ -174,6 +178,7 @@ function ViewerHarness({
   branch = 'alice/draft',
   filePath = 'knowledge-base/Knowledge/Foo.md',
   kbDirName = 'knowledge-base',
+  fileTree = null,
   addTab,
   changeRequests = [],
   authUser = null,
@@ -182,8 +187,11 @@ function ViewerHarness({
   initialContent?: string;
   pendingValue?: string;
   branch?: string;
-  filePath?: string;
+  /** `null` means nothing is open — the viewer's empty state. */
+  filePath?: string | null;
   kbDirName?: string | null;
+  /** What the explorer holds; the empty state draws its suggestions from it. */
+  fileTree?: FileTreeEntry | null;
   addTab?: WorkspaceContextValue['addTab'];
   /** Open change requests touching `filePath`. */
   changeRequests?: { number: number; title: string; who: string }[];
@@ -210,18 +218,20 @@ function ViewerHarness({
   }, [pendingValue]);
 
   const effectiveSaved = captureTyped ? savedContent : openFileContent;
-  const tab = {
-    path: filePath,
-    content: openFileContent,
-    savedContent: effectiveSaved,
-    isDirty: false,
-    pendingFileContent,
-  };
+  const tab = filePath
+    ? {
+        path: filePath,
+        content: openFileContent,
+        savedContent: effectiveSaved,
+        isDirty: false,
+        pendingFileContent,
+      }
+    : null;
   const workspace: WorkspaceContextValue = {
     workspaceId: 'ws-1',
     kbDirName,
-    fileTree: null,
-    openTabs: [tab],
+    fileTree,
+    openTabs: tab ? [tab] : [],
     activeTab: tab,
     dirtyTabFilenames: [],
     openFilePath: filePath,
@@ -300,7 +310,7 @@ function ViewerHarness({
             <ReviewContext.Provider value={review}>
                 <OpenChangeRequestsContext.Provider
                   value={{
-                    paths: new Set(changeRequests.length ? [filePath] : []),
+                    paths: new Set(changeRequests.length && filePath ? [filePath] : []),
                     minePaths: new Map(),
                     mineNumbers: new Set<number>(),
                     forPath: (p) =>
@@ -906,5 +916,127 @@ describe('FileViewer: proposing a change without write access', () => {
     // permission stripe with it (removed for readers everywhere).
     expect(await screen.findByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
     expect(screen.queryByText(/You don't have permission to edit/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * NOTHING OPEN. The first thing most people see in Knowledge, and for a long
+ * time it told them to go and ask an assistant a question — three canned ones
+ * about a "process landscape" that only rendered at all on a deployment with a
+ * chat surface registered, and that sent someone looking at a knowledge base
+ * away from the pages it holds. It offers those pages now.
+ */
+describe('FileViewer: nothing open', () => {
+  const TREE: FileTreeEntry = {
+    name: 'knowledge-base',
+    relativePath: 'knowledge-base',
+    type: 'directory',
+    children: [
+      {
+        name: 'KnowledgeBase',
+        relativePath: 'knowledge-base/KnowledgeBase',
+        type: 'directory',
+        children: [
+          {
+            name: 'Onboarding',
+            relativePath: 'knowledge-base/KnowledgeBase/Onboarding',
+            type: 'directory',
+            children: [
+              {
+                name: 'Day one.md',
+                relativePath: 'knowledge-base/KnowledgeBase/Onboarding/Day one.md',
+                type: 'file',
+              },
+            ],
+          },
+          {
+            name: 'Handbook.md',
+            relativePath: 'knowledge-base/KnowledgeBase/Handbook.md',
+            type: 'file',
+          },
+          {
+            name: 'logo.png',
+            relativePath: 'knowledge-base/KnowledgeBase/logo.png',
+            type: 'file',
+          },
+        ],
+      },
+      {
+        name: 'Groups',
+        relativePath: 'knowledge-base/Groups',
+        type: 'directory',
+        children: [
+          {
+            name: 'SKILL.md',
+            relativePath: 'knowledge-base/Groups/team-a/SKILL.md',
+            type: 'file',
+          },
+        ],
+      },
+      { name: 'access.md', relativePath: 'knowledge-base/access.md', type: 'file' },
+    ],
+  };
+
+  it('does not send the reader off to an assistant', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} />);
+    await screen.findByRole('heading', { name: /Open a page/ });
+    expect(document.body.textContent).not.toMatch(/assistant/i);
+  });
+
+  it('offers the pages nearest the top of the knowledge tree', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} />);
+    // Shallowest first, and the extension is not part of the name.
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeInTheDocument();
+    // One level down, labelled with the folder that tells two like-named
+    // pages apart.
+    const deeper = screen.getByRole('button', { name: /Day one/ });
+    expect(deeper).toHaveTextContent('Onboarding');
+  });
+
+  it('offers nothing that is not a document', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} />);
+    await screen.findByRole('button', { name: /Handbook/ });
+    // An image is not a page; `Groups/` belongs to Skills & Tools and is not a
+    // browsing destination here; the loose root files configure the
+    // deployment rather than saying anything.
+    expect(screen.queryByRole('button', { name: /logo/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /SKILL/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /access/ })).toBeNull();
+  });
+
+  it('opens the page it suggested', async () => {
+    const addTab = vi.fn(async () => true);
+    render(<ViewerHarness filePath={null} fileTree={TREE} addTab={addTab} />);
+    await userEvent.click(await screen.findByRole('button', { name: /Handbook/ }));
+    expect(addTab).toHaveBeenCalledWith('knowledge-base/KnowledgeBase/Handbook.md');
+  });
+
+  /** A knowledge base with nothing in it has nothing to suggest, and says so. */
+  it('promises nothing when there is nothing to open', async () => {
+    render(<ViewerHarness filePath={null} fileTree={null} />);
+    await screen.findByRole('heading', { name: /Open a page/ });
+    expect(screen.getByText('Pick anything from the file tree.')).toBeInTheDocument();
+  });
+
+  /**
+   * A clone that predates the `KnowledgeBase/` split has no named roots to
+   * scope to — the whole tree is the knowledge, and reading none of it because
+   * a folder is missing would be the wrong answer.
+   */
+  it('reads the whole tree when there are no named roots', async () => {
+    render(
+      <ViewerHarness
+        filePath={null}
+        fileTree={{
+          name: 'knowledge-base',
+          relativePath: 'knowledge-base',
+          type: 'directory',
+          children: [
+            { name: 'Charter.md', relativePath: 'knowledge-base/Charter.md', type: 'file' },
+          ],
+        }}
+      />,
+    );
+    expect(await screen.findByRole('button', { name: /Charter/ })).toBeInTheDocument();
   });
 });
