@@ -60,41 +60,49 @@ export function WorkspaceItemRoute() {
     return <ToolPage slug={catalogSlug ?? last.slice(0, -'.tool'.length)} />;
   }
 
-  // A `SKILL.md` names its own skill: the folder holding it, at any depth.
-  // Groups may nest (`Groups/Engineering/coding/create-ticket/SKILL.md`) —
-  // `skills.service` walks until it finds a `SKILL.md` and treats THAT folder
-  // as the skill, so the id is the parent of the file, never the first segment
-  // below the group. Reading the first segment sent every nested skill to a
-  // lookup for its CATEGORY name ("coding"), which no skill answers to.
-  //
-  // No catalog needed, which is the point: a skill created a moment ago opens
-  // from its URL alone, exactly as the flat case always has.
-  if (last === 'SKILL.md' && tail.length >= 2) {
-    return <SkillPage name={tail[tail.length - 2]!} activeFile="SKILL.md" />;
-  }
-
-  // A bundled file (`reference/LESSONS.md`, `check-vocab.mjs`) or a bare skill
-  // folder. Which prefix is the skill is genuinely ambiguous from the URL —
-  // both `<skill>/reference/x.md` and `<category>/<skill>/x.md` are four
-  // segments — so this is the one case that asks the catalog, taking the
-  // DEEPEST skill whose folder contains the path (a category folder is never
-  // itself a skill, so the deepest match is the owner).
+  // THE CATALOG IS THE AUTHORITY on which folder is a skill and what its id
+  // is. Groups may nest (`Groups/Engineering/coding/create-ticket/SKILL.md`),
+  // and a skill's id is its frontmatter `id`/`name` — only FALLING BACK to the
+  // folder name — so neither the depth nor the id can be read off the URL with
+  // certainty. Take the DEEPEST skill whose folder contains this path: a
+  // category folder is never itself a skill, so the deepest match is the owner,
+  // and a `SKILL.md` bundled inside a skill (`<skill>/examples/SKILL.md`)
+  // stays that skill's file instead of inventing a skill called `examples`.
   const owner = deepestSkillOwning(data.items, repoRel);
   if (owner) {
     const file = repoRel.slice(owner.path.length + 1);
     return <SkillPage name={owner.id} activeFile={file || 'SKILL.md'} />;
   }
 
-  // A direct FILE in the group folder (`access.md`, a stray upload) is the
-  // group's business, not a page of its own.
-  if (tail.length === 1 && /\.[a-z0-9]+$/i.test(last)) {
+  // Not in the catalog. A `SKILL.md` still names its own skill structurally —
+  // the folder holding it — and that is deliberately catalog-FREE: a skill
+  // created a moment ago opens from its URL alone, before any reload lands.
+  // (`Groups/<group>/SKILL.md` makes the group folder itself the skill, which
+  // is what the backend's walk would report for it.)
+  if (last === 'SKILL.md') {
+    return <SkillPage name={tail.length >= 2 ? tail[tail.length - 2]! : group} activeFile="SKILL.md" />;
+  }
+
+  // Below here the URL is genuinely ambiguous — `<skill>/reference/x.md` and
+  // `<category>/<skill>/x.md` are the same shape — and the catalog is the only
+  // thing that can settle it. While it is still loading, WAIT: guessing sends
+  // SkillPage to fetch a skill named after a category folder, which flashes a
+  // not-found error and then corrects itself. The layout (and its sidebar) is
+  // already on screen around this.
+  if (data.loading) return null;
+
+  // The catalog has spoken and no skill owns this file, so it is not a page:
+  // a group's `access.md`, a category folder's own `access.md`, a stray
+  // upload. That belongs to the group — at ANY depth, not just the group's
+  // top level.
+  if (/\.[a-z0-9]+$/i.test(last)) {
     return <Navigate to={pathForGroup(group)} replace />;
   }
 
-  // Catalog silent (still loading, or the caller can't read this one): fall
-  // back to the structural reading. Wrong only for a nested bundled file,
-  // which then resolves on the next render once the catalog lands.
-  return <SkillPage name={tail[0]!} activeFile={tail.slice(1).join('/') || 'SKILL.md'} />;
+  // A FOLDER the catalog doesn't know: most likely a skill whose reload hasn't
+  // landed yet (the catalog can be settled but stale). Its own name is the id
+  // — the same rule the backend applies when no frontmatter declares one.
+  return <SkillPage name={last} activeFile="SKILL.md" />;
 }
 
 /**

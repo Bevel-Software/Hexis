@@ -227,11 +227,48 @@ describe('WorkspaceItemRoute', () => {
       );
     });
 
-    it('resolves a `.tool` filed under a category folder', async () => {
+    it('resolves a `.tool` filed under a category folder, by its catalog slug', async () => {
       // `walkFiles` finds manuals at ANY depth, so this is a real listed tool;
-      // matching only the group's top level listed it and 404'd the click.
+      // matching only the group's top level listed it and 404'd the click. The
+      // slug is the manual's declared `id`, which need not match the filename —
+      // so a fixture whose slug equals its filename would prove nothing.
+      dataMock.useLibraryData.mockReturnValue({
+        ...NESTED,
+        tools: [
+          {
+            slug: 'internal_deploy',
+            name: 'internal_deploy',
+            path: 'Groups/Engineering/coding/deploy.tool',
+            type: 'mcp' as const,
+            setup: null,
+            canWrite: false,
+            variables: [],
+          },
+        ],
+      });
       renderAt(itemUrl('Groups/Engineering/coding/deploy.tool'));
-      expect(await screen.findByLabelText('tool-page')).toHaveTextContent('deploy');
+      expect(await screen.findByLabelText('tool-page')).toHaveTextContent('internal_deploy');
+    });
+
+    it("sends a category folder's own access.md to the group page", async () => {
+      // The same answer a stray file at the group's top level gets. Before, it
+      // fell through to a SkillPage named after the category.
+      renderAt(itemUrl('Groups/Engineering/coding/access.md'));
+      await waitFor(() =>
+        expect(screen.getByLabelText('pathname')).toHaveTextContent(
+          '/skills-and-tools/groups/Engineering',
+        ),
+      );
+    });
+
+    it('waits for the catalog rather than guessing a category is the skill', async () => {
+      // A bare nested folder is ambiguous without the catalog. Guessing sent
+      // SkillPage after a skill named "coding" and flashed a not-found error;
+      // the catalog is what settles it, so hold the slot until it lands.
+      dataMock.useLibraryData.mockReturnValue({ ...NESTED, loading: true, skills: [], tools: [] });
+      renderAt(itemUrl('Groups/Engineering/coding/create-ticket'));
+      expect(await screen.findByRole('button', { name: /^All groups/ })).toBeInTheDocument();
+      expect(screen.queryByLabelText('skill-page')).toBeNull();
     });
 
     it('does not let a prefix-sharing sibling claim a bundled file', async () => {
@@ -253,6 +290,29 @@ describe('WorkspaceItemRoute', () => {
         'create-ticket-v2::notes.md',
       );
     });
+  });
+
+  /**
+   * A skill's id is its frontmatter `id`/`name`, and only FALLS BACK to the
+   * folder name — so the URL cannot be trusted to spell it. The catalog can.
+   */
+  it('resolves a skill whose declared id differs from its folder name', async () => {
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      skills: [{ name: 'deck-builder', description: '', path: 'Groups/Sales/create-sales-deck' }],
+    });
+    renderAt(itemUrl('Groups/Sales/create-sales-deck/SKILL.md'));
+    expect(await screen.findByLabelText('skill-page')).toHaveTextContent('deck-builder::SKILL.md');
+  });
+
+  it("keeps a SKILL.md bundled INSIDE a skill as that skill's file", async () => {
+    // `skills.service` stops at the first `SKILL.md` and treats that folder as
+    // the skill, so a nested one is a bundled asset — never a skill called
+    // `examples`.
+    renderAt(itemUrl('Groups/Sales/create-sales-deck/examples/SKILL.md'));
+    expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
+      'create-sales-deck::examples/SKILL.md',
+    );
   });
 
   it('a non-default branch never renders an item page', async () => {
