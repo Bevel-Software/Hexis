@@ -41,7 +41,7 @@ import type {
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
 } from '@bevel-software/platform-shared';
-import { isProtectedBranch } from '@bevel-software/platform-shared';
+import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { and, eq } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
@@ -1534,6 +1534,86 @@ export class WorkflowService implements IWorkflowService {
     this.events?.emit({ kind: 'change-request-rejected', number });
     await this.retireMergedSourceBranch(number, summary.base, user);
     return true;
+  }
+
+  /**
+   * Close every open change request whose source branch no longer exists.
+   *
+   * A change request is a proposal to merge a branch. When that branch is
+   * gone — deleted after a manual merge, pruned as abandoned, or left behind
+   * by a feature that has itself been removed — the request cannot be read,
+   * reviewed, applied or declined. It is not a pending decision, it is a
+   * tombstone, and it costs more than tidiness: `listOpenPrs` resolves each
+   * open request's changed paths, so every one of these throws
+   * `unknown branch` on every poll, filling the log and slowing the list it
+   * appears in.
+   *
+   * CLOSED, NOT DELETED. The row is evidence — who proposed what, when, and
+   * that it was never applied — and it is the only remaining trace once the
+   * branch is gone. Closing takes it out of every open list (which is the
+   * whole visible problem) while a `state = 'closed'` row can still be read,
+   * counted, and reopened by hand. Deleting would make this sweep the one
+   * operation in the workflow that destroys history without a human asking.
+   *
+   * ONE fetch, then a set lookup. The freshness matters more than the cost:
+   * `changedPathsForPr` fails when the branch is missing from THAT
+   * workspace's refs, which is not the same thing as missing from origin —
+   * a clone that never fetched a branch someone else created reports exactly
+   * the same error. Closing on that signal would eat live requests. So the
+   * verdict comes from `listBranches({ freshFetch: true })`, which fetches
+   * with prune and unions local heads with origin's, on a single workspace.
+   *
+   * Fails SAFE: any error listing branches abandons the sweep entirely rather
+   * than closing anything, because "I could not reach origin" and "the branch
+   * is gone" are indistinguishable from the inside and only one of them is a
+   * reason to act.
+   *
+   * Returns how many it closed.
+   */
+  async closeChangeRequestsWithDeletedBranches(): Promise<number> {
+    const open = await this.db
+      .select({ number: changeRequests.number, sourceBranch: changeRequests.sourceBranch })
+      .from(changeRequests)
+      .where(eq(changeRequests.state, 'open'));
+    if (open.length === 0) return 0;
+
+    let live: Set<string>;
+    try {
+      const branches = await this.git.listBranches(workspaceIdForBranch(DEFAULT_BRANCH), {
+        freshFetch: true,
+      });
+      live = new Set(branches.map((b) => b.name));
+    } catch (err) {
+      console.warn('[cr] branch sweep skipped — could not list branches:', err);
+      return 0;
+    }
+    // An empty branch list means something is wrong with the clone, not that
+    // every branch in the repo was deleted at once. Refuse to act on it.
+    if (live.size === 0) {
+      console.warn('[cr] branch sweep skipped — branch list came back empty');
+      return 0;
+    }
+
+    let closed = 0;
+    for (const cr of open) {
+      if (live.has(cr.sourceBranch)) continue;
+      const now = new Date();
+      // Guarded on `state = 'open'`, so a merge or withdraw racing this call
+      // wins and this becomes a no-op.
+      const updated = await this.db
+        .update(changeRequests)
+        .set({ state: 'closed', closedAt: now, updatedAt: now })
+        .where(and(eq(changeRequests.number, cr.number), eq(changeRequests.state, 'open')))
+        .returning({ id: changeRequests.id });
+      if (updated.length === 0) continue;
+      this.prs.invalidateDetailCache(cr.number);
+      this.events?.emit({ kind: 'change-request-rejected', number: cr.number });
+      console.log(
+        `[cr] closed change request #${cr.number}: source branch "${cr.sourceBranch}" no longer exists`,
+      );
+      closed++;
+    }
+    return closed;
   }
 
   /**
