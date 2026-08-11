@@ -58,11 +58,7 @@ export function IconButton({
       className={cn(
         'inline-flex flex-none items-center justify-center transition-colors',
         'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-muted',
-        // `aria-disabled` gets the same look as `disabled`, because a control
-        // that is inert but still focusable (so its reason stays reachable by
-        // keyboard) must not READ as available.
         'disabled:cursor-not-allowed disabled:opacity-50',
-        'aria-disabled:cursor-not-allowed aria-disabled:opacity-50',
         SIZE[size],
         tone === 'danger'
           ? 'text-ink-faint hover:bg-danger-soft hover:text-danger'

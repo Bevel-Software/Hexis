@@ -241,28 +241,13 @@ export function GroupPage() {
         <div className="mt-1.5">
           <PageActions
             onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
-            onAdd={() => setAddOpen(true)}
             // The dialog needs both to mount (`addOpen && summary &&
-            // primaryFolder`), so without them `+` would open nothing. Same
-            // prerequisite the empty band's doorway checks — the two ways to
-            // add must agree about whether adding is possible at all.
-            //
-            // Three different reasons, not one: this page renders as soon as
-            // the CATALOG has items, so a missing summary can mean discovery
-            // is still in flight, or that it failed — or that it succeeded and
-            // this caller simply reached the group through a per-file grant,
-            // with no folder of their own to add into. Only the middle one is
-            // worth retrying, and telling the other two to "try again" sends
-            // people to re-run something that already answered.
-            addDisabledReason={
-              summary && primaryFolder
-                ? undefined
-                : data.groupsLoading
-                  ? `${group} is still loading`
-                  : data.groupsError
-                    ? `${group} couldn't be loaded — try again`
-                    : `Adding isn't available for ${group}`
-            }
+            // primaryFolder`), so without them `+` could only ever be a
+            // no-op — it is omitted instead, the same way `Share` is when
+            // there is no folder to manage. The empty band's doorway checks
+            // the identical prerequisite, so the two ways to add always agree
+            // about whether adding is possible at all.
+            onAdd={summary && primaryFolder ? () => setAddOpen(true) : undefined}
             onCopyLink={() => copyToClipboard(window.location.href)}
             // The OWNER's verb — `isOwner` is the same verdict the DELETE
             // route enforces, so the item appears for exactly the people the

@@ -38,20 +38,17 @@ export interface PageActionsProps {
    * editor with nothing to edit.
    */
   onShare?: () => void;
-  /** Opens the add dialog. Never gated on role — see the note above. */
-  onAdd(): void;
   /**
-   * Why `+` cannot act right now, if it cannot — e.g. the group's folder is
-   * unknown because its endpoint failed, so the add dialog has nothing to
-   * write into.
+   * Opens the add dialog. Never gated on ROLE — see the note above; that is
+   * the whole point of this component.
    *
-   * Present, the button renders DISABLED with this as its tooltip rather than
-   * vanishing. That is the difference between this and `onShare`'s absence:
-   * the personal page has no folder to share EVER (structural, so no button),
-   * while a failed lookup is transient (so the affordance stays put and says
-   * why it cannot act). Role is still never a reason — see the note above.
+   * Omitted when there is nothing to add INTO, exactly as `onShare` is: the
+   * dialog needs the group's summary and its primary folder, so without them
+   * the button could only ever be a no-op. A control that is present and does
+   * nothing teaches people that buttons lie, which is worse than a control
+   * that is not there.
    */
-  addDisabledReason?: string;
+  onAdd?: () => void;
   /** Copies a link to this page. Resolves false if the clipboard refused. */
   onCopyLink(): Promise<boolean>;
   /**
@@ -68,7 +65,6 @@ export interface PageActionsProps {
 export function PageActions({
   onShare,
   onAdd,
-  addDisabledReason,
   onCopyLink,
   onDelete,
   addLabel = 'Add a skill or tool',
@@ -99,56 +95,11 @@ export function PageActions({
         </Button>
       )}
 
-      {/* `group` so the reason below can open on the button's hover AND its
-          focus — see the note on the tooltip itself. */}
-      <div className="group relative flex">
-        <IconButton
-          // The reason rides IN the accessible name when it applies: a control
-          // that says only "Add a skill or tool" tells a screen-reader user what
-          // it would do, not why it will not.
-          aria-label={addDisabledReason ? `${addLabel} — ${addDisabledReason}` : addLabel}
-          // The native tooltip is the RIGHT affordance only while the button
-          // works: browsers show `title` on hover and not on keyboard focus, so
-          // for the disabled case it would hide the reason from the one group
-          // that can neither see the greyed-out pixels change nor hear the
-          // label — sighted keyboard users. That case gets the span below.
-          title={addDisabledReason ? undefined : addLabel}
-          // `aria-disabled`, NOT `disabled`. A disabled button leaves the tab
-          // order entirely and stops firing pointer events, so the reason we
-          // just went to the trouble of writing would be unreachable by keyboard
-          // — unreadable to precisely the people who cannot see the greyed-out
-          // pixels. Focusable-but-inert keeps the explanation reachable; the
-          // handler below is what makes it actually do nothing.
-          aria-disabled={addDisabledReason ? true : undefined}
-          onClick={() => {
-            if (addDisabledReason) return;
-            onAdd();
-          }}
-        >
+      {onAdd && (
+        <IconButton aria-label={addLabel} title={addLabel} onClick={onAdd}>
           <Plus size={15} />
         </IconButton>
-
-        {/* The reason, made VISIBLE — on hover for the pointer and on focus
-            for the keyboard, which is the half `title` cannot do.
-
-            `aria-hidden`, deliberately: the same words are already in the
-            button's accessible name, so exposing them again here would have a
-            screen reader read the reason twice. This span exists for the eyes
-            that need it, and the name carries it for everyone else.
-
-            Opacity rather than `hidden`, and `pointer-events-none`: it must
-            not become a hover target that flickers itself in and out, and it
-            sits BELOW the row for the same reason the copy status does — a
-            panel that opened upward or leftward would cover the page title. */}
-        {addDisabledReason && (
-          <span
-            aria-hidden="true"
-            className="pointer-events-none absolute right-0 top-full z-40 mt-1.5 whitespace-nowrap rounded-sm bg-ink px-2 py-1 text-meta text-canvas opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
-          >
-            {addDisabledReason}
-          </span>
-        )}
-      </div>
+      )}
 
       <div className="relative">
         <IconButton
