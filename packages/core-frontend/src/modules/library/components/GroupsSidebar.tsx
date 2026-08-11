@@ -53,8 +53,14 @@ export interface GroupsSidebarProps {
    * Whether to spell the first group out in words, with the chalk arrow. The
    * hover-revealed `+` is unchanged for everyone; this is only the teaching
    * mark, and it is an administrator's — see the empty-state block below.
+   *
+   * Optional, defaulting to OFF, for the same reason `isAdminLoading` is
+   * optional on the admin context: this props type is public, and a host
+   * application rendering the nav must stay source-compatible across the
+   * upgrade. Omitting it reproduces the nav exactly as it shipped, which had
+   * no written-out CTA at all.
    */
-  canCreateGroup: boolean;
+  canCreateGroup?: boolean;
   /**
    * The all-groups index is showing. Beside `filter` rather than inside it: the
    * index lists PLACES, not a filtered slice of the catalog, so it is not a
@@ -106,7 +112,7 @@ export function GroupsSidebar({
   attentionCount,
   onFinishSetup,
   onCreateGroup,
-  canCreateGroup,
+  canCreateGroup = false,
   groupsIndexActive,
   onOpenGroupsIndex,
   onContextMenu,

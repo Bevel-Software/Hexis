@@ -105,6 +105,13 @@ describe('GroupsSidebar', () => {
     expect(screen.queryByRole('button', { name: 'Create a group' })).not.toBeInTheDocument();
   });
 
+  it('says nothing about creating when the prop is omitted — the nav a host app already had', () => {
+    // `canCreateGroup` is optional so this public props type survives the
+    // upgrade. Omitted must mean OFF, which is the nav exactly as it shipped.
+    renderSidebar({ groups: [], lockedGroups: [], canCreateGroup: undefined });
+    expect(screen.queryByRole('button', { name: 'Create a group' })).not.toBeInTheDocument();
+  });
+
   it('marks the selected group current and leaves the others alone', () => {
     renderSidebar({ filter: { kind: 'group', group: 'GTM' } });
     expect(row(/^GTM/)).toHaveAttribute('aria-current', 'true');
