@@ -12,7 +12,7 @@ import {
 } from '../../workspace/routing/kb-routes';
 import { groupOfPath, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
-import { DOCUMENT_COLUMN } from '../../../shared/theme/measure';
+import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { ReviewFileRow } from './ReviewFileRow';
 import { DiffViewer } from './DiffViewer';
 import { MarkdownDiffViewer } from './MarkdownDiffViewer';
@@ -349,32 +349,37 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
         )}
         {!isLoadingDiff && fileDiff && !fileDiff.isBinary && (
           isMarkdownPath(fileDiff.path) ? (
-            // The measure, and ONLY the measure. `MarkdownDiffViewer` is fine
-            // as it is — it renders a self-contained box with its own scroller
-            // and padding, which is what the change-request dialog and file
-            // history want. What was wrong is this container: it handed that
-            // box the full width of the panel, so the very document that reads
-            // at an 880px line two clicks away arrived in the review surface
-            // as a wall of text.
+            // Panel-width SCROLLER, measured INNER column.
             //
-            // So the wrapper constrains width and nothing else. Not
-            // `documentGutters`, which bundles `pb-[110px]`: the scroller is
-            // the CHILD here, so that bottom rhythm would sit outside it as
-            // permanent dead space with the scroll ending short of the panel.
-            // Not `KbDocumentShell` either — it owns a scroller, a rail track
-            // and the file lock's scroll listener, none of which belong to a
-            // floating panel that has its own header and footer.
+            // The scroller has to be the outer box: when the centred column
+            // scrolled instead, the gutters either side sat outside its hit
+            // area and the wheel did nothing over them — a dead margin on
+            // exactly the wide screens the measure exists for.
             //
-            // The child's own `px-4` becomes the gutter, so the line lands at
-            // 848px against Knowledge's 800px — near enough that the two read
-            // as the same column, and bought without reaching into a component
-            // three surfaces share.
-            <div className={cn('h-full', DOCUMENT_COLUMN)}>
-              <MarkdownDiffViewer
-                payload={fileDiff}
-                onOpenFile={openDiffLink}
-                onOpenNodeId={openNodeId}
-              />
+            // With the outer scrolling, the inner column can carry the real
+            // Knowledge contract: `DOCUMENT_COLUMN` + `documentGutters`, which
+            // bundles the 40px sides AND the 110px bottom rhythm. Both now sit
+            // INSIDE the scroller, where they belong — the earlier version had
+            // to skip the gutters entirely because that bottom padding would
+            // have become permanent dead space below a child-owned scroll.
+            // The line lands at 800px, the same as the document two clicks
+            // away, rather than the 848px approximation.
+            //
+            // `scroll={false}` is what makes it possible: two nested
+            // `h-full overflow-auto` boxes leave the outer unable to scroll
+            // and stack both paddings.
+            //
+            // `roomy` is false — this panel covers the viewer, not the nav, so
+            // the file tree is still on screen beside it.
+            <div className="h-full overflow-auto bg-white">
+              <div className={cn(DOCUMENT_COLUMN, documentGutters(false))}>
+                <MarkdownDiffViewer
+                  payload={fileDiff}
+                  onOpenFile={openDiffLink}
+                  onOpenNodeId={openNodeId}
+                  scroll={false}
+                />
+              </div>
             </div>
           ) : (
             // Left full-bleed on purpose. This is the marked-SOURCE view for
