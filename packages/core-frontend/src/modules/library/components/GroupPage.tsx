@@ -242,6 +242,13 @@ export function GroupPage() {
           <PageActions
             onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
             onAdd={() => setAddOpen(true)}
+            // The dialog needs both to mount (`addOpen && summary &&
+            // primaryFolder`), so without them `+` would open nothing. Same
+            // prerequisite the empty band's doorway checks — the two ways to
+            // add must agree about whether adding is possible at all.
+            addDisabledReason={
+              summary && primaryFolder ? undefined : `${group} couldn't be loaded — try again`
+            }
             onCopyLink={() => copyToClipboard(window.location.href)}
             // The OWNER's verb — `isOwner` is the same verdict the DELETE
             // route enforces, so the item appears for exactly the people the

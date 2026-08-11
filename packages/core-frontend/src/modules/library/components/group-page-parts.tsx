@@ -430,18 +430,6 @@ export function EmptyStateAction({
 }
 
 /**
- * The empty Skills band as a doorway instead of a dead end. The sentence
- * names the fact and hands over a link that DOES the thing — the same thing
- * the title row's `+` does — while a chalk arrow points up at that `+`, so
- * the page itself teaches where "add" lives. No separate tour, no overlay:
- * the arrow exists only because this component only renders when the band is
- * empty, and it leaves the moment the first skill arrives.
- *
- * The arrow overlaps the band heading on its way up. That is intended — it is
- * background, not layout: absolutely placed, `pointer-events-none`, and faint
- * enough to read as a margin note rather than a fourth piece of chrome.
- */
-/**
  * Where the nudge's arrow sits so its TIP lands on the `+` icon-button's
  * centre: from the column's right edge that centre sits behind the `⋯` button
  * and two flex gaps (~54px), constant on every page that renders
@@ -456,6 +444,18 @@ export function EmptyStateAction({
 const ARROW_AT_PAGE_ACTIONS_PLUS =
   'pointer-events-none absolute -top-[74px] right-[45px] h-[68px] w-[84px] text-ink-faint';
 
+/**
+ * The empty Skills band as a doorway instead of a dead end. The sentence
+ * names the fact and hands over a button that DOES the thing — the same thing
+ * the title row's `+` does — while a chalk arrow points up at that `+`, so
+ * the page itself teaches where "add" lives. No separate tour, no overlay:
+ * the arrow exists only because this component only renders when the band is
+ * empty, and it leaves the moment the first skill arrives.
+ *
+ * The arrow overlaps the band heading on its way up. That is intended — it is
+ * background, not layout: absolutely placed, `pointer-events-none`, and faint
+ * enough to read as a margin note rather than a fourth piece of chrome.
+ */
 export function EmptySkillsNudge({
   lead,
   actionLabel,

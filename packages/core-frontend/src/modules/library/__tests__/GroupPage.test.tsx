@@ -330,6 +330,9 @@ describe('GroupPage', () => {
       await screen.findByText('No skills yet. Ask your agent to write one for GTM.'),
     ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Add the first skill' })).not.toBeInTheDocument();
+    // The title row's `+` is under the same prerequisite: both ways to add
+    // must agree that adding is impossible here.
+    expect(screen.getByRole('button', { name: /^Add a skill or tool to GTM —/ })).toBeDisabled();
   });
 
   it('makes the empty Skills band a doorway for an admin: its link opens the same add dialog as `+`', async () => {
@@ -443,10 +446,18 @@ describe('GroupPage', () => {
     groupsMock.listGroups.mockRejectedValue(new Error("Couldn't load groups."));
     renderGroup('GTM');
     expect(await screen.findByTestId('library-card-skill-outreach')).toBeInTheDocument();
-    // No verified principals, so no claim about them. The add door still opens
-    // — it writes nothing, so there is no permission to be wrong about.
+    // No verified principals, so no claim about them.
     expect(screen.queryByText(/^Run by/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Add a skill or tool to GTM' })).toBeInTheDocument();
+    // The add door STAYS, and says why it cannot act. It used to be asserted
+    // present-and-enabled on the reasoning that adding writes nothing a
+    // permission could be wrong about — but permission was never what stops
+    // it here: `AddToGroupDialog` needs `summary && primaryFolder` to mount,
+    // and the failed endpoint left neither, so the enabled button opened
+    // nothing at all. Disabled-with-a-reason is the honest version of the
+    // same intent (the affordance does not vanish for a transient failure).
+    const add = screen.getByRole('button', { name: /^Add a skill or tool to GTM —/ });
+    expect(add).toBeInTheDocument();
+    expect(add).toBeDisabled();
   });
 
   it('does not claim a missing group is gone while the endpoint is still failing', async () => {

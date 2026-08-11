@@ -129,9 +129,9 @@ export function CreatorWelcomePage() {
             existingSkills={skillNames}
             onBusyChange={setNewSkillBusy}
             onCreated={() => {
-              // Both flags, not just `open`: on the proposal path nothing
-              // navigates away, and a dialog re-opened later must not start
-              // life with its doors already shut.
+              // Belt and braces on the lifted flag: the panel clears it
+              // itself, and clearing it again as the dialog closes means a
+              // later open can never inherit a stale busy state.
               setNewSkillOpen(false);
               setNewSkillBusy(false);
             }}

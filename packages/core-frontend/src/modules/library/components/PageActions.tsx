@@ -40,6 +40,18 @@ export interface PageActionsProps {
   onShare?: () => void;
   /** Opens the add dialog. Never gated on role — see the note above. */
   onAdd(): void;
+  /**
+   * Why `+` cannot act right now, if it cannot — e.g. the group's folder is
+   * unknown because its endpoint failed, so the add dialog has nothing to
+   * write into.
+   *
+   * Present, the button renders DISABLED with this as its tooltip rather than
+   * vanishing. That is the difference between this and `onShare`'s absence:
+   * the personal page has no folder to share EVER (structural, so no button),
+   * while a failed lookup is transient (so the affordance stays put and says
+   * why it cannot act). Role is still never a reason — see the note above.
+   */
+  addDisabledReason?: string;
   /** Copies a link to this page. Resolves false if the clipboard refused. */
   onCopyLink(): Promise<boolean>;
   /**
@@ -56,6 +68,7 @@ export interface PageActionsProps {
 export function PageActions({
   onShare,
   onAdd,
+  addDisabledReason,
   onCopyLink,
   onDelete,
   addLabel = 'Add a skill or tool',
@@ -86,7 +99,15 @@ export function PageActions({
         </Button>
       )}
 
-      <IconButton aria-label={addLabel} title={addLabel} onClick={onAdd}>
+      <IconButton
+        // The reason rides IN the accessible name when it applies: a disabled
+        // control that says only "Add a skill or tool" tells a screen-reader
+        // user what it would do, not why it will not.
+        aria-label={addDisabledReason ? `${addLabel} — ${addDisabledReason}` : addLabel}
+        title={addDisabledReason ?? addLabel}
+        disabled={Boolean(addDisabledReason)}
+        onClick={onAdd}
+      >
         <Plus size={15} />
       </IconButton>
 
@@ -141,16 +162,22 @@ export function PageActions({
           outright on a non-secure origin, and a silent no-op is the worst
           possible reply to "copy this".
 
-          OUT of the flex flow, beside the row: in flow, the appearing text
+          OUT of the flex flow, BELOW the row: in flow, the appearing text
           widened the row and slid every button — including the `+` an empty
           page's chalk arrow is aimed at — left for the 1.8s the answer shows.
           A status is an annotation on the actions, not a fourth action, so it
-          must not move them. */}
+          must not move them.
+
+          Below rather than beside, because beside (`right-full`) reaches into
+          whatever shares the row — on a narrow column, or under a long group
+          name, that is the page title, and an answer that covers the heading
+          traded one layout bug for a worse one. Under the row it is clear of
+          every sibling at any width. */}
       <span
         role="status"
         aria-live="polite"
         className={cn(
-          'absolute right-full top-1/2 mr-2 -translate-y-1/2 whitespace-nowrap text-meta transition-opacity',
+          'absolute right-0 top-full mt-1 whitespace-nowrap text-meta transition-opacity',
           copied ? 'opacity-100' : 'opacity-0',
           copied === 'fail' ? 'text-danger' : 'text-ink-faint',
         )}

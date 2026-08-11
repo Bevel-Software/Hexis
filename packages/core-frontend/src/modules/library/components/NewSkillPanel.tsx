@@ -104,6 +104,12 @@ export function NewSkillPanel({
       // The library is where the result lives, whichever way it went — nobody
       // is bounced to the Knowledge app to meet the thing they just made.
       reloadLibrary();
+      // Settled, and said so BEFORE handing back: the panel owns the whole
+      // lifecycle it advertises. Leaving the success case to the host works
+      // only while every host remembers to clear the flag in `onCreated` — a
+      // host that merely closes its dialog there (as `PersonalAddDialog` does
+      // with `onCreated={onClose}`) would stay busy forever.
+      onBusyChange?.(false);
       onCreated();
       if (created.direct) {
         // Straight into the new skill's page, editor open: an empty SKILL.md

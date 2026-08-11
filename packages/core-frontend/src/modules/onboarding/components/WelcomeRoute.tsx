@@ -1,8 +1,8 @@
 import { useLayoutEffect } from 'react';
-import { useLocation } from 'react-router-dom';
 import { useAdmin } from '../../admin/state/admin.context';
 import { setSidebarCollapsed } from '../../layout/state/sidebar';
 import { useLibrary } from '../../library/state/library-data';
+import { useWelcomeRouteState } from '../welcome-state';
 import { CreatorWelcomePage } from './CreatorWelcomePage';
 import { WelcomePage } from './WelcomePage';
 
@@ -14,13 +14,11 @@ import { WelcomePage } from './WelcomePage';
  * instructions, even when the admin has not created anything yet.
  */
 export function WelcomeRoute() {
-  const location = useLocation();
   const { isAdmin, isAdminLoading = false } = useAdmin();
   const data = useLibrary();
-  const routeState = location.state as { greeting?: boolean; returnTo?: string | null } | null;
-  const greeting = routeState?.greeting === true;
-  /** A deep link that survived the SSO round-trip — see `RootLanding`. */
-  const returnTo = greeting ? (routeState?.returnTo ?? null) : null;
+  // The same reading `WelcomePage` gets — one parser, so the router and the
+  // page cannot disagree about whether a deep link was carried.
+  const { greeting, returnTo } = useWelcomeRouteState();
 
   // Hold the sidebar out of the first painted frame while the admin and
   // library checks settle. Both welcome pages use the full reading column.
@@ -39,8 +37,11 @@ export function WelcomeRoute() {
     // may be headed for the agent welcome, where their library is beside the
     // point — so the hold says nothing about one. Once the verdict says
     // admin, the remaining wait really is their library loading.
+    // A live region: the wait changes its own words as it advances from the
+    // admin check to the library load, and a silent swap is a change only
+    // sighted users are told about.
     return (
-      <div className="py-16 text-center text-ui text-ink-faint">
+      <div role="status" className="py-16 text-center text-ui text-ink-faint">
         {isAdminLoading ? 'One moment…' : 'Preparing your library…'}
       </div>
     );
