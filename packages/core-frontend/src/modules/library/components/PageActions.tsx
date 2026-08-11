@@ -100,13 +100,22 @@ export function PageActions({
       )}
 
       <IconButton
-        // The reason rides IN the accessible name when it applies: a disabled
-        // control that says only "Add a skill or tool" tells a screen-reader
-        // user what it would do, not why it will not.
+        // The reason rides IN the accessible name when it applies: a control
+        // that says only "Add a skill or tool" tells a screen-reader user what
+        // it would do, not why it will not.
         aria-label={addDisabledReason ? `${addLabel} — ${addDisabledReason}` : addLabel}
         title={addDisabledReason ?? addLabel}
-        disabled={Boolean(addDisabledReason)}
-        onClick={onAdd}
+        // `aria-disabled`, NOT `disabled`. A disabled button leaves the tab
+        // order entirely and stops firing pointer events, so the reason we
+        // just went to the trouble of writing would be unreachable by keyboard
+        // — unreadable to precisely the people who cannot see the greyed-out
+        // pixels. Focusable-but-inert keeps the explanation reachable; the
+        // handler below is what makes it actually do nothing.
+        aria-disabled={addDisabledReason ? true : undefined}
+        onClick={() => {
+          if (addDisabledReason) return;
+          onAdd();
+        }}
       >
         <Plus size={15} />
       </IconButton>

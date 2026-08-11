@@ -332,7 +332,9 @@ describe('GroupPage', () => {
     expect(screen.queryByRole('button', { name: 'Add the first skill' })).not.toBeInTheDocument();
     // The title row's `+` is under the same prerequisite: both ways to add
     // must agree that adding is impossible here.
-    expect(screen.getByRole('button', { name: /^Add a skill or tool to GTM —/ })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: /^Add a skill or tool to GTM —/ }),
+    ).toHaveAttribute('aria-disabled', 'true');
   });
 
   it('makes the empty Skills band a doorway for an admin: its link opens the same add dialog as `+`', async () => {
@@ -455,9 +457,45 @@ describe('GroupPage', () => {
     // and the failed endpoint left neither, so the enabled button opened
     // nothing at all. Disabled-with-a-reason is the honest version of the
     // same intent (the affordance does not vanish for a transient failure).
-    const add = screen.getByRole('button', { name: /^Add a skill or tool to GTM —/ });
-    expect(add).toBeInTheDocument();
-    expect(add).toBeDisabled();
+    //
+    // `aria-disabled` rather than `disabled`, so the reason in its name stays
+    // reachable by keyboard — which means the click has to be inert on its
+    // own, and that is what the press below pins.
+    const add = screen.getByRole('button', { name: /^Add a skill or tool to GTM — GTM couldn't/ });
+    expect(add).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(add);
+    expect(
+      screen.queryByRole('heading', { name: 'Add a skill or tool to GTM' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('says the group is still loading, not that it failed, while discovery is in flight', async () => {
+    // The page renders as soon as the CATALOG has items, so the summary can be
+    // missing simply because groups are still on their way. "Try again" would
+    // send someone to re-run something that has not answered yet.
+    let settle!: (groups: GroupSummary[]) => void;
+    groupsMock.listGroups.mockReturnValue(new Promise((resolve) => (settle = resolve)));
+    renderGroup('GTM');
+    expect(
+      await screen.findByRole('button', { name: 'Add a skill or tool to GTM — GTM is still loading' }),
+    ).toBeInTheDocument();
+
+    settle([gtm()]);
+    // Once discovery lands with a real folder behind it, the door opens again.
+    expect(
+      await screen.findByRole('button', { name: 'Add a skill or tool to GTM' }),
+    ).not.toHaveAttribute('aria-disabled');
+  });
+
+  it("does not blame a load failure when discovery succeeded and the caller simply isn't in the group", async () => {
+    // A per-file grant puts one skill from GTM in this caller's catalog while
+    // no summary vouches for the group. Discovery worked — there is nothing to
+    // retry, so the reason must not claim there is.
+    groupsMock.listGroups.mockResolvedValue([]);
+    renderGroup('GTM');
+    expect(
+      await screen.findByRole('button', { name: "Add a skill or tool to GTM — Adding isn't available for GTM" }),
+    ).toHaveAttribute('aria-disabled', 'true');
   });
 
   it('does not claim a missing group is gone while the endpoint is still failing', async () => {
