@@ -67,6 +67,27 @@ describe('GroupsSidebarMenu', () => {
     expect(items()).toEqual(['New group', 'Copy link']);
   });
 
+  it("puts Delete group last, below its own rule, and only when it was given — the owner's verb", () => {
+    renderMenu({ onDelete: vi.fn() });
+    expect(items()).toEqual([
+      'Add a skill or tool',
+      'New group',
+      'Copy link',
+      'Manage access',
+      'Delete group',
+    ]);
+    // The default render (no onDelete) is the non-owner's menu — the earlier
+    // full-menu assertion already proves the item is absent there.
+  });
+
+  it('runs Delete group and then closes', () => {
+    const onDelete = vi.fn();
+    const props = renderMenu({ onDelete });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete group' }));
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps New group on the empty-space menu, where it is the only verb', () => {
     renderMenu({
       label: 'Library',

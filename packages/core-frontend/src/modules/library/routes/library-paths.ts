@@ -1,4 +1,6 @@
+import { DEFAULT_BRANCH, GROUPS_DIR, groupOfPath, isPersonalGroupFolder } from '@bevel-software/platform-shared';
 import { matchPath } from 'react-router-dom';
+import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import type { LibraryFilter } from '../utils/status';
 
 /**
@@ -73,10 +75,55 @@ export function decodeGroupSegment(raw: string): string {
 }
 
 /**
- * The route for one tool. Four surfaces build this URL — the gallery card, the
- * Secrets page, the Connect page, and the tool page's own OAuth `returnTo` —
- * and the fourth is validated server-side, so a stray fragment or a missing
- * encode is a 400 rather than a broken link. One function, no drift.
+ * The CANONICAL URL of a library item: its workspace file URL on the default
+ * branch — `/workspace/main/<kbDir>/<repo path>`. One URL system for humans
+ * and agents: the address a card navigates to is the address an agent can
+ * derive from the repo path it already works with, and the Knowledge tree's
+ * link to the same file lands on the same page. `WorkspaceItemGate` is what
+ * makes these URLs render the library surface instead of the raw file view.
+ *
+ * For a skill, pass the FILE inside the folder (`<skillPath>/SKILL.md`, a
+ * reference doc, a script) — each file of a multi-file skill has its own URL,
+ * and the page opens on that tab. A bare skill-folder URL opens SKILL.md.
+ */
+export function urlForItemFile(kbDirName: string, repoRelativePath: string): string {
+  return kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${repoRelativePath}`);
+}
+
+/** The canonical URL of one file of a skill (default: its SKILL.md). */
+export function urlForSkillFile(kbDirName: string, skillPath: string, file = 'SKILL.md'): string {
+  return urlForItemFile(kbDirName, `${skillPath}/${file}`);
+}
+
+/**
+ * Whether a location belongs to the LIBRARY surface — decided by URL SHAPE
+ * alone, never by catalog contents: `/skills-and-tools/...`, or a
+ * default-branch workspace URL under `Groups/`
+ * (`/workspace/<default>/<kbDir>/Groups/<group>/...`). KnowledgeBase paths go
+ * to the Knowledge surface, Groups paths to Skills & Tools — the two roots ARE
+ * the two apps. A shape rule means a just-created skill routes correctly
+ * before any catalog has heard of it.
+ *
+ * Non-default branches stay with Knowledge deliberately: the library pages
+ * speak the default branch, and a draft's file is reviewed raw.
+ */
+export function isLibraryLocation(pathname: string): boolean {
+  if (pathname === LIBRARY_ROOT || pathname.startsWith(`${LIBRARY_ROOT}/`)) return true;
+  const segments = pathname.split('/').filter(Boolean).map(decodeSegment);
+  return (
+    segments[0] === 'workspace' &&
+    segments[1] === DEFAULT_BRANCH &&
+    segments[3] === GROUPS_DIR &&
+    segments.length >= 6 // workspace/<branch>/<kbDir>/Groups/<group>/<item>
+  );
+}
+
+/**
+ * The LEGACY route for one tool — now a redirect to the canonical workspace
+ * URL (`urlForItemFile`), preserving any `#…` the OAuth callback appended.
+ * Still built in three places, deliberately: the Secrets and Connect pages
+ * link it by slug (they don't carry the repo path), and the tool page's own
+ * OAuth `returnTo` MUST stay this shape — the server validates it.
  *
  * Returns the BARE path: never append `#…` to it. The OAuth start route rejects
  * a `returnTo` containing `#`, and the callback is what puts the fragment on.
@@ -86,12 +133,9 @@ export function pathForTool(slug: string): string {
 }
 
 /**
- * The route for one skill. `:name` is the skill's folder name — the same id the
- * catalog, the card and `GET /api/skills/:name` all use — so the URL a card
- * navigates to is the URL the page fetches from, with no lookup table in
- * between. Encoded here rather than at each link site for the same reason
- * `pathForTool` is: three surfaces build it (gallery card, group card, the tool
- * page's "Powers these skills" chips).
+ * The LEGACY route for one skill — now a redirect to the canonical workspace
+ * URL. Kept so old links and name-only callers still land; new code should
+ * build `urlForSkillFile` from the catalog's path instead.
  */
 export function pathForSkill(name: string): string {
   return `${LIBRARY_ROOT}/skills/${encodeURIComponent(name)}`;
@@ -120,4 +164,28 @@ function decodeSegment(raw: string): string {
   } catch {
     return raw;
   }
+}
+
+/**
+ * Where an item's back link points: the page the item LIVES on.
+ *
+ * `‹ All skills & tools` used to be the one answer, and it stopped being
+ * true the day the Library's root became the all-groups index — a skill
+ * opened from its group page went "back" to a page the reader had never
+ * been on. The honest destination is derivable from the path alone: the
+ * group page for a grouped item, the personal page for a personal one, and
+ * the root only for the legacy shapes that live in neither.
+ */
+export function libraryHomeForItemPath(repoRelativePath: string): {
+  label: string;
+  path: string;
+} {
+  const group = groupOfPath(repoRelativePath);
+  if (group !== null && !isPersonalGroupFolder(group)) {
+    return { label: group, path: pathForGroup(group) };
+  }
+  if (group !== null) {
+    return { label: 'Yours', path: `${LIBRARY_ROOT}/yours` };
+  }
+  return { label: 'All skills & tools', path: LIBRARY_ROOT };
 }

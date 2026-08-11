@@ -2,7 +2,11 @@ import type { ReactNode } from 'react';
 import '../../../change-requests/change-requests.css';
 import { FilePaneCard } from '../../../workspace/components/FilePaneCard';
 import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdownView';
+import { HtmlRenderer } from '../../../workspace/components/renderers/HtmlRenderer';
 import type { DiffLine } from '../../../change-requests/utils/diff';
+
+/** The pane never writes — editing goes through the page's Edit / Propose. */
+const NOOP_SAVE = async () => {};
 
 interface SkillFilePaneProps {
   /** Repo-relative-to-the-skill file name, e.g. `SKILL.md`. */
@@ -67,6 +71,15 @@ export function SkillFilePane({
           headingLink={headingLink}
           scroll={false}
         />
+      ) : /\.html?$/i.test(file) ? (
+        // The same sandboxed preview the Knowledge viewer gives `.html` — a
+        // skill's bundled template (a deck, a report shell) is meant to be
+        // SEEN; the renderer's own Code tab keeps the source one click away.
+        // Sized wrapper because the renderer fills its parent, and this card
+        // has no height of its own.
+        <div className="h-[70vh]">
+          <HtmlRenderer content={raw} filePath={file} readOnly onSave={NOOP_SAVE} />
+        </div>
       ) : (
         <pre className="whitespace-pre-wrap break-words font-mono text-detail leading-relaxed text-ink-muted">
           {raw}

@@ -137,6 +137,17 @@ export interface IAccessControl {
   ): Promise<boolean>;
 
   /**
+   * Batched `canOwner` — one config load per call, same `owner:`-lists-only
+   * resolution (no admin rescue). Used by group enumeration to answer "which
+   * of these folders does the caller own?" without one model load per group.
+   */
+  canOwnerBatch(
+    workspaceId: string,
+    userEmail: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean>>;
+
+  /**
    * The set of principals (roles + direct users) that own this path — i.e.
    * who to contact about it. Resolved from `owner:` lists only. Used by the
    * file viewer to render the "owners / contact" affordance.

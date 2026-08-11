@@ -451,7 +451,7 @@ describe('FileViewer', () => {
     expect(screen.queryByText(/current company state/i)).not.toBeInTheDocument();
   });
 
-  it('goes read-only and shows AccessRestrictedBanner when canWrite is false on a protected branch', async () => {
+  it('goes read-only, WITHOUT a permission banner, when canWrite is false on a protected branch', async () => {
     // The access gate only fires on protected branches — drafts are
     // free-for-all and never reach the API, so reproducing the read-only
     // state requires a protected branch.
@@ -462,11 +462,14 @@ describe('FileViewer', () => {
       owners: EMPTY_ELIGIBLE,
     };
     render(<ViewerHarness initialContent="official" branch="target-company-state" />);
+    // Read-only means the Edit affordance withdraws…
     await waitFor(() => {
-      expect(screen.getByText(/You don't have permission to edit/i)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
     });
-    expect(screen.getByText(/Admin, Product Manager/)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+    // …and that is ALL it means on screen: no "you don't have permission"
+    // stripe — for a reader the restriction is not news, and the propose
+    // affordance says what they CAN do instead.
+    expect(screen.queryByText(/You don't have permission to edit/i)).not.toBeInTheDocument();
   });
 
   // Drafts are free-for-all: even if the backend would deny at PR-merge
@@ -899,7 +902,9 @@ describe('FileViewer: proposing a change without write access', () => {
 
     expect(proposeMock).not.toHaveBeenCalled();
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
-    // The refusal strip is back once the editor is gone.
-    expect(await screen.findByText(/You don't have permission to edit/i)).toBeInTheDocument();
+    // Back to the read-only view: the propose affordance returns, and no
+    // permission stripe with it (removed for readers everywhere).
+    expect(await screen.findByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
+    expect(screen.queryByText(/You don't have permission to edit/i)).not.toBeInTheDocument();
   });
 });

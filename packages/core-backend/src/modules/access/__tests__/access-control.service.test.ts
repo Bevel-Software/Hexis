@@ -1008,4 +1008,76 @@ describe('AccessControlService', () => {
       });
     });
   });
+
+  /**
+   * The deployment owner (`ADMIN_EMAIL`) as a rescue path.
+   *
+   * `roles.yaml` is Admin-only by a hardcoded rule, and "Admin" used to mean
+   * the `Admin` role in `roles.yaml` and nothing else. That makes the file
+   * self-sealing: a roles.yaml that loses its last Admin — a bad merge, a
+   * renamed address, a restored backup — can then be repaired only by
+   * committing to the KB repo by hand, because the one file that decides who
+   * may fix it is the one file nobody may write.
+   *
+   * It also disagreed with `AdminAccessService`, which was already given the
+   * same owner list: the owner saw every admin surface and was refused the
+   * save, with the UI calling them an admin and the gate answering
+   * "Eligible: Admin".
+   */
+  describe('deployment owner (ADMIN_EMAIL)', () => {
+    const OWNER = 'owner@bevel.software';
+    /** roles.yaml with an Admin that is NOT the deployment owner. */
+    const ROLES_WITHOUT_OWNER = `roles:
+  Admin:
+    - someone-else@example.com
+`;
+
+    async function seeded() {
+      const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+      await writeFile(repo, 'roles.yaml', ROLES_WITHOUT_OWNER);
+      await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
+      return stubWorkspaceService(workspaceId, workspaceDir);
+    }
+
+    it('may write roles.yaml even when roles.yaml does not list them', async () => {
+      const ws = await seeded();
+      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, [OWNER]);
+      expect(await svc.canWrite(workspaceId, OWNER, 'roles.yaml')).toBe(true);
+    });
+
+    it('may write an access.md — the same rescue the Admin role gets', async () => {
+      const ws = await seeded();
+      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, [OWNER]);
+      expect(await svc.canWrite(workspaceId, OWNER, 'Knowledge/access.md')).toBe(true);
+    });
+
+    /**
+     * The rescue is exactly two files wide. It is not a general grant: the
+     * owner is admitted to the hardcoded `write` overrides and to nothing
+     * else, so ordinary content still answers to the access tree.
+     */
+    it('gets no ordinary write from being the owner', async () => {
+      const ws = await seeded();
+      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, [OWNER]);
+      expect(await svc.canWrite(workspaceId, OWNER, 'Knowledge/Foo.md')).toBe(false);
+    });
+
+    it('is matched case-insensitively, like every other email here', async () => {
+      const ws = await seeded();
+      const svc = new AccessControlService(ws, PROCESS_MAP_DIR, ['OWNER@Bevel.Software']);
+      expect(await svc.canWrite(workspaceId, OWNER, 'roles.yaml')).toBe(true);
+    });
+
+    /**
+     * Unconfigured, nothing changes — which is what keeps every other test in
+     * this file (and every fixture that constructs the service with two
+     * arguments) meaningful.
+     */
+    it('changes nothing when no owner is configured', async () => {
+      const ws = await seeded();
+      const svc = new AccessControlService(ws, PROCESS_MAP_DIR);
+      expect(await svc.canWrite(workspaceId, OWNER, 'roles.yaml')).toBe(false);
+      expect(await svc.canWrite(workspaceId, 'someone-else@example.com', 'roles.yaml')).toBe(true);
+    });
+  });
 });

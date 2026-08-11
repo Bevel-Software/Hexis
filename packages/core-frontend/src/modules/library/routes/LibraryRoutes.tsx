@@ -1,15 +1,15 @@
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { LibraryToastProvider } from '../state/toast';
-import { LibraryProvider } from '../state/library-data';
+import { LibraryProvider, useLibrary } from '../state/library-data';
+import { useWorkspace } from '../../workspace/state/workspace.context';
 import { LibraryLayout } from '../components/LibraryLayout';
 import { LibraryPage } from '../components/LibraryPage';
 import { GroupPage } from '../components/GroupPage';
 import { GroupsIndexPage } from '../components/GroupsIndexPage';
 import { PersonalGroupPage } from '../components/PersonalGroupPage';
-import { ToolPage } from '../components/tool-page/ToolPage';
-import { SkillPage } from '../components/skill-page/SkillPage';
 import { WelcomeRoute } from '../../onboarding/components/WelcomeRoute';
-import { LIBRARY_ROOT } from './library-paths';
+import { WorkspaceItemRoute } from './WorkspaceItemRoute';
+import { decodeGroupSegment, LIBRARY_ROOT, urlForItemFile, urlForSkillFile } from './library-paths';
 
 /**
  * The Skills & Tools surface — everything under `/skills-and-tools/*`.
@@ -64,17 +64,29 @@ export function LibraryRoutes() {
             <Route path="groups" element={<Navigate to={LIBRARY_ROOT} replace />} />
             <Route path="groups/:group" element={<GroupPage />} />
 
-            {/* The routed replacement for the dialog's tool half, and the
-                landing target of the OAuth round-trip
-                (`…/tools/:slug#authorized`). */}
-            <Route path="tools/:slug" element={<ToolPage />} />
-
-            {/* The skill page, per the contract this file reserved: `:name` is
-                `encodeURIComponent(skill name)`, and it sits above the `*`
-                fallback so the URL resolves instead of bouncing to the
-                gallery. It replaces the detail dialog for skills. */}
-            <Route path="skills/:name" element={<SkillPage />} />
+            {/* The canonical item addresses. This surface is mounted at TWO
+                shell paths (`/skills-and-tools/*` and, for default-branch
+                `Groups/` URLs, `/workspace/*` — see `isLibraryLocation` and
+                the shell's `CoreSurfaces`), and under the second the remainder
+                is `<branch>/<kbDir>/Groups/...`. Matching it HERE, inside the
+                layout route, is what makes a skill page share the exact
+                sidebar instance the reader browsed in with — one surface, not
+                a second implementation of it. Static siblings above outrank
+                the param, so no `/skills-and-tools` page is shadowed. */}
+            <Route path=":branch/*" element={<WorkspaceItemRoute />} />
           </Route>
+
+          {/* LEGACY item addresses. The canonical URL of a skill or tool is
+              its workspace file URL (`urlForItemFile` — one URL system for
+              humans and agents; `WorkspaceItemGate` renders the pages there).
+              These name-based routes survive as redirects because links to
+              them exist in the wild, the Secrets/Connect pages still build
+              them by slug, and `tools/:slug` is the server-validated OAuth
+              `returnTo` — the redirect carries the callback's `#…` fragment
+              along. Outside the layout route: a redirect never paints a
+              sidebar on its way through. */}
+          <Route path="tools/:slug" element={<LegacyToolRedirect />} />
+          <Route path="skills/:name" element={<LegacySkillRedirect />} />
 
           {/* An unknown subpath is a stale or mistyped link, not an error page —
               send it home. Outside the layout route so a redirect never paints
@@ -84,4 +96,39 @@ export function LibraryRoutes() {
       </LibraryProvider>
     </LibraryToastProvider>
   );
+}
+
+/** `skills/:name` → the skill's canonical workspace URL (its SKILL.md). */
+function LegacySkillRedirect() {
+  const { name = '' } = useParams<{ name: string }>();
+  const data = useLibrary();
+  const { kbDirName } = useWorkspace();
+  const decoded = decodeGroupSegment(name);
+  const skill = data.items.find((i) => i.kind === 'skill' && i.id === decoded);
+  if (skill && kbDirName) return <Navigate to={urlForSkillFile(kbDirName, skill.path)} replace />;
+  if (kbDirName === null) return null;
+  if (data.loading) return null;
+  return <Navigate to={LIBRARY_ROOT} replace />;
+}
+
+/**
+ * `tools/:slug` → the manual's canonical workspace URL. The `#…` fragment is
+ * carried along explicitly — this route is the OAuth callback's landing
+ * target, and the fragment is the outcome it came back with.
+ */
+function LegacyToolRedirect() {
+  const { slug = '' } = useParams<{ slug: string }>();
+  const location = useLocation();
+  const data = useLibrary();
+  const { kbDirName } = useWorkspace();
+  const decoded = decodeGroupSegment(slug);
+  const tool = data.items.find((i) => i.kind === 'integration' && i.id === decoded);
+  if (kbDirName === null) return null;
+  if (tool) {
+    return (
+      <Navigate to={{ pathname: urlForItemFile(kbDirName, tool.path), hash: location.hash }} replace />
+    );
+  }
+  if (data.loading) return null;
+  return <Navigate to={LIBRARY_ROOT} replace />;
 }

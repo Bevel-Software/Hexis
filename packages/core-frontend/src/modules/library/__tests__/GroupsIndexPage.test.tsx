@@ -81,6 +81,7 @@ const summary = (over: Partial<GroupSummary> = {}): GroupSummary => ({
   folders: ['Groups/GTM'],
   canRead: true,
   canWrite: false,
+  isOwner: false,
   skillCount: 4,
   toolCount: 2,
   owners: { roles: [], users: [{ name: 'Olga Ivanova', email: 'olga@bevel.software' }] },

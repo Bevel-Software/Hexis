@@ -33,8 +33,11 @@ export function PageShell({
 }) {
   return (
     <div className="h-full overflow-y-auto bg-sunken">
-      <div className={`${WIDTH_CLASS[width]} mx-auto px-6 py-8`}>
-        <header className="mb-4 flex items-center justify-between gap-3">
+      <div className={`${WIDTH_CLASS[width]} mx-auto px-4 sm:px-6 py-8`}>
+        {/* `flex-wrap` so a wide `actions` control (e.g. the New role form, once
+            expanded) drops below the title on a narrow viewport instead of
+            overflowing the column. */}
+        <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <h1 className="text-lg font-semibold text-ink">{title}</h1>
           {actions && <div className="flex items-center gap-2">{actions}</div>}
         </header>

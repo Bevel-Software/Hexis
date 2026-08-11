@@ -1,14 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   type FileDiffPayload,
   type PullRequestDetail,
   type PullRequestSummary,
 } from '@bevel-software/platform-shared';
 import '../change-requests.css';
-import { Badge, Banner, Button, Surface } from '../../../shared/components';
+import { Banner, Button, Surface } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
+import { AuthContext } from '../../auth/state/auth.context';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
+import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/pr-approvals.api';
+import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
 import { changeAuthorName } from '../utils/author';
@@ -18,6 +21,7 @@ import { useDefaultBranchFile } from '../hooks/useFileOnBranch';
 import { diffLines, type DiffLine } from '../utils/diff';
 import { isBinaryFile } from '../../workspace/components/renderers';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
+import { CrFileTree, type CrTreeFileState } from './CrFileTree';
 
 /**
  * Extra context for the file list — NOT a filter. The dialog always shows
@@ -218,6 +222,115 @@ export function ChangeRequestDialog({
   );
   const touchesSelected = changedFiles.has(selected);
 
+  /** Per-file approval verdicts, straight from the detail. */
+  const approvalByPath = useMemo(
+    () => new Map((detail?.approvals ?? []).map((a) => [a.path, a])),
+    [detail],
+  );
+
+  /**
+   * The old CR system's rule, restored: Apply exists only when every file is
+   * either already approved or approvable BY THIS VIEWER (they hold write on
+   * it, so their click completes the gate). Anything less and Apply was a
+   * button that walked into "Waiting on approval for …" — offering a verdict
+   * the viewer cannot actually deliver.
+   */
+  const canApply =
+    detail !== null &&
+    detail.approvals.length > 0 &&
+    detail.approvals.every((a) => a.isApproved || a.viewerCanApprove);
+
+  /** Approve / revert verbs — per file, from the tree. */
+  const [verbBusy, setVerbBusy] = useState(false);
+  const [verbError, setVerbError] = useState<string | null>(null);
+  useEffect(() => {
+    setVerbError(null);
+  }, [selected]);
+
+  async function toggleApprove(path: string, approved: boolean) {
+    if (!detail || verbBusy) return;
+    setVerbBusy(true);
+    setVerbError(null);
+    try {
+      const approvals = approved
+        ? await unapprovePrFile(cr.number, path)
+        : await approvePrFile(cr.number, path);
+      setDetail((d) => (d ? { ...d, approvals } : d));
+    } catch (err) {
+      setVerbError(err instanceof Error ? err.message : "Couldn't record that.");
+    } finally {
+      setVerbBusy(false);
+    }
+  }
+
+  async function revertFile(path: string) {
+    if (!detail || verbBusy) return;
+    setVerbBusy(true);
+    setVerbError(null);
+    try {
+      const result = await revertPrFile(cr.number, path);
+      if (result.closed) {
+        // That was the last file: the request closed itself and its branch
+        // is retired. The dialog's subject is gone — leave through the same
+        // door an apply does, so every list behind it refreshes.
+        onResolved();
+        return;
+      }
+      // The file is out of the diff; the branch copy we cached for it is
+      // stale. Refetch the detail and drop the cached read so a re-selection
+      // (via the scope's baseFiles) reads the restored content.
+      asked.current.delete(path);
+      setBranchContents((c) => {
+        const next = { ...c };
+        delete next[path];
+        return next;
+      });
+      setPicked(null);
+      setDetail(await fetchPrDetail(cr.number));
+    } catch (err) {
+      setVerbError(err instanceof Error ? err.message : "Couldn't revert this file.");
+    } finally {
+      setVerbBusy(false);
+    }
+  }
+
+  // Tolerant read (not useAuth): the dialog renders in tests without the
+  // provider, and the email only sharpens the withdraw affordance.
+  const viewerEmail = useContext(AuthContext)?.user?.email ?? '';
+
+  /** The tree's per-file state, in the file list's order. */
+  const treeFiles: CrTreeFileState[] = useMemo(() => {
+    const statusByPath = new Map((detail?.files ?? []).map((f) => [f.path, f.status]));
+    return allFiles.map((path) => ({
+      path,
+      changed: changedFiles.has(path),
+      added: addedFiles.includes(path),
+      status: statusByPath.get(path),
+      approval: approvalByPath.get(path),
+    }));
+  }, [detail, allFiles, changedFiles, addedFiles, approvalByPath]);
+
+  /** The footer's verdicts: apply plainly, apply by covering, or wait. */
+  const allApproved =
+    detail !== null && detail.approvals.length > 0 && detail.approvals.every((a) => a.isApproved);
+
+  /** Admin-only: delete the request and its branch, with an armed confirm. */
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  async function deleteRequest() {
+    if (deleting) return;
+    setDeleting(true);
+    setVerbError(null);
+    try {
+      await deleteChangeRequest(cr.number);
+      onResolved();
+    } catch (err) {
+      setVerbError(err instanceof Error ? err.message : "Couldn't delete this change request.");
+      setDeleting(false);
+      setDeleteArmed(false);
+    }
+  }
+
   /**
    * Apply = record the approvals the gate requires, then merge, then wait for
    * the merge to land. The POST only acks — see `useApplyChangeRequest` for
@@ -243,6 +356,15 @@ export function ChangeRequestDialog({
   const author = changeAuthorName(cr);
   const firstName = author.split(' ')[0];
   const why = authorsReason(detail?.body);
+  const [whyExpanded, setWhyExpanded] = useState(false);
+  /**
+   * Whether the one-line view is actually hiding anything — a short reason
+   * with a pointless "Read more" beside it would be a button that does
+   * nothing visible. Length is a heuristic (true truncation depends on the
+   * viewport), erring toward showing the toggle: a newline always overflows a
+   * single line, and ~90 characters approximates one row of the quote.
+   */
+  const whyOverflows = !!why && (why.includes('\n') || why.length > 90);
 
   return (
     <div
@@ -257,7 +379,7 @@ export function ChangeRequestDialog({
         tone="surface"
         radius="2xl"
         elevation="overlay"
-        className="relative mx-auto mt-[4vh] mb-[4vh] flex h-[92vh] w-full max-w-5xl flex-col overflow-hidden"
+        className="relative mx-auto mt-[4vh] mb-[4vh] flex h-[92vh] w-full max-w-6xl flex-col overflow-hidden"
       >
         <div className="flex items-start gap-4 px-8 pt-7">
           <div className="min-w-0 flex-1">
@@ -276,10 +398,46 @@ export function ChangeRequestDialog({
 
         {/* Why, in the author's words. Omitted rather than faked when the
             request carries no description — an empty quote block reads as the
-            author having said nothing worth reading. */}
+            author having said nothing worth reading.
+
+            ONE line by default, because agents write essays: the decision is
+            made on the diff below, and every line the description takes is a
+            line the file grid (the dialog's one flexible region) loses. Read
+            more opens the whole thing (self-scrolling past half the surface,
+            so even an essay never pushes the files off screen); Hide folds it
+            back to the line. */}
         {why && (
-          <blockquote className="mx-8 mt-5 border-l-2 border-line-strong pl-4 text-body text-ink">
-            {why}
+          <blockquote
+            className={cn(
+              'mx-8 mt-5 shrink-0 border-l-2 border-line-strong pl-4 text-body text-ink',
+              whyExpanded && 'max-h-[50vh] overflow-y-auto',
+            )}
+          >
+            {whyExpanded ? (
+              <>
+                <span className="whitespace-pre-wrap">{why}</span>{' '}
+                <button
+                  type="button"
+                  className="text-detail font-medium text-ink-faint transition-colors hover:text-ink"
+                  onClick={() => setWhyExpanded(false)}
+                >
+                  Hide
+                </button>
+              </>
+            ) : (
+              <span className="flex items-baseline gap-3">
+                <span className="min-w-0 flex-1 truncate">{why}</span>
+                {whyOverflows && (
+                  <button
+                    type="button"
+                    className="shrink-0 text-detail font-medium text-ink-faint transition-colors hover:text-ink"
+                    onClick={() => setWhyExpanded(true)}
+                  >
+                    Read more
+                  </button>
+                )}
+              </span>
+            )}
           </blockquote>
         )}
 
@@ -315,44 +473,39 @@ export function ChangeRequestDialog({
           </Banner>
         )}
 
+        {/* A request that no longer changes anything — everything it proposed
+            has since landed on (or been removed from) the target, or its only
+            change was one the merge never takes (roles.yaml). The file grid
+            below would render a blank pill over an eternal "Loading…", which
+            reads as a hang; the truth is simpler and gets said instead. */}
+        {detail !== null && allFiles.length === 0 ? (
+          <div className="mt-4 min-h-0 flex-1 px-8">
+            <p className="mx-auto max-w-[52ch] py-10 text-center text-detail text-ink-faint">
+              This request doesn't change anything anymore. What it proposed is already part of
+              the current text, or has since been removed on its branch — there is nothing left
+              to review or apply. {firstName} can withdraw it.
+            </p>
+          </div>
+        ) : (
+        <>
         {/* The folder on the left, the file with the change marked in it on the
             right — the same reading as version history. */}
-        <div className="mt-4 grid min-h-0 flex-1 grid-cols-[13.5rem_minmax(0,1fr)] gap-7 px-8">
+        <div className="mt-4 grid min-h-0 flex-1 grid-cols-[17rem_minmax(0,1fr)] gap-7 px-8">
           <Surface
             tone="surface"
             radius="lg"
             elevation="none"
-            className="self-start overflow-y-auto p-2.5"
+            className="max-h-full self-start overflow-y-auto p-2"
           >
-            {allFiles.map((rel) => {
-              const added = addedFiles.includes(rel);
-              const on = selected === rel;
-              return (
-                <button
-                  key={rel}
-                  type="button"
-                  className={cn(
-                    'flex w-full items-center gap-2 rounded-sm px-2.5 py-1.5 text-left font-mono text-meta transition-colors',
-                    on ? 'bg-hover font-semibold text-ink' : 'text-ink-muted hover:bg-hover',
-                  )}
-                  onClick={() => setSelected(rel)}
-                >
-                  <span className="truncate">{rel}</span>
-                  {added ? (
-                    <Badge tone="ok" size="xs" className="ml-auto shrink-0">
-                      New
-                    </Badge>
-                  ) : (
-                    changedFiles.has(rel) && (
-                      <span
-                        className="ml-auto size-1.5 shrink-0 rounded-full bg-wait-dot"
-                        title="Changed in this request"
-                      />
-                    )
-                  )}
-                </button>
-              );
-            })}
+            <CrFileTree
+              files={treeFiles}
+              selected={selected}
+              currentUserEmail={viewerEmail}
+              onSelect={(p) => setSelected(p)}
+              onToggleApprove={(p, approved) => void toggleApprove(p, approved)}
+              onRevert={(p) => void revertFile(p)}
+              busy={verbBusy}
+            />
           </Surface>
 
           <div className="flex min-h-0 flex-col">
@@ -366,6 +519,11 @@ export function ChangeRequestDialog({
                     : ' · not touched by this request'}
               </span>
             </div>
+            {verbError && (
+              <Banner tone="danger" role="alert" className="mb-2">
+                {verbError}
+              </Banner>
+            )}
             <div className="min-h-0 flex-1 overflow-y-auto">
               {/* The diff only needs the two file contents, so it renders as
                   soon as those arrive rather than waiting on the (slow) detail
@@ -382,6 +540,19 @@ export function ChangeRequestDialog({
                 // An untouched file arrives here too and simply renders as a
                 // clean document — identical sides diff to all-same blocks —
                 // so the reader gets prose everywhere, marked or not.
+                //
+                // No link resolvers, deliberately. This dialog shows a diff of
+                // the CHANGE REQUEST's branch, while the navigation hooks
+                // resolve against the branch that is checked out — so wiring
+                // them through would send a reviewer to a different branch's
+                // copy of whatever they clicked, and an id-link to a node the
+                // change request itself creates would resolve to nothing with
+                // only a console warning. Links therefore render as inert
+                // anchors; everything else the KB pipeline brings (rendered
+                // details blocks, mermaid, sanitised HTML, escaped link
+                // destinations) applies here as it does in the document view.
+                // Navigating away from a modal mid-review would also lose the
+                // review context, so inert is the better default regardless.
                 <MarkdownDiffViewer payload={mdPayload} />
               ) : (
               <MarkedFile
@@ -397,6 +568,8 @@ export function ChangeRequestDialog({
             </div>
           </div>
         </div>
+        </>
+        )}
 
         {/* The verdict. Fixed to the bottom of the surface — a decision the
             reader has to scroll to find is one they will make without reading. */}
@@ -404,16 +577,57 @@ export function ChangeRequestDialog({
           <p className="mr-auto max-w-[52ch] text-meta text-ink-muted">
             {blocked
               ? `Nothing changes for anyone until ${firstName} proposes it again against the current text.`
-              : 'Every agent that connects after this picks it up. There is no staged rollout.'}
+              : detail === null
+                ? ''
+                : allFiles.length === 0
+                  ? 'Applying would change nothing, so the button stays away.'
+                  : canApply
+                    ? 'Every agent that connects after this picks it up. There is no staged rollout.'
+                    : detail.mergeWarnings[0] ??
+                      'Waiting on approval from the files’ owners — applying is theirs to do.'}
           </p>
-          {!blocked && (
+          {/* Admins carry the moderation verb: delete the request AND its
+              branch, armed on the first click. `viewerCanBypassMerge` is the
+              server's admin verdict — the DELETE route re-checks it. */}
+          {!blocked && detail?.viewerCanBypassMerge && (
+            deleteArmed ? (
+              <>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  disabled={deleting}
+                  onClick={() => void deleteRequest()}
+                >
+                  {deleting ? 'Deleting…' : 'Really delete request and branch?'}
+                </Button>
+                <Button variant="quiet" size="sm" disabled={deleting} onClick={() => setDeleteArmed(false)}>
+                  Keep
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="quiet"
+                size="sm"
+                className="text-danger"
+                onClick={() => setDeleteArmed(true)}
+              >
+                Delete request
+              </Button>
+            )
+          )}
+          {/* Apply exists only when the viewer can actually deliver the
+              verdict. All files approved → plain Apply. Some not yet approved
+              but every one of them approvable BY THIS VIEWER (write access) →
+              the same click, named for what it is: their authority covers the
+              missing approvals. Anyone else gets the waiting line above. */}
+          {!blocked && canApply && (
             <Button
               variant="primary"
               size="sm"
               disabled={applyBusy}
               onClick={() => applying.apply(cr)}
             >
-              {applyBusy ? applyLabel : 'Apply changes'}
+              {applyBusy ? applyLabel : allApproved ? 'Apply changes' : 'Bypass approval and apply'}
             </Button>
           )}
         </div>

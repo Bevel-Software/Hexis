@@ -193,6 +193,63 @@ describe('KbSeedService', () => {
       expect(await exists(path.join(dir, 'KnowledgeBase/ExampleOntology'))).toBe(false);
     });
 
+    it('replaces an edited AGENTS.md with the current template — the file is managed', async () => {
+      const upstream = await seededUpstream(PROTECTED, {
+        'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
+        'AGENTS.md': '# my own conventions\n',
+        '.bevelignore': 'AGENTS.md\n',
+        '.gitignore': '',
+        'access.md': 'CUSTOM ACCESS RULES',
+        'KnowledgeBase/Real/Knowledge/.gitkeep': '',
+        'Groups/.gitkeep': '',
+      });
+
+      const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
+      await makeSeeder(upstream).topUpWorkspace(repoDir, DEFAULT_BRANCH);
+
+      const dir = await checkout(root, upstream, DEFAULT_BRANCH);
+      const agents = await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8');
+      // The template's copy, not the edit — and the template says WHY, so the
+      // overwrite is a stated contract rather than a surprise.
+      expect(agents).not.toContain('my own conventions');
+      expect(agents).toContain('managed by the platform');
+      // Everything the platform does NOT manage is preserved verbatim.
+      expect(await fs.readFile(path.join(dir, 'access.md'), 'utf8')).toBe('CUSTOM ACCESS RULES');
+      const log = await git(dir, ['log', '-1', '--pretty=%s']);
+      expect(log.trim()).toBe('Update AGENTS.md to the current platform template');
+    });
+
+    it('a current AGENTS.md makes no refresh commit, even with CRLF endings', async () => {
+      const template = await fs.readFile(
+        path.join(__dirname, '../../../../kb-template/AGENTS.md'),
+        'utf8',
+      );
+      const upstream = await seededUpstream(PROTECTED, {
+        'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
+        // Same content, Windows endings — must read as "same", or the managed
+        // refresh would commit churn on every boot forever.
+        //
+        // `\r?\n`, not `\n`: on a Windows checkout (`core.autocrlf=true`) the
+        // template already HAS CRLF, so converting every `\n` would produce
+        // `\r\r\n` — a file that differs from the template for real, failing
+        // this test for a reason that has nothing to do with what it asserts.
+        // Matching the optional `\r` normalizes first, so the fixture is
+        // exactly-CRLF on every platform.
+        'AGENTS.md': template.replace(/\r?\n/g, '\r\n'),
+        '.bevelignore': 'AGENTS.md\n',
+        '.gitignore': '',
+        'access.md': 'CUSTOM ACCESS RULES',
+        'KnowledgeBase/Real/Knowledge/.gitkeep': '',
+        'Groups/.gitkeep': '',
+      });
+
+      const first = await checkout(root, upstream, DEFAULT_BRANCH);
+      await makeSeeder(upstream).topUpWorkspace(first, DEFAULT_BRANCH);
+      const after = await headCommitCount(root, upstream, DEFAULT_BRANCH);
+      // Only the pre-seed commit: nothing was missing, nothing was stale.
+      expect(after).toBe(1);
+    });
+
     it('topUpWorkspace is idempotent — a second load makes no new commit', async () => {
       const upstream = await seededUpstream(PROTECTED, {
         'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',

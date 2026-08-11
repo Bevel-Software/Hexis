@@ -41,7 +41,7 @@ import type {
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
 } from '@bevel-software/platform-shared';
-import { isProtectedBranch } from '@bevel-software/platform-shared';
+import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { and, eq } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
@@ -64,6 +64,7 @@ import {
   RolesYamlPreservationError,
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
+  WorkflowDomainError,
   WorkflowValidationError,
 } from './workflow.errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
@@ -1342,6 +1343,277 @@ export class WorkflowService implements IWorkflowService {
       change: 'removed',
     });
     return approvals;
+  }
+
+  /**
+   * Decline ONE file of an open change request: restore its merge-base
+   * version on the SOURCE branch (commit + push), so the file drops out of
+   * the request's three-dot diff — the same mechanics
+   * `preserveBaseRolesYaml` uses to neutralise roles.yaml, offered as a
+   * reviewer's verb. Accept-or-revert per file is how a reviewer takes the
+   * good half of a proposal without rejecting the whole thing.
+   *
+   * Authority: exactly the approval predicate — an eligible approver for the
+   * file per the access tree on `origin/<base>`. Declining takes the same
+   * permission as accepting.
+   *
+   * When the LAST file is reverted the request proposes nothing: it closes
+   * itself and its source branch is retired, exactly as a merge would have
+   * retired it — a shell of a request pointing at an empty diff serves
+   * nobody (see the zero-files dialog state this replaces).
+   */
+  async revertChangeRequestFile(
+    number: number,
+    user: AuthUser,
+    repoRelPath: string,
+  ): Promise<{ closed: boolean; remainingPaths: string[] }> {
+    const summary = await this.prs.getPr(number);
+    if (!summary) throw new WorkflowDomainError('change request not found', 404);
+    if (summary.state !== 'open') {
+      throw new WorkflowDomainError('This change request is no longer open.', 422);
+    }
+    const baseBranch = summary.base;
+    const headBranch = summary.branch;
+
+    const ws = await this.workspaceService.getOrCreateForBranch(headBranch);
+    // Best-effort freshen of the source checkout: the diff below reads origin
+    // refs, but the restore commits from the working tree — a stale tree
+    // would push non-fast-forward and fail loudly anyway; this just makes
+    // that rare.
+    await this.git.pull(ws.id).catch(() => undefined);
+
+    // The verb acts on the request as it is NOW — never a cached file list.
+    const paths = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
+    if (!paths.includes(repoRelPath)) {
+      throw new WorkflowDomainError('That file is not part of this change request.', 422);
+    }
+
+    const canApprove = await this.accessControl.canWriteAtRef(
+      ws.id,
+      `origin/${baseBranch}`,
+      user.email,
+      repoRelPath,
+    );
+    if (canApprove !== true) {
+      throw new WorkflowDomainError(
+        'Only an eligible approver of this file can revert it — declining takes the same permission as accepting.',
+        403,
+      );
+    }
+
+    const mergeBase = await this.git.mergeBaseForPr(ws.id, baseBranch, headBranch);
+    if (!mergeBase) {
+      throw new WorkflowDomainError('These branches share no history to revert to.', 422);
+    }
+
+    // Same per-file lock every other editor of this path takes — a concurrent
+    // save must not race the restore between write and commit.
+    const lockPath = `${this.kbDirName}/${repoRelPath}`;
+    const lock = await this.fileLocks.acquire(ws.id, headBranch, lockPath, user);
+    if (!lock.acquired) {
+      throw new WorkflowDomainError(
+        `${repoRelPath} is being edited by ${lock.lock.holderName} — try again once the edit settles.`,
+        409,
+      );
+    }
+    try {
+      await this.git.restorePathFromRef(ws.id, mergeBase, repoRelPath);
+      await this.git.commitFile(
+        ws.id,
+        user,
+        repoRelPath,
+        `Revert ${repoRelPath} (declined in change request #${number})`,
+        true, // skipValidator — this restores an already-validated base version
+      );
+      await this.git.push(ws.id, user);
+    } finally {
+      // Committed inline — drop the lock row directly rather than enqueueing
+      // a duplicate commit through releaseLock.
+      await this.fileLocks.release(ws.id, headBranch, lockPath, user);
+    }
+    this.prs.invalidateDetailCache(number);
+
+    const remaining = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
+    if (remaining.length > 0) {
+      return { closed: false, remainingPaths: remaining };
+    }
+    // Every change declined → the request proposes nothing.
+    await this.closeEmptyChangeRequest(number, user);
+    return { closed: true, remainingPaths: [] };
+  }
+
+  /**
+   * DELETE a change request outright: close it (whatever its diff says) and
+   * retire its source branch — the request, its proposal, and the branch that
+   * carried it are gone in one verb. Admin-only, resolved the same way every
+   * other admin check here is (write on `roles.yaml` at `origin/<base>`,
+   * never a local ref): this is the moderation verb for a shared deployment,
+   * stronger than reject (which the author or the files' owners can do, and
+   * which leaves the branch for a second round).
+   */
+  async deleteChangeRequest(number: number, user: AuthUser): Promise<void> {
+    const summary = await this.prs.getPr(number);
+    if (!summary) throw new WorkflowDomainError('change request not found', 404);
+    if (summary.state === 'merged') {
+      throw new WorkflowDomainError('This change request has already been applied.', 422);
+    }
+
+    const ws = await this.workspaceService.getOrCreateForBranch(summary.base);
+    await this.workspaceService.ensureRemotesFetched(ws.id).catch(() => undefined);
+    const isAdmin = await this.accessControl.canWriteAtRef(
+      ws.id,
+      `origin/${summary.base}`,
+      user.email,
+      'roles.yaml',
+    );
+    if (isAdmin !== true) {
+      throw new WorkflowDomainError('Only an admin can delete a change request.', 403);
+    }
+
+    // Close first (idempotent: an already-closed request just skips to the
+    // branch retirement). Guarded on `open` so a concurrent merge wins.
+    const now = new Date();
+    const updated = await this.db
+      .update(changeRequests)
+      .set({ state: 'closed', closedAt: now, updatedAt: now })
+      .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
+      .returning({ id: changeRequests.id });
+    if (updated.length > 0) {
+      this.prs.invalidateDetailCache(number);
+      this.events?.emit({ kind: 'change-request-rejected', number });
+    } else {
+      const fresh = await this.prs.getPr(number);
+      if (fresh?.state === 'merged') {
+        throw new WorkflowDomainError('This change request has already been applied.', 422);
+      }
+    }
+    await this.retireMergedSourceBranch(number, summary.base, user);
+  }
+
+  /**
+   * Close an open change request whose diff has EMPTIED — everything it
+   * proposed has since landed on the target, been reverted, or been undone on
+   * its own branch — and retire its source branch, exactly as a merge would
+   * have. A request pointing at an empty diff serves nobody: reviewers never
+   * see it (zero touched paths routes to no one) and the author sees a shell.
+   *
+   * Called after the last per-file revert, and as a lazy reconcile whenever a
+   * detail read observes an open request with no files (the join-requests
+   * pattern: derived state, settled on observation). The emptiness check here
+   * is AUTHORITATIVE — recomputed, and a diff failure aborts rather than
+   * closes, so a transient git error can never eat a live request.
+   *
+   * Returns true when THIS call closed it.
+   */
+  async closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean> {
+    const summary = await this.prs.getPr(number);
+    if (!summary || summary.state !== 'open') return false;
+    let paths: string[];
+    try {
+      const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
+      paths = await this.git.changedPathsForPr(ws.id, summary.base, summary.branch);
+    } catch (err) {
+      console.warn(
+        `[cr] empty-check for change request #${number} failed — leaving it open:`,
+        err,
+      );
+      return false;
+    }
+    if (paths.length > 0) return false;
+
+    // Guard on `state = 'open'` so a concurrent merge or withdraw wins the
+    // race and this becomes a no-op.
+    const now = new Date();
+    const updated = await this.db
+      .update(changeRequests)
+      .set({ state: 'closed', closedAt: now, updatedAt: now })
+      .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
+      .returning({ id: changeRequests.id });
+    if (updated.length === 0) return false;
+    this.prs.invalidateDetailCache(number);
+    this.events?.emit({ kind: 'change-request-rejected', number });
+    await this.retireMergedSourceBranch(number, summary.base, user);
+    return true;
+  }
+
+  /**
+   * Close every open change request whose source branch no longer exists.
+   *
+   * A change request is a proposal to merge a branch. When that branch is
+   * gone — deleted after a manual merge, pruned as abandoned, or left behind
+   * by a feature that has itself been removed — the request cannot be read,
+   * reviewed, applied or declined. It is not a pending decision, it is a
+   * tombstone, and it costs more than tidiness: `listOpenPrs` resolves each
+   * open request's changed paths, so every one of these throws
+   * `unknown branch` on every poll, filling the log and slowing the list it
+   * appears in.
+   *
+   * CLOSED, NOT DELETED. The row is evidence — who proposed what, when, and
+   * that it was never applied — and it is the only remaining trace once the
+   * branch is gone. Closing takes it out of every open list (which is the
+   * whole visible problem) while a `state = 'closed'` row can still be read,
+   * counted, and reopened by hand. Deleting would make this sweep the one
+   * operation in the workflow that destroys history without a human asking.
+   *
+   * ONE fetch, then a set lookup. The freshness matters more than the cost:
+   * `changedPathsForPr` fails when the branch is missing from THAT
+   * workspace's refs, which is not the same thing as missing from origin —
+   * a clone that never fetched a branch someone else created reports exactly
+   * the same error. Closing on that signal would eat live requests. So the
+   * verdict comes from `listBranches({ freshFetch: true })`, which fetches
+   * with prune and unions local heads with origin's, on a single workspace.
+   *
+   * Fails SAFE: any error listing branches abandons the sweep entirely rather
+   * than closing anything, because "I could not reach origin" and "the branch
+   * is gone" are indistinguishable from the inside and only one of them is a
+   * reason to act.
+   *
+   * Returns how many it closed.
+   */
+  async closeChangeRequestsWithDeletedBranches(): Promise<number> {
+    const open = await this.db
+      .select({ number: changeRequests.number, sourceBranch: changeRequests.sourceBranch })
+      .from(changeRequests)
+      .where(eq(changeRequests.state, 'open'));
+    if (open.length === 0) return 0;
+
+    let live: Set<string>;
+    try {
+      const branches = await this.git.listBranches(workspaceIdForBranch(DEFAULT_BRANCH), {
+        freshFetch: true,
+      });
+      live = new Set(branches.map((b) => b.name));
+    } catch (err) {
+      console.warn('[cr] branch sweep skipped — could not list branches:', err);
+      return 0;
+    }
+    // An empty branch list means something is wrong with the clone, not that
+    // every branch in the repo was deleted at once. Refuse to act on it.
+    if (live.size === 0) {
+      console.warn('[cr] branch sweep skipped — branch list came back empty');
+      return 0;
+    }
+
+    let closed = 0;
+    for (const cr of open) {
+      if (live.has(cr.sourceBranch)) continue;
+      const now = new Date();
+      // Guarded on `state = 'open'`, so a merge or withdraw racing this call
+      // wins and this becomes a no-op.
+      const updated = await this.db
+        .update(changeRequests)
+        .set({ state: 'closed', closedAt: now, updatedAt: now })
+        .where(and(eq(changeRequests.number, cr.number), eq(changeRequests.state, 'open')))
+        .returning({ id: changeRequests.id });
+      if (updated.length === 0) continue;
+      this.prs.invalidateDetailCache(cr.number);
+      this.events?.emit({ kind: 'change-request-rejected', number: cr.number });
+      console.log(
+        `[cr] closed change request #${cr.number}: source branch "${cr.sourceBranch}" no longer exists`,
+      );
+      closed++;
+    }
+    return closed;
   }
 
   /**

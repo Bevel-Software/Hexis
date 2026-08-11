@@ -1866,8 +1866,20 @@ export class GitService implements IGitService {
         this.git(cwd, ['diff', '-M', '-z', '--name-status', range]),
         this.git(cwd, ['diff', '-M', '-z', '--numstat', range]),
       ]);
-      const statuses = parseNameStatusZ(nameStatusOut);
-      const counts = parseNumstatZ(numstatOut);
+      let statuses = parseNameStatusZ(nameStatusOut);
+      let counts = parseNumstatZ(numstatOut);
+      // roles.yaml can NEVER change through a merge — `preserveBaseRolesYaml`
+      // restores the base copy onto the source branch before every merge — so
+      // listing it as "changed" claims something the merge will not do, and
+      // (worse) makes its approval a requirement for a change that cannot
+      // land. Filter it from the review surface entirely; the neutralisation
+      // reads the raw refs itself and is unaffected. Both lists are filtered
+      // IN STEP so the index-zip below stays aligned.
+      if (statuses.some((s) => s.path === 'roles.yaml')) {
+        const keep = statuses.map((s) => s.path !== 'roles.yaml');
+        statuses = statuses.filter((_, i) => keep[i]);
+        if (counts.length === keep.length) counts = counts.filter((_, i) => keep[i]);
+      }
 
       // `--name-status` and `--numstat` enumerate the same files in the same
       // order (same `-M` over the same range), so we zip by index. If the two
@@ -1931,7 +1943,85 @@ export class GitService implements IGitService {
       const { stdout } = await this.git(cwd, [
         'diff', '-M', '--name-only', `${baseRef}...${headRef}`,
       ]);
-      return stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+      return (
+        stdout
+          .split('\n')
+          .map((s) => s.trim())
+          .filter(Boolean)
+          // Same rule as `changedFilesForPr`: a roles.yaml change never
+          // survives a merge, so it is not a touched path for routing or
+          // summaries either.
+          .filter((p) => p !== 'roles.yaml')
+      );
+    });
+  }
+
+  /**
+   * The merge-base commit of a change request's two branches (their origin
+   * refs), or null when they share no history. This is the "before" the CR's
+   * three-dot diff is read against — the ref a per-file revert restores from,
+   * so the reverted file drops OUT of that same diff.
+   */
+  async mergeBaseForPr(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<string | null> {
+    assertValidBranchName(baseBranch);
+    assertValidBranchName(headBranch);
+    const cwd = await this.repoDir(workspaceId);
+    await this.fetchPrRefs(cwd, baseBranch, headBranch);
+    return this.mutex.run(workspaceId, async () => {
+      const baseRef = await this.resolveBranchRef(cwd, baseBranch);
+      const headRef = await this.resolveBranchRef(cwd, headBranch);
+      try {
+        const { stdout } = await this.git(cwd, ['merge-base', baseRef, headRef]);
+        return stdout.trim() || null;
+      } catch (err) {
+        // Exit 1 is git's specific "no common ancestor" answer; anything else
+        // is an infra failure that must not masquerade as it.
+        if ((err as { exitCode?: number }).exitCode === 1) return null;
+        throw err;
+      }
+    });
+  }
+
+  /**
+   * Restore one path in the working tree (and index) to its content at `ref`;
+   * a path ABSENT at `ref` is deleted — the revert of an added file is its
+   * removal. Byte-exact via git itself (`checkout <ref> -- <path>`), never a
+   * read-as-string round-trip that would mangle binary files. The caller owns
+   * committing the result (see `commitFile`).
+   */
+  async restorePathFromRef(
+    workspaceId: string,
+    ref: string,
+    repoRelativePath: string,
+  ): Promise<void> {
+    assertValidRelativePath(repoRelativePath);
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      let existsAtRef = true;
+      try {
+        await this.git(cwd, ['cat-file', '-e', `${ref}:${repoRelativePath}`]);
+      } catch {
+        existsAtRef = false;
+      }
+      if (existsAtRef) {
+        await this.git(cwd, ['checkout', ref, '--', repoRelativePath]);
+      } else {
+        // First re-align the INDEX with HEAD for this path. A previous failed
+        // attempt (the git-rm era of this method) can have left a staged
+        // deletion — index entry gone — and `git add` can only stage a
+        // deletion for a path the index still tracks. No-op on a clean tree.
+        await this.git(cwd, ['reset', '-q', 'HEAD', '--', repoRelativePath]);
+        // Then delete from the WORKING TREE only, never `git rm`: the
+        // follow-up `commitFile` stages via `git add -- <path>`, and dropping
+        // the index entry too made that add match nothing — the whole revert
+        // failed with "pathspec did not match any files". A tracked file
+        // missing from disk is exactly what `git add` records as deleted.
+        await fs.rm(path.join(cwd, repoRelativePath), { force: true });
+      }
     });
   }
 

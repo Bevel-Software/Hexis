@@ -106,7 +106,8 @@ class CancelStateError extends WorkflowDomainError {
 class CancelAuthError extends WorkflowDomainError {
   constructor() {
     super(
-      "You can't cancel this change request — only the author or an admin can.",
+      "You can't cancel this change request — that takes being its author, an admin, " +
+        'or having edit access to every file it changes.',
       403,
     );
     this.name = 'CancelAuthError';
@@ -500,7 +501,11 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       })
       .onConflictDoNothing();
 
-    return this.getApprovalStates(prNumber, files, headSha, baseBranch, prAuthorIdHash, workspaceId);
+    // WITH the caller as viewer: these approvals go straight back to the UI
+    // that just clicked, and omitting the viewer computed every
+    // `viewerCanApprove` as false — one approval made the apply button and
+    // every remaining approve control vanish until a fresh detail fetch.
+    return this.getApprovalStates(prNumber, files, headSha, baseBranch, prAuthorIdHash, workspaceId, user.email);
   }
 
   evaluateMergeGate(input: MergeGateInput): MergeGateResult {
@@ -801,6 +806,10 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
         ),
       );
 
-    return this.getApprovalStates(prNumber, files, headSha, baseBranch, prAuthorIdHash, workspaceId);
+    // WITH the caller as viewer: these approvals go straight back to the UI
+    // that just clicked, and omitting the viewer computed every
+    // `viewerCanApprove` as false — one approval made the apply button and
+    // every remaining approve control vanish until a fresh detail fetch.
+    return this.getApprovalStates(prNumber, files, headSha, baseBranch, prAuthorIdHash, workspaceId, user.email);
   }
 }

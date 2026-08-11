@@ -2,18 +2,20 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
+import { useLibraryToast } from '../state/toast.context';
 import {
   decodeGroupSegment,
   pathForGroupsIndex,
-  pathForSkill,
-  pathForTool,
+  urlForItemFile,
 } from '../routes/library-paths';
 import { primaryFolderOf } from '../utils/group-summary';
 import { GroupJoinRequests } from './GroupJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
-import { BandControls, GroupBreadcrumb, GroupItemSections, PageNote } from './group-page-parts';
+import { BandControls, GroupBreadcrumb, GroupItemSections, PageNote, RemoveLibraryItemDialog,
+} from './group-page-parts';
+import { DeleteGroupDialog } from './DeleteGroupDialog';
 import { PageActions } from './PageActions';
 import { copyToClipboard } from '../utils/clipboard';
 import { LockedGroupView } from './LockedGroupView';
@@ -40,6 +42,7 @@ export function GroupPage() {
   const params = useParams();
   const group = decodeGroupSegment(params.group ?? '');
   const data = useLibrary();
+  const toast = useLibraryToast();
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
   const [addOpen, setAddOpen] = useState(false);
@@ -99,6 +102,11 @@ export function GroupPage() {
     return () => window.clearTimeout(timer);
   }, [refreshState]);
 
+  /** The card being removed, while its confirm dialog is up. */
+  const [removing, setRemoving] = useState<LibraryItem | null>(null);
+  /** Whether the group's own delete confirmation is up. */
+  const [deleteOpen, setDeleteOpen] = useState(false);
+
   const summary = useMemo(
     () => data.groupSummaries.find((g) => g.name === group) ?? null,
     [data.groupSummaries, group],
@@ -132,7 +140,7 @@ export function GroupPage() {
       setReviewing(item);
       return;
     }
-    navigate(item.kind === 'integration' ? pathForTool(item.id) : pathForSkill(item.id));
+    if (kbDirName) navigate(urlForItemFile(kbDirName, item.path));
   }
 
   /**
@@ -227,6 +235,10 @@ export function GroupPage() {
             onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
             onAdd={() => setAddOpen(true)}
             onCopyLink={() => copyToClipboard(window.location.href)}
+            // The OWNER's verb — `isOwner` is the same verdict the DELETE
+            // route enforces, so the item appears for exactly the people the
+            // backend will let through.
+            onDelete={summary?.isOwner ? () => setDeleteOpen(true) : undefined}
             addLabel={`Add a skill or tool to ${group}`}
           />
         </div>
@@ -264,6 +276,10 @@ export function GroupPage() {
         skillItems={shownSkills}
         toolItems={toolItems}
         onOpen={openItem}
+        // Removal is the GROUP MANAGER's verb — the same canWrite that lets
+        // them answer join requests. The backend's per-path gate enforces it
+        // for real; this only decides who sees the affordance.
+        onRemove={summary?.canWrite ? setRemoving : undefined}
         emptySkills={
           filterOn
             ? 'Nothing in this band needs you right now.'
@@ -313,6 +329,37 @@ export function GroupPage() {
           // ids are global, so the collision that matters is with any of them.
           existingSkills={allSkillNames}
           onClose={() => setAddOpen(false)}
+        />
+      )}
+
+      {deleteOpen && summary && (
+        <DeleteGroupDialog
+          name={group}
+          skillCount={summary.skillCount}
+          toolCount={summary.toolCount}
+          onClose={() => setDeleteOpen(false)}
+          onDeleted={() => {
+            toast(`Deleted ${group}.`);
+            // This page's place just ceased to exist — the index is the
+            // honest landing. Reloads follow so the sidebar agrees.
+            navigate(pathForGroupsIndex());
+            data.reload();
+            data.reloadGroups();
+          }}
+        />
+      )}
+
+      {removing && (
+        <RemoveLibraryItemDialog
+          item={removing}
+          place={group}
+          onClose={() => setRemoving(null)}
+          onRemoved={() => {
+            toast(`Removed ${removing.name} from ${group}.`);
+            // Catalog for the card, group index for the counts.
+            data.reload();
+            data.reloadGroups();
+          }}
         />
       )}
 

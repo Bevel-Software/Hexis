@@ -62,33 +62,54 @@ describe('GroupIndexService', () => {
 
   const kb = () => join(root, wsId, KB_DIR);
 
+  /** A REAL group: a folder carrying the access.md that makes it exist. */
+  const groupDir = async (name: string) => {
+    await mkdir(join(kb(), 'Groups', name), { recursive: true });
+    await writeFile(join(kb(), 'Groups', name, 'access.md'), '---\nread:\n  - everyone\n---\n');
+  };
+
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'group-index-'));
     await mkdir(kb(), { recursive: true });
   });
   afterEach(() => rm(root, { recursive: true, force: true }));
 
-  test('enumerates Groups/ subfolders as groups, sorted by name', async () => {
-    await mkdir(join(kb(), 'Groups', 'GTM'), { recursive: true });
-    await mkdir(join(kb(), 'Groups', 'Engineering'), { recursive: true });
+  test('enumerates Groups/ folders carrying an access.md, sorted by name', async () => {
+    await groupDir('GTM');
+    await groupDir('Engineering');
 
     const catalog = await svc().catalog();
     expect(catalog.map((g) => g.name)).toEqual(['Engineering', 'GTM']);
     expect(catalog[1].folders).toEqual(['Groups/GTM']);
   });
 
+  test('a folder without an access.md is not a group', async () => {
+    // The residue a deleted group leaves behind: git cannot record an empty
+    // directory, so the folder outlives its files on live checkouts — and a
+    // folder with content but no access.md is just as much a non-group.
+    await mkdir(join(kb(), 'Groups', 'Ghost'), { recursive: true });
+    await mkdir(join(kb(), 'Groups', 'Residue'), { recursive: true });
+    await writeFile(join(kb(), 'Groups', 'Residue', 'notes.md'), 'leftover');
+    await groupDir('Real');
+
+    const catalog = await svc().catalog();
+    expect(catalog.map((g) => g.name)).toEqual(['Real']);
+  });
+
   test('the retired Skills/ and Tools/ roots are NOT group roots', async () => {
     await mkdir(join(kb(), 'Skills', 'GTM'), { recursive: true });
     await mkdir(join(kb(), 'Tools', 'GTM'), { recursive: true });
-    await mkdir(join(kb(), 'Groups', 'Engineering'), { recursive: true });
+    await groupDir('Engineering');
 
     const catalog = await svc().catalog();
     expect(catalog.map((g) => g.name)).toEqual(['Engineering']);
   });
 
   test('ignores loose files and dot-dirs under the group root', async () => {
+    // The dot filter wins even over a folder that carries an access.md.
     await mkdir(join(kb(), 'Groups', '.hidden'), { recursive: true });
-    await mkdir(join(kb(), 'Groups', 'GTM'), { recursive: true });
+    await writeFile(join(kb(), 'Groups', '.hidden', 'access.md'), '---\nread:\n  - everyone\n---\n');
+    await groupDir('GTM');
     await writeFile(join(kb(), 'Groups', 'slack.tool'), '{}');
 
     const catalog = await svc().catalog();
@@ -96,8 +117,8 @@ describe('GroupIndexService', () => {
   });
 
   test('counts skills and tools from the global catalogs by groupOfPath', async () => {
-    await mkdir(join(kb(), 'Groups', 'GTM'), { recursive: true });
-    await mkdir(join(kb(), 'Groups', 'Product'), { recursive: true });
+    await groupDir('GTM');
+    await groupDir('Product');
 
     const catalog = await svc({
       skills: skills('Groups/GTM/outreach', 'Groups/GTM/newsletter', 'Groups/Product/roadmap'),
@@ -114,7 +135,7 @@ describe('GroupIndexService', () => {
   });
 
   test('resolves principals on the group folder', async () => {
-    await mkdir(join(kb(), 'Groups', 'GTM'), { recursive: true });
+    await groupDir('GTM');
 
     const seen: string[] = [];
     const access = {
@@ -151,7 +172,7 @@ describe('GroupIndexService', () => {
   });
 
   test('a failed scan is served but NOT cached — the next call retries', async () => {
-    await mkdir(join(kb(), 'Groups', 'GTM'), { recursive: true });
+    await groupDir('GTM');
     let fail = true;
     const flaky = {
       // Fails once, the way a default-branch clone mid-creation does, then
@@ -190,12 +211,12 @@ describe('GroupIndexService', () => {
   });
 
   test('caches for the TTL and rescans after invalidate()', async () => {
-    await mkdir(join(kb(), 'Groups', 'GTM'), { recursive: true });
+    await groupDir('GTM');
     const service = svc();
 
     expect((await service.catalog()).map((g) => g.name)).toEqual(['GTM']);
-    // A folder added out of band is NOT seen while the cache holds…
-    await mkdir(join(kb(), 'Groups', 'Finance'), { recursive: true });
+    // A group added out of band is NOT seen while the cache holds…
+    await groupDir('Finance');
     expect((await service.catalog()).map((g) => g.name)).toEqual(['GTM']);
     // …and IS seen once the file-change subscriber drops it.
     service.invalidate();

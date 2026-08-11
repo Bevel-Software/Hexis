@@ -6,8 +6,10 @@ import { AuthContext } from '../../auth/state/auth.context';
 import { authValue } from '../../library/__tests__/auth-harness';
 import { LibraryToastProvider } from '../../library/state/toast';
 import { WelcomePage } from '../components/WelcomePage';
+import { AppRegistryContext, EMPTY_REGISTRY } from '../../../core/registry';
 import { ConnectAgentPill } from '../components/ConnectAgentPill';
 import { RootLanding } from '../components/RootLanding';
+import { POST_LOGIN_REDIRECT_KEY } from '../../auth/services/sso';
 import { WELCOME_PATH } from '../paths';
 import { resetOnboardingForTests } from '../state/onboarding';
 import { setSidebarCollapsed, useSidebar } from '../../layout/state/sidebar';
@@ -52,14 +54,15 @@ function sidebarState() {
   return renderHook(() => useSidebar()).result.current;
 }
 
-/** Where we are, and whether we got here by being greeted. */
+/** Where we are, whether we got here by being greeted, and any carried link. */
 function LocationProbe() {
   const { pathname, state } = useLocation();
-  const greeting = (state as { greeting?: boolean } | null)?.greeting === true;
+  const s = state as { greeting?: boolean; returnTo?: string | null } | null;
   return (
     <>
       <div data-testid="pathname">{pathname}</div>
-      <div data-testid="greeting">{String(greeting)}</div>
+      <div data-testid="greeting">{String(s?.greeting === true)}</div>
+      <div data-testid="returnTo">{s?.returnTo ?? ''}</div>
     </>
   );
 }
@@ -101,6 +104,7 @@ const landingRoutes = (
 beforeEach(() => {
   resetOnboardingForTests();
   authFetchMock.mockClear();
+  sessionStorage.clear();
 });
 
 /**
@@ -152,6 +156,36 @@ describe('RootLanding: the one-time greeting', () => {
   // must never resurrect the welcome flow. Only an explicit false onboards.
   it('treats a missing flag as done, not as new', () => {
     mount(landingRoutes, authValue());
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
+  });
+
+  /**
+   * The SSO round-trip returns to a fixed callback URL, so a deep link
+   * someone clicked dies in transit unless `startSsoLogin` stashed it. These
+   * prove the far side: the stash is honoured, exactly once, and can never
+   * point off-site.
+   */
+  it('sends an existing account straight to the stashed deep link, once', () => {
+    const DEEP = '/workspace/main/knowledge-base/KnowledgeBase/Start here.md';
+    sessionStorage.setItem(POST_LOGIN_REDIRECT_KEY, DEEP);
+    mount(landingRoutes, doneUser());
+    expect(screen.getByTestId('pathname')).toHaveTextContent(DEEP);
+    // Taken, not peeked: the next front-door visit is an ordinary one.
+    expect(sessionStorage.getItem(POST_LOGIN_REDIRECT_KEY)).toBeNull();
+  });
+
+  it('greets a brand-new account first, handing the link to the welcome page', () => {
+    const DEEP = '/workspace/main/knowledge-base/KnowledgeBase/Start here.md';
+    sessionStorage.setItem(POST_LOGIN_REDIRECT_KEY, DEEP);
+    mount(landingRoutes);
+    expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
+    expect(screen.getByTestId('greeting')).toHaveTextContent('true');
+    expect(screen.getByTestId('returnTo')).toHaveTextContent(DEEP);
+  });
+
+  it('discards a stash that is not an in-app path — never an off-site redirect', () => {
+    sessionStorage.setItem(POST_LOGIN_REDIRECT_KEY, '//evil.example/phish');
+    mount(landingRoutes, doneUser());
     expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
   });
 
@@ -402,6 +436,96 @@ describe('WelcomePage', () => {
     await userEvent.click(screen.getByRole('button', { name: /Go to your skills/ }));
     expect(authFetchMock).not.toHaveBeenCalled();
     expect(screen.getByTestId('pathname')).toHaveTextContent('/skills-and-tools/yours');
+  });
+
+  /**
+   * A deep link that survived the SSO round-trip retargets BOTH exits: the
+   * greeting concluded by discarding the page someone was sent would cost
+   * them the reason they came. The skip label says where it now goes.
+   */
+  it('keeps a carried deep link: Done lands on it, and the skip link says so', async () => {
+    const DEEP = '/workspace/main/knowledge-base/KnowledgeBase/Start here.md';
+    const arrivedWithLink = { pathname: WELCOME_PATH, state: { greeting: true, returnTo: DEEP } };
+    mountPage(newUser(), arrivedWithLink);
+    expect(screen.getByRole('button', { name: /Continue to your link/ })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(authFetchMock).toHaveBeenCalledWith(
+      '/api/auth/onboarding-done',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(screen.getByTestId('pathname')).toHaveTextContent(DEEP);
+  });
+
+  /**
+   * `AppRegistry.welcomeExit` moves where a new person starts. WHERE that is,
+   * is a property of the product: core sends them to their own skills shelf,
+   * because on a core deployment that is the product and a fresh knowledge
+   * base is empty. A distribution built around the knowledge graph wants the
+   * opposite and would otherwise greet someone and then leave them in a
+   * surface they did not come for.
+   *
+   * The tests above deliberately mount WITHOUT a registry, so they pin the
+   * default: the seam must be invisible to a deployment that does not use it.
+   */
+  describe('welcomeExit', () => {
+    const mountWithExit = (
+      welcomeExit: { path: string; label: string } | undefined,
+      // Same shape `mount` accepts — `typeof greeted` would pin `state` to
+      // `{ greeting: boolean }` and reject the deep-link case below.
+      route: string | { pathname: string; state?: unknown } = greeted,
+    ) =>
+      mount(
+        <AppRegistryContext.Provider value={{ ...EMPTY_REGISTRY, welcomeExit }}>
+          <Routes>
+            <Route path={WELCOME_PATH} element={<WelcomePage />} />
+            <Route path="/skills-and-tools/yours" element={<div>your group</div>} />
+            <Route path="/workspace" element={<div>knowledge</div>} />
+          </Routes>
+        </AppRegistryContext.Provider>,
+        newUser(),
+        route,
+      );
+
+    it('sends both exits to the configured destination', async () => {
+      mountWithExit({ path: '/workspace', label: 'Go to your knowledge base' });
+      await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+      expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace');
+    });
+
+    /**
+     * The label travels WITH the path. "Go to your skills →" pointing at a
+     * knowledge base is a lie, and letting a caller set one without the other
+     * is the likeliest way to produce it.
+     */
+    it('labels the skip link with the configured destination', () => {
+      mountWithExit({ path: '/workspace', label: 'Go to your knowledge base' });
+      expect(
+        screen.getByRole('button', { name: /Go to your knowledge base/ }),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Go to your skills/ })).not.toBeInTheDocument();
+    });
+
+    it('falls back to the skills shelf when a registry sets nothing', async () => {
+      mountWithExit(undefined);
+      expect(screen.getByRole('button', { name: /Go to your skills/ })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+      expect(screen.getByTestId('pathname')).toHaveTextContent('/skills-and-tools/yours');
+    });
+
+    /**
+     * A deep link still outranks it. Someone who followed a link is owed that
+     * link, and no amount of deployment configuration may eat an intention.
+     */
+    it('does not override a carried deep link', async () => {
+      const DEEP = '/workspace/main/knowledge-base/KnowledgeBase/Start here.md';
+      mountWithExit(
+        { path: '/skills-and-tools/yours', label: 'Go to your skills' },
+        { pathname: WELCOME_PATH, state: { greeting: true, returnTo: DEEP } },
+      );
+      expect(screen.getByRole('button', { name: /Continue to your link/ })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+      expect(screen.getByTestId('pathname')).toHaveTextContent(DEEP);
+    });
   });
 });
 

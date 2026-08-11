@@ -6,6 +6,7 @@ import {
   WorkspaceContext,
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
+import { AdminContext, type AdminContextValue } from '../../admin/state/admin.context';
 import type { LibraryData } from '../hooks/useLibraryData';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { GroupSummary } from '../services/groups.api';
@@ -27,6 +28,12 @@ const groupsMock = vi.hoisted(() => ({
   reconcileJoinRequest: vi.fn(),
   requestGroupAccess: vi.fn(),
 }));
+const libApiMock = vi.hoisted(() => ({ removeLibraryItem: vi.fn() }));
+vi.mock('../services/library.api', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  removeLibraryItem: libApiMock.removeLibraryItem,
+}));
+
 vi.mock('../services/groups.api', () => ({
   listGroups: groupsMock.listGroups,
   listJoinRequests: groupsMock.listJoinRequests,
@@ -65,6 +72,17 @@ const workspace = {
   workspaceId: 'target-company-state',
   kbDirName: 'knowledge-base',
 } as unknown as WorkspaceContextValue;
+
+const nonAdmin: AdminContextValue = {
+  isAdmin: false,
+  unreadCount: 0,
+  lastSeen: null,
+  markSeen: vi.fn(),
+  refresh: vi.fn(),
+  rolesConfigCorrupted: false,
+  rolesConfigErrors: [],
+  runRolesRecovery: vi.fn(),
+};
 
 const connectedTool = (over: Partial<ToolSecrets> = {}): ToolSecrets => ({
   slug: 'heyreach',
@@ -117,6 +135,7 @@ const gtm = (over: Partial<GroupSummary> = {}): GroupSummary => ({
   folders: ['Groups/GTM'],
   canRead: true,
   canWrite: false,
+  isOwner: false,
   skillCount: 1,
   toolCount: 1,
   owners: { roles: [], users: [{ name: 'Olga Ivanova', email: 'olga@bevel.software' }] },
@@ -139,25 +158,24 @@ function LocationProbe() {
 function renderGroup(name: string, children?: ReactNode) {
   return render(
     <MemoryRouter initialEntries={[`/skills-and-tools/groups/${encodeURIComponent(name)}`]}>
-      <WorkspaceContext.Provider value={workspace}>
-        <LibraryToastProvider>
-          <LibraryProvider>
-            {/* The add dialog's create half signs the new skill's change
-                request with the caller, so it reads `useAuth` — which throws
-                rather than returning null when nothing provides it. */}
-            {withAuth(
-              <>
-                <Routes>
-                  <Route path="/skills-and-tools/groups/:group" element={<GroupPage />} />
-                  <Route path="*" element={<div />} />
-                </Routes>
-                <LocationProbe />
-                {children}
-              </>,
-            )}
-          </LibraryProvider>
-        </LibraryToastProvider>
-      </WorkspaceContext.Provider>
+      <AdminContext.Provider value={nonAdmin}>
+        <WorkspaceContext.Provider value={workspace}>
+          <LibraryToastProvider>
+            <LibraryProvider>
+              {withAuth(
+                <>
+                  <Routes>
+                    <Route path="/skills-and-tools/groups/:group" element={<GroupPage />} />
+                    <Route path="*" element={<div />} />
+                  </Routes>
+                  <LocationProbe />
+                  {children}
+                </>,
+              )}
+            </LibraryProvider>
+          </LibraryToastProvider>
+        </WorkspaceContext.Provider>
+      </AdminContext.Provider>
     </MemoryRouter>,
   );
 }
@@ -171,6 +189,29 @@ describe('GroupPage', () => {
     groupsMock.listJoinRequests.mockResolvedValue([]);
     groupsMock.reconcileJoinRequest.mockResolvedValue(false);
     groupsMock.requestGroupAccess.mockResolvedValue(undefined);
+  });
+
+  it('lets a group MANAGER remove a skill, behind a confirm that says who loses it', async () => {
+    groupsMock.listGroups.mockResolvedValue([gtm({ canWrite: true })]);
+    libApiMock.removeLibraryItem.mockResolvedValue(undefined);
+    renderGroup('GTM');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove outreach' }));
+    expect(await screen.findByText(/Everyone here loses it/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+
+    // The skill FOLDER, repo-relative — the recursive delete under it runs
+    // per-file through the same ACL gate that governs editing the group.
+    await waitFor(() =>
+      expect(libApiMock.removeLibraryItem).toHaveBeenCalledWith('Groups/GTM/outreach'),
+    );
+    expect(await screen.findByText(/Removed outreach from GTM/)).toBeInTheDocument();
+  });
+
+  it('offers no remove affordance to a non-manager', async () => {
+    renderGroup('GTM'); // gtm() defaults to canWrite: false
+    await screen.findByText('outreach');
+    expect(screen.queryByRole('button', { name: 'Remove outreach' })).toBeNull();
   });
 
   it("shows only the group's own skills and tools", async () => {
@@ -206,6 +247,7 @@ describe('GroupPage', () => {
       await screen.findByRole('heading', { name: 'Add a skill or tool to GTM' }),
     ).toBeInTheDocument();
     expect(screen.getByText(/No review step/)).toBeInTheDocument();
+    expect(screen.queryByText('Start an empty SKILL.md')).not.toBeInTheDocument();
   });
 
   it('opens the same add dialog for everyone else, and says review is coming', async () => {
@@ -214,7 +256,8 @@ describe('GroupPage', () => {
     expect(
       await screen.findByRole('heading', { name: 'Add a skill or tool to GTM' }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/an owner reviews it before it joins/)).toBeInTheDocument();
+    expect(screen.getByText(/change request for an owner to review/)).toBeInTheDocument();
+    expect(screen.queryByText('Start an empty SKILL.md')).not.toBeInTheDocument();
   });
 
   it('offers no separate propose door to anybody', async () => {

@@ -28,10 +28,15 @@ import type { GroupSummary } from '../services/groups.api';
 const dataMock = vi.hoisted(() => ({ useLibraryData: vi.fn() }));
 vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryData }));
 
-const groupsMock = vi.hoisted(() => ({ listGroups: vi.fn(), listJoinRequests: vi.fn() }));
+const groupsMock = vi.hoisted(() => ({
+  listGroups: vi.fn(),
+  listJoinRequests: vi.fn(),
+  deleteGroup: vi.fn(),
+}));
 vi.mock('../services/groups.api', () => ({
   listGroups: groupsMock.listGroups,
   listJoinRequests: groupsMock.listJoinRequests,
+  deleteGroup: groupsMock.deleteGroup,
   reconcileJoinRequest: vi.fn(),
   requestGroupAccess: vi.fn(),
   AlreadyReadableError: class AlreadyReadableError extends Error {},
@@ -82,6 +87,7 @@ const summary = (over: Partial<GroupSummary>): GroupSummary => ({
   folders: ['Groups/GTM'],
   canRead: true,
   canWrite: true,
+  isOwner: false,
   skillCount: 1,
   toolCount: 0,
   owners: { roles: [], users: [] },
@@ -162,6 +168,7 @@ describe('Library sidebar: right-click, end to end', () => {
     dataMock.useLibraryData.mockReturnValue(CATALOG);
     groupsMock.listGroups.mockResolvedValue(GROUPS);
     groupsMock.listJoinRequests.mockResolvedValue([]);
+    groupsMock.deleteGroup.mockResolvedValue(undefined);
   });
 
   // Only the globals this file stubs — NOT `restoreAllMocks`, which would strip
@@ -204,6 +211,37 @@ describe('Library sidebar: right-click, end to end', () => {
     await openMenuOn('Finance (locked)');
     expect(screen.getByRole('menu', { name: 'Actions for Finance' })).toBeInTheDocument();
     expect(menuItems()).toContain('Manage access');
+  });
+
+  /**
+   * Delete is the OWNER's verb: `isOwner` is the same verdict the backend's
+   * DELETE route enforces, so the affordance appears for exactly the people
+   * the endpoint will let through. GTM's default summary here says
+   * `canWrite: true, isOwner: false` — the full-menu test above is therefore
+   * also the proof that a mere MANAGER does not see the item.
+   */
+  it('offers Delete group to an owner, and drives the confirm → delete round-trip', async () => {
+    groupsMock.listGroups.mockResolvedValue([summary({ isOwner: true })]);
+    renderLibrary();
+    await openMenuOn(/^GTM/);
+    expect(menuItems()).toEqual([
+      'Add a skill or tool',
+      'New group',
+      'Copy link',
+      'Manage access',
+      'Delete group',
+    ]);
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete group' }));
+    // The menu hands over to the confirmation — nothing is deleted yet.
+    const dialog = await screen.findByRole('dialog');
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(groupsMock.deleteGroup).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete group' }));
+    await waitFor(() => expect(groupsMock.deleteGroup).toHaveBeenCalledWith('GTM'));
+    // The layout says so — same voice as every other completed verb here.
+    expect(await screen.findByText('Deleted GTM.')).toBeInTheDocument();
   });
 
   it('gives the empty nav space the one verb that belongs to the nav itself', async () => {

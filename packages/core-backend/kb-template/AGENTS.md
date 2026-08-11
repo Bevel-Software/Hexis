@@ -3,6 +3,11 @@
 This is a git-backed knowledge base. You are the primary agent responsible for
 maintaining it.
 
+> **This file is managed by the platform.** Every server restart replaces it
+> with the current template, so edits made here are overwritten. Deployment- or
+> team-specific conventions belong in files of your own — anywhere under
+> `KnowledgeBase/`, linked from wherever they are needed.
+
 **There is no required format for knowledge.** Write markdown the way the
 subject wants to be written: prose, tables, checklists, diagrams, whatever
 serves the reader. Nothing here parses your files into a schema or rejects a
@@ -28,10 +33,24 @@ platform reads:
 Groups/<Group>/<skill>/SKILL.md   a skill
 Groups/<Group>/<name>.tool        a tool manual
 Groups/<Group>/access.md          who can read/write the whole group
+Groups/personal-<user-id>/…       one per person: their own skills, private
 ```
 
 Skills and tools live TOGETHER in a group because they share one access
 boundary: a tool a group cannot read is a skill that group cannot run.
+
+**Group folders are made through the app, not by writing files.** A group
+exists exactly when its folder carries an `access.md` — a bare directory
+under `Groups/` is not a group and is never listed. A new
+direct child of `Groups/` needs an `access.md` naming who runs it, and the
+write gate refuses a plain write into an unused name there — so do not try to
+create a group by writing a skill into `Groups/<new-name>/…`; it will be
+denied. Send the user to the app's **New group** button (or its
+`POST /api/groups` endpoint), then write into the folder it made. Names
+starting with `personal-` are reserved: one such folder exists per person,
+created automatically with their first personal skill, readable only by its
+owner and never listed as a group — a signed-in user's own skills belong
+there, and move into a group by moving the skill's folder.
 
 Everything under `KnowledgeBase/` is yours to arrange. Subfolders, naming,
 whether a topic is one file or twenty — all of it is a judgement call about

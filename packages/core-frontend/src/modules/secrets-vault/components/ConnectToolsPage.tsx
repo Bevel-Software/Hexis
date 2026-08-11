@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import { pathForTool } from '../../library/routes/library-paths';
+import { LIBRARY_ROOT, pathForTool } from '../../library/routes/library-paths';
 import { ToolLogo } from '../../library/components/ToolLogo';
 import { startOAuth } from '../services/secrets.api';
 import { setUserVar, deleteUserVar } from '../services/tool-secrets.api';
@@ -217,6 +217,15 @@ export function ConnectToolsPage() {
   return (
     <div className="flex h-full flex-col bg-canvas text-ink">
       <header className="flex shrink-0 items-center gap-3 border-b border-line px-8 py-4">
+        {/* The one page that had NO way back: it is reached from the library's
+            "Finish setup" and from tool pages, and stranded everyone it
+            helped. The Library is where every one of those journeys starts. */}
+        <Link
+          to={LIBRARY_ROOT}
+          className="rounded-xs text-detail text-ink-muted hover:text-ink"
+        >
+          {'‹ Skills & tools'}
+        </Link>
         <h1 className="text-strong font-semibold text-ink">Connect your tools</h1>
         <Button variant="quiet" size="sm" className="ml-auto" onClick={() => void refresh()}>
           Refresh

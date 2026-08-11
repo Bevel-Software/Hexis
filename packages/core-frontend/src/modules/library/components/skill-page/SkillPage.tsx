@@ -20,7 +20,7 @@ import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
 import { useDefaultBranchFile, useFileOnBranch } from '../../../change-requests/hooks/useFileOnBranch';
 import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast.context';
-import { LIBRARY_ROOT } from '../../routes/library-paths';
+import { libraryHomeForItemPath, urlForSkillFile } from '../../routes/library-paths';
 import { changeAuthorName, formatWhen } from '../../../change-requests/utils/author';
 import { ownersTextOf } from '../../utils/group-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
@@ -53,9 +53,22 @@ import { isBinaryFile } from '../../../workspace/components/renderers';
  * `description` (and everything else the YAML says), exactly as the Knowledge
  * view would render the same file.
  */
-export function SkillPage() {
+export function SkillPage({
+  name: nameProp,
+  activeFile,
+}: {
+  /**
+   * Both provided when the page is mounted at its CANONICAL address — the
+   * skill file's own /workspace URL (see `WorkspaceItemGate`): `name` names
+   * the skill, `activeFile` the tab, and switching tabs NAVIGATES (each file
+   * has its own URL). Absent on the legacy `/skills-and-tools/skills/:name`
+   * mount, where the name comes from the route and tabs are local state.
+   */
+  name?: string;
+  activeFile?: string;
+} = {}) {
   const { name: rawName = '' } = useParams<{ name: string }>();
-  const name = safeDecode(rawName);
+  const name = nameProp ?? safeDecode(rawName);
   const navigate = useNavigate();
   const toast = useLibraryToast();
   const { kbDirName } = useWorkspace();
@@ -66,7 +79,8 @@ export function SkillPage() {
   // link inside a skill file navigates to that node, not to a dead span.
   const { openNodeId } = useNodeIdNav();
 
-  const [selected, setSelected] = useState('SKILL.md');
+  const [selectedState, setSelected] = useState('SKILL.md');
+  const selected = activeFile ?? selectedState;
   const [compareCr, setCompareCr] = useState<PullRequestSummary | null>(null);
   /** Ties the tabs to the panel they control; unique per mounted page. */
   const tabsId = useId();
@@ -353,25 +367,17 @@ export function SkillPage() {
     }
   }
 
+  // The page the skill lives on, not the Library root: "back" from a skill
+  // you opened off its group page must land on that group page. Derived from
+  // the path, so a deep link gets the same honest destination as a click.
+  const home = libraryHomeForItemPath(skillPath);
   const backLink = (
-    <Button variant="quiet" size="sm" onClick={() => navigate(LIBRARY_ROOT)}>
-      ‹ All skills &amp; tools
+    <Button variant="quiet" size="sm" onClick={() => navigate(home.path)}>
+      {`‹ ${home.label}`}
     </Button>
   );
 
-  // Same frame as the other two branches: the way out is on screen while the
-  // skill loads, not only once it has, and the column does not jump when the
-  // content arrives under it.
-  if (detail.loading) {
-    return (
-      <Article>
-        {backLink}
-        <p className="py-16 text-center text-ui text-ink-muted">Loading…</p>
-      </Article>
-    );
-  }
-
-  if (detail.error || !skill) {
+  if (!detail.loading && (detail.error || !skill)) {
     return (
       <Article>
         {backLink}
@@ -389,7 +395,7 @@ export function SkillPage() {
   // underneath it. It is the SHARED dialog, scoped to this skill: its folder
   // frames the file list, and the skill's own files always show so an owner
   // can read the untouched parts too.
-  if (compareCr) {
+  if (compareCr && skill) {
     return (
       <ChangeRequestDialog
         cr={compareCr}
@@ -404,14 +410,18 @@ export function SkillPage() {
     );
   }
 
+  // Loading deliberately falls through to this real page tree. The route
+  // already knows the skill name, `files` already contains SKILL.md, and
+  // keeping these exact nodes mounted prevents a blank handoff followed by a
+  // second layout when the detail request settles.
   return (
     <Article>
       {backLink}
 
       <header className="mt-4">
         <div className="flex items-center gap-3">
-          <h1 className="text-display font-semibold text-ink">{skill.name}</h1>
-          {owned && (
+          <h1 className="text-display font-semibold text-ink">{skill?.name ?? name}</h1>
+          {skill && owned && (
             <Badge tone="outline" size="xs" className="shrink-0 uppercase">
               Owner
             </Badge>
@@ -434,7 +444,14 @@ export function SkillPage() {
         pending={pendingFiles}
         baseId={tabsId}
         onSelect={(f) => {
-          setSelected(f);
+          // At the canonical mount every file has its own URL — a tab switch
+          // is a navigation, so the address bar always names what is on
+          // screen and any tab can be deep-linked or shared.
+          if (activeFile !== undefined && skill && kbDirName) {
+            navigate(urlForSkillFile(kbDirName, skill.path, f));
+          } else {
+            setSelected(f);
+          }
           setEditing(false);
         }}
       />
@@ -446,8 +463,16 @@ export function SkillPage() {
         role="tabpanel"
         id={skillPanelId(tabsId)}
         aria-labelledby={skillTabId(tabsId, active)}
+        aria-busy={detail.loading || raw === null || undefined}
       >
-      {editing && editorBase !== null && fileAccess.canWrite !== null ? (
+      {detail.loading ? (
+        <SkillFilePane
+          file={active}
+          raw={null}
+          suggestion={null}
+          headingLink={headingLink}
+        />
+      ) : editing && editorBase !== null && fileAccess.canWrite !== null ? (
         <SkillFileEditor
           file={active}
           base={editorBase}
@@ -463,7 +488,7 @@ export function SkillPage() {
           suggestion={null}
           onOpenLink={(href) => {
             if (!kbDirName) return;
-            openInEditor(resolveRelativePath(`${kbDirName}/${skill.path}/${active}`, href));
+            openInEditor(resolveRelativePath(`${kbDirName}/${skillPath}/${active}`, href));
           }}
           onOpenNodeId={openNodeId}
           headingLink={headingLink}
@@ -567,7 +592,7 @@ export function SkillPage() {
           the skill, so it is not about the selected tab. The boxes above only
           cover the file on screen, and without this a proposal to a file you
           are not looking at has no way to reach you. */}
-      {owned && <ChangeRequestDock crs={skillCrs} onSelect={setCompareCr} />}
+      {skill && owned && <ChangeRequestDock crs={skillCrs} onSelect={setCompareCr} />}
     </Article>
   );
 }

@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
-import { Link2, Plus, Users } from 'lucide-react';
+import { Link2, Plus, Trash2, Users } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import {
   Button,
@@ -42,6 +42,13 @@ export interface PageActionsProps {
   onAdd(): void;
   /** Copies a link to this page. Resolves false if the clipboard refused. */
   onCopyLink(): Promise<boolean>;
+  /**
+   * Opens the delete confirmation. Present ONLY when the caller owns the
+   * place (`isOwner` — the same verdict the DELETE route enforces), which is
+   * the one gating exception to "everyone sees the same menu": an item that
+   * 404s for everyone but the owner is a broken promise, not a consistency.
+   */
+  onDelete?: () => void;
   /** Names the thing, for the `+` tooltip and the accessible names. */
   addLabel?: string;
 }
@@ -50,6 +57,7 @@ export function PageActions({
   onShare,
   onAdd,
   onCopyLink,
+  onDelete,
   addLabel = 'Add a skill or tool',
 }: PageActionsProps) {
   const [open, setOpen] = useState(false);
@@ -104,11 +112,26 @@ export function PageActions({
                   Copy link
                 </span>
               </MenuItem>
-              {/* "Leave this subscription" / "Delete subscription" belong here
-                  (proto:3020-3021) and are deliberately NOT built yet: neither
-                  has a backend endpoint, and a menu item that cannot do its
-                  job is worse than one that is not there. The menu exists so
-                  they drop in without moving anything. */}
+              {/* "Leave this subscription" (proto:3020) is deliberately NOT
+                  built yet: no backend endpoint stands behind it, and a menu
+                  item that cannot do its job is worse than one that is not
+                  there. The menu exists so it drops in without moving
+                  anything. */}
+              {onDelete && (
+                <MenuItem
+                  role="menuitem"
+                  tone="danger"
+                  onClick={() => {
+                    close();
+                    onDelete();
+                  }}
+                >
+                  <span className="flex items-center gap-2.5">
+                    <Trash2 size={14} />
+                    Delete group
+                  </span>
+                </MenuItem>
+              )}
             </MenuPanel>
           </div>
         )}

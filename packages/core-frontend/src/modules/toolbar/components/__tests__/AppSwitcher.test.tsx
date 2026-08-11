@@ -3,7 +3,7 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { AppSwitcher } from '../AppSwitcher';
-import { AppRegistryContext, makeRegistry } from '../../../../core/registry';
+import { ActiveAppIdContext, AppRegistryContext, makeRegistry } from '../../../../core/registry';
 
 /** Exposes the router's current pathname so navigation can be asserted. */
 function LocationProbe() {
@@ -11,7 +11,7 @@ function LocationProbe() {
   return <div data-testid="pathname">{location.pathname}</div>;
 }
 
-function renderSwitcher(opts?: { path?: string; extraApps?: boolean }) {
+function renderSwitcher(opts?: { path?: string; extraApps?: boolean; shellActiveId?: string }) {
   // The switcher reads apps from the registry — in the app the shell merges
   // the core apps in (see CoreAppShell CORE_APPS); the harness mirrors that.
   const coreLikeApps = [
@@ -47,12 +47,19 @@ function renderSwitcher(opts?: { path?: string; extraApps?: boolean }) {
         ]
       : coreLikeApps,
   });
+  const tree = (
+    <MemoryRouter initialEntries={[opts?.path ?? '/']}>
+      <AppSwitcher />
+      <LocationProbe />
+    </MemoryRouter>
+  );
   return render(
     <AppRegistryContext.Provider value={registry}>
-      <MemoryRouter initialEntries={[opts?.path ?? '/']}>
-        <AppSwitcher />
-        <LocationProbe />
-      </MemoryRouter>
+      {opts?.shellActiveId ? (
+        <ActiveAppIdContext.Provider value={opts.shellActiveId}>{tree}</ActiveAppIdContext.Provider>
+      ) : (
+        tree
+      )}
     </AppRegistryContext.Provider>,
   );
 }
@@ -75,6 +82,22 @@ describe('AppSwitcher', () => {
     renderSwitcher({ path: '/workspace/main/Skills' });
     expect(screen.getByRole('button', { name: 'Switch app' })).toHaveTextContent(
       'Knowledge',
+    );
+  });
+
+  /**
+   * The shell's answer beats the prefix rule. A skill page at its canonical
+   * /workspace URL CLAIMS Skills & Tools (WorkspaceItemGate via
+   * AppClaimContext → the shell's ActiveAppIdContext) — the switcher must
+   * name the surface on screen, not the app that owns the URL prefix.
+   */
+  it('honours a shell-provided active app over the URL prefix', () => {
+    renderSwitcher({
+      path: '/workspace/main/knowledge-base/Groups/Sales/create-sales-deck/SKILL.md',
+      shellActiveId: 'skills-tools',
+    });
+    expect(screen.getByRole('button', { name: 'Switch app' })).toHaveTextContent(
+      'Skills & Tools',
     );
   });
 

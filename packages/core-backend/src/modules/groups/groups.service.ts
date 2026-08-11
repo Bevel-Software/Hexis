@@ -23,8 +23,13 @@ const CACHE_TTL_MS = 60_000;
  *
  * Two decisions worth keeping straight:
  *
- *  - **Enumeration is a readdir, counting is not.** A group EXISTS because a
- *    folder exists (`readdir` of `Groups/`), but its counts come from the
+ *  - **Existence is an `access.md`, counting is not.** A group EXISTS because
+ *    its folder carries an `access.md` — the file the provisioning endpoint
+ *    seeds and the one every per-caller verdict (member / manager /
+ *    discoverable) resolves against. A bare directory under `Groups/` is NOT
+ *    a group: git cannot record an empty folder, so deleting a group's files
+ *    leaves its directory behind on live checkouts, and enumerating by
+ *    directory would resurrect every such ghost. Counts come from the
  *    already-cached global catalogs — `skillService.listSkills(undefined)` and
  *    `toolManualService.listAllSummaries()` — bucketed by `groupOfPath`. A
  *    second `walkFiles` pass would re-read the same tree and could disagree
@@ -134,14 +139,29 @@ export class GroupIndexService implements IGroupIndexService {
     } catch {
       return byName; // a KB without a `Groups/` root simply has no groups
     }
-    for (const child of children) {
-      if (!child.isDirectory() || child.name.startsWith('.')) continue;
-      // Personal folders live under Groups/ but are not groups: one exists
-      // per person, private by construction, and listing them would put a
-      // locked row per employee in everyone's index.
-      if (isPersonalGroupFolder(child.name)) continue;
-      byName.set(child.name, [`${GROUPS_DIR}/${child.name}`]);
-    }
+    const candidates = children.filter(
+      (child) =>
+        child.isDirectory() &&
+        !child.name.startsWith('.') &&
+        // Personal folders live under Groups/ but are not groups: one exists
+        // per person, private by construction, and listing them would put a
+        // locked row per employee in everyone's index.
+        !isPersonalGroupFolder(child.name),
+    );
+    // A group exists exactly when its folder carries an `access.md` (see the
+    // class doc) — stat that file, don't trust the directory.
+    const verdicts = await Promise.all(
+      candidates.map(async (child) => {
+        try {
+          return (await fs.stat(path.join(kbRoot, GROUPS_DIR, child.name, 'access.md'))).isFile();
+        } catch {
+          return false;
+        }
+      }),
+    );
+    candidates.forEach((child, i) => {
+      if (verdicts[i]) byName.set(child.name, [`${GROUPS_DIR}/${child.name}`]);
+    });
     return byName;
   }
 

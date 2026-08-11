@@ -235,7 +235,15 @@ export async function createCoreServices(
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
   const spillStore = new SpillStore(config.spillRoot);
-  const accessControl = new AccessControlService(workspaceService, kbDirName);
+  // The deployment owner counts as Admin for the two hardcoded `write`
+  // rescues (`roles.yaml` and any `access.md`) — the SAME list
+  // `AdminAccessService` below is given, so the admin surfaces and the write
+  // gate cannot disagree about who the owner is. They did: the owner could
+  // open Roles & Members and then be refused the save, with the UI showing
+  // them as an admin and the gate saying "Eligible: Admin".
+  const accessControl = new AccessControlService(workspaceService, kbDirName, [
+    config.adminEmail,
+  ]);
   // Creator read-grant on creation: read is default-deny, so every surface
   // that creates KB files/folders (human routes, agent tools, upload apply)
   // consults this planner to keep creations visible to their creator.
@@ -425,6 +433,22 @@ export async function createCoreServices(
       skillService.invalidate();
       groupIndexService.invalidate();
     }
+  });
+
+  // Subscriber B — WRITE-time freshness for the same three caches. The
+  // workspace routes emit `fs-tree-changed` the moment bytes hit a working
+  // tree; Subscriber A above fires only when the ASYNC commit lands. Between
+  // the two, "create a skill, reload the catalog" raced the commit pipeline
+  // and lost — the new skill's card stayed invisible until a refresh outlived
+  // the TTL. The catalogs scan the working tree anyway, so invalidating at
+  // write time makes the very next read see the file. No path filter: this
+  // event carries none, and a spurious drop only costs one re-scan.
+  eventBus.onEmit((event) => {
+    if (event.kind !== 'fs-tree-changed') return;
+    if (!('branch' in event) || event.branch !== DEFAULT_BRANCH) return;
+    toolManualService.invalidate();
+    skillService.invalidate();
+    groupIndexService.invalidate();
   });
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the

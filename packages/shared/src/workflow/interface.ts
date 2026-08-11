@@ -332,6 +332,45 @@ export interface IWorkflowService {
   ): Promise<FileApproval[]>;
 
   /**
+   * Decline ONE file of an open change request: restore its merge-base
+   * version on the source branch so it drops out of the request's diff.
+   * Same permission as approving the file. When the last file is declined
+   * the request closes itself and its source branch is retired
+   * (`closed: true` in the result).
+   */
+  revertChangeRequestFile(
+    number: number,
+    user: AuthUser,
+    repoRelPath: string,
+  ): Promise<{ closed: boolean; remainingPaths: string[] }>;
+
+  /**
+   * Close an OPEN change request whose diff has emptied (authoritatively
+   * re-verified; a failed diff never closes) and retire its source branch.
+   * Returns true when this call closed it.
+   */
+  closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean>;
+
+  /**
+   * Close every open change request whose source branch no longer exists.
+   * Such a request cannot be read, reviewed, applied or declined — it is a
+   * tombstone, and it makes every open-list poll throw `unknown branch`.
+   *
+   * Closes rather than deletes (the row is the only surviving evidence of the
+   * proposal), and fails safe: an unreachable origin closes nothing, because
+   * "cannot reach" and "was deleted" look identical from here. Returns how
+   * many it closed. No `user` — it is a system sweep, not somebody's verdict.
+   */
+  closeChangeRequestsWithDeletedBranches(): Promise<number>;
+
+  /**
+   * Delete a change request outright: close it and retire its source branch.
+   * Admin-only (write on `roles.yaml` at `origin/<base>`); refuses a merged
+   * request.
+   */
+  deleteChangeRequest(number: number, user: AuthUser): Promise<void>;
+
+  /**
    * Reject a change request without merging. Authorized for the author or
    * for users with write permission to every changed file on the target
    * branch.

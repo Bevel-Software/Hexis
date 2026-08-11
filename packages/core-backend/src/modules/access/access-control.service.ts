@@ -188,6 +188,20 @@ interface RolesIndex {
 interface AccessModel {
   roles: RolesIndex;
   accessFilesByDir: Map<string, AccessFile>;
+  /**
+   * Canonical emails that count as Admin whatever `roles.yaml` says — the
+   * deployment owner (`ADMIN_EMAIL`). Empty when none is configured.
+   *
+   * This exists for the two hardcoded `write` rescues below, and only those.
+   * It is NOT a general grant: it never enters scope resolution, so it gives
+   * no read, no download, and no write anywhere except `roles.yaml` and
+   * `access.md`. The deployment owner is the person who can already change
+   * `ADMIN_EMAIL` itself, so admitting them to the rescue path concedes
+   * nothing they could not already take — while withholding it turns a
+   * `roles.yaml` that has lost its last Admin into a knowledge base nobody
+   * can repair through the app.
+   */
+  deploymentOwners: ReadonlySet<string>;
 }
 
 function isBuiltInRole(canonicalRole: string): boolean {
@@ -791,6 +805,7 @@ function resolveAtPath(
 }
 
 function isAdminEmail(model: AccessModel, email: string): boolean {
+  if (model.deploymentOwners.has(email)) return true;
   const roles = model.roles.byEmail.get(email);
   return !!roles && roles.has(ADMIN_CANONICAL);
 }
@@ -816,6 +831,15 @@ function isAdminEmail(model: AccessModel, email: string): boolean {
  *     itself excludes them or fails to parse cleanly. These are the rescue
  *     mechanism for the rest of the tree — without this, a typo in
  *     `access.md` could permanently lock admins out of fixing it.
+ *
+ * "Admin" for BOTH rescues means the `Admin` role in `roles.yaml` OR the
+ * deployment owner (`ADMIN_EMAIL`). Without the second, the first rule turns
+ * into the lockout it exists to prevent: a `roles.yaml` that has lost its last
+ * Admin — a bad merge, a renamed address, a restored backup — can then be
+ * repaired only by committing to the KB repo by hand, because the one file
+ * that decides who may fix it is the one file nobody may write. The deployment
+ * owner is whoever can already set `ADMIN_EMAIL`, so this concedes no
+ * authority they did not have; it only gives it a door.
  *
  * No special-cases for `read`/`download` — they fall through to scope resolution.
  */
@@ -1167,10 +1191,28 @@ export class AccessControlService implements IAccessControl {
   >();
   private static readonly OWN_ENTRIES_TTL_MS = 5 * 60_000;
 
+  /**
+   * Canonicalised deployment-owner emails (see `AccessModel.deploymentOwners`).
+   * Held on the service rather than read per-model because it comes from the
+   * environment, not from the knowledge base.
+   */
+  private readonly deploymentOwners: ReadonlySet<string>;
+
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly kbDirName: string,
-  ) {}
+    /**
+     * Emails that count as Admin for the two hardcoded `write` rescues,
+     * whatever `roles.yaml` says — in practice `ADMIN_EMAIL`. Optional so the
+     * many test fixtures that construct this service directly keep their
+     * current behaviour (no owner, roles.yaml is the only authority).
+     */
+    deploymentOwners: readonly string[] = [],
+  ) {
+    this.deploymentOwners = new Set(
+      deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
+    );
+  }
 
   /**
    * Drop a workspace's cached model + frontmatter memo. Call after operations
@@ -1298,6 +1340,22 @@ export class AccessControlService implements IAccessControl {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return hasPermissionResolved(model, 'download', userEmail, relativePath, own);
+  }
+
+  async canOwnerBatch(
+    workspaceId: string,
+    userEmail: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean>> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    // Parallel own-entries reads, memoized — same shape as `canWriteBatch`.
+    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const result = new Map<string, boolean>();
+    relativePaths.forEach((p, i) => {
+      result.set(p, hasPermissionResolved(model, 'owner', userEmail, p, owns[i]));
+    });
+    return result;
   }
 
   async canOwner(
@@ -1626,6 +1684,7 @@ export class AccessControlService implements IAccessControl {
     const model: AccessModel = {
       roles: rolesParsed.index,
       accessFilesByDir: accessFiles,
+      deploymentOwners: this.deploymentOwners,
     };
     this.cache.set(workspaceId, { model, loadedAt: Date.now() });
     return model;
@@ -1869,6 +1928,11 @@ export class AccessControlService implements IAccessControl {
       model: {
         roles: rolesParsed.index,
         accessFilesByDir: accessFiles,
+        // Same owners as the working-tree model. The at-ref model backs the
+        // PUSH gate, so omitting them here would let the deployment owner save
+        // a roles.yaml repair locally and then be refused when it tries to
+        // land — the lockout moved one step later, not removed.
+        deploymentOwners: this.deploymentOwners,
       },
       resolvedRef,
     };

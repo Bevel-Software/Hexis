@@ -1,10 +1,11 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { Funnel, RotateCw } from 'lucide-react';
+import { Funnel, RotateCw, Trash2 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
-import { IconButton } from '../../../shared/components';
+import { Banner, Button, Dialog, IconButton } from '../../../shared/components';
 import { pathForGroupsIndex } from '../routes/library-paths';
 import type { LibraryItem } from '../state/library-data';
+import { removeLibraryItem } from '../services/library.api';
 import { LibraryCard } from './LibraryCard';
 
 /**
@@ -108,9 +109,17 @@ export function GroupSection({
 export function CardGrid({
   items,
   onOpen,
+  onRemove,
 }: {
   items: LibraryItem[];
   onOpen(item: LibraryItem): void;
+  /**
+   * The manager's "remove from this place". Present only when the caller
+   * runs the page the grid is on — the pages decide that, not the grid.
+   * Rendered as an overlay SIBLING of the card, never inside it: the whole
+   * card is one <button>, and a button inside a button is not HTML.
+   */
+  onRemove?(item: LibraryItem): void;
 }) {
   return (
     <div
@@ -119,30 +128,127 @@ export function CardGrid({
         'grid-cols-[repeat(auto-fill,minmax(min(236px,100%),1fr))]',
       )}
     >
-      {items.map((item) => (
+      {items.map((item) => {
         // The change-request number is part of the key, not decoration: two
         // people can propose a skill of the same name into different groups,
         // and until one of them merges neither is in the catalog to collide
         // with — so the name alone is not yet unique.
-        <LibraryCard
-          key={`${item.kind}:${item.id}:${item.pending?.changeRequestNumber ?? ''}`}
-          kind={item.kind}
-          id={item.id}
-          name={item.name}
-          description={item.description}
-          owned={item.owned}
-          status={item.status}
-          version={item.version}
-          pending={
-            item.pending && {
-              authorName: item.pending.authorName,
-              mine: item.pending.mine,
+        const key = `${item.kind}:${item.id}:${item.pending?.changeRequestNumber ?? ''}`;
+        const card = (
+          <LibraryCard
+            key={key}
+            kind={item.kind}
+            id={item.id}
+            name={item.name}
+            description={item.description}
+            owned={item.owned}
+            status={item.status}
+            version={item.version}
+            pending={
+              item.pending && {
+                authorName: item.pending.authorName,
+                mine: item.pending.mine,
+              }
             }
-          }
-          onOpen={() => onOpen(item)}
-        />
-      ))}
+            onOpen={() => onOpen(item)}
+          />
+        );
+        // A pending proposal is not IN the place yet — there is nothing to
+        // remove; declining it lives with the review.
+        if (!onRemove || item.pending) return card;
+        return (
+          // `grid`, not a plain block: the wrapper takes the card's place as
+          // the grid item, and only a grid (or flex) container stretches its
+          // child the way the outer grid stretched the bare card — without it
+          // the <button> shrinks to its content and the overlay floats in the
+          // leftover width, off the card's own edge.
+          <div key={key} className="group/removable relative grid">
+            {card}
+            <button
+              type="button"
+              aria-label={`Remove ${item.name}`}
+              title={`Remove ${item.name}`}
+              onClick={() => onRemove(item)}
+              className={cn(
+                'absolute right-1.5 top-1.5 rounded-sm border border-line bg-surface p-1 text-ink-faint',
+                'opacity-0 transition-opacity hover:text-danger focus-visible:opacity-100 group-hover/removable:opacity-100',
+              )}
+            >
+              <Trash2 size={13} />
+            </button>
+          </div>
+        );
+      })}
     </div>
+  );
+}
+
+/**
+ * The "are you sure" a removal deserves: deleting a skill or tool from a
+ * group takes it from EVERYONE in the group, not from a personal shelf, and
+ * there is no undo shortcut — the content survives only in git history.
+ */
+export function RemoveLibraryItemDialog({
+  item,
+  place,
+  onClose,
+  onRemoved,
+}: {
+  item: LibraryItem;
+  /** Where it is being removed from, for the copy: a group name, or "your space". */
+  place: string;
+  onClose(): void;
+  /** Fired after the delete lands; the host page reloads and says so. */
+  onRemoved(): void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const what = item.kind === 'skill' ? 'skill' : 'tool';
+
+  async function remove() {
+    setBusy(true);
+    setError(null);
+    try {
+      await removeLibraryItem(item.path);
+      onRemoved();
+      onClose();
+    } catch (err) {
+      // The backend's refusal names the rule (access, a held lock); a
+      // generic apology would hide the one thing worth reading.
+      setError(err instanceof Error ? err.message : `Couldn't remove the ${what}.`);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Remove ${item.name}?`}
+      size="md"
+      busy={busy}
+      footer={
+        <>
+          <Button variant="quiet" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="danger" onClick={() => void remove()} disabled={busy}>
+            {busy ? 'Removing…' : 'Remove'}
+          </Button>
+        </>
+      }
+    >
+      <p className="text-ui text-ink-muted">
+        {item.kind === 'skill'
+          ? `This deletes the skill and its files from ${place}. Everyone here loses it the next time their agent connects.`
+          : `This deletes the tool and its connection settings from ${place}. Skills here that need it will ask for setup again.`}
+      </p>
+      {error && (
+        <Banner tone="danger" role="alert" className="mt-3">
+          {error}
+        </Banner>
+      )}
+    </Dialog>
   );
 }
 
@@ -157,6 +263,7 @@ export function GroupItemSections({
   skillItems,
   toolItems,
   onOpen,
+  onRemove,
   emptySkills,
   emptyTools = 'No tools yet.',
   hideEmpty = false,
@@ -166,6 +273,8 @@ export function GroupItemSections({
   skillItems: LibraryItem[];
   toolItems: LibraryItem[];
   onOpen(item: LibraryItem): void;
+  /** See {@link CardGrid} — present only when the caller manages this place. */
+  onRemove?(item: LibraryItem): void;
   emptySkills: string;
   emptyTools?: string;
   /**
@@ -198,7 +307,7 @@ export function GroupItemSections({
           {skillItems.length === 0 ? (
             <p className="text-ui text-ink-faint">{emptySkills}</p>
           ) : (
-            <CardGrid items={skillItems} onOpen={onOpen} />
+            <CardGrid items={skillItems} onOpen={onOpen} onRemove={onRemove} />
           )}
         </GroupSection>
       )}
@@ -208,7 +317,7 @@ export function GroupItemSections({
           {toolItems.length === 0 ? (
             <p className="text-ui text-ink-faint">{emptyTools}</p>
           ) : (
-            <CardGrid items={toolItems} onOpen={onOpen} />
+            <CardGrid items={toolItems} onOpen={onOpen} onRemove={onRemove} />
           )}
         </GroupSection>
       )}

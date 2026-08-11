@@ -1,6 +1,6 @@
 {
   "name": "@bevel-software/platform-shared",
-  "version": "0.4.1",
+  "version": "0.7.0",
   "description": "Shared types and pure domain utilities of the Bevel core platform (auth, workspace, git/workflow contracts, branch registry).",
   "type": "module",
   "main": "./dist/index.js",
@@ -14,7 +14,8 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "engines": {
     "node": ">=22 <23"
@@ -32,7 +33,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Bevel-Software/skill-and-tool-management.git",
+    "url": "git+https://github.com/Bevel-Software/Hexis.git",
     "directory": "packages/shared"
   },
   "publishConfig": {

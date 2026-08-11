@@ -38,6 +38,14 @@ async function seedWorkspace(root: string, workspaceId: string) {
   const repo = path.join(workspaceDir, 'knowledge-base');
   await fs.mkdir(workspaceDir, { recursive: true });
   await runGit(root, ['clone', upstream, repo]);
+  // Repo-local identity, because `GitService` spawns its own git children
+  // with the AMBIENT env — `runGit`'s `GIT_COMMITTER_*` vars never reach
+  // them. A dev machine hides this behind a global git config; a CI runner
+  // has none, so anything committing through the service (here:
+  // `commitFile`) fails with "Committer identity unknown". Same reason
+  // `git.service.commitFile.test.ts` configures its fixture this way.
+  await runGit(repo, ['config', 'user.email', 'test@bevel.local']);
+  await runGit(repo, ['config', 'user.name', 'Test Runner']);
   return { upstream, repo };
 }
 
@@ -120,5 +128,98 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     expect(baseSha).toMatch(/^[0-9a-f]{40}$/);
     expect(headSha).toMatch(/^[0-9a-f]{40}$/);
     expect(baseSha).not.toBe(headSha);
+  });
+
+  /**
+   * roles.yaml can never change through a merge — `preserveBaseRolesYaml`
+   * restores the base copy onto the source before every merge — so the review
+   * surface must not list it as changed: the claim would be false, the empty
+   * diff reads as a bug, and its per-file approval would gate the merge on a
+   * change that cannot land. Counts stay aligned with the surviving files.
+   */
+  it('excludes roles.yaml from the changed-file list and the touched paths', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await runGit(repo, ['checkout', '-b', 'mallory/self-promote']);
+    await fs.writeFile(path.join(repo, 'roles.yaml'), 'roles:\n  Admin:\n    - mallory@x.com\n');
+    await fs.writeFile(path.join(repo, 'honest.md'), 'real change\nsecond line\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'work + attempted escalation']);
+    await runGit(repo, ['push', '-u', 'origin', 'mallory/self-promote']);
+
+    const git = new GitService(
+      stubWorkspaceService(workspaceId, repo),
+      new WorkflowHooks(),
+      'knowledge-base',
+    );
+
+    const files = await git.changedFilesForPr(
+      workspaceId,
+      'current-company-state',
+      'mallory/self-promote',
+    );
+    expect(files.map((f) => f.path)).toEqual(['honest.md']);
+    // The counts filter moved in step with the statuses filter.
+    expect(files[0].additions).toBe(2);
+
+    const paths = await git.changedPathsForPr(
+      workspaceId,
+      'current-company-state',
+      'mallory/self-promote',
+    );
+    expect(paths).toEqual(['honest.md']);
+  });
+
+  /**
+   * The per-file revert's two primitives: the merge-base a revert restores
+   * from, and the restore itself — byte-exact via git, with "absent at the
+   * merge-base" meaning deletion (the revert of an added file).
+   */
+  it('mergeBaseForPr + restorePathFromRef restore a modified file and delete an added one', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await runGit(repo, ['checkout', '-b', 'alice/feature']);
+    await fs.writeFile(path.join(repo, 'base.md'), 'rewritten\n');
+    await fs.writeFile(path.join(repo, 'added.md'), 'brand new\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'feature work']);
+    await runGit(repo, ['push', '-u', 'origin', 'alice/feature']);
+
+    const git = new GitService(
+      stubWorkspaceService(workspaceId, repo),
+      new WorkflowHooks(),
+      'knowledge-base',
+    );
+
+    const mergeBase = await git.mergeBaseForPr(workspaceId, 'current-company-state', 'alice/feature');
+    expect(mergeBase).toMatch(/^[0-9a-f]{40}$/);
+
+    await git.restorePathFromRef(workspaceId, mergeBase!, 'base.md');
+    // Normalized: a Windows dev box with core.autocrlf smudges the checkout
+    // to CRLF; the blob git commits back is what matters, not the smudge.
+    const restored = await fs.readFile(path.join(repo, 'base.md'), 'utf8');
+    expect(restored.replace(/\r\n/g, '\n')).toBe('base\n');
+
+    // Simulate the wreckage a previously-failed attempt leaves behind: a
+    // STAGED deletion (index entry gone). The restore must self-heal it —
+    // without the index realignment, the commit below fatals on `git add`.
+    await runGit(repo, ['rm', '--force', '--quiet', '--', 'added.md']);
+
+    await git.restorePathFromRef(workspaceId, mergeBase!, 'added.md');
+    await expect(fs.access(path.join(repo, 'added.md'))).rejects.toThrow();
+
+    // The chain that actually failed in production: committing the DELETION
+    // through commitFile, whose `git add -- <path>` can only stage it while
+    // the index still tracks the path — a `git rm`-based restore broke here
+    // with "pathspec did not match any files".
+    const committed = await git.commitFile(
+      workspaceId,
+      { id: 'u1', email: 'reviewer@x.com', name: 'Reviewer' },
+      'added.md',
+      'Revert added.md (declined in change request #1)',
+      true,
+    );
+    expect(committed).not.toBeNull();
+    await expect(
+      execFileAsync('git', ['-C', repo, 'cat-file', '-e', 'HEAD:added.md']),
+    ).rejects.toThrow();
   });
 });

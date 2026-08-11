@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
+import { AdminContext, type AdminContextValue } from '../../admin/state/admin.context';
 import { LibraryToastProvider } from '../state/toast';
 import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
 
@@ -35,36 +37,51 @@ const workspace = {
   kbDirName: 'knowledge-base',
 } as unknown as WorkspaceContextValue;
 
+function admin(isAdmin: boolean): AdminContextValue {
+  return {
+    isAdmin,
+    unreadCount: 0,
+    lastSeen: null,
+    markSeen: vi.fn(),
+    refresh: vi.fn(),
+    rolesConfigCorrupted: false,
+    rolesConfigErrors: [],
+    runRolesRecovery: vi.fn(),
+  };
+}
+
 function LocationProbe() {
   const location = useLocation();
   return <div aria-label="href">{location.pathname}</div>;
 }
 
-function renderDialog(existingSkills: string[] = []) {
+function renderDialog(existingSkills: string[] = [], isAdmin = true) {
   const onClose = vi.fn();
   render(
     <MemoryRouter initialEntries={['/skills-and-tools/yours']}>
-      <WorkspaceContext.Provider value={workspace}>
-        <LibraryToastProvider>
-          {withAuth(
-            <>
-              <Routes>
-                <Route
-                  path="*"
-                  element={
-                    <PersonalAddDialog
-                      name={TEST_PERSONAL_GROUP}
-                      existingSkills={existingSkills}
-                      onClose={onClose}
-                    />
-                  }
-                />
-              </Routes>
-              <LocationProbe />
-            </>,
-          )}
-        </LibraryToastProvider>
-      </WorkspaceContext.Provider>
+      <AdminContext.Provider value={admin(isAdmin)}>
+        <WorkspaceContext.Provider value={workspace}>
+          <LibraryToastProvider>
+            {withAuth(
+              <>
+                <Routes>
+                  <Route
+                    path="*"
+                    element={
+                      <PersonalAddDialog
+                        name={TEST_PERSONAL_GROUP}
+                        existingSkills={existingSkills}
+                        onClose={onClose}
+                      />
+                    }
+                  />
+                </Routes>
+                <LocationProbe />
+              </>,
+            )}
+          </LibraryToastProvider>
+        </WorkspaceContext.Provider>
+      </AdminContext.Provider>
     </MemoryRouter>,
   );
   return {
@@ -94,7 +111,7 @@ describe('PersonalAddDialog', () => {
     Reflect.deleteProperty(navigator, 'clipboard');
   });
 
-  it('offers both doors, not just the prompt', () => {
+  it('offers an admin both doors, not just the prompt', () => {
     const { field } = renderDialog();
     expect(field()).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
@@ -115,7 +132,10 @@ describe('PersonalAddDialog', () => {
       ),
     );
     // The skill's own library page, editor invited open — not the Knowledge app.
-    await waitFor(() => expect(href()).toBe('/skills-and-tools/skills/scratch'));
+    // The canonical address: the new SKILL.md's own workspace URL.
+    await waitFor(() =>
+      expect(href()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Groups/scratch/SKILL.md`),
+    );
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -142,5 +162,16 @@ describe('PersonalAddDialog', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('already exists');
     expect(create()).toBeDisabled();
     await waitFor(() => expect(apiMock.createEmptySkill).not.toHaveBeenCalled());
+  });
+
+  it('gives a non-admin only the agent-assisted path', () => {
+    renderDialog([], false);
+
+    expect(screen.queryByText('Start an empty SKILL.md')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Skill name' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
+    expect(screen.getByText(/Tell your agent what you need/)).toBeInTheDocument();
+    expect(screen.getByText(/Yours alone until you add it to a group/)).toBeInTheDocument();
+    expect(apiMock.createEmptySkill).not.toHaveBeenCalled();
   });
 });

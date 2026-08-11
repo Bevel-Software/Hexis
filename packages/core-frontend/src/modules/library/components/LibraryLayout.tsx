@@ -23,6 +23,7 @@ import { ConnectAgentPill } from '../../onboarding/components/ConnectAgentPill';
 import { GroupsSidebar, type SidebarContextTarget } from './GroupsSidebar';
 import { GroupsSidebarMenu } from './GroupsSidebarMenu';
 import { AddToGroupDialog } from './AddToGroupDialog';
+import { DeleteGroupDialog } from './DeleteGroupDialog';
 import { NewGroupDialog } from './NewGroupDialog';
 
 /**
@@ -61,6 +62,16 @@ export function LibraryLayout() {
     canWrite: boolean;
   } | null>(null);
   const [manageFolder, setManageFolder] = useState<string | null>(null);
+  /**
+   * The group whose delete confirmation is up — captured whole at pick time
+   * for the same reason `addTo` is: the menu is gone by the time the dialog
+   * paints, and the counts belong in the dialog's copy.
+   */
+  const [deleting, setDeleting] = useState<{
+    name: string;
+    skillCount: number;
+    toolCount: number;
+  } | null>(null);
   /**
    * The row the open menu came from. A ref, not state, because
    * `useDismissableMenu` wants a stable `RefObject` to return focus INTO on
@@ -235,6 +246,19 @@ export function LibraryLayout() {
           onCreateGroup={() => setNewGroupOpen(true)}
           onCopyLink={menuFilter ? () => void copyLink(menuFilter) : undefined}
           onManageAccess={menuFolder && kbDirName ? () => setManageFolder(menuFolder) : undefined}
+          // The OWNER's verb, and only theirs — `isOwner` is the same verdict
+          // the DELETE route enforces, so the affordance appears for exactly
+          // the people the backend will let through.
+          onDelete={
+            menuSummary?.isOwner
+              ? () =>
+                  setDeleting({
+                    name: menuSummary.name,
+                    skillCount: menuSummary.skillCount,
+                    toolCount: menuSummary.toolCount,
+                  })
+              : undefined
+          }
           returnFocusTo={menuRow}
         />
       )}
@@ -265,6 +289,26 @@ export function LibraryLayout() {
             // page does when its copy of this dialog closes.
             reloadGroups();
             reload();
+          }}
+        />
+      )}
+
+      {deleting && (
+        <DeleteGroupDialog
+          name={deleting.name}
+          skillCount={deleting.skillCount}
+          toolCount={deleting.toolCount}
+          onClose={() => setDeleting(null)}
+          onDeleted={() => {
+            toast(`Deleted ${deleting.name}.`);
+            // Standing inside the group that just ceased to exist would
+            // render "This group doesn't exist yet" — the index is the
+            // honest place to land. Any other page is unaffected.
+            if (filter?.kind === 'group' && filter.group === deleting.name) {
+              navigate(pathForGroupsIndex());
+            }
+            reload();
+            reloadGroups();
           }}
         />
       )}

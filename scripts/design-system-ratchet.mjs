@@ -20,7 +20,7 @@
  *   node scripts/design-system-ratchet.mjs --update # re-baseline after a codemod
  */
 
-import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -58,13 +58,24 @@ const EXEMPT = [
   'shared/components/Menu.tsx',
 ];
 
+/**
+ * `withFileTypes` + an explicit symlink skip, rather than `statSync`.
+ *
+ * `statSync` FOLLOWS links, so a link pointing at any ancestor directory makes
+ * this recurse forever, and a link pointing outside the scanned tree silently
+ * widens the scan — either way the gate stops being a gate. `Dirent.isDirectory()`
+ * reports the link itself, not its target, so a link is never descended into.
+ *
+ * Not hypothetical in this repo: pnpm builds `node_modules` out of symlinks and
+ * `apps/web/node_modules/@bevel-software/*` links straight back into `packages/`.
+ */
 function walk(dir, out = []) {
   if (!existsSync(dir)) return out;
-  for (const entry of readdirSync(dir)) {
-    if (entry === 'node_modules' || entry === 'dist') continue;
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) out.push(full);
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name === 'dist' || entry.isSymbolicLink()) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) walk(full, out);
+    else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) out.push(full);
   }
   return out;
 }

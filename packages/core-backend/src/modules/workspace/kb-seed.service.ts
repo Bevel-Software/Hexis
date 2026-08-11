@@ -246,6 +246,20 @@ export class KbSeedService implements IKbSeedService {
           if (rel === 'AGENTS.md') added.push(...(await this.mergeIgnorePattern(repoDir, rel)));
         }
       }
+      // AGENTS.md is MANAGED, not merely seeded: the platform owns its
+      // content, and a stale copy is replaced with the packaged template's on
+      // every top-up (each fresh clone of a protected branch — in practice,
+      // every server restart). The file's own header says so, which is what
+      // makes overwriting edits a stated contract instead of a surprise.
+      let agentsRefreshed = false;
+      if (
+        !added.includes('AGENTS.md') &&
+        (await this.templateDiffers(repoDir, 'AGENTS.md'))
+      ) {
+        await this.copyTemplateFile('AGENTS.md', repoDir);
+        added.push('AGENTS.md');
+        agentsRefreshed = true;
+      }
       added.push(...(await this.ensureRequiredDirs(repoDir)));
       if (!(await this.exists(path.join(repoDir, 'roles.yaml')))) {
         if (this.seedAdminEmails.length > 0) {
@@ -271,7 +285,11 @@ export class KbSeedService implements IKbSeedService {
       // values, so this is a harmless no-op there).
       await this.stampIdentity(repoDir);
       await this.git(repoDir, ['add', '--', ...added]);
-      await this.git(repoDir, ['commit', '-m', `Add missing KB scaffolding: ${added.join(', ')}`]);
+      const message =
+        agentsRefreshed && added.length === 1
+          ? 'Update AGENTS.md to the current platform template'
+          : `Add missing KB scaffolding: ${added.join(', ')}`;
+      await this.git(repoDir, ['commit', '-m', message]);
       try {
         await this.git(repoDir, ['push', 'origin', `HEAD:refs/heads/${branch}`]);
         console.log(`[kb-seed] Topped up "${branch}" with: ${added.join(', ')}`);
@@ -379,6 +397,20 @@ export class KbSeedService implements IKbSeedService {
   }
 
   /** Copy one template file (by repo-relative path) into `dest`, creating parents. */
+  /**
+   * Whether the repo's copy of `relPath` differs from the template's, modulo
+   * line endings — a CRLF checkout of identical content must read as "same",
+   * or the managed-file refresh would commit churn on every boot forever.
+   */
+  private async templateDiffers(repoDir: string, relPath: string): Promise<boolean> {
+    const norm = (text: string) => text.replace(/\r\n?/g, '\n');
+    const [current, template] = await Promise.all([
+      fs.readFile(path.join(repoDir, relPath), 'utf8'),
+      fs.readFile(path.join(this.kbTemplateDir, relPath), 'utf8'),
+    ]);
+    return norm(current) !== norm(template);
+  }
+
   private async copyTemplateFile(relPath: string, dest: string): Promise<void> {
     const from = path.join(this.kbTemplateDir, relPath);
     const to = path.join(dest, relPath);

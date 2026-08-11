@@ -4,9 +4,14 @@
  * boundary, one place, derived from the path exactly the way `groupOfPath`
  * derives it.
  *
- * Enumeration follows the KB's read model with NO special cases: a group
- * appears for a caller exactly when the access resolution says something
- * about it —
+ * A group EXISTS exactly when its folder carries an `access.md` — the file
+ * the provisioning endpoint seeds. A bare directory under `Groups/` is not a
+ * group (git cannot record an empty folder, so deleted groups leave ghost
+ * directories on live checkouts).
+ *
+ * Enumeration then follows the KB's read model with NO special cases: an
+ * existing group appears for a caller exactly when the access resolution says
+ * something about it —
  *
  *   - MEMBER: the caller can read the folder itself (`canRead`).
  *   - MANAGER: the caller can write the folder's `access.md` (`canWrite`,
@@ -56,6 +61,13 @@ export interface GroupSummary {
    * reading still sees the group and gets the self-service way back in.
    */
   canWrite: boolean;
+  /**
+   * Per-caller: the caller holds the `owner` verb on the FOLDER — resolved
+   * from the `owner:` lists alone, no admin rescue. Deleting the group is the
+   * owner's verb (the DELETE route enforces the same verdict); managers who
+   * merely write the access.md do not get it.
+   */
+  isOwner: boolean;
   /** Caller-INDEPENDENT total (the group's whole content, not the caller's slice). */
   skillCount: number;
   toolCount: number;

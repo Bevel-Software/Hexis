@@ -1,6 +1,6 @@
 {
   "name": "@bevel-software/platform-core-backend",
-  "version": "0.4.1",
+  "version": "0.7.0",
   "description": "Open-source core backend of the Bevel platform: git-backed knowledge workspace, workflow (branches/change requests/locks/SSE), skills, tools, secrets vault, access control and the remote MCP surface.",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,7 +22,8 @@
     "dist",
     "src",
     "migrations",
-    "kb-template"
+    "kb-template",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "engines": {
     "node": ">=22 <23"
@@ -71,7 +72,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Bevel-Software/skill-and-tool-management.git",
+    "url": "git+https://github.com/Bevel-Software/Hexis.git",
     "directory": "packages/core-backend"
   },
   "publishConfig": {

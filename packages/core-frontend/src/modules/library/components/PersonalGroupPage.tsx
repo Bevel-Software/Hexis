@@ -2,9 +2,12 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../auth/state/auth.context';
 import { useLibrary, type LibraryItem } from '../state/library-data';
-import { pathForSkill, pathForTool } from '../routes/library-paths';
+import { useLibraryToast } from '../state/toast.context';
+import { urlForItemFile } from '../routes/library-paths';
+import { useWorkspace } from '../../workspace/state/workspace.context';
 import { personalGroupName } from '../utils/personal-group';
-import { GroupBreadcrumb, GroupItemSections, PageNote } from './group-page-parts';
+import { GroupBreadcrumb, GroupItemSections, PageNote, RemoveLibraryItemDialog,
+} from './group-page-parts';
 import { PageActions } from './PageActions';
 import { PersonalAddDialog } from './PersonalAddDialog';
 import { copyToClipboard } from '../utils/clipboard';
@@ -34,8 +37,12 @@ import { copyToClipboard } from '../utils/clipboard';
 export function PersonalGroupPage() {
   const data = useLibrary();
   const navigate = useNavigate();
+  const { kbDirName } = useWorkspace();
   const { user } = useAuth();
   const [addOpen, setAddOpen] = useState(false);
+  const toast = useLibraryToast();
+  /** The card being removed, while its confirm dialog is up. */
+  const [removing, setRemoving] = useState<LibraryItem | null>(null);
 
   const name = personalGroupName(user?.name);
   const items = useMemo(() => data.items.filter((i) => i.group === null), [data.items]);
@@ -53,7 +60,7 @@ export function PersonalGroupPage() {
 
   /** Identical to the gallery's and the group page's — one behaviour per card. */
   function openItem(item: LibraryItem) {
-    navigate(item.kind === 'integration' ? pathForTool(item.id) : pathForSkill(item.id));
+    if (kbDirName) navigate(urlForItemFile(kbDirName, item.path));
   }
 
   if (items.length === 0 && data.loading) {
@@ -84,6 +91,9 @@ export function PersonalGroupPage() {
         skillItems={skillItems}
         toolItems={toolItems}
         onOpen={openItem}
+        // Your own space: everything here is yours to remove — the backend's
+        // per-path gate agrees, since your personal folder names you as owner.
+        onRemove={setRemoving}
         // An empty room should say what to do in it, not explain its own filing
         // rule. "Anything your agent writes outside a group lands here" was
         // true and told nobody how to make the first thing appear.
@@ -96,6 +106,18 @@ export function PersonalGroupPage() {
           name={name}
           existingSkills={allSkillNames}
           onClose={() => setAddOpen(false)}
+        />
+      )}
+
+      {removing && (
+        <RemoveLibraryItemDialog
+          item={removing}
+          place="your space"
+          onClose={() => setRemoving(null)}
+          onRemoved={() => {
+            toast(`Removed ${removing.name}.`);
+            data.reload();
+          }}
         />
       )}
     </div>
