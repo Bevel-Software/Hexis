@@ -622,10 +622,14 @@ export async function createCoreServices(
   );
   const pendingCommitsWorker = new PendingCommitsWorker({
     service: pendingCommitsService,
-    workflow: {
-      runPendingCommit: (workspaceId, branch, path, user) =>
-        workflowService.runPendingCommit(workspaceId, branch, path, user),
-    },
+    // The service IS the driver — passed directly rather than wrapped in a
+    // forwarding lambda. A lambda that names its parameters silently drops any
+    // the interface later adds (TypeScript accepts a shorter parameter list),
+    // and that is not hypothetical: the wrapper here took four arguments and
+    // swallowed the `opts` carrying `skipValidation`, so the burst-validation
+    // skip was a no-op in production while every unit test — which stubs this
+    // port — passed. No wrapper, no gap to fall through.
+    workflow: workflowService,
     // Both escalation sinks come through CorePorts: the recovery agent and the
     // notice sink are enterprise-owned (background-agent factory / feedback
     // dashboard); core defaults skip recovery and log to stderr.

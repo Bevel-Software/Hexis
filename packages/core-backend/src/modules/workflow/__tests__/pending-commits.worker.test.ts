@@ -279,19 +279,61 @@ describe('PendingCommitsWorker.drainOnce', () => {
       expect(workflow.runPendingCommit).toHaveBeenCalledTimes(1);
     });
 
-    it('does not re-claim a row that just failed — the backoff gate holds', async () => {
-      // `markTransientFailure` leaves `lastAttemptedAt` set, so `claimNext`
-      // refuses the same row until its backoff elapses. Were that not true,
-      // draining until empty would spin on a failing row.
+    it('carries on after a transient failure and ends the pass when nothing is ready', async () => {
+      // What keeps the drain loop from SPINNING on a failing row is the SQL
+      // backoff gate: `markTransientFailure` leaves `lastAttemptedAt` set, so
+      // `claimNext` refuses that row until its backoff elapses. That gate is
+      // not exercised here — `claimNext` is a stub, so this would pass with
+      // the gate removed. It lives in `readyPredicate`, shared by `claimNext`
+      // and `hasReadyRow` precisely so the two cannot drift; there is no
+      // database-backed test for it in this package.
+      //
+      // What this DOES pin is the loop's own half of the contract: a failure
+      // is recorded and the pass keeps going rather than aborting the sweep,
+      // and the row is attempted once.
       (service.claimNext as ReturnType<typeof vi.fn>)
         .mockResolvedValueOnce(makeRow({ id: 'bad' }))
+        .mockResolvedValueOnce(makeRow({ id: 'good' }))
         .mockResolvedValue(null);
-      workflow.runPendingCommit.mockRejectedValueOnce(new Error('push rejected'));
+      workflow.runPendingCommit
+        .mockRejectedValueOnce(new Error('push rejected'))
+        .mockResolvedValueOnce(undefined);
 
       await worker.drainOnce();
 
       expect(service.markTransientFailure).toHaveBeenCalledTimes(1);
-      expect(workflow.runPendingCommit).toHaveBeenCalledTimes(1);
+      expect(service.markSucceeded).toHaveBeenCalledTimes(1);
+      expect(workflow.runPendingCommit).toHaveBeenCalledTimes(2);
+    });
+
+    it('validates the final slot when the burst hits its ceiling', async () => {
+      // Rows remain queued, so the peek says "more" — but this is the last
+      // commit of the PASS, and skipping it would end every sweep of a big
+      // backlog on an unvalidated commit.
+      queue(200);
+      await worker.drainOnce();
+      const calls = workflow.runPendingCommit.mock.calls;
+      expect(calls).toHaveLength(50);
+      expect(calls[49]?.[4]?.skipValidation).toBe(false);
+      expect(calls[48]?.[4]?.skipValidation).toBe(true);
+    });
+
+    it('commits the claimed row even if the peek throws', async () => {
+      // The row is already claimed and `running`; nothing resets that, so
+      // throwing out of the peek would strand it and the workspace would stop
+      // draining until the process restarted. A failed peek assumes "last",
+      // which costs one extra validation and nothing else.
+      (service.claimNext as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(makeRow({ id: 'claimed' }))
+        .mockResolvedValue(null);
+      (service.hasReadyRow as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error('connection reset'),
+      );
+
+      await expect(worker.drainOnce()).resolves.toBeUndefined();
+
+      expect(service.markSucceeded).toHaveBeenCalledTimes(1);
+      expect(workflow.runPendingCommit.mock.calls[0]?.[4]?.skipValidation).toBe(false);
     });
   });
 });

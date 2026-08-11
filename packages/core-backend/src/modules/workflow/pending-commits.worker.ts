@@ -211,14 +211,31 @@ export class PendingCommitsWorker {
         if (!this.running) return;
         const row = await this.deps.service.claimNext(workspace.id, this.deps.now());
         if (!row) break;
-        // Is this the last of the burst? Everything before it can skip the
-        // advisory commit validator, which parses the whole KB to produce a
-        // report that is only logged. Running it per file made a bulk change
-        // pay one full parse per commit; running it on the last commit
-        // reports the same end state once. Asked AFTER the claim, so the row
-        // in hand is already out of `pending` and cannot answer for itself.
-        const more = await this.deps.service.hasReadyRow(workspace.id, this.deps.now());
-        await this.processRow(row, { skipValidation: more });
+        // Is this the last commit of the burst? Everything before it can skip
+        // the advisory commit validator, which parses the whole KB to produce
+        // a report that is only logged. Running it per file made a bulk change
+        // pay one full parse per commit; running it on the last one reports
+        // the same end state once. Asked AFTER the claim, so the row in hand
+        // is already out of `pending` and cannot answer for itself.
+        //
+        // The peek is an OPTIMISATION, never a gate: a row is already claimed
+        // and `running`, and throwing here would abandon it in that state —
+        // nothing resets it, so that workspace would stop draining until the
+        // process restarted. A failed peek therefore means "assume last",
+        // which costs one extra validation pass and nothing else.
+        let more = false;
+        try {
+          more = await this.deps.service.hasReadyRow(workspace.id, this.deps.now());
+        } catch (peekErr) {
+          console.warn(
+            `[pending-commits] ready-row peek failed for ws=${workspace.id}; validating this commit: ${sanitizeError(peekErr)}`,
+          );
+        }
+        // At the burst ceiling this IS the last commit of the pass, however
+        // many rows remain queued — so it must validate, or a backlog larger
+        // than the cap would end every sweep on a skipped validation.
+        const lastOfBurst = !more || drained === MAX_BURST_PER_WORKSPACE - 1;
+        await this.processRow(row, { skipValidation: !lastOfBurst });
       }
     }
   }
