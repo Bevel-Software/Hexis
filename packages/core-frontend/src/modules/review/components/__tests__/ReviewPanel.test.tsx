@@ -39,7 +39,10 @@ function makeReview(overrides: Partial<ReviewContextValue> = {}): ReviewContextV
 }
 
 function renderPanel(review: ReviewContextValue) {
-  const workspace = { refreshFileTree: vi.fn(async () => null) } as unknown as WorkspaceContextValue;
+  const workspace = {
+    refreshFileTree: vi.fn(async () => null),
+    kbDirName: 'knowledge-base',
+  } as unknown as WorkspaceContextValue;
   const git = { status: { branch: session.branchName } } as unknown as GitContextValue;
   const wrapper = ({ children }: { children: ReactNode }) => (
     <MemoryRouter>
@@ -52,6 +55,7 @@ function renderPanel(review: ReviewContextValue) {
   );
   return render(<ReviewPanel />, { wrapper });
 }
+
 
 describe('ReviewPanel top-bar actions (BEVA-77)', () => {
   beforeEach(() => vi.clearAllMocks());

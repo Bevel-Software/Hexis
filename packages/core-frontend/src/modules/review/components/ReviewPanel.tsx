@@ -7,8 +7,12 @@ import {
   useFileNav,
   useNodeIdNav,
   resolveRelativePath,
+  stripJunkBeforeKbDir,
   KB_ROUTE_PREFIX,
 } from '../../workspace/routing/kb-routes';
+import { groupOfPath } from '@bevel-software/platform-shared';
+import { cn } from '../../../lib/utils';
+import { DOCUMENT_COLUMN } from '../../../shared/theme/measure';
 import { ReviewFileRow } from './ReviewFileRow';
 import { DiffViewer } from './DiffViewer';
 import { MarkdownDiffViewer } from './MarkdownDiffViewer';
@@ -16,6 +20,31 @@ import { BinaryChangePlaceholder } from './BinaryChangePlaceholder';
 
 function isMarkdownPath(p: string): boolean {
   return /\.md$/i.test(p);
+}
+
+/**
+ * Whether a review-session path is a skill or tool — anything under `Groups/`.
+ *
+ * The paths in a review session are WORKSPACE-relative: the diff module
+ * resolves them against the workspace directory, so they arrive carrying the
+ * KB clone as their first segment (`knowledge-base/Groups/GTM/x/SKILL.md`).
+ * `groupOfPath` wants them REPO-relative, and `stripJunkBeforeKbDir` does not
+ * get there on its own — it only drops junk BEFORE the kb dir and keeps the
+ * segment itself, so it returns an already-well-formed path unchanged. Asking
+ * `groupOfPath` about the workspace-relative form gets `null` for every path,
+ * group or not, which is a check that silently never fires.
+ *
+ * Exported so it can be tested directly. The behaviour it guards lives behind
+ * a dropdown the component tests cannot open, and a first attempt at covering
+ * it through the UI passed with the guard deleted.
+ */
+export function isGroupItemPath(path: string, kbDirName: string | null): boolean {
+  const withoutJunk = stripJunkBeforeKbDir(path, kbDirName);
+  const repoRelative =
+    kbDirName && withoutJunk.startsWith(`${kbDirName}/`)
+      ? withoutJunk.slice(kbDirName.length + 1)
+      : withoutJunk;
+  return groupOfPath(repoRelative) !== null;
 }
 
 function basename(p: string): string {
@@ -46,7 +75,7 @@ function kindLabel(kind: PendingChange['kind']): string {
  */
 export function ReviewPanel({ onClose }: { onClose?: () => void }) {
   const review = useReview();
-  const { refreshFileTree } = useWorkspace();
+  const { refreshFileTree, kbDirName } = useWorkspace();
   const { openFile } = useFileNav();
   // Links inside a rendered diff. Both resolvers navigate relative to
   // `git.status.branch`, which is CORRECT here and only here: this panel
@@ -117,15 +146,27 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
     async (path: string) => {
       setPickerOpen(false);
       await selectPath(path);
-      // Also surface the file in the editor so the user can see context alongside
-      // the diff. Skip for deleted files — navigating to a missing path would
-      // land FileRoute on the file-not-found state.
+      // Also surface the file in the editor so the user can see context
+      // alongside the diff.
+      //
+      // Skipped in two cases, both of which take the reader somewhere they did
+      // not ask to go:
+      //   - a DELETED file: navigating to a missing path lands FileRoute on
+      //     the file-not-found state.
+      //   - anything under `Groups/`: a skill or tool file's canonical URL is
+      //     a LIBRARY location, so opening it switches the whole shell to the
+      //     Skills & Tools app — the panel, the diff and the rest of the
+      //     review vanish because you clicked a row in a list. The diff is
+      //     already on screen next to the row; that is the context this call
+      //     exists to provide, and for group items it is the only context
+      //     that can be shown without leaving.
       const change = session?.changes.find((c) => c.path === path);
-      if (change && change.kind !== 'deleted') {
+      const isGroupItem = isGroupItemPath(path, kbDirName);
+      if (change && change.kind !== 'deleted' && !isGroupItem) {
         openFile(path);
       }
     },
-    [selectPath, openFile, session],
+    [selectPath, openFile, session, kbDirName],
   );
 
   const withBusy = useCallback(
@@ -277,12 +318,38 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
         )}
         {!isLoadingDiff && fileDiff && !fileDiff.isBinary && (
           isMarkdownPath(fileDiff.path) ? (
-            <MarkdownDiffViewer
-              payload={fileDiff}
-              onOpenFile={openDiffLink}
-              onOpenNodeId={openNodeId}
-            />
+            // The measure, and ONLY the measure. `MarkdownDiffViewer` is fine
+            // as it is — it renders a self-contained box with its own scroller
+            // and padding, which is what the change-request dialog and file
+            // history want. What was wrong is this container: it handed that
+            // box the full width of the panel, so the very document that reads
+            // at an 880px line two clicks away arrived in the review surface
+            // as a wall of text.
+            //
+            // So the wrapper constrains width and nothing else. Not
+            // `documentGutters`, which bundles `pb-[110px]`: the scroller is
+            // the CHILD here, so that bottom rhythm would sit outside it as
+            // permanent dead space with the scroll ending short of the panel.
+            // Not `KbDocumentShell` either — it owns a scroller, a rail track
+            // and the file lock's scroll listener, none of which belong to a
+            // floating panel that has its own header and footer.
+            //
+            // The child's own `px-4` becomes the gutter, so the line lands at
+            // 848px against Knowledge's 800px — near enough that the two read
+            // as the same column, and bought without reaching into a component
+            // three surfaces share.
+            <div className={cn('h-full', DOCUMENT_COLUMN)}>
+              <MarkdownDiffViewer
+                payload={fileDiff}
+                onOpenFile={openDiffLink}
+                onOpenNodeId={openNodeId}
+              />
+            </div>
           ) : (
+            // Left full-bleed on purpose. This is the marked-SOURCE view for
+            // yaml, scripts and config, where a line is a line of code and
+            // wrapping it to a prose measure helps nobody — the same call
+            // `getRendererLayout` makes for those types in the file viewer.
             <DiffViewer payload={fileDiff} />
           )
         )}
