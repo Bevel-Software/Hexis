@@ -10,7 +10,7 @@ import {
   stripJunkBeforeKbDir,
   KB_ROUTE_PREFIX,
 } from '../../workspace/routing/kb-routes';
-import { groupOfPath } from '@bevel-software/platform-shared';
+import { groupOfPath, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN } from '../../../shared/theme/measure';
 import { ReviewFileRow } from './ReviewFileRow';
@@ -45,6 +45,41 @@ export function isGroupItemPath(path: string, kbDirName: string | null): boolean
       ? withoutJunk.slice(kbDirName.length + 1)
       : withoutJunk;
   return groupOfPath(repoRelative) !== null;
+}
+
+/**
+ * Whether selecting `change` should also open its file beside the diff.
+ *
+ * The whole decision in one place, and exported, because the call site sits
+ * behind a dropdown the component harness cannot open — everything asserted
+ * about it through the UI passed with the guard deleted.
+ *
+ * Two reasons not to:
+ *   - DELETED: navigating to a missing path lands FileRoute on its
+ *     file-not-found state.
+ *   - a group item ON THE DEFAULT BRANCH: that URL is a library location, so
+ *     opening it switches the whole shell to Skills & Tools and the panel,
+ *     the diff and the review vanish because someone clicked a row in a list.
+ *
+ * The branch is part of it, and this is the easy half to get wrong: only the
+ * DEFAULT branch's `Groups/` URLs are library locations (`isLibraryLocation`
+ * tests `segments[1] === DEFAULT_BRANCH`). The same skill on a draft branch
+ * opens in Knowledge like any other file and switches nothing, so refusing to
+ * open it there would cost the context this call exists to give and buy
+ * nothing.
+ *
+ * `DEFAULT_BRANCH` is read here rather than captured at module scope — it is
+ * a live binding configured during boot.
+ */
+export function shouldOpenBesideDiff(input: {
+  kind: PendingChange['kind'];
+  path: string;
+  kbDirName: string | null;
+  branch: string | null;
+}): boolean {
+  if (input.kind === 'deleted') return false;
+  const switchesApp = input.branch === DEFAULT_BRANCH && isGroupItemPath(input.path, input.kbDirName);
+  return !switchesApp;
 }
 
 function basename(p: string): string {
@@ -147,22 +182,18 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
       setPickerOpen(false);
       await selectPath(path);
       // Also surface the file in the editor so the user can see context
-      // alongside the diff.
-      //
-      // Skipped in two cases, both of which take the reader somewhere they did
-      // not ask to go:
-      //   - a DELETED file: navigating to a missing path lands FileRoute on
-      //     the file-not-found state.
-      //   - anything under `Groups/`: a skill or tool file's canonical URL is
-      //     a LIBRARY location, so opening it switches the whole shell to the
-      //     Skills & Tools app — the panel, the diff and the rest of the
-      //     review vanish because you clicked a row in a list. The diff is
-      //     already on screen next to the row; that is the context this call
-      //     exists to provide, and for group items it is the only context
-      //     that can be shown without leaving.
+      // alongside the diff — unless doing so would take the reader somewhere
+      // they did not ask to go. See `shouldOpenBesideDiff`.
       const change = session?.changes.find((c) => c.path === path);
-      const isGroupItem = isGroupItemPath(path, kbDirName);
-      if (change && change.kind !== 'deleted' && !isGroupItem) {
+      if (
+        change &&
+        shouldOpenBesideDiff({
+          kind: change.kind,
+          path,
+          kbDirName,
+          branch: session?.branchName ?? null,
+        })
+      ) {
         openFile(path);
       }
     },

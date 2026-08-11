@@ -1,5 +1,16 @@
-import { describe, it, expect } from 'vitest';
-import { isGroupItemPath } from '../ReviewPanel';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { configureBranchModel } from '@bevel-software/platform-shared';
+import { isGroupItemPath, shouldOpenBesideDiff } from '../ReviewPanel';
+
+const DEFAULT = 'target-company-state';
+const DRAFT = 'razvan/onboarding-tweaks';
+
+beforeEach(() => {
+  configureBranchModel({
+    defaultBranch: DEFAULT,
+    protectedBranches: ['current-company-state', DEFAULT],
+  });
+});
 
 const KB = 'knowledge-base';
 
@@ -68,5 +79,49 @@ describe('isGroupItemPath', () => {
   it('handles a null kbDirName', () => {
     expect(isGroupItemPath('Groups/GTM/x/SKILL.md', null)).toBe(true);
     expect(isGroupItemPath('KnowledgeBase/Thing.md', null)).toBe(false);
+  });
+});
+
+/**
+ * The full decision behind "selecting a row also opens the file beside the
+ * diff". Tested here for the same reason as the predicate above: the call
+ * site is behind a dropdown the component harness cannot open.
+ */
+describe('shouldOpenBesideDiff', () => {
+  const base = { kbDirName: KB, branch: DEFAULT } as const;
+  const SKILL = `${KB}/Groups/GTM/update-website/SKILL.md`;
+  const DOC = `${KB}/KnowledgeBase/Product/Thing.md`;
+
+  it('opens an ordinary knowledge document', () => {
+    expect(shouldOpenBesideDiff({ ...base, kind: 'modified', path: DOC })).toBe(true);
+  });
+
+  it('does NOT open a skill on the default branch — that switches apps', () => {
+    expect(shouldOpenBesideDiff({ ...base, kind: 'modified', path: SKILL })).toBe(false);
+  });
+
+  /**
+   * Only the DEFAULT branch's `Groups/` URLs are library locations
+   * (`isLibraryLocation` tests `segments[1] === DEFAULT_BRANCH`). On a draft
+   * branch the same skill opens in Knowledge and switches nothing, so the
+   * guard must not fire — refusing there would cost the context this call
+   * exists to give and buy nothing.
+   */
+  it('DOES open the same skill on a draft branch', () => {
+    expect(shouldOpenBesideDiff({ ...base, branch: DRAFT, kind: 'modified', path: SKILL })).toBe(true);
+  });
+
+  it.each(['modified', 'added', 'renamed'] as const)('opens a %s knowledge file', (kind) => {
+    expect(shouldOpenBesideDiff({ ...base, kind, path: DOC })).toBe(true);
+  });
+
+  it('never opens a deleted file, wherever it lives', () => {
+    expect(shouldOpenBesideDiff({ ...base, kind: 'deleted', path: DOC })).toBe(false);
+    expect(shouldOpenBesideDiff({ ...base, kind: 'deleted', path: SKILL })).toBe(false);
+    expect(shouldOpenBesideDiff({ ...base, branch: DRAFT, kind: 'deleted', path: SKILL })).toBe(false);
+  });
+
+  it('treats an unknown branch as not-the-default, so it opens', () => {
+    expect(shouldOpenBesideDiff({ ...base, branch: null, kind: 'modified', path: SKILL })).toBe(true);
   });
 });
