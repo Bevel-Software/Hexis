@@ -329,6 +329,18 @@ describe('GroupsIndexPage', () => {
     ).not.toBeInTheDocument();
   });
 
+  it('does not promise the first group while the catalog is still loading', async () => {
+    // The initial empty `items` is an unanswered question, not an untouched
+    // workspace: a catalog-derived group may still be on its way in.
+    groupsMock.listGroups.mockResolvedValue([]);
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
+    renderIndex(asAdmin);
+    await screen.findByText("Groups you're in");
+    expect(
+      screen.queryByRole('button', { name: 'Create the first group' }),
+    ).not.toBeInTheDocument();
+  });
+
   it('offers a retry when the groups endpoint fails, and keeps Yours', async () => {
     groupsMock.listGroups.mockRejectedValue(new Error("Couldn't load groups."));
     renderIndex();

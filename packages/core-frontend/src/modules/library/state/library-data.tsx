@@ -207,6 +207,27 @@ export function useLibrary(): LibraryContextValue {
 }
 
 /**
+ * "This workspace holds no groups at all" — settled, and from both witnesses.
+ *
+ * One predicate for every surface that offers to create the FIRST group (the
+ * nav's spelled-out row, the index's CTA), so the two cannot drift into
+ * disagreeing about whether a workspace is untouched. Deliberately false while
+ * either source is still loading or has failed: an unanswered question is not
+ * "no groups", and a first-group doorway shown on a guess points somebody at a
+ * decision that may already be taken.
+ */
+export function workspaceHasNoGroups(lib: LibraryContextValue): boolean {
+  return (
+    !lib.loading &&
+    !lib.groupsLoading &&
+    !lib.error &&
+    !lib.groupsError &&
+    lib.groupSummaries.length === 0 &&
+    lib.items.every((item) => item.group === null)
+  );
+}
+
+/**
  * How many of a group's integrations need setup — the amber count on the
  * sidebar row and the group page's banner, computed from one place so the two
  * can never disagree.

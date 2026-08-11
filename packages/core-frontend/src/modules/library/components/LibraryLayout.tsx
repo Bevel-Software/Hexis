@@ -4,7 +4,7 @@ import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { useAuth } from '../../auth/state/auth.context';
 import { useAdmin } from '../../admin/state/admin.context';
-import { attentionOf, useLibrary } from '../state/library-data';
+import { attentionOf, useLibrary, workspaceHasNoGroups } from '../state/library-data';
 import { personalGroupName } from '../utils/personal-group';
 import {
   isGroupsIndexPath,
@@ -37,7 +37,8 @@ import { NewGroupDialog } from './NewGroupDialog';
  * can take its filter as a plain prop and the sidebar can hold no state.
  */
 export function LibraryLayout() {
-  const { items, groupSummaries, reload, reloadGroups } = useLibrary();
+  const lib = useLibrary();
+  const { items, groupSummaries, reload, reloadGroups } = lib;
   const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -219,7 +220,12 @@ export function LibraryLayout() {
           attentionCount={attentionCount}
           onFinishSetup={() => navigate('/connect')}
           onCreateGroup={() => setNewGroupOpen(true)}
-          canCreateGroup={isAdmin}
+          // The whole verdict, not just the role: the create-a-group row is a
+          // claim that the workspace holds no groups AT ALL, and that claim is
+          // only honest once both group witnesses have settled successfully —
+          // while they load (or after they fail) an empty list is an unanswered
+          // question, not an untouched workspace.
+          canCreateGroup={isAdmin && workspaceHasNoGroups(lib)}
           groupsIndexActive={isGroupsIndexPath(location.pathname)}
           onOpenGroupsIndex={() => navigate(pathForGroupsIndex())}
           onContextMenu={openContextMenu}

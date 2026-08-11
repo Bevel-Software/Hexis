@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Badge, Banner } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
 import { useAdmin } from '../../admin/state/admin.context';
-import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
+import { attentionOf, useLibrary, workspaceHasNoGroups, type LibraryItem } from '../state/library-data';
 import { personalGroupName } from '../utils/personal-group';
 import { LIBRARY_ROOT, pathForGroup } from '../routes/library-paths';
 import { ownersTextOf } from '../utils/group-summary';
@@ -41,7 +41,8 @@ interface IndexEntry {
 }
 
 export function GroupsIndexPage() {
-  const { items, groupSummaries, groupsLoading, groupsError, reload, reloadGroups } = useLibrary();
+  const lib = useLibrary();
+  const { items, groupSummaries, groupsLoading, groupsError, reload, reloadGroups } = lib;
   const navigate = useNavigate();
   const { user } = useAuth();
   const { isAdmin } = useAdmin();
@@ -125,13 +126,15 @@ export function GroupsIndexPage() {
               you". The sidebar's `+` does the same thing; this one is written
               out because a newcomer has not found that `+` yet.
 
-              Same two conditions as the nav's version, for the same reasons:
-              an administrator, and a workspace with no groups in it at all.
-              `mine.length === 0` alone would promise "the first group" to
-              someone who simply has not been added to any of the twenty that
-              exist — locked entries are groups too, and their existence is
-              the proof this workspace is not untouched. */}
-          {isAdmin && entries.length === 0 && (
+              Same verdict as the nav's version, from the same shared
+              predicate — `workspaceHasNoGroups` — so the two surfaces cannot
+              disagree about whether a workspace is untouched. It is false for
+              locked groups too (`mine.length === 0` alone would promise "the
+              first group" to someone simply not added to the twenty that
+              exist), and false until both group witnesses settle successfully:
+              a catalog still loading, or a summaries call that failed, is an
+              unanswered question, not an untouched workspace. */}
+          {isAdmin && workspaceHasNoGroups(lib) && (
             <p className="text-ui text-ink-faint">
               {"You're not in any groups yet. "}
               <EmptyStateAction onClick={() => setNewGroupOpen(true)}>

@@ -54,6 +54,13 @@ export interface GroupsSidebarProps {
    * hover-revealed `+` is unchanged for everyone; this is only the teaching
    * mark, and it is an administrator's — see the empty-state block below.
    *
+   * The caller passes a SETTLED verdict, not just a role: the layout derives
+   * it from `workspaceHasNoGroups`, which stays false while group discovery
+   * is loading or has failed. Without that, an admin whose groups were still
+   * arriving would briefly read "Create a group" over a workspace that has
+   * twenty. The empty-`groups` check below is therefore structural (where the
+   * row may appear), while WHETHER it may appear is the caller's call.
+   *
    * Optional, defaulting to OFF, for the same reason `isAdminLoading` is
    * optional on the admin context: this props type is public, and a host
    * application rendering the nav must stay source-compatible across the
