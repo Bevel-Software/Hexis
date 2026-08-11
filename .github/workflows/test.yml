@@ -4,6 +4,9 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+  # Lets other workflows run this suite as a gate on their own trigger — the
+  # image publish re-runs it on the exact commit it is about to publish.
+  workflow_call:
 
 jobs:
   test:
