@@ -74,6 +74,7 @@ export function Surface({
   children,
   ...rest
 }: SurfaceProps) {
+  const isDisabled = disabled && Tag === 'button';
   return (
     <Tag
       className={cn(
@@ -83,12 +84,15 @@ export function Surface({
         ELEVATION[elevation],
         padded && 'px-4 pt-3.5 pb-3',
         interactive &&
-          !disabled &&
+          !isDisabled &&
           'cursor-pointer transition-[border-color,background-color,transform] hover:border-line-strong hover:bg-surface-hover active:scale-[.995]',
-        disabled && 'cursor-not-allowed opacity-60',
+        // Gated on the SAME condition as the attribute below: on a non-button
+        // tag nothing enforces the state, and a surface that looks disabled
+        // while still firing onClick is worse than one that looks live.
+        isDisabled && 'cursor-not-allowed opacity-60',
         className,
       )}
-      disabled={Tag === 'button' ? disabled : undefined}
+      disabled={isDisabled || undefined}
       {...rest}
     >
       {children}

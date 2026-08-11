@@ -225,13 +225,19 @@ export function useFileNav() {
    * from the file tree, where `#` is just a character in a filename. Callers
    * holding a real path (suggestions, explorers) use this; callers holding a
    * link destination keep `openFile`.
+   *
+   * VERBATIM means verbatim: no `stripJunkBeforeKbDir` either. That repair
+   * exists for paths an LLM may have mangled, and it rewrites any path whose
+   * later segment happens to equal `kbDirName` — which a real folder inside
+   * the tree is allowed to be. A path that came from the tree needs no
+   * repair, so applying one could only ever open the wrong file.
    */
   const openWorkspacePath = useCallback(
     (path: string) => {
       if (!branch) return;
-      navigate(kbFileUrl(branch, stripJunkBeforeKbDir(path, kbDirName)));
+      navigate(kbFileUrl(branch, path));
     },
-    [branch, kbDirName, navigate],
+    [branch, navigate],
   );
 
   const closeFile = useCallback(() => {

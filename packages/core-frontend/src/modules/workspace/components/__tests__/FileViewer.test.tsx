@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import type {
   BranchInfo,
@@ -186,6 +186,7 @@ function ViewerHarness({
   initialContent = 'Base content',
   pendingValue = 'Agent version',
   branch = 'alice/draft',
+  routeBranch,
   filePath = 'knowledge-base/Knowledge/Foo.md',
   kbDirName = 'knowledge-base',
   fileTree = null,
@@ -198,6 +199,11 @@ function ViewerHarness({
   pendingValue?: string;
   /** `null` = git status has not loaded (or failed) — there is no branch yet. */
   branch?: string | null;
+  /**
+   * The branch the URL names, when it differs from the one git status reports
+   * — i.e. mid-switch, before the workspace has caught up.
+   */
+  routeBranch?: string;
   /** `null` means nothing is open — the viewer's empty state. */
   filePath?: string | null;
   kbDirName?: string | null;
@@ -313,8 +319,11 @@ function ViewerHarness({
     login: async () => {},
     logout: () => {},
   };
-  return (
-    <MemoryRouter>
+  // Rendered UNDER the real route shape, so `:branch` resolves the way it does
+  // in the app — the empty state's suggestions compare it against git status
+  // before offering to navigate.
+  const urlBranch = routeBranch ?? branch ?? 'alice/draft';
+  const tree = (
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={makeGit(branch ? makeStatus(branch) : null)}>
@@ -348,6 +357,12 @@ function ViewerHarness({
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
+  );
+  return (
+    <MemoryRouter initialEntries={[`/workspace/${encodeURIComponent(urlBranch)}`]}>
+      <Routes>
+        <Route path="/workspace/:branch/*" element={tree} />
+      </Routes>
     </MemoryRouter>
   );
 }
@@ -1046,6 +1061,19 @@ describe('FileViewer: nothing open', () => {
    */
   it('waits for the branch before offering to open anything', async () => {
     render(<ViewerHarness filePath={null} fileTree={TREE} branch={null} />);
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeDisabled();
+  });
+
+  /**
+   * Mid-switch, git status still reports the branch being LEFT while the URL
+   * already names the new one. Navigating on the stale value would send the
+   * reader back to the branch they just left, so the offer waits — the same
+   * "branch matches the route" test `FileRoute` makes before acting.
+   */
+  it('does not offer to open on the branch it is switching away from', async () => {
+    render(
+      <ViewerHarness filePath={null} fileTree={TREE} branch="alice/draft" routeBranch="main" />,
+    );
     expect(await screen.findByRole('button', { name: /Handbook/ })).toBeDisabled();
   });
 

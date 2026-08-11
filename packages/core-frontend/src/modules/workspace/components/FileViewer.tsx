@@ -9,6 +9,7 @@ import { Banner, Button, Surface } from '../../../shared/components';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
+import { useParams } from 'react-router-dom';
 import { useCanonicalFileUrl, useFileNav } from '../routing/kb-routes';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { useFileAccess } from '../../access/hooks/useFileAccess';
@@ -810,7 +811,15 @@ export function FileViewer() {
   // anchor. Navigation needs the branch, so the buttons wait for it rather
   // than rendering a click that silently does nothing while git status loads.
   const { openWorkspacePath } = useFileNav();
-  const navReady = !!git.status?.branch;
+  // "Ready" is the same predicate `FileRoute` uses to decide the workspace is
+  // actually backing this route: the branch is known AND it is the branch the
+  // URL names. Mid-switch the status still reports the branch being left, and
+  // navigating on that would send the reader back to the branch they just
+  // left — a worse outcome than a button that waits a moment.
+  const routeBranch = useParams<{ branch: string }>().branch;
+  const navReady =
+    !!git.status?.branch &&
+    (!routeBranch || git.status.branch === decodeURIComponent(routeBranch));
 
   // ALL open requests, not just the ones scoped to you — a colleague's request
   // on a file you can read but not write still belongs on this page.

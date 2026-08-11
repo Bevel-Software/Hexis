@@ -98,6 +98,19 @@ describe('useFileNav.openFile', () => {
     );
   });
 
+  it('opens a tree path verbatim even when a folder inside it is named like the kbDirName', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    // A tree whose root is not the KB dir, holding a folder that happens to be
+    // named like it. The junk-segment repair drops everything before that
+    // segment, rewriting this to `knowledge-base/notes.md` — a different file.
+    // A path that came from the tree is already correct and needs no repair.
+    result.current.openWorkspacePath('Knowledge/knowledge-base/notes.md');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/Knowledge/knowledge-base/notes.md',
+    );
+  });
+
   it('leaves a well-formed path untouched and ignores a kbDirName substring match', () => {
     navigateMock.mockClear();
     const { result } = renderNav('alice/draft');
