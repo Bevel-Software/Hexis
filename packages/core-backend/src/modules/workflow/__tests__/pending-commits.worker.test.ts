@@ -316,6 +316,9 @@ describe('PendingCommitsWorker.drainOnce', () => {
       expect(calls).toHaveLength(50);
       expect(calls[49]?.[4]?.skipValidation).toBe(false);
       expect(calls[48]?.[4]?.skipValidation).toBe(true);
+      // …and does not ASK on that slot: the ceiling already answers it, so
+      // peeking would be a wasted round-trip on every sweep of a backlog.
+      expect(service.hasReadyRow).toHaveBeenCalledTimes(49);
     });
 
     it('commits the claimed row even if the peek throws', async () => {

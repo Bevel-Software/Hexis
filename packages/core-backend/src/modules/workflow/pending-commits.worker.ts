@@ -218,23 +218,28 @@ export class PendingCommitsWorker {
         // the same end state once. Asked AFTER the claim, so the row in hand
         // is already out of `pending` and cannot answer for itself.
         //
-        // The peek is an OPTIMISATION, never a gate: a row is already claimed
-        // and `running`, and throwing here would abandon it in that state —
-        // nothing resets it, so that workspace would stop draining until the
-        // process restarted. A failed peek therefore means "assume last",
-        // which costs one extra validation pass and nothing else.
-        let more = false;
-        try {
-          more = await this.deps.service.hasReadyRow(workspace.id, this.deps.now());
-        } catch (peekErr) {
-          console.warn(
-            `[pending-commits] ready-row peek failed for ws=${workspace.id}; validating this commit: ${sanitizeError(peekErr)}`,
-          );
-        }
         // At the burst ceiling this IS the last commit of the pass, however
         // many rows remain queued — so it must validate, or a backlog larger
-        // than the cap would end every sweep on a skipped validation.
-        const lastOfBurst = !more || drained === MAX_BURST_PER_WORKSPACE - 1;
+        // than the cap would end every sweep on a skipped validation. Known
+        // without asking, so the ceiling is checked BEFORE the peek rather
+        // than folded in after it: on a big backlog that would be one wasted
+        // round-trip per sweep, on the hot path this change exists to speed up.
+        let lastOfBurst = drained === MAX_BURST_PER_WORKSPACE - 1;
+        if (!lastOfBurst) {
+          // The peek is an OPTIMISATION, never a gate: the row is already
+          // claimed and `running`, and throwing here would abandon it in that
+          // state — nothing resets it, so the workspace would stop draining
+          // until the process restarted. A failed peek therefore means
+          // "assume last", costing one extra validation pass and nothing else.
+          try {
+            lastOfBurst = !(await this.deps.service.hasReadyRow(workspace.id, this.deps.now()));
+          } catch (peekErr) {
+            console.warn(
+              `[pending-commits] ready-row peek failed for ws=${workspace.id}; validating this commit: ${sanitizeError(peekErr)}`,
+            );
+            lastOfBurst = true;
+          }
+        }
         await this.processRow(row, { skipValidation: !lastOfBurst });
       }
     }
