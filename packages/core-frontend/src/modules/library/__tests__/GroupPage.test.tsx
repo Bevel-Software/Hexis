@@ -467,6 +467,9 @@ describe('GroupPage', () => {
     expect(
       screen.queryByRole('heading', { name: 'Add a skill or tool to GTM' }),
     ).not.toBeInTheDocument();
+    // And the reason is on the page as SEEN text, not only in the name: a
+    // sighted keyboard user gets neither the greyed-out cue nor the label.
+    expect(screen.getByText("GTM couldn't be loaded — try again")).toBeInTheDocument();
   });
 
   it('says the group is still loading, not that it failed, while discovery is in flight', async () => {
