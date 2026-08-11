@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Badge, Banner } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
+import { useAdmin } from '../../admin/state/admin.context';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
 import { personalGroupName } from '../utils/personal-group';
 import { LIBRARY_ROOT, pathForGroup } from '../routes/library-paths';
@@ -43,6 +44,7 @@ export function GroupsIndexPage() {
   const { items, groupSummaries, groupsLoading, groupsError, reload, reloadGroups } = useLibrary();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { isAdmin } = useAdmin();
   const [newGroupOpen, setNewGroupOpen] = useState(false);
 
   const personalName = personalGroupName(user?.name);
@@ -121,8 +123,15 @@ export function GroupsIndexPage() {
               the Library opens here — so it is where the app says how a group
               comes to exist, instead of a blank section that reads as "not for
               you". The sidebar's `+` does the same thing; this one is written
-              out because a newcomer has not found that `+` yet. */}
-          {mine.length === 0 && (
+              out because a newcomer has not found that `+` yet.
+
+              Same two conditions as the nav's version, for the same reasons:
+              an administrator, and a workspace with no groups in it at all.
+              `mine.length === 0` alone would promise "the first group" to
+              someone who simply has not been added to any of the twenty that
+              exist — locked entries are groups too, and their existence is
+              the proof this workspace is not untouched. */}
+          {isAdmin && entries.length === 0 && (
             <p className="text-ui text-ink-faint">
               {"You're not in any groups yet. "}
               <EmptyStateAction onClick={() => setNewGroupOpen(true)}>

@@ -248,8 +248,12 @@ describe('creator welcome actions', () => {
       }),
     );
     expect(data.reload).toHaveBeenCalledOnce();
+    // The skill's canonical address is its workspace FILE url, not the legacy
+    // `skills/:name` route — that one survives only as a redirect. The dialog
+    // owns this navigation, so the welcome page inherits whatever the rest of
+    // the Library does, which is the point of routing through it.
     expect(screen.getByLabelText('pathname')).toHaveTextContent(
-      '/skills-and-tools/skills/weekly-report',
+      '/workspace/target-company-state/knowledge-base/Groups/personal-u1/weekly-report/SKILL.md',
     );
   });
 });

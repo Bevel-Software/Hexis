@@ -292,6 +292,7 @@ export function GroupPage() {
               lead="No skills yet."
               actionLabel="Add the first skill"
               tail={`, or ask your agent to write one for ${group}.`}
+              agentOnly={`No skills yet. Ask your agent to write one for ${group}.`}
               onAction={() => setAddOpen(true)}
             />
           )

@@ -30,6 +30,7 @@ function renderSidebar(over: Partial<GroupsSidebarProps> = {}) {
     attentionCount: 2,
     onFinishSetup: vi.fn(),
     onCreateGroup: vi.fn(),
+    canCreateGroup: true,
     groupsIndexActive: false,
     onOpenGroupsIndex: vi.fn(),
 

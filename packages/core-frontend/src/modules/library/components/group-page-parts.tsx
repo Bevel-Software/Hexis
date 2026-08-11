@@ -1,6 +1,7 @@
 import { useId, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { Funnel, RotateCw, Trash2 } from 'lucide-react';
+import { useAdmin } from '../../admin/state/admin.context';
 import { cn } from '../../../lib/utils';
 import { Banner, Button, Dialog, IconButton } from '../../../shared/components';
 import { pathForGroupsIndex } from '../routes/library-paths';
@@ -440,6 +441,7 @@ export function EmptySkillsNudge({
   lead,
   actionLabel,
   tail,
+  agentOnly,
   onAction,
 }: {
   /** The fact: "No skills yet." */
@@ -448,9 +450,25 @@ export function EmptySkillsNudge({
   actionLabel: string;
   /** The rest of the sentence — usually pointing at the agent as the other door. */
   tail: string;
+  /**
+   * The whole sentence a non-admin reads instead — same fact, agent door only.
+   * Written out rather than assembled from `lead` + `tail`, because `tail` is
+   * a continuation (", or ask your agent…") and cannot stand on its own.
+   */
+  agentOnly: string;
   /** Exactly what the title row's `+` does. One intent, two doors. */
   onAction(): void;
 }) {
+  const { isAdmin } = useAdmin();
+
+  // Starting a skill in place is an administrator's affordance — the add
+  // dialogs already refuse the empty-file half to everyone else. So the
+  // doorway, link and chalk arrow both, is admin-only. The band still states
+  // the fact and names the agent, which IS the door a non-admin has: the
+  // title row's `+` stays where it was for them, just without a mark
+  // pointing at it.
+  if (!isAdmin) return <p className="text-ui text-ink-faint">{agentOnly}</p>;
+
   return (
     <div className="relative">
       {/* The offsets aim the TIP at the `+` icon-button's centre: from the

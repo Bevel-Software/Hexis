@@ -28,6 +28,7 @@ function renderSidebar(over: Partial<GroupsSidebarProps> = {}) {
     attentionCount: 2,
     onFinishSetup,
     onCreateGroup: vi.fn(),
+    canCreateGroup: true,
     groupsIndexActive: false,
     onOpenGroupsIndex: vi.fn(),
 
@@ -96,6 +97,11 @@ describe('GroupsSidebar', () => {
 
   it('stands the create CTA down when only locked groups exist — someone already created them', () => {
     renderSidebar({ groups: [], lockedGroups: ['Ops'] });
+    expect(screen.queryByRole('button', { name: 'Create a group' })).not.toBeInTheDocument();
+  });
+
+  it('stands the create CTA down for a non-admin, empty workspace or not', () => {
+    renderSidebar({ groups: [], lockedGroups: [], canCreateGroup: false });
     expect(screen.queryByRole('button', { name: 'Create a group' })).not.toBeInTheDocument();
   });
 

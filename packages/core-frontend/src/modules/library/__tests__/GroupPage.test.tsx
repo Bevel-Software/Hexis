@@ -84,6 +84,9 @@ const nonAdmin: AdminContextValue = {
   runRolesRecovery: vi.fn(),
 };
 
+/** The same caller with the admin bit set — the empty band's doorway is theirs. */
+const asAdmin: AdminContextValue = { ...nonAdmin, isAdmin: true };
+
 const connectedTool = (over: Partial<ToolSecrets> = {}): ToolSecrets => ({
   slug: 'heyreach',
   name: 'heyreach',
@@ -155,10 +158,10 @@ function LocationProbe() {
   return <div aria-label="href">{location.pathname + location.search}</div>;
 }
 
-function renderGroup(name: string, children?: ReactNode) {
+function renderGroup(name: string, children?: ReactNode, admin: AdminContextValue = nonAdmin) {
   return render(
     <MemoryRouter initialEntries={[`/skills-and-tools/groups/${encodeURIComponent(name)}`]}>
-      <AdminContext.Provider value={nonAdmin}>
+      <AdminContext.Provider value={admin}>
         <WorkspaceContext.Provider value={workspace}>
           <LibraryToastProvider>
             <LibraryProvider>
@@ -298,25 +301,38 @@ describe('GroupPage', () => {
     dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
     groupsMock.listGroups.mockResolvedValue([gtm({ skillCount: 0, toolCount: 0 })]);
     renderGroup('GTM');
+    // A non-admin reads one plain sentence: the fact, and the agent as the
+    // door that IS theirs. No inline action, so nothing is split around it.
+    expect(
+      await screen.findByText('No skills yet. Ask your agent to write one for GTM.'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('No tools yet.')).toBeInTheDocument();
+  });
+
+  it('keeps the empty band a dead end for a non-admin — no doorway, no arrow', async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+    groupsMock.listGroups.mockResolvedValue([gtm({ skillCount: 0, toolCount: 0 })]);
+    renderGroup('GTM');
+    await screen.findByText(/No skills yet/);
+    expect(screen.queryByRole('button', { name: 'Add the first skill' })).not.toBeInTheDocument();
+  });
+
+  it('makes the empty Skills band a doorway for an admin: its link opens the same add dialog as `+`', async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+    groupsMock.listGroups.mockResolvedValue([gtm({ skillCount: 0, toolCount: 0 })]);
+    renderGroup('GTM', undefined, asAdmin);
     // The sentence is split around its inline action, so it is asserted in its
     // parts: the fact, the doorway, and the agent as the other door.
     expect(await screen.findByText(/No skills yet/)).toBeInTheDocument();
     expect(screen.getByText(/or ask your agent to write one for GTM/)).toBeInTheDocument();
-    expect(screen.getByText('No tools yet.')).toBeInTheDocument();
-  });
-
-  it('makes the empty Skills band a doorway: its link opens the same add dialog as `+`', async () => {
-    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
-    groupsMock.listGroups.mockResolvedValue([gtm({ skillCount: 0, toolCount: 0 })]);
-    renderGroup('GTM');
-    fireEvent.click(await screen.findByRole('button', { name: 'Add the first skill' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add the first skill' }));
     expect(
       await screen.findByRole('heading', { name: 'Add a skill or tool to GTM' }),
     ).toBeInTheDocument();
   });
 
   it('drops the nudge once a skill exists — the arrow belongs to the empty band only', async () => {
-    renderGroup('GTM'); // CATALOG carries outreach in GTM
+    renderGroup('GTM', undefined, asAdmin); // CATALOG carries outreach in GTM
     await screen.findByRole('button', { name: /^outreach/ });
     expect(screen.queryByRole('button', { name: 'Add the first skill' })).not.toBeInTheDocument();
   });

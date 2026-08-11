@@ -50,6 +50,12 @@ export interface GroupsSidebarProps {
   /** Start a new group. The layout owns the dialog; this is only the intent. */
   onCreateGroup(): void;
   /**
+   * Whether to spell the first group out in words, with the chalk arrow. The
+   * hover-revealed `+` is unchanged for everyone; this is only the teaching
+   * mark, and it is an administrator's — see the empty-state block below.
+   */
+  canCreateGroup: boolean;
+  /**
    * The all-groups index is showing. Beside `filter` rather than inside it: the
    * index lists PLACES, not a filtered slice of the catalog, so it is not a
    * `LibraryFilter` and pretending otherwise would put a row in the gallery's
@@ -100,6 +106,7 @@ export function GroupsSidebar({
   attentionCount,
   onFinishSetup,
   onCreateGroup,
+  canCreateGroup,
   groupsIndexActive,
   onOpenGroupsIndex,
   onContextMenu,
@@ -275,8 +282,13 @@ export function GroupsSidebar({
               empty group page. It stands down the moment any group exists,
               readable or locked: a locked group means someone already created
               one, and this is a doorway for an untouched workspace, not a
-              permanent duplicate of the `+`. */}
-          {groups.length === 0 && lockedGroups.length === 0 && (
+              permanent duplicate of the `+`.
+
+              Administrators only. On an untouched workspace the first group is
+              theirs to make, and telling everyone else to make it points them
+              at a decision that is not theirs. The `+` above is untouched for
+              every caller — this is the teaching mark, not the affordance. */}
+          {canCreateGroup && groups.length === 0 && lockedGroups.length === 0 && (
             <div className="relative">
               <button
                 type="button"

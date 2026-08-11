@@ -28,6 +28,7 @@ import {
   WorkspaceContext,
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
+import { AdminContext, type AdminContextValue } from '../../admin/state/admin.context';
 import { GroupsIndexPage } from '../components/GroupsIndexPage';
 import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
 
@@ -103,19 +104,35 @@ const WORKSPACE = {
   kbDirName: 'knowledge-base',
 } as unknown as WorkspaceContextValue;
 
-function renderIndex() {
+const nonAdmin: AdminContextValue = {
+  isAdmin: false,
+  unreadCount: 0,
+  lastSeen: null,
+  markSeen: vi.fn(),
+  refresh: vi.fn(),
+  rolesConfigCorrupted: false,
+  rolesConfigErrors: [],
+  runRolesRecovery: vi.fn(),
+};
+
+/** The same caller with the admin bit set — the empty index's CTA is theirs. */
+const asAdmin: AdminContextValue = { ...nonAdmin, isAdmin: true };
+
+function renderIndex(admin: AdminContextValue = nonAdmin) {
   return render(
     <MemoryRouter initialEntries={['/skills-and-tools']}>
       {withAuth(
-      <WorkspaceContext.Provider value={WORKSPACE}>
-        <LibraryProvider>
-          <Routes>
-            <Route path="/skills-and-tools" element={<GroupsIndexPage />} />
-            <Route path="*" element={<div />} />
-          </Routes>
-          <LocationProbe />
-        </LibraryProvider>
-      </WorkspaceContext.Provider>,
+      <AdminContext.Provider value={admin}>
+        <WorkspaceContext.Provider value={WORKSPACE}>
+          <LibraryProvider>
+            <Routes>
+              <Route path="/skills-and-tools" element={<GroupsIndexPage />} />
+              <Route path="*" element={<div />} />
+            </Routes>
+            <LocationProbe />
+          </LibraryProvider>
+        </WorkspaceContext.Provider>
+      </AdminContext.Provider>,
       )}
     </MemoryRouter>,
   );
@@ -261,9 +278,8 @@ describe('GroupsIndexPage', () => {
     expect(await screen.findByRole('button', { name: 'GTM 1 skills · 1 tools' })).toBeInTheDocument();
   });
 
-  it('turns an empty "Groups you\'re in" into a create CTA, and the CTA into the dialog', async () => {
-    // Nothing grouped anywhere: no summaries, and the catalog holds only
-    // ungrouped items — the newcomer's actual first view of this page.
+  /** An untouched workspace: no summaries, and only ungrouped items. */
+  function untouchedWorkspace() {
     groupsMock.listGroups.mockResolvedValue([]);
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,
@@ -272,15 +288,42 @@ describe('GroupsIndexPage', () => {
         tool({ slug: 'slack', name: 'slack', path: 'Tools/slack.tool' }),
       ],
     });
-    renderIndex();
+  }
+
+  it('turns an untouched index into a create CTA for an admin, and the CTA into the dialog', async () => {
+    untouchedWorkspace();
+    renderIndex(asAdmin);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Create the first group' }));
     expect(await screen.findByRole('textbox', { name: 'Group name' })).toBeInTheDocument();
   });
 
+  it('never offers the first group to a non-admin — that call is not theirs to make', async () => {
+    untouchedWorkspace();
+    renderIndex();
+    await screen.findByText("Groups you're in");
+    expect(
+      screen.queryByRole('button', { name: 'Create the first group' }),
+    ).not.toBeInTheDocument();
+  });
+
   it('keeps the create CTA out of the way once the caller is in a group', async () => {
-    renderIndex(); // default fixture: member of GTM
+    renderIndex(asAdmin); // default fixture: member of GTM
     await screen.findByRole('button', { name: /^GTM/ });
+    expect(
+      screen.queryByRole('button', { name: 'Create the first group' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('stands the CTA down when groups exist that the admin is simply not in', async () => {
+    // Locked entries are groups too: "the first group" would be a lie here,
+    // even though `Groups you're in` is empty.
+    groupsMock.listGroups.mockResolvedValue([
+      summary({ name: 'Finance', folders: ['Groups/Finance'], canRead: false, canWrite: false }),
+    ]);
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+    renderIndex(asAdmin);
+    await screen.findByRole('button', { name: /^Finance/ });
     expect(
       screen.queryByRole('button', { name: 'Create the first group' }),
     ).not.toBeInTheDocument();

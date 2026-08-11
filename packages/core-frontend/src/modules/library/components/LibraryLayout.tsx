@@ -3,6 +3,7 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { useAuth } from '../../auth/state/auth.context';
+import { useAdmin } from '../../admin/state/admin.context';
 import { attentionOf, useLibrary } from '../state/library-data';
 import { personalGroupName } from '../utils/personal-group';
 import {
@@ -40,6 +41,7 @@ export function LibraryLayout() {
   const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { isAdmin } = useAdmin();
   const { kbDirName } = useWorkspace();
   const toast = useLibraryToast();
   const [newGroupOpen, setNewGroupOpen] = useState(false);
@@ -217,6 +219,7 @@ export function LibraryLayout() {
           attentionCount={attentionCount}
           onFinishSetup={() => navigate('/connect')}
           onCreateGroup={() => setNewGroupOpen(true)}
+          canCreateGroup={isAdmin}
           groupsIndexActive={isGroupsIndexPath(location.pathname)}
           onOpenGroupsIndex={() => navigate(pathForGroupsIndex())}
           onContextMenu={openContextMenu}

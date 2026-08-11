@@ -104,6 +104,7 @@ export function PersonalGroupPage() {
             lead="No skills of your own yet."
             actionLabel="Add the first skill"
             tail=", or ask your agent to create one."
+            agentOnly="No skills of your own yet. Ask your agent to create skills."
             onAction={() => setAddOpen(true)}
           />
         }
