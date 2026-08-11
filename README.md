@@ -39,6 +39,7 @@ that agents connect to.
 ## Contents
 
 - [See Hexis in action](#see-hexis-in-action)
+- [Connect Hexis to Cline](#connect-hexis-to-cline)
 - [Try the live demo](#try-it-first-the-live-demo)
 - [Managed hosting](#want-a-managed-instance)
 - [Deploy with Docker](#deploy-it-in-5-minutes-docker)
@@ -69,6 +70,19 @@ load the approved skill instructions and company context your role can access,
 without copying prompts between tools.
 
 ![Claude uses approved team skills and company context through Hexis over MCP](docs/demo-claude-mcp.gif)
+
+### Connect Hexis to Cline
+
+Cline can connect directly to Hexis as a remote Streamable HTTP MCP server.
+Install the public demo connection from the Cline CLI:
+
+```sh
+cline mcp install hexis --transport http https://demo.bevel.software/api/mcp --yes
+```
+
+Complete the OAuth sign-in in your browser when prompted. Cline then discovers
+the skills, tools and context your Hexis role can access. For your own Hexis
+deployment, replace `demo.bevel.software` with your deployment's host.
 
 ### Share skills with the right people
 
