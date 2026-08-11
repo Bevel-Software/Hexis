@@ -805,8 +805,12 @@ export function FileViewer() {
   // Opening a suggestion is NAVIGATION, the same as clicking the file in the
   // explorer or a tab: the URL is the canonical record of what is open, and a
   // refresh, share or back-press must land on the page — not on the empty
-  // state this button was clicked from.
-  const { openFile: navigateToFile } = useFileNav();
+  // state this button was clicked from. `openWorkspacePath`, not `openFile`:
+  // these are real tree paths, and a `#` in a filename is a character, not an
+  // anchor. Navigation needs the branch, so the buttons wait for it rather
+  // than rendering a click that silently does nothing while git status loads.
+  const { openWorkspacePath } = useFileNav();
+  const navReady = !!git.status?.branch;
 
   // ALL open requests, not just the ones scoped to you — a colleague's request
   // on a file you can read but not write still belongs on this page.
@@ -847,7 +851,8 @@ export function FileViewer() {
                       elevation="none"
                       interactive
                       type="button"
-                      onClick={() => navigateToFile(page.relativePath)}
+                      onClick={() => openWorkspacePath(page.relativePath)}
+                      disabled={!navReady}
                       className="flex items-center gap-2.5 px-3 py-2"
                     >
                       <FileText size={15} className="shrink-0 text-ink-faint" aria-hidden />

@@ -205,6 +205,23 @@ describe('SetupScreen', () => {
     expect(screen.getByLabelText('Main branch')).toHaveValue('');
   });
 
+  /** A stale FAILURE is as misleading as a stale success, and goes the same way. */
+  it('drops a test failure that arrives after the connection was edited', async () => {
+    await renderScreen();
+    let fail!: (e: Error) => void;
+    api.testConnection.mockReturnValue(new Promise((_resolve, reject) => (fail = reject)));
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/old.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    // The failure now in flight is about old.git; this edit supersedes it.
+    await userEvent.type(screen.getByLabelText('Repository address'), '2');
+    fail(new Error('The host rejected those credentials.'));
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Test connection' })).toBeEnabled(),
+    );
+    expect(screen.queryByText(/rejected those credentials/)).toBeNull();
+  });
+
   /** A branch name typed while the test runs is an answer, not a blank to fill. */
   it('does not overwrite a branch name typed while the test runs', async () => {
     await renderScreen();

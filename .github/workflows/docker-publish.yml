@@ -26,6 +26,10 @@ jobs:
   # published from a commit whose tests fail.
   test:
     uses: ./.github/workflows/test.yml
+    # Explicit, so a permissive repository default can never hand the gate's
+    # jobs a write-scoped token.
+    permissions:
+      contents: read
 
   publish:
     needs: test

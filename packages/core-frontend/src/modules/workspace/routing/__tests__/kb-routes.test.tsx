@@ -86,6 +86,18 @@ describe('useFileNav.openFile', () => {
     );
   });
 
+  it('treats # in a filename as part of the path when told it IS a path', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    // `openFile` parses link-shaped input, so `#` means "anchor" there.
+    // `openWorkspacePath` is for real tree paths, where `#` is a character in
+    // a filename and must be encoded, not split off.
+    result.current.openWorkspacePath('knowledge-base/Knowledge/Q#A.md');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Q%23A.md',
+    );
+  });
+
   it('leaves a well-formed path untouched and ignores a kbDirName substring match', () => {
     navigateMock.mockClear();
     const { result } = renderNav('alice/draft');

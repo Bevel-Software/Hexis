@@ -333,10 +333,17 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
   async function runTest() {
     setTesting(true);
     setError(null);
+    const epoch = connectionEpoch.current;
     try {
       await probeConnection();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not test the connection.');
+      // A FAILURE goes stale the same way a success does: if the connection
+      // was edited while this request was out, the error describes values no
+      // longer on screen, and showing it would complain about something the
+      // reader already changed.
+      if (epoch === connectionEpoch.current) {
+        setError(err instanceof Error ? err.message : 'Could not test the connection.');
+      }
     } finally {
       setTesting(false);
     }

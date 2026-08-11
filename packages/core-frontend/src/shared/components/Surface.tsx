@@ -46,6 +46,13 @@ export interface SurfaceProps extends HTMLAttributes<HTMLElement> {
    * submit the form it happens to sit in.
    */
   type?: 'button' | 'submit' | 'reset';
+  /**
+   * Also only meaningful with `as="button"`, and declared for the same reason
+   * `type` is: `HTMLAttributes` has no `disabled`. A disabled interactive
+   * surface drops the hover/press affordance too — a card that still lifts
+   * under the cursor reads as one that would do something.
+   */
+  disabled?: boolean;
   tone?: SurfaceTone;
   radius?: SurfaceRadius;
   elevation?: SurfaceElevation;
@@ -62,6 +69,7 @@ export function Surface({
   elevation = 'card',
   interactive = false,
   padded = false,
+  disabled = false,
   className,
   children,
   ...rest
@@ -75,9 +83,12 @@ export function Surface({
         ELEVATION[elevation],
         padded && 'px-4 pt-3.5 pb-3',
         interactive &&
+          !disabled &&
           'cursor-pointer transition-[border-color,background-color,transform] hover:border-line-strong hover:bg-surface-hover active:scale-[.995]',
+        disabled && 'cursor-not-allowed opacity-60',
         className,
       )}
+      disabled={Tag === 'button' ? disabled : undefined}
       {...rest}
     >
       {children}

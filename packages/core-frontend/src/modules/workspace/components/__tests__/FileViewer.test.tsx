@@ -152,7 +152,7 @@ const fetchFileHistoryMock = vi.fn(async () => [
   },
 ]);
 
-function makeGit(status: WorkingTreeStatus): GitContextValue {
+function makeGit(status: WorkingTreeStatus | null): GitContextValue {
   const branches: BranchInfo[] = [];
   return {
     status,
@@ -196,7 +196,8 @@ function ViewerHarness({
 }: {
   initialContent?: string;
   pendingValue?: string;
-  branch?: string;
+  /** `null` = git status has not loaded (or failed) — there is no branch yet. */
+  branch?: string | null;
   /** `null` means nothing is open — the viewer's empty state. */
   filePath?: string | null;
   kbDirName?: string | null;
@@ -316,7 +317,7 @@ function ViewerHarness({
     <MemoryRouter>
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
-          <GitContext.Provider value={makeGit(makeStatus(branch))}>
+          <GitContext.Provider value={makeGit(branch ? makeStatus(branch) : null)}>
             <ReviewContext.Provider value={review}>
                 <OpenChangeRequestsContext.Provider
                   value={{
@@ -1036,6 +1037,16 @@ describe('FileViewer: nothing open', () => {
     );
     // Through the route, not around it.
     expect(addTab).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Navigation needs a branch, and git status arrives asynchronously. Until it
+   * does, a suggestion click would silently do nothing — so the buttons wait,
+   * visibly, instead of pretending to work.
+   */
+  it('waits for the branch before offering to open anything', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} branch={null} />);
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeDisabled();
   });
 
   /** A knowledge base with nothing in it has nothing to suggest, and says so. */

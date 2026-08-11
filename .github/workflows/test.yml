@@ -11,14 +11,18 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # This suite is also the publish workflow's gate, so its actions are pinned
+    # to reviewed commit SHAs (release tag alongside each) for the same reason
+    # the publish steps are: a moved tag must not be able to tamper with the
+    # workspace that decides whether an image ships.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4 tag as of 2026-08-11
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           # 22 is the minimum for isolated-vm@6, which is a transitive dep of
           # @utcp/code-mode and won't compile against Node 20's V8 headers

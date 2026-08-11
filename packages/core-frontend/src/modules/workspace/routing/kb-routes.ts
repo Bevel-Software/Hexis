@@ -218,12 +218,28 @@ export function useFileNav() {
     [branch, kbDirName, navigate],
   );
 
+  /**
+   * Navigate to a KNOWN workspace-relative path, verbatim. `openFile` parses
+   * link-shaped input — it splits off `#heading` anchors and unwraps absolute
+   * workspace URLs — which is right for hrefs and wrong for a path that came
+   * from the file tree, where `#` is just a character in a filename. Callers
+   * holding a real path (suggestions, explorers) use this; callers holding a
+   * link destination keep `openFile`.
+   */
+  const openWorkspacePath = useCallback(
+    (path: string) => {
+      if (!branch) return;
+      navigate(kbFileUrl(branch, stripJunkBeforeKbDir(path, kbDirName)));
+    },
+    [branch, kbDirName, navigate],
+  );
+
   const closeFile = useCallback(() => {
     if (!branch) return;
     navigate(kbFileUrl(branch));
   }, [branch, navigate]);
 
-  return { openFile, closeFile };
+  return { openFile, openWorkspacePath, closeFile };
 }
 
 /**
