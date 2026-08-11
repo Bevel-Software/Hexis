@@ -25,6 +25,13 @@ export interface GroupJoinRequestsProps {
    * next natural fetch.
    */
   reloadSignal?: number;
+  /**
+   * Told whether the banner is actually on screen (it renders nothing while
+   * no requests pend). The group page listens so the empty band's chalk
+   * arrow can stand down when this banner sits in its line of fire — the
+   * arrow's aim assumes nothing between the band and the title row.
+   */
+  onVisible?(visible: boolean): void;
   className?: string;
 }
 
@@ -33,6 +40,7 @@ export function GroupJoinRequests({
   folders,
   onManage,
   reloadSignal = 0,
+  onVisible,
   className,
 }: GroupJoinRequestsProps) {
   const requests = useJoinRequests(group, folders[0] ?? null);
@@ -41,6 +49,14 @@ export function GroupJoinRequests({
   useEffect(() => {
     if (reloadSignal > 0) reload();
   }, [reloadSignal, reload]);
+
+  const visible = requests.requests.length > 0;
+  useEffect(() => {
+    onVisible?.(visible);
+    // Unmounting is the banner leaving the page — say so, or a listener keeps
+    // holding a "visible" that nothing on screen backs up.
+    return () => onVisible?.(false);
+  }, [visible, onVisible]);
 
   return (
     <AccessRequestsBanner

@@ -356,6 +356,7 @@ export function ChalkArrow({ className }: { className?: string }) {
   const filterId = `chalk-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
   return (
     <svg
+      data-testid="chalk-arrow"
       className={className}
       aria-hidden="true"
       focusable="false"
@@ -418,7 +419,10 @@ export function EmptyStateAction({
     <button
       type="button"
       onClick={onClick}
-      className="rounded-xs font-semibold text-ink underline underline-offset-2 hover:text-ink-muted"
+      // The same focus ring as `Button`/`IconButton`: an inline action is
+      // still a stop on the keyboard's path, and the underline alone does not
+      // say "you are here".
+      className="rounded-xs font-semibold text-ink underline underline-offset-2 hover:text-ink-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-muted"
     >
       {children}
     </button>
@@ -437,11 +441,27 @@ export function EmptyStateAction({
  * background, not layout: absolutely placed, `pointer-events-none`, and faint
  * enough to read as a margin note rather than a fourth piece of chrome.
  */
+/**
+ * Where the nudge's arrow sits so its TIP lands on the `+` icon-button's
+ * centre: from the column's right edge that centre sits behind the `⋯` button
+ * and two flex gaps (~54px), constant on every page that renders
+ * `PageActions` — Share sits on the far side of `+`, so its presence moves
+ * nothing.
+ *
+ * A named constant because these offsets are TUNED, together with the tip the
+ * `ChalkArrow` paths aim at (76,11 in its 88×72 viewBox): change the
+ * `PageActions` row — button size, gap, order — and this is the one place the
+ * aim gets re-tuned, rather than a magic literal scattered per call site.
+ */
+const ARROW_AT_PAGE_ACTIONS_PLUS =
+  'pointer-events-none absolute -top-[74px] right-[45px] h-[68px] w-[84px] text-ink-faint';
+
 export function EmptySkillsNudge({
   lead,
   actionLabel,
   tail,
   agentOnly,
+  arrow = true,
   onAction,
 }: {
   /** The fact: "No skills yet." */
@@ -456,10 +476,24 @@ export function EmptySkillsNudge({
    * a continuation (", or ask your agent…") and cannot stand on its own.
    */
   agentOnly: string;
+  /**
+   * Whether the chalk arrow may be drawn. The arrow's aim is a fixed offset
+   * from THIS component to the title row's `+`, so it only tells the truth
+   * when nothing sits between them — a page that knows a banner intervenes
+   * (join requests, integration attention) passes false and keeps the
+   * sentence, which needs no geometry to be right.
+   */
+  arrow?: boolean;
   /** Exactly what the title row's `+` does. One intent, two doors. */
   onAction(): void;
 }) {
-  const { isAdmin } = useAdmin();
+  const { isAdmin, isAdminLoading = false } = useAdmin();
+
+  // While the admin verdict is still in flight, say only the fact. Committing
+  // to either door — the inline action or "ask your agent" — would flip the
+  // sentence (and the arrow) in front of the reader the moment the verdict
+  // lands, and the fact is the one part that is true either way.
+  if (isAdminLoading) return <p className="text-ui text-ink-faint">{lead}</p>;
 
   // Starting a skill in place is an administrator's affordance — the add
   // dialogs already refuse the empty-file half to everyone else. So the
@@ -471,11 +505,7 @@ export function EmptySkillsNudge({
 
   return (
     <div className="relative">
-      {/* The offsets aim the TIP at the `+` icon-button's centre: from the
-          column's right edge that centre sits behind the `⋯` button and two
-          flex gaps (~54px), constant on every page that renders PageActions —
-          Share sits on the far side of `+`, so its presence moves nothing. */}
-      <ChalkArrow className="pointer-events-none absolute -top-[74px] right-[45px] h-[68px] w-[84px] text-ink-faint" />
+      {arrow && <ChalkArrow className={ARROW_AT_PAGE_ACTIONS_PLUS} />}
       <p className="text-ui text-ink-faint">
         {lead} <EmptyStateAction onClick={onAction}>{actionLabel}</EmptyStateAction>
         {tail}

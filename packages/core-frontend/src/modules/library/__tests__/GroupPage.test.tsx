@@ -315,6 +315,21 @@ describe('GroupPage', () => {
     renderGroup('GTM');
     await screen.findByText(/No skills yet/);
     expect(screen.queryByRole('button', { name: 'Add the first skill' })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('chalk-arrow')).not.toBeInTheDocument();
+  });
+
+  it('keeps the doorway but not the dialog-less click when the groups endpoint failed', async () => {
+    // The add dialog mounts only with a summary and its primary folder. When
+    // the endpoint failed there is neither, so an admin's "Add the first
+    // skill" would be a button that does nothing — the band must fall back to
+    // the sentence whose one door (the agent) still works.
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+    groupsMock.listGroups.mockRejectedValue(new Error('boom'));
+    renderGroup('GTM', undefined, asAdmin);
+    expect(
+      await screen.findByText('No skills yet. Ask your agent to write one for GTM.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add the first skill' })).not.toBeInTheDocument();
   });
 
   it('makes the empty Skills band a doorway for an admin: its link opens the same add dialog as `+`', async () => {

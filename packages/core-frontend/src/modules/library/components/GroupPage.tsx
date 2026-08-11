@@ -60,6 +60,13 @@ export function GroupPage() {
   const [accessRevision, setAccessRevision] = useState(0);
   /** The proposed skill being reviewed, if the reader opened one. */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
+  /**
+   * Whether the join-requests banner is actually on screen. The empty band's
+   * chalk arrow points a fixed distance up at the title row's `+`, so any
+   * banner between them turns the arrow into a lie — this is how the page
+   * knows to stand the arrow down (the sentence and its action stay).
+   */
+  const [joinRequestsShown, setJoinRequestsShown] = useState(false);
 
   /**
    * "Last updated just now" has to be TRUE.
@@ -254,6 +261,7 @@ export function GroupPage() {
           folders={summary.folders}
           onManage={setManageFolder}
           reloadSignal={accessRevision}
+          onVisible={setJoinRequestsShown}
           className="mt-4"
         />
       )}
@@ -284,17 +292,28 @@ export function GroupPage() {
         emptySkills={
           filterOn ? (
             'Nothing in this band needs you right now.'
-          ) : (
+          ) : summary && primaryFolder ? (
             // A truly empty group is the one moment the page has to teach
-            // where "add" lives — the link opens the same dialog the title
-            // row's `+` does, and the nudge's arrow points at that `+`.
+            // where "add" lives — the button opens the same dialog the title
+            // row's `+` does, and the nudge's arrow points at that `+`. The
+            // arrow stands down when a banner sits between the band and the
+            // title row (join requests, integration attention): its aim is a
+            // fixed offset, and pointing into a banner teaches the wrong spot.
             <EmptySkillsNudge
               lead="No skills yet."
               actionLabel="Add the first skill"
               tail={`, or ask your agent to write one for ${group}.`}
               agentOnly={`No skills yet. Ask your agent to write one for ${group}.`}
+              arrow={attention === 0 && !joinRequestsShown}
               onAction={() => setAddOpen(true)}
             />
+          ) : (
+            // Degraded: the groups endpoint failed, so the summary — and with
+            // it the folder the add dialog writes into — is missing. The
+            // dialog gated on both (`addOpen && summary && primaryFolder`)
+            // could not mount, so a doorway here would be a button that does
+            // nothing. State the fact and the one door that still works.
+            `No skills yet. Ask your agent to write one for ${group}.`
           )
         }
         // The band fades its controls until you hover it, and `opacity`

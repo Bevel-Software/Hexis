@@ -78,7 +78,7 @@ export function PageActions({
   }, [close, onCopyLink]);
 
   return (
-    <div className="flex flex-none items-center gap-1.5">
+    <div className="relative flex flex-none items-center gap-1.5">
       {onShare && (
         <Button variant="outline" size="sm" onClick={onShare}>
           <Users size={13} />
@@ -139,12 +139,18 @@ export function PageActions({
 
       {/* The copy's answer, announced once. A clipboard write can be refused
           outright on a non-secure origin, and a silent no-op is the worst
-          possible reply to "copy this". */}
+          possible reply to "copy this".
+
+          OUT of the flex flow, beside the row: in flow, the appearing text
+          widened the row and slid every button — including the `+` an empty
+          page's chalk arrow is aimed at — left for the 1.8s the answer shows.
+          A status is an annotation on the actions, not a fourth action, so it
+          must not move them. */}
       <span
         role="status"
         aria-live="polite"
         className={cn(
-          'text-meta transition-opacity',
+          'absolute right-full top-1/2 mr-2 -translate-y-1/2 whitespace-nowrap text-meta transition-opacity',
           copied ? 'opacity-100' : 'opacity-0',
           copied === 'fail' ? 'text-danger' : 'text-ink-faint',
         )}
