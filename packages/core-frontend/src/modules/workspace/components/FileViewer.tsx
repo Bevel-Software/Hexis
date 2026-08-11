@@ -816,10 +816,12 @@ export function FileViewer() {
   // URL names. Mid-switch the status still reports the branch being left, and
   // navigating on that would send the reader back to the branch they just
   // left — a worse outcome than a button that waits a moment.
+  // The param arrives ALREADY decoded — the router percent-decodes path params
+  // — so it is compared as-is. Decoding again would turn a branch named
+  // `my%20branch` into `my branch`, which matches nothing and would leave the
+  // offers disabled for good on that deployment.
   const routeBranch = useParams<{ branch: string }>().branch;
-  const navReady =
-    !!git.status?.branch &&
-    (!routeBranch || git.status.branch === decodeURIComponent(routeBranch));
+  const navReady = !!git.status?.branch && (!routeBranch || git.status.branch === routeBranch);
 
   // ALL open requests, not just the ones scoped to you — a colleague's request
   // on a file you can read but not write still belongs on this page.

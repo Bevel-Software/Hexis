@@ -1077,6 +1077,17 @@ describe('FileViewer: nothing open', () => {
     expect(await screen.findByRole('button', { name: /Handbook/ })).toBeDisabled();
   });
 
+  /**
+   * A branch name may legitimately contain a percent sign. The router hands
+   * path params over already decoded, so decoding again would read this branch
+   * as `my branch`, match nothing, and disable the offers permanently for a
+   * deployment on it.
+   */
+  it('offers pages on a branch whose name contains a percent sign', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} branch="my%20branch" />);
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeEnabled();
+  });
+
   /** A knowledge base with nothing in it has nothing to suggest, and says so. */
   it('promises nothing when there is nothing to open', async () => {
     render(<ViewerHarness filePath={null} fileTree={null} />);
