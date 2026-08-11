@@ -22,6 +22,14 @@ export function CreatorWelcomePage() {
   const data = useLibrary();
   const [newGroupOpen, setNewGroupOpen] = useState(false);
   const [newSkillOpen, setNewSkillOpen] = useState(false);
+  /**
+   * The skill panel's in-flight state, lifted. A create that has started
+   * finishes even if the dialog goes away — and then navigates. Holding the
+   * dialog's close doors shut while it runs (`Dialog.busy` + the footer
+   * button) is what keeps "dismiss" from turning into "get carried to a page
+   * you closed the door on".
+   */
+  const [newSkillBusy, setNewSkillBusy] = useState(false);
 
   const { markWelcomed } = onboarding;
   useEffect(() => {
@@ -100,10 +108,15 @@ export function CreatorWelcomePage() {
       {newSkillOpen && (
         <Dialog
           open
+          busy={newSkillBusy}
           onClose={() => setNewSkillOpen(false)}
           title="New skill"
           footer={
-            <Button variant="quiet" onClick={() => setNewSkillOpen(false)}>
+            <Button
+              variant="quiet"
+              disabled={newSkillBusy}
+              onClick={() => setNewSkillOpen(false)}
+            >
               Close
             </Button>
           }
@@ -114,7 +127,14 @@ export function CreatorWelcomePage() {
           <NewSkillPanel
             destination={{ personal: true }}
             existingSkills={skillNames}
-            onCreated={() => setNewSkillOpen(false)}
+            onBusyChange={setNewSkillBusy}
+            onCreated={() => {
+              // Both flags, not just `open`: on the proposal path nothing
+              // navigates away, and a dialog re-opened later must not start
+              // life with its doors already shut.
+              setNewSkillOpen(false);
+              setNewSkillBusy(false);
+            }}
           />
         </Dialog>
       )}

@@ -93,18 +93,25 @@ function providers(
   );
 }
 
-function renderWelcome(
-  options: {
-    greeted?: boolean;
-    admin?: Partial<AdminContextValue>;
-    library?: Partial<LibraryContextValue>;
-  } = {},
-) {
+interface WelcomeOptions {
+  greeted?: boolean;
+  /** Overrides the greeting arrival's route state — e.g. to carry `returnTo`. */
+  routeState?: Record<string, unknown>;
+  admin?: Partial<AdminContextValue>;
+  library?: Partial<LibraryContextValue>;
+}
+
+/**
+ * The whole tree, as one builder — so a test that re-renders with different
+ * options reuses the exact router + provider composition instead of
+ * hand-assembling a second copy that can drift from this one.
+ */
+function welcomeUi(options: WelcomeOptions = {}) {
   const entry = options.greeted === false
     ? WELCOME_PATH
-    : { pathname: WELCOME_PATH, state: { greeting: true } };
+    : { pathname: WELCOME_PATH, state: options.routeState ?? { greeting: true } };
 
-  return render(
+  return (
     <MemoryRouter initialEntries={[entry]}>
       {providers(
         <>
@@ -117,8 +124,12 @@ function renderWelcome(
         </>,
         options,
       )}
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+}
+
+function renderWelcome(options: WelcomeOptions = {}) {
+  return render(welcomeUi(options));
 }
 
 beforeEach(() => {
@@ -176,23 +187,35 @@ describe('creator welcome routing', () => {
   });
 
   it('does not mistake loading or failed group data for an empty library', () => {
+    // While the ADMIN verdict is unknown the hold says nothing about a
+    // library — the reader may be headed for the agent welcome, where theirs
+    // is beside the point.
     const { rerender } = renderWelcome({ admin: { isAdminLoading: true } });
-    expect(screen.getByText('Preparing your library…')).toBeInTheDocument();
+    expect(screen.getByText('One moment…')).toBeInTheDocument();
 
-    rerender(
-      <MemoryRouter
-        initialEntries={[{ pathname: WELCOME_PATH, state: { greeting: true } }]}
-      >
-        {providers(
-          <Routes>
-            <Route path={WELCOME_PATH} element={<WelcomeRoute />} />
-          </Routes>,
-          { library: { groupsError: "Couldn't load groups." } },
-        )}
-      </MemoryRouter>,
-    );
+    rerender(welcomeUi({ library: { groupsError: "Couldn't load groups." } }));
 
     expect(screen.getByRole('radiogroup', { name: 'Your agent' })).toBeInTheDocument();
+  });
+
+  it("names the wait truthfully once the verdict says admin — it IS their library loading", () => {
+    renderWelcome({ library: { loading: true } });
+    expect(screen.getByText('Preparing your library…')).toBeInTheDocument();
+  });
+
+  it('keeps a carried deep link out of the creator welcome', () => {
+    // Only `WelcomePage` has the exit that honors `returnTo`. An empty-library
+    // admin would otherwise be routed to the creator page — and lose the page
+    // their SSO round-trip was carrying them to.
+    renderWelcome({
+      routeState: {
+        greeting: true,
+        returnTo: '/workspace/main/knowledge-base/KnowledgeBase/Start here.md',
+      },
+    });
+    expect(screen.getByRole('radiogroup', { name: 'Your agent' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Continue to your link/ })).toBeInTheDocument();
+    expect(screen.queryByText(/Build the shared library/)).toBeNull();
   });
 
   it('uses the external-agent welcome for later visits from its reminder', () => {
@@ -254,6 +277,42 @@ describe('creator welcome actions', () => {
     // the Library does, which is the point of routing through it.
     expect(screen.getByLabelText('pathname')).toHaveTextContent(
       '/workspace/target-company-state/knowledge-base/Groups/personal-u1/weekly-report/SKILL.md',
+    );
+  });
+
+  it('holds the New skill dialog open while creation is pending', async () => {
+    // A create that has started finishes even if the dialog goes away — and
+    // then NAVIGATES. Every way out must be barred until it settles, or a
+    // dismissal turns into being carried to a page you closed the door on.
+    let release!: () => void;
+    serviceMocks.createEmptySkill.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              repoRelativePath: 'Groups/personal-u1/weekly-report/SKILL.md',
+              workspacePath: 'knowledge-base/Groups/personal-u1/weekly-report/SKILL.md',
+              branch: 'dev',
+              direct: true,
+            });
+        }),
+    );
+    const user = userEvent.setup();
+    renderWelcome();
+
+    await user.click(screen.getByRole('button', { name: 'Create a skill' }));
+    await user.type(screen.getByRole('textbox', { name: 'Skill name' }), 'weekly-report');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+
+    for (const door of screen.getAllByRole('button', { name: /close/i })) {
+      expect(door).toBeDisabled();
+    }
+
+    release();
+    await waitFor(() =>
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(
+        '/workspace/target-company-state/knowledge-base/Groups/personal-u1/weekly-report/SKILL.md',
+      ),
     );
   });
 });
