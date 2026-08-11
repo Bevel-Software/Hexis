@@ -92,6 +92,17 @@ const FIELDS: Record<
  */
 const REQUIRED_KEYS = ['kbRepoUrl', 'gitToken', 'defaultBranch', 'protectedBranches'];
 
+/**
+ * The answers a connection test actually proves — the address, the credential
+ * and the name that goes beside it.
+ *
+ * Editing one invalidates the result on screen, because it described the old
+ * ones. Editing anything ELSE leaves it standing: whether a repository is
+ * reachable has nothing to do with an identity provider's scopes, and clearing
+ * it there would ask an admin to prove the same repository twice.
+ */
+const CONNECTION_KEYS = ['kbRepoUrl', 'gitToken', 'gitUsername'];
+
 /** The blocks, in the order they are worked through. */
 const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[] = [
   {
@@ -153,12 +164,44 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
   const [needsRestart, setNeedsRestart] = useState(false);
   const noticeRef = useRef<HTMLDivElement>(null);
 
+  /**
+   * What a field would save as, given a set of typed answers: what is in them,
+   * else what is already stored. Taken over a payload rather than the draft
+   * alone so a submit can ask about values it has just derived, which `draft`
+   * will not hold until the next render.
+   */
+  const resolvedIn = (typed: Record<string, string>, key: string) =>
+    (typed[key] ?? settings.find((s) => s.key === key)?.value ?? '').trim();
+
   /** What a field would save as: what was typed, else what is already stored. */
-  const resolved = (key: string) =>
-    (draft[key] ?? settings.find((s) => s.key === key)?.value ?? '').trim();
+  const resolved = (key: string) => resolvedIn(draft, key);
 
   const editable = settings.filter((s) => s.source !== 'env');
   const fromEnv = settings.filter((s) => s.source === 'env');
+
+  /**
+   * Whether THIS save has to stand behind the repository connection.
+   *
+   * On first run it always does: everything behind the gate reads from a
+   * repository that has to be reachable, and the save that finishes setup is
+   * what opens that gate. On the Deployment page only a save that CHANGES the
+   * connection does — an admin editing single sign-on has no repository to
+   * re-prove, and refusing them over a token that expired somewhere else helps
+   * nobody.
+   *
+   * There is nothing to prove until there is an address to prove it against; a
+   * blank form is the server's to complain about, field by field.
+   */
+  const mustProveConnection =
+    !!resolved('kbRepoUrl') &&
+    (variant === 'setup' || CONNECTION_KEYS.some((key) => key in draft));
+
+  /**
+   * The host was asked about the answers currently on screen, and said no.
+   * Editing any of them clears the result, so this is never about a value the
+   * reader has already changed.
+   */
+  const connectionRejected = mustProveConnection && test?.ok === false;
 
   function set(key: string, value: string) {
     setDraft((d) => {
@@ -181,75 +224,73 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
       delete next[key];
       return next;
     });
-    setTest(null);
+    if (CONNECTION_KEYS.includes(key)) setTest(null);
+  }
+
+  /**
+   * Which branch the repository just named, or the best conventional stand-in.
+   *
+   * Prefer what the remote calls its trunk. Not every host advertises it —
+   * older servers answer `ls-remote` without the symref line — so fall back to
+   * the conventional names before the first branch it did list. Leaving these
+   * blank is the one way a save can succeed and still not finish setup, which
+   * is worth a guess the reader can see and correct.
+   */
+  function suggestedBranch(result: ConnectionTest): string | null {
+    return (
+      result.defaultBranch ||
+      ['main', 'master', 'trunk'].find((name) => result.branches?.includes(name)) ||
+      result.branches?.[0] ||
+      // An EMPTY repository has no branch to report, but it will be seeded
+      // with whatever is configured here, so the conventional name is the
+      // right suggestion. Suggesting nothing was the one way "Connected"
+      // could still end, silently, in a save that did not finish setup.
+      (result.empty ? 'main' : null)
+    );
+  }
+
+  /**
+   * Ask the remote, record what it said, and fill the version fields in from
+   * it. The repository has just said what it calls its trunk and which
+   * branches it has; filling those in beats asking someone to remember, and
+   * beats the silent failure of a name that is one character off. Only into
+   * fields nobody has answered — never over a name somebody typed.
+   *
+   * ONE function for both callers — the Test button, and a Save that has to
+   * prove the connection before storing it — because two copies of "which
+   * branch did it name?" is how the two answers drift apart. It returns what
+   * it derived as well as the result, so a submit can use both without waiting
+   * for a re-render.
+   */
+  async function probeConnection(): Promise<{
+    result: ConnectionTest;
+    derived: Record<string, string>;
+  }> {
+    const result = await testConnection(draft);
+    // Read the answer BEFORE storing it, so a response that is not one at all
+    // throws to the caller (which treats that as "could not ask") instead of
+    // parking a value in state that every reader downstream has to defend
+    // against.
+    const suggested = result.ok ? suggestedBranch(result) : null;
+    setTest(result);
+    const derived: Record<string, string> = {};
+    if (suggested) {
+      if (!resolved('defaultBranch')) derived.defaultBranch = suggested;
+      if (!resolved('protectedBranches')) derived.protectedBranches = suggested;
+    }
+    if (Object.keys(derived).length > 0) setDraft((d) => ({ ...d, ...derived }));
+    return { result, derived };
   }
 
   async function runTest() {
     setTesting(true);
     setError(null);
     try {
-      const result = await testConnection(draft);
-      setTest(result);
-      // The repository has just said what it calls its trunk and which
-      // branches it has. Filling those in beats asking someone to remember —
-      // and beats the silent failure of a name that is one character off.
-      // Only into fields nobody has typed in.
-      // Prefer what the remote calls its trunk. Not every host advertises it —
-      // older servers answer `ls-remote` without the symref line — so fall back
-      // to the conventional names before the first branch it did list. Leaving
-      // these blank is the one way a save can succeed and still not finish
-      // setup, which is worth a guess the reader can see and correct.
-      const suggested =
-        result.defaultBranch ||
-        ['main', 'master', 'trunk'].find((name) => result.branches?.includes(name)) ||
-        result.branches?.[0] ||
-        // An EMPTY repository has no branch to report, but it will be seeded
-        // with whatever is configured here, so the conventional name is the
-        // right suggestion. Suggesting nothing was the one way "Connected"
-        // could still end, silently, in a save that did not finish setup.
-        (result.empty ? 'main' : null);
-      if (result.ok && suggested) {
-        setDraft((d) => ({
-          ...d,
-          defaultBranch: d.defaultBranch || suggested,
-          protectedBranches: d.protectedBranches || suggested,
-        }));
-      }
+      await probeConnection();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not test the connection.');
     } finally {
       setTesting(false);
-    }
-  }
-
-  /**
-   * Ask the repository which branch to use, for someone who pressed Save
-   * without pressing Test. They have supplied everything they can be expected
-   * to know; a branch name is something we can look up, so refusing over it
-   * asks a question with a knowable answer. Only when the lookup ALSO comes
-   * back empty is the message worth showing.
-   */
-  async function deriveVersions(): Promise<Record<string, string> | null> {
-    try {
-      const result = await testConnection(draft);
-      if (!result.ok) return null;
-      const suggested =
-        result.defaultBranch ||
-        ['main', 'master', 'trunk'].find((name) => result.branches?.includes(name)) ||
-        result.branches?.[0] ||
-        // Same empty-repository rule as the visible test button above.
-        (result.empty ? 'main' : undefined);
-      if (!suggested) return null;
-      setTest(result);
-      const derived: Record<string, string> = {};
-      if (!resolved('defaultBranch')) derived.defaultBranch = suggested;
-      if (!resolved('protectedBranches')) derived.protectedBranches = suggested;
-      setDraft((d) => ({ ...d, ...derived }));
-      return derived;
-    } catch {
-      // The save carries on and the server says what is missing — a failed
-      // lookup is not itself an error the reader can act on.
-      return null;
     }
   }
 
@@ -259,11 +300,59 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
     setSaving(true);
     setError(null);
     setProblems({});
+    // The list describes what the LAST completed save left unanswered. A new
+    // attempt supersedes it — leaving it up put "Saved what you filled in, but
+    // this deployment still needs…" directly above this attempt's "Not saved."
+    setStillMissing([]);
     try {
       let payload = draft;
-      if (!resolved('defaultBranch') || !resolved('protectedBranches')) {
-        const derived = await deriveVersions();
-        if (derived) payload = { ...draft, ...derived };
+      /** What the host said this time, or null when it could not be asked. */
+      let proven: ConnectionTest | null = test;
+      let probed = false;
+      const probe = async () => {
+        probed = true;
+        try {
+          const { result, derived } = await probeConnection();
+          proven = result;
+          payload = { ...payload, ...derived };
+        } catch {
+          // The lookup itself failed — the endpoint is down, the request threw.
+          // That is not evidence about the credentials, so nothing is concluded
+          // from it and the save carries on: the server has the last word, and
+          // a failed lookup is not an error the reader can act on.
+          proven = null;
+        }
+      };
+
+      if (mustProveConnection && !test?.ok) {
+        // PROVE THE CONNECTION BEFORE STORING IT. The server's completeness
+        // check asks only whether the answers are PRESENT — so a token the
+        // host rejects finishes setup just as well as one it accepts, and the
+        // gate opens onto an app whose every call fails against a repository
+        // it cannot clone. This is the one moment that can tell the two apart.
+        setTesting(true);
+        await probe();
+        setTesting(false);
+        if (proven && !proven.ok) {
+          setError(
+            variant === 'setup'
+              ? 'Not saved. Nothing behind this screen works until the repository answers, and it did not — fix the connection above and test it again.'
+              : 'Not saved. The repository did not answer with those details — fix the connection above and test it again.',
+          );
+          return;
+        }
+      }
+
+      // Someone who pressed Save without pressing Test has supplied everything
+      // they can be expected to know; a branch name is something we can look
+      // up, so refusing over it asks a question with a knowable answer. Only
+      // when the remote has not already been asked this time round — the probe
+      // above fills the same fields from the same answer.
+      if (
+        !probed &&
+        (!resolvedIn(payload, 'defaultBranch') || !resolvedIn(payload, 'protectedBranches'))
+      ) {
+        await probe();
       }
       const result = await saveSettings(payload);
       setRestartRequired(result.restartRequired);
@@ -481,7 +570,10 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
                         variant="outline"
                         size="sm"
                         onClick={() => void runTest()}
-                        disabled={testing}
+                        // Also while SAVING: a save may be asking the remote
+                        // itself, and a second test racing it would overwrite
+                        // both the result and the versions derived from it.
+                        disabled={testing || saving}
                       >
                         {testing ? 'Checking…' : 'Test connection'}
                       </Button>
@@ -542,10 +634,30 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
           })}
 
 
-          <div className="flex items-center gap-3">
-            <Button type="submit" variant="primary" disabled={saving}>
+          {/* A rejected connection stops here rather than at the far side of
+              it. Saving these answers would finish setup — the server checks
+              that they are present, not that they work — and open the app onto
+              a repository it cannot reach, which reads as a broken product
+              rather than a wrong token. */}
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={saving || testing || connectionRejected}
+              // Described by the refusal, so a reader who lands on a button
+              // that will not move is told why rather than left guessing.
+              aria-describedby={connectionRejected ? 'connection-refusal' : undefined}
+            >
               {saving ? 'Saving…' : 'Save and continue'}
             </Button>
+            {connectionRejected && (
+              // Not a live region: the test panel above already announced the
+              // host's own words, and the save banner announces a blocked
+              // attempt. This is the label for a button that will not move.
+              <span id="connection-refusal" className="text-meta text-danger">
+                The repository turned that connection down. Fix it above and test again.
+              </span>
+            )}
           </div>
         </form>
 

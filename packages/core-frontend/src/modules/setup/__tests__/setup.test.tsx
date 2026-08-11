@@ -141,6 +141,126 @@ describe('SetupScreen', () => {
     expect(await screen.findByText(/rejected those credentials/)).toBeInTheDocument();
   });
 
+  /**
+   * A REJECTED CONNECTION MUST NOT FINISH SETUP.
+   *
+   * The server's completeness check asks whether the answers are present, not
+   * whether they work — so a token the host turns down finishes setup exactly
+   * as well as one it accepts, and the gate opens onto an app whose every call
+   * fails against a repository it cannot clone. Someone who has just been told
+   * the credentials are wrong could still press the button that let them in.
+   */
+  it('will not let a rejected connection through to the app', async () => {
+    await renderScreen();
+    api.testConnection.mockResolvedValue({
+      ok: false,
+      error: 'The host rejected those credentials.',
+    });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_wrong');
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByText(/rejected those credentials/);
+
+    expect(screen.getByRole('button', { name: 'Save and continue' })).toBeDisabled();
+    expect(screen.getByText(/turned that connection down/)).toBeInTheDocument();
+    expect(api.saveSettings).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  /** Fixing the answer clears the refusal — it described the old one. */
+  it('lets go of the refusal as soon as the connection is edited', async () => {
+    await renderScreen();
+    api.testConnection.mockResolvedValue({ ok: false, error: 'The host rejected those.' });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Save and continue' })).toBeDisabled(),
+    );
+
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_corrected');
+    expect(screen.getByRole('button', { name: 'Save and continue' })).toBeEnabled();
+  });
+
+  /**
+   * The button is not the only way in. Pressing Save without ever pressing
+   * Test used to store whatever was typed and open the gate on it, so the
+   * first news of a wrong token was a broken app — the connection is proven
+   * here instead, before anything is written.
+   */
+  it('proves the connection on a save that never pressed Test', async () => {
+    await renderScreen();
+    api.testConnection.mockResolvedValue({
+      ok: false,
+      error: 'No repository at that URL — or the token cannot see it.',
+    });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/typo.git');
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_x');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    await waitFor(() => expect(api.testConnection).toHaveBeenCalled());
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Not saved/);
+    expect(api.saveSettings).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+    // And the host's own words are on screen, not just the refusal.
+    expect(screen.getByText(/No repository at that URL/)).toBeInTheDocument();
+  });
+
+  /**
+   * A test that could not be RUN is not evidence against the credentials.
+   * Treating an unreachable test endpoint as a rejection would lock an admin
+   * out of the only screen that fixes it.
+   */
+  it('does not refuse over a test it could not run', async () => {
+    await renderScreen();
+    api.testConnection.mockRejectedValue(new Error('offline'));
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+    api.fetchSetupStatus.mockResolvedValue({ complete: true, isAdmin: true });
+
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_x');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
+  });
+
+  /**
+   * On the Deployment page the app is already running, and single sign-on has
+   * nothing to do with whether a repository answers. Refusing an SSO edit over
+   * a token that expired somewhere else would be a page that cannot be used to
+   * fix anything.
+   */
+  it('settings mode: an unrelated edit is not held hostage by the connection', async () => {
+    const stored = SETTINGS.map((s) =>
+      s.key === 'kbRepoUrl'
+        ? { ...s, source: 'stored' as const, value: 'https://example.com/kb.git', configured: true }
+        : s,
+    );
+    render(<SetupScreen settings={stored} onSaved={vi.fn()} variant="settings" />);
+    api.testConnection.mockResolvedValue({ ok: false, error: 'The host rejected those.' });
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: stored });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByText(/host rejected those/);
+
+    await userEvent.type(screen.getByLabelText('Application secret'), 'new-secret');
+    expect(screen.getByRole('button', { name: 'Save and continue' })).toBeEnabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
+  });
+
+  /** Changing the connection itself is another matter: that has to prove out. */
+  it('settings mode: refuses to store a connection the host turned down', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" />);
+    api.testConnection.mockResolvedValue({ ok: false, error: 'The host rejected those.' });
+
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/moved.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByText(/host rejected those/);
+
+    expect(screen.getByRole('button', { name: 'Save and continue' })).toBeDisabled();
+    expect(api.saveSettings).not.toHaveBeenCalled();
+  });
+
   /** An empty repository is a supported starting point, not a failure. */
   it('treats an empty repository as a success', async () => {
     await renderScreen();
