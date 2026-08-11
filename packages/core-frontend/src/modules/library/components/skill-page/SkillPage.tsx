@@ -56,6 +56,7 @@ import { isBinaryFile } from '../../../workspace/components/renderers';
 export function SkillPage({
   name: nameProp,
   activeFile,
+  provisional = false,
 }: {
   /**
    * Both provided when the page is mounted at its CANONICAL address — the
@@ -66,6 +67,14 @@ export function SkillPage({
    */
   name?: string;
   activeFile?: string;
+  /**
+   * Whether `name` is a GUESS the catalog never confirmed — read off the URL's
+   * folder name, which is the skill's id only when no frontmatter declares
+   * one. A failed lookup for a provisional name is not evidence of absence
+   * until the catalog has actually answered; it may simply be the wrong name.
+   * Default `false`: a caller that says nothing is naming a skill it knows.
+   */
+  provisional?: boolean;
 } = {}) {
   const { name: rawName = '' } = useParams<{ name: string }>();
   const name = nameProp ?? safeDecode(rawName);
@@ -377,12 +386,18 @@ export function SkillPage({
     </Button>
   );
 
-  // `data.loading` joins the guard because the NAME may be provisional: when
-  // the catalog hasn't answered for a URL yet, the route resolves it by
-  // reading the folder name, which is the id only when no frontmatter declares
-  // one. Deciding "doesn't exist" before the catalog can correct that flashes
-  // it at somebody who is simply early — the call GroupPage already makes.
-  if (!detail.loading && !data.loading && (detail.error || !skill)) {
+  // "Doesn't exist" is a VERDICT, and a provisional name has not earned one:
+  // the route guessed it from the URL's folder name, so a failed lookup may
+  // just mean we asked with the wrong name. Only the catalog can correct that,
+  // and only a SUCCESSFUL catalog response counts — `loading: false` also
+  // describes a catalog that failed, which is "we couldn't ask", not "there is
+  // no such skill". The same distinction GroupPage draws a few files over.
+  //
+  // A confirmed name (the catalog resolved this URL to it) is unaffected: its
+  // detail error is real and gets reported immediately.
+  const catalogAnswered = !data.loading && !data.error;
+  const mayConcludeAbsence = !provisional || catalogAnswered;
+  if (!detail.loading && mayConcludeAbsence && (detail.error || !skill)) {
     return (
       <Article>
         {backLink}

@@ -238,6 +238,8 @@ function renderPage(
   routerState?: Record<string, unknown>,
   /** Catalog-state overrides — e.g. `{ loading: true }` for the early case. */
   library?: Partial<LibraryContextValue>,
+  /** Props the canonical /workspace mount passes; the legacy route passes none. */
+  pageProps?: { provisional?: boolean },
 ) {
   libraryMock.value = { ...libraryValue(owned, crs, mine), ...library };
   return render(
@@ -255,7 +257,10 @@ function renderPage(
                 leave the one assertion that matters unmakeable. */}
             <LibraryToastProvider>
               <Routes>
-                <Route path="/skills-and-tools/skills/:name" element={<SkillPage />} />
+                <Route
+                  path="/skills-and-tools/skills/:name"
+                  element={<SkillPage {...(pageProps ?? {})} />}
+                />
               </Routes>
             </LibraryToastProvider>
           </EventBusContext.Provider>
@@ -618,16 +623,53 @@ describe('SkillPage', () => {
    * not evidence the skill is missing, just that we asked with the wrong name.
    * GroupPage already refuses to decide this early; this is the same call.
    */
-  it('does not cry "doesn\'t exist" while the catalog is still loading', async () => {
-    apiMock.getSkill.mockRejectedValueOnce(new Error('nope'));
-    renderPage(false, [], [], makeFakeBus(), undefined, { loading: true, items: [] });
+  describe('a PROVISIONAL name — one the route guessed from the URL', () => {
+    // The route reads the folder name when the catalog can't resolve a URL,
+    // and that is the id only when no frontmatter declares one. So a failed
+    // lookup may just mean we asked with the wrong name.
+    const early = { loading: true, items: [] };
+    const failed = { loading: false, error: "Couldn't load the catalog.", items: [] };
 
-    // The lookup failed and the catalog has not answered — so we were possibly
-    // asking with the wrong name, and saying "doesn't exist" would be a guess.
-    await waitFor(() => expect(apiMock.getSkill).toHaveBeenCalled());
-    expect(
-      screen.queryByText(/doesn't exist, or you don't have access to it/),
-    ).not.toBeInTheDocument();
+    it.each([
+      ['still loading', early],
+      // `loading: false` also describes a catalog that FAILED — "we couldn't
+      // ask" is not "there is no such skill", so absence stays unconcluded and
+      // a valid declared-id skill never turns into a permanent error page.
+      ['failed to load', failed],
+    ])('holds the "doesn\'t exist" verdict while the catalog %s', async (_label, lib) => {
+      apiMock.getSkill.mockRejectedValueOnce(new Error('nope'));
+      renderPage(false, [], [], makeFakeBus(), undefined, lib, { provisional: true });
+
+      await waitFor(() => expect(apiMock.getSkill).toHaveBeenCalled());
+      expect(
+        screen.queryByText(/doesn't exist, or you don't have access to it/),
+      ).not.toBeInTheDocument();
+      // …and says so as a LOADING state, not a blank page: an empty render
+      // would satisfy the assertion above while telling the reader nothing.
+      expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-busy', 'true');
+    });
+
+    it('does conclude absence once the catalog has answered', async () => {
+      apiMock.getSkill.mockRejectedValueOnce(new Error('nope'));
+      renderPage(false, [], [], makeFakeBus(), undefined, { loading: false, error: null }, {
+        provisional: true,
+      });
+
+      expect(
+        await screen.findByText(/doesn't exist, or you don't have access to it/),
+      ).toBeInTheDocument();
+    });
+
+    it('never holds it for a name the catalog confirmed', async () => {
+      // A confirmed name's detail error is real — report it immediately, even
+      // mid-refresh. Suppressing it would hide a genuine access failure.
+      apiMock.getSkill.mockRejectedValueOnce(new Error('nope'));
+      renderPage(false, [], [], makeFakeBus(), undefined, early);
+
+      expect(
+        await screen.findByText(/doesn't exist, or you don't have access to it/),
+      ).toBeInTheDocument();
+    });
   });
 });
 

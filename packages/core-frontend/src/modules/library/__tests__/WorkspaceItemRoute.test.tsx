@@ -291,6 +291,33 @@ describe('WorkspaceItemRoute', () => {
       );
     });
 
+    it('opens a bundled file of a skill the catalog has not caught up with', async () => {
+      // STALE, not failed: the catalog loaded fine, it just predates the skill.
+      // Concluding "nothing owns this file, so it is not a page" bounced the
+      // reader to the group — the very symptom this change exists to remove,
+      // reached through a different unsettled state. Absence proves nothing;
+      // only positive evidence (a known category above it) redirects.
+      renderAt(itemUrl('Groups/Engineering/coding/brand-new-skill/notes.md'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
+        'brand-new-skill::notes.md',
+      );
+    });
+
+    it('still routes a known category by its CACHED skills after a failed refresh', async () => {
+      // `useLibraryData` keeps the previous entries when a refresh fails, and
+      // what the catalog KNOWS stays true — a category is still a category.
+      dataMock.useLibraryData.mockReturnValue({
+        ...NESTED,
+        error: "Couldn't refresh the catalog.",
+      });
+      renderAt(itemUrl('Groups/Engineering/coding'));
+      await waitFor(() =>
+        expect(screen.getByLabelText('pathname')).toHaveTextContent(
+          '/skills-and-tools/groups/Engineering',
+        ),
+      );
+    });
+
     it('does not let a prefix-sharing sibling claim a bundled file', async () => {
       // Ownership compares whole segments: `create-ticket-v2` shares a string
       // prefix with `create-ticket` and must not swallow its files.
