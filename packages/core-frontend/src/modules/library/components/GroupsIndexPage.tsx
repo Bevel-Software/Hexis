@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Badge, Banner } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
@@ -7,9 +7,11 @@ import { personalGroupName } from '../utils/personal-group';
 import { LIBRARY_ROOT, pathForGroup } from '../routes/library-paths';
 import { ownersTextOf } from '../utils/group-summary';
 import type { GroupSummary } from '../services/groups.api';
+import { EmptyStateAction } from './group-page-parts';
 import { GroupIndexRow } from './GroupIndexRow';
 import { LockGlyph } from './LockGlyph';
 import { ManagedGroupRequests } from './ManagedGroupRequests';
+import { NewGroupDialog } from './NewGroupDialog';
 
 /**
  * The all-groups index — `/skills-and-tools`, where the Library opens.
@@ -38,9 +40,10 @@ interface IndexEntry {
 }
 
 export function GroupsIndexPage() {
-  const { items, groupSummaries, groupsLoading, groupsError, reloadGroups } = useLibrary();
+  const { items, groupSummaries, groupsLoading, groupsError, reload, reloadGroups } = useLibrary();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const [newGroupOpen, setNewGroupOpen] = useState(false);
 
   const personalName = personalGroupName(user?.name);
   const ungroupedSkills = countKind(items, null, 'skill');
@@ -114,6 +117,20 @@ export function GroupsIndexPage() {
       ) : (
         <>
           <SectionHead count={mine.length}>{"Groups you're in"}</SectionHead>
+          {/* The one page a person with no groups is guaranteed to land on —
+              the Library opens here — so it is where the app says how a group
+              comes to exist, instead of a blank section that reads as "not for
+              you". The sidebar's `+` does the same thing; this one is written
+              out because a newcomer has not found that `+` yet. */}
+          {mine.length === 0 && (
+            <p className="text-ui text-ink-faint">
+              {"You're not in any groups yet. "}
+              <EmptyStateAction onClick={() => setNewGroupOpen(true)}>
+                Create the first group
+              </EmptyStateAction>
+              {' to share skills and tools with your team.'}
+            </p>
+          )}
           <RowList>
             {mine.map((entry) => (
               <GroupIndexRow
@@ -173,6 +190,20 @@ export function GroupsIndexPage() {
             </>
           )}
         </>
+      )}
+
+      {newGroupOpen && (
+        <NewGroupDialog
+          // Every name this page can see — summaries and catalog-derived rows
+          // alike. Locked-but-undiscoverable groups are absent from both; the
+          // provisioning endpoint is the authority that catches those.
+          existing={entries.map((e) => e.name)}
+          onClose={() => setNewGroupOpen(false)}
+          onCreated={() => {
+            reload();
+            reloadGroups();
+          }}
+        />
       )}
     </div>
   );

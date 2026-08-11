@@ -261,6 +261,31 @@ describe('GroupsIndexPage', () => {
     expect(await screen.findByRole('button', { name: 'GTM 1 skills · 1 tools' })).toBeInTheDocument();
   });
 
+  it('turns an empty "Groups you\'re in" into a create CTA, and the CTA into the dialog', async () => {
+    // Nothing grouped anywhere: no summaries, and the catalog holds only
+    // ungrouped items — the newcomer's actual first view of this page.
+    groupsMock.listGroups.mockResolvedValue([]);
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      skills: [{ name: 'scratch', description: '', path: 'Skills/scratch' }],
+      tools: [
+        tool({ slug: 'slack', name: 'slack', path: 'Tools/slack.tool' }),
+      ],
+    });
+    renderIndex();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create the first group' }));
+    expect(await screen.findByRole('textbox', { name: 'Group name' })).toBeInTheDocument();
+  });
+
+  it('keeps the create CTA out of the way once the caller is in a group', async () => {
+    renderIndex(); // default fixture: member of GTM
+    await screen.findByRole('button', { name: /^GTM/ });
+    expect(
+      screen.queryByRole('button', { name: 'Create the first group' }),
+    ).not.toBeInTheDocument();
+  });
+
   it('offers a retry when the groups endpoint fails, and keeps Yours', async () => {
     groupsMock.listGroups.mockRejectedValue(new Error("Couldn't load groups."));
     renderIndex();

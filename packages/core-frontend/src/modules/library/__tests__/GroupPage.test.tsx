@@ -298,10 +298,27 @@ describe('GroupPage', () => {
     dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
     groupsMock.listGroups.mockResolvedValue([gtm({ skillCount: 0, toolCount: 0 })]);
     renderGroup('GTM');
-    expect(
-      await screen.findByText('No skills yet. Add one, or ask your agent to write one for GTM.'),
-    ).toBeInTheDocument();
+    // The sentence is split around its inline action, so it is asserted in its
+    // parts: the fact, the doorway, and the agent as the other door.
+    expect(await screen.findByText(/No skills yet/)).toBeInTheDocument();
+    expect(screen.getByText(/or ask your agent to write one for GTM/)).toBeInTheDocument();
     expect(screen.getByText('No tools yet.')).toBeInTheDocument();
+  });
+
+  it('makes the empty Skills band a doorway: its link opens the same add dialog as `+`', async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+    groupsMock.listGroups.mockResolvedValue([gtm({ skillCount: 0, toolCount: 0 })]);
+    renderGroup('GTM');
+    fireEvent.click(await screen.findByRole('button', { name: 'Add the first skill' }));
+    expect(
+      await screen.findByRole('heading', { name: 'Add a skill or tool to GTM' }),
+    ).toBeInTheDocument();
+  });
+
+  it('drops the nudge once a skill exists — the arrow belongs to the empty band only', async () => {
+    renderGroup('GTM'); // CATALOG carries outreach in GTM
+    await screen.findByRole('button', { name: /^outreach/ });
+    expect(screen.queryByRole('button', { name: 'Add the first skill' })).not.toBeInTheDocument();
   });
 
   it('keeps Share on an EMPTY group. The folder is what carries access, not the items', async () => {

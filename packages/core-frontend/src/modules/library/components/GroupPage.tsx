@@ -13,7 +13,8 @@ import { GroupJoinRequests } from './GroupJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { AddToGroupDialog } from './AddToGroupDialog';
-import { BandControls, GroupBreadcrumb, GroupItemSections, PageNote, RemoveLibraryItemDialog,
+import { BandControls, EmptySkillsNudge, GroupBreadcrumb, GroupItemSections, PageNote,
+  RemoveLibraryItemDialog,
 } from './group-page-parts';
 import { DeleteGroupDialog } from './DeleteGroupDialog';
 import { PageActions } from './PageActions';
@@ -281,9 +282,19 @@ export function GroupPage() {
         // for real; this only decides who sees the affordance.
         onRemove={summary?.canWrite ? setRemoving : undefined}
         emptySkills={
-          filterOn
-            ? 'Nothing in this band needs you right now.'
-            : `No skills yet. Add one, or ask your agent to write one for ${group}.`
+          filterOn ? (
+            'Nothing in this band needs you right now.'
+          ) : (
+            // A truly empty group is the one moment the page has to teach
+            // where "add" lives — the link opens the same dialog the title
+            // row's `+` does, and the nudge's arrow points at that `+`.
+            <EmptySkillsNudge
+              lead="No skills yet."
+              actionLabel="Add the first skill"
+              tail={`, or ask your agent to write one for ${group}.`}
+              onAction={() => setAddOpen(true)}
+            />
+          )
         }
         // The band fades its controls until you hover it, and `opacity`
         // composites — so "the filter stays lit when it is on" has to be said
