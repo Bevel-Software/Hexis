@@ -808,9 +808,20 @@ export class WorkflowService implements IWorkflowService {
     branch: string,
     targetPath: string,
     user: AuthUser,
-    opts?: { systemAuthorized?: boolean },
+    opts?: { systemAuthorized?: boolean; skipValidation?: boolean },
   ): Promise<void> {
-    const change = await this.git.commitFile(workspaceId, user, targetPath);
+    // `skipValidation` is the worker telling us this commit is not the last of
+    // a burst. The validator is advisory — it parses the whole KB to produce a
+    // report nothing reads but the log — so running it once on the burst's
+    // final state says the same thing as running it per file, for a fraction
+    // of the work. Nothing downstream depends on it having run.
+    const change = await this.git.commitFile(
+      workspaceId,
+      user,
+      targetPath,
+      undefined,
+      opts?.skipValidation,
+    );
     if (!change) {
       // No-op commit — the path was already clean. Usually a double-enqueue
       // or a save of bytes identical to HEAD, BUT a clean tree does NOT
