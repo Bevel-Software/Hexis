@@ -57,6 +57,16 @@ export const consoleSystemNoticeSink: ISystemNoticeSink = {
 const POLL_INTERVAL_MS = 500;
 
 /**
+ * Ceiling on rows drained from ONE workspace before the sweep moves on.
+ * Fairness, not throughput: the loop holds the single in-flight commit slot,
+ * so an unbounded drain would let one workspace's thousand-file migration
+ * stall every other user's save until it finished. At this size a normal
+ * bulk change (tens of files) still lands in one sweep, and a huge one gives
+ * way after a bounded stretch and resumes on the next pass.
+ */
+const MAX_BURST_PER_WORKSPACE = 50;
+
+/**
  * The recovery-agent dispatcher the worker calls when a row exhausts its
  * transient budget. Pulled behind an interface so the unit tests can
  * substitute a fake without bringing the entire BackgroundAgentFactory
@@ -99,6 +109,7 @@ export interface WorkflowCommitDriver {
     branch: string,
     path: string,
     user: AuthUser,
+    opts?: { skipValidation?: boolean },
   ): Promise<void>;
 }
 
@@ -176,18 +187,39 @@ export class PendingCommitsWorker {
   }
 
   /**
-   * Run one drain pass: rotate through known workspaces, claim+process
-   * one row from each. Exposed publicly so tests can step the loop
-   * deterministically without driving `setTimeout`.
+   * Run one drain pass: rotate through known workspaces, draining each
+   * one's ready rows before moving on. Exposed publicly so tests can step
+   * the loop deterministically without driving `setTimeout`.
+   *
+   * Draining a BURST rather than a single row per sweep is what keeps a
+   * bulk change honest. One row per sweep, with a `POLL_INTERVAL_MS` sleep
+   * after every pass, capped a workspace at ~2 commits/second no matter how
+   * fast git was — so a migration or an agent run that touched a hundred
+   * files spent a minute of pure polling latency, and anything waiting on
+   * the queue to settle (a change request being applied) waited with it.
+   *
+   * A failing row cannot spin this loop: `markTransientFailure` leaves
+   * `lastAttemptedAt` set, so the backoff gate in `claimNext` refuses to
+   * hand the same row back within the same sweep.
    */
   async drainOnce(): Promise<void> {
     for (const workspace of this.deps.workspaces.knownWorkspaces()) {
       // Bail mid-sweep if stop() fired — the in-flight workspace gets
       // to finish but we don't start a new one.
       if (!this.running) return;
-      const row = await this.deps.service.claimNext(workspace.id, this.deps.now());
-      if (!row) continue;
-      await this.processRow(row);
+      for (let drained = 0; drained < MAX_BURST_PER_WORKSPACE; drained += 1) {
+        if (!this.running) return;
+        const row = await this.deps.service.claimNext(workspace.id, this.deps.now());
+        if (!row) break;
+        // Is this the last of the burst? Everything before it can skip the
+        // advisory commit validator, which parses the whole KB to produce a
+        // report that is only logged. Running it per file made a bulk change
+        // pay one full parse per commit; running it on the last commit
+        // reports the same end state once. Asked AFTER the claim, so the row
+        // in hand is already out of `pending` and cannot answer for itself.
+        const more = await this.deps.service.hasReadyRow(workspace.id, this.deps.now());
+        await this.processRow(row, { skipValidation: more });
+      }
     }
   }
 
@@ -226,7 +258,7 @@ export class PendingCommitsWorker {
    *   - throws, transient exhausted, recovery budget remains → spawn agent.
    *   - throws, recovery exhausted → markNeedsAttention + feedback notice.
    */
-  private async processRow(row: PendingCommit): Promise<void> {
+  private async processRow(row: PendingCommit, opts?: { skipValidation?: boolean }): Promise<void> {
     const user: AuthUser = {
       // The worker doesn't have a real `users.id` for the commit author —
       // commit attribution flows through `git commit --author="Name <email>"`,
@@ -237,7 +269,9 @@ export class PendingCommitsWorker {
       name: row.authorName,
     };
     try {
-      await this.deps.workflow.runPendingCommit(row.workspaceId, row.branch, row.path, user);
+      await this.deps.workflow.runPendingCommit(row.workspaceId, row.branch, row.path, user, {
+        skipValidation: opts?.skipValidation,
+      });
       await this.deps.service.markSucceeded(row.id);
       return;
     } catch (err) {
