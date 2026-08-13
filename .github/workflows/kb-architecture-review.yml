@@ -84,13 +84,23 @@ jobs:
 
       # Instant sign of life: react 👀 to the triggering comment so the author
       # knows the command was seen while the agent (~3 min) spins up.
+      #
+      # It is cosmetic, so it must never be able to gate the review. Reacting
+      # needs a permission the job token is not reliably granted — it returned
+      # `Resource not accessible by integration` (403) here even with
+      # `issues: write` in scope — and steps run under `bash -e`, so that 403
+      # took down `start` before it could open the check. `publish` is gated on
+      # `needs.start.result == 'success'`, so the whole review died and the PR
+      # kept whatever stale status it already had. Swallow the failure into a
+      # warning: losing the 👀 is a papercut, losing the review is not.
       - name: Acknowledge the command
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh api -X POST \
             "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
-            -f content=eyes
+            -f content=eyes \
+            || echo "::warning::Could not react to the triggering comment — continuing with the review."
 
       - name: Resolve PR head branch
         id: pr
