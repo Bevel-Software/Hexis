@@ -52,6 +52,7 @@ function makeService(): PendingCommitsService {
   return {
     enqueue: vi.fn().mockResolvedValue(undefined),
     claimNext: vi.fn().mockResolvedValue(null),
+    hasReadyRow: vi.fn().mockResolvedValue(false),
     markSucceeded: vi.fn().mockResolvedValue(undefined),
     markTransientFailure: vi.fn().mockResolvedValue(undefined),
     markRecoveryStarted: vi.fn().mockResolvedValue(undefined),
@@ -114,6 +115,8 @@ describe('PendingCommitsWorker.drainOnce', () => {
       'feat/x',
       'Foo.md',
       expect.objectContaining<Partial<AuthUser>>({ email: 'alice@example.com', name: 'Alice' }),
+      // Last (only) row of the burst, so the advisory validator runs.
+      { skipValidation: false },
     );
     expect(service.markSucceeded).toHaveBeenCalledWith('row-1');
     expect(service.markTransientFailure).not.toHaveBeenCalled();
@@ -220,6 +223,121 @@ describe('PendingCommitsWorker.drainOnce', () => {
 
     await expect(worker.drainOnce()).resolves.toBeUndefined();
     expect(service.markNeedsAttention).toHaveBeenCalled();
+  });
+
+  /**
+   * A sweep used to take exactly ONE row per workspace and then sleep
+   * `POLL_INTERVAL_MS`, capping a workspace at ~2 commits/second however fast
+   * git was. A bulk change — a migration, an agent run — paid a minute of
+   * pure polling latency, and anything waiting for the queue to settle (a
+   * change request being applied) waited with it.
+   */
+  describe('draining a burst', () => {
+    /** Queue `count` rows, then nothing — the shape a bulk change leaves. */
+    function queue(count: number) {
+      const claim = service.claimNext as ReturnType<typeof vi.fn>;
+      const ready = service.hasReadyRow as ReturnType<typeof vi.fn>;
+      for (let i = 0; i < count; i += 1) {
+        claim.mockResolvedValueOnce(makeRow({ id: `row-${i}`, path: `File${i}.md` }));
+        // True until the last row is the one in hand.
+        ready.mockResolvedValueOnce(i < count - 1);
+      }
+      claim.mockResolvedValue(null);
+      ready.mockResolvedValue(false);
+    }
+
+    it('commits every queued row in ONE pass', async () => {
+      queue(12);
+      await worker.drainOnce();
+      expect(workflow.runPendingCommit).toHaveBeenCalledTimes(12);
+      expect(service.markSucceeded).toHaveBeenCalledTimes(12);
+    });
+
+    it('validates once — on the last commit, whose tree is the end state', async () => {
+      // The validator parses the whole KB for a report that is only logged,
+      // so per-file runs cost a full parse each and all say the same thing.
+      queue(5);
+      await worker.drainOnce();
+      const skipped = workflow.runPendingCommit.mock.calls.map((c) => c[4]?.skipValidation);
+      expect(skipped).toEqual([true, true, true, true, false]);
+    });
+
+    it('stops at the burst ceiling so one workspace cannot starve the rest', async () => {
+      // The loop holds the single in-flight commit slot; an unbounded drain
+      // would park every other user's save behind a huge migration.
+      queue(200);
+      await worker.drainOnce();
+      expect(workflow.runPendingCommit).toHaveBeenCalledTimes(50);
+    });
+
+    it('gives up the pass the moment stop() lands mid-burst', async () => {
+      queue(12);
+      workflow.runPendingCommit.mockImplementation(async () => {
+        (worker as unknown as { running: boolean }).running = false;
+      });
+      await worker.drainOnce();
+      expect(workflow.runPendingCommit).toHaveBeenCalledTimes(1);
+    });
+
+    it('carries on after a transient failure and ends the pass when nothing is ready', async () => {
+      // What keeps the drain loop from SPINNING on a failing row is the SQL
+      // backoff gate: `markTransientFailure` leaves `lastAttemptedAt` set, so
+      // `claimNext` refuses that row until its backoff elapses. That gate is
+      // not exercised here — `claimNext` is a stub, so this would pass with
+      // the gate removed. It lives in `readyPredicate`, shared by `claimNext`
+      // and `hasReadyRow` precisely so the two cannot drift; there is no
+      // database-backed test for it in this package.
+      //
+      // What this DOES pin is the loop's own half of the contract: a failure
+      // is recorded and the pass keeps going rather than aborting the sweep,
+      // and the row is attempted once.
+      (service.claimNext as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(makeRow({ id: 'bad' }))
+        .mockResolvedValueOnce(makeRow({ id: 'good' }))
+        .mockResolvedValue(null);
+      workflow.runPendingCommit
+        .mockRejectedValueOnce(new Error('push rejected'))
+        .mockResolvedValueOnce(undefined);
+
+      await worker.drainOnce();
+
+      expect(service.markTransientFailure).toHaveBeenCalledTimes(1);
+      expect(service.markSucceeded).toHaveBeenCalledTimes(1);
+      expect(workflow.runPendingCommit).toHaveBeenCalledTimes(2);
+    });
+
+    it('validates the final slot when the burst hits its ceiling', async () => {
+      // Rows remain queued, so the peek says "more" — but this is the last
+      // commit of the PASS, and skipping it would end every sweep of a big
+      // backlog on an unvalidated commit.
+      queue(200);
+      await worker.drainOnce();
+      const calls = workflow.runPendingCommit.mock.calls;
+      expect(calls).toHaveLength(50);
+      expect(calls[49]?.[4]?.skipValidation).toBe(false);
+      expect(calls[48]?.[4]?.skipValidation).toBe(true);
+      // …and does not ASK on that slot: the ceiling already answers it, so
+      // peeking would be a wasted round-trip on every sweep of a backlog.
+      expect(service.hasReadyRow).toHaveBeenCalledTimes(49);
+    });
+
+    it('commits the claimed row even if the peek throws', async () => {
+      // The row is already claimed and `running`; nothing resets that, so
+      // throwing out of the peek would strand it and the workspace would stop
+      // draining until the process restarted. A failed peek assumes "last",
+      // which costs one extra validation and nothing else.
+      (service.claimNext as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(makeRow({ id: 'claimed' }))
+        .mockResolvedValue(null);
+      (service.hasReadyRow as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error('connection reset'),
+      );
+
+      await expect(worker.drainOnce()).resolves.toBeUndefined();
+
+      expect(service.markSucceeded).toHaveBeenCalledTimes(1);
+      expect(workflow.runPendingCommit.mock.calls[0]?.[4]?.skipValidation).toBe(false);
+    });
   });
 });
 

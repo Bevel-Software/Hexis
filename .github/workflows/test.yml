@@ -11,6 +11,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Building and testing a fork PR runs that contributor's code on the runner
+    # — unavoidable, and fine, because the run holds nothing worth stealing: no
+    # secrets, and GitHub forces a read-only token on fork PRs anyway. Stating
+    # the scope here keeps that true if the repo-wide default workflow
+    # permission is ever flipped back to read/write in settings.
+    permissions:
+      contents: read
     # This suite is also the publish workflow's gate, so its actions are pinned
     # to reviewed commit SHAs (release tag alongside each) for the same reason
     # the publish steps are: a moved tag must not be able to tamper with the
