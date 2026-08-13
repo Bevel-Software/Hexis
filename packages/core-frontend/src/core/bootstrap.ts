@@ -1,5 +1,8 @@
 import { configureBranchModel, validateBranchModel } from '@bevel-software/platform-shared';
-import { configureMcpUrl } from '../shared/mcp';
+// The pure module, NOT the `shared/mcp` barrel — the same reason `test-setup.ts`
+// avoids it. This runs BEFORE React renders, and the barrel would drag the
+// components and their icon imports into the boot path to set one string.
+import { configureMcpUrl } from '../shared/mcp/connect-snippets';
 
 /** What `GET /api/config` serves. Unauthenticated — see the route's comment. */
 interface ServerConfig {
