@@ -10,7 +10,8 @@ import { pathForLibraryFilter } from '../../library/routes/library-paths';
 import { useAppRegistry } from '../../../core/registry';
 import { displayFirstName } from '../../library/utils/personal-group';
 import { setSidebarCollapsed } from '../../layout/state/sidebar';
-import { AGENT_CLIENTS, mcpUrlFromOrigin, type AgentClient } from '../agent-clients';
+import { ClaudeInstallLink, mcpEndpointUrl } from '../../../shared/mcp';
+import { AGENT_CLIENTS, type AgentClient } from '../agent-clients';
 import { useOnboarding } from '../state/onboarding';
 
 /**
@@ -153,7 +154,9 @@ export function WelcomePage() {
   }, []);
 
   const client = AGENT_CLIENTS.find((c) => c.id === clientId) ?? AGENT_CLIENTS[0]!;
-  const snippet = client.snip(mcpUrlFromOrigin(window.location.origin));
+  // The deployment's own address, not the browser's — see `shared/mcp`.
+  const mcpUrl = mcpEndpointUrl();
+  const snippet = client.snip(mcpUrl);
   // Capitalized by the same function that spells the group heading — "Welcome,
   // juan" over a sidebar reading "Juan's Group" is the app misspelling someone
   // to their face on the one page addressed to them.
@@ -313,6 +316,14 @@ export function WelcomePage() {
         </div>
 
         <p className="mt-2.5 text-meta leading-normal text-ink-faint">{client.hint}</p>
+
+        {/* Claude only, because Claude is the only client with an install
+            link — and it renders nothing at all when this deployment is one
+            Anthropic could not reach, rather than offering a shortcut that
+            dead-ends. No `showHint`: the reader here is a new employee, and
+            naming an env var they cannot change is noise. The copy block
+            below is the route that always works. */}
+        {client.id === 'claude' && <ClaudeInstallLink mcpUrl={mcpUrl} className="mt-3.5" />}
 
         {/* The copy rides the block it copies. */}
         <div className="relative mt-3.5">

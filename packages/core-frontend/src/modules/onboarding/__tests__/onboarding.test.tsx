@@ -12,6 +12,7 @@ import { RootLanding } from '../components/RootLanding';
 import { POST_LOGIN_REDIRECT_KEY } from '../../auth/services/sso';
 import { WELCOME_PATH } from '../paths';
 import { resetOnboardingForTests } from '../state/onboarding';
+import { configureMcpUrl } from '../../../shared/mcp';
 import { setSidebarCollapsed, useSidebar } from '../../layout/state/sidebar';
 
 /**
@@ -341,6 +342,83 @@ describe('WelcomePage', () => {
     expect(screen.queryByText(/mcpServers/)).toBeNull();
     await userEvent.click(screen.getByRole('radio', { name: 'Cursor & Others' }));
     expect(screen.getByText(/mcpServers/)).toBeInTheDocument();
+  });
+
+  /**
+   * One click instead of a menu path. It is Claude-only because Claude is the
+   * only client with a documented install link, and it appears only when
+   * Anthropic could actually reach this deployment — see `canDeepLink`. The
+   * copy block stays either way; it is the route that always works.
+   */
+  describe('the Add to Claude link', () => {
+    it('offers one-click connect on a reachable deployment', () => {
+      configureMcpUrl('https://kb.acme.com/api/mcp');
+      mountPage();
+      const link = screen.getByRole('link', { name: 'Add to Claude' });
+      const href = new URL(link.getAttribute('href')!);
+      expect(href.origin + href.pathname).toBe('https://claude.ai/customize/connectors');
+      expect(href.searchParams.get('connectorUrl')).toBe('https://kb.acme.com/api/mcp');
+      expect(href.searchParams.get('connectorName')).toBe('Hexis — kb.acme.com');
+    });
+
+    /**
+     * The default install: `PUBLIC_BACKEND_URL` unset means localhost, which
+     * claude.ai cannot reach. A dead button on the first screen a self-hoster
+     * sees reads as a broken product.
+     */
+    it('offers nothing to click on a localhost deployment', () => {
+      configureMcpUrl('http://localhost:3001/api/mcp');
+      mountPage();
+      expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
+      // …and the route that always works is still there.
+      expect(screen.getByText('http://localhost:3001/api/mcp')).toBeInTheDocument();
+    });
+
+    /**
+     * No `PUBLIC_BACKEND_URL` hint on THIS surface. The reader is a new
+     * employee who cannot change deployment config; naming an env var at them
+     * is noise. The settings page, whose reader plausibly can, says it there.
+     */
+    it('does not lecture a new employee about deployment config', () => {
+      configureMcpUrl('http://localhost:3001/api/mcp');
+      mountPage();
+      expect(screen.queryByText(/PUBLIC_BACKEND_URL/)).toBeNull();
+    });
+
+    it('belongs to Claude alone', async () => {
+      configureMcpUrl('https://kb.acme.com/api/mcp');
+      mountPage();
+      expect(screen.getByRole('link', { name: 'Add to Claude' })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
+      expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
+      await userEvent.click(screen.getByRole('radio', { name: 'Cursor & Others' }));
+      expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
+    });
+
+    // Opening claude.ai must not hand it a handle on this window.
+    it('opens in a new tab safely', () => {
+      configureMcpUrl('https://kb.acme.com/api/mcp');
+      mountPage();
+      const link = screen.getByRole('link', { name: 'Add to Claude' });
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    });
+
+    /**
+     * The whole point of the canonical URL: what the button hands Claude and
+     * what the copy block shows a human must be the same string, or one of
+     * them is lying.
+     */
+    it('hands Claude exactly the URL the copy block shows', () => {
+      configureMcpUrl('https://kb.acme.com/api/mcp');
+      mountPage();
+      const href = new URL(
+        screen.getByRole('link', { name: 'Add to Claude' }).getAttribute('href')!,
+      );
+      expect(href.searchParams.get('connectorUrl')).toBe(
+        screen.getByText(/\/api\/mcp$/).textContent,
+      );
+    });
   });
 
   it('copies the visible snippet without concluding anything', async () => {
