@@ -8,6 +8,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Building and testing a fork PR runs that contributor's code on the runner
+    # — unavoidable, and fine, because the run holds nothing worth stealing: no
+    # secrets, and GitHub forces a read-only token on fork PRs anyway. Stating
+    # the scope here keeps that true if the repo-wide default workflow
+    # permission is ever flipped back to read/write in settings.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
