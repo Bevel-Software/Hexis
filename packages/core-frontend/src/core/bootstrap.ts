@@ -1,8 +1,16 @@
 import { configureBranchModel, validateBranchModel } from '@bevel-software/platform-shared';
+import { configureMcpUrl } from '../shared/mcp';
 
 /** What `GET /api/config` serves. Unauthenticated — see the route's comment. */
 interface ServerConfig {
   branchModel: { defaultBranch: string; protectedBranches: string[] };
+  /**
+   * Optional because a browser can outlive the server it loaded from — a
+   * cached bundle talking to a backend that predates this field must still
+   * boot. `configureMcpUrl` falls back to the origin when it is absent, which
+   * is what every connect surface did before this existed.
+   */
+  mcpUrl?: string;
 }
 
 /**
@@ -41,6 +49,15 @@ export async function loadServerConfig(): Promise<void> {
    */
   const problem = validateBranchModel(config.branchModel);
   if (!problem) configureBranchModel(config.branchModel);
+
+  /**
+   * Unconditional, and deliberately not guarded by the branch-model check
+   * above: an unconfigured deployment still has a real address, and the
+   * connect surfaces are among the few things worth showing on one. Absent or
+   * unparseable input is not an error here either — it falls back to the
+   * origin rather than taking down the boot for a snippet.
+   */
+  configureMcpUrl(config.mcpUrl);
 }
 
 /**
