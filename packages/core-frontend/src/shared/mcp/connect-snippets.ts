@@ -48,14 +48,37 @@ let configured: string | null = null;
  * surface used before this existed.
  */
 export function configureMcpUrl(url: unknown): void {
-  if (typeof url !== 'string' || url.trim() === '') {
+  // Absent is the expected older-server case, not a problem — say nothing.
+  if (url === undefined || url === null || url === '') {
     configured = null;
     return;
   }
+  configured = parseEndpoint(url);
+  if (configured === null) {
+    // A value WAS sent and we refused it. Without this the app silently shows
+    // the origin instead, and an operator who typo'd PUBLIC_BACKEND_URL has no
+    // signal anywhere — the snippets just quietly name the wrong server.
+    console.warn('[mcp] ignoring an unusable mcpUrl from /api/config:', url);
+  }
+}
+
+/**
+ * `null` unless this is a string holding an absolute http(s) URL.
+ *
+ * The scheme check is deliberate rather than incidental. `new URL()` happily
+ * parses `javascript:alert(1)` — nothing renders this value as an `href`
+ * today, and `canDeepLink` would refuse it anyway, but a value that reaches
+ * the UI from over the network should not be ABLE to carry a script scheme
+ * waiting for the next consumer to use it less carefully.
+ */
+function parseEndpoint(url: unknown): string | null {
+  if (typeof url !== 'string' || url.trim() === '') return null;
   try {
-    configured = new URL(url).toString();
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+    return parsed.toString();
   } catch {
-    configured = null;
+    return null;
   }
 }
 

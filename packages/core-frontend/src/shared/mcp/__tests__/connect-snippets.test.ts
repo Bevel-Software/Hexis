@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   canDeepLink,
   claudeCodeCommand,
@@ -37,12 +37,44 @@ describe('mcpEndpointUrl: the deployment answers for its own address', () => {
   });
 
   it('falls back rather than trusting a value it cannot parse', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     configureMcpUrl('not a url');
-    expect(mcpEndpointUrl()).toBe(`${window.location.origin}/api/mcp`);
-    configureMcpUrl('');
     expect(mcpEndpointUrl()).toBe(`${window.location.origin}/api/mcp`);
     configureMcpUrl(42);
     expect(mcpEndpointUrl()).toBe(`${window.location.origin}/api/mcp`);
+    warn.mockRestore();
+  });
+
+  /**
+   * `new URL()` parses `javascript:alert(1)` perfectly happily. Nothing
+   * renders this value as an `href` today and `canDeepLink` would refuse it
+   * anyway, but a value arriving over the network should not be able to hold
+   * a script scheme at all, waiting for a future consumer to use it less
+   * carefully.
+   */
+  it('refuses a scheme that is not http or https', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    for (const hostile of ['javascript:alert(1)', 'data:text/html,<script>', 'ftp://kb.acme.com/']) {
+      configureMcpUrl(hostile);
+      expect(mcpEndpointUrl()).toBe(`${window.location.origin}/api/mcp`);
+    }
+    warn.mockRestore();
+  });
+
+  /**
+   * A value WAS sent and we refused it: the operator gets a signal instead of
+   * silently seeing the origin. Absence is the expected older-server path and
+   * must stay quiet.
+   */
+  it('warns when it refuses a value, and stays quiet when none was sent', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    configureMcpUrl('not a url');
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockClear();
+    configureMcpUrl(undefined);
+    configureMcpUrl('');
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   // Module-global state: a suite that configures an address must not decide
