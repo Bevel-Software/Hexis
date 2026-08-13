@@ -36,6 +36,41 @@ describe('MarkdownDiffViewer', () => {
     expect(screen.getByRole('heading', { name: 'Old title' })).toBeInTheDocument();
   });
 
+  /**
+   * `scroll={false}` is what lets a parent be the scroller. The review panel
+   * needs that: when the centred column scrolled instead, the gutters either
+   * side sat outside the hit area and the wheel did nothing over them. Two
+   * nested `h-full overflow-auto` boxes also leave the outer one unable to
+   * scroll and stack both paddings.
+   */
+  describe('scroll', () => {
+    it('owns a scroller and padding by default', () => {
+      const { container } = render(<MarkdownDiffViewer payload={payload('a\n', 'b\n')} />);
+      const root = container.firstElementChild as HTMLElement;
+      expect(root.className).toContain('overflow-auto');
+      expect(root.className).toContain('px-4');
+    });
+
+    it('yields both when the parent owns the scroller', () => {
+      const { container } = render(
+        <MarkdownDiffViewer payload={payload('a\n', 'b\n')} scroll={false} />,
+      );
+      const root = container.firstElementChild as HTMLElement;
+      expect(root.className).not.toContain('overflow-auto');
+      expect(root.className).not.toContain('px-4');
+    });
+
+    it('renders the same content either way', () => {
+      for (const scroll of [true, false]) {
+        const { getByText, unmount } = render(
+          <MarkdownDiffViewer payload={payload('old line\n', 'new line\n')} scroll={scroll} />,
+        );
+        expect(getByText('new line')).toBeInTheDocument();
+        unmount();
+      }
+    });
+  });
+
   it('renders unchanged text once and changed text on both sides', () => {
     render(
       <MarkdownDiffViewer
