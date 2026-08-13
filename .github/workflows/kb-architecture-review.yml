@@ -16,9 +16,18 @@ on:
 
 jobs:
   review:
+    # This repo is public and `issue_comment` is NOT covered by the fork-PR
+    # approval policy: the run starts immediately, on the default branch, with
+    # the KB connection key and a write-scoped token in scope. Without a gate
+    # any GitHub account could comment `/bevel-review` on any PR and drive the
+    # agent. First filter: association, so a drive-by comment never spins up a
+    # runner. It is deliberately broader than "write access" — MEMBER is every
+    # org member (org base permission here is `read`) and COLLABORATOR is any
+    # invitation at any level — so the job re-checks for real below.
     if: >-
       github.event.issue.pull_request != null &&
-      startsWith(github.event.comment.body, '/bevel-review')
+      startsWith(github.event.comment.body, '/bevel-review') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -41,6 +50,37 @@ jobs:
       actions: read
 
     steps:
+      # Second filter, and the authoritative one: narrow the association gate
+      # down to actual write access on THIS repo. Runs before checkout and
+      # before the agent, so nothing attacker-influenced is touched and no
+      # secret is in scope until it passes.
+      #
+      # The permission endpoint wants push access itself; if the job token is
+      # ever scoped too thinly for it, fall back to the association the `if:`
+      # already validated rather than bricking the command — that fallback is
+      # exactly the old behaviour, never weaker.
+      - name: Authorize commenter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.event.comment.user.login }}
+          ASSOCIATION: ${{ github.event.comment.author_association }}
+        run: |
+          set -uo pipefail
+
+          if ! perm=$(gh api "repos/${{ github.repository }}/collaborators/$ACTOR/permission" \
+                        --jq .permission 2>/dev/null); then
+            echo "::warning::Could not read $ACTOR's repo permission — falling back to author_association=$ASSOCIATION."
+            exit 0
+          fi
+
+          case "$perm" in
+            admin|maintain|write)
+              echo "$ACTOR authorized (permission=$perm)." ;;
+            *)
+              echo "::error::$ACTOR has permission '$perm' on this repository — /bevel-review needs write access."
+              exit 1 ;;
+          esac
+
       # Instant sign of life: react 👀 to the triggering comment so the author
       # knows the command was seen while the agent (~3 min) spins up.
       - name: Acknowledge the command
