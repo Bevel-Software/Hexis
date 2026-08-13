@@ -19,10 +19,24 @@ export function useCopyFeedback(): { copied: boolean; copy: (text: string) => vo
     return () => window.clearTimeout(timerId);
   }, [copied]);
   const copy = useCallback((text: string) => {
+    /**
+     * `navigator.clipboard` is absent in an insecure context — which this app
+     * routinely runs in, since the default deployment is plain http on
+     * localhost. Reaching for `.writeText` there throws a TypeError
+     * SYNCHRONOUSLY, before any promise exists, so `void` swallows nothing and
+     * the click errors instead of failing quietly.
+     */
+    if (!navigator.clipboard?.writeText) {
+      setCopied(false);
+      return;
+    }
     void navigator.clipboard
       .writeText(text)
       .then(() => setCopied(true))
-      .catch(() => {});
+      // Clear rather than ignore: a failure inside the 1500ms window of an
+      // earlier success would otherwise leave the checkmark up, reporting that
+      // this copy worked when it did not.
+      .catch(() => setCopied(false));
   }, []);
   return { copied, copy };
 }

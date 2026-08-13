@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { ExternalAgentAccessPage } from '../ExternalAgentAccessPage';
@@ -104,6 +104,20 @@ describe('the interactive tab quotes the deployment, not the browser', () => {
     mount(PUBLIC_URL);
     expect(screen.getByRole('link', { name: /Configure your tools/ })).toBeInTheDocument();
   });
+
+  /**
+   * A bare `<button>` defaults to `type="submit"`. These render inside a
+   * shared component that does not get to assume which tree it lands in, and
+   * a copy button that submits an enclosing form is a nasty surprise.
+   */
+  it('gives every copy button an explicit type so it cannot submit a form', () => {
+    mount(PUBLIC_URL);
+    const copyButtons = screen.getAllByRole('button', { name: /^Copy/ });
+    expect(copyButtons.length).toBeGreaterThan(0);
+    for (const button of copyButtons) {
+      expect(button).toHaveAttribute('type', 'button');
+    }
+  });
 });
 
 describe('the key-bearing snippets quote the deployment too', () => {
@@ -198,7 +212,7 @@ describe('tabs', () => {
   it('starts on the interactive tab', () => {
     mount(PUBLIC_URL);
     const tabs = screen.getAllByRole('tab');
-    expect(within(tabs[0]!).queryByText).toBeDefined();
+    expect(tabs.map((t) => t.textContent)).toEqual(['Your agent', 'Autonomous agents']);
     expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
     expect(tabs[1]).toHaveAttribute('aria-selected', 'false');
   });

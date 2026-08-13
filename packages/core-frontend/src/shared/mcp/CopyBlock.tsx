@@ -18,6 +18,10 @@ export function CopyBlock({
       <div className="flex items-center justify-between mb-1">
         {label !== null && <div className="text-xs font-medium text-ink">{label}</div>}
         <button
+          // Explicit: a bare <button> inside a <form> defaults to `submit`,
+          // and this is a shared component now — it does not get to assume
+          // which tree it renders in.
+          type="button"
           onClick={() => copy(value)}
           className="ml-auto p-1 rounded hover:bg-hover text-ink-muted"
           aria-label={label ? `Copy: ${label}` : 'Copy to clipboard'}
