@@ -69,7 +69,7 @@ export function createAccessRoutes(
     workflowService,
     accessControl,
     kbDirName,
-    DEFAULT_BRANCH,
+    () => DEFAULT_BRANCH,
     eventBus,
   );
 

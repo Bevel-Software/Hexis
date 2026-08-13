@@ -119,8 +119,14 @@ export class RolesAdminService {
     private readonly workflowService: IWorkflowService,
     private readonly accessControl: IAccessControl,
     private readonly kbDirName: string,
-    /** The branch whose roles.yaml is authoritative for admin status. */
-    private readonly defaultBranch: string,
+    /**
+     * The branch whose roles.yaml is authoritative for admin status, read
+     * through a thunk rather than taken by value. `DEFAULT_BRANCH` is an ES
+     * module live binding that stays empty until `configureBranchModel()` runs
+     * at boot; a service constructed before that would freeze the empty string
+     * and every roles route would fail branch validation until a restart.
+     */
+    private readonly defaultBranchOf: () => string,
     /**
      * Optional so existing tests can construct the service without an event
      * bus. When present, every committed write announces itself so already-open
@@ -130,6 +136,11 @@ export class RolesAdminService {
      */
     private readonly eventBus?: WorkflowEventBus,
   ) {}
+
+  /** Resolved per call — see the constructor note on `defaultBranchOf`. */
+  private get defaultBranch(): string {
+    return this.defaultBranchOf();
+  }
 
   private get workspaceId(): string {
     return workspaceIdForBranch(this.defaultBranch);
