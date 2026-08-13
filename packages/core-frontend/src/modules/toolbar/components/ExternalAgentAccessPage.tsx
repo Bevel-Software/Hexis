@@ -3,6 +3,15 @@ import { Link } from 'react-router-dom';
 import { Check, Copy, Wrench, ExternalLink } from 'lucide-react';
 import { Dialog } from '../../../shared/components/Dialog';
 import { PageShell } from '../../../shared/components/PageShell';
+import { buttonClasses } from '../../../shared/components';
+import {
+  ConnectionInstructions,
+  claudeCodeCommand,
+  jsonConfigSnippet,
+  langdockSnippet,
+  mcpEndpointUrl,
+  useCopyFeedback,
+} from '../../../shared/mcp';
 import {
   type ExternalApiKeySummary,
   type MintedExternalApiKey,
@@ -11,29 +20,6 @@ import {
   disconnectExternalApiKey,
   listExternalApiKeys,
 } from '../services/external-api-keys.api';
-
-/**
- * "Copied" affordance with a 1500ms auto-reset. Owns the timer + its teardown
- * (so an unmounting page can't fire a stale setState), shared by the reveal
- * modal and every CopyBlock. `copy(text)` writes to the clipboard and flags
- * copied; a rejected write (insecure context / denied permission) leaves the
- * textarea selectable for manual copy and shows no false "Copied".
- */
-function useCopyFeedback(): { copied: boolean; copy: (text: string) => void } {
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (!copied) return;
-    const timerId = window.setTimeout(() => setCopied(false), 1500);
-    return () => window.clearTimeout(timerId);
-  }, [copied]);
-  const copy = useCallback((text: string) => {
-    void navigator.clipboard
-      .writeText(text)
-      .then(() => setCopied(true))
-      .catch(() => {});
-  }, []);
-  return { copied, copy };
-}
 
 const MAX_LABEL_LEN = 200;
 
@@ -69,6 +55,15 @@ function formatRelative(ts: number | null): string {
  */
 export function ExternalAgentAccessPage() {
   const labelInputId = useId();
+
+  /**
+   * What this deployment says its own address is. Read ONCE here and threaded
+   * down, so the interactive tab and the key-bearing snippets in the reveal
+   * modal cannot end up quoting different servers — which is exactly what
+   * happened while six separate sites each rebuilt it from
+   * `window.location.origin`.
+   */
+  const mcpUrl = mcpEndpointUrl();
 
   const [tab, setTab] = useState<'agent' | 'autonomous'>('agent');
   const [keys, setKeys] = useState<ExternalApiKeySummary[]>([]);
@@ -197,52 +192,21 @@ export function ExternalAgentAccessPage() {
               needed: the first time the agent connects, your browser opens so you can sign in and
               choose which tools to share with it. Everything it saves appears under your name.
             </p>
+            {/* `buttonClasses`, not a hand-rolled class string — the one
+                button primitive exists because 171 sites once shared 153
+                variants between them, and its docstring prescribes exactly
+                this shape for links. */}
             <Link
               to="/connect"
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center justify-center gap-1.5 rounded border border-line px-2 py-1.5 text-xs text-ink hover:bg-hover"
+              className={buttonClasses({ variant: 'outline', size: 'sm', className: 'w-full' })}
             >
               <Wrench size={12} />
               Configure your tools
-              <ExternalLink size={11} className="opacity-60" />
+              <ExternalLink size={11} className="opacity-60" aria-hidden="true" />
             </Link>
-            <CopyBlock
-              label="Connect Claude Code"
-              value={`claude mcp add --transport http knowledge-base ${window.location.origin}/api/mcp`}
-              rows={2}
-            />
-            <div>
-              <div className="text-xs font-medium text-ink mb-1">claude.ai / Claude Desktop</div>
-              <p className="text-[11px] text-ink-muted mb-1 leading-snug">
-                Settings → Connectors → Add custom connector, then paste this URL. When asked to
-                authorize, your browser opens this app to finish connecting.
-              </p>
-              <CopyBlock label={null} value={`${window.location.origin}/api/mcp`} rows={1} />
-            </div>
-            <div>
-              <div className="text-xs font-medium text-ink mb-1">Other agents (JSON config)</div>
-              <p className="text-[11px] text-ink-muted mb-1 leading-snug">
-                Works with Cursor, Windsurf, Cline, and most clients that load servers from a JSON
-                config and support signing in.
-              </p>
-              <CopyBlock
-                label={null}
-                value={JSON.stringify(
-                  {
-                    mcpServers: {
-                      'knowledge-base': {
-                        type: 'http',
-                        url: `${window.location.origin}/api/mcp`,
-                      },
-                    },
-                  },
-                  null,
-                  2,
-                )}
-                rows={9}
-              />
-            </div>
+            <ConnectionInstructions mcpUrl={mcpUrl} />
             <p className="text-[11px] text-ink-muted leading-snug">
               Running an unattended pipeline or CI agent that can't open a browser? Use the{' '}
               <button
@@ -450,7 +414,7 @@ export function ExternalAgentAccessPage() {
                 </div>
                 <textarea
                   readOnly
-                  value={`claude mcp add --transport http knowledge-base ${window.location.origin}/api/mcp --header "Authorization: Bearer ${reveal.plaintext}"`}
+                  value={claudeCodeCommand(mcpUrl, reveal.plaintext)}
                   rows={3}
                   className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
@@ -468,7 +432,7 @@ export function ExternalAgentAccessPage() {
                 </ol>
                 <textarea
                   readOnly
-                  value={`URL: ${window.location.origin}/api/mcp\nHeader name: Authorization\nHeader value: Bearer ${reveal.plaintext}`}
+                  value={langdockSnippet(mcpUrl, reveal.plaintext)}
                   rows={3}
                   className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
@@ -483,21 +447,7 @@ export function ExternalAgentAccessPage() {
                 </p>
                 <textarea
                   readOnly
-                  value={JSON.stringify(
-                    {
-                      mcpServers: {
-                        'knowledge-base': {
-                          type: 'http',
-                          url: `${window.location.origin}/api/mcp`,
-                          headers: {
-                            Authorization: `Bearer ${reveal.plaintext}`,
-                          },
-                        },
-                      },
-                    },
-                    null,
-                    2,
-                  )}
+                  value={jsonConfigSnippet(mcpUrl, reveal.plaintext)}
                   rows={11}
                   className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
@@ -516,33 +466,5 @@ export function ExternalAgentAccessPage() {
         </div>
       )}
     </>
-  );
-}
-
-/** Read-only snippet with a copy button, for the no-key connection configs. */
-function CopyBlock({ label, value, rows }: { label: string | null; value: string; rows: number }) {
-  const { copied, copy } = useCopyFeedback();
-
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-1">
-        {label !== null && <div className="text-xs font-medium text-ink">{label}</div>}
-        <button
-          onClick={() => copy(value)}
-          className="ml-auto p-1 rounded hover:bg-hover text-ink-muted"
-          aria-label={label ? `Copy: ${label}` : 'Copy to clipboard'}
-          title="Copy to clipboard"
-        >
-          {copied ? <Check size={14} /> : <Copy size={14} />}
-        </button>
-      </div>
-      <textarea
-        readOnly
-        value={value}
-        rows={rows}
-        className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
-        onFocus={(e) => e.currentTarget.select()}
-      />
-    </div>
   );
 }
