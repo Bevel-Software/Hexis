@@ -199,14 +199,20 @@ function isPrivateIpv4(host: string): boolean {
 }
 
 /**
- * Loopback, unique-local and link-local IPv6, plus IPv4-mapped addresses that
- * wrap a private v4 block (`::ffff:10.0.0.1` is as unreachable as `10.0.0.1`).
+ * Whether an IPv6 literal is something Anthropic could never reach.
+ *
+ * Stated as an allowlist, unlike its v4 counterpart, because v6 hands us one:
+ * globally routable unicast is `2000::/3` and nothing else is. Naming the
+ * unreachable blocks instead — loopback, ULA, link-local — reads fine and
+ * leaks, because the unreachable set is most of a 128-bit space and a list of
+ * it is never finished. Refusing everything outside `2000::/3` closes
+ * multicast, the discard prefix, the `::`-compressed reserved forms and every
+ * block IANA has not allocated yet, in one line that cannot fall behind.
  *
  * Takes the host WITH its brackets, the form `URL.hostname` returns.
  */
 function isPrivateIpv6(bracketed: string): boolean {
   const addr = bracketed.slice(1, -1).toLowerCase();
-  if (addr === '::1' || addr === '::') return true;
 
   /**
    * IPv4-mapped (`::ffff:10.0.0.1`) — an IPv4 address wearing a v6 hat, and
@@ -227,10 +233,34 @@ function isPrivateIpv6(bracketed: string): boolean {
     return isPrivateIpv4([hi! >> 8, hi! & 0xff, lo! >> 8, lo! & 0xff].join('.'));
   }
 
-  const first = Number.parseInt(addr.split(':')[0] ?? '', 16);
-  if (Number.isNaN(first)) return false;
-  if (first >= 0xfc00 && first <= 0xfdff) return true; // fc00::/7  unique-local
-  if (first >= 0xfe80 && first <= 0xfebf) return true; // fe80::/10 link-local
+  const parts = addr.split(':');
+  const first = Number.parseInt(parts[0] ?? '', 16);
+
+  /**
+   * Outside global unicast — so loopback, the unspecified address, ULA
+   * (fc00::/7), link-local (fe80::/10), multicast (ff00::/8) and the
+   * discard-only prefix (100::/64) all land here without needing a rule each.
+   *
+   * A first hextet we cannot read fails this test too, which is the right way
+   * round: `::2` splits to an empty leading field and parses as NaN, and an
+   * address we cannot parse must not be advertised as reachable. Nothing
+   * legitimate is caught by that — `2000::/3` never starts with elided zeros.
+   */
+  if (!(first >= 0x2000 && first <= 0x3fff)) return true;
+
+  /**
+   * Allocated inside `2000::/3`, still not somewhere you can deploy. The v4
+   * gate already refuses its documentation and benchmark ranges; these are the
+   * same ranges, and leaving them out is what let `2001:db8::1` read as public.
+   *
+   * `2001:db8::1` splits to ['2001','db8','','1'], but `2001::1` gives
+   * ['2001','','1'] — an empty field is elided zeros, so it reads as 0.
+   */
+  const second = parts[1] === '' ? 0 : Number.parseInt(parts[1] ?? '', 16);
+  if (Number.isNaN(second)) return true;
+  if (first === 0x2001 && second <= 0x01ff) return true; // 2001::/23 IETF protocol assignments
+  if (first === 0x2001 && second === 0x0db8) return true; // 2001:db8::/32 documentation (RFC 3849)
+  if (first === 0x3fff && second <= 0x0fff) return true; // 3fff::/20 documentation (RFC 9637)
   return false;
 }
 

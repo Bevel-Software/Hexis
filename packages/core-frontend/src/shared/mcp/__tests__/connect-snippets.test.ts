@@ -202,10 +202,14 @@ describe('canDeepLink: is this endpoint certainly unreachable?', () => {
   /**
    * A public IPv6 endpoint is a real deployment, and the earlier
    * "hostname must contain a dot" shortcut refused all of them.
+   *
+   * Google's resolver is in here on purpose: it sits at `2001:4860:...`, so it
+   * proves the `2001::/23` carve-out below refuses that /23 and not the whole
+   * `2001::/16` around it.
    */
   it('accepts a public IPv6 literal', () => {
-    expect(canDeepLink('https://[2001:db8::1]/api/mcp')).toBe(true);
     expect(canDeepLink('https://[2606:4700::1111]:8443/api/mcp')).toBe(true);
+    expect(canDeepLink('https://[2001:4860:4860::8888]/api/mcp')).toBe(true);
   });
 
   it('refuses IPv6 that is loopback, unique-local or link-local', () => {
@@ -214,6 +218,36 @@ describe('canDeepLink: is this endpoint certainly unreachable?', () => {
     expect(canDeepLink('https://[fd00::1]/api/mcp')).toBe(false); // unique-local
     expect(canDeepLink('https://[fc00::1]/api/mcp')).toBe(false); // unique-local
     expect(canDeepLink('https://[fe80::1]/api/mcp')).toBe(false); // link-local
+  });
+
+  /**
+   * The v4 gate refuses documentation, benchmark and multicast ranges. A v6
+   * gate that does not is the same bug on the other address family, and it
+   * shipped that way once: `2001:db8::1` was asserted REACHABLE here, because
+   * the check named the blocks it refused instead of the one block it allows.
+   */
+  it('holds the same line on IPv6 that it holds on IPv4', () => {
+    // Documentation — the v6 spelling of 192.0.2.0/24 and friends.
+    expect(canDeepLink('https://[2001:db8::1]/api/mcp')).toBe(false); // RFC 3849
+    expect(canDeepLink('https://[3fff::1]/api/mcp')).toBe(false); // RFC 9637
+    // Benchmarking — the v6 spelling of 198.18.0.0/15.
+    expect(canDeepLink('https://[2001:2::1]/api/mcp')).toBe(false);
+    // Multicast: never a unicast destination, refused as `a >= 224` is on v4.
+    expect(canDeepLink('https://[ff01::1]/api/mcp')).toBe(false);
+    expect(canDeepLink('https://[ff02::1]/api/mcp')).toBe(false);
+    // Teredo, and the discard-only prefix that exists to blackhole traffic.
+    expect(canDeepLink('https://[2001::1]/api/mcp')).toBe(false);
+    expect(canDeepLink('https://[100::1]/api/mcp')).toBe(false);
+  });
+
+  /**
+   * An address the parser cannot read must not be called reachable. `::2`
+   * splits to an empty leading field, and reading that as "not one of the
+   * blocks I know" used to hand it a live install button.
+   */
+  it('refuses a v6 literal it cannot parse rather than assuming it is public', () => {
+    expect(canDeepLink('https://[::2]/api/mcp')).toBe(false);
+    expect(canDeepLink('https://[::abcd]/api/mcp')).toBe(false);
   });
 
   /**
