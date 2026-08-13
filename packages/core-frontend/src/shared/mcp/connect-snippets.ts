@@ -76,6 +76,26 @@ function parseEndpoint(url: unknown): string | null {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+    /**
+     * Credentials are STRIPPED, not preserved and not rejected.
+     *
+     * A `PUBLIC_BACKEND_URL` of `https://user:hunter2@kb.acme.com` is a
+     * misconfiguration, but every surface downstream would have published the
+     * password: the copy blocks render this string on screen and put it on the
+     * clipboard, and the install link hands it to claude.ai. Rejecting outright
+     * would take the whole connect page down over a credential nobody needs —
+     * MCP authenticates over OAuth, so the userinfo is dead weight even when
+     * someone sets it.
+     *
+     * So: drop the secret, keep the address, and say so.
+     */
+    if (parsed.username !== '' || parsed.password !== '') {
+      console.warn(
+        '[mcp] stripped credentials from the configured mcpUrl — PUBLIC_BACKEND_URL should not carry a username or password',
+      );
+      parsed.username = '';
+      parsed.password = '';
+    }
     return parsed.toString();
   } catch {
     return null;
@@ -123,35 +143,94 @@ export function canDeepLink(url: string): boolean {
   // Anthropic will not fetch plaintext http, whatever the host.
   if (parsed.protocol !== 'https:') return false;
 
+  // Never hand a third party a URL carrying credentials. `parseEndpoint`
+  // already strips them on the way in; this is the second lock, because
+  // `canDeepLink` is exported and a future caller may not have gone through it.
+  if (parsed.username !== '' || parsed.password !== '') return false;
+
   const host = parsed.hostname.toLowerCase();
 
-  // Bracketed IPv6 literals and bare single-label hostnames (`https://hexis/`)
-  // have no public DNS to resolve. A dot is a weak signal but a necessary one.
-  if (!host.includes('.')) return false;
+  // Bracketed IPv6 literal, e.g. `https://[2001:db8::1]/`.
+  if (host.startsWith('[')) return !isPrivateIpv6(host);
 
   // Names that are private by definition.
   if (host === 'localhost' || host.endsWith('.localhost')) return false;
   if (host.endsWith('.local') || host.endsWith('.internal')) return false;
 
-  return !isPrivateIpv4(host);
+  if (isDottedQuad(host)) return !isPrivateIpv4(host);
+
+  // A single-label DNS name (`https://hexis/`) has no public DNS to resolve.
+  return host.includes('.');
+}
+
+/** Four dot-separated decimal octets, each 0-255. */
+function isDottedQuad(host: string): boolean {
+  const parts = host.split('.');
+  return (
+    parts.length === 4 &&
+    parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255)
+  );
 }
 
 /**
- * RFC 1918 space plus loopback, link-local and the unspecified address. Only
- * meaningful when the host IS a dotted-quad — a domain name falls straight
- * through, which is correct: we cannot resolve it and are not trying to.
+ * Every IPv4 block that is not routable on the public internet.
+ *
+ * Broader than RFC 1918 on purpose. The gate's job is "could Anthropic reach
+ * this at all", and carrier-grade NAT (100.64/10) and the benchmark range
+ * (198.18/15) are just as unreachable as 10/8 while looking like ordinary
+ * public addresses. Only meaningful for a dotted-quad host — see `isDottedQuad`.
  */
 function isPrivateIpv4(host: string): boolean {
-  const parts = host.split('.');
-  if (parts.length !== 4) return false;
-  const octets = parts.map((p) => (/^\d{1,3}$/.test(p) ? Number(p) : NaN));
-  if (octets.some((n) => Number.isNaN(n) || n > 255)) return false;
-  const [a, b] = octets as [number, number, number, number];
-  if (a === 0 || a === 127) return true; // unspecified, loopback
-  if (a === 10) return true; // 10.0.0.0/8
-  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
-  if (a === 192 && b === 168) return true; // 192.168.0.0/16
+  const [a, b, c] = host.split('.').map(Number) as [number, number, number, number];
+  if (a === 0) return true; // 0.0.0.0/8      this network
+  if (a === 10) return true; // 10.0.0.0/8     private
+  if (a === 127) return true; // 127.0.0.0/8    loopback
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10  carrier-grade NAT
   if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12  private
+  if (a === 192 && b === 0 && c === 0) return true; // 192.0.0.0/24   IETF protocol assignments
+  if (a === 192 && b === 0 && c === 2) return true; // 192.0.2.0/24   TEST-NET-1
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16 private
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15  benchmarking
+  if (a === 198 && b === 51 && c === 100) return true; // 198.51.100.0/24 TEST-NET-2
+  if (a === 203 && b === 0 && c === 113) return true; // 203.0.113.0/24 TEST-NET-3
+  if (a >= 224) return true; // 224.0.0.0/4 multicast + 240.0.0.0/4 reserved
+  return false;
+}
+
+/**
+ * Loopback, unique-local and link-local IPv6, plus IPv4-mapped addresses that
+ * wrap a private v4 block (`::ffff:10.0.0.1` is as unreachable as `10.0.0.1`).
+ *
+ * Takes the host WITH its brackets, the form `URL.hostname` returns.
+ */
+function isPrivateIpv6(bracketed: string): boolean {
+  const addr = bracketed.slice(1, -1).toLowerCase();
+  if (addr === '::1' || addr === '::') return true;
+
+  /**
+   * IPv4-mapped (`::ffff:10.0.0.1`) — an IPv4 address wearing a v6 hat, and
+   * exactly as unreachable as the address it wraps.
+   *
+   * The readable dotted form never gets here: `new URL()` normalizes
+   * `[::ffff:10.0.0.1]` to `[::ffff:a00:1]`, so the v4 address has to be
+   * decoded back out of the last two hextets. The dotted branch is kept
+   * anyway for a raw string that never went through the parser.
+   */
+  if (addr.startsWith('::ffff:')) {
+    const tail = addr.slice('::ffff:'.length);
+    if (tail.includes('.')) return isDottedQuad(tail) ? isPrivateIpv4(tail) : true;
+    const [hi, lo] = tail.split(':').map((h) => Number.parseInt(h, 16));
+    // Anything else wearing an `::ffff:` prefix is a shape we cannot read —
+    // refuse rather than guess it is public.
+    if (tail.split(':').length !== 2 || Number.isNaN(hi!) || Number.isNaN(lo!)) return true;
+    return isPrivateIpv4([hi! >> 8, hi! & 0xff, lo! >> 8, lo! & 0xff].join('.'));
+  }
+
+  const first = Number.parseInt(addr.split(':')[0] ?? '', 16);
+  if (Number.isNaN(first)) return false;
+  if (first >= 0xfc00 && first <= 0xfdff) return true; // fc00::/7  unique-local
+  if (first >= 0xfe80 && first <= 0xfebf) return true; // fe80::/10 link-local
   return false;
 }
 

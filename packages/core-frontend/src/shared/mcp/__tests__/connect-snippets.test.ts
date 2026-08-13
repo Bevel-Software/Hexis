@@ -77,6 +77,29 @@ describe('mcpEndpointUrl: the deployment answers for its own address', () => {
     warn.mockRestore();
   });
 
+  /**
+   * A `PUBLIC_BACKEND_URL` carrying userinfo would otherwise publish the
+   * password three ways: rendered on screen in the copy blocks, written to the
+   * clipboard, and handed to claude.ai in the install link. The address is
+   * kept because MCP authenticates over OAuth and the credential is dead
+   * weight; only the secret goes.
+   */
+  it('strips credentials from a configured URL instead of publishing them', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    configureMcpUrl('https://someone:hunter2@kb.acme.com/api/mcp');
+    expect(mcpEndpointUrl()).toBe('https://kb.acme.com/api/mcp');
+    expect(mcpEndpointUrl()).not.toContain('hunter2');
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('strips a username even with no password', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    configureMcpUrl('https://someone@kb.acme.com/api/mcp');
+    expect(mcpEndpointUrl()).toBe('https://kb.acme.com/api/mcp');
+    warn.mockRestore();
+  });
+
   // Module-global state: a suite that configures an address must not decide
   // the answer for the next one.
   it('forgets a configured address on reset', () => {
@@ -148,6 +171,76 @@ describe('canDeepLink: is this endpoint certainly unreachable?', () => {
     expect(canDeepLink('not a url')).toBe(false);
     expect(canDeepLink('')).toBe(false);
     expect(canDeepLink('ftp://kb.acme.com/api/mcp')).toBe(false);
+  });
+
+  /**
+   * Blocks that look like ordinary public addresses and are not routable.
+   * Carrier-grade NAT in particular reads as a normal /10 and is exactly as
+   * unreachable from Anthropic as 10.0.0.0/8.
+   */
+  it('refuses non-routable ranges that look public', () => {
+    expect(canDeepLink('https://100.64.0.1/api/mcp')).toBe(false); // CGNAT
+    expect(canDeepLink('https://100.127.255.254/api/mcp')).toBe(false); // CGNAT, top
+    expect(canDeepLink('https://198.18.0.1/api/mcp')).toBe(false); // benchmarking
+    expect(canDeepLink('https://198.19.255.254/api/mcp')).toBe(false); // benchmarking, top
+    expect(canDeepLink('https://192.0.2.1/api/mcp')).toBe(false); // TEST-NET-1
+    expect(canDeepLink('https://198.51.100.1/api/mcp')).toBe(false); // TEST-NET-2
+    expect(canDeepLink('https://203.0.113.1/api/mcp')).toBe(false); // TEST-NET-3
+    expect(canDeepLink('https://224.0.0.1/api/mcp')).toBe(false); // multicast
+    expect(canDeepLink('https://240.0.0.1/api/mcp')).toBe(false); // reserved
+  });
+
+  // The neighbours of those blocks are ordinary public space.
+  it('does not over-reach past the edges of the non-routable blocks', () => {
+    expect(canDeepLink('https://100.63.255.254/api/mcp')).toBe(true);
+    expect(canDeepLink('https://100.128.0.1/api/mcp')).toBe(true);
+    expect(canDeepLink('https://198.17.255.254/api/mcp')).toBe(true);
+    expect(canDeepLink('https://198.20.0.1/api/mcp')).toBe(true);
+    expect(canDeepLink('https://223.255.255.254/api/mcp')).toBe(true);
+  });
+
+  /**
+   * A public IPv6 endpoint is a real deployment, and the earlier
+   * "hostname must contain a dot" shortcut refused all of them.
+   */
+  it('accepts a public IPv6 literal', () => {
+    expect(canDeepLink('https://[2001:db8::1]/api/mcp')).toBe(true);
+    expect(canDeepLink('https://[2606:4700::1111]:8443/api/mcp')).toBe(true);
+  });
+
+  it('refuses IPv6 that is loopback, unique-local or link-local', () => {
+    expect(canDeepLink('https://[::1]/api/mcp')).toBe(false); // loopback
+    expect(canDeepLink('https://[::]/api/mcp')).toBe(false); // unspecified
+    expect(canDeepLink('https://[fd00::1]/api/mcp')).toBe(false); // unique-local
+    expect(canDeepLink('https://[fc00::1]/api/mcp')).toBe(false); // unique-local
+    expect(canDeepLink('https://[fe80::1]/api/mcp')).toBe(false); // link-local
+  });
+
+  /**
+   * `::ffff:10.0.0.1` is as unreachable as `10.0.0.1` wearing a different hat.
+   * Note `new URL()` normalizes it to `[::ffff:a00:1]` before we ever see it,
+   * so this only works if the v4 address is decoded out of the hextets — the
+   * readable dotted form never arrives.
+   */
+  it('sees through an IPv4-mapped IPv6 address', () => {
+    expect(canDeepLink('https://[::ffff:10.0.0.1]/api/mcp')).toBe(false);
+    expect(canDeepLink('https://[::ffff:127.0.0.1]/api/mcp')).toBe(false);
+    expect(canDeepLink('https://[::ffff:192.168.1.1]/api/mcp')).toBe(false);
+  });
+
+  // ...and does not over-reject: a mapped PUBLIC v4 address is routable.
+  it('allows an IPv4-mapped IPv6 address that wraps a public address', () => {
+    expect(canDeepLink('https://[::ffff:8.8.8.8]/api/mcp')).toBe(true);
+  });
+
+  /**
+   * Credentials must never reach a third party's dialog. `configureMcpUrl`
+   * strips them on the way in; this is the second lock, since `canDeepLink`
+   * is exported and a future caller may not come through that door.
+   */
+  it('refuses a URL carrying credentials', () => {
+    expect(canDeepLink('https://someone:hunter2@kb.acme.com/api/mcp')).toBe(false);
+    expect(canDeepLink('https://someone@kb.acme.com/api/mcp')).toBe(false);
   });
 
   /**
