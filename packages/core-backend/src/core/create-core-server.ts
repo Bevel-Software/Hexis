@@ -170,6 +170,24 @@ export async function createCoreServer(
         defaultBranch: DEFAULT_BRANCH,
         protectedBranches: [...PROTECTED_BRANCHES],
       },
+      /**
+       * Where this deployment says its MCP endpoint is — THE SAME derivation
+       * as the OAuth `resourceServerUrl` a few lines below, deliberately, and
+       * they must never be allowed to drift apart.
+       *
+       * The frontend used to build this from `window.location.origin`, which
+       * is the browser's idea of our address rather than ours. The two agree
+       * on a simple deployment and disagree behind a proxy, on a second
+       * domain, or on an internal hostname — and the one that decides whether
+       * a connection works is this one, because it is the resource identifier
+       * the OAuth metadata publishes.
+       *
+       * That was survivable while every surface was copy-paste: a human sees
+       * the host before pasting it. It stops being survivable the moment we
+       * hand the URL to a third party (a connector install link), where
+       * nobody reads it and the failure surfaces inside someone else's UI.
+       */
+      mcpUrl: new URL('/api/mcp', core.config.publicBackendUrl).toString(),
     });
   });
 
