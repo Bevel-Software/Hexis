@@ -63,18 +63,18 @@ answer to that — and the `mcp.json` projection carries only where a server is,
 never a `${VAR}` reference to how to authenticate with it. Those stay in the
 `.tool`, which is ours to interpret.
 
-**Group folders are made through the app, not by writing files.** A group
+**Plugin folders are made through the app, not by writing files.** A plugin
 exists exactly when its folder carries an `access.md` — a bare directory
 under `Plugins/` is not a plugin and is never listed. A new
 direct child of `Plugins/` needs an `access.md` naming who runs it, and the
 write gate refuses a plain write into an unused name there — so do not try to
 create a plugin by writing a skill into `Plugins/<new-name>/…`; it will be
-denied. Send the user to the app's **New group** button (or its
-`POST /api/groups` endpoint), then write into the folder it made. Names
+denied. Send the user to the app's **New plugin** button (or its
+`POST /api/plugins` endpoint), then write into the folder it made. Names
 starting with `personal-` are reserved: one such folder exists per person,
 created automatically with their first personal skill, readable only by its
-owner and never listed as a group — a signed-in user's own skills belong
-there, and move into a group by moving the skill's folder.
+owner and never listed as a plugin — a signed-in user's own skills belong
+there, and move into a plugin by moving the skill's folder.
 
 Everything under `KnowledgeBase/` is yours to arrange. Subfolders, naming,
 whether a topic is one file or twenty — all of it is a judgement call about
@@ -137,15 +137,15 @@ allowed-tools: [slack_post_message]
 ```
 
 The body is the instructions, in plain markdown. `allowed-tools` entries are
-tool names from the `.tool` manuals in the same group — a skill can only reach
-tools its group can read.
+tool names from the `.tool` manuals in the same plugin — a skill can only reach
+tools its plugin can read.
 
 ## Tool Manuals (`Plugins/<Plugin>/software.bevel.hexis/tools/*.tool`)
 
-Each group folder holds `*.tool` files — reusable **tool manuals** that let agents call external APIs. They are **not part of the knowledge graph** (never modelled as nodes) and are access-controlled like any other file via `access.md`. Any user who can *read* a `.tool` can use its tools; anyone who can *write* it sets its shared (admin) secrets (see below). Put each manual directly in the group folder whose skills use it. The same
-integration may exist in several groups as separate files (`Everyone/notion.tool`
+Each plugin folder holds `*.tool` files — reusable **tool manuals** that let agents call external APIs. They are **not part of the knowledge graph** (never modelled as nodes) and are access-controlled like any other file via `access.md`. Any user who can *read* a `.tool` can use its tools; anyone who can *write* it sets its shared (admin) secrets (see below). Put each manual directly in the plugin folder whose skills use it. The same
+integration may exist in several plugins as separate files (`Everyone/notion.tool`
 and `Finance/notion.tool`), each with its own credentials and access rule —
-a group is a folder, not a registry of unique names.
+a plugin is a folder, not a registry of unique names.
 
 A `.tool` file is JSON or YAML. Its `type` decides how tools are discovered:
 

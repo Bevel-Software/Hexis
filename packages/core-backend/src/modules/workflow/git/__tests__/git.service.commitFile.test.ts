@@ -174,7 +174,7 @@ describe('GitService.commitFile — skipValidator', () => {
       '1. Service Commitment Management',
       '1.1 In - Architecture Layering (AL)',
       '0-Governance',
-      '0.5-Layer-Group-Specific-Governance-Principles',
+      '0.5-Layer-Plugin-Specific-Governance-Principles',
     );
     const fileName = '0.5.5-Buyer-Side-Commercial-Agreement-Governance.md';
     const relPath = path.posix.join(deepDir.split(path.sep).join('/'), fileName);

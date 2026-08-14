@@ -238,7 +238,7 @@ export function ProfileMenu() {
           reason PageActions wraps it. */}
       {open && (
         <div ref={panelRef} className="absolute right-0 top-[calc(100%+5px)] z-40">
-        {/* A GROUP of buttons, not a `role="menu"`.
+        {/* A PLUGIN of buttons, not a `role="menu"`.
             `menu`/`menuitem` is a promise about the keyboard: arrow keys move
             between items, one roving tab stop, Home/End jump the ends — and
             screen readers switch to application mode to deliver it. This panel

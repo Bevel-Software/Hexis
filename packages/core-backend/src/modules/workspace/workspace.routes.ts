@@ -465,7 +465,7 @@ export function createWorkspaceRoutes(
       // The structural top-level folders are always shown as folders, even to
       // a user who can't read into them. Their existence isn't sensitive
       // (every KB has them), and keeping them visible lets the explorer render
-      // its Knowledge/Groups section view instead of collapsing to an empty
+      // its Knowledge/Plugins section view instead of collapsing to an empty
       // flat tree. A ROOT-LEVEL `Knowledge/` is the legacy pre-split layout's
       // knowledge root (kb-layout.ts calls it the neutral bucket) and gets the
       // same treatment so legacy clones don't collapse. Only the folders
@@ -849,7 +849,7 @@ export function createWorkspaceRoutes(
       // the unwind commits each side's release in reverse order, which
       // produces two single-file commits (one create, one delete) —
       // not a single merge-style rename commit, but git's log/blame
-      // rename detection still groups them visually after the fact.
+      // rename detection still plugins them visually after the fact.
       const [firstLock, secondLock] = oldPath < newPath ? [oldPath, newPath] : [newPath, oldPath];
       await withLock(id, user, firstLock, () =>
         withLock(id, user, secondLock, () =>

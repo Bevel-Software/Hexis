@@ -52,7 +52,7 @@ export function ToolPage({
   }, [oauthOutcome]);
 
   // Same rule as the skill page: back goes to the page the tool LIVES on —
-  // its group, or the personal page — never to a root the reader may not
+  // its plugin, or the personal page — never to a root the reader may not
   // have come from. Falls back to the root while the tool is still loading.
   const home = libraryHomeForItemPath(page.tool?.path ?? '');
   const backLink = (
@@ -121,10 +121,10 @@ export function ToolPage({
           )}
         </div>
         {/* No `Manage access` here, deliberately. Access is decided at the
-            GROUP — a tool inherits its folder's `access.md`, so an editor on
-            this page would either duplicate the group's one or quietly write a
-            per-file override that nobody looking at the group would see. The
-            group's `Share` panel is the single place. */}
+            PLUGIN — a tool inherits its folder's `access.md`, so an editor on
+            this page would either duplicate the plugin's one or quietly write a
+            per-file override that nobody looking at the plugin would see. The
+            plugin's `Share` panel is the single place. */}
       </header>
 
       {actionError && (

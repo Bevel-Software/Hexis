@@ -19,7 +19,7 @@ import { spliceGrant, spliceRevoke } from '../access-splice.js';
  *    govern itself (its readability follows the folder chain).
  *  - NEW: the body carries the folder's rules; the frontmatter — like every
  *    other file's — is about the FILE itself. `read: everyone` there makes
- *    the group discoverable (anyone may open the access.md and see who runs
+ *    the plugin discoverable (anyone may open the access.md and see who runs
  *    the folder) while the folder's contents stay locked.
  *
  * Compat rule under test: a file whose body is NOT parsable as rules resolves
@@ -35,7 +35,7 @@ const ROLES_YAML = `roles:
     - felix@example.com
 `;
 
-/** New-format group access.md: discoverable by everyone, readable by GTM Team. */
+/** New-format plugin access.md: discoverable by everyone, readable by GTM Team. */
 const NEW_FORMAT = `---
 read:
   - everyone
@@ -145,9 +145,9 @@ describe('access.md splice targeting', () => {
   });
 });
 
-describe('end-to-end resolution over a new-format group', () => {
+describe('end-to-end resolution over a new-format plugin', () => {
   let root: string;
-  const workspaceId = 'ws-groups-fmt';
+  const workspaceId = 'ws-plugins-fmt';
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-accessfmt-'));

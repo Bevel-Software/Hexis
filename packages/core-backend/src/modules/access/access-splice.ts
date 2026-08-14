@@ -122,7 +122,7 @@ export function validatePrincipal(p: Principal): Principal {
   }
   const role = p.role.trim();
   const canonical = canonicalRoleName(role);
-  if (!canonical) throw new AccessSpliceError('group grant needs a name');
+  if (!canonical) throw new AccessSpliceError('plugin grant needs a name');
   if (
     CONTROL_CHARS.test(role) ||
     role.includes('<') ||
@@ -130,16 +130,16 @@ export function validatePrincipal(p: Principal): Principal {
     role.includes(':') ||
     role.includes('#')
   ) {
-    throw new AccessSpliceError(`invalid group name: ${JSON.stringify(p.role)}`);
+    throw new AccessSpliceError(`invalid plugin name: ${JSON.stringify(p.role)}`);
   }
   // `deny` is never a grantee — it's the denial prefix. `everyone` IS grantable
   // (the built-in public role); the access route restricts it to the read verb.
   if (canonical === 'deny') {
-    throw new AccessSpliceError(`'${role}' is a reserved name and cannot be granted as a group`);
+    throw new AccessSpliceError(`'${role}' is a reserved name and cannot be granted as a plugin`);
   }
   const round = parseAccessEntry(role);
   if (!round.ok || round.entry.kind !== 'role' || round.entry.deny) {
-    throw new AccessSpliceError(`group grant does not round-trip: ${JSON.stringify(p)}`);
+    throw new AccessSpliceError(`plugin grant does not round-trip: ${JSON.stringify(p)}`);
   }
   return { kind: 'role', role };
 }

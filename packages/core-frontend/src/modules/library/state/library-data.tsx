@@ -3,18 +3,18 @@ import { LibraryContext } from './library-context';
 import { pluginOfPath, isPersonalPluginFolder } from '@bevel-software/platform-shared';
 
 /**
- * The group a card files under — with personal folders mapped to `null`, the
- * "yours alone" bucket. A personal folder (`Groups/personal-<id>/`) is where
- * a person's own skills live; it is a place, not a group, and the only
+ * The plugin a card files under — with personal folders mapped to `null`, the
+ * "yours alone" bucket. A personal folder (`Plugins/personal-<id>/`) is where
+ * a person's own skills live; it is a place, not a plugin, and the only
  * personal items a caller can ever read are their own (the folder's seeded
  * access.md names nobody else), so `null` here always means "yours".
  */
-function displayGroupOf(path: string): string | null {
-  const group = pluginOfPath(path);
-  return group !== null && isPersonalPluginFolder(group) ? null : group;
+function displayPluginOf(path: string): string | null {
+  const plugin = pluginOfPath(path);
+  return plugin !== null && isPersonalPluginFolder(plugin) ? null : plugin;
 }
 import { useLibraryData, type LibraryData } from '../hooks/useLibraryData';
-import { listGroups, type GroupSummary } from '../services/groups.api';
+import { listPlugins, type PluginSummary } from '../services/plugins.api';
 import {
   neededToolsFor,
   skillStatus,
@@ -25,8 +25,8 @@ import {
 /**
  * The Library's data host.
  *
- * Everything under `/skills-and-tools/*` — the gallery, the group pages, the
- * all-groups index — reads the SAME catalog, so it is fetched once here rather
+ * Everything under `/skills-and-tools/*` — the gallery, the plugin pages, the
+ * all-plugins index — reads the SAME catalog, so it is fetched once here rather
  * than once per page. That matters more than it looks: `useLibraryData` pays an
  * N+1 `getSkill` to read `allowed-tools` frontmatter, and mounting it per route
  * would re-pay it on every navigation.
@@ -34,8 +34,8 @@ import {
  * Two independent loads live side by side:
  *  - the catalog (`useLibraryData`), whose failure IS surfaced (the gallery
  *    shows a banner — an empty library is indistinguishable from a broken one);
- *  - the group index (`GET /api/groups`), whose failure degrades to `[]` and is
- *    reported through `groupsError` for the surfaces that want to say so.
+ *  - the plugin index (`GET /api/plugins`), whose failure degrades to `[]` and is
+ *    reported through `pluginsError` for the surfaces that want to say so.
  */
 
 /** One card in the gallery — a skill or an integration, already status-derived. */
@@ -46,8 +46,8 @@ export interface LibraryItem {
   description: string;
   owned: boolean;
   status: AttentionStatus;
-  /** Folder group from the KB path, or null when the item is in none. */
-  group: string | null;
+  /** Folder plugin from the KB path, or null when the item is in none. */
+  plugin: string | null;
   /** Repo-root-relative path — the skill's folder, or the `.tool` file. */
   path: string;
   /**
@@ -77,41 +77,41 @@ export interface LibraryItem {
 export interface LibraryContextValue extends LibraryData {
   items: LibraryItem[];
   /** `[]` until loaded, and on error. */
-  groupSummaries: GroupSummary[];
-  groupsLoading: boolean;
-  groupsError: string | null;
-  reloadGroups(): void;
+  pluginSummaries: PluginSummary[];
+  pluginsLoading: boolean;
+  pluginsError: string | null;
+  reloadPlugins(): void;
 }
 
 
 export function LibraryProvider({ children }: { children: ReactNode }) {
   const data = useLibraryData();
-  const [groupSummaries, setGroupSummaries] = useState<GroupSummary[]>([]);
-  const [groupsLoading, setGroupsLoading] = useState(true);
-  const [groupsError, setGroupsError] = useState<string | null>(null);
-  const [groupsRevision, setGroupsRevision] = useState(0);
+  const [pluginSummaries, setPluginSummaries] = useState<PluginSummary[]>([]);
+  const [pluginsLoading, setPluginsLoading] = useState(true);
+  const [pluginsError, setPluginsError] = useState<string | null>(null);
+  const [pluginsRevision, setPluginsRevision] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    listGroups()
-      .then((groups) => {
+    listPlugins()
+      .then((plugins) => {
         if (cancelled) return;
-        setGroupSummaries(groups);
-        setGroupsError(null);
+        setPluginSummaries(plugins);
+        setPluginsError(null);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
         // Keep whatever we had: a transient failure on a manual reload should
         // not blank a list the user is looking at.
-        setGroupsError(err instanceof Error ? err.message : "Couldn't load groups.");
+        setPluginsError(err instanceof Error ? err.message : "Couldn't load plugins.");
       })
       .finally(() => {
-        if (!cancelled) setGroupsLoading(false);
+        if (!cancelled) setPluginsLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [groupsRevision]);
+  }, [pluginsRevision]);
 
   const items: LibraryItem[] = useMemo(() => {
     const skillItems: LibraryItem[] = data.skills.map((s) => ({
@@ -120,7 +120,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: data.ownedSkills.has(s.name),
-      group: displayGroupOf(s.path),
+      plugin: displayPluginOf(s.path),
       path: s.path,
       version: s.version,
       status: skillStatus(
@@ -130,13 +130,13 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     /**
      * Proposed skills, alongside the released ones rather than in a pile of
      * their own. The question "is this skill available?" is asked in the same
-     * place as "does this group have one?", and a separate shelf answers the
+     * place as "does this plugin have one?", and a separate shelf answers the
      * second while hiding the first — which is exactly the failure this fixes:
      * a skill an agent proposed was nowhere at all until it merged.
      *
      * `status` is the neutral `ok`: a proposal has no integrations resolved
      * against it, and reporting `warn` would put it in the setup filter and the
-     * group's amber count as though something were broken.
+     * plugin's amber count as though something were broken.
      */
     const pendingItems: LibraryItem[] = data.pendingSkills.map((s) => ({
       kind: 'skill',
@@ -144,7 +144,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: false,
-      group: displayGroupOf(s.path),
+      plugin: displayPluginOf(s.path),
       path: s.path,
       version: s.version,
       status: { state: 'ok', text: 'In review' },
@@ -163,7 +163,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       // manual yet (see report) — the card stays clean; detail lives behind it.
       description: '',
       owned: t.canWrite,
-      group: displayGroupOf(t.path),
+      plugin: displayPluginOf(t.path),
       path: t.path,
       status: toolStatus(t),
     }));
@@ -180,21 +180,21 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   // already covers the first load, and flipping it from the event that asked
   // for the refetch keeps the effect body free of synchronous setState (which
   // costs a cascading render on every revision).
-  const reloadGroups = useCallback(() => {
-    setGroupsLoading(true);
-    setGroupsRevision((r) => r + 1);
+  const reloadPlugins = useCallback(() => {
+    setPluginsLoading(true);
+    setPluginsRevision((r) => r + 1);
   }, []);
 
   const value = useMemo(
     (): LibraryContextValue => ({
       ...data,
       items,
-      groupSummaries,
-      groupsLoading,
-      groupsError,
-      reloadGroups,
+      pluginSummaries,
+      pluginsLoading,
+      pluginsError,
+      reloadPlugins,
     }),
-    [data, items, groupSummaries, groupsLoading, groupsError, reloadGroups],
+    [data, items, pluginSummaries, pluginsLoading, pluginsError, reloadPlugins],
   );
 
   return <LibraryContext.Provider value={value}>{children}</LibraryContext.Provider>;
@@ -207,8 +207,8 @@ export function useLibrary(): LibraryContextValue {
 }
 
 /**
- * How many of a group's integrations need setup — the amber count on the
- * sidebar row and the group page's banner, computed from one place so the two
+ * How many of a plugin's integrations need setup — the amber count on the
+ * sidebar row and the plugin page's banner, computed from one place so the two
  * can never disagree.
  *
  * Only integrations count. A skill that reports `warn` is warning about the
@@ -216,8 +216,8 @@ export function useLibrary(): LibraryContextValue {
  * broken connection; pending change requests are a review concern, not a setup
  * one, and belong to a different surface.
  */
-export function attentionOf(items: LibraryItem[], group: string): number {
+export function attentionOf(items: LibraryItem[], plugin: string): number {
   return items.filter(
-    (i) => i.group === group && i.kind === 'integration' && i.status.state !== 'ok',
+    (i) => i.plugin === plugin && i.kind === 'integration' && i.status.state !== 'ok',
   ).length;
 }

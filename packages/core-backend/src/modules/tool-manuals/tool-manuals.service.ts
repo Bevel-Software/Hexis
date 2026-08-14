@@ -270,7 +270,7 @@ export class ToolManualService implements IToolManualService {
   async preview(content: string): Promise<ToolManualPreview> {
     let descriptor: ToolManualDescriptor;
     try {
-      descriptor = normalizeToolManual('draft', 'Groups/draft.tool', content);
+      descriptor = normalizeToolManual('draft', 'Plugins/draft.tool', content);
     } catch (err) {
       return { ok: false, errors: [err instanceof Error ? err.message : String(err)] };
     }
@@ -487,7 +487,7 @@ export class ToolManualService implements IToolManualService {
     }
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
-    // A `.tool` sits under `Groups/`, beside the skills that use it.
+    // A `.tool` sits under `Plugins/`, beside the skills that use it.
     const files: { abs: string; rel: string }[] = [];
     const root = path.join(kbRoot, PLUGINS_DIR);
     for (const rel of await walkFiles(root, (n) => n.toLowerCase().endsWith('.tool'))) {

@@ -78,7 +78,7 @@ export interface CorePorts {
   erasureParticipants?: IErasureParticipant[];
   /**
    * Root folders THIS distribution reserves in the knowledge base, on top of
-   * core's `KnowledgeBase/` + `Groups/`. Core default: `[]`.
+   * core's `KnowledgeBase/` + `Plugins/`. Core default: `[]`.
    *
    * A name here does two things: the seeder guarantees the folder exists on
    * every branch it tops up, and — because the names are already reserved in

@@ -37,7 +37,7 @@ const BOT_EMAIL = 'bevel-workflow@bevel.software';
 const REQUIRED_FILES: readonly string[] = ['access.md', 'AGENTS.md', '.bevelignore', '.gitignore'];
 
 /**
- * The two roots CORE gives a knowledge base: the ontologies, and the groups
+ * The two roots CORE gives a knowledge base: the ontologies, and the plugins
  * that hold skills and tools.
  *
  * `Data/`, `Agents/` and `Pipelines/` are deliberately absent. They scaffold
@@ -236,7 +236,7 @@ export class KbSeedService implements IKbSeedService {
     try {
       const added: string[] = [];
       // BEFORE the dir top-up: `ensureRequiredDirs` would otherwise create an
-      // empty `Plugins/` next to the `Groups/` that is about to become it, and
+      // empty `Plugins/` next to the `Plugins/` that is about to become it, and
       // the migration refuses a destination that already exists — so the
       // scaffolding would quietly block the very migration it precedes.
       const migration = await migrateGroupsToPlugins(repoDir);
@@ -295,7 +295,7 @@ export class KbSeedService implements IKbSeedService {
       // values, so this is a harmless no-op there).
       await this.stampIdentity(repoDir);
       // `-A` so the migration's renames stage their DELETIONS as well; a plain
-      // `add` would commit the new tree while leaving `Groups/` in the index.
+      // `add` would commit the new tree while leaving `Plugins/` in the index.
       await this.git(repoDir, ['add', '-A', '--', ...added]);
       const message = migration.migrated
         ? `Move ${LEGACY_GROUPS_DIR}/ to ${PLUGINS_DIR}/ (Agent Plugins layout)`
@@ -440,7 +440,7 @@ export class KbSeedService implements IKbSeedService {
    * where it came from. Absent file, or a file that already lists the pattern,
    * is a no-op, so running it on every clone changes nothing after the first.
    *
-   * Matched line-wise rather than by substring: a rule for `Groups/AGENTS.md`
+   * Matched line-wise rather than by substring: a rule for `Plugins/AGENTS.md`
    * is not a rule for the root `AGENTS.md`, and treating it as one would leave
    * the mismatch this exists to close.
    */
@@ -480,10 +480,10 @@ export class KbSeedService implements IKbSeedService {
     for (const rootDir of this.requiredDirs) {
       const abs = path.join(repoDir, rootDir);
       // `lstat`, not `exists`: `fs.access` answers "is there something here?",
-      // which is true of a FILE named `Groups` — and the old skip-if-present
+      // which is true of a FILE named `Plugins` — and the old skip-if-present
       // check then did nothing and reported success, leaving a knowledge base
       // permanently missing a root it claims to guarantee. `lstat` rather than
-      // `stat` so a SYMLINK is rejected too: a link named `Groups` is not a KB
+      // `stat` so a SYMLINK is rejected too: a link named `Plugins` is not a KB
       // layout, and one pointing outside the repo would make every later write
       // into it land somewhere nobody asked for.
       const found = await this.lstatOrNull(abs);

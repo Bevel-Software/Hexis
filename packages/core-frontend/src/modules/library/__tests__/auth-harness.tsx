@@ -5,8 +5,8 @@ import { AuthContext, type AuthContextValue } from '../../auth/state/auth.contex
 /**
  * The signed-in user, for tests that render a Library surface.
  *
- * The Library names a person's own space after them ("Juan's Group"), so the
- * sidebar and the all-groups index now read `useAuth`. In production that is
+ * The Library names a person's own space after them ("Juan's Plugin"), so the
+ * sidebar and the all-plugins index now read `useAuth`. In production that is
  * free — nothing under `CoreAppShell` renders before a user exists — but a
  * test that mounts a page in isolation has no provider above it, and `useAuth`
  * throws rather than returning null.
@@ -18,8 +18,8 @@ import { AuthContext, type AuthContextValue } from '../../auth/state/auth.contex
 /** The name every Library suite expects to see reflected back. */
 export const TEST_USER_NAME = 'Juan Viera';
 
-/** What `personalGroupName(TEST_USER_NAME)` produces — assert against this. */
-export const TEST_PERSONAL_GROUP = "Juan's Group";
+/** What `personalPluginName(TEST_USER_NAME)` produces — assert against this. */
+export const TEST_PERSONAL_GROUP = "Juan's Plugin";
 
 export function authValue(over: Partial<AuthContextValue> = {}): AuthContextValue {
   return {

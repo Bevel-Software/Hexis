@@ -103,8 +103,8 @@ export class SkillService implements ISkillService {
   }
 
   private async scanDisk(): Promise<ParsedSkill[]> {
-    // Ensure the default-branch clone exists, then scan its Groups/ dir. Any
-    // failure (no workspace, no Groups/ dir) degrades to an empty catalog — the
+    // Ensure the default-branch clone exists, then scan its Plugins/ dir. Any
+    // failure (no workspace, no Plugins/ dir) degrades to an empty catalog — the
     // manual/tools must never break because skills can't be read.
     let wsId: string;
     try {
@@ -119,7 +119,7 @@ export class SkillService implements ISkillService {
     // tree and treat every folder that directly contains a SKILL.md as a skill;
     // don't descend past it — its inner files are bundled assets, not nested
     // skills. The skill name is the leaf folder name; its path is the full
-    // repo-relative folder (e.g. `Groups/Development/coding-guidelines`).
+    // repo-relative folder (e.g. `Plugins/Development/coding-guidelines`).
     const out: ParsedSkill[] = [];
     const walk = async (dir: string, relFolder: string): Promise<void> => {
       let entries: import('node:fs').Dirent[];

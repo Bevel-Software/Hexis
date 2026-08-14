@@ -9,7 +9,7 @@ import {
 import type { PendingEntry } from '../state/workspace.context';
 
 // RESERVED is not the same as CREATED (see kb-layout.ts): core only seeds
-// KnowledgeBase/ and Groups/, but every reserved name renders as its own root
+// KnowledgeBase/ and Plugins/, but every reserved name renders as its own root
 // when present — a distribution that owns the execution layer seeds Data/,
 // Agents/ and Pipelines/, and a KB that has them must not see them folded
 // into Knowledge as stray content.
@@ -86,7 +86,7 @@ function collectFilesByBasename(tree: FileTreeEntry | null, basename: string, ac
  * Returns a freshly-allocated tree; the input is not mutated. Children at
  * each level are re-sorted so synthesized entries appear in the same order
  * a server refresh would render them: directories first, then files,
- * alphabetical within each group.
+ * alphabetical within each plugin.
  */
 export function mergePendingIntoTree(
   tree: FileTreeEntry,

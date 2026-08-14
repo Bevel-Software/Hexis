@@ -88,7 +88,7 @@ describe('ToolManualService', () => {
   });
 
   test('listAllSummaries returns every manual regardless of caller access', async () => {
-    // The group index counts a group's tools for people who cannot read them,
+    // The plugin index counts a plugin's tools for people who cannot read them,
     // so this surface must ignore the ACL that `listAccessible` applies.
     const service = svc(denyBilling);
     expect((await service.listAccessible('user@x.eu')).map((m) => m.name)).toEqual(['weather']);

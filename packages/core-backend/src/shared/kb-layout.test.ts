@@ -17,7 +17,7 @@ describe('ontologyOf', () => {
   });
 
   it('treats a nested ontology directory as the full prefix before the marker', () => {
-    expect(ontologyOf('KnowledgeBase/Group/Sub/Knowledge/x.md')).toBe('KnowledgeBase/Group/Sub');
+    expect(ontologyOf('KnowledgeBase/Plugin/Sub/Knowledge/x.md')).toBe('KnowledgeBase/Plugin/Sub');
   });
 
   it('returns null when the marker sits directly under KnowledgeBase/', () => {
@@ -41,8 +41,8 @@ describe('ontologyOf', () => {
     expect(ontologyOf('KnowledgeBase/Ops/Knowledge/x.md')).toBe('KnowledgeBase/Ops');
   });
 
-  it('returns null for Groups and root config (neutral)', () => {
-    expect(ontologyOf('Groups/some-skill/SKILL.md')).toBeNull();
+  it('returns null for Plugins and root config (neutral)', () => {
+    expect(ontologyOf('Plugins/some-skill/SKILL.md')).toBeNull();
     expect(ontologyOf('access.md')).toBeNull();
     expect(ontologyOf('roles.yaml')).toBeNull();
   });

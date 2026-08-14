@@ -142,8 +142,8 @@ describe('ToolPage: frame', () => {
     expect(screen.queryByText(/Tool · /)).toBeNull();
   });
 
-  it("goes back to the tool's own group from the back link", async () => {
-    // Not the Library root: the reader opened this tool off its group page,
+  it("goes back to the tool's own plugin from the back link", async () => {
+    // Not the Library root: the reader opened this tool off its plugin page,
     // and "back" should land where the tool lives. Derived from the path, so
     // a deep link gets the same destination as a click.
     renderPage();
@@ -151,7 +151,7 @@ describe('ToolPage: frame', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '‹ GTM' }));
     await waitFor(() =>
-      expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools/groups/GTM'),
+      expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools/plugins/GTM'),
     );
   });
 
@@ -280,9 +280,9 @@ describe('ToolPage: connection', () => {
 
 describe('ToolPage: manage access', () => {
   it('offers none, to anyone, including an admin', async () => {
-    // Access is decided at the GROUP. A tool inherits its folder's rules, so an
-    // editor here would either duplicate the group's or quietly write a
-    // per-file override nobody looking at the group would ever see.
+    // Access is decided at the PLUGIN. A tool inherits its folder's rules, so an
+    // editor here would either duplicate the plugin's or quietly write a
+    // per-file override nobody looking at the plugin would ever see.
     renderPage({ isAdmin: true });
     await screen.findByRole('heading', { name: 'heyreach', level: 1 });
     expect(screen.queryByRole('button', { name: 'Manage access' })).toBeNull();

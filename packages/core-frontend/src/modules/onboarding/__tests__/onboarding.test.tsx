@@ -215,7 +215,7 @@ describe('WelcomePage', () => {
       <Routes>
         <Route path={WELCOME_PATH} element={<WelcomePage />} />
         <Route path="/skills-and-tools" element={<div>library</div>} />
-        <Route path="/skills-and-tools/yours" element={<div>your group</div>} />
+        <Route path="/skills-and-tools/yours" element={<div>your plugin</div>} />
       </Routes>,
       auth,
       route,
@@ -288,7 +288,7 @@ describe('WelcomePage', () => {
     expect(sidebarState()).toMatchObject({ collapsed: true, instant: true });
   });
 
-  it('leaves it collapsed when you go to your own group', async () => {
+  it('leaves it collapsed when you go to your own plugin', async () => {
     setSidebarCollapsed(false);
     mountPage(newUser(), greeted);
     await userEvent.click(screen.getByRole('button', { name: /Go to your skills/ }));
@@ -432,9 +432,9 @@ describe('WelcomePage', () => {
   });
 
   // Exact, not a substring: `/skills-and-tools` is a PREFIX of the personal
-  // group's path, so a loose match would pass even if Done dropped someone in
+  // plugin's path, so a loose match would pass even if Done dropped someone in
   // the whole company's catalog instead of their own shelf.
-  it('Done concludes: server write + landing in your own group', async () => {
+  it('Done concludes: server write + landing in your own plugin', async () => {
     mountPage();
     await userEvent.click(screen.getByRole('button', { name: 'Done' }));
     expect(authFetchMock).toHaveBeenCalledWith(
@@ -461,9 +461,9 @@ describe('WelcomePage', () => {
   // including none, was possible.
   it('presents the client picker as an exclusive choice', async () => {
     mountPage();
-    const group = screen.getByRole('radiogroup', { name: 'Your agent' });
+    const plugin = screen.getByRole('radioplugin', { name: 'Your agent' });
     const options = screen.getAllByRole('radio');
-    expect(group).toContainElement(options[0]!);
+    expect(plugin).toContainElement(options[0]!);
     expect(options.map((o) => o.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
     await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
     expect(screen.getAllByRole('radio').map((o) => o.getAttribute('aria-checked'))).toEqual([
@@ -474,8 +474,8 @@ describe('WelcomePage', () => {
   });
 
   /**
-   * `role="radiogroup"` is a promise about the keyboard, not just a label for
-   * a screen reader: arrows select, and selection follows focus. The group
+   * `role="radioplugin"` is a promise about the keyboard, not just a label for
+   * a screen reader: arrows select, and selection follows focus. The plugin
    * wraps, because three options in a row have no edge worth stopping at.
    */
   it('drives the picker with the arrow keys, wrapping at both ends', async () => {
@@ -507,9 +507,9 @@ describe('WelcomePage', () => {
     ]);
   });
 
-  // Into the person's OWN group, not the whole catalog — the same place the
+  // Into the person's OWN plugin, not the whole catalog — the same place the
   // sidebar's personal row goes.
-  it('the skip link leaves for your own group, without concluding', async () => {
+  it('the skip link leaves for your own plugin, without concluding', async () => {
     mountPage();
     await userEvent.click(screen.getByRole('button', { name: /Go to your skills/ }));
     expect(authFetchMock).not.toHaveBeenCalled();
@@ -556,7 +556,7 @@ describe('WelcomePage', () => {
         <AppRegistryContext.Provider value={{ ...EMPTY_REGISTRY, welcomeExit }}>
           <Routes>
             <Route path={WELCOME_PATH} element={<WelcomePage />} />
-            <Route path="/skills-and-tools/yours" element={<div>your group</div>} />
+            <Route path="/skills-and-tools/yours" element={<div>your plugin</div>} />
             <Route path="/workspace" element={<div>knowledge</div>} />
           </Routes>
         </AppRegistryContext.Provider>,

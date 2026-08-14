@@ -21,7 +21,7 @@ import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
 import { registerSkillsTools, createSkillsRoutes } from '../modules/skills/index.js';
-import { createGroupsRoutes } from '../modules/groups/index.js';
+import { createPluginsRoutes } from '../modules/plugins/index.js';
 import type { SessionOntologyGate } from '../modules/workspace/session-ontology.gate.js';
 import {
   createSecretsVaultRoutes,
@@ -386,17 +386,17 @@ export async function createCoreServer(
     core.authMiddleware,
     createSkillsRoutes(core.skillService, core.pendingSkillsService),
   );
-  // Group enumeration + join requests. Browser-only (JWT), and fail-closed
-  // like every other read surface: groups the caller cannot access (member,
+  // Plugin enumeration + join requests. Browser-only (JWT), and fail-closed
+  // like every other read surface: plugins the caller cannot access (member,
   // manager, or discoverable via the access.md file's own read grant) are
   // absent from the list. A join request is a plain change request.
-  app.use('/api', core.authMiddleware, createGroupsRoutes(
-    core.groupIndexService,
+  app.use('/api', core.authMiddleware, createPluginsRoutes(
+    core.pluginIndexService,
     core.accessControl,
     core.workflowService,
     core.workspaceService,
     core.joinRequestsService,
-    core.groupProvisionService,
+    core.pluginProvisionService,
     core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
   ));

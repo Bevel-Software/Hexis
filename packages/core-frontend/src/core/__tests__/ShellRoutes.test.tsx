@@ -91,7 +91,7 @@ describe('ShellRoutes', () => {
 
   it('keeps a tool deep link inside the Skills & Tools surface', () => {
     // The app owns everything under `/skills-and-tools/*`, so its nested
-    // routes (the tool page, the group pages) must not fall into the shell's
+    // routes (the tool page, the plugin pages) must not fall into the shell's
     // catch-all on a cold load or a refresh.
     renderAt('/skills-and-tools/tools/heyreach');
     expect(screen.getByTestId('pathname')).toHaveTextContent(

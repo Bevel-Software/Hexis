@@ -22,7 +22,7 @@ import { SettingsNav, type LinkableItem } from './SettingsNav';
  * something each page has to remember to render.
  *
  * It fills the app's ONE `SidebarFrame` — the third renderer of it, after
- * Knowledge's file tree and Skills & Tools' group list. `sidebar.ts` already
+ * Knowledge's file tree and Skills & Tools' plugin list. `sidebar.ts` already
  * states the claim this relies on: there is one nav, in one place, holding a
  * different list depending on where you are.
  *

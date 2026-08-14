@@ -1047,12 +1047,12 @@ export class GitService implements IGitService {
       // protected pushes; that's defence-in-depth against local rebases or
       // `commit-tree` shenanigans that might bypass the commit-time gate.
       // `systemAuthorized` skips the gate for flows whose ENDPOINT is the
-      // authorization — group provisioning commits an access.md into a
+      // authorization — plugin provisioning commits an access.md into a
       // folder that does not exist at origin yet, which this gate can only
       // ever read as "write: Admin". The provisioning service has already
       // decided the write is legitimate (unused name, exclusive create);
       // gating it here again just refuses every non-admin the product
-      // promised a group to.
+      // promised a plugin to.
       if (isProtectedBranch(branch) && !opts?.systemAuthorized) {
         const touched = await this.unpushedTouchedPaths(cwd);
         await this.assertCanWriteAtRef(

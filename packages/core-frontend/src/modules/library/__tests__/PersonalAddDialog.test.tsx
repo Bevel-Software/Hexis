@@ -115,7 +115,7 @@ describe('PersonalAddDialog', () => {
     const { field } = renderDialog();
     expect(field()).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
-    expect(screen.getByText(/Yours alone until you add it to a group/)).toBeInTheDocument();
+    expect(screen.getByText(/Yours alone until you add it to a plugin/)).toBeInTheDocument();
   });
 
   it('creates the skill as PERSONAL. Destination resolution belongs to the api layer', async () => {
@@ -156,7 +156,7 @@ describe('PersonalAddDialog', () => {
     expect(screen.queryByText(/sent for review/)).not.toBeInTheDocument();
   });
 
-  it('refuses a name a group’s skill already holds', async () => {
+  it('refuses a name a plugin’s skill already holds', async () => {
     const { field, create } = renderDialog(['rfi']);
     fireEvent.change(field(), { target: { value: 'RFI' } });
     expect(screen.getByRole('alert')).toHaveTextContent('already exists');
@@ -171,7 +171,7 @@ describe('PersonalAddDialog', () => {
     expect(screen.queryByRole('textbox', { name: 'Skill name' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
     expect(screen.getByText(/Tell your agent what you need/)).toBeInTheDocument();
-    expect(screen.getByText(/Yours alone until you add it to a group/)).toBeInTheDocument();
+    expect(screen.getByText(/Yours alone until you add it to a plugin/)).toBeInTheDocument();
     expect(apiMock.createEmptySkill).not.toHaveBeenCalled();
   });
 });

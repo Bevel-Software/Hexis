@@ -21,8 +21,8 @@ import type { LibraryData } from '../hooks/useLibraryData';
 const dataMock = vi.hoisted(() => ({ useLibraryData: vi.fn() }));
 vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryData }));
 
-vi.mock('../services/groups.api', () => ({
-  listGroups: vi.fn().mockResolvedValue([]),
+vi.mock('../services/plugins.api', () => ({
+  listPlugins: vi.fn().mockResolvedValue([]),
   listJoinRequests: vi.fn().mockResolvedValue([]),
 }));
 
@@ -127,7 +127,7 @@ describe('WorkspaceItemRoute', () => {
       'create-sales-deck::reference/LESSONS.md',
     );
     // The ONE library sidebar is on screen with it — same surface, not a copy.
-    expect(screen.getByRole('button', { name: /^All groups/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^All plugins/ })).toBeInTheDocument();
   });
 
   it('a bare skill-folder URL opens SKILL.md', async () => {
@@ -152,7 +152,7 @@ describe('WorkspaceItemRoute', () => {
       'brand-new-skill::SKILL.md',
     );
     // …inside the library surface, never the Knowledge view.
-    expect(screen.getByRole('button', { name: /^All groups/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^All plugins/ })).toBeInTheDocument();
   });
 
   it("a `.tool` URL falls back to the filename slug when the catalog hasn't loaded", async () => {
@@ -161,19 +161,19 @@ describe('WorkspaceItemRoute', () => {
     expect(await screen.findByLabelText('tool-page')).toHaveTextContent('notion');
   });
 
-  it("a Groups path that is no item lands on its group's page", async () => {
+  it("a Plugins path that is no item lands on its plugin's page", async () => {
     renderAt(itemUrl('Plugins/Sales/access.md'));
     await waitFor(() =>
-      expect(screen.getByLabelText('pathname')).toHaveTextContent('/skills-and-tools/groups/Sales'),
+      expect(screen.getByLabelText('pathname')).toHaveTextContent('/skills-and-tools/plugins/Sales'),
     );
   });
 
   /**
-   * A group may carry CATEGORY folders: `skills.service` walks until it finds
+   * A plugin may carry CATEGORY folders: `skills.service` walks until it finds
    * a `SKILL.md` and treats that folder as the skill, so `Plugins/Engineering/
    * coding/create-ticket/SKILL.md` is a skill named `create-ticket`.
    *
-   * Reading the first segment below the group asked for the category —
+   * Reading the first segment below the plugin asked for the category —
    * "coding", which no skill answers to — so every nested skill listed
    * perfectly and then reported "doesn't exist, or you don't have access to
    * it" on click. Every fixture here used to be flat, which is exactly why
@@ -229,7 +229,7 @@ describe('WorkspaceItemRoute', () => {
 
     it('resolves a `.tool` filed under a category folder, by its catalog slug', async () => {
       // `walkFiles` finds manuals at ANY depth, so this is a real listed tool;
-      // matching only the group's top level listed it and 404'd the click. The
+      // matching only the plugin's top level listed it and 404'd the click. The
       // slug is the manual's declared `id`, which need not match the filename —
       // so a fixture whose slug equals its filename would prove nothing.
       dataMock.useLibraryData.mockReturnValue({
@@ -250,13 +250,13 @@ describe('WorkspaceItemRoute', () => {
       expect(await screen.findByLabelText('tool-page')).toHaveTextContent('internal_deploy');
     });
 
-    it("sends a category folder's own access.md to the group page", async () => {
-      // The same answer a stray file at the group's top level gets. Before, it
+    it("sends a category folder's own access.md to the plugin page", async () => {
+      // The same answer a stray file at the plugin's top level gets. Before, it
       // fell through to a SkillPage named after the category.
       renderAt(itemUrl('Plugins/Engineering/coding/access.md'));
       await waitFor(() =>
         expect(screen.getByLabelText('pathname')).toHaveTextContent(
-          '/skills-and-tools/groups/Engineering',
+          '/skills-and-tools/plugins/Engineering',
         ),
       );
     });
@@ -267,18 +267,18 @@ describe('WorkspaceItemRoute', () => {
       // the catalog is what settles it, so hold the slot until it lands.
       dataMock.useLibraryData.mockReturnValue({ ...NESTED, loading: true, skills: [], tools: [] });
       renderAt(itemUrl('Plugins/Engineering/coding/create-ticket'));
-      expect(await screen.findByRole('button', { name: /^All groups/ })).toBeInTheDocument();
+      expect(await screen.findByRole('button', { name: /^All plugins/ })).toBeInTheDocument();
       expect(screen.queryByLabelText('skill-page')).toBeNull();
     });
 
-    it('sends a bare CATEGORY folder to its group, not to a skill page', async () => {
+    it('sends a bare CATEGORY folder to its plugin, not to a skill page', async () => {
       // A category is not a skill, and `coding` names none. What tells it apart
       // from a just-created skill the catalog hasn't caught up with is that the
       // catalog knows skills UNDER it.
       renderAt(itemUrl('Plugins/Engineering/coding'));
       await waitFor(() =>
         expect(screen.getByLabelText('pathname')).toHaveTextContent(
-          '/skills-and-tools/groups/Engineering',
+          '/skills-and-tools/plugins/Engineering',
         ),
       );
       expect(screen.queryByLabelText('skill-page')).toBeNull();
@@ -294,7 +294,7 @@ describe('WorkspaceItemRoute', () => {
     it('opens a bundled file of a skill the catalog has not caught up with', async () => {
       // STALE, not failed: the catalog loaded fine, it just predates the skill.
       // Concluding "nothing owns this file, so it is not a page" bounced the
-      // reader to the group — the very symptom this change exists to remove,
+      // reader to the plugin — the very symptom this change exists to remove,
       // reached through a different unsettled state. Absence proves nothing;
       // only positive evidence (a known category above it) redirects.
       renderAt(itemUrl('Plugins/Engineering/coding/brand-new-skill/notes.md'));
@@ -313,7 +313,7 @@ describe('WorkspaceItemRoute', () => {
       renderAt(itemUrl('Plugins/Engineering/coding'));
       await waitFor(() =>
         expect(screen.getByLabelText('pathname')).toHaveTextContent(
-          '/skills-and-tools/groups/Engineering',
+          '/skills-and-tools/plugins/Engineering',
         ),
       );
     });
@@ -364,8 +364,8 @@ describe('WorkspaceItemRoute', () => {
 
   /**
    * A failed catalog is "we couldn't ask", not "no such item" — the same
-   * distinction GroupPage draws. Reading it as proof that nothing owns the
-   * file would bounce every bundled-file deep link to the group page during a
+   * distinction PluginPage draws. Reading it as proof that nothing owns the
+   * file would bounce every bundled-file deep link to the plugin page during a
    * transient outage, losing the URL; the skill detail comes from a different
    * endpoint and can still answer.
    */
@@ -379,7 +379,7 @@ describe('WorkspaceItemRoute', () => {
     });
     // The file's own folder is the best available reading without a catalog
     // (an asset nested deeper simply cannot be attributed) — the point is that
-    // the reader stays on a skill page instead of being bounced to the group.
+    // the reader stays on a skill page instead of being bounced to the plugin.
     renderAt(itemUrl('Plugins/Sales/create-sales-deck/notes.md'));
     expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
       'create-sales-deck::notes.md',
@@ -397,15 +397,15 @@ describe('WorkspaceItemRoute', () => {
 describe('isLibraryLocation — the surface rule', () => {
   it.each([
     ['/skills-and-tools', true],
-    ['/skills-and-tools/groups/Sales', true],
+    ['/skills-and-tools/plugins/Sales', true],
     [itemUrl('Plugins/Sales/create-sales-deck/SKILL.md'), true],
     [itemUrl('Plugins/Support/notion.tool'), true],
     // KnowledgeBase paths are the Knowledge app's, whatever the file.
     [`/workspace/${DEFAULT_BRANCH}/${KB}/KnowledgeBase/Handbook/Tone of voice.md`, false],
     // Drafts review raw, in Knowledge — the library speaks the default branch.
     [itemUrl('Plugins/Sales/create-sales-deck/SKILL.md', 'razvan/draft'), false],
-    // Too shallow to name an item (`Plugins/` itself, a group folder alone).
-    [`/workspace/${DEFAULT_BRANCH}/${KB}/Groups`, false],
+    // Too shallow to name an item (`Plugins/` itself, a plugin folder alone).
+    [`/workspace/${DEFAULT_BRANCH}/${KB}/Plugins`, false],
     [`/workspace/${DEFAULT_BRANCH}/${KB}/Plugins/Sales`, false],
     ['/workspace', false],
     ['/secrets', false],

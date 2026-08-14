@@ -1,19 +1,19 @@
 import { describe, it, expect } from 'vitest';
-import { isJoinBranchFor, joinBranchFor, kebabGroupName } from '@bevel-software/platform-shared';
+import { isJoinBranchFor, joinBranchFor, kebabPluginName } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../modules/workflow/git/branch-name.js';
 
 /**
  * The join-branch convention. Two properties matter, and they pull in
  * different directions:
  *
- *  - UNIQUENESS (the write side): distinct requesters and distinct groups must
+ *  - UNIQUENESS (the write side): distinct requesters and distinct plugins must
  *    never share a branch, or one person's commit lands on another's request.
  *    Both inputs the name is built from are lossy; the requester tag fixes it.
- *  - EXACT GROUP IDENTITY (the read side): the settle decision is "the diff
- *    is empty", so matching a branch to the WRONG group reads an unchanged
+ *  - EXACT PLUGIN IDENTITY (the read side): the settle decision is "the diff
+ *    is empty", so matching a branch to the WRONG plugin reads an unchanged
  *    file, sees an empty diff, and destroys somebody else's request. The
- *    group tag is recomputed from the exact name so shape-matching can never
- *    cross groups; only the requester half matches by shape (the reader has
+ *    plugin tag is recomputed from the exact name so shape-matching can never
+ *    cross plugins; only the requester half matches by shape (the reader has
  *    no email to recompute it from).
  */
 const TAG = '[0-9a-z]{7}';
@@ -37,19 +37,19 @@ describe('joinBranchFor', () => {
     );
   });
 
-  it('separates groups whose names kebab to the same slug', () => {
+  it('separates plugins whose names kebab to the same slug', () => {
     expect(joinBranchFor('ali@bevel.software', 'Finance!')).not.toBe(
       joinBranchFor('ali@bevel.software', 'Finance'),
     );
-    // Case is part of a group's identity (the folder name is case-sensitive).
+    // Case is part of a plugin's identity (the folder name is case-sensitive).
     expect(joinBranchFor('ali@bevel.software', 'finance')).not.toBe(
       joinBranchFor('ali@bevel.software', 'Finance'),
     );
   });
 
-  it('still yields a valid, matchable branch for a group with no alphanumerics', () => {
+  it('still yields a valid, matchable branch for a plugin with no alphanumerics', () => {
     const branch = joinBranchFor('ali@bevel.software', '!!!');
-    expect(kebabGroupName('!!!')).toBe('');
+    expect(kebabPluginName('!!!')).toBe('');
     expect(branch).toMatch(new RegExp(`^ali/join-${TAG}-${TAG}$`));
     expect(() => assertValidBranchName(branch)).not.toThrow();
     expect(isJoinBranchFor(branch, '!!!')).toBe(true);
@@ -62,16 +62,16 @@ describe('isJoinBranchFor', () => {
     expect(isJoinBranchFor(joinBranchFor('ali@other.com', 'GTM'), 'GTM')).toBe(true);
   });
 
-  it('rejects a branch for a different group', () => {
+  it('rejects a branch for a different plugin', () => {
     expect(isJoinBranchFor(joinBranchFor('ali@bevel.software', 'Finance'), 'GTM')).toBe(false);
   });
 
-  it('NEVER crosses slug-colliding groups — the destructive-settle regression', () => {
+  it('NEVER crosses slug-colliding plugins — the destructive-settle regression', () => {
     // `Finance!`, `finance` and `Finance` all slug to `finance`. A listing
     // for one that matched another's branch would read that branch's copy of
     // ITS OWN access.md (unchanged there), see an empty diff, and settle —
     // closing a change request and deleting a branch belonging to a
-    // different group. The recomputed group tag is what forbids the match.
+    // different plugin. The recomputed plugin tag is what forbids the match.
     const forBang = joinBranchFor('ali@bevel.software', 'Finance!');
     expect(isJoinBranchFor(forBang, 'finance')).toBe(false);
     expect(isJoinBranchFor(forBang, 'Finance')).toBe(false);

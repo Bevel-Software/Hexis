@@ -46,7 +46,7 @@ async function openAndUncheckEdit(user: ReturnType<typeof userEvent.setup>) {
 describe('ManageAccessDialog: unchecking an inherited verb on a mixed row', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    api.suggestPrincipals.mockResolvedValue({ groups: [], people: [], peopleWithheld: false });
+    api.suggestPrincipals.mockResolvedValue({ plugins: [], people: [], peopleWithheld: false });
   });
 
   it('write PURELY inherited (download direct): uncheck "Can edit" → 409 → opens prompt on FIRST click, revokes only write', async () => {
@@ -135,7 +135,7 @@ describe('ManageAccessDialog: unchecking an inherited verb on a mixed row', () =
  * The file explorer edits the branch the user is looking at, so the ambient
  * workspace is the right default and stays the default. The Library is the
  * other case entirely: it describes the default branch no matter which branch
- * happens to be open, so a group's access edit has to be pinned. Without the
+ * happens to be open, so a plugin's access edit has to be pinned. Without the
  * pin the same click would splice `access.md` on a draft — a rule that looks
  * written and governs nothing.
  */
@@ -166,7 +166,7 @@ describe('ManageAccessDialog: which workspace the edit targets', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    api.suggestPrincipals.mockResolvedValue({ groups: [], people: [], peopleWithheld: false });
+    api.suggestPrincipals.mockResolvedValue({ plugins: [], people: [], peopleWithheld: false });
     api.fetchFileAccess.mockResolvedValue(VIEW);
     api.grantAccess.mockResolvedValue(VIEW);
   });
@@ -215,7 +215,7 @@ describe('ManageAccessDialog: which workspace the edit targets', () => {
 describe('ManageAccessDialog: naming the rules', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    api.suggestPrincipals.mockResolvedValue({ users: [], groups: [], peopleWithheld: false });
+    api.suggestPrincipals.mockResolvedValue({ users: [], plugins: [], peopleWithheld: false });
   });
 
   /** The real AccessResponse shape — see the passing fixture above. */
@@ -240,7 +240,7 @@ describe('ManageAccessDialog: naming the rules', () => {
     expect(screen.queryByRole('heading', { name: /People with access/i })).not.toBeInTheDocument();
   });
 
-  it('gives each granting folder its own group, named after the folder', async () => {
+  it('gives each granting folder its own plugin, named after the folder', async () => {
     api.fetchFileAccess.mockResolvedValue(
       view({
         readers: { restricted: true, roles: [], users: [A, { name: 'Bo', email: 'bo@x.com' }] },

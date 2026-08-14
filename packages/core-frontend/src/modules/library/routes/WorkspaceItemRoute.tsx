@@ -4,22 +4,22 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useLibrary } from '../state/library-data';
 import { SkillPage } from '../components/skill-page/SkillPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
-import { LIBRARY_ROOT, pathForGroup } from './library-paths';
+import { LIBRARY_ROOT, pathForPlugin } from './library-paths';
 
 /**
  * The library page behind a canonical workspace URL —
- * `/workspace/<default>/<kbDir>/Groups/<group>/<...>` — rendered INSIDE the
+ * `/workspace/<default>/<kbDir>/Plugins/<plugin>/<...>` — rendered INSIDE the
  * same `LibraryLayout` route tree as every other library page, so the sidebar
  * is the one the reader already had and nothing remounts on the way in.
  *
- * Resolution is STRUCTURAL, not a catalog lookup: under `Groups/<group>/`, a
+ * Resolution is STRUCTURAL, not a catalog lookup: under `Plugins/<plugin>/`, a
  * `*.tool` file is a tool page, any other direct FILE (an extension, no
- * segments below it — `access.md`) belongs to the group page, and everything
+ * segments below it — `access.md`) belongs to the plugin page, and everything
  * else is a skill FOLDER whose name is the skill's id — the same identity the
  * old name-based route used. That is what makes a skill created a moment ago
  * open instantly: its URL says everything the page needs, and `SkillPage`
  * fetches the skill by name itself. Waiting on the catalog here raced every
- * reload and lost (the just-created skill bounced to its group's page).
+ * reload and lost (the just-created skill bounced to its plugin's page).
  *
  * The catalog is consulted only to REFINE a tool's slug (a `.tool` may
  * declare an explicit id different from its filename); the filename is the
@@ -42,12 +42,12 @@ export function WorkspaceItemRoute() {
     return <Navigate to={LIBRARY_ROOT} replace />;
   }
 
-  const [, , group, ...tail] = segments;
+  const [, , plugin, ...tail] = segments;
   const last = tail[tail.length - 1];
-  if (!group || !last) {
+  if (!plugin || !last) {
     return <Navigate to={LIBRARY_ROOT} replace />;
   }
-  const repoRel = `${PLUGINS_DIR}/${group}/${tail.join('/')}`;
+  const repoRel = `${PLUGINS_DIR}/${plugin}/${tail.join('/')}`;
 
   /**
    * `key={name}` is load-bearing. A provisional name gets CORRECTED once the
@@ -61,9 +61,9 @@ export function WorkspaceItemRoute() {
   );
 
   // A `.tool` is a tool page wherever it sits. The backend finds manuals at
-  // ANY depth below `Groups/` (`walkFiles` over the whole tree), so a manual
+  // ANY depth below `Plugins/` (`walkFiles` over the whole tree), so a manual
   // filed inside a category folder is a real, listed tool — matching only at
-  // the group's top level would list it and then 404 the click.
+  // the plugin's top level would list it and then 404 the click.
   if (last.toLowerCase().endsWith('.tool')) {
     const catalogSlug = data.items.find(
       (i) => i.kind === 'integration' && i.path === repoRel,
@@ -72,7 +72,7 @@ export function WorkspaceItemRoute() {
   }
 
   // THE CATALOG IS THE AUTHORITY on which folder is a skill and what its id
-  // is. Groups may nest (`Groups/Engineering/coding/create-ticket/SKILL.md`),
+  // is. Plugins may nest (`Plugins/Engineering/coding/create-ticket/SKILL.md`),
   // and a skill's id is its frontmatter `id`/`name` — only FALLING BACK to the
   // folder name — so neither the depth nor the id can be read off the URL with
   // certainty. Take the DEEPEST skill whose folder contains this path: a
@@ -88,10 +88,10 @@ export function WorkspaceItemRoute() {
   // Not in the catalog. A `SKILL.md` still names its own skill structurally —
   // the folder holding it — and that is deliberately catalog-FREE: a skill
   // created a moment ago opens from its URL alone, before any reload lands.
-  // (`Groups/<group>/SKILL.md` makes the group folder itself the skill, which
+  // (`Plugins/<plugin>/SKILL.md` makes the plugin folder itself the skill, which
   // is what the backend's walk would report for it.)
   if (last === 'SKILL.md') {
-    return skillPage(tail.length >= 2 ? tail[tail.length - 2]! : group, 'SKILL.md', true);
+    return skillPage(tail.length >= 2 ? tail[tail.length - 2]! : plugin, 'SKILL.md', true);
   }
 
   // Everything below is decided on POSITIVE evidence only. What the catalog
@@ -99,24 +99,24 @@ export function WorkspaceItemRoute() {
   // failed refresh — but what it does NOT know proves nothing: it may be
   // loading, stale (a skill created seconds ago), or have failed outright.
   // Reading absence as "this is not a page" is what bounced valid deep links
-  // to the group, so this no longer draws that inference at all.
+  // to the plugin, so this no longer draws that inference at all.
 
   // A folder with catalog skills UNDER it is a category, not a skill. That is
   // the discriminator between a category folder and a just-created skill whose
   // reload hasn't landed: the former has known descendants, the latter has
-  // none. A category has no page of its own; its group does.
+  // none. A category has no page of its own; its plugin does.
   if (!hasExtension(last) && containsCatalogSkill(data.items, repoRel)) {
-    return <Navigate to={pathForGroup(group)} replace />;
+    return <Navigate to={pathForPlugin(plugin)} replace />;
   }
 
-  // A FILE is the group's business when it cannot be a skill's file: either it
-  // sits directly in the group folder (structurally never inside a skill), or
+  // A FILE is the plugin's business when it cannot be a skill's file: either it
+  // sits directly in the plugin folder (structurally never inside a skill), or
   // its own folder is a known category. `access.md` at either level, a stray
   // upload. A file under an UNKNOWN folder is left alone — that folder is most
   // likely a skill the catalog hasn't caught up with.
   const parentRel = repoRel.slice(0, repoRel.length - last.length - 1);
   if (hasExtension(last) && (tail.length === 1 || containsCatalogSkill(data.items, parentRel))) {
-    return <Navigate to={pathForGroup(group)} replace />;
+    return <Navigate to={pathForPlugin(plugin)} replace />;
   }
 
   // Nothing positive settled it. While the catalog is still loading, WAIT: the
@@ -131,7 +131,7 @@ export function WorkspaceItemRoute() {
   // so SkillPage must not turn a failed lookup into "doesn't exist" until the
   // catalog has actually answered.
   return hasExtension(last)
-    ? skillPage(tail.length >= 2 ? tail[tail.length - 2]! : group, last, true)
+    ? skillPage(tail.length >= 2 ? tail[tail.length - 2]! : plugin, last, true)
     : skillPage(last, 'SKILL.md', true);
 }
 
@@ -154,9 +154,9 @@ function containsCatalogSkill(
 /**
  * The catalog skill whose folder contains `repoRel`, deepest first — the skill
  * a bundled file belongs to. Deepest wins because a category folder is never a
- * skill itself, so between `Groups/E/coding` and `Groups/E/coding/create-ticket`
+ * skill itself, so between `Plugins/E/coding` and `Plugins/E/coding/create-ticket`
  * only the latter can be a real entry; taking the shallower match would hand
- * the file to whichever skill sat nearest the group root.
+ * the file to whichever skill sat nearest the plugin root.
  *
  * Compares on whole segments (`path + '/'`), never a bare `startsWith`: a
  * sibling named `create-ticket-v2` shares a prefix with `create-ticket` and

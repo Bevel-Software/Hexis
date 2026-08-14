@@ -8,7 +8,7 @@ import type { LibraryFilter } from '../utils/status';
  *
  * Pure functions rather than logic inside the layout, because three surfaces
  * need them: the layout (to light the right sidebar row), every page that links
- * to a group, and the tests. Keeping the pair together is what makes the round
+ * to a plugin, and the tests. Keeping the pair together is what makes the round
  * trip auditable — a path that maps to a filter must map back to itself.
  */
 
@@ -17,21 +17,21 @@ export const LIBRARY_ROOT = '/skills-and-tools';
 
 /**
  * What the sidebar should show as selected for a path. `null` on the pages that
- * are not a filtered view of the catalog — the all-groups index (the root, see
- * `isGroupsIndexPath`) and the item pages — where the gallery rows are all
+ * are not a filtered view of the catalog — the all-plugins index (the root, see
+ * `isPluginsIndexPath`) and the item pages — where the gallery rows are all
  * inactive.
  *
  * `matchPath` hands params back RAW (react-router decodes neither here nor in
- * `useParams`), so a group named `Sales & Ops` arrives as `Sales%20%26%20Ops`
- * and has to be decoded to match the catalog's folder name. The group page owes
- * the same decode on `useParams().group`.
+ * `useParams`), so a plugin named `Sales & Ops` arrives as `Sales%20%26%20Ops`
+ * and has to be decoded to match the catalog's folder name. The plugin page owes
+ * the same decode on `useParams().plugin`.
  */
 export function libraryFilterForPath(pathname: string): LibraryFilter | null {
   if (matchPath({ path: `${LIBRARY_ROOT}/everything`, end: true }, pathname)) return { kind: 'all' };
   if (matchPath({ path: `${LIBRARY_ROOT}/owned`, end: true }, pathname)) return { kind: 'owned' };
   if (matchPath({ path: `${LIBRARY_ROOT}/yours`, end: true }, pathname)) return { kind: 'ungrouped' };
-  const group = matchPath({ path: `${LIBRARY_ROOT}/groups/:group`, end: true }, pathname);
-  if (group?.params.group) return { kind: 'group', group: decodeSegment(group.params.group) };
+  const plugin = matchPath({ path: `${LIBRARY_ROOT}/plugins/:plugin`, end: true }, pathname);
+  if (plugin?.params.plugin) return { kind: 'group', plugin: decodeSegment(plugin.params.plugin) };
   return null;
 }
 
@@ -45,32 +45,32 @@ export function pathForLibraryFilter(filter: LibraryFilter): string {
     case 'ungrouped':
       return `${LIBRARY_ROOT}/yours`;
     case 'group':
-      return pathForGroup(filter.group);
+      return pathForPlugin(filter.plugin);
   }
 }
 
-/** The route for one group — member view or locked view, the page decides. */
-export function pathForGroup(group: string): string {
-  return `${LIBRARY_ROOT}/groups/${encodeURIComponent(group)}`;
+/** The route for one plugin — member view or locked view, the page decides. */
+export function pathForPlugin(plugin: string): string {
+  return `${LIBRARY_ROOT}/plugins/${encodeURIComponent(plugin)}`;
 }
 
 /**
- * The all-groups index — the Library's HOME. Groups are the structure of this
- * surface, so the index of them is what the root shows; `groups` is kept as a
+ * The all-plugins index — the Library's HOME. Plugins are the structure of this
+ * surface, so the index of them is what the root shows; `plugins` is kept as a
  * redirect so the links that used to name it still land.
  */
-export function pathForGroupsIndex(): string {
+export function pathForPluginsIndex(): string {
   return LIBRARY_ROOT;
 }
 
 /**
- * Read a `:group` route param. React-router 7 hands params back RAW from both
+ * Read a `:plugin` route param. React-router 7 hands params back RAW from both
  * `matchPath` and `useParams`, so every reader owes this decode — and a
  * malformed escape (`%zz`, from a hand-edited or truncated link) THROWS, which
  * would blank the page. A bad link is a bad link, not a crash: fall back to the
- * raw segment and let the group simply not be found.
+ * raw segment and let the plugin simply not be found.
  */
-export function decodeGroupSegment(raw: string): string {
+export function decodePluginSegment(raw: string): string {
   return decodeSegment(raw);
 }
 
@@ -98,9 +98,9 @@ export function urlForSkillFile(kbDirName: string, skillPath: string, file = 'SK
 /**
  * Whether a location belongs to the LIBRARY surface — decided by URL SHAPE
  * alone, never by catalog contents: `/skills-and-tools/...`, or a
- * default-branch workspace URL under `Groups/`
- * (`/workspace/<default>/<kbDir>/Groups/<group>/...`). KnowledgeBase paths go
- * to the Knowledge surface, Groups paths to Skills & Tools — the two roots ARE
+ * default-branch workspace URL under `Plugins/`
+ * (`/workspace/<default>/<kbDir>/Plugins/<plugin>/...`). KnowledgeBase paths go
+ * to the Knowledge surface, Plugins paths to Skills & Tools — the two roots ARE
  * the two apps. A shape rule means a just-created skill routes correctly
  * before any catalog has heard of it.
  *
@@ -114,7 +114,7 @@ export function isLibraryLocation(pathname: string): boolean {
     segments[0] === 'workspace' &&
     segments[1] === DEFAULT_BRANCH &&
     segments[3] === PLUGINS_DIR &&
-    segments.length >= 6 // workspace/<branch>/<kbDir>/Groups/<group>/<item>
+    segments.length >= 6 // workspace/<branch>/<kbDir>/Plugins/<plugin>/<item>
   );
 }
 
@@ -142,18 +142,18 @@ export function pathForSkill(name: string): string {
 }
 
 /**
- * Whether a path is the all-groups index — the one path that lights the "All
- * groups" row. It is not a `LibraryFilter`: the index lists PLACES, not a
+ * Whether a path is the all-plugins index — the one path that lights the "All
+ * plugins" row. It is not a `LibraryFilter`: the index lists PLACES, not a
  * filtered slice of the catalog, which is why selection for it travels beside
  * the filter rather than inside it.
  *
- * `groups` answers true as well even though it only ever redirects, so the row
+ * `plugins` answers true as well even though it only ever redirects, so the row
  * is already lit while the redirect resolves.
  */
-export function isGroupsIndexPath(pathname: string): boolean {
+export function isPluginsIndexPath(pathname: string): boolean {
   return (
     matchPath({ path: LIBRARY_ROOT, end: true }, pathname) !== null ||
-    matchPath({ path: `${LIBRARY_ROOT}/groups`, end: true }, pathname) !== null
+    matchPath({ path: `${LIBRARY_ROOT}/plugins`, end: true }, pathname) !== null
   );
 }
 
@@ -170,21 +170,21 @@ function decodeSegment(raw: string): string {
  * Where an item's back link points: the page the item LIVES on.
  *
  * `‹ All skills & tools` used to be the one answer, and it stopped being
- * true the day the Library's root became the all-groups index — a skill
- * opened from its group page went "back" to a page the reader had never
+ * true the day the Library's root became the all-plugins index — a skill
+ * opened from its plugin page went "back" to a page the reader had never
  * been on. The honest destination is derivable from the path alone: the
- * group page for a grouped item, the personal page for a personal one, and
+ * plugin page for a grouped item, the personal page for a personal one, and
  * the root only for the legacy shapes that live in neither.
  */
 export function libraryHomeForItemPath(repoRelativePath: string): {
   label: string;
   path: string;
 } {
-  const group = pluginOfPath(repoRelativePath);
-  if (group !== null && !isPersonalPluginFolder(group)) {
-    return { label: group, path: pathForGroup(group) };
+  const plugin = pluginOfPath(repoRelativePath);
+  if (plugin !== null && !isPersonalPluginFolder(plugin)) {
+    return { label: plugin, path: pathForPlugin(plugin) };
   }
-  if (group !== null) {
+  if (plugin !== null) {
     return { label: 'Yours', path: `${LIBRARY_ROOT}/yours` };
   }
   return { label: 'All skills & tools', path: LIBRARY_ROOT };

@@ -379,7 +379,7 @@ describe('KbSeedService', () => {
     });
 
     /**
-     * A FILE named `Groups` used to satisfy the presence check — `fs.access`
+     * A FILE named `Plugins` used to satisfy the presence check — `fs.access`
      * answers "is there something here?" — so the seeder skipped it, said
      * nothing, and left a knowledge base permanently missing a root it claims
      * to guarantee. Now it says so.

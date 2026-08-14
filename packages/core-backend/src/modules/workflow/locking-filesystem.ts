@@ -145,7 +145,7 @@ export class LockingFilesystem extends LocalFilesystem {
     // unwind in reverse: the outer lock's release commits its path, then
     // the inner lock's release commits its path — each move lands as two
     // single-file changes (one delete, one create). Git's rename
-    // detection on log/blame still groups them visually after the fact.
+    // detection on log/blame still plugins them visually after the fact.
     if (src === dest) {
       return this.withLock(dest, () => super.moveFile(src, dest, options));
     }

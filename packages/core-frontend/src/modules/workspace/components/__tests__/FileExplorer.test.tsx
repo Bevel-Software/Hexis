@@ -646,16 +646,16 @@ describe('FileExplorer sections: root folders', () => {
 
   /**
    * `Plugins/` is the Skills & Tools app's storage, and that app presents it as
-   * groups, skills and tools. Listing it here offered a second, worse way in —
+   * plugins, skills and tools. Listing it here offered a second, worse way in —
    * raw markdown editing of a SKILL.md, on a folder whose access is managed
-   * from the group page.
+   * from the plugin page.
    *
    * Not shown, and NOT folded into Knowledge either: it is a reserved root, so
    * the "stray content folder" path must not pick it up. Both halves are
    * asserted, because dropping it from the reserved set would still hide the
    * section while quietly moving the whole folder under Knowledge.
    */
-  it('never shows Groups in the knowledge view', () => {
+  it('never shows Plugins in the knowledge view', () => {
     const tree: FileTreeEntry = {
       name: '.',
       relativePath: '.',
@@ -667,8 +667,8 @@ describe('FileExplorer sections: root folders', () => {
     expect(screen.queryByText('Plugins')).not.toBeInTheDocument();
   });
 
-  /** A KB whose only root is Groups still has a knowledge view — an empty one. */
-  it('does not fall back to the flat tree when Groups is the only root', () => {
+  /** A KB whose only root is Plugins still has a knowledge view — an empty one. */
+  it('does not fall back to the flat tree when Plugins is the only root', () => {
     const tree: FileTreeEntry = {
       name: '.',
       relativePath: '.',
@@ -893,7 +893,7 @@ describe('FileExplorer rows: the prototype tree', () => {
   it('does not synthesize a row under a root folder the server hid', () => {
     renderExplorer({
       fileTree: TREE,
-      // `Groups` is not in TREE — the server filtered it (bevelignored). The
+      // `Plugins` is not in TREE — the server filtered it (bevelignored). The
       // touched file underneath must NOT appear.
       minePaths: new Map([['Plugins/newsletter/SKILL.md', 12]]),
     });

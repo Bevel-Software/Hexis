@@ -4,19 +4,19 @@ import { LibraryProvider, useLibrary } from '../state/library-data';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { LibraryLayout } from '../components/LibraryLayout';
 import { LibraryPage } from '../components/LibraryPage';
-import { GroupPage } from '../components/GroupPage';
-import { GroupsIndexPage } from '../components/GroupsIndexPage';
-import { PersonalGroupPage } from '../components/PersonalGroupPage';
+import { PluginPage } from '../components/PluginPage';
+import { PluginsIndexPage } from '../components/PluginsIndexPage';
+import { PersonalPluginPage } from '../components/PersonalPluginPage';
 import { WelcomePage } from '../../onboarding/components/WelcomePage';
 import { WorkspaceItemRoute } from './WorkspaceItemRoute';
-import { decodeGroupSegment, LIBRARY_ROOT, urlForItemFile, urlForSkillFile } from './library-paths';
+import { decodePluginSegment, LIBRARY_ROOT, urlForItemFile, urlForSkillFile } from './library-paths';
 
 /**
  * The Skills & Tools surface — everything under `/skills-and-tools/*`.
  *
  * The shell mounts this once (`CORE_APPS`), so the toast host and the data
  * provider wrap the WHOLE surface rather than one page: navigating between the
- * gallery, a group and an item must not refetch the catalog or drop a toast
+ * gallery, a plugin and an item must not refetch the catalog or drop a toast
  * mid-flight.
  *
  * Paths below are RELATIVE — the shell already matched `/skills-and-tools/*`.
@@ -32,11 +32,11 @@ export function LibraryRoutes() {
       <LibraryProvider>
         <Routes>
           <Route element={<LibraryLayout />}>
-            {/* The Library OPENS on its groups. A group is where skills and
+            {/* The Library OPENS on its plugins. A plugin is where skills and
                 tools live and who they are for, so the index of them is the
                 orienting view; the undifferentiated card grid is a lens on
                 the same catalog and keeps its own row and URL below. */}
-            <Route index element={<GroupsIndexPage />} />
+            <Route index element={<PluginsIndexPage />} />
 
             {/* The whole catalog as cards, with the library-wide search. */}
             <Route path="everything" element={<LibraryPage filter={{ kind: 'all' }} />} />
@@ -49,26 +49,26 @@ export function LibraryRoutes() {
 
             <Route path="owned" element={<LibraryPage filter={{ kind: 'owned' }} />} />
 
-            {/* `yours` is a GROUP page, not a gallery filter — the items in no
+            {/* `yours` is a PLUGIN page, not a gallery filter — the items in no
                 folder, given the same page the folders get. The sidebar still
                 lights it through the `ungrouped` filter, so the URL and the
                 selection stay the pair they were. */}
-            <Route path="yours" element={<PersonalGroupPage />} />
+            <Route path="yours" element={<PersonalPluginPage />} />
 
-            {/* A group is a PLACE: `groups/:group` is a real page with a real
-                URL, and `GroupPage` — not the router — decides whether the
+            {/* A plugin is a PLACE: `plugins/:plugin` is a real page with a real
+                URL, and `PluginPage` — not the router — decides whether the
                 caller gets the member view or the locked one. */}
             {/* The index moved to the root. This path is where every older
                 link points, so it redirects rather than 404s or duplicates
                 the page at a second URL. */}
-            <Route path="groups" element={<Navigate to={LIBRARY_ROOT} replace />} />
-            <Route path="groups/:group" element={<GroupPage />} />
+            <Route path="plugins" element={<Navigate to={LIBRARY_ROOT} replace />} />
+            <Route path="plugins/:plugin" element={<PluginPage />} />
 
             {/* The canonical item addresses. This surface is mounted at TWO
                 shell paths (`/skills-and-tools/*` and, for default-branch
-                `Groups/` URLs, `/workspace/*` — see `isLibraryLocation` and
+                `Plugins/` URLs, `/workspace/*` — see `isLibraryLocation` and
                 the shell's `CoreSurfaces`), and under the second the remainder
-                is `<branch>/<kbDir>/Groups/...`. Matching it HERE, inside the
+                is `<branch>/<kbDir>/Plugins/...`. Matching it HERE, inside the
                 layout route, is what makes a skill page share the exact
                 sidebar instance the reader browsed in with — one surface, not
                 a second implementation of it. Static siblings above outrank
@@ -103,7 +103,7 @@ function LegacySkillRedirect() {
   const { name = '' } = useParams<{ name: string }>();
   const data = useLibrary();
   const { kbDirName } = useWorkspace();
-  const decoded = decodeGroupSegment(name);
+  const decoded = decodePluginSegment(name);
   const skill = data.items.find((i) => i.kind === 'skill' && i.id === decoded);
   if (skill && kbDirName) return <Navigate to={urlForSkillFile(kbDirName, skill.path)} replace />;
   if (kbDirName === null) return null;
@@ -121,7 +121,7 @@ function LegacyToolRedirect() {
   const location = useLocation();
   const data = useLibrary();
   const { kbDirName } = useWorkspace();
-  const decoded = decodeGroupSegment(slug);
+  const decoded = decodePluginSegment(slug);
   const tool = data.items.find((i) => i.kind === 'integration' && i.id === decoded);
   if (kbDirName === null) return null;
   if (tool) {

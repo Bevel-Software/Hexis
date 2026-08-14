@@ -110,7 +110,7 @@ describe('PendingSkillsService', () => {
 
   /**
    * The decision that shapes this surface: a proposal is between its author and
-   * the people who can approve it, and nobody else. A member of the group who
+   * the people who can approve it, and nobody else. A member of the plugin who
    * cannot write the folder is not one of those people.
    */
   test('hides it from everyone else', async () => {
@@ -157,7 +157,7 @@ describe('PendingSkillsService', () => {
         cr({
           touchedNodePaths: [
             'Plugins/Engineering/access.md',
-            'Plugins/Engineering/SKILL.md', // a group folder is not a skill
+            'Plugins/Engineering/SKILL.md', // a plugin folder is not a skill
             'Plugins/Engineering/weekly-newsletter/reference.md',
           ],
         }),

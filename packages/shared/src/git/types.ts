@@ -120,8 +120,8 @@ export interface IGitService {
       /**
        * Skip the per-user protected-branch access gate for THIS push. Only
        * for system-authorized flows whose endpoint is itself the
-       * authorization (group provisioning: any signed-in user may claim an
-       * unused name under `Groups/`, and the seeded access.md governs
+       * authorization (plugin provisioning: any signed-in user may claim an
+       * unused name under `Plugins/`, and the seeded access.md governs
        * everything after). Never thread a raw user request into this.
        */
       systemAuthorized?: boolean;

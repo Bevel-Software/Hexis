@@ -42,9 +42,9 @@ describe('ResizableThreePaneLayout', () => {
     expect(screen.getByTestId('probe-chat').textContent).toBe('false');
   });
 
-  // The explorer left the group: it is the app's SIDEBAR now, sized by
+  // The explorer left the plugin: it is the app's SIDEBAR now, sized by
   // `SidebarFrame` against a shared, persisted width rather than by a panel in
-  // this layout's own persisted arrangement. So the group holds viewer + chat
+  // this layout's own persisted arrangement. So the plugin holds viewer + chat
   // and needs one panel separator, while the sidebar brings its own handle.
   it('separates the panels it still owns, and lets the sidebar bring its own handle', () => {
     const { container } = render(
