@@ -165,7 +165,7 @@ export function WelcomePage() {
   const radios = useRef<(HTMLButtonElement | null)[]>([]);
 
   /**
-   * Arrow keys move the choice, because `role="radioplugin"` promised they
+   * Arrow keys move the choice, because `role="radiogroup"` promised they
    * would. The role is not decoration — it tells a screen reader "these are
    * exclusive, one is always on", and the same standard that defines it also
    * defines how it is driven: arrows select, Tab leaves. Claiming the role
@@ -285,7 +285,7 @@ export function WelcomePage() {
             what `pressed` does not — three independent toggles tell a screen
             reader that any combination, including none, is possible. */}
         <div
-          role="radioplugin"
+          role="radiogroup"
           aria-label="Your agent"
           className="mt-2.5 flex gap-0.5 rounded-lg bg-sunken p-0.5"
         >

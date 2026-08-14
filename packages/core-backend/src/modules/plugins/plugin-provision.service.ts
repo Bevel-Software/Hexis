@@ -263,16 +263,16 @@ export class PluginProvisionService {
       }
       throw err;
     }
-    // The manifest is what makes the folder a PLUGIN to anything outside this
-    // app, so it lands in the same commit as the access rules — a folder that
-    // is briefly a plugin to us and not to a conformant client is a state
-    // worth not having.
-    await this.workspaceService.writeFile(
-      wsId,
-      `${folderPath}/${PLUGIN_MANIFEST_FILE}`,
-      renderPluginManifest(folder),
-    );
     try {
+      // The manifest is what makes the folder a PLUGIN to anything outside
+      // this app, so it lands in the same commit as the access rules — and
+      // INSIDE the rollback scope: a manifest write that fails must clean up
+      // the access.md it would otherwise strand as a half-made plugin.
+      await this.workspaceService.writeFile(
+        wsId,
+        `${folderPath}/${PLUGIN_MANIFEST_FILE}`,
+        renderPluginManifest(folder),
+      );
       // Inline, not enqueued: the gate reads rules at HEAD, so the folder is
       // only real once this commit lands. `runPendingCommit` is the same
       // commit+push (with pull-rebase recovery) the queue worker runs.

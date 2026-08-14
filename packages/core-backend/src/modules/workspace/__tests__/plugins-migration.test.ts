@@ -56,7 +56,7 @@ afterEach(async () => {
 describe('migrateGroupsToPlugins', () => {
   it('does nothing to a knowledge base that has neither root', async () => {
     await write('KnowledgeBase/.gitkeep', '');
-    expect(await migrateGroupsToPlugins(repo)).toEqual({ migrated: false, notes: [] });
+    expect(await migrateGroupsToPlugins(repo)).toEqual({ migrated: false, renamed: false, notes: [] });
   });
 
   it('moves the root, the skills and the tools, and writes the manifest', async () => {
@@ -188,7 +188,7 @@ describe('migrateGroupsToPlugins', () => {
     await seedLegacyKb();
     await migrateGroupsToPlugins(repo);
     const before = await read('Plugins/GTM/plugin.json');
-    expect(await migrateGroupsToPlugins(repo)).toEqual({ migrated: false, notes: [] });
+    expect(await migrateGroupsToPlugins(repo)).toEqual({ migrated: false, renamed: false, notes: [] });
     expect(await read('Plugins/GTM/plugin.json')).toBe(before);
   });
 
@@ -206,7 +206,7 @@ describe('migrateGroupsToPlugins', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     await write('Groups/GTM/access.md', 'write:\n  - Admin\n');
     await write('Plugins/GTM/access.md', 'write:\n  - Admin\n');
-    expect(await migrateGroupsToPlugins(repo)).toEqual({ migrated: false, notes: [] });
+    expect(await migrateGroupsToPlugins(repo)).toEqual({ migrated: false, renamed: false, notes: [] });
     // Both left exactly as they were — merging would pick a winner nobody chose.
     expect(await exists('Groups/GTM/access.md')).toBe(true);
     expect(await exists('Plugins/GTM/access.md')).toBe(true);

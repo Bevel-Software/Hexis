@@ -93,19 +93,43 @@ export function createToolManualsAgentRoutes(
       await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
       const wsDir = await workspaceService.getWorkspacePath(wsId);
       const pluginDir = path.join(wsDir, kbDirName, PLUGINS_DIR, folder);
+      const pluginReal = await fs.realpath(pluginDir).catch(() => null);
+      if (pluginReal === null) return void res.status(404).json({ error: 'Not found' });
       const rels: string[] = [];
       const walk = async (dir: string, rel: string): Promise<void> => {
         let entries;
         try {
           entries = await fs.readdir(dir, { withFileTypes: true });
-        } catch {
-          return;
+        } catch (err) {
+          // Only an absent directory is a non-event; anything else (EACCES,
+          // EIO) silently missing from the archive would hand the client an
+          // incomplete plugin stamped as success.
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+          throw err;
         }
         for (const e of entries) {
           if (e.name === '.git') continue;
           const childRel = rel ? `${rel}/${e.name}` : e.name;
-          if (e.isDirectory()) await walk(path.join(dir, e.name), childRel);
+          const abs = path.join(dir, e.name);
+          if (e.isDirectory()) await walk(abs, childRel);
           else if (e.isFile()) rels.push(childRel);
+          else if (e.isSymbolicLink()) {
+            // A symlink materializes as its target CONTENT — but only when the
+            // resolved target stays inside the plugin. A link reaching outside
+            // would zip content the per-file ACL below never judged (verdicts
+            // key on the plugin-relative path, not the target), so it is
+            // dropped, loudly rather than silently.
+            const real = await fs.realpath(abs).catch(() => null);
+            if (real === null) continue;
+            const relToRoot = path.relative(pluginReal, real);
+            if (relToRoot.startsWith('..') || path.isAbsolute(relToRoot)) {
+              console.warn(`[tool-manuals] archive of "${folder}": symlink ${childRel} points outside the plugin — skipped.`);
+              continue;
+            }
+            const st = await fs.stat(abs).catch(() => null);
+            if (st?.isDirectory()) await walk(abs, childRel);
+            else if (st?.isFile()) rels.push(childRel);
+          }
         }
       };
       await walk(pluginDir, '');
@@ -117,10 +141,21 @@ export function createToolManualsAgentRoutes(
       );
       const zip = new AdmZip();
       let included = 0;
+      let bytes = 0;
+      // The zip is built in memory; without a ceiling one plugin full of large
+      // assets is a backend OOM any key holder can trigger.
+      const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
       for (const rel of rels) {
         // Fail closed, per file — only an explicit `true` verdict is included.
         if (verdicts.get(`${PLUGINS_DIR}/${folder}/${rel}`) !== true) continue;
-        zip.addFile(rel, await fs.readFile(path.join(pluginDir, ...rel.split('/'))));
+        const data = await fs.readFile(path.join(pluginDir, ...rel.split('/')));
+        bytes += data.length;
+        if (bytes > MAX_ARCHIVE_BYTES) {
+          return void res.status(413).json({
+            error: `Plugin "${folder}" exceeds the ${MAX_ARCHIVE_BYTES / (1024 * 1024)}MB archive limit.`,
+          });
+        }
+        zip.addFile(rel, data);
         included += 1;
       }
       // An all-filtered plugin looks exactly like an absent one — a 404 must

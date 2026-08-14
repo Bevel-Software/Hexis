@@ -461,9 +461,9 @@ describe('WelcomePage', () => {
   // including none, was possible.
   it('presents the client picker as an exclusive choice', async () => {
     mountPage();
-    const plugin = screen.getByRole('radioplugin', { name: 'Your agent' });
+    const group = screen.getByRole('radiogroup', { name: 'Your agent' });
     const options = screen.getAllByRole('radio');
-    expect(plugin).toContainElement(options[0]!);
+    expect(group).toContainElement(options[0]!);
     expect(options.map((o) => o.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
     await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
     expect(screen.getAllByRole('radio').map((o) => o.getAttribute('aria-checked'))).toEqual([

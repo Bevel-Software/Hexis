@@ -93,8 +93,8 @@ export function ResizableThreePaneLayout({
     return legacy;
   }, [panes, explorer, viewer, chat]);
 
-  // The sidebar is pulled OUT of the plugin: its width is a shared preference
-  // that outlives this layout (Skills & Tools has no plugin at all and the same
+  // The sidebar is pulled OUT of the group: its width is a shared preference
+  // that outlives this layout (Skills & Tools has no group at all and the same
   // sidebar), so it cannot be a panel in a per-app persisted layout.
   const sidebarPane = useMemo(() => allPanes.find((p) => p.sidebar), [allPanes]);
   const paneList = useMemo(() => allPanes.filter((p) => !p.sidebar), [allPanes]);

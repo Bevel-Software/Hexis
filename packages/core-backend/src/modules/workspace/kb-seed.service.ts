@@ -241,7 +241,12 @@ export class KbSeedService implements IKbSeedService {
       // scaffolding would quietly block the very migration it precedes.
       const migration = await migrateGroupsToPlugins(repoDir);
       if (migration.migrated) {
-        added.push(LEGACY_GROUPS_DIR, PLUGINS_DIR);
+        // Stage the legacy root ONLY when the rename happened this run: `git
+        // add -A -- Groups Plugins` fails outright on a pathspec that matches
+        // nothing, and a reorganisation inside an existing Plugins/ tree has
+        // no Groups/ to stage.
+        if (migration.renamed) added.push(LEGACY_GROUPS_DIR);
+        added.push(PLUGINS_DIR);
         for (const note of migration.notes) console.log(`[plugins-migration] ${note}`);
       }
       for (const rel of REQUIRED_FILES) {

@@ -48,11 +48,11 @@ export interface PaneDef {
   collapsible?: boolean;
   /**
    * Render this pane as the app's nav spine (`SidebarFrame`) instead of as a
-   * panel in the resizable plugin. At most one pane per app should set it.
+   * panel in the resizable group. At most one pane per app should set it.
    *
    * A sidebar is not a pane that happens to be on the left: its width is a
    * shared, persisted preference that survives switching to an app with no
-   * panes at all (Skills & Tools has no pane plugin and the same sidebar), so
+   * panes at all (Skills & Tools has no pane group and the same sidebar), so
    * it cannot live in a per-app panel layout. `defaultSize`/`minSize`/
    * `maxSize` are ignored for it — the frame owns the range.
    */

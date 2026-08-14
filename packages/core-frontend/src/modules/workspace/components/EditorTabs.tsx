@@ -267,7 +267,7 @@ function TabPill(props: TabPillProps) {
         }
       }}
       className={cn(
-        'plugin relative flex shrink-0 cursor-pointer select-none items-center gap-[7px]',
+        'group relative flex shrink-0 cursor-pointer select-none items-center gap-[7px]',
         'whitespace-nowrap rounded-t-sm px-2.5 pt-[7px] pb-2.5 text-detail transition-colors',
         // Active is weight and a 2px underline, not a filled pill: the tab is
         // part of the page, and a pill would make the strip its own object.

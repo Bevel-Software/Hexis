@@ -70,9 +70,10 @@ defines no portable credential mechanism on purpose: authorization and
 credential storage are the client's business, header and `env` values are
 "visible package data", and a client must not expand anything except
 `${PLUGIN_ROOT}` and `${PLUGIN_DATA}`. So the Secrets Vault IS this platform's
-answer to that — and the `mcp.json` projection carries only where a server is,
-never a `${VAR}` reference to how to authenticate with it. Those stay in the
-`.tool`, which is ours to interpret.
+answer to that — and `mcp.json` carries only where a server is, never a
+`${VAR}` reference to how to authenticate with it. Those live in `plugin.json`
+under `extensions["software.bevel.hexis"].mcpServers[<name>]`, which is ours
+to interpret and which other clients ignore by design.
 
 **Plugin folders are made through the app, not by writing files.** A plugin
 exists exactly when its folder carries an `access.md` — a bare directory
@@ -153,10 +154,12 @@ tools its plugin can read.
 
 ## Tool Manuals (`Plugins/<Plugin>/software.bevel.hexis/tools/*.tool`)
 
-Each plugin folder holds `*.tool` files — reusable **tool manuals** that let agents call external APIs. They are **not part of the knowledge graph** (never modelled as nodes) and are access-controlled like any other file via `access.md`. Any user who can *read* a `.tool` can use its tools; anyone who can *write* it sets its shared (admin) secrets (see below). Put each manual directly in the plugin folder whose skills use it. The same
-integration may exist in several plugins as separate files (`Everyone/notion.tool`
-and `Finance/notion.tool`), each with its own credentials and access rule —
-a plugin is a folder, not a registry of unique names.
+Each plugin folder holds `*.tool` files — reusable **tool manuals** that let agents call external APIs. They are **not part of the knowledge graph** (never modelled as nodes) and are access-controlled like any other file via `access.md`. Any user who can *read* a `.tool` can use its tools; anyone who can *write* it sets its shared (admin) secrets (see below). Put each manual in the plugin's `software.bevel.hexis/tools/` directory, beside
+the skills that use it. The same integration may exist in several plugins as
+separate files (`Everyone/…/serper.tool` and `Finance/…/serper.tool`), each
+with its own credentials and access rule — a plugin is a folder, not a registry
+of unique names. Remember: `.tool` files are for `http` and `inline` manuals
+only; MCP servers belong in `mcp.json`.
 
 A `.tool` file is JSON or YAML. Its `type` decides how tools are discovered:
 

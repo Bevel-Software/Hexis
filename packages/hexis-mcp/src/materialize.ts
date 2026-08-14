@@ -161,8 +161,18 @@ export async function prepareStdioSpec(
   if (declared.includes('PLUGIN_ROOT') || declared.includes('PLUGIN_DATA')) {
     throw new Error('a stdio server env must not declare PLUGIN_ROOT or PLUGIN_DATA');
   }
-  const cwd = spec.cwd !== undefined ? expandPlaceholders(spec.cwd, m) : m.pluginRoot;
-  if (spec.cwd?.startsWith('./') && !isWithin(m.pluginRoot, path.resolve(m.pluginRoot, cwd))) {
+  // EVERY cwd shape is contained, not just `./` ones: `../x`, an absolute
+  // `/etc`, or a crafted expansion would otherwise pass through to spawn
+  // unchecked. After expansion the cwd must land inside one of the two
+  // directories the runtime contract hands the server — the plugin root or
+  // its data dir (either directory itself included).
+  const expandedCwd = spec.cwd !== undefined ? expandPlaceholders(spec.cwd, m) : m.pluginRoot;
+  const resolvedCwd = path.resolve(m.pluginRoot, expandedCwd);
+  const within = (root: string): boolean => {
+    const rel = path.relative(root, resolvedCwd);
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  };
+  if (!within(m.pluginRoot) && !within(m.pluginData)) {
     throw new Error(`stdio cwd "${spec.cwd}" escapes the plugin root`);
   }
   return {
@@ -173,6 +183,6 @@ export async function prepareStdioSpec(
       PLUGIN_ROOT: m.pluginRoot,
       PLUGIN_DATA: m.pluginData,
     },
-    cwd: spec.cwd?.startsWith('./') ? path.resolve(m.pluginRoot, cwd) : cwd,
+    cwd: resolvedCwd,
   };
 }

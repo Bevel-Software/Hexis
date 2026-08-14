@@ -44,6 +44,8 @@ import { normalizeToolManual } from '../tool-manuals/tool-manuals.service.js';
 
 export interface PluginsMigrationResult {
   migrated: boolean;
+  /** Whether the `Groups/` → `Plugins/` root rename itself happened this run. */
+  renamed: boolean;
   /** Human-readable summary lines (plugin names, tool moves) for the seed log. */
   notes: string[];
 }
@@ -125,7 +127,11 @@ async function foldIntoPluginFiles(
 
   const mcpPath = path.join(pluginDir, PLUGIN_MCP_FILE);
   const mcp = (await readJson(mcpPath)) ?? { $schema: PLUGIN_MCP_SCHEMA, mcpServers: {} };
-  if (typeof mcp.mcpServers !== 'object' || mcp.mcpServers === null) mcp.mcpServers = {};
+  // An array (or any non-object) here would take property assignments and then
+  // drop them at stringify — normalize to an object before merging into it.
+  if (typeof mcp.mcpServers !== 'object' || mcp.mcpServers === null || Array.isArray(mcp.mcpServers)) {
+    mcp.mcpServers = {};
+  }
   const servers = mcp.mcpServers as Record<string, unknown>;
 
   const manifestPath = path.join(pluginDir, PLUGIN_MANIFEST_FILE);
@@ -141,7 +147,9 @@ async function foldIntoPluginFiles(
   let wroteManifest = false;
   for (const m of manuals.sort((a, b) => a.name.localeCompare(b.name))) {
     const { literal, credential } = splitHeaders(m.headers);
-    if (!(m.name in servers)) {
+    // Own-property check: `in` sees `constructor` and friends on the prototype,
+    // which would silently skip a legitimately named server.
+    if (!Object.prototype.hasOwnProperty.call(servers, m.name)) {
       servers[m.name] = {
         type: 'streamable-http',
         url: m.url,
@@ -159,10 +167,21 @@ async function foldIntoPluginFiles(
       ...(m.remote === false ? { local: true } : {}),
     };
     if (manifest !== null && Object.keys(extEntry).length > 0) {
-      const ext = (manifest.extensions ??= {}) as Record<string, unknown>;
-      const ns = (ext[HEXIS_EXTENSION_NS] ??= {}) as Record<string, unknown>;
-      const extServers = (ns.mcpServers ??= {}) as Record<string, unknown>;
-      if (!(m.name in extServers)) {
+      // Normalize each level: a parseable manifest can still carry a string or
+      // array where an object belongs, and mutating that would throw mid-run.
+      if (typeof manifest.extensions !== 'object' || manifest.extensions === null || Array.isArray(manifest.extensions)) {
+        manifest.extensions = {};
+      }
+      const ext = manifest.extensions as Record<string, unknown>;
+      if (typeof ext[HEXIS_EXTENSION_NS] !== 'object' || ext[HEXIS_EXTENSION_NS] === null || Array.isArray(ext[HEXIS_EXTENSION_NS])) {
+        ext[HEXIS_EXTENSION_NS] = {};
+      }
+      const ns = ext[HEXIS_EXTENSION_NS] as Record<string, unknown>;
+      if (typeof ns.mcpServers !== 'object' || ns.mcpServers === null || Array.isArray(ns.mcpServers)) {
+        ns.mcpServers = {};
+      }
+      const extServers = ns.mcpServers as Record<string, unknown>;
+      if (!Object.prototype.hasOwnProperty.call(extServers, m.name)) {
         extServers[m.name] = extEntry;
         wroteManifest = true;
       }
@@ -185,7 +204,12 @@ async function asMcpManual(abs: string, repoRel: string): Promise<ToolManualDesc
   try {
     const content = await fs.readFile(abs, 'utf-8');
     const d = normalizeToolManual(path.basename(abs).replace(/\.tool$/i, ''), repoRel, content);
-    return d.type === 'mcp' && d.url ? d : null;
+    // The mcp.json loader accepts only names it can serve as a namespace and
+    // route slug — converting a manual whose id fails that shape would DELETE
+    // a working integration and write an entry discovery then skips. Such a
+    // manual stays a `.tool`.
+    if (d.type !== 'mcp' || !d.url) return null;
+    return /^[a-z0-9][a-z0-9_-]*$/.test(d.name) ? d : null;
   } catch {
     return null;
   }
@@ -289,14 +313,16 @@ export async function migrateGroupsToPlugins(repoDir: string): Promise<PluginsMi
       `[plugins-migration] both ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ exist — leaving both alone. ` +
         `Merge ${LEGACY_GROUPS_DIR}/ into ${PLUGINS_DIR}/ by hand; nothing is being migrated automatically.`,
     );
-    return { migrated: false, notes };
+    return { migrated: false, renamed: false, notes };
   }
 
+  let renamed = false;
   if (hasLegacy) {
     await fs.rename(legacyDir, pluginsDir);
+    renamed = true;
     notes.push(`${LEGACY_GROUPS_DIR}/ → ${PLUGINS_DIR}/`);
   } else if (!hasPlugins) {
-    return { migrated: false, notes };
+    return { migrated: false, renamed: false, notes };
   }
 
   // Runs whether or not the rename just happened, so a KB already on
@@ -307,5 +333,5 @@ export async function migrateGroupsToPlugins(repoDir: string): Promise<PluginsMi
     notes.push(...(await migratePluginFolder(path.join(pluginsDir, entry.name), entry.name)));
   }
 
-  return { migrated: notes.length > 0, notes };
+  return { migrated: notes.length > 0, renamed, notes };
 }

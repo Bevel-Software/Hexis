@@ -5,6 +5,24 @@ import {
   PLUGINS_DIR,
 } from '@bevel-software/platform-shared';
 import type { ToolManualDescriptor, ToolVariable } from './tool-manuals.contract.js';
+import { assertSafeFetchUrl } from '../../shared/ssrf.js';
+
+/**
+ * The same reserved-reference policy `.tool` parsing enforces, applied to the
+ * extension block: `API_URL`/`CONNECTION_KEY` (bare or namespaced) are seeded
+ * by the platform for its own manuals, and an extension header referencing one
+ * would be asking the substitutor to hand a third-party server the caller's
+ * bearer. One rule, both declaration surfaces.
+ */
+const RESERVED_VARIABLE_RE = /\$\{\s*([A-Za-z0-9_]+)\s*\}|\$([A-Za-z0-9_]+)/g;
+function referencesReservedVariable(doc: unknown): string | null {
+  const text = JSON.stringify(doc) ?? '';
+  for (const match of text.matchAll(RESERVED_VARIABLE_RE)) {
+    const varName = match[1] ?? match[2] ?? '';
+    if (varName.endsWith('API_URL') || varName.endsWith('CONNECTION_KEY')) return match[0];
+  }
+  return null;
+}
 
 /**
  * MCP servers are declared in each plugin's `mcp.json` (the Agent Plugins
@@ -117,6 +135,15 @@ export function descriptorsFromMcpJson(
       continue;
     }
     const ext = extensions[name] ?? {};
+    const reserved = referencesReservedVariable(ext);
+    if (reserved !== null) {
+      console.warn(
+        `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: its extension entry references ` +
+          `the reserved variable "${reserved}" — API_URL and CONNECTION_KEY are platform-seeded and may ` +
+          'not appear in server declarations.',
+      );
+      continue;
+    }
     const shared = {
       slug: name,
       name,
@@ -148,6 +175,22 @@ export function descriptorsFromMcpJson(
       if (typeof raw.url !== 'string' || raw.url.length === 0) {
         console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: no url.`);
         continue;
+      }
+      // Remote-capable servers get the same SSRF gate `.tool` urls pass —
+      // otherwise mcp.json becomes the way to point the backend at loopback,
+      // private ranges, or the cloud metadata endpoint. A `local: true` entry
+      // is exempt because loopback is exactly what local MEANS, and only the
+      // user's own machine ever dials it.
+      if (ext.local !== true) {
+        try {
+          assertSafeFetchUrl(raw.url, { label: `mcp server "${name}" url` });
+        } catch (err) {
+          console.warn(
+            `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: ` +
+              `${err instanceof Error ? err.message : String(err)} (declare it \`local: true\` if it is deliberately private).`,
+          );
+          continue;
+        }
       }
       // Extension headers (auth, `${VAR}` refs) win over mcp.json's literal
       // ones on a key collision: the portable file cannot carry a credential,
