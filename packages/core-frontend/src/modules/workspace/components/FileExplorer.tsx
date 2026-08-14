@@ -21,7 +21,7 @@ import {
   validateFilename,
   KNOWLEDGE_BASE_DIR,
   DATA_DIR,
-  GROUPS_DIR,
+  PLUGINS_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
@@ -1099,7 +1099,7 @@ export function FileExplorer() {
     // rendered: its presence proves the split just as well as the others, and
     // without it a KB whose only root is Groups would fail this check, fall
     // back to the flat tree, and show the folder that way instead.
-    const groups = findDir(GROUPS_DIR);
+    const groups = findDir(PLUGINS_DIR);
     if (!knowledgeBase && !data && !agents && !pipelines && !groups) return null;
     // Any other top-level content folder (e.g. a stray `Legal/`) folds into Knowledge.
     const otherDirs = kids.filter(

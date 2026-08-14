@@ -87,7 +87,7 @@ const nonAdmin: AdminContextValue = {
 const connectedTool = (over: Partial<ToolSecrets> = {}): ToolSecrets => ({
   slug: 'heyreach',
   name: 'heyreach',
-  path: 'Groups/GTM/heyreach.tool',
+  path: 'Plugins/GTM/heyreach.tool',
   type: 'inline',
   setup: null,
   canWrite: false,
@@ -100,7 +100,7 @@ const unsetTool = (over: Partial<ToolSecrets> = {}): ToolSecrets =>
   connectedTool({
     slug: 'apollo',
     name: 'apollo',
-    path: 'Groups/GTM/apollo.tool',
+    path: 'Plugins/GTM/apollo.tool',
     variables: [
       {
         name: 'API_KEY',
@@ -118,8 +118,8 @@ const CATALOG: LibraryData = {
   loading: false,
   error: null,
   skills: [
-    { name: 'outreach', description: 'Runs the GTM outreach.', path: 'Groups/GTM/outreach' },
-    { name: 'roadmap', description: 'Keeps the roadmap.', path: 'Groups/Product/roadmap' },
+    { name: 'outreach', description: 'Runs the GTM outreach.', path: 'Plugins/GTM/outreach' },
+    { name: 'roadmap', description: 'Keeps the roadmap.', path: 'Plugins/Product/roadmap' },
   ],
   pendingSkills: [],
   tools: [connectedTool()],
@@ -132,7 +132,7 @@ const CATALOG: LibraryData = {
 
 const gtm = (over: Partial<GroupSummary> = {}): GroupSummary => ({
   name: 'GTM',
-  folders: ['Groups/GTM'],
+  folders: ['Plugins/GTM'],
   canRead: true,
   canWrite: false,
   isOwner: false,
@@ -203,7 +203,7 @@ describe('GroupPage', () => {
     // The skill FOLDER, repo-relative — the recursive delete under it runs
     // per-file through the same ACL gate that governs editing the group.
     await waitFor(() =>
-      expect(libApiMock.removeLibraryItem).toHaveBeenCalledWith('Groups/GTM/outreach'),
+      expect(libApiMock.removeLibraryItem).toHaveBeenCalledWith('Plugins/GTM/outreach'),
     );
     expect(await screen.findByText(/Removed outreach from GTM/)).toBeInTheDocument();
   });
@@ -284,7 +284,7 @@ describe('GroupPage', () => {
   it('pluralises the attention banner', async () => {
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,
-      tools: [unsetTool(), unsetTool({ slug: 'clay', name: 'clay', path: 'Groups/GTM/clay.tool' })],
+      tools: [unsetTool(), unsetTool({ slug: 'clay', name: 'clay', path: 'Plugins/GTM/clay.tool' })],
     });
     renderGroup('GTM');
     expect(
@@ -316,7 +316,7 @@ describe('GroupPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Share' }));
     expect(
       await screen.findByRole('dialog', {
-        name: 'Manage access directory knowledge-base/Groups/GTM',
+        name: 'Manage access directory knowledge-base/Plugins/GTM',
       }),
     ).toBeInTheDocument();
   });
@@ -331,7 +331,7 @@ describe('GroupPage', () => {
     // the folder, never on one file inside it.
     expect(
       await screen.findByRole('dialog', {
-        name: 'Manage access directory knowledge-base/Groups/GTM',
+        name: 'Manage access directory knowledge-base/Plugins/GTM',
       }),
     ).toBeInTheDocument();
   });
@@ -348,7 +348,7 @@ describe('GroupPage', () => {
   it('a DISCOVERABLE group the caller cannot read shows the locked view', async () => {
     dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
     groupsMock.listGroups.mockResolvedValue([
-      gtm({ name: 'Finance', folders: ['Groups/Finance'], canRead: false }),
+      gtm({ name: 'Finance', folders: ['Plugins/Finance'], canRead: false }),
     ]);
     renderGroup('Finance');
     expect(
@@ -362,7 +362,7 @@ describe('GroupPage', () => {
   it('a locked-out admin (canWrite via admin-rescue) gets the locked view with Manage access', async () => {
     dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
     groupsMock.listGroups.mockResolvedValue([
-      gtm({ name: 'Finance', folders: ['Groups/Finance'], canRead: false, canWrite: true }),
+      gtm({ name: 'Finance', folders: ['Plugins/Finance'], canRead: false, canWrite: true }),
     ]);
     renderGroup('Finance');
     expect(await screen.findByRole('button', { name: 'Manage access' })).toBeInTheDocument();
@@ -374,7 +374,7 @@ describe('GroupPage', () => {
     // summaries. The platform already returned the item; the page shows it.
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,
-      skills: [{ name: 'budget', description: '', path: 'Groups/Finance/budget' }],
+      skills: [{ name: 'budget', description: '', path: 'Plugins/Finance/budget' }],
       tools: [],
     });
     groupsMock.listGroups.mockResolvedValue([]);
@@ -414,7 +414,7 @@ describe('GroupPage', () => {
   it('decodes a URL-hostile group name', async () => {
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,
-      skills: [{ name: 'pricing', description: '', path: 'Groups/Sales & Ops/pricing' }],
+      skills: [{ name: 'pricing', description: '', path: 'Plugins/Sales & Ops/pricing' }],
       tools: [],
     });
     renderGroup('Sales & Ops');

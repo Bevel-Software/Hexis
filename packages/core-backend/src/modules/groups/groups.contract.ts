@@ -1,7 +1,7 @@
 /**
  * Groups — the folders under `Groups/` that carry a team's skills and the
  * tools those skills need. A group is a FOLDER, never a role: one access
- * boundary, one place, derived from the path exactly the way `groupOfPath`
+ * boundary, one place, derived from the path exactly the way `pluginOfPath`
  * derives it.
  *
  * A group EXISTS exactly when its folder carries an `access.md` — the file

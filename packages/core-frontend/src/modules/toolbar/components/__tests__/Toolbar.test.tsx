@@ -306,7 +306,7 @@ describe('Toolbar', () => {
       // follow the claim — the old path test made it vanish here.
       [
         'a canonical /workspace item URL, by the claimed app',
-        '/workspace/main/knowledge-base/Groups/Sales/create-sales-deck/SKILL.md',
+        '/workspace/main/knowledge-base/Plugins/Sales/create-sales-deck/SKILL.md',
         false,
         'skills-tools',
       ],

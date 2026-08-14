@@ -51,7 +51,7 @@ describe('SecretsPage', () => {
     const heyreach: ToolSecrets = {
       slug: 'heyreach',
       name: 'heyreach',
-      path: 'Groups/GTM/heyreach.tool',
+      path: 'Plugins/GTM/heyreach.tool',
       type: 'inline',
       setup: null,
       canWrite: false,

@@ -230,7 +230,7 @@ export function createGroupsRoutes(
         res.status(401).json({ error: 'Unauthenticated' });
         return;
       }
-      // Case-sensitive, like `groupOfPath` — the group name IS the folder name.
+      // Case-sensitive, like `pluginOfPath` — the group name IS the folder name.
       const group = (await groupIndex.catalog()).find((g) => g.name === req.params.name);
       const wsId = groupsWorkspaceId();
       const ownerVerdicts = group
@@ -268,7 +268,7 @@ export function createGroupsRoutes(
         return;
       }
       const catalog = await groupIndex.catalog();
-      // Case-sensitive, like `groupOfPath` — the group name IS the folder name.
+      // Case-sensitive, like `pluginOfPath` — the group name IS the folder name.
       const group = catalog.find((g) => g.name === req.params.name);
       const wsId = groupsWorkspaceId();
       // Same ANY-folder shape `GET /groups` resolves with, so a group can

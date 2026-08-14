@@ -9,7 +9,7 @@ import {
   DefaultVariableSubstitutor,
   type CallTemplate,
 } from '@utcp/sdk';
-import { DEFAULT_BRANCH, GROUPS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -489,9 +489,9 @@ export class ToolManualService implements IToolManualService {
 
     // A `.tool` sits under `Groups/`, beside the skills that use it.
     const files: { abs: string; rel: string }[] = [];
-    const root = path.join(kbRoot, GROUPS_DIR);
+    const root = path.join(kbRoot, PLUGINS_DIR);
     for (const rel of await walkFiles(root, (n) => n.toLowerCase().endsWith('.tool'))) {
-      files.push({ abs: path.join(root, rel), rel: `${GROUPS_DIR}/${rel}` });
+      files.push({ abs: path.join(root, rel), rel: `${PLUGINS_DIR}/${rel}` });
     }
 
     const parsed: ToolManualDescriptor[] = [];

@@ -21,30 +21,45 @@ change them.
 ```text
 knowledge-base/
 ├── KnowledgeBase/        ← the knowledge itself; organise it however suits you
-├── Groups/               ← one folder per group: its skills AND its tools
+├── Plugins/              ← one folder per plugin: its skills AND its tools
 ├── roles.yaml            ← identity → role mapping (Admin-only edits)
 └── access.md             ← repo-root access-control rules
 ```
 
-Only those two folders are structural, and only `Groups/` has a layout the
+Only those two folders are structural, and only `Plugins/` has a layout the
 platform reads:
 
 ```text
-Groups/<Group>/<skill>/SKILL.md   a skill
-Groups/<Group>/<name>.tool        a tool manual
-Groups/<Group>/access.md          who can read/write the whole group
-Groups/personal-<user-id>/…       one per person: their own skills, private
+Plugins/<Plugin>/plugin.json                  the manifest (Agent Plugins)
+Plugins/<Plugin>/skills/<skill>/SKILL.md      a skill
+Plugins/<Plugin>/mcp.json                     MCP servers, for other clients
+Plugins/<Plugin>/software.bevel.hexis/tools/  `.tool` manuals
+Plugins/<Plugin>/access.md                    who can read/write the plugin
+Plugins/personal-<user-id>/…                  one per person: private
 ```
 
-Skills and tools live TOGETHER in a group because they share one access
-boundary: a tool a group cannot read is a skill that group cannot run.
+Skills and tools live TOGETHER in a plugin because they share one access
+boundary: a tool a plugin cannot read is a skill that plugin cannot run.
+
+**A plugin follows the [Agent Plugins](https://agent-plugins.org) specification**
+(v1.0.0), so another conformant client can load one: it reads `plugin.json`, the
+skills under `skills/`, and the servers in `mcp.json`, and ignores everything
+else. Two things here are ours and sit outside that portable core. `access.md`
+stays at the plugin root because access resolution walks root → file, so the
+same rules one level down would govern only that subtree. And `.tool` manuals
+live under the reverse-DNS `software.bevel.hexis/` namespace, because the
+specification describes MCP servers only and has no way to express an `http` or
+`inline` manual. For `mcp`-type manuals the `.tool` file remains what this
+platform reads — it carries the access verbs and the secret namespace that
+`mcp.json` has no field for — and `mcp.json` is a projection of them written so
+other clients can see the servers at all.
 
 **Group folders are made through the app, not by writing files.** A group
 exists exactly when its folder carries an `access.md` — a bare directory
-under `Groups/` is not a group and is never listed. A new
-direct child of `Groups/` needs an `access.md` naming who runs it, and the
+under `Plugins/` is not a plugin and is never listed. A new
+direct child of `Plugins/` needs an `access.md` naming who runs it, and the
 write gate refuses a plain write into an unused name there — so do not try to
-create a group by writing a skill into `Groups/<new-name>/…`; it will be
+create a plugin by writing a skill into `Plugins/<new-name>/…`; it will be
 denied. Send the user to the app's **New group** button (or its
 `POST /api/groups` endpoint), then write into the folder it made. Names
 starting with `personal-` are reserved: one such folder exists per person,
@@ -99,7 +114,7 @@ File-level write access decides how a change lands on the default branch:
   review flow — and prefer a change request when in doubt, when the change is
   large, or when it touches content the user does not own.
 
-## Skills (`Groups/<Group>/<skill>/SKILL.md`)
+## Skills (`Plugins/<Plugin>/skills/<skill>/SKILL.md`)
 
 A skill is a folder holding a `SKILL.md` and whatever files it needs. The
 frontmatter names it and declares which tools it may use:
@@ -116,7 +131,7 @@ The body is the instructions, in plain markdown. `allowed-tools` entries are
 tool names from the `.tool` manuals in the same group — a skill can only reach
 tools its group can read.
 
-## Tool Manuals (`Groups/<Group>/*.tool`)
+## Tool Manuals (`Plugins/<Plugin>/software.bevel.hexis/tools/*.tool`)
 
 Each group folder holds `*.tool` files — reusable **tool manuals** that let agents call external APIs. They are **not part of the knowledge graph** (never modelled as nodes) and are access-controlled like any other file via `access.md`. Any user who can *read* a `.tool` can use its tools; anyone who can *write* it sets its shared (admin) secrets (see below). Put each manual directly in the group folder whose skills use it. The same
 integration may exist in several groups as separate files (`Everyone/notion.tool`

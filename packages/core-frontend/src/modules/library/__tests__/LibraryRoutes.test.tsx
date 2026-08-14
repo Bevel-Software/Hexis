@@ -67,7 +67,7 @@ import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
 const tool = (over: Partial<ToolSecrets>): ToolSecrets => ({
   slug: 'heyreach',
   name: 'heyreach',
-  path: 'Groups/GTM/heyreach.tool',
+  path: 'Plugins/GTM/heyreach.tool',
   type: 'inline',
   setup: null,
   canWrite: false,
@@ -79,8 +79,8 @@ const CATALOG: LibraryData = {
   loading: false,
   error: null,
   skills: [
-    { name: 'outreach', description: 'Runs the GTM outreach.', path: 'Groups/GTM/outreach' },
-    { name: 'roadmap', description: 'Keeps the roadmap.', path: 'Groups/Product/roadmap' },
+    { name: 'outreach', description: 'Runs the GTM outreach.', path: 'Plugins/GTM/outreach' },
+    { name: 'roadmap', description: 'Keeps the roadmap.', path: 'Plugins/Product/roadmap' },
     { name: 'scratch', description: 'A skill in no group.', path: 'Skills/scratch' },
   ],
   pendingSkills: [],
@@ -99,7 +99,7 @@ const CATALOG: LibraryData = {
 const GROUPS: GroupSummary[] = [
   {
     name: 'GTM',
-    folders: ['Groups/GTM'],
+    folders: ['Plugins/GTM'],
     canRead: true,
     canWrite: true,
     isOwner: false,
@@ -245,7 +245,7 @@ describe('LibraryRoutes', () => {
       ...GROUPS,
       {
         name: 'Fresh',
-        folders: ['Groups/Fresh'],
+        folders: ['Plugins/Fresh'],
         canRead: true,
         canWrite: true,
         skillCount: 0,
@@ -321,7 +321,7 @@ describe('LibraryRoutes', () => {
   it('a group deep link with a URL-hostile name round-trips', async () => {
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,
-      skills: [{ name: 'pricing', description: '', path: 'Groups/Sales & Ops/pricing' }],
+      skills: [{ name: 'pricing', description: '', path: 'Plugins/Sales & Ops/pricing' }],
       tools: [],
     });
     renderAt(`/skills-and-tools/groups/${encodeURIComponent('Sales & Ops')}`);
@@ -336,7 +336,7 @@ describe('LibraryRoutes', () => {
     renderAt('/skills-and-tools/tools/heyreach#authorized');
     await waitFor(() =>
       expect(pathname()).toBe(
-        `/workspace/${DEFAULT_BRANCH}/knowledge-base/Groups/GTM/heyreach.tool#authorized`,
+        `/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/GTM/heyreach.tool#authorized`,
       ),
     );
   });
@@ -345,7 +345,7 @@ describe('LibraryRoutes', () => {
     renderAt('/skills-and-tools/skills/outreach');
     await waitFor(() =>
       expect(pathname()).toBe(
-        `/workspace/${DEFAULT_BRANCH}/knowledge-base/Groups/GTM/outreach/SKILL.md`,
+        `/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/GTM/outreach/SKILL.md`,
       ),
     );
   });
@@ -355,7 +355,7 @@ describe('LibraryRoutes', () => {
     fireEvent.click(await screen.findByRole('button', { name: /^heyreach/ }));
 
     await waitFor(() =>
-      expect(pathname()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Groups/GTM/heyreach.tool`),
+      expect(pathname()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/GTM/heyreach.tool`),
     );
     expect(screen.queryByRole('dialog')).toBeNull();
   });

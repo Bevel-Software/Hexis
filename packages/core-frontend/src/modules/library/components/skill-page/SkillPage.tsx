@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   DEFAULT_BRANCH,
-  groupOfPath,
+  pluginOfPath,
   type PullRequestSummary,
 } from '@bevel-software/platform-shared';
 import '../../library.css';
@@ -113,7 +113,7 @@ export function SkillPage({
    * the neutral fallback when the group index hasn't resolved.
    */
   const ownerName = useMemo(() => {
-    const group = skill ? groupOfPath(skill.path) : null;
+    const group = skill ? pluginOfPath(skill.path) : null;
     const summary = group ? data.groupSummaries.find((g) => g.name === group) : undefined;
     return summary ? ownersTextOf(summary) : 'the owner';
   }, [skill, data.groupSummaries]);

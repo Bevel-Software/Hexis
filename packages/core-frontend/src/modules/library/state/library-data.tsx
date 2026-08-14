@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode,  } from 'react';
 import { LibraryContext } from './library-context';
-import { groupOfPath, isPersonalGroupFolder } from '@bevel-software/platform-shared';
+import { pluginOfPath, isPersonalPluginFolder } from '@bevel-software/platform-shared';
 
 /**
  * The group a card files under — with personal folders mapped to `null`, the
@@ -10,8 +10,8 @@ import { groupOfPath, isPersonalGroupFolder } from '@bevel-software/platform-sha
  * access.md names nobody else), so `null` here always means "yours".
  */
 function displayGroupOf(path: string): string | null {
-  const group = groupOfPath(path);
-  return group !== null && isPersonalGroupFolder(group) ? null : group;
+  const group = pluginOfPath(path);
+  return group !== null && isPersonalPluginFolder(group) ? null : group;
 }
 import { useLibraryData, type LibraryData } from '../hooks/useLibraryData';
 import { listGroups, type GroupSummary } from '../services/groups.api';

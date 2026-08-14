@@ -50,7 +50,7 @@ function tool(over: Partial<ToolSecrets> = {}): ToolSecrets {
   return {
     slug: 'github',
     name: 'github',
-    path: 'Groups/Engineering/github.tool',
+    path: 'Plugins/Engineering/github.tool',
     type: 'mcp',
     setup: null,
     canWrite: false,
@@ -109,7 +109,7 @@ describe('ToolConnectionSection', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit the tool file' }));
     await waitFor(() =>
       expect(screen.getByLabelText('pathname').textContent).toContain(
-        'knowledge-base/Groups/Engineering/github.tool',
+        'knowledge-base/Plugins/Engineering/github.tool',
       ),
     );
   });

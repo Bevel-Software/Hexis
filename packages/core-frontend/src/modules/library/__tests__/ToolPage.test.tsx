@@ -45,7 +45,7 @@ import { ToolPage } from '../components/tool-page/ToolPage';
 const GITHUB: ToolSecrets = {
   slug: 'heyreach',
   name: 'heyreach',
-  path: 'Groups/GTM/heyreach.tool',
+  path: 'Plugins/GTM/heyreach.tool',
   type: 'inline',
   setup: null,
   canWrite: false,
@@ -55,7 +55,7 @@ const GITHUB: ToolSecrets = {
 const DETAIL: ToolManualDetail = {
   slug: 'heyreach',
   name: 'heyreach',
-  path: 'Groups/GTM/heyreach.tool',
+  path: 'Plugins/GTM/heyreach.tool',
   type: 'inline',
   description: 'Runs LinkedIn outreach campaigns.',
   capabilities: [
@@ -212,8 +212,8 @@ describe('ToolPage: capabilities', () => {
 describe('ToolPage: powers these skills', () => {
   it('links each matching skill at the reserved skill route', async () => {
     libraryMock.listSkills.mockResolvedValue([
-      { name: 'outreach', description: '', path: 'Groups/GTM/outreach' },
-      { name: 'roadmap', description: '', path: 'Groups/Product/roadmap' },
+      { name: 'outreach', description: '', path: 'Plugins/GTM/outreach' },
+      { name: 'roadmap', description: '', path: 'Plugins/Product/roadmap' },
     ]);
     libraryMock.getSkill.mockImplementation(async (name: string) =>
       name === 'outreach' ? { allowedTools: ['heyreach_add_leads'] } : { allowedTools: ['Bash'] },

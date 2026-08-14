@@ -50,7 +50,7 @@ const request = (over: Partial<JoinRequest> = {}): JoinRequest => ({
 function renderBanner(onManage = vi.fn()) {
   render(
     <LibraryToastProvider>
-      <GroupJoinRequests group="GTM" folders={['Groups/GTM']} onManage={onManage} />
+      <GroupJoinRequests group="GTM" folders={['Plugins/GTM']} onManage={onManage} />
     </LibraryToastProvider>,
   );
   return { onManage };
@@ -99,7 +99,7 @@ describe('GroupJoinRequests', () => {
     await waitFor(() => expect(accessMock.grantAccess).toHaveBeenCalledTimes(1));
     // The grant lands on the DEFAULT branch — that is where "the list" lives.
     expect(accessMock.grantAccess).toHaveBeenCalledWith(encodeURIComponent(DEFAULT_BRANCH), {
-      path: 'Groups/GTM',
+      path: 'Plugins/GTM',
       kind: 'folder',
       verb: 'read',
       principal: { kind: 'user', email: 'ali@bevel.software', displayName: 'Ali Baba' },
@@ -158,7 +158,7 @@ describe('GroupJoinRequests', () => {
     groupsMock.listJoinRequests.mockResolvedValue([]);
     const { container } = render(
       <LibraryToastProvider>
-        <GroupJoinRequests group="GTM" folders={['Groups/GTM']} onManage={vi.fn()} />
+        <GroupJoinRequests group="GTM" folders={['Plugins/GTM']} onManage={vi.fn()} />
       </LibraryToastProvider>,
     );
     await waitFor(() => expect(groupsMock.listJoinRequests).toHaveBeenCalled());
@@ -169,7 +169,7 @@ describe('GroupJoinRequests', () => {
     groupsMock.listJoinRequests.mockRejectedValue(new Error('boom'));
     const { container } = render(
       <LibraryToastProvider>
-        <GroupJoinRequests group="GTM" folders={['Groups/GTM']} onManage={vi.fn()} />
+        <GroupJoinRequests group="GTM" folders={['Plugins/GTM']} onManage={vi.fn()} />
       </LibraryToastProvider>,
     );
     await waitFor(() => expect(groupsMock.listJoinRequests).toHaveBeenCalled());

@@ -36,7 +36,7 @@ export function NewGroupDialog({ existing, onClose, onCreated }: NewGroupDialogP
    * A group name becomes a folder name, so the characters a path cannot carry
    * are the characters a name cannot have. Checked here rather than left to the
    * server because `Groups/A/B` would silently create a NESTED folder — which
-   * `groupOfPath` would then read as the group "A", not "A/B".
+   * `pluginOfPath` would then read as the group "A", not "A/B".
    */
   const illegal = /[/\\]/.test(trimmed);
   const error = taken

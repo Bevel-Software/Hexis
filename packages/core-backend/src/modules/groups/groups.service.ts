@@ -3,9 +3,9 @@ import fs from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import {
   DEFAULT_BRANCH,
-  GROUPS_DIR,
-  groupOfPath,
-  isPersonalGroupFolder,
+  PLUGINS_DIR,
+  pluginOfPath,
+  isPersonalPluginFolder,
 } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
@@ -31,12 +31,12 @@ const CACHE_TTL_MS = 60_000;
  *    leaves its directory behind on live checkouts, and enumerating by
  *    directory would resurrect every such ghost. Counts come from the
  *    already-cached global catalogs — `skillService.listSkills(undefined)` and
- *    `toolManualService.listAllSummaries()` — bucketed by `groupOfPath`. A
+ *    `toolManualService.listAllSummaries()` — bucketed by `pluginOfPath`. A
  *    second `walkFiles` pass would re-read the same tree and could disagree
  *    with the catalogs about what counts as a skill.
  *  - **Loose files are not groups.** `Groups/slack.tool` sits directly under
  *    the root, so it is a file, not a directory — the same ≥3-segment rule
- *    `groupOfPath` applies, arrived at from the other side.
+ *    `pluginOfPath` applies, arrived at from the other side.
  *
  * Cached for {@link CACHE_TTL_MS} and dropped by `invalidate()` from the
  * file-change subscriber, so a grant committed on the default branch is
@@ -135,7 +135,7 @@ export class GroupIndexService implements IGroupIndexService {
     const byName = new Map<string, string[]>();
     let children: Dirent[];
     try {
-      children = await fs.readdir(path.join(kbRoot, GROUPS_DIR), { withFileTypes: true });
+      children = await fs.readdir(path.join(kbRoot, PLUGINS_DIR), { withFileTypes: true });
     } catch {
       return byName; // a KB without a `Groups/` root simply has no groups
     }
@@ -146,21 +146,21 @@ export class GroupIndexService implements IGroupIndexService {
         // Personal folders live under Groups/ but are not groups: one exists
         // per person, private by construction, and listing them would put a
         // locked row per employee in everyone's index.
-        !isPersonalGroupFolder(child.name),
+        !isPersonalPluginFolder(child.name),
     );
     // A group exists exactly when its folder carries an `access.md` (see the
     // class doc) — stat that file, don't trust the directory.
     const verdicts = await Promise.all(
       candidates.map(async (child) => {
         try {
-          return (await fs.stat(path.join(kbRoot, GROUPS_DIR, child.name, 'access.md'))).isFile();
+          return (await fs.stat(path.join(kbRoot, PLUGINS_DIR, child.name, 'access.md'))).isFile();
         } catch {
           return false;
         }
       }),
     );
     candidates.forEach((child, i) => {
-      if (verdicts[i]) byName.set(child.name, [`${GROUPS_DIR}/${child.name}`]);
+      if (verdicts[i]) byName.set(child.name, [`${PLUGINS_DIR}/${child.name}`]);
     });
     return byName;
   }
@@ -180,7 +180,7 @@ export class GroupIndexService implements IGroupIndexService {
 function bucketByGroup(items: { path: string }[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const item of items) {
-    const group = groupOfPath(item.path);
+    const group = pluginOfPath(item.path);
     if (group === null) continue;
     counts.set(group, (counts.get(group) ?? 0) + 1);
   }

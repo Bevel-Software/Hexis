@@ -77,7 +77,7 @@ function renderDialog(
                     element={
                       <AddToGroupDialog
                         name="GTM"
-                        primaryPath="Groups/GTM"
+                        primaryPath="Plugins/GTM"
                         canWrite={canWrite}
                         existingSkills={existingSkills}
                         onClose={onClose}
@@ -109,8 +109,8 @@ describe('AddToGroupDialog', () => {
     writeText.mockResolvedValue(undefined);
     apiMock.createEmptySkill.mockReset();
     apiMock.createEmptySkill.mockResolvedValue({
-      repoRelativePath: 'Groups/GTM/weekly-report/SKILL.md',
-      workspacePath: 'knowledge-base/Groups/GTM/weekly-report/SKILL.md',
+      repoRelativePath: 'Plugins/GTM/weekly-report/SKILL.md',
+      workspacePath: 'knowledge-base/Plugins/GTM/weekly-report/SKILL.md',
       branch: 'target-company-state',
       direct: true,
     });
@@ -171,8 +171,8 @@ describe('AddToGroupDialog: starting an empty SKILL.md', () => {
   beforeEach(() => {
     apiMock.createEmptySkill.mockReset();
     apiMock.createEmptySkill.mockResolvedValue({
-      repoRelativePath: 'Groups/GTM/weekly-report/SKILL.md',
-      workspacePath: 'knowledge-base/Groups/GTM/weekly-report/SKILL.md',
+      repoRelativePath: 'Plugins/GTM/weekly-report/SKILL.md',
+      workspacePath: 'knowledge-base/Plugins/GTM/weekly-report/SKILL.md',
       branch: 'target-company-state',
       direct: true,
     });
@@ -193,7 +193,7 @@ describe('AddToGroupDialog: starting an empty SKILL.md', () => {
     await waitFor(() =>
       expect(apiMock.createEmptySkill).toHaveBeenCalledWith(
         expect.objectContaining({
-          parentPath: 'Groups/GTM',
+          parentPath: 'Plugins/GTM',
           name: 'weekly-report',
           canWrite: true,
         }),
@@ -205,7 +205,7 @@ describe('AddToGroupDialog: starting an empty SKILL.md', () => {
     // rather than silently landing on a read-only page.
     await waitFor(() =>
       // The canonical address: the new SKILL.md's own workspace URL.
-      expect(href()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Groups/GTM/weekly-report/SKILL.md`),
+      expect(href()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/GTM/weekly-report/SKILL.md`),
     );
     expect(screen.getByLabelText('router-state')).toHaveTextContent(
       JSON.stringify({ startEditing: true }),
@@ -232,13 +232,13 @@ describe('AddToGroupDialog: starting an empty SKILL.md', () => {
 
   it('surfaces the backend refusal and stays open', async () => {
     apiMock.createEmptySkill.mockRejectedValue(
-      new Error("You don't have permission to write to Groups/GTM"),
+      new Error("You don't have permission to write to Plugins/GTM"),
     );
     const { field, create, onClose } = renderDialog();
     fireEvent.change(field(), { target: { value: 'weekly-report' } });
     fireEvent.click(create());
 
-    expect(await screen.findByText(/don't have permission to write to Groups\/GTM/)).toBeInTheDocument();
+    expect(await screen.findByText(/don't have permission to write to Plugins\/GTM/)).toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
   });
 });
@@ -265,8 +265,8 @@ describe('AddToGroupDialog for an admin non-writer', () => {
 
   it('passes the verdict down, so the file goes for review', async () => {
     apiMock.createEmptySkill.mockResolvedValue({
-      repoRelativePath: 'Groups/GTM/weekly-report/SKILL.md',
-      workspacePath: 'knowledge-base/Groups/GTM/weekly-report/SKILL.md',
+      repoRelativePath: 'Plugins/GTM/weekly-report/SKILL.md',
+      workspacePath: 'knowledge-base/Plugins/GTM/weekly-report/SKILL.md',
       branch: 'suggestions/juan/weekly-report',
       direct: false,
     });

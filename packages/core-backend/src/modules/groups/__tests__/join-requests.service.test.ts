@@ -18,7 +18,7 @@ import { JoinRequestsService } from '../join-requests.service.js';
  * is what happens when that stops being true — nothing stores a status.
  */
 const ALI = 'ali@bevel.software';
-const FOLDER = 'Groups/GTM';
+const FOLDER = 'Plugins/GTM';
 const ACCESS_MD = `${FOLDER}/access.md`;
 const ACTOR: AuthUser = { id: 'u-1', email: 'olga@bevel.software', name: 'Olga Ivanova' };
 
@@ -134,7 +134,7 @@ describe('JoinRequestsService.list', () => {
 
   it('NEVER settles a slug-colliding other group\'s request (branch match is exact)', async () => {
     // `Finance!` slugs to `finance` too. Its branch's copy of
-    // `Groups/finance/access.md` is unchanged, so if the branch matched, the
+    // `Plugins/finance/access.md` is unchanged, so if the branch matched, the
     // empty diff would settle — closing a change request and deleting a
     // branch that belong to a DIFFERENT group. The group tag in the branch
     // name is what forbids the match.
@@ -143,10 +143,10 @@ describe('JoinRequestsService.list', () => {
       [`origin/${DEFAULT_BRANCH}`]: DEFAULT_MD,
       [`origin/${joinBranchFor(ALI, 'Finance!')}`]: DEFAULT_MD,
     });
-    await expect(h.svc.list('finance', 'Groups/finance', [other], ACTOR)).resolves.toEqual([]);
+    await expect(h.svc.list('finance', 'Plugins/finance', [other], ACTOR)).resolves.toEqual([]);
     expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
     expect(h.workflow.deleteBranch).not.toHaveBeenCalled();
-    await expect(h.svc.reconcile('finance', 'Groups/finance', other, ACTOR)).resolves.toBe(false);
+    await expect(h.svc.reconcile('finance', 'Plugins/finance', other, ACTOR)).resolves.toBe(false);
     expect(h.workflow.rejectChangeRequest).not.toHaveBeenCalled();
   });
 });

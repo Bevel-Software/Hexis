@@ -1,6 +1,6 @@
 import {
   DEFAULT_BRANCH,
-  GROUPS_DIR,
+  PLUGINS_DIR,
   type ChangeRequest,
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
@@ -157,7 +157,7 @@ function isSkillDoc(repoRelPath: string): boolean {
   const segments = repoRelPath.split('/');
   return (
     segments.length >= 4 &&
-    segments[0] === GROUPS_DIR &&
+    segments[0] === PLUGINS_DIR &&
     segments[segments.length - 1] === SKILL_DOC
   );
 }

@@ -8,7 +8,7 @@ import { ToolSharePanel } from '../components/tool-page/ToolSharePanel';
  * placeholder are what his work replaces without touching this file's callers.
  */
 
-const TOOL = { slug: 'github', name: 'github', path: 'Groups/Engineering/github.tool' };
+const TOOL = { slug: 'github', name: 'github', path: 'Plugins/Engineering/github.tool' };
 
 describe('ToolSharePanel', () => {
   it('renders nothing while closed', () => {

@@ -5,7 +5,7 @@ import { pendingProposals } from '../join-proposals.js';
  * What a join branch proposes, relative to the default branch. This diff IS
  * the request's lifecycle: non-empty ⇒ open, empty ⇒ settled and closed.
  */
-const PATH = 'Groups/GTM/access.md';
+const PATH = 'Plugins/GTM/access.md';
 
 /** New-format access.md: `read: everyone` self-frontmatter, body = folder rules. */
 const base = (body: string) => `---\nread:\n  - everyone\n---\n${body}`;

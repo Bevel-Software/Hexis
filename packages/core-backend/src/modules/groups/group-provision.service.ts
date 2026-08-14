@@ -36,10 +36,12 @@ import path from 'node:path';
 
 import {
   DEFAULT_BRANCH,
-  GROUPS_DIR,
-  PERSONAL_GROUP_PREFIX,
-  isPersonalGroupFolder,
-  personalGroupFolderName,
+  PLUGINS_DIR,
+  PLUGIN_MANIFEST_FILE,
+  renderPluginManifest,
+  PERSONAL_PLUGIN_PREFIX,
+  isPersonalPluginFolder,
+  personalPluginFolderName,
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
@@ -113,11 +115,11 @@ export class GroupProvisionService {
         422,
       );
     }
-    if (name.toLowerCase().startsWith(PERSONAL_GROUP_PREFIX)) {
+    if (name.toLowerCase().startsWith(PERSONAL_PLUGIN_PREFIX)) {
       // Reserved: the personal-folder namespace. A group squatting there
       // would collide with somebody's future personal folder.
       throw new GroupProvisionError(
-        `Group names starting with "${PERSONAL_GROUP_PREFIX}" are reserved.`,
+        `Group names starting with "${PERSONAL_PLUGIN_PREFIX}" are reserved.`,
         422,
       );
     }
@@ -136,7 +138,7 @@ export class GroupProvisionService {
    * stable user id. Returns `created: false` when it is already there.
    */
   async ensurePersonalGroup(user: AuthUser): Promise<ProvisionedGroup> {
-    const folder = personalGroupFolderName(user.id);
+    const folder = personalPluginFolderName(user.id);
     return this.creations.run(`group:${folder.toLowerCase()}`, async () => {
       if ((await this.existingFolder(folder)) !== null) {
         return { folder, created: false };
@@ -177,7 +179,7 @@ export class GroupProvisionService {
   async deleteGroup(user: AuthUser, rawName: string): Promise<void> {
     const name = rawName.trim();
     if (!name) throw new GroupProvisionError('A group needs a name.', 422);
-    if (isPersonalGroupFolder(name)) {
+    if (isPersonalPluginFolder(name)) {
       // Personal folders are not groups (the catalog never lists them), and
       // nobody deletes somebody's private shelf through the group door.
       throw new GroupProvisionError('Unknown group', 404);
@@ -190,7 +192,7 @@ export class GroupProvisionService {
 
       const wsId = await this.readyWorkspaceId();
       const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-      const groupsDir = path.join(wsDir, this.kbDirName, GROUPS_DIR);
+      const groupsDir = path.join(wsDir, this.kbDirName, PLUGINS_DIR);
       const folderDir = path.join(groupsDir, name);
       // Dot-prefixed ⇒ invisible to the group scanner and the collision
       // check for the whole window the commit is in flight.
@@ -209,7 +211,7 @@ export class GroupProvisionService {
         await this.commits.runPendingCommit(
           wsId,
           DEFAULT_BRANCH,
-          `${this.kbDirName}/${GROUPS_DIR}/${name}`,
+          `${this.kbDirName}/${PLUGINS_DIR}/${name}`,
           user,
           { systemAuthorized: true },
         );
@@ -237,7 +239,7 @@ export class GroupProvisionService {
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
     let children: string[];
     try {
-      children = await fs.readdir(path.join(wsDir, this.kbDirName, GROUPS_DIR));
+      children = await fs.readdir(path.join(wsDir, this.kbDirName, PLUGINS_DIR));
     } catch {
       return null; // no Groups/ root yet — nothing can collide
     }
@@ -247,10 +249,13 @@ export class GroupProvisionService {
 
   private async provision(user: AuthUser, folder: string, accessMd: string): Promise<void> {
     const wsId = await this.readyWorkspaceId();
-    const wsRelPath = `${this.kbDirName}/${GROUPS_DIR}/${folder}/access.md`;
+    const folderPath = `${this.kbDirName}/${PLUGINS_DIR}/${folder}`;
+    const wsRelPath = `${folderPath}/access.md`;
     try {
       // Exclusive create — the fs is the arbiter of a same-name race, not
-      // the (stale-able) existence check above.
+      // the (stale-able) existence check above. `access.md` stays the marker
+      // that a folder is real (every scanner keys on it), so it is still the
+      // file the race is decided on.
       await this.workspaceService.writeFile(wsId, wsRelPath, accessMd, { failIfExists: true });
     } catch (err) {
       if ((err as { status?: number }).status === 409) {
@@ -258,6 +263,15 @@ export class GroupProvisionService {
       }
       throw err;
     }
+    // The manifest is what makes the folder a PLUGIN to anything outside this
+    // app, so it lands in the same commit as the access rules — a folder that
+    // is briefly a plugin to us and not to a conformant client is a state
+    // worth not having.
+    await this.workspaceService.writeFile(
+      wsId,
+      `${folderPath}/${PLUGIN_MANIFEST_FILE}`,
+      renderPluginManifest(folder),
+    );
     try {
       // Inline, not enqueued: the gate reads rules at HEAD, so the folder is
       // only real once this commit lands. `runPendingCommit` is the same
@@ -267,7 +281,7 @@ export class GroupProvisionService {
       // rule this endpoint exists to carve through. The endpoint has already
       // authorized the write (any signed-in user, unused name, exclusive
       // create), so the per-user gate is skipped for exactly this commit.
-      await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, wsRelPath, user, {
+      await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, folderPath, user, {
         systemAuthorized: true,
       });
     } catch (err) {
@@ -278,8 +292,9 @@ export class GroupProvisionService {
       // so a concurrent writer's bytes can't be collateral.
       try {
         const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-        const folderDir = path.join(wsDir, this.kbDirName, GROUPS_DIR, folder);
+        const folderDir = path.join(wsDir, this.kbDirName, PLUGINS_DIR, folder);
         await fs.rm(path.join(folderDir, 'access.md'), { force: true });
+        await fs.rm(path.join(folderDir, PLUGIN_MANIFEST_FILE), { force: true });
         await fs.rmdir(folderDir).catch(() => {});
       } catch {
         /* leave it for the next attempt's wx conflict — better than masking the real error */

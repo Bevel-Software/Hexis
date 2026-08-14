@@ -611,7 +611,7 @@ describe('FileExplorer chevron collapse: userIntent vs autoExpanded', () => {
 });
 
 // The KB level splits the well-known root folders into labelled top-level
-// sections — with one deliberate exception, `Groups/`.
+// sections — with one deliberate exception, `Plugins/`.
 describe('FileExplorer sections: root folders', () => {
   beforeEach(() => {
     cleanup();
@@ -645,7 +645,7 @@ describe('FileExplorer sections: root folders', () => {
   });
 
   /**
-   * `Groups/` is the Skills & Tools app's storage, and that app presents it as
+   * `Plugins/` is the Skills & Tools app's storage, and that app presents it as
    * groups, skills and tools. Listing it here offered a second, worse way in —
    * raw markdown editing of a SKILL.md, on a folder whose access is managed
    * from the group page.
@@ -660,11 +660,11 @@ describe('FileExplorer sections: root folders', () => {
       name: '.',
       relativePath: '.',
       type: 'directory',
-      children: [dir('KnowledgeBase'), dir('Groups')],
+      children: [dir('KnowledgeBase'), dir('Plugins')],
     };
     renderExplorer({ fileTree: tree });
     expect(screen.getByText('Knowledge')).toBeInTheDocument();
-    expect(screen.queryByText('Groups')).not.toBeInTheDocument();
+    expect(screen.queryByText('Plugins')).not.toBeInTheDocument();
   });
 
   /** A KB whose only root is Groups still has a knowledge view — an empty one. */
@@ -673,10 +673,10 @@ describe('FileExplorer sections: root folders', () => {
       name: '.',
       relativePath: '.',
       type: 'directory',
-      children: [dir('Groups')],
+      children: [dir('Plugins')],
     };
     renderExplorer({ fileTree: tree });
-    expect(screen.queryByText('Groups')).not.toBeInTheDocument();
+    expect(screen.queryByText('Plugins')).not.toBeInTheDocument();
   });
 });
 
@@ -895,10 +895,10 @@ describe('FileExplorer rows: the prototype tree', () => {
       fileTree: TREE,
       // `Groups` is not in TREE — the server filtered it (bevelignored). The
       // touched file underneath must NOT appear.
-      minePaths: new Map([['Groups/newsletter/SKILL.md', 12]]),
+      minePaths: new Map([['Plugins/newsletter/SKILL.md', 12]]),
     });
     expect(screen.queryByTitle('Proposed by you: opens the change request')).toBeNull();
-    expect(screen.queryByText('Groups')).toBeNull();
+    expect(screen.queryByText('Plugins')).toBeNull();
     expect(screen.queryByText('SKILL.md')).toBeNull();
   });
 

@@ -1,5 +1,5 @@
 import { Navigate, useParams } from 'react-router-dom';
-import { DEFAULT_BRANCH, GROUPS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useLibrary } from '../state/library-data';
 import { SkillPage } from '../components/skill-page/SkillPage';
@@ -35,7 +35,7 @@ export function WorkspaceItemRoute() {
   // Shape re-validation: the route pattern (`:branch/*`) is broader than the
   // shape the shell dispatches here, and a stray URL must not read as a page.
   const segments = splat.split('/').filter(Boolean).map(safeDecode);
-  if (branch !== DEFAULT_BRANCH || segments[1] !== GROUPS_DIR || segments.length < 3) {
+  if (branch !== DEFAULT_BRANCH || segments[1] !== PLUGINS_DIR || segments.length < 3) {
     return <Navigate to={LIBRARY_ROOT} replace />;
   }
   if (kbDirName !== null && segments[0] !== kbDirName) {
@@ -47,7 +47,7 @@ export function WorkspaceItemRoute() {
   if (!group || !last) {
     return <Navigate to={LIBRARY_ROOT} replace />;
   }
-  const repoRel = `${GROUPS_DIR}/${group}/${tail.join('/')}`;
+  const repoRel = `${PLUGINS_DIR}/${group}/${tail.join('/')}`;
 
   /**
    * `key={name}` is load-bearing. A provisional name gets CORRECTED once the

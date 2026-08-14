@@ -1,4 +1,4 @@
-import { DEFAULT_BRANCH, GROUPS_DIR, groupOfPath, isPersonalGroupFolder } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR, pluginOfPath, isPersonalPluginFolder } from '@bevel-software/platform-shared';
 import { matchPath } from 'react-router-dom';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import type { LibraryFilter } from '../utils/status';
@@ -113,7 +113,7 @@ export function isLibraryLocation(pathname: string): boolean {
   return (
     segments[0] === 'workspace' &&
     segments[1] === DEFAULT_BRANCH &&
-    segments[3] === GROUPS_DIR &&
+    segments[3] === PLUGINS_DIR &&
     segments.length >= 6 // workspace/<branch>/<kbDir>/Groups/<group>/<item>
   );
 }
@@ -180,8 +180,8 @@ export function libraryHomeForItemPath(repoRelativePath: string): {
   label: string;
   path: string;
 } {
-  const group = groupOfPath(repoRelativePath);
-  if (group !== null && !isPersonalGroupFolder(group)) {
+  const group = pluginOfPath(repoRelativePath);
+  if (group !== null && !isPersonalPluginFolder(group)) {
     return { label: group, path: pathForGroup(group) };
   }
   if (group !== null) {

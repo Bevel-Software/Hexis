@@ -70,7 +70,7 @@ const CATALOG: LibraryData = {
   loading: false,
   error: null,
   skills: [
-    { name: 'outreach', description: 'Runs the GTM outreach.', path: 'Groups/GTM/outreach' },
+    { name: 'outreach', description: 'Runs the GTM outreach.', path: 'Plugins/GTM/outreach' },
     { name: 'scratch', description: 'A skill in no group.', path: 'Skills/scratch' },
   ],
   tools: [],
@@ -84,7 +84,7 @@ const CATALOG: LibraryData = {
 
 const summary = (over: Partial<GroupSummary>): GroupSummary => ({
   name: 'GTM',
-  folders: ['Groups/GTM'],
+  folders: ['Plugins/GTM'],
   canRead: true,
   canWrite: true,
   isOwner: false,
@@ -102,7 +102,7 @@ const GROUPS: GroupSummary[] = [
   summary({}),
   // Not readable and not writable, and no item of it reaches the catalog — the
   // sidebar's locked half.
-  summary({ name: 'Finance', folders: ['Groups/Finance'], canRead: false, canWrite: false }),
+  summary({ name: 'Finance', folders: ['Plugins/Finance'], canRead: false, canWrite: false }),
 ];
 
 function wrap(children: ReactNode) {
@@ -282,11 +282,11 @@ describe('Library sidebar: right-click, end to end', () => {
      * WORKSPACE path (`<kbDirName>/<folder>`), the dialog strips that prefix
      * back off, and what reaches the resolver is the REPO-relative folder —
      * which is the only address `access.md` is written at. Get either half
-     * wrong and this is `undefined/Groups/GTM` or `knowledge-base/Groups/GTM`,
+     * wrong and this is `undefined/Plugins/GTM` or `knowledge-base/Plugins/GTM`,
      * and the dialog silently resolves a folder that does not exist. It is the
      * same handoff `GroupPage` makes, which is why it has to match exactly.
      */
-    expect(vi.mocked(access.fetchFileAccess).mock.calls[0][1]).toBe('Groups/GTM');
+    expect(vi.mocked(access.fetchFileAccess).mock.calls[0][1]).toBe('Plugins/GTM');
   });
 
   it("copies the clicked row's own URL, not the one you are standing on", async () => {

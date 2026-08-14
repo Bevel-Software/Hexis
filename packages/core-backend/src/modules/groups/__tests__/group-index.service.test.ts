@@ -64,8 +64,8 @@ describe('GroupIndexService', () => {
 
   /** A REAL group: a folder carrying the access.md that makes it exist. */
   const groupDir = async (name: string) => {
-    await mkdir(join(kb(), 'Groups', name), { recursive: true });
-    await writeFile(join(kb(), 'Groups', name, 'access.md'), '---\nread:\n  - everyone\n---\n');
+    await mkdir(join(kb(), 'Plugins', name), { recursive: true });
+    await writeFile(join(kb(), 'Plugins', name, 'access.md'), '---\nread:\n  - everyone\n---\n');
   };
 
   beforeEach(async () => {
@@ -74,22 +74,22 @@ describe('GroupIndexService', () => {
   });
   afterEach(() => rm(root, { recursive: true, force: true }));
 
-  test('enumerates Groups/ folders carrying an access.md, sorted by name', async () => {
+  test('enumerates Plugins/ folders carrying an access.md, sorted by name', async () => {
     await groupDir('GTM');
     await groupDir('Engineering');
 
     const catalog = await svc().catalog();
     expect(catalog.map((g) => g.name)).toEqual(['Engineering', 'GTM']);
-    expect(catalog[1].folders).toEqual(['Groups/GTM']);
+    expect(catalog[1].folders).toEqual(['Plugins/GTM']);
   });
 
   test('a folder without an access.md is not a group', async () => {
     // The residue a deleted group leaves behind: git cannot record an empty
     // directory, so the folder outlives its files on live checkouts — and a
     // folder with content but no access.md is just as much a non-group.
-    await mkdir(join(kb(), 'Groups', 'Ghost'), { recursive: true });
-    await mkdir(join(kb(), 'Groups', 'Residue'), { recursive: true });
-    await writeFile(join(kb(), 'Groups', 'Residue', 'notes.md'), 'leftover');
+    await mkdir(join(kb(), 'Plugins', 'Ghost'), { recursive: true });
+    await mkdir(join(kb(), 'Plugins', 'Residue'), { recursive: true });
+    await writeFile(join(kb(), 'Plugins', 'Residue', 'notes.md'), 'leftover');
     await groupDir('Real');
 
     const catalog = await svc().catalog();
@@ -107,23 +107,23 @@ describe('GroupIndexService', () => {
 
   test('ignores loose files and dot-dirs under the group root', async () => {
     // The dot filter wins even over a folder that carries an access.md.
-    await mkdir(join(kb(), 'Groups', '.hidden'), { recursive: true });
-    await writeFile(join(kb(), 'Groups', '.hidden', 'access.md'), '---\nread:\n  - everyone\n---\n');
+    await mkdir(join(kb(), 'Plugins', '.hidden'), { recursive: true });
+    await writeFile(join(kb(), 'Plugins', '.hidden', 'access.md'), '---\nread:\n  - everyone\n---\n');
     await groupDir('GTM');
-    await writeFile(join(kb(), 'Groups', 'slack.tool'), '{}');
+    await writeFile(join(kb(), 'Plugins', 'slack.tool'), '{}');
 
     const catalog = await svc().catalog();
     expect(catalog.map((g) => g.name)).toEqual(['GTM']);
   });
 
-  test('counts skills and tools from the global catalogs by groupOfPath', async () => {
+  test('counts skills and tools from the global catalogs by pluginOfPath', async () => {
     await groupDir('GTM');
     await groupDir('Product');
 
     const catalog = await svc({
-      skills: skills('Groups/GTM/outreach', 'Groups/GTM/newsletter', 'Groups/Product/roadmap'),
-      // `Groups/slack.tool` is ungrouped (two segments) — it counts nowhere.
-      tools: tools('Groups/GTM/heyreach.tool', 'Groups/slack.tool'),
+      skills: skills('Plugins/GTM/outreach', 'Plugins/GTM/newsletter', 'Plugins/Product/roadmap'),
+      // `Plugins/slack.tool` is ungrouped (two segments) — it counts nowhere.
+      tools: tools('Plugins/GTM/heyreach.tool', 'Plugins/slack.tool'),
     }).catalog();
 
     const gtm = catalog.find((g) => g.name === 'GTM')!;
@@ -148,13 +148,13 @@ describe('GroupIndexService', () => {
     } as unknown as IAccessControl;
 
     const catalog = await svc({ access }).catalog();
-    expect(catalog[0].folders).toEqual(['Groups/GTM']);
-    expect(seen).toEqual(['Groups/GTM']);
+    expect(catalog[0].folders).toEqual(['Plugins/GTM']);
+    expect(seen).toEqual(['Plugins/GTM']);
     expect(catalog[0].owners.users).toEqual([OLGA]);
     expect(catalog[0].readers).toEqual({ restricted: false, roles: [], users: [] });
   });
 
-  test('a missing Groups/ root yields an empty list, not an error', async () => {
+  test('a missing Plugins/ root yields an empty list, not an error', async () => {
     await expect(svc().catalog()).resolves.toEqual([]);
   });
 

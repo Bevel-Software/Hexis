@@ -10,7 +10,7 @@ import {
   stripJunkBeforeKbDir,
   KB_ROUTE_PREFIX,
 } from '../../workspace/routing/kb-routes';
-import { groupOfPath, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { pluginOfPath, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { ReviewFileRow } from './ReviewFileRow';
@@ -28,10 +28,10 @@ function isMarkdownPath(p: string): boolean {
  * The paths in a review session are WORKSPACE-relative: the diff module
  * resolves them against the workspace directory, so they arrive carrying the
  * KB clone as their first segment (`knowledge-base/Groups/GTM/x/SKILL.md`).
- * `groupOfPath` wants them REPO-relative, and `stripJunkBeforeKbDir` does not
+ * `pluginOfPath` wants them REPO-relative, and `stripJunkBeforeKbDir` does not
  * get there on its own — it only drops junk BEFORE the kb dir and keeps the
  * segment itself, so it returns an already-well-formed path unchanged. Asking
- * `groupOfPath` about the workspace-relative form gets `null` for every path,
+ * `pluginOfPath` about the workspace-relative form gets `null` for every path,
  * group or not, which is a check that silently never fires.
  *
  * Exported so it can be tested directly. The behaviour it guards lives behind
@@ -44,7 +44,7 @@ export function isGroupItemPath(path: string, kbDirName: string | null): boolean
     kbDirName && withoutJunk.startsWith(`${kbDirName}/`)
       ? withoutJunk.slice(kbDirName.length + 1)
       : withoutJunk;
-  return groupOfPath(repoRelative) !== null;
+  return pluginOfPath(repoRelative) !== null;
 }
 
 /**

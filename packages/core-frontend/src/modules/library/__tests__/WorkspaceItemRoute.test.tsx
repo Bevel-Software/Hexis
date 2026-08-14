@@ -43,14 +43,14 @@ const CATALOG: LibraryData = {
   loading: false,
   error: null,
   skills: [
-    { name: 'create-sales-deck', description: '', path: 'Groups/Sales/create-sales-deck' },
+    { name: 'create-sales-deck', description: '', path: 'Plugins/Sales/create-sales-deck' },
   ],
   pendingSkills: [],
   tools: [
     {
       slug: 'notion',
       name: 'notion',
-      path: 'Groups/Support/notion.tool',
+      path: 'Plugins/Support/notion.tool',
       type: 'mcp',
       setup: null,
       canWrite: false,
@@ -122,7 +122,7 @@ beforeEach(() => {
 
 describe('WorkspaceItemRoute', () => {
   it("a skill file's URL renders the skill page on that file's tab, inside the library nav", async () => {
-    renderAt(itemUrl('Groups/Sales/create-sales-deck/reference/LESSONS.md'));
+    renderAt(itemUrl('Plugins/Sales/create-sales-deck/reference/LESSONS.md'));
     expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
       'create-sales-deck::reference/LESSONS.md',
     );
@@ -131,14 +131,14 @@ describe('WorkspaceItemRoute', () => {
   });
 
   it('a bare skill-folder URL opens SKILL.md', async () => {
-    renderAt(itemUrl('Groups/Sales/create-sales-deck'));
+    renderAt(itemUrl('Plugins/Sales/create-sales-deck'));
     expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
       'create-sales-deck::SKILL.md',
     );
   });
 
   it("a `.tool` manual's URL renders the tool page", async () => {
-    renderAt(itemUrl('Groups/Support/notion.tool'));
+    renderAt(itemUrl('Plugins/Support/notion.tool'));
     expect(await screen.findByLabelText('tool-page')).toHaveTextContent('notion');
   });
 
@@ -147,7 +147,7 @@ describe('WorkspaceItemRoute', () => {
     // catalog reload hasn't landed. Resolution is structural (the folder name
     // IS the skill id), so the page opens instantly anyway.
     dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
-    renderAt(itemUrl('Groups/Sales/brand-new-skill/SKILL.md'));
+    renderAt(itemUrl('Plugins/Sales/brand-new-skill/SKILL.md'));
     expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
       'brand-new-skill::SKILL.md',
     );
@@ -157,12 +157,12 @@ describe('WorkspaceItemRoute', () => {
 
   it("a `.tool` URL falls back to the filename slug when the catalog hasn't loaded", async () => {
     dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
-    renderAt(itemUrl('Groups/Support/notion.tool'));
+    renderAt(itemUrl('Plugins/Support/notion.tool'));
     expect(await screen.findByLabelText('tool-page')).toHaveTextContent('notion');
   });
 
   it("a Groups path that is no item lands on its group's page", async () => {
-    renderAt(itemUrl('Groups/Sales/access.md'));
+    renderAt(itemUrl('Plugins/Sales/access.md'));
     await waitFor(() =>
       expect(screen.getByLabelText('pathname')).toHaveTextContent('/skills-and-tools/groups/Sales'),
     );
@@ -170,7 +170,7 @@ describe('WorkspaceItemRoute', () => {
 
   /**
    * A group may carry CATEGORY folders: `skills.service` walks until it finds
-   * a `SKILL.md` and treats that folder as the skill, so `Groups/Engineering/
+   * a `SKILL.md` and treats that folder as the skill, so `Plugins/Engineering/
    * coding/create-ticket/SKILL.md` is a skill named `create-ticket`.
    *
    * Reading the first segment below the group asked for the category —
@@ -183,11 +183,11 @@ describe('WorkspaceItemRoute', () => {
     const NESTED: LibraryData = {
       ...CATALOG,
       skills: [
-        { name: 'create-ticket', description: '', path: 'Groups/Engineering/coding/create-ticket' },
+        { name: 'create-ticket', description: '', path: 'Plugins/Engineering/coding/create-ticket' },
         {
           name: 'architecture-review',
           description: '',
-          path: 'Groups/Engineering/review/architecture-review',
+          path: 'Plugins/Engineering/review/architecture-review',
         },
       ],
     };
@@ -197,21 +197,21 @@ describe('WorkspaceItemRoute', () => {
     });
 
     it('resolves its SKILL.md to the folder holding it, not the category', async () => {
-      renderAt(itemUrl('Groups/Engineering/coding/create-ticket/SKILL.md'));
+      renderAt(itemUrl('Plugins/Engineering/coding/create-ticket/SKILL.md'));
       expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
         'create-ticket::SKILL.md',
       );
     });
 
     it('resolves a bundled file below a category folder', async () => {
-      renderAt(itemUrl('Groups/Engineering/review/architecture-review/check-vocab.mjs'));
+      renderAt(itemUrl('Plugins/Engineering/review/architecture-review/check-vocab.mjs'));
       expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
         'architecture-review::check-vocab.mjs',
       );
     });
 
     it('resolves a bare nested skill folder to SKILL.md', async () => {
-      renderAt(itemUrl('Groups/Engineering/coding/create-ticket'));
+      renderAt(itemUrl('Plugins/Engineering/coding/create-ticket'));
       expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
         'create-ticket::SKILL.md',
       );
@@ -221,7 +221,7 @@ describe('WorkspaceItemRoute', () => {
       // The SKILL.md rule reads the URL alone, so the just-created case above
       // keeps working at depth: the folder holding SKILL.md IS the skill.
       dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
-      renderAt(itemUrl('Groups/Engineering/coding/brand-new-skill/SKILL.md'));
+      renderAt(itemUrl('Plugins/Engineering/coding/brand-new-skill/SKILL.md'));
       expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
         'brand-new-skill::SKILL.md',
       );
@@ -238,7 +238,7 @@ describe('WorkspaceItemRoute', () => {
           {
             slug: 'internal_deploy',
             name: 'internal_deploy',
-            path: 'Groups/Engineering/coding/deploy.tool',
+            path: 'Plugins/Engineering/coding/deploy.tool',
             type: 'mcp' as const,
             setup: null,
             canWrite: false,
@@ -246,14 +246,14 @@ describe('WorkspaceItemRoute', () => {
           },
         ],
       });
-      renderAt(itemUrl('Groups/Engineering/coding/deploy.tool'));
+      renderAt(itemUrl('Plugins/Engineering/coding/deploy.tool'));
       expect(await screen.findByLabelText('tool-page')).toHaveTextContent('internal_deploy');
     });
 
     it("sends a category folder's own access.md to the group page", async () => {
       // The same answer a stray file at the group's top level gets. Before, it
       // fell through to a SkillPage named after the category.
-      renderAt(itemUrl('Groups/Engineering/coding/access.md'));
+      renderAt(itemUrl('Plugins/Engineering/coding/access.md'));
       await waitFor(() =>
         expect(screen.getByLabelText('pathname')).toHaveTextContent(
           '/skills-and-tools/groups/Engineering',
@@ -266,7 +266,7 @@ describe('WorkspaceItemRoute', () => {
       // SkillPage after a skill named "coding" and flashed a not-found error;
       // the catalog is what settles it, so hold the slot until it lands.
       dataMock.useLibraryData.mockReturnValue({ ...NESTED, loading: true, skills: [], tools: [] });
-      renderAt(itemUrl('Groups/Engineering/coding/create-ticket'));
+      renderAt(itemUrl('Plugins/Engineering/coding/create-ticket'));
       expect(await screen.findByRole('button', { name: /^All groups/ })).toBeInTheDocument();
       expect(screen.queryByLabelText('skill-page')).toBeNull();
     });
@@ -275,7 +275,7 @@ describe('WorkspaceItemRoute', () => {
       // A category is not a skill, and `coding` names none. What tells it apart
       // from a just-created skill the catalog hasn't caught up with is that the
       // catalog knows skills UNDER it.
-      renderAt(itemUrl('Groups/Engineering/coding'));
+      renderAt(itemUrl('Plugins/Engineering/coding'));
       await waitFor(() =>
         expect(screen.getByLabelText('pathname')).toHaveTextContent(
           '/skills-and-tools/groups/Engineering',
@@ -285,7 +285,7 @@ describe('WorkspaceItemRoute', () => {
     });
 
     it('still opens a folder the catalog has no skills under — a stale new skill', async () => {
-      renderAt(itemUrl('Groups/Engineering/coding/brand-new-skill'));
+      renderAt(itemUrl('Plugins/Engineering/coding/brand-new-skill'));
       expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
         'brand-new-skill::SKILL.md',
       );
@@ -297,7 +297,7 @@ describe('WorkspaceItemRoute', () => {
       // reader to the group — the very symptom this change exists to remove,
       // reached through a different unsettled state. Absence proves nothing;
       // only positive evidence (a known category above it) redirects.
-      renderAt(itemUrl('Groups/Engineering/coding/brand-new-skill/notes.md'));
+      renderAt(itemUrl('Plugins/Engineering/coding/brand-new-skill/notes.md'));
       expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
         'brand-new-skill::notes.md',
       );
@@ -310,7 +310,7 @@ describe('WorkspaceItemRoute', () => {
         ...NESTED,
         error: "Couldn't refresh the catalog.",
       });
-      renderAt(itemUrl('Groups/Engineering/coding'));
+      renderAt(itemUrl('Plugins/Engineering/coding'));
       await waitFor(() =>
         expect(screen.getByLabelText('pathname')).toHaveTextContent(
           '/skills-and-tools/groups/Engineering',
@@ -328,11 +328,11 @@ describe('WorkspaceItemRoute', () => {
           {
             name: 'create-ticket-v2',
             description: '',
-            path: 'Groups/Engineering/coding/create-ticket-v2',
+            path: 'Plugins/Engineering/coding/create-ticket-v2',
           },
         ],
       });
-      renderAt(itemUrl('Groups/Engineering/coding/create-ticket-v2/notes.md'));
+      renderAt(itemUrl('Plugins/Engineering/coding/create-ticket-v2/notes.md'));
       expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
         'create-ticket-v2::notes.md',
       );
@@ -346,9 +346,9 @@ describe('WorkspaceItemRoute', () => {
   it('resolves a skill whose declared id differs from its folder name', async () => {
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,
-      skills: [{ name: 'deck-builder', description: '', path: 'Groups/Sales/create-sales-deck' }],
+      skills: [{ name: 'deck-builder', description: '', path: 'Plugins/Sales/create-sales-deck' }],
     });
-    renderAt(itemUrl('Groups/Sales/create-sales-deck/SKILL.md'));
+    renderAt(itemUrl('Plugins/Sales/create-sales-deck/SKILL.md'));
     expect(await screen.findByLabelText('skill-page')).toHaveTextContent('deck-builder::SKILL.md');
   });
 
@@ -356,7 +356,7 @@ describe('WorkspaceItemRoute', () => {
     // `skills.service` stops at the first `SKILL.md` and treats that folder as
     // the skill, so a nested one is a bundled asset — never a skill called
     // `examples`.
-    renderAt(itemUrl('Groups/Sales/create-sales-deck/examples/SKILL.md'));
+    renderAt(itemUrl('Plugins/Sales/create-sales-deck/examples/SKILL.md'));
     expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
       'create-sales-deck::examples/SKILL.md',
     );
@@ -380,14 +380,14 @@ describe('WorkspaceItemRoute', () => {
     // The file's own folder is the best available reading without a catalog
     // (an asset nested deeper simply cannot be attributed) — the point is that
     // the reader stays on a skill page instead of being bounced to the group.
-    renderAt(itemUrl('Groups/Sales/create-sales-deck/notes.md'));
+    renderAt(itemUrl('Plugins/Sales/create-sales-deck/notes.md'));
     expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
       'create-sales-deck::notes.md',
     );
   });
 
   it('a non-default branch never renders an item page', async () => {
-    renderAt(itemUrl('Groups/Sales/create-sales-deck/SKILL.md', 'razvan/some-draft'));
+    renderAt(itemUrl('Plugins/Sales/create-sales-deck/SKILL.md', 'razvan/some-draft'));
     await waitFor(() =>
       expect(screen.getByLabelText('pathname')).toHaveTextContent(/^\/skills-and-tools$/),
     );
@@ -398,15 +398,15 @@ describe('isLibraryLocation — the surface rule', () => {
   it.each([
     ['/skills-and-tools', true],
     ['/skills-and-tools/groups/Sales', true],
-    [itemUrl('Groups/Sales/create-sales-deck/SKILL.md'), true],
-    [itemUrl('Groups/Support/notion.tool'), true],
+    [itemUrl('Plugins/Sales/create-sales-deck/SKILL.md'), true],
+    [itemUrl('Plugins/Support/notion.tool'), true],
     // KnowledgeBase paths are the Knowledge app's, whatever the file.
     [`/workspace/${DEFAULT_BRANCH}/${KB}/KnowledgeBase/Handbook/Tone of voice.md`, false],
     // Drafts review raw, in Knowledge — the library speaks the default branch.
-    [itemUrl('Groups/Sales/create-sales-deck/SKILL.md', 'razvan/draft'), false],
-    // Too shallow to name an item (`Groups/` itself, a group folder alone).
+    [itemUrl('Plugins/Sales/create-sales-deck/SKILL.md', 'razvan/draft'), false],
+    // Too shallow to name an item (`Plugins/` itself, a group folder alone).
     [`/workspace/${DEFAULT_BRANCH}/${KB}/Groups`, false],
-    [`/workspace/${DEFAULT_BRANCH}/${KB}/Groups/Sales`, false],
+    [`/workspace/${DEFAULT_BRANCH}/${KB}/Plugins/Sales`, false],
     ['/workspace', false],
     ['/secrets', false],
   ])('%s → %s', (pathname, expected) => {

@@ -1,4 +1,4 @@
-import { DEFAULT_BRANCH, GROUPS_DIR, type PullRequestSummary } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR, type PullRequestSummary } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
 import { createBranch } from '../../git/services/git.api';
@@ -248,7 +248,7 @@ export interface CreatedSkill {
 export async function createEmptySkill(input: CreateSkillInput): Promise<CreatedSkill> {
   const parentPath =
     'personal' in input
-      ? `${GROUPS_DIR}/${(await ensurePersonalGroup()).folder}`
+      ? `${PLUGINS_DIR}/${(await ensurePersonalGroup()).folder}`
       : input.parentPath;
   const repoRelativePath = `${parentPath}/${input.name}/SKILL.md`;
 

@@ -11,7 +11,7 @@ import {
   KNOWLEDGE_BASE_DIR,
   KNOWLEDGE_DIR,
   PIPELINES_DIR,
-  GROUPS_DIR,
+  PLUGINS_DIR,
 } from '@bevel-software/platform-shared';
 import { branchForWorkspaceId, FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import type { WorkspaceService } from './workspace.service.js';
@@ -476,7 +476,7 @@ export function createWorkspaceRoutes(
         DATA_DIR,
         AGENTS_DIR,
         PIPELINES_DIR,
-        GROUPS_DIR,
+        PLUGINS_DIR,
         KNOWLEDGE_DIR,
       ]);
       for (const wp of wsRelPaths) {

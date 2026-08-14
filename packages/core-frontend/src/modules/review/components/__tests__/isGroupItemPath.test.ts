@@ -24,15 +24,15 @@ const KB = 'knowledge-base';
  * The first version of this check shipped broken for exactly the reason the
  * first case below pins: review-session paths are WORKSPACE-relative, so they
  * carry the KB clone as their first segment, and `stripJunkBeforeKbDir` keeps
- * that segment rather than removing it. `groupOfPath` then saw
+ * that segment rather than removing it. `pluginOfPath` then saw
  * `knowledge-base` where it wanted `Groups` and answered `null` for every
  * path — a guard that could never fire.
  */
 describe('isGroupItemPath', () => {
   it.each([
-    ['skill, workspace-relative', `${KB}/Groups/GTM/update-website/SKILL.md`],
-    ['tool, workspace-relative', `${KB}/Groups/Engineering/notion.tool`],
-    ['personal group', `${KB}/Groups/personal-u1/my-skill/SKILL.md`],
+    ['skill, workspace-relative', `${KB}/Plugins/GTM/update-website/SKILL.md`],
+    ['tool, workspace-relative', `${KB}/Plugins/Engineering/notion.tool`],
+    ['personal group', `${KB}/Plugins/personal-u1/my-skill/SKILL.md`],
   ])('recognises a %s', (_name, path) => {
     expect(isGroupItemPath(path, KB)).toBe(true);
   });
@@ -50,19 +50,19 @@ describe('isGroupItemPath', () => {
    * fixtures use repo-relative ones — so both shapes have to work.
    */
   it('accepts an already repo-relative path', () => {
-    expect(isGroupItemPath('Groups/GTM/x/SKILL.md', KB)).toBe(true);
+    expect(isGroupItemPath('Plugins/GTM/x/SKILL.md', KB)).toBe(true);
     expect(isGroupItemPath('KnowledgeBase/Product/Thing.md', KB)).toBe(false);
   });
 
   it('tolerates junk before the kb dir, which is what strip exists for', () => {
-    expect(isGroupItemPath(`some/prefix/${KB}/Groups/GTM/x/SKILL.md`, KB)).toBe(true);
+    expect(isGroupItemPath(`some/prefix/${KB}/Plugins/GTM/x/SKILL.md`, KB)).toBe(true);
   });
 
   it('does not treat the Groups folder itself as an item', () => {
-    // `groupOfPath` needs a segment BELOW the group; `Groups/GTM` is the
-    // folder, and a bare `Groups/x.tool` names no group at all.
-    expect(isGroupItemPath(`${KB}/Groups/GTM`, KB)).toBe(false);
-    expect(isGroupItemPath(`${KB}/Groups/slack.tool`, KB)).toBe(false);
+    // `pluginOfPath` needs a segment BELOW the group; `Plugins/GTM` is the
+    // folder, and a bare `Plugins/x.tool` names no group at all.
+    expect(isGroupItemPath(`${KB}/Plugins/GTM`, KB)).toBe(false);
+    expect(isGroupItemPath(`${KB}/Plugins/slack.tool`, KB)).toBe(false);
   });
 
   /**
@@ -70,14 +70,14 @@ describe('isGroupItemPath', () => {
    * clone, so nothing inside it is a group item. Both the segment-exact match
    * in `stripJunkBeforeKbDir` and the `${kbDirName}/` prefix test added here
    * have to agree on that — a `startsWith(kbDirName)` in either would strip
-   * `-backup/…` down to `Groups/…` and call a backup copy a live skill.
+   * `-backup/…` down to `Plugins/…` and call a backup copy a live skill.
    */
   it('is not fooled by a directory whose name merely starts with the kb dir', () => {
-    expect(isGroupItemPath(`${KB}-backup/Groups/GTM/x/SKILL.md`, KB)).toBe(false);
+    expect(isGroupItemPath(`${KB}-backup/Plugins/GTM/x/SKILL.md`, KB)).toBe(false);
   });
 
   it('handles a null kbDirName', () => {
-    expect(isGroupItemPath('Groups/GTM/x/SKILL.md', null)).toBe(true);
+    expect(isGroupItemPath('Plugins/GTM/x/SKILL.md', null)).toBe(true);
     expect(isGroupItemPath('KnowledgeBase/Thing.md', null)).toBe(false);
   });
 });
@@ -89,7 +89,7 @@ describe('isGroupItemPath', () => {
  */
 describe('shouldOpenBesideDiff', () => {
   const base = { kbDirName: KB, branch: DEFAULT } as const;
-  const SKILL = `${KB}/Groups/GTM/update-website/SKILL.md`;
+  const SKILL = `${KB}/Plugins/GTM/update-website/SKILL.md`;
   const DOC = `${KB}/KnowledgeBase/Product/Thing.md`;
 
   it('opens an ordinary knowledge document', () => {
@@ -101,7 +101,7 @@ describe('shouldOpenBesideDiff', () => {
   });
 
   /**
-   * Only the DEFAULT branch's `Groups/` URLs are library locations
+   * Only the DEFAULT branch's `Plugins/` URLs are library locations
    * (`isLibraryLocation` tests `segments[1] === DEFAULT_BRANCH`). On a draft
    * branch the same skill opens in Knowledge and switches nothing, so the
    * guard must not fire — refusing there would cost the context this call

@@ -27,7 +27,7 @@ import { joinNames, firstNames } from '../utils/names';
 
 const finance = (over: Partial<GroupSummary> = {}): GroupSummary => ({
   name: 'Finance',
-  folders: ['Groups/Finance'],
+  folders: ['Plugins/Finance'],
   canRead: false,
   canWrite: false,
   isOwner: false,
@@ -178,9 +178,9 @@ describe('LockedGroupView', () => {
   });
 
   it('gives a locked-out admin the self-service way in', () => {
-    const { onManage } = renderLocked(finance({ canWrite: true, folders: ['Groups/Finance'] }));
+    const { onManage } = renderLocked(finance({ canWrite: true, folders: ['Plugins/Finance'] }));
     fireEvent.click(screen.getByRole('button', { name: 'Manage access' }));
-    expect(onManage).toHaveBeenCalledWith('Groups/Finance');
+    expect(onManage).toHaveBeenCalledWith('Plugins/Finance');
   });
 
   it('offers no Manage access to somebody who cannot write the folder', () => {

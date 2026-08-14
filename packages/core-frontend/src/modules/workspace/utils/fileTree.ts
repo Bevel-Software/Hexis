@@ -3,7 +3,7 @@ import {
   DATA_DIR,
   KNOWLEDGE_BASE_DIR,
   PIPELINES_DIR,
-  GROUPS_DIR,
+  PLUGINS_DIR,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
 import type { PendingEntry } from '../state/workspace.context';
@@ -18,7 +18,7 @@ export const KB_ROOT_DIRS = new Set([
   DATA_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
-  GROUPS_DIR,
+  PLUGINS_DIR,
 ]);
 
 /**

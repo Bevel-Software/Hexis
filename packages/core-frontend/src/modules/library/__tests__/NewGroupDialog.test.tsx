@@ -68,7 +68,7 @@ describe('NewGroupDialog', () => {
     expect(submit()).toBeDisabled();
   });
 
-  it('creates the folder under Groups/ and opens the new group', async () => {
+  it('creates the folder under Plugins/ and opens the new group', async () => {
     const { field, submit, onCreated, pathname } = renderDialog();
     fireEvent.change(field(), { target: { value: '  Design  ' } });
     fireEvent.click(submit());
@@ -81,7 +81,7 @@ describe('NewGroupDialog', () => {
   });
 
   it('refuses a name that is already taken, whoever can see it', () => {
-    // `existing` carries LOCKED groups too. Creating `Groups/Finance` when a
+    // `existing` carries LOCKED groups too. Creating `Plugins/Finance` when a
     // Finance you cannot read exists would not make a group — it would put
     // your items in somebody else's.
     const { field, submit } = renderDialog(['GTM', 'Finance']);
@@ -91,7 +91,7 @@ describe('NewGroupDialog', () => {
   });
 
   it('refuses a name that would create a nested folder', () => {
-    // `Groups/A/B` would be read back by `groupOfPath` as the group "A".
+    // `Plugins/A/B` would be read back by `pluginOfPath` as the group "A".
     const { field, submit } = renderDialog();
     fireEvent.change(field(), { target: { value: 'GTM/EMEA' } });
     expect(screen.getByRole('alert')).toHaveTextContent('/');

@@ -38,13 +38,13 @@ const tmpDirs: string[] = [];
 
 interface HarnessOpts {
   /**
-   * Paths (`Groups/GTM` for the folder/member verdict, `Groups/GTM/access.md`
+   * Paths (`Plugins/GTM` for the folder/member verdict, `Plugins/GTM/access.md`
    * for the discover verdict) the given email may read.
    */
   readable?: Record<string, string[]>;
   /** Paths the given email may write. */
   writable?: Record<string, string[]>;
-  /** Paths (the FOLDER, e.g. `Groups/GTM`) the given email OWNS. */
+  /** Paths (the FOLDER, e.g. `Plugins/GTM`) the given email OWNS. */
   owner?: Record<string, string[]>;
   /** Open CRs `listChangeRequestsAuthoredBy` returns for any caller. */
   authoredCrs?: ChangeRequest[];
@@ -76,14 +76,14 @@ async function makeHarness(opts: HarnessOpts = {}) {
   tmpDirs.push(workspaceDir);
   const kbRoot = path.join(workspaceDir, KB);
   // Both carry the access.md that makes a folder a group at all.
-  await fs.mkdir(path.join(kbRoot, 'Groups', 'GTM'), { recursive: true });
+  await fs.mkdir(path.join(kbRoot, 'Plugins', 'GTM'), { recursive: true });
   await fs.writeFile(
-    path.join(kbRoot, 'Groups', 'GTM', 'access.md'),
+    path.join(kbRoot, 'Plugins', 'GTM', 'access.md'),
     '---\nread:\n  - everyone\n---\nread: []\n',
   );
-  await fs.mkdir(path.join(kbRoot, 'Groups', 'Finance'), { recursive: true });
+  await fs.mkdir(path.join(kbRoot, 'Plugins', 'Finance'), { recursive: true });
   await fs.writeFile(
-    path.join(kbRoot, 'Groups', 'Finance', 'access.md'),
+    path.join(kbRoot, 'Plugins', 'Finance', 'access.md'),
     '---\nread:\n  - everyone\n---\nread: []\n',
   );
 
@@ -191,7 +191,7 @@ function close(s: Server): Promise<void> {
 }
 
 const MEMBER_OF_BOTH = {
-  [ALI]: ['Groups/GTM', 'Groups/GTM/access.md', 'Groups/Finance', 'Groups/Finance/access.md'],
+  [ALI]: ['Plugins/GTM', 'Plugins/GTM/access.md', 'Plugins/Finance', 'Plugins/Finance/access.md'],
 };
 
 describe('/api/groups routes', () => {
@@ -221,13 +221,13 @@ describe('/api/groups routes', () => {
     }
   });
 
-  it('lists member groups sorted, counting by groupOfPath', async () => {
+  it('lists member groups sorted, counting by pluginOfPath', async () => {
     const h = await makeHarness({
       readable: MEMBER_OF_BOTH,
-      skills: [{ name: 'outreach', description: '', path: 'Groups/GTM/outreach' }],
+      skills: [{ name: 'outreach', description: '', path: 'Plugins/GTM/outreach' }],
       tools: [
-        { slug: 'ledger', name: 'ledger', path: 'Groups/Finance/ledger.tool', type: 'inline' },
-        { slug: 'slack', name: 'slack', path: 'Groups/slack.tool', type: 'inline' },
+        { slug: 'ledger', name: 'ledger', path: 'Plugins/Finance/ledger.tool', type: 'inline' },
+        { slug: 'slack', name: 'slack', path: 'Plugins/slack.tool', type: 'inline' },
       ],
     });
     server = h.server;
@@ -240,7 +240,7 @@ describe('/api/groups routes', () => {
 
   it('a DISCOVERABLE group (access.md readable, folder not) lists locked with hasRequested from the join CR', async () => {
     const h = await makeHarness({
-      readable: { [ALI]: ['Groups/Finance/access.md'] },
+      readable: { [ALI]: ['Plugins/Finance/access.md'] },
       authoredCrs: [cr({ branch: joinBranchFor(ALI, 'Finance'), number: 9 })],
     });
     server = h.server;
@@ -255,16 +255,16 @@ describe('/api/groups routes', () => {
   });
 
   it('OMITS a group with NO verdict at all — nothing about it leaves the backend', async () => {
-    const h = await makeHarness({ readable: { [ALI]: ['Groups/Finance/access.md'] } });
+    const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     server = h.server;
     const { groups, raw } = await listGroups(h.baseUrl);
     expect(groups.map((g) => g.name)).toEqual(['Finance']);
     expect(raw).not.toContain('"name":"GTM"');
-    expect(raw).not.toContain('Groups/GTM');
+    expect(raw).not.toContain('Plugins/GTM');
   });
 
   it("keeps a locked-out folder-writer's group listed with canWrite: true (admin-rescue)", async () => {
-    const h = await makeHarness({ writable: { [ALI]: ['Groups/GTM/access.md'] } });
+    const h = await makeHarness({ writable: { [ALI]: ['Plugins/GTM/access.md'] } });
     server = h.server;
     const { groups } = await listGroups(h.baseUrl);
     expect(groups.map((g) => g.name)).toEqual(['GTM']);
@@ -273,7 +273,7 @@ describe('/api/groups routes', () => {
 
   it('a member never reports hasRequested (their stale join CR is ignored)', async () => {
     const h = await makeHarness({
-      readable: { [ALI]: ['Groups/GTM', 'Groups/GTM/access.md'] },
+      readable: { [ALI]: ['Plugins/GTM', 'Plugins/GTM/access.md'] },
       authoredCrs: [cr({})],
     });
     server = h.server;
@@ -284,7 +284,7 @@ describe('/api/groups routes', () => {
   it('lists the owner verdict per caller — the folder verdict, not the manager one', async () => {
     const h = await makeHarness({
       readable: MEMBER_OF_BOTH,
-      owner: { [ALI]: ['Groups/GTM'] },
+      owner: { [ALI]: ['Plugins/GTM'] },
     });
     server = h.server;
     const { groups } = await listGroups(h.baseUrl);
@@ -298,7 +298,7 @@ describe('/api/groups routes', () => {
     // group exists.
     const h = await makeHarness({
       readable: MEMBER_OF_BOTH,
-      writable: { [ALI]: ['Groups/GTM/access.md'] },
+      writable: { [ALI]: ['Plugins/GTM/access.md'] },
     });
     server = h.server;
     for (const name of ['Nope', 'GTM']) {
@@ -310,7 +310,7 @@ describe('/api/groups routes', () => {
   });
 
   it('delete: an OWNER deletes through the provision door, by the catalog name', async () => {
-    const h = await makeHarness({ owner: { [ALI]: ['Groups/GTM'] } });
+    const h = await makeHarness({ owner: { [ALI]: ['Plugins/GTM'] } });
     server = h.server;
     const res = await fetch(`${h.baseUrl}/api/groups/GTM`, { method: 'DELETE' });
     expect(res.status).toBe(200);
@@ -322,7 +322,7 @@ describe('/api/groups routes', () => {
   });
 
   it("delete: passes a provision refusal through with the service's own status and words", async () => {
-    const h = await makeHarness({ owner: { [ALI]: ['Groups/GTM'] } });
+    const h = await makeHarness({ owner: { [ALI]: ['Plugins/GTM'] } });
     const { GroupProvisionError } = await import('../group-provision.service.js');
     h.provision.deleteGroup.mockRejectedValueOnce(new GroupProvisionError('Unknown group', 404));
     server = h.server;
@@ -333,7 +333,7 @@ describe('/api/groups routes', () => {
 
   it('delete: 500s with its own words when the mechanism fails', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const h = await makeHarness({ owner: { [ALI]: ['Groups/GTM'] } });
+    const h = await makeHarness({ owner: { [ALI]: ['Plugins/GTM'] } });
     h.provision.deleteGroup.mockRejectedValueOnce(new Error('push refused'));
     server = h.server;
     const res = await fetch(`${h.baseUrl}/api/groups/GTM`, { method: 'DELETE' });
@@ -361,7 +361,7 @@ describe('/api/groups routes', () => {
   });
 
   it('join-request: branch + splice + commit + CR, on the deterministic join branch', async () => {
-    const h = await makeHarness({ readable: { [ALI]: ['Groups/Finance/access.md'] } });
+    const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     server = h.server;
     const res = await fetch(`${h.baseUrl}/api/groups/Finance/join-request`, { method: 'POST' });
     expect(res.status).toBe(200);
@@ -372,7 +372,7 @@ describe('/api/groups routes', () => {
     // The write went to the group's access.md and added the caller to the
     // BODY's read list (folder rules), leaving the discovery frontmatter alone.
     const write = (h.workspaceService.writeFile as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(write[1]).toBe(`${KB}/Groups/Finance/access.md`);
+    expect(write[1]).toBe(`${KB}/Plugins/Finance/access.md`);
     expect(write[2]).toContain('Ali Baba <ali@bevel.software>');
     expect((write[2] as string).indexOf('everyone')).toBeLessThan(
       (write[2] as string).indexOf('Ali Baba'),
@@ -391,7 +391,7 @@ describe('/api/groups routes', () => {
 
   it('join-request is idempotent: an existing open join CR is returned, nothing new is created', async () => {
     const h = await makeHarness({
-      readable: { [ALI]: ['Groups/Finance/access.md'] },
+      readable: { [ALI]: ['Plugins/Finance/access.md'] },
       authoredCrs: [cr({ branch: joinBranchFor(ALI, 'Finance'), number: 9 })],
     });
     server = h.server;
@@ -403,7 +403,7 @@ describe('/api/groups routes', () => {
   });
 
   it('degrades hasRequested to false when the CR lookup throws', async () => {
-    const h = await makeHarness({ readable: { [ALI]: ['Groups/Finance/access.md'] } });
+    const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     (h.workflow.listChangeRequestsAuthoredBy as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error('gh down'),
     );
@@ -416,14 +416,14 @@ describe('/api/groups routes', () => {
   });
 
   it('join-requests: a MANAGER gets the service\'s list for the group', async () => {
-    const h = await makeHarness({ writable: { [ALI]: ['Groups/GTM/access.md'] } });
+    const h = await makeHarness({ writable: { [ALI]: ['Plugins/GTM/access.md'] } });
     server = h.server;
     const res = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ requests: [] });
     expect(h.joinRequests.list).toHaveBeenCalledWith(
       'GTM',
-      'Groups/GTM',
+      'Plugins/GTM',
       expect.anything(),
       expect.objectContaining({ email: ALI }),
     );
@@ -451,7 +451,7 @@ describe('/api/groups routes', () => {
   });
 
   it('reconcile: 404 for a manager when the change request does not exist', async () => {
-    const h = await makeHarness({ writable: { [ALI]: ['Groups/GTM/access.md'] } });
+    const h = await makeHarness({ writable: { [ALI]: ['Plugins/GTM/access.md'] } });
     server = h.server;
     const missing = await fetch(`${h.baseUrl}/api/groups/GTM/join-requests/999/reconcile`, {
       method: 'POST',
@@ -462,7 +462,7 @@ describe('/api/groups routes', () => {
 
   it('reconcile: a manager settles an open request through the service', async () => {
     const h = await makeHarness({
-      writable: { [ALI]: ['Groups/GTM/access.md'] },
+      writable: { [ALI]: ['Plugins/GTM/access.md'] },
       authoredCrs: [cr({ number: 7 })],
     });
     (h.joinRequests.reconcile as ReturnType<typeof vi.fn>).mockResolvedValue(true);

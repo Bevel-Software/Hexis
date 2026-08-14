@@ -34,7 +34,7 @@ import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
 const tool = (over: Partial<ToolSecrets> = {}): ToolSecrets => ({
   slug: 'heyreach',
   name: 'heyreach',
-  path: 'Groups/GTM/heyreach.tool',
+  path: 'Plugins/GTM/heyreach.tool',
   type: 'inline',
   setup: null,
   canWrite: false,
@@ -46,7 +46,7 @@ const CATALOG: LibraryData = {
   loading: false,
   error: null,
   skills: [
-    { name: 'outreach', description: '', path: 'Groups/GTM/outreach' },
+    { name: 'outreach', description: '', path: 'Plugins/GTM/outreach' },
     { name: 'scratch', description: '', path: 'Skills/scratch' },
   ],
   pendingSkills: [],
@@ -78,7 +78,7 @@ const CATALOG: LibraryData = {
 
 const summary = (over: Partial<GroupSummary> = {}): GroupSummary => ({
   name: 'GTM',
-  folders: ['Groups/GTM'],
+  folders: ['Plugins/GTM'],
   canRead: true,
   canWrite: false,
   isOwner: false,
@@ -155,7 +155,7 @@ describe('GroupsIndexPage', () => {
   it("keeps the caller's own group listed even when nothing sits outside a group", async () => {
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,
-      skills: [{ name: 'outreach', description: '', path: 'Groups/GTM/outreach' }],
+      skills: [{ name: 'outreach', description: '', path: 'Plugins/GTM/outreach' }],
       tools: [tool()],
     });
     renderIndex();
@@ -183,7 +183,7 @@ describe('GroupsIndexPage', () => {
     groupsMock.listGroups.mockResolvedValue([
       summary({
         name: 'Yours',
-        folders: ['Groups/Yours'],
+        folders: ['Plugins/Yours'],
       }),
       summary(),
     ]);
@@ -211,7 +211,7 @@ describe('GroupsIndexPage', () => {
   it('lists a DISCOVERABLE locked group under Ask to join, Locked or Requested', async () => {
     groupsMock.listGroups.mockResolvedValue([
       summary(),
-      summary({ name: 'Finance', folders: ['Groups/Finance'], canRead: false, canWrite: false }),
+      summary({ name: 'Finance', folders: ['Plugins/Finance'], canRead: false, canWrite: false }),
     ]);
     renderIndex();
     expect(await screen.findByRole('heading', { name: 'Ask to join' })).toBeInTheDocument();
@@ -223,7 +223,7 @@ describe('GroupsIndexPage', () => {
     groupsMock.listGroups.mockResolvedValue([
       summary({
         name: 'Finance',
-        folders: ['Groups/Finance'],
+        folders: ['Plugins/Finance'],
         canRead: false,
         canWrite: false,
         hasRequested: true,
@@ -247,7 +247,7 @@ describe('GroupsIndexPage', () => {
   it('lists a group an item grant reaches inside, even without a summary', async () => {
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,
-      skills: [{ name: 'budget', description: '', path: 'Groups/Finance/budget' }],
+      skills: [{ name: 'budget', description: '', path: 'Plugins/Finance/budget' }],
     });
     renderIndex();
     expect(await screen.findByRole('button', { name: /^Finance/ })).toBeInTheDocument();
@@ -256,7 +256,7 @@ describe('GroupsIndexPage', () => {
   it('lists a catalog-derived group with counts alone when no summary vouches for it', async () => {
     groupsMock.listGroups.mockResolvedValue([]);
     renderIndex();
-    // One skill and one tool in Groups/GTM, and nothing claiming to know who
+    // One skill and one tool in Plugins/GTM, and nothing claiming to know who
     // runs it — so the row states what it can count, not what it cannot.
     expect(await screen.findByRole('button', { name: 'GTM 1 skills · 1 tools' })).toBeInTheDocument();
   });

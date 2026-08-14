@@ -28,7 +28,7 @@ import { useToolPage } from '../hooks/useToolPage';
 const GITHUB: ToolSecrets = {
   slug: 'github',
   name: 'github',
-  path: 'Groups/Engineering/github.tool',
+  path: 'Plugins/Engineering/github.tool',
   type: 'inline',
   setup: null,
   canWrite: false,
@@ -38,7 +38,7 @@ const GITHUB: ToolSecrets = {
 const DETAIL: ToolManualDetail = {
   slug: 'github',
   name: 'github',
-  path: 'Groups/Engineering/github.tool',
+  path: 'Plugins/Engineering/github.tool',
   type: 'inline',
   description: 'Read and write GitHub issues.',
   capabilities: [{ name: 'create_issue', description: 'Open an issue.' }],
@@ -96,7 +96,7 @@ describe('useToolPage', () => {
 
   it('builds the reverse index from allowed-tools frontmatter', async () => {
     libraryMock.listSkills.mockResolvedValue([
-      { name: 'triage', description: '', path: 'Groups/Engineering/triage' },
+      { name: 'triage', description: '', path: 'Plugins/Engineering/triage' },
       { name: 'newsletter', description: '', path: 'Skills/newsletter' },
     ]);
     libraryMock.getSkill.mockImplementation(async (name: string) =>
@@ -110,7 +110,7 @@ describe('useToolPage', () => {
 
   it('keeps one skill failing from emptying the whole index', async () => {
     libraryMock.listSkills.mockResolvedValue([
-      { name: 'triage', description: '', path: 'Groups/Engineering/triage' },
+      { name: 'triage', description: '', path: 'Plugins/Engineering/triage' },
       { name: 'broken', description: '', path: 'Skills/broken' },
     ]);
     libraryMock.getSkill.mockImplementation(async (name: string) => {

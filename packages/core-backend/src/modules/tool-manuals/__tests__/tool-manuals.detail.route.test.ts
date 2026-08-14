@@ -24,7 +24,7 @@ import type { IToolManualService, ToolManualDetail } from '../tool-manuals.contr
 const DETAIL: ToolManualDetail = {
   slug: 'github',
   name: 'github',
-  path: 'Groups/Engineering/github.tool',
+  path: 'Plugins/Engineering/github.tool',
   type: 'inline',
   description: 'Read and write GitHub issues and PRs.',
   capabilities: [{ name: 'create_issue', description: 'Open an issue in a repo.' }],
@@ -165,7 +165,7 @@ describe('ToolManualService.getDetail — capabilities + access', () => {
   /** Write one `.tool` into a fresh temp KB and return the service over it. */
   async function withTool(file: string, content: string): Promise<void> {
     root = await mkdtemp(join(tmpdir(), 'tooldetail-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(join(tools, file), content);
   }
@@ -189,7 +189,7 @@ describe('ToolManualService.getDetail — capabilities + access', () => {
     expect(detail).toMatchObject({
       slug: 'github',
       name: 'github',
-      path: 'Groups/github.tool',
+      path: 'Plugins/github.tool',
       type: 'inline',
       description: 'Read and write GitHub issues and PRs.',
       capabilities: [

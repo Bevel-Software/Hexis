@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { parseDocument } from 'yaml';
-import { DEFAULT_BRANCH, GROUPS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -156,7 +156,7 @@ export class SkillService implements ISkillService {
         await walk(path.join(dir, entry.name), `${relFolder}/${entry.name}`);
       }
     };
-    await walk(path.join(kbRoot, GROUPS_DIR), GROUPS_DIR);
+    await walk(path.join(kbRoot, PLUGINS_DIR), PLUGINS_DIR);
     // A skill's id (frontmatter `id`/`name`, else folder name) is how getSkill()
     // resolves it, so it must be unique. Sort by (name, path) for a deterministic
     // winner, then REFUSE later duplicates via the shared dedup — the same rule

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_BRANCH, personalGroupFolderName } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, personalPluginFolderName } from '@bevel-software/platform-shared';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -61,7 +61,7 @@ describe('GroupProvisionService.createGroup', () => {
     const result = await h.svc.createGroup(USER, 'GTM');
     expect(result).toEqual({ folder: 'GTM', created: true });
 
-    const accessMd = await fs.readFile(path.join(h.dir, KB, 'Groups/GTM/access.md'), 'utf-8');
+    const accessMd = await fs.readFile(path.join(h.dir, KB, 'Plugins/GTM/access.md'), 'utf-8');
     // Discoverable FILE (frontmatter read: everyone), creator-run FOLDER
     // (body names the creator under all three verbs).
     expect(accessMd.startsWith('---\nread:\n  - everyone\n---\n')).toBe(true);
@@ -78,11 +78,26 @@ describe('GroupProvisionService.createGroup', () => {
     expect(h.commits.runPendingCommit).toHaveBeenCalledWith(
       'ws-main',
       DEFAULT_BRANCH,
-      `${KB}/Groups/GTM/access.md`,
+      // FOLDER-scoped: plugin.json must land in the same commit as the rules,
+      // or the folder is briefly a plugin to us and not to any other client.
+      `${KB}/Plugins/GTM`,
       USER,
       { systemAuthorized: true },
     );
     expect(h.accessControl.invalidate).toHaveBeenCalledWith('ws-main');
+  });
+
+  it('writes a conformant plugin.json naming the folder in slug form', async () => {
+    await h.svc.createGroup(USER, 'GTM');
+    const manifest = JSON.parse(
+      await fs.readFile(path.join(h.dir, KB, 'Plugins/GTM/plugin.json'), 'utf-8'),
+    );
+    expect(manifest).toEqual({
+      $schema: 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
+      name: 'gtm',
+    });
+    // The schema's `name` pattern is the thing a conformant client refuses on.
+    expect(manifest.name).toMatch(/^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/);
   });
 
   it('refuses a taken name case-insensitively with 409', async () => {
@@ -96,7 +111,7 @@ describe('GroupProvisionService.createGroup', () => {
       await expect(h.svc.createGroup(USER, bad)).rejects.toMatchObject({ status: 422 });
     }
     // Nothing landed on disk for any of them.
-    await expect(fs.readdir(path.join(h.dir, KB, 'Groups'))).rejects.toThrow();
+    await expect(fs.readdir(path.join(h.dir, KB, 'Plugins'))).rejects.toThrow();
   });
 
   it('serialises concurrent creations of one name in different casings — exactly one lands', async () => {
@@ -113,14 +128,14 @@ describe('GroupProvisionService.createGroup', () => {
     );
     expect(ok).toHaveLength(1);
     expect(refused).toHaveLength(1);
-    expect(await fs.readdir(path.join(h.dir, KB, 'Groups'))).toHaveLength(1);
+    expect(await fs.readdir(path.join(h.dir, KB, 'Plugins'))).toHaveLength(1);
   });
 
   it('rolls the seeded file back when the commit fails, so a retry is not told "already exists"', async () => {
     h.commits.runPendingCommit.mockRejectedValueOnce(new Error('push refused'));
     await expect(h.svc.createGroup(USER, 'GTM')).rejects.toThrow('push refused');
     // The folder is gone again — the next attempt starts clean.
-    await expect(fs.stat(path.join(h.dir, KB, 'Groups/GTM'))).rejects.toThrow();
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/GTM'))).rejects.toThrow();
     await expect(h.svc.createGroup(USER, 'GTM')).resolves.toEqual({ folder: 'GTM', created: true });
   });
 });
@@ -134,16 +149,16 @@ describe('GroupProvisionService.deleteGroup', () => {
   it('removes the whole folder in ONE folder-scoped commit, and drops the access cache', async () => {
     await h.svc.createGroup(USER, 'GTM');
     // A group with content — the delete takes the skills with the folder.
-    await fs.mkdir(path.join(h.dir, KB, 'Groups/GTM/outreach'), { recursive: true });
-    await fs.writeFile(path.join(h.dir, KB, 'Groups/GTM/outreach/SKILL.md'), '# outreach\n');
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/GTM/outreach'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/GTM/outreach/SKILL.md'), '# outreach\n');
     h.commits.runPendingCommit.mockClear();
     (h.accessControl.invalidate as ReturnType<typeof vi.fn>).mockClear();
 
     await h.svc.deleteGroup(USER, 'GTM');
 
-    await expect(fs.stat(path.join(h.dir, KB, 'Groups/GTM'))).rejects.toThrow();
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/GTM'))).rejects.toThrow();
     // No parked remnant either — the commit landed, so the bytes may go.
-    expect(await fs.readdir(path.join(h.dir, KB, 'Groups'))).toEqual([]);
+    expect(await fs.readdir(path.join(h.dir, KB, 'Plugins'))).toEqual([]);
     // FOLDER-scoped (`git add -- <folder>` stages every deletion under it),
     // inline, and `systemAuthorized` — the endpoint already authorized the
     // delete (owner verdict), and the per-user push gate would re-read the
@@ -151,7 +166,7 @@ describe('GroupProvisionService.deleteGroup', () => {
     expect(h.commits.runPendingCommit).toHaveBeenCalledWith(
       'ws-main',
       DEFAULT_BRANCH,
-      `${KB}/Groups/GTM`,
+      `${KB}/Plugins/GTM`,
       USER,
       { systemAuthorized: true },
     );
@@ -166,20 +181,20 @@ describe('GroupProvisionService.deleteGroup', () => {
     for (const name of ['Nope', 'gtm']) {
       await expect(h.svc.deleteGroup(USER, name)).rejects.toMatchObject({ status: 404 });
     }
-    expect(await fs.readdir(path.join(h.dir, KB, 'Groups'))).toEqual(['GTM']);
+    expect(await fs.readdir(path.join(h.dir, KB, 'Plugins'))).toEqual(['GTM']);
   });
 
   it('never deletes a personal folder through the group door', async () => {
     await h.svc.ensurePersonalGroup(USER);
-    const folder = personalGroupFolderName(USER.id);
+    const folder = personalPluginFolderName(USER.id);
     await expect(h.svc.deleteGroup(USER, folder)).rejects.toMatchObject({ status: 404 });
-    await expect(fs.stat(path.join(h.dir, KB, 'Groups', folder))).resolves.toBeDefined();
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins', folder))).resolves.toBeDefined();
   });
 
   it('puts the folder back, content intact, when the commit is refused', async () => {
     await h.svc.createGroup(USER, 'GTM');
-    await fs.mkdir(path.join(h.dir, KB, 'Groups/GTM/outreach'), { recursive: true });
-    await fs.writeFile(path.join(h.dir, KB, 'Groups/GTM/outreach/SKILL.md'), '# outreach\n');
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/GTM/outreach'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/GTM/outreach/SKILL.md'), '# outreach\n');
     h.commits.runPendingCommit.mockRejectedValueOnce(new Error('push refused'));
 
     await expect(h.svc.deleteGroup(USER, 'GTM')).rejects.toThrow('push refused');
@@ -187,23 +202,23 @@ describe('GroupProvisionService.deleteGroup', () => {
     // A failed delete is a NO-OP: origin still carries the group, so the
     // working tree must too — bytes included, not just the folder shell.
     expect(
-      await fs.readFile(path.join(h.dir, KB, 'Groups/GTM/outreach/SKILL.md'), 'utf-8'),
+      await fs.readFile(path.join(h.dir, KB, 'Plugins/GTM/outreach/SKILL.md'), 'utf-8'),
     ).toBe('# outreach\n');
     // And the retry goes through.
     await expect(h.svc.deleteGroup(USER, 'GTM')).resolves.toBeUndefined();
-    await expect(fs.stat(path.join(h.dir, KB, 'Groups/GTM'))).rejects.toThrow();
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/GTM'))).rejects.toThrow();
   });
 });
 
 describe('GroupProvisionService.ensurePersonalGroup', () => {
   it('creates the private personal folder once, then reports it as existing', async () => {
     const h = await makeHarness();
-    const folder = personalGroupFolderName(USER.id);
+    const folder = personalPluginFolderName(USER.id);
 
     const first = await h.svc.ensurePersonalGroup(USER);
     expect(first).toEqual({ folder, created: true });
     const accessMd = await fs.readFile(
-      path.join(h.dir, KB, 'Groups', folder, 'access.md'),
+      path.join(h.dir, KB, 'Plugins', folder, 'access.md'),
       'utf-8',
     );
     // PRIVATE: no `everyone` self-grant anywhere — the file follows the
@@ -215,14 +230,20 @@ describe('GroupProvisionService.ensurePersonalGroup', () => {
 
     const second = await h.svc.ensurePersonalGroup(USER);
     expect(second).toEqual({ folder, created: false });
-    // Idempotent for real: one write, one commit.
-    expect(h.writeFile).toHaveBeenCalledTimes(1);
+    // Idempotent for real: one provision (access.md + plugin.json), one commit.
+    expect(h.writeFile).toHaveBeenCalledTimes(2);
     expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1);
+    // A personal folder is a plugin too — its id is slugged from the folder,
+    // which is where a doubled separator would have produced an invalid name.
+    const manifest = JSON.parse(
+      await fs.readFile(path.join(h.dir, KB, 'Plugins', folder, 'plugin.json'), 'utf-8'),
+    );
+    expect(manifest.name).toMatch(/^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/);
   });
 
   it('two concurrent ensures both succeed — one creates, the other reports existing', async () => {
     const h = await makeHarness();
-    const folder = personalGroupFolderName(USER.id);
+    const folder = personalPluginFolderName(USER.id);
     const [a, b] = await Promise.all([
       h.svc.ensurePersonalGroup(USER),
       h.svc.ensurePersonalGroup(USER),

@@ -5,7 +5,7 @@ import {
   configureBranchModel,
   validateBranchModel,
   PROTECTED_BRANCHES,
-  GROUPS_DIR,
+  PLUGINS_DIR,
 } from '@bevel-software/platform-shared';
 import { CoreConfig } from '../core-config.js';
 import { getDb, type Database } from '../modules/database/connection.js';
@@ -427,7 +427,7 @@ export async function createCoreServices(
     // default-branch change to `Groups/<group>/access.md`, so this is also
     // what makes a newly-granted group unlock within one round-trip instead
     // of one TTL.
-    const touched = paths.some((p) => p.startsWith(`${kbDirName}/${GROUPS_DIR}/`));
+    const touched = paths.some((p) => p.startsWith(`${kbDirName}/${PLUGINS_DIR}/`));
     if (touched) {
       toolManualService.invalidate();
       skillService.invalidate();
