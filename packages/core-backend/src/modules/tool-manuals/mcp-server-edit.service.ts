@@ -9,6 +9,7 @@ import {
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch, type WorkspaceService } from '../workspace/workspace.service.js';
+import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { IToolManualService, ToolVariable } from './tool-manuals.contract.js';
 
@@ -143,6 +144,11 @@ export class McpServerEditService {
     const servers = mcp.mcpServers as Record<string, unknown>;
     if (!(name in servers)) throw new McpServerEditError('No such server.', 404);
 
+    if (write.transport !== 'streamable-http' && write.transport !== 'sse' && write.transport !== 'stdio') {
+      // Persisting an unknown transport would save an entry discovery then
+      // refuses — an unusable server with no error at the moment it was made.
+      throw new McpServerEditError(`Unknown transport "${String(write.transport)}".`, 422);
+    }
     const target = write.newName?.trim() || name;
     if (!SERVER_NAME_RE.test(target)) {
       throw new McpServerEditError(
@@ -186,6 +192,21 @@ export class McpServerEditService {
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
         throw new McpServerEditError('The server needs a valid http(s) URL.', 422);
       }
+      // The same SSRF gate discovery applies on read: without it here, a save
+      // succeeds and the server then silently disappears from the catalog —
+      // an edit flow that eats its own output. Local-only servers are exempt;
+      // loopback is what local means.
+      if (write.local !== true) {
+        try {
+          assertSafeFetchUrl(write.url ?? '', { label: 'Server URL' });
+        } catch (err) {
+          throw new McpServerEditError(
+            `${err instanceof Error ? err.message : 'The URL is not reachable from the workspace'} — ` +
+              'mark the server local-only if it is deliberately private.',
+            422,
+          );
+        }
+      }
       entry = {
         type: write.transport,
         url: write.url,
@@ -209,7 +230,18 @@ export class McpServerEditService {
       throw new McpServerEditError(`${PLUGIN_MANIFEST_FILE} is missing or unparsable — fix the file first.`, 422);
     }
     if (manifest !== null) {
+      // A wrong-TYPED extensions chain (a string, an array) would throw a
+      // TypeError below and surface as a 500. It is also not ours to silently
+      // replace: an array `extensions` may be another tool's data, malformed
+      // or not, and a save aimed at one server should not discard it.
+      const badShape = (v: unknown): boolean => v !== undefined && (typeof v !== 'object' || v === null || Array.isArray(v));
       const ext = (manifest.extensions ??= {}) as Record<string, unknown>;
+      if (badShape(manifest.extensions)) {
+        throw new McpServerEditError(`${PLUGIN_MANIFEST_FILE} has a malformed \`extensions\` block — fix the file first.`, 422);
+      }
+      if (badShape(ext[HEXIS_EXTENSION_NS]) || badShape((ext[HEXIS_EXTENSION_NS] as Record<string, unknown> | undefined)?.mcpServers)) {
+        throw new McpServerEditError(`${PLUGIN_MANIFEST_FILE} has a malformed \`extensions\` block — fix the file first.`, 422);
+      }
       const ns = (ext[HEXIS_EXTENSION_NS] ??= {}) as Record<string, unknown>;
       const extServers = (ns.mcpServers ??= {}) as Record<string, unknown>;
       delete extServers[name];

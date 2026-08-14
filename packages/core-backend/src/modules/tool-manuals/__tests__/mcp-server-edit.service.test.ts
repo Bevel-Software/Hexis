@@ -162,6 +162,23 @@ describe('putServer', () => {
     expect(Object.keys(servers)).toEqual(['vendor_eu']);
   });
 
+  it('refuses a rename onto a taken key with 409, committing nothing', async () => {
+    // A second server occupies the target name.
+    const mcp = await readJson('Plugins/GTM/mcp.json');
+    (mcp.mcpServers as Record<string, unknown>).vendor_eu = {
+      type: 'streamable-http',
+      url: 'https://eu.example/mcp',
+    };
+    await fs.writeFile(path.join(repo, 'Plugins/GTM/mcp.json'), JSON.stringify(mcp), 'utf-8');
+    await expect(
+      svc.putServer(USER, 'vendor', { newName: 'vendor_eu', transport: 'streamable-http', url: 'https://v.example/mcp' }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(commits.runPendingCommit).not.toHaveBeenCalled();
+    // The original key survives untouched.
+    const after = await readJson('Plugins/GTM/mcp.json');
+    expect(Object.keys(after.mcpServers as object).sort()).toEqual(['vendor', 'vendor_eu']);
+  });
+
   it('refuses without write access, an invalid name, and a bad URL', async () => {
     canWrite = false;
     await expect(

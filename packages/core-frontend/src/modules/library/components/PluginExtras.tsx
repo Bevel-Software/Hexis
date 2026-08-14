@@ -72,6 +72,9 @@ export function ClientExtensionsSection({
   const [listings, setListings] = useState<NamespaceListing[]>([]);
 
   useEffect(() => {
+    // Reset FIRST: on a folder change or a failed refetch, stale state would
+    // keep rendering the previous plugin's files under the new plugin's name.
+    setListings([]);
     if (!workspaceId || !kbDirName) return;
     let live = true;
     listFiles(workspaceId)

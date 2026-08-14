@@ -145,7 +145,7 @@ export function ToolPage({
 
       <McpServerSection
         slug={tool.slug}
-        configuredCount={tool.variables.filter((v) => v.adminConfigured || v.userConfigured).length}
+        configuredCount={tool.variables.filter((v) => v.adminConfigured || v.userConfigured || v.authorized === true).length}
         onSaved={() => {
           setActionError(null);
           page.reload();

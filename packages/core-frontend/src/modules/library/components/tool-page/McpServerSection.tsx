@@ -57,8 +57,11 @@ export function McpServerSection({
       .then((view) => {
         if (live) setServer(view);
       })
-      .catch(() => {
-        /* the section simply does not render — the page stays a tool page */
+      .catch((err: unknown) => {
+        // A 404 already came back as null (a .tool-backed manual). Anything
+        // ELSE is a real failure, and vanishing silently would make it
+        // indistinguishable from that expected case.
+        if (live) onError(err instanceof Error ? err.message : 'Could not load the server configuration.');
       });
     return () => {
       live = false;

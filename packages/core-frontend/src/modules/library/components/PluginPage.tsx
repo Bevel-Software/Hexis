@@ -193,8 +193,7 @@ export function PluginPage() {
           }}
           onManage={setManageFolder}
         />
-        <ClientExtensionsSection workspaceId={workspaceId} kbDirName={kbDirName} folder={plugin} />
-        {manageDialog}
+{manageDialog}
       </>
     );
   }
@@ -366,6 +365,7 @@ export function PluginPage() {
         />
       )}
 
+      <ClientExtensionsSection workspaceId={workspaceId} kbDirName={kbDirName} folder={plugin} />
       {manageDialog}
     </div>
   );
