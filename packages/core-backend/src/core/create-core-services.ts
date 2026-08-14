@@ -33,6 +33,7 @@ import { AccessControlService } from '../modules/access/access-control.service.j
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
+import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
 import { PluginIndexService, PluginProvisionService, JoinRequestsService } from '../modules/plugins/index.js';
 import {
   DbSecretsVaultService,
@@ -102,6 +103,7 @@ export interface CoreServices {
   skillService: SkillService;
   pendingSkillsService: PendingSkillsService;
   toolManualService: ToolManualService;
+  mcpServerEditService: McpServerEditService;
   pluginIndexService: PluginIndexService;
   pluginProvisionService: PluginProvisionService;
   joinRequestsService: JoinRequestsService;
@@ -393,6 +395,14 @@ export async function createCoreServices(
   // folders into existence (named plugins and personal folders alike). Commits
   // INLINE through the same pipeline the pending-commits worker uses, so the
   // folder's rules are at HEAD before the endpoint answers.
+  const mcpServerEditService = new McpServerEditService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    toolManualService,
+    kbDirName,
+  );
+
   const pluginProvisionService = new PluginProvisionService(
     workspaceService,
     workflowService,
@@ -675,6 +685,7 @@ export async function createCoreServices(
   return {
     config,
     db,
+    mcpServerEditService,
     workspaceService,
     kbSeedService,
     settings,

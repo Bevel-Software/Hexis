@@ -138,6 +138,13 @@ export function CardGrid({
           <LibraryCard
             key={key}
             kind={item.kind}
+            flavor={
+              item.kind === 'integration'
+                ? item.path.endsWith('/mcp.json')
+                  ? 'mcp'
+                  : 'utcp'
+                : undefined
+            }
             id={item.id}
             name={item.name}
             description={item.description}

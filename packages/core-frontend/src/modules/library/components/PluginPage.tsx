@@ -11,6 +11,7 @@ import {
 import { primaryFolderOf } from '../utils/plugin-summary';
 import { PluginJoinRequests } from './PluginJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
+import { ManifestButton, ClientExtensionsSection } from './PluginExtras';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { AddToPluginDialog } from './AddToPluginDialog';
 import { BandControls, PluginBreadcrumb, PluginItemSections, PageNote, RemoveLibraryItemDialog,
@@ -44,7 +45,7 @@ export function PluginPage() {
   const data = useLibrary();
   const toast = useLibraryToast();
   const navigate = useNavigate();
-  const { kbDirName } = useWorkspace();
+  const { kbDirName, workspaceId } = useWorkspace();
   const [addOpen, setAddOpen] = useState(false);
   // The Skills band's two controls. `filterOn` narrows the band to what is
   // waiting on the reader; `refresh` re-reads the catalog and then says when it
@@ -192,7 +193,7 @@ export function PluginPage() {
           }}
           onManage={setManageFolder}
         />
-        {manageDialog}
+{manageDialog}
       </>
     );
   }
@@ -230,7 +231,8 @@ export function PluginPage() {
           which is exactly what "who is this shared with?" should answer. */}
       <div className="flex items-start justify-between gap-4">
         <h1 className="mt-1.5 text-display font-semibold">{plugin}</h1>
-        <div className="mt-1.5">
+        <div className="mt-1.5 flex items-center gap-1">
+          <ManifestButton kbDirName={kbDirName} folder={plugin} canWrite={summary?.canWrite === true} />
           <PageActions
             onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
             onAdd={() => setAddOpen(true)}
@@ -363,6 +365,7 @@ export function PluginPage() {
         />
       )}
 
+      <ClientExtensionsSection workspaceId={workspaceId} kbDirName={kbDirName} folder={plugin} />
       {manageDialog}
     </div>
   );
