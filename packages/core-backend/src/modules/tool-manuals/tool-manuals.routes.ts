@@ -98,10 +98,12 @@ export function createToolManualsAgentRoutes(
       const pluginReal = await fs.realpath(pluginDir).catch(() => null);
       if (pluginReal === null) return void res.status(404).json({ error: 'Not found' });
       const rels: string[] = [];
-      // Realpath-keyed visited set: a directory symlink pointing at its own
-      // ancestor otherwise recurses forever — an unbounded-CPU hang any
-      // key holder could craft into a plugin.
-      const visited = new Set<string>([pluginReal]);
+      // Cycle guard by ANCESTOR STACK, not a global visited set: a symlink
+      // into the walker's own ancestry recurses forever (an unbounded-CPU
+      // hang any key holder could craft), but two different symlink routes to
+      // one directory are a diamond — both are legitimate archive paths, and
+      // a global dedupe would silently drop the second.
+      const ancestry = new Set<string>([pluginReal]);
       const walk = async (dir: string, rel: string): Promise<void> => {
         let entries;
         try {
@@ -134,9 +136,13 @@ export function createToolManualsAgentRoutes(
             }
             const st = await fs.stat(abs).catch(() => null);
             if (st?.isDirectory()) {
-              if (visited.has(real)) continue; // a cycle, not a subtree
-              visited.add(real);
-              await walk(abs, childRel);
+              if (ancestry.has(real)) continue; // a cycle, not a subtree
+              ancestry.add(real);
+              try {
+                await walk(abs, childRel);
+              } finally {
+                ancestry.delete(real);
+              }
             } else if (st?.isFile()) rels.push(childRel);
           }
         }

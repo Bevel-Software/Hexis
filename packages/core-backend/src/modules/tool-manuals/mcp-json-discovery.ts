@@ -141,9 +141,9 @@ export function descriptorsFromMcpJson(
     const reserved = referencesReservedVariable({ raw, ext });
     if (reserved !== null) {
       console.warn(
-        `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: its extension entry references ` +
-          `the reserved variable "${reserved}" — API_URL and CONNECTION_KEY are platform-seeded and may ` +
-          'not appear in server declarations.',
+        `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: its declaration (mcp.json ` +
+          `entry or plugin.json extension) references the reserved variable "${reserved}" — API_URL and ` +
+          'CONNECTION_KEY are platform-seeded and may not appear in server declarations.',
       );
       continue;
     }
