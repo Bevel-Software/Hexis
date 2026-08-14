@@ -151,6 +151,22 @@ export async function createCoreServer(
   });
 
   /**
+   * This deployment's MCP endpoint, derived ONCE.
+   *
+   * Two consumers must agree on it: `/api/config` below, which is where the
+   * frontend learns what address to show people, and the OAuth
+   * `resourceServerUrl` further down, which is the resource identifier the
+   * protected-resource metadata publishes and therefore the one that decides
+   * whether a connection actually works.
+   *
+   * A constant rather than the same expression written twice. The frontend
+   * carried the two-places version of this bug for a long time — six inline
+   * sites each rebuilding the address, held together by a docstring asserting
+   * they could not diverge — and a comment is not a mechanism.
+   */
+  const mcpResourceUrl = new URL('/api/mcp', core.config.publicBackendUrl);
+
+  /**
    * The handful of facts the browser needs BEFORE it can render anything, and
    * therefore before it can authenticate: the branch model.
    *
@@ -170,6 +186,21 @@ export async function createCoreServer(
         defaultBranch: DEFAULT_BRANCH,
         protectedBranches: [...PROTECTED_BRANCHES],
       },
+      /**
+       * The same value the OAuth metadata publishes (see `mcpResourceUrl`).
+       *
+       * The frontend used to build this from `window.location.origin`, which
+       * is the browser's idea of our address rather than ours. The two agree
+       * on a simple deployment and disagree behind a proxy, on a second
+       * domain, or on an internal hostname — and the one that decides whether
+       * a connection works is this one.
+       *
+       * That was survivable while every surface was copy-paste: a human sees
+       * the host before pasting it. It stops being survivable the moment we
+       * hand the URL to a third party (a connector install link), where
+       * nobody reads it and the failure surfaces inside someone else's UI.
+       */
+      mcpUrl: mcpResourceUrl.toString(),
     });
   });
 
@@ -225,7 +256,7 @@ export async function createCoreServer(
   app.use(mcpAuthRouter({
     provider: core.mcpOAuthProvider,
     issuerUrl: new URL(core.config.publicBackendUrl),
-    resourceServerUrl: new URL('/api/mcp', core.config.publicBackendUrl),
+    resourceServerUrl: mcpResourceUrl,
     scopesSupported: ['mcp'],
     resourceName: 'Bevel MCP',
   }));
