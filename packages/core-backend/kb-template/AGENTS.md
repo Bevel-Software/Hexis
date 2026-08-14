@@ -149,7 +149,15 @@ url: https://mcp.example.com
 
 **Frontmatter `id` = address.** This is generic, not tool-specific: ANY `.md` or `.tool` file whose frontmatter declares an `id` (or a lowercase snake_case/kebab `name`) is addressable at `/workspace/<branch>/<id>` in the app, exactly like a knowledge node — tools, skills (`SKILL.md`), and plain notes alike. Graph nodes win an id collision; files without frontmatter stay path-addressed.
 
-**Remote vs local (`remote`).** A tool is available to remote agents by default. Add `remote: false` for a tool that only works on the user's own machine (e.g. an mcp/http `url` on `localhost`): the hosted remote MCP endpoint then skips it and instead advertises it through the `list_local_tools` tool, which returns the `.tool`'s path so a local agent can read it and self-configure (e.g. add the MCP server to its own client).
+**Remote vs local (`remote`).** A tool is available to remote agents by default. Add `remote: false` for a tool that only works on the user's own machine (e.g. an mcp/http `url` on `localhost`): the hosted remote MCP endpoint cannot reach it, so it skips the tool and advertises it through the `list_local_tools` tool instead.
+
+To actually USE those tools, run the workspace as a local MCP server:
+
+```
+npx @bevel-software/hexis-mcp --url <workspace-url> --key <connection-key>
+```
+
+It serves everything the hosted endpoint serves **plus** the local-only tools, because it runs on the machine where they exist. Remote tools still execute on the server, so their shared keys and OAuth sign-ins keep working untouched; a local-only tool's own `${VAR}`s come from the environment of whatever launched the command (your MCP client's config), since the Secrets Vault never leaves the server. Reading the `.tool` and wiring the server into your client by hand still works and is the fallback when the command is unavailable.
 
 ### Referencing secrets — `${VAR}` and the `variables` block
 
