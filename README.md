@@ -9,32 +9,37 @@
   <a href="https://github.com/Bevel-Software/Hexis/commits"><img src="https://img.shields.io/github/last-commit/Bevel-Software/Hexis?style=flat-square" alt="Last commit"></a>
 </p>
 
-One place where your company's **AI plugins, tools and knowledge** live:
-centrally managed, reviewed and access-controlled, and usable from **any AI
-agent**. The open-source core of the Bevel platform.
+**Git-backed control plane for AI-agent skills, tools, context, permissions and
+identity. Self-hosted and MCP-native.**
 
-- **Every employee connects once, in minutes.** They add the workspace to
-  Claude Code, ChatGPT, Cursor or any MCP-capable agent with a single
-  connection key, and their agent can use exactly the skills, tools (such as MCP servers) and
-  knowledge their role allows. No per-tool credentials handed around, no
-  per-agent setup projects.
-- **The company stays in control.** Skills, tool access and knowledge are
-  managed and reviewed in one place: every change has an author and a way
-  back, and anything proposed through a change request reaches its owners
-  for review before it lands. The rules apply to agents exactly as they
-  apply to people.
-- **Independent of any agent vendor.** Because the workspace speaks open
-  protocols, you can switch agent vendors on price and performance, or mix
-  them by task and role, without rebuilding what your agents know and can do.
-  The investment lives with you, not inside one vendor's walls. That is what
-  makes enterprise agent rollouts fast: onboard the next team, or the next
-  agent, instead of starting over.
+One place where your company's AI plugins, tools and knowledge live: centrally
+managed, reviewed and access-controlled, and usable from **any AI agent**. The
+open-source core of the Bevel platform.
 
-Under the hood, everything lives in a **git repository you own**, on any git
-host: skills (`SKILL.md` folders), tool (such as MCP servers) with an encrypted
-secrets vault, and knowledge. You get branches, change requests with owner
-approval, role-based access, and a built-in remote MCP server (OAuth 2.1)
-that agents connect to.
+## Why Hexis?
+
+### For teams
+
+One place where engineers and non-technical people alike can browse and load
+plugins, propose suggestions, and manage access.
+
+### For enterprises
+
+Every skill, tool manual and permission is a file in a git repository you own,
+so the audit trail is the storage layer: who changed what, when, who approved
+it, and how to undo it. An agent can only do what the person running it can do,
+resolved per file, and it never holds the credentials it uses. Runs on your
+infrastructure, behind your own SSO.
+
+### Why it's different from MCP gateways: review changes
+
+A gateway decides which tools an agent may call. It has no opinion on whether
+the skill telling that agent what to do is any good.
+
+In Hexis, skills and tool manuals are reviewable files. Anyone can propose a
+change; on protected branches it reaches the owners of the files it touches and
+ships only once they approve. Agents propose too: one that hits a broken skill
+mid-task can suggest the fix, and a person decides whether it lands.
 
 ## Contents
 
@@ -44,9 +49,10 @@ that agents connect to.
 - [Managed hosting](#want-a-managed-instance)
 - [Deploy with Docker](#deploy-it-in-5-minutes-docker)
 - [Local development](#local-development-run-from-source)
-- [Environment reference](#environment-reference)
-- [Troubleshooting](#troubleshooting)
+- [Configuration reference](docs/configuration.md)
+- [Troubleshooting](docs/troubleshooting.md)
 - [Repository layout](#repository-layout)
+- [FAQ](#faq)
 
 [![Watch the full Hexis demo](docs/demo-video-thumbnail.jpg)](https://youtu.be/RjOWRz4E0ZU?si=R7d8rT_P1YVxmQBO)
 
@@ -125,7 +131,7 @@ Open `.env` and fill in the **four required values** (everything else can wait):
 
 ```sh
 ADMIN_EMAIL=you@example.com     # the deployment owner, always an admin
-ADMIN_PASSWORD=pick-something   # sign-in password; only with password login (SSO-only deployments drop it, see below)
+ADMIN_PASSWORD=pick-something   # sign-in password; only with password login (SSO-only deployments drop it)
 JWT_SECRET=…                    # generate with the command below
 SECRETS_ENC_KEY=…               # generate with the command below
 ```
@@ -189,26 +195,9 @@ writes a `roles.yaml` whose first Admin is you. That's it: you're in the
 workspace. Head to **Skills & Tools** to make your first plugin and skill, and to
 **Connect** (in the app menu) to hook up an agent over MCP.
 
-Prefer configuring by environment instead of the setup screen? Every one of
-those values has an env var (`KB_REPO_URL`, `GIT_TOKEN`, `DEFAULT_BRANCH`, …);
-anything set in the environment wins over the setup screen. See
-[`.env.example`](.env.example).
-
-Worth knowing in production:
-
-- **State that survives redeploys**: Postgres data plus three app volumes
-  (workspace clones, diff-review backups, tool-chain spill files) are named
-  volumes, so a redeploy or image rebuild loses nothing. Back up the `pgdata`
-  volume and your knowledge-base git repo; everything else is derivable.
-- **Health**: `GET /api/health`. First boot can take a minute or two while it
-  runs migrations and seeds the knowledge-base repo.
-- **Single sign-on**: set `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` /
-  `OIDC_CLIENT_SECRET` (any spec-compliant provider) or configure it on the
-  setup screen, which shows you the redirect URI to register. For SSO-only
-  deployments set `LOGIN_PASSWORD=false` and drop `ADMIN_PASSWORD`. If your
-  issuer is multi-tenant (Google, Entra `common`), set
-  `ALLOWED_EMAIL_DOMAINS`. SSO auto-provisions accounts, and that list is the
-  only signup boundary.
+Going to production? [Configuration reference](docs/configuration.md) covers
+single sign-on, the state you need to back up, health checks, and configuring
+by environment instead of the setup screen.
 
 ## Local development (run from source)
 
@@ -230,54 +219,12 @@ commands: `pnpm test`, `pnpm typecheck`, `pnpm lint`.
 Migrations run automatically on boot; there is no separate migrate step, in
 dev or in production.
 
-## Environment reference
+## Reference
 
-The four **required** values, then the rest. Everything marked *setup screen*
-can be left unset and configured in the app at first sign-in (env always wins).
-[`.env.example`](.env.example) documents every variable in full.
-
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `ADMIN_EMAIL` | yes | Deployment owner: always an admin, and the initial Admin of a freshly seeded KB |
-| `ADMIN_PASSWORD` | with password login | Bootstrap sign-in password, checked against the env and never stored. Not needed when `LOGIN_PASSWORD=false` |
-| `JWT_SECRET` | yes | Signs login sessions + OAuth state |
-| `SECRETS_ENC_KEY` | yes | 32-byte key (base64/hex) encrypting vault secrets + MCP OAuth tokens |
-| `DATABASE_URL` | see note | Postgres connection string. Unset under compose, the app builds it from the `POSTGRES_*` values the bundled db was created with |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | no | Credentials for the bundled database (applied only when its volume is first created) |
-| `KB_REPO_URL` | setup screen | https clone/push URL of the knowledge-base repo, on any git host |
-| `GIT_TOKEN` / `GIT_USERNAME` | setup screen | Git credential (HTTP Basic password / host-specific username; see `.env.example` for per-host usernames) |
-| `DEFAULT_BRANCH` / `PROTECTED_BRANCHES` | setup screen | Branch model. Runtime-only: served to the frontend over `/api/config`, so one build runs anywhere |
-| `PUBLIC_BACKEND_URL` / `PUBLIC_FRONTEND_URL` | production | Public origins for OAuth redirects + post-login bounces |
-| `TRUST_PROXY` | behind a proxy | Reverse-proxy hop count, so `req.ip` and the login rate limit see the real client |
-| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | no | Generic OIDC SSO; the login method appears once all three are set |
-| `ALLOWED_EMAIL_DOMAINS` | with multi-tenant SSO | Signup allow-list for SSO auto-provisioning |
-| `LOGIN_PASSWORD` | no | `false` hides password login and rejects the endpoint |
-| `PORT` | no | Backend port (default 3001) |
-| `KB_DIR_NAME` | no | Directory name of the KB clone inside each workspace |
-| `TENANT_ID` | no | Slug branding credential prefixes (default `bevel`) |
-| `KB_TEMPLATE_DIR` | no | Overrides the packaged KB seed template |
-| `ONTOLOGY_SESSION_BLOCK` | no | Ontology-session touch tracking toggle (default on) |
-
-## Troubleshooting
-
-- **`port is already allocated` on redeploy**: you're behind a proxy but ran
-  compose without `-f docker-compose.yml`, so the override published a host
-  port. Deploy with the explicit `-f` (see above).
-- **Changed `POSTGRES_PASSWORD` but can't connect**: Postgres applies those
-  values only when its data volume is **first** created. In dev,
-  `docker compose down -v` resets it; in production, change the password in
-  the database itself.
-- **`pnpm install` fails on Node version**: the engine range is strict
-  (`>=22 <23`) because of a native dependency's ABI. `nvm use` picks up
-  `.nvmrc`.
-- **Setup screen rejects the git token**: the token needs read *and* write
-  (push) access to the KB repository; the setup screen's test tells you which
-  half failed. On GitHub, fine-grained tokens also need the repo explicitly
-  selected.
-- **Changed `ADMIN_PASSWORD` and nothing happened**: it's read once at
-  startup; restart the app container.
-- **App unhealthy right after first start**: give it the `start_period`
-  (~90s); first boot runs migrations and seeds the KB repo before answering.
+- **[Configuration](docs/configuration.md)**: every environment variable, SSO
+  setup, secret generation, backups and health.
+- **[Troubleshooting](docs/troubleshooting.md)**: the failures you are most
+  likely to hit, and what causes them.
 
 ## Repository layout
 
@@ -288,5 +235,38 @@ can be left unset and configured in the app at first sign-in (env always wins).
 | `packages/core-frontend` | `@bevel-software/platform-core-frontend`: the core UI, published as raw TS/TSX source |
 | `apps/server` | standalone core backend shell |
 | `apps/web` | standalone core SPA shell (Vite) |
+
+## FAQ
+
+Questions that come up when teams evaluate Hexis as a central, versioned
+catalogue for agent skills and tools.
+
+<details>
+<summary><b>How do agents find skills without flooding the context window?</b></summary>
+
+They look them up rather than loading them all: `list_skills` and `search`
+narrow the field, `get_skill` returns one skill at call time.
+</details>
+
+<details>
+<summary><b>Which agents can connect?</b></summary>
+
+Any MCP-capable client, including Claude Code, Codex, Cursor, Cline and ChatGPT,
+each seeing only what its user's role allows.
+</details>
+
+<details>
+<summary><b>How is the catalogue versioned?</b></summary>
+
+By git: every save is a commit, so history, blame and revert work as they do for
+code, and changes to protected branches ship as reviewable change requests.
+</details>
+
+<details>
+<summary><b>What governance do we get?</b></summary>
+
+Per-file access control, review-gated change requests, and a git audit trail of
+who changed what and who approved it.
+</details>
 
 License: [Apache-2.0](LICENSE)
