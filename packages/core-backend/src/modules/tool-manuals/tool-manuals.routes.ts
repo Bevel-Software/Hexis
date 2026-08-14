@@ -1,4 +1,10 @@
 import express, { type Request, type RequestHandler } from 'express';
+import path from 'node:path';
+import fs from 'node:fs/promises';
+import AdmZip from 'adm-zip';
+import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
+import { workspaceIdForBranch, type WorkspaceService } from '../workspace/workspace.service.js';
+import type { IAccessControl } from '../access/access-control.interface.js';
 import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
 import { type IToolManualService, EXTERNAL_KB_MANUAL_NAME } from './tool-manuals.contract.js';
@@ -35,6 +41,7 @@ export function createToolManualsAgentRoutes(
   toolManualService: IToolManualService,
   manualAuth: RequestHandler,
   resolveUserEmail: ResolveUserEmail,
+  archiveDeps?: { workspaceService: WorkspaceService; accessControl: IAccessControl; kbDirName: string },
 ): express.Router {
   const router = express.Router();
 
@@ -60,6 +67,70 @@ export function createToolManualsAgentRoutes(
     } catch (err) {
       console.error('[tool-manuals] all-tools failed:', err instanceof Error ? err.message : err);
       res.status(500).json({ error: 'Failed to list tools' });
+    }
+  });
+
+  /**
+   * The whole plugin, byte-for-byte, as a zip — the materialization surface
+   * for the local MCP server. `read_file` is the agent's READING tool (text,
+   * one file at a time); this exists because a stdio server's plugin must
+   * land on the user's disk exactly as it is, binaries included. Access is
+   * per-file and the caller's own: every entry is filtered through the same
+   * read verdicts `list_files` uses, so a file the key cannot read is a file
+   * that is not in the archive — not an error, an absence.
+   */
+  router.get('/agent/plugins/:folder/archive', manualAuth, async (req, res) => {
+    if (!archiveDeps) return void res.status(404).json({ error: 'Not available' });
+    try {
+      const email = await callerEmail(req);
+      if (!email) return void res.status(403).json({ error: 'Forbidden' });
+      const folder = String(Array.isArray(req.params.folder) ? req.params.folder[0] : req.params.folder);
+      if (!folder || folder === '.' || folder === '..' || /[/\\]/.test(folder)) {
+        return void res.status(422).json({ error: 'Not a plugin folder name' });
+      }
+      const { workspaceService, accessControl, kbDirName } = archiveDeps;
+      const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
+      await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
+      const wsDir = await workspaceService.getWorkspacePath(wsId);
+      const pluginDir = path.join(wsDir, kbDirName, PLUGINS_DIR, folder);
+      const rels: string[] = [];
+      const walk = async (dir: string, rel: string): Promise<void> => {
+        let entries;
+        try {
+          entries = await fs.readdir(dir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const e of entries) {
+          if (e.name === '.git') continue;
+          const childRel = rel ? `${rel}/${e.name}` : e.name;
+          if (e.isDirectory()) await walk(path.join(dir, e.name), childRel);
+          else if (e.isFile()) rels.push(childRel);
+        }
+      };
+      await walk(pluginDir, '');
+      if (rels.length === 0) return void res.status(404).json({ error: 'Not found' });
+      const verdicts = await accessControl.canReadBatch(
+        wsId,
+        email,
+        rels.map((r) => `${PLUGINS_DIR}/${folder}/${r}`),
+      );
+      const zip = new AdmZip();
+      let included = 0;
+      for (const rel of rels) {
+        // Fail closed, per file — only an explicit `true` verdict is included.
+        if (verdicts.get(`${PLUGINS_DIR}/${folder}/${rel}`) !== true) continue;
+        zip.addFile(rel, await fs.readFile(path.join(pluginDir, ...rel.split('/'))));
+        included += 1;
+      }
+      // An all-filtered plugin looks exactly like an absent one — a 404 must
+      // not confirm to a keyless caller that the folder exists.
+      if (included === 0) return void res.status(404).json({ error: 'Not found' });
+      res.setHeader('Content-Type', 'application/zip');
+      res.send(zip.toBuffer());
+    } catch (err) {
+      console.error('[tool-manuals] plugin archive failed:', err instanceof Error ? err.message : err);
+      res.status(500).json({ error: 'Failed to archive plugin' });
     }
   });
 

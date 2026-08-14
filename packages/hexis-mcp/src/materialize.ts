@@ -2,8 +2,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import AdmZip from 'adm-zip';
 import type { HexisMcpConfig } from './config.js';
-import { callKbTool } from './deployment.js';
 
 /**
  * Local materialization of a plugin, per the Agent Plugins runtime contract.
@@ -14,18 +14,14 @@ import { callKbTool } from './deployment.js';
  * those two placeholders in `args` elements, `env` values and `cwd`, and
  * resolve a `./` command against the plugin root — refusing anything that
  * escapes it. None of that is possible against a knowledge base that lives on
- * a server, so the plugin's files are fetched here first, over the same
- * key-authenticated tools any agent uses (`list_files` + `read_file`).
+ * a server, so the plugin's files are fetched here first, via the deployment's
+ * plugin-archive endpoint (key-authenticated, per-file read-ACL'd).
  *
  * Layout: `~/.hexis/plugins/<host>/<plugin>` as PLUGIN_ROOT, refreshed on
  * every server start (a stale copy is the cost of a running session, not of a
  * lifetime); `~/.hexis/plugin-data/<host>/<plugin>` as PLUGIN_DATA, created
  * once and NEVER cleared — it is the server's persistent state, and the spec
  * says the client manages its lifetime, not its contents.
- *
- * Honest limitation: files arrive through `read_file`, a TEXT surface — a
- * binary asset does not survive the trip. Scripts, configs and manifests do,
- * which is what a stdio server's plugin realistically carries today.
  */
 
 /** Where a deployment's materialized plugins live, keyed by host so two workspaces never collide. */
@@ -52,9 +48,9 @@ export interface MaterializedPlugin {
 }
 
 /**
- * Fetch every file under `Plugins/<folder>` into the local root. The listing
- * comes from the deployment's own `list_files` tool, so access control is the
- * caller's key's — a file the key cannot read is a file that stays remote.
+ * Fetch the plugin into the local root, byte-for-byte. The archive is built
+ * server-side and filtered per file by the caller's own read access — a file
+ * the key cannot read is a file that stays remote.
  */
 export async function materializePlugin(
   config: HexisMcpConfig,
@@ -73,41 +69,31 @@ export async function materializePlugin(
   await fs.rm(pluginRoot, { recursive: true, force: true });
   await fs.mkdir(pluginRoot, { recursive: true });
 
-  const rels = await listPluginFiles(config, `Plugins/${folder}`);
-  for (const rel of rels) {
-    const res = (await callKbTool(config, 'read_file', {
-      path: `Plugins/${folder}/${rel}`,
-    })) as { content?: unknown };
-    if (typeof res?.content !== 'string') continue;
-    const abs = path.join(pluginRoot, ...rel.split('/'));
-    // The server names the paths; keep a hostile-looking one inside the root.
+  // One request, byte-for-byte: the deployment's plugin-archive endpoint zips
+  // the folder server-side, filtered per file by the caller's own read access.
+  // This is deliberately NOT `read_file` — that is the agent's reading surface
+  // (text, one file at a time); a plugin must land here exactly as it is,
+  // binaries included, or a stdio server's assets arrive corrupted.
+  const res = await fetch(
+    `${config.baseUrl}/api/agent/plugins/${encodeURIComponent(folder)}/archive`,
+    {
+      headers: { Authorization: `Bearer ${config.connectionKey}` },
+      signal: AbortSignal.timeout(60_000),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`could not fetch plugin "${folder}": HTTP ${res.status}`);
+  }
+  const zip = new AdmZip(Buffer.from(await res.arrayBuffer()));
+  for (const entry of zip.getEntries()) {
+    if (entry.isDirectory) continue;
+    const abs = path.join(pluginRoot, ...entry.entryName.split('/'));
+    // The archive names the paths; keep a hostile-looking one inside the root.
     if (!isWithin(pluginRoot, abs)) continue;
     await fs.mkdir(path.dirname(abs), { recursive: true });
-    await fs.writeFile(abs, res.content, 'utf8');
+    await fs.writeFile(abs, entry.getData());
   }
   return { pluginRoot, pluginData };
-}
-
-/** Recursive listing of workspace-relative file paths under `dir`, relative to it. */
-async function listPluginFiles(config: HexisMcpConfig, dir: string): Promise<string[]> {
-  const out: string[] = [];
-  const queue: string[] = [''];
-  // Bounded sweep: a plugin is a folder of scripts and notes, and a listing
-  // that large means something else is being pointed at.
-  let guard = 0;
-  while (queue.length > 0 && guard++ < 500) {
-    const sub = queue.shift()!;
-    const res = (await callKbTool(config, 'list_files', {
-      path: sub ? `${dir}/${sub}` : dir,
-    })) as { entries?: { name?: unknown; type?: unknown }[] };
-    for (const e of res?.entries ?? []) {
-      if (typeof e?.name !== 'string' || e.name === '.git') continue;
-      const rel = sub ? `${sub}/${e.name}` : e.name;
-      if (e.type === 'directory') queue.push(rel);
-      else out.push(rel);
-    }
-  }
-  return out;
 }
 
 function isWithin(root: string, candidate: string): boolean {

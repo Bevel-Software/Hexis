@@ -331,6 +331,7 @@ export async function createCoreServer(
     core.toolManualService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
+    { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName },
   ));
   app.use('/api', toolsRouter);
 

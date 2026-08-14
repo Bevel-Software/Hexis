@@ -38,6 +38,7 @@
   },
   "dependencies": {
     "@bevel-software/platform-mcp-core": "workspace:*",
+    "adm-zip": "^0.5.17",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@utcp/code-mode": "^1.2.12",
     "@utcp/http": "^1.1.11",
@@ -45,6 +46,7 @@
     "@utcp/sdk": "^1.1.1"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
     "@types/node": "^22.0.0",
     "typescript": "^5.8.0",
     "vitest": "^2.1.9"
