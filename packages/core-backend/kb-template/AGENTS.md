@@ -54,6 +54,15 @@ platform reads — it carries the access verbs and the secret namespace that
 `mcp.json` has no field for — and `mcp.json` is a projection of them written so
 other clients can see the servers at all.
 
+**Secrets are never written into a plugin's portable files.** The specification
+defines no portable credential mechanism on purpose: authorization and
+credential storage are the client's business, header and `env` values are
+"visible package data", and a client must not expand anything except
+`${PLUGIN_ROOT}` and `${PLUGIN_DATA}`. So the Secrets Vault IS this platform's
+answer to that — and the `mcp.json` projection carries only where a server is,
+never a `${VAR}` reference to how to authenticate with it. Those stay in the
+`.tool`, which is ours to interpret.
+
 **Group folders are made through the app, not by writing files.** A group
 exists exactly when its folder carries an `access.md` — a bare directory
 under `Plugins/` is not a plugin and is never listed. A new

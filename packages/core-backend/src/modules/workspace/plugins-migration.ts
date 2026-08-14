@@ -74,6 +74,15 @@ async function moveIfAbsent(from: string, to: string): Promise<boolean> {
 }
 
 /**
+ * A header value that references something for a client to fill in, rather
+ * than a literal. `${SERPER_KEY}`, `${MCP_OAUTH}` — our Secrets Vault
+ * placeholders, which are not part of the specification.
+ */
+function isCredentialReference(value: string): boolean {
+  return /\$\{[^}]+\}/.test(value);
+}
+
+/**
  * The mcp.json projection of a plugin's `mcp`-type manuals.
  *
  * `streamable-http` for every entry: a `.tool` of type `mcp` names a remote
@@ -81,18 +90,32 @@ async function moveIfAbsent(from: string, to: string): Promise<boolean> {
  * never emitted — nothing in a `.tool` distinguishes it, and guessing would
  * produce a config that fails at connect time.
  *
- * Values may still contain `${VAR}` references to the Secrets Vault. Those are
- * OURS, not the spec's (which defines only `${PLUGIN_ROOT}` / `${PLUGIN_DATA}`),
- * so another client reads them literally and the call fails at the provider.
- * That is inherent to a server-side vault: the secret cannot be in the file.
+ * CREDENTIAL REFERENCES ARE STRIPPED, not copied. The specification is
+ * deliberate about this: it defines no portable credential mechanism at all
+ * ("Authorization discovery, user interaction, and credential storage are
+ * client-managed"), says header values are "visible package data, not a
+ * portable secret mechanism", and forbids any expansion beyond
+ * `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` — unrecognized placeholder-like text
+ * MUST remain literal. So a `${SERPER_KEY}` copied here would be transmitted
+ * verbatim as a header value by a conformant client: not a leak, but a broken
+ * request and a file asserting an auth scheme nobody can honour.
+ *
+ * What the projection says is therefore only WHERE the server is. How to
+ * authenticate is the client's business — which for this platform means the
+ * Secrets Vault, reached through the `.tool` in our extension namespace, and
+ * for any other client means whatever credential storage that client has.
+ * That division is the spec's, not ours.
  */
 function renderMcpJson(servers: { name: string; url: string; headers?: Record<string, string> }[]): string {
   const mcpServers: Record<string, unknown> = {};
   for (const s of servers.sort((a, b) => a.name.localeCompare(b.name))) {
+    const portableHeaders = Object.fromEntries(
+      Object.entries(s.headers ?? {}).filter(([, value]) => !isCredentialReference(value)),
+    );
     mcpServers[s.name] = {
       type: 'streamable-http',
       url: s.url,
-      ...(s.headers && Object.keys(s.headers).length > 0 ? { headers: s.headers } : {}),
+      ...(Object.keys(portableHeaders).length > 0 ? { headers: portableHeaders } : {}),
     };
   }
   return `${JSON.stringify({ $schema: PLUGIN_MCP_SCHEMA, mcpServers }, null, 2)}\n`;

@@ -100,6 +100,50 @@ describe('migrateGroupsToPlugins', () => {
     expect(mcp.mcpServers.web_search).toBeUndefined();
   });
 
+  it('strips credential references from the projection, keeping literal headers', async () => {
+    await write('Groups/GTM/access.md', 'write:\n  - Admin\n');
+    await write(
+      'Groups/GTM/vendor.tool',
+      JSON.stringify({
+        name: 'vendor',
+        type: 'mcp',
+        url: 'https://mcp.vendor.example/mcp',
+        headers: { Authorization: 'Bearer ${VENDOR_KEY}', 'X-Api-Version': '2' },
+      }),
+    );
+    await migrateGroupsToPlugins(repo);
+    const mcp = JSON.parse(await read('Plugins/GTM/mcp.json'));
+    // The spec forbids credentials in `headers` and forbids expanding anything
+    // but ${PLUGIN_ROOT}/${PLUGIN_DATA} — a copied ${VENDOR_KEY} would be sent
+    // literally by a conformant client.
+    expect(mcp.mcpServers.vendor.headers).toEqual({ 'X-Api-Version': '2' });
+    // The reference itself survives where this platform reads it.
+    expect(await read('Plugins/GTM/software.bevel.hexis/tools/vendor.tool')).toContain(
+      '${VENDOR_KEY}',
+    );
+  });
+
+  it('omits headers entirely when every one of them was a credential reference', async () => {
+    await write('Groups/GTM/access.md', 'write:\n  - Admin\n');
+    await write(
+      'Groups/GTM/vendor.tool',
+      JSON.stringify({
+        name: 'vendor',
+        type: 'mcp',
+        url: 'https://mcp.vendor.example/mcp',
+        headers: { Authorization: 'Bearer ${VENDOR_KEY}' },
+      }),
+    );
+    await migrateGroupsToPlugins(repo);
+    const mcp = JSON.parse(await read('Plugins/GTM/mcp.json'));
+    // An empty `headers` object would assert "this server needs no auth".
+    // Saying nothing is the honest projection: where it is, not how to reach it.
+    expect(mcp.mcpServers.vendor).toEqual({
+      type: 'streamable-http',
+      url: 'https://mcp.vendor.example/mcp',
+    });
+  });
+
   it('keeps the .tool file for an mcp manual — mcp.json cannot carry its access verbs or secret namespace', async () => {
     await seedLegacyKb();
     await migrateGroupsToPlugins(repo);
