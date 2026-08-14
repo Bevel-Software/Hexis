@@ -9,7 +9,7 @@
   <a href="https://github.com/Bevel-Software/Hexis/commits"><img src="https://img.shields.io/github/last-commit/Bevel-Software/Hexis?style=flat-square" alt="Last commit"></a>
 </p>
 
-One place where your company's **AI skills, tools and knowledge** live:
+One place where your company's **AI plugins, tools and knowledge** live:
 centrally managed, reviewed and access-controlled, and usable from **any AI
 agent**. The open-source core of the Bevel platform.
 
@@ -31,7 +31,7 @@ agent**. The open-source core of the Bevel platform.
   agent, instead of starting over.
 
 Under the hood, everything lives in a **git repository you own**, on any git
-host: skills (`SKILL.md` folders), tool manuals (UTCP) with an encrypted
+host: skills (`SKILL.md` folders), tool (such as MCP servers) with an encrypted
 secrets vault, and knowledge. You get branches, change requests with owner
 approval, role-based access, and a built-in remote MCP server (OAuth 2.1)
 that agents connect to.
@@ -186,7 +186,7 @@ real host before saving**:
 
 Since the repo is empty, the app initialises it from the bundled template and
 writes a `roles.yaml` whose first Admin is you. That's it: you're in the
-workspace. Head to **Skills & Tools** to make your first group and skill, and to
+workspace. Head to **Skills & Tools** to make your first plugin and skill, and to
 **Connect** (in the app menu) to hook up an agent over MCP.
 
 Prefer configuring by environment instead of the setup screen? Every one of
