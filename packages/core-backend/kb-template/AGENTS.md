@@ -165,7 +165,9 @@ A `.tool` file is JSON or YAML. Its `type` decides how tools are discovered:
 
 - **`inline`** — the tools are embedded in the file (no network round-trip to list them).
 - **`http`** — `url` points to an endpoint that returns a UTCP manual.
-- **`mcp`** — `url` is a remote MCP server whose tools are discovered over MCP.
+
+(`type: mcp` is the LEGACY spelling of an MCP server as a `.tool`. The boot
+migration converts such files into `mcp.json` entries; do not write new ones.)
 
 **The tool is the frontmatter.** A `.tool` is one `---` YAML block holding *everything* — its `id`, its access verbs (`read:`/`write:`/`owner:`/`download:`), and its config (`type`/`url`/`variables`/…) — all in the same object. Anything after the closing `---` is free-form notes the parser ignores (like a `SKILL.md` body):
 
@@ -176,8 +178,8 @@ write:
   - Product Team
 owner:
   - Jane Doe <jane@x.com>
-type: mcp
-url: https://mcp.example.com
+type: http
+url: https://api.example.com/utcp
 ---
 ```
 
@@ -253,8 +255,8 @@ An `inline` manual with one tool:
 When asked to add/integrate a product as a tool (e.g. "add Notion", "wire up Linear"), **never invent an endpoint or write a placeholder URL** — a `.tool` pointing at a made-up host is useless:
 
 1. **Find the real endpoint from the vendor's own docs.** Prefer the vendor's official **remote MCP server** if one exists; otherwise fall back to their **REST API** base. No endpoint is named here on purpose — a URL copied into this file would be asserted long after it stopped being true, which is the failure this step exists to prevent. Use web search/extract to confirm the exact URL, transport, and auth scheme — don't answer from memory. If you have no web access or genuinely can't find it, **ask the user** for the endpoint URL and auth instead of guessing.
-2. **Pick the type from what you found.** An MCP server → `type: mcp` with the official `url` (the MCP transport is HTTP/streamable — use the `https://…` URL, **never** `ws://`/`wss://`). A plain REST/HTTP endpoint → `type: http`. Use `type: inline` only when hand-authoring the individual HTTP calls.
-3. **An OAuth-protected MCP server usually needs NOTHING beyond `type: mcp` + `url`.** Write just those two and let the app probe the server: it discovers the sign-in provider (MCP authorization spec), registers itself, and surfaces a per-user sign-in on the Connect page. That is the `oauth-auto` case, and for it you must NOT declare `variables` or `headers`.
+2. **Pick the home from what you found.** An MCP server → an entry in the plugin's `mcp.json` (`type: "streamable-http"` with the official `url` — use the `https://…` URL, **never** `ws://`/`wss://`). A plain REST/HTTP endpoint → a `.tool` with `type: http`. Use `type: inline` only when hand-authoring the individual HTTP calls.
+3. **An OAuth-protected MCP server usually needs NOTHING beyond its `mcp.json` entry.** Write just those two and let the app probe the server: it discovers the sign-in provider (MCP authorization spec), registers itself, and surfaces a per-user sign-in on the Connect page. That is the `oauth-auto` case, and for it you must NOT declare `variables` or `headers`.
 
    Some providers do not support automatic registration (`oauth-manual` — see the walkthrough below). Those DO need a sign-in variable to hold the client id, and an admin pastes the client secret on the tool's page. You do not have to guess which kind you are facing: write the two lines, then run `list_tool_setup` and read `setup.kind`.
 4. **For key-based auth, wire it as `variables`, never a hard-coded secret.** Reference credentials as `${VAR}` in `headers` (e.g. `Authorization: Bearer ${NOTION_TOKEN}`) and declare each in the `variables` block with a scope (`admin` = one shared value; `user` = per-user). Users fill the values in the Secrets Vault.
@@ -264,7 +266,7 @@ When asked to add/integrate a product as a tool (e.g. "add Notion", "wire up Lin
 
 Call the **`list_tool_setup`** tool to see, for every accessible `.tool`, what is configured and what is still missing. Use it whenever a tool isn't working, after adding a tool, or when asked "what do I need to set up?" — then EXPLAIN the remaining steps to the user rather than guessing. Per tool it reports:
 
-- **`setup.kind`** (for `type: mcp`): `open` = no credentials needed; `oauth-auto` = the platform registered itself with the server automatically and users just authorize on the **Connect page**; `oauth-manual` = the provider does not support automatic registration, so a tool writer must configure it by hand (below).
+- **`setup.kind`** (for MCP servers): `open` = no credentials needed; `oauth-auto` = the platform registered itself with the server automatically and users just authorize on the **Connect page**; `oauth-manual` = the provider does not support automatic registration, so a tool writer must configure it by hand (below).
 - **Per variable**: `adminConfigured` (the shared value — or, for a sign-in, the owner-side provider setup — is done), `userConfigured` / `authorized` (the CURRENT user's own value / sign-in), and `canWrite` (whether the current user may set the tool's shared config).
 
 The listing is scoped by the same access controls as everything else: a `.tool` the caller can't READ doesn't appear at all, and `canWrite` means write access **on that `.tool` file itself** — granted by its frontmatter `write:`/`owner:` verbs or the `access.md` chain, NOT by any platform role. The people who manage a `.tool` file are exactly the people who configure its shared secrets. To delegate a tool to someone, add them to the file's `write:` or `owner:` list (an edit you can make via change request); that alone lets them configure it.

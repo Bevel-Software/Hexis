@@ -135,7 +135,10 @@ export function descriptorsFromMcpJson(
       continue;
     }
     const ext = extensions[name] ?? {};
-    const reserved = referencesReservedVariable(ext);
+    // The EFFECTIVE declaration, not just the extension block: a reserved
+    // reference in mcp.json's own url or literal headers would be expanded
+    // into outbound requests exactly the same way.
+    const reserved = referencesReservedVariable({ raw, ext });
     if (reserved !== null) {
       console.warn(
         `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: its extension entry references ` +

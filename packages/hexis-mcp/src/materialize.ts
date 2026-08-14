@@ -168,11 +168,22 @@ export async function prepareStdioSpec(
   // its data dir (either directory itself included).
   const expandedCwd = spec.cwd !== undefined ? expandPlaceholders(spec.cwd, m) : m.pluginRoot;
   const resolvedCwd = path.resolve(m.pluginRoot, expandedCwd);
+  // Canonicalized on BOTH sides: a symlink inside the plugin pointing at /tmp
+  // would pass a lexical check while spawning the process outside the roots.
+  // A cwd that does not exist is refused outright — spawn would fail on it
+  // anyway, and an honest error beats ENOENT out of a subprocess.
+  const realCwd = await fs.realpath(resolvedCwd).catch(() => {
+    throw new Error(`stdio cwd "${spec.cwd}" does not exist in the materialized plugin`);
+  });
+  const [realRoot, realData] = await Promise.all([
+    fs.realpath(m.pluginRoot),
+    fs.realpath(m.pluginData),
+  ]);
   const within = (root: string): boolean => {
-    const rel = path.relative(root, resolvedCwd);
+    const rel = path.relative(root, realCwd);
     return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
   };
-  if (!within(m.pluginRoot) && !within(m.pluginData)) {
+  if (!within(realRoot) && !within(realData)) {
     throw new Error(`stdio cwd "${spec.cwd}" escapes the plugin root`);
   }
   return {

@@ -96,6 +96,10 @@ export function createToolManualsAgentRoutes(
       const pluginReal = await fs.realpath(pluginDir).catch(() => null);
       if (pluginReal === null) return void res.status(404).json({ error: 'Not found' });
       const rels: string[] = [];
+      // Realpath-keyed visited set: a directory symlink pointing at its own
+      // ancestor otherwise recurses forever — an unbounded-CPU hang any
+      // key holder could craft into a plugin.
+      const visited = new Set<string>([pluginReal]);
       const walk = async (dir: string, rel: string): Promise<void> => {
         let entries;
         try {
@@ -127,8 +131,11 @@ export function createToolManualsAgentRoutes(
               continue;
             }
             const st = await fs.stat(abs).catch(() => null);
-            if (st?.isDirectory()) await walk(abs, childRel);
-            else if (st?.isFile()) rels.push(childRel);
+            if (st?.isDirectory()) {
+              if (visited.has(real)) continue; // a cycle, not a subtree
+              visited.add(real);
+              await walk(abs, childRel);
+            } else if (st?.isFile()) rels.push(childRel);
           }
         }
       };
@@ -148,14 +155,17 @@ export function createToolManualsAgentRoutes(
       for (const rel of rels) {
         // Fail closed, per file — only an explicit `true` verdict is included.
         if (verdicts.get(`${PLUGINS_DIR}/${folder}/${rel}`) !== true) continue;
-        const data = await fs.readFile(path.join(pluginDir, ...rel.split('/')));
-        bytes += data.length;
+        const abs = path.join(pluginDir, ...rel.split('/'));
+        // Size BEFORE content: rejecting after readFile would already have
+        // spiked memory by exactly the payload the limit exists to refuse.
+        const size = (await fs.stat(abs)).size;
+        bytes += size;
         if (bytes > MAX_ARCHIVE_BYTES) {
           return void res.status(413).json({
             error: `Plugin "${folder}" exceeds the ${MAX_ARCHIVE_BYTES / (1024 * 1024)}MB archive limit.`,
           });
         }
-        zip.addFile(rel, data);
+        zip.addFile(rel, await fs.readFile(abs));
         included += 1;
       }
       // An all-filtered plugin looks exactly like an absent one — a 404 must
