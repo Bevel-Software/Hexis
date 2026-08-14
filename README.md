@@ -15,7 +15,7 @@ agent**. The open-source core of the Bevel platform.
 
 - **Every employee connects once, in minutes.** They add the workspace to
   Claude Code, ChatGPT, Cursor or any MCP-capable agent with a single
-  connection key, and their agent can use exactly the skills, tools and
+  connection key, and their agent can use exactly the skills, tools (such as MCP servers) and
   knowledge their role allows. No per-tool credentials handed around, no
   per-agent setup projects.
 - **The company stays in control.** Skills, tool access and knowledge are
