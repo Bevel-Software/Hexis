@@ -49,6 +49,7 @@ export function McpServerSection({
   const [literalHeaders, setLiteralHeaders] = useState('');
   const [authHeaders, setAuthHeaders] = useState('');
   const [local, setLocal] = useState(false);
+  const [variables, setVariables] = useState<McpServerView['variables']>([]);
 
   useEffect(() => {
     let live = true;
@@ -75,6 +76,7 @@ export function McpServerSection({
     setLiteralHeaders(headersToLines(server.literalHeaders));
     setAuthHeaders(headersToLines(server.authHeaders));
     setLocal(server.local);
+    setVariables(server.variables);
     setEditing(true);
   };
 
@@ -95,7 +97,7 @@ export function McpServerSection({
           : { url: url.trim() }),
         literalHeaders: linesToHeaders(literalHeaders),
         authHeaders: linesToHeaders(authHeaders),
-        variables: server.variables,
+        variables: variables.filter((v) => v.name.trim().length > 0),
         ...(server.description ? { description: server.description } : {}),
         local,
       });
@@ -189,6 +191,7 @@ export function McpServerSection({
             hint="One `Header: value` per line. Visible package data — no secrets here." />
           <LabeledTextarea label="Auth headers" value={authHeaders} onChange={setAuthHeaders}
             hint="One per line; values may use ${VAR} vault references, e.g. `Authorization: Bearer ${API_KEY}`." />
+          <VariablesEditor variables={variables} onChange={setVariables} />
           {transport !== 'stdio' && (
             <label className="flex items-center gap-2 text-detail text-ink-muted">
               <input type="checkbox" checked={local} onChange={(e) => setLocal(e.target.checked)} />
@@ -274,6 +277,69 @@ function LabeledTextarea({
       />
       {hint && <span className="text-ink-faint">{hint}</span>}
     </label>
+  );
+}
+
+/**
+ * Declared `${VAR}`s and who provisions each: `admin` (one shared value, set
+ * by a tool writer) or `user` (each member their own, on the Connect page).
+ * The names must match the `${VAR}` references in the auth headers — the vault
+ * key is `<server>_<VAR>`, derived from exactly these names.
+ */
+function VariablesEditor({
+  variables,
+  onChange,
+}: {
+  variables: McpServerView['variables'];
+  onChange(next: McpServerView['variables']): void;
+}) {
+  const update = (i: number, patch: Partial<McpServerView['variables'][number]>) =>
+    onChange(variables.map((v, j) => (j === i ? { ...v, ...patch } : v)));
+  return (
+    <div className="flex flex-col gap-1 text-detail">
+      <span className="font-semibold text-ink">Variables</span>
+      {variables.map((v, i) => (
+        // Index keys are correct here: rows are edited in place and have no
+        // identity beyond their position until saved.
+        // eslint-disable-next-line react/no-array-index-key
+        <div key={i} className="flex items-center gap-2">
+          <input
+            aria-label={`Variable ${i + 1} name`}
+            className="w-40 rounded-md border border-line bg-white px-2 py-1 font-mono text-ui"
+            value={v.name}
+            onChange={(e) => update(i, { name: e.target.value })}
+          />
+          <select
+            aria-label={`Variable ${i + 1} scope`}
+            className="rounded-md border border-line bg-white px-2 py-1 text-ui"
+            value={v.scope}
+            onChange={(e) => update(i, { scope: e.target.value as 'admin' | 'user' })}
+          >
+            <option value="admin">admin — one shared value</option>
+            <option value="user">user — each member their own</option>
+          </select>
+          <input
+            aria-label={`Variable ${i + 1} label`}
+            className="min-w-0 flex-1 rounded-md border border-line bg-white px-2 py-1 text-ui"
+            placeholder="Label shown in the secrets UI"
+            value={v.label ?? ''}
+            onChange={(e) => update(i, { label: e.target.value || undefined })}
+          />
+          <Button variant="quiet" size="sm" onClick={() => onChange(variables.filter((_, j) => j !== i))}>
+            Remove
+          </Button>
+        </div>
+      ))}
+      <div>
+        <Button variant="outline" size="sm" onClick={() => onChange([...variables, { name: '', scope: 'admin' }])}>
+          Add variable
+        </Button>
+      </div>
+      <span className="text-ink-faint">
+        Names must match the {'`${VAR}`'} references in the auth headers; secrets are stored under{' '}
+        <code>&lt;server&gt;_&lt;VAR&gt;</code>.
+      </span>
+    </div>
   );
 }
 
