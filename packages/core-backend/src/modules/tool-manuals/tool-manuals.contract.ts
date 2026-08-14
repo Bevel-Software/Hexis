@@ -122,6 +122,14 @@ export interface ToolManualDescriptor {
   remote?: boolean;
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
+  /**
+   * For a `type: mcp` server declared with a stdio transport in a plugin's
+   * `mcp.json`: the spawn spec. Implies `remote: false` — the hosted proxy
+   * can never spawn a subprocess out of knowledge-base content, so stdio
+   * servers are served only to local consumers, which run them per the Agent
+   * Plugins runtime contract (PLUGIN_ROOT/PLUGIN_DATA, `./` containment).
+   */
+  stdio?: { command: string; args: string[]; env?: Record<string, string>; cwd?: string };
 }
 
 /** A validated UTCP manual dict (`{ utcp_version, manual_version, tools }`). */

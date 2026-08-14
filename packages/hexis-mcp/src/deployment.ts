@@ -97,7 +97,7 @@ export async function fetchAllManuals(config: HexisMcpConfig): Promise<RawManual
  * to add. Asking the deployment (rather than inferring from the two list
  * variants) keeps the definition of "local-only" in the one place that owns it.
  */
-export async function fetchLocalOnlyManualNames(config: HexisMcpConfig): Promise<Set<string>> {
+export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map<string, string>> {
   const body = (await getJson(`${config.baseUrl}/api/agent/tools/list_local_tools`, {
     label: 'the local-only tool list',
     method: 'POST',
@@ -108,12 +108,18 @@ export async function fetchLocalOnlyManualNames(config: HexisMcpConfig): Promise
     body: '{}',
   })) as { tools?: unknown };
   const tools = Array.isArray(body?.tools) ? body.tools : [];
-  const names = new Set<string>();
+  // name → KB path of its declaration. The path is what locates the PLUGIN a
+  // stdio server belongs to (`Plugins/<folder>/mcp.json`), which is what gets
+  // materialized locally before the server can spawn.
+  const manuals = new Map<string, string>();
   for (const t of tools) {
     const name = (t as { name?: unknown })?.name;
-    if (typeof name === 'string' && name.length > 0) names.add(name);
+    const path = (t as { path?: unknown })?.path;
+    if (typeof name === 'string' && name.length > 0) {
+      manuals.set(name, typeof path === 'string' ? path : '');
+    }
   }
-  return names;
+  return manuals;
 }
 
 /** A skill as the catalog lists it, and one loaded in full. Shapes mirror the KB tools. */

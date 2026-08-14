@@ -32,7 +32,7 @@ platform reads:
 ```text
 Plugins/<Plugin>/plugin.json                  the manifest (Agent Plugins)
 Plugins/<Plugin>/skills/<skill>/SKILL.md      a skill
-Plugins/<Plugin>/mcp.json                     MCP servers, for other clients
+Plugins/<Plugin>/mcp.json                     MCP servers (authoritative)
 Plugins/<Plugin>/software.bevel.hexis/tools/  `.tool` manuals
 Plugins/<Plugin>/access.md                    who can read/write the plugin
 Plugins/personal-<user-id>/…                  one per person: private
@@ -46,13 +46,24 @@ boundary: a tool a plugin cannot read is a skill that plugin cannot run.
 skills under `skills/`, and the servers in `mcp.json`, and ignores everything
 else. Two things here are ours and sit outside that portable core. `access.md`
 stays at the plugin root because access resolution walks root → file, so the
-same rules one level down would govern only that subtree. And `.tool` manuals
-live under the reverse-DNS `software.bevel.hexis/` namespace, because the
-specification describes MCP servers only and has no way to express an `http` or
-`inline` manual. For `mcp`-type manuals the `.tool` file remains what this
-platform reads — it carries the access verbs and the secret namespace that
-`mcp.json` has no field for — and `mcp.json` is a projection of them written so
-other clients can see the servers at all.
+same rules one level down would govern only that subtree. And `http`/`inline` `.tool`
+manuals live under the reverse-DNS `software.bevel.hexis/` namespace, because
+the specification describes MCP servers only and has no way to express them.
+
+**MCP servers belong in `mcp.json` — do not write `.tool` files for them.**
+Each `mcpServers` key is the server's identity: it is the namespace its vault
+secrets bind to (`<name>_<VAR>`), so renaming a key unbinds every configured
+secret and sign-in. The portable entry carries only where the server is
+(`type`, `url`, literal headers). Anything this platform needs beyond that —
+auth headers carrying `${VAR}` vault references, `variables` declarations,
+a `description`, or `local: true` for a server only reachable from a user's
+machine — goes in `plugin.json` under
+`extensions["software.bevel.hexis"].mcpServers[<name>]`, which other clients
+ignore by design. A `type: "stdio"` entry (a command run on the user's own
+machine) is always local: the hosted endpoint never spawns it; the local
+`hexis-mcp` server fetches the plugin's files to a local directory and runs it
+per the Agent Plugins runtime contract (`PLUGIN_ROOT`/`PLUGIN_DATA`, `./`
+commands contained to the plugin).
 
 **Secrets are never written into a plugin's portable files.** The specification
 defines no portable credential mechanism on purpose: authorization and

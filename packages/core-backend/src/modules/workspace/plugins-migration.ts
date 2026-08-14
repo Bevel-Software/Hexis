@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
+  HEXIS_EXTENSION_NS,
   HEXIS_TOOLS_DIR,
   LEGACY_GROUPS_DIR,
   PLUGINS_DIR,
@@ -10,6 +11,7 @@ import {
   PLUGIN_SKILLS_DIR,
   renderPluginManifest,
 } from '@bevel-software/platform-shared';
+import type { ToolManualDescriptor } from '../tool-manuals/tool-manuals.contract.js';
 import { normalizeToolManual } from '../tool-manuals/tool-manuals.service.js';
 
 /**
@@ -17,27 +19,29 @@ import { normalizeToolManual } from '../tool-manuals/tool-manuals.service.js';
  * layout under `Plugins/` (https://agent-plugins.org, v1.0.0).
  *
  * Runs from the seed top-up, so every deployment self-heals on the next load of
- * a protected branch — including the ones nobody remembers to migrate. It is
- * idempotent: a KB already on the new layout is untouched, and a half-finished
- * run (the process died between steps) is completed by the next one.
+ * a protected branch. Idempotent: a KB already on the new layout is untouched,
+ * and a half-finished run is completed by the next one.
  *
- * What moves:
+ * What moves — and what CONVERTS:
  *
- *   Groups/GTM/access.md            → Plugins/GTM/access.md              (stays put)
+ *   Groups/GTM/access.md            → Plugins/GTM/access.md            (stays put)
  *   Groups/GTM/deploy/SKILL.md      → Plugins/GTM/skills/deploy/SKILL.md
- *   Groups/GTM/notion.tool          → Plugins/GTM/software.bevel.hexis/tools/notion.tool
- *                                   → and, for `mcp` manuals, an entry in Plugins/GTM/mcp.json
- *                                     Plugins/GTM/plugin.json            (written)
+ *   Groups/GTM/web-search.tool      → Plugins/GTM/software.bevel.hexis/tools/web-search.tool
+ *   Groups/GTM/notion.tool (mcp)    → an entry in Plugins/GTM/mcp.json, and the
+ *                                     `.tool` file is DELETED — mcp.json is
+ *                                     authoritative for MCP servers now.
+ *                                     Plugins/GTM/plugin.json           (written)
  *
- * `.tool` files MOVE rather than convert, including the `mcp` ones. A manual
- * carries things `mcp.json` has no field for — its per-file access verbs, and
- * the `id` that secrets are namespaced under — so converting would silently
- * drop a tool's access rules and unbind its configured secrets. `mcp.json` is
- * therefore a PROJECTION of the mcp-type manuals, written so a conformant
- * client can see the servers; the `.tool` remains what this platform reads.
+ * The mcp.json entry is keyed by the `.tool`'s manual id: that id is the
+ * namespace vault secrets bind to (`<id>_<VAR>`), so keeping it is what keeps
+ * every configured secret and completed OAuth grant bound. What mcp.json
+ * cannot carry — auth headers with `${VAR}` references, variable declarations,
+ * the local-only flag — moves into `plugin.json`'s
+ * `extensions["software.bevel.hexis"].mcpServers[<id>]` block, the reverse-DNS
+ * namespace the spec reserves for client-specific data. `http`/`inline`
+ * manuals still MOVE as `.tool` files: nothing but this platform can run them.
  */
 
-/** A repo-relative path the caller should stage, plus what happened, for the log. */
 export interface PluginsMigrationResult {
   migrated: boolean;
   /** Human-readable summary lines (plugin names, tool moves) for the seed log. */
@@ -73,52 +77,118 @@ async function moveIfAbsent(from: string, to: string): Promise<boolean> {
   return true;
 }
 
-/**
- * A header value that references something for a client to fill in, rather
- * than a literal. `${SERPER_KEY}`, `${MCP_OAUTH}` — our Secrets Vault
- * placeholders, which are not part of the specification.
- */
+/** A header value referencing a vault variable rather than carrying a literal. */
 function isCredentialReference(value: string): boolean {
   return /\$\{[^}]+\}/.test(value);
 }
 
-/**
- * The mcp.json projection of a plugin's `mcp`-type manuals.
- *
- * `streamable-http` for every entry: a `.tool` of type `mcp` names a remote
- * HTTP endpoint, which is exactly that transport. The legacy `sse` variant is
- * never emitted — nothing in a `.tool` distinguishes it, and guessing would
- * produce a config that fails at connect time.
- *
- * CREDENTIAL REFERENCES ARE STRIPPED, not copied. The specification is
- * deliberate about this: it defines no portable credential mechanism at all
- * ("Authorization discovery, user interaction, and credential storage are
- * client-managed"), says header values are "visible package data, not a
- * portable secret mechanism", and forbids any expansion beyond
- * `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` — unrecognized placeholder-like text
- * MUST remain literal. So a `${SERPER_KEY}` copied here would be transmitted
- * verbatim as a header value by a conformant client: not a leak, but a broken
- * request and a file asserting an auth scheme nobody can honour.
- *
- * What the projection says is therefore only WHERE the server is. How to
- * authenticate is the client's business — which for this platform means the
- * Secrets Vault, reached through the `.tool` in our extension namespace, and
- * for any other client means whatever credential storage that client has.
- * That division is the spec's, not ours.
- */
-function renderMcpJson(servers: { name: string; url: string; headers?: Record<string, string> }[]): string {
-  const mcpServers: Record<string, unknown> = {};
-  for (const s of servers.sort((a, b) => a.name.localeCompare(b.name))) {
-    const portableHeaders = Object.fromEntries(
-      Object.entries(s.headers ?? {}).filter(([, value]) => !isCredentialReference(value)),
-    );
-    mcpServers[s.name] = {
-      type: 'streamable-http',
-      url: s.url,
-      ...(Object.keys(portableHeaders).length > 0 ? { headers: portableHeaders } : {}),
-    };
+/** Split a manual's headers into what mcp.json may carry and what may not. */
+function splitHeaders(headers: Record<string, string> | undefined): {
+  literal: Record<string, string>;
+  credential: Record<string, string>;
+} {
+  const literal: Record<string, string> = {};
+  const credential: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers ?? {})) {
+    (isCredentialReference(v) ? credential : literal)[k] = v;
   }
-  return `${JSON.stringify({ $schema: PLUGIN_MCP_SCHEMA, mcpServers }, null, 2)}\n`;
+  return { literal, credential };
+}
+
+/** Read+parse a JSON file, or `null` when absent or unparsable. */
+async function readJson(p: string): Promise<Record<string, unknown> | null> {
+  try {
+    const parsed: unknown = JSON.parse(await fs.readFile(p, 'utf-8'));
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fold converted mcp manuals into the plugin's mcp.json and plugin.json.
+ *
+ * MERGE, never clobber: an entry already present under a manual's key — hand
+ * written or from a previous run — wins, because overwriting it would discard
+ * the newer intent. The extension block merges the same way. A plugin.json
+ * that does not parse costs the extension write (logged), not the migration.
+ */
+async function foldIntoPluginFiles(
+  pluginDir: string,
+  folderName: string,
+  manuals: ToolManualDescriptor[],
+  notes: string[],
+): Promise<void> {
+  if (manuals.length === 0) return;
+
+  const mcpPath = path.join(pluginDir, PLUGIN_MCP_FILE);
+  const mcp = (await readJson(mcpPath)) ?? { $schema: PLUGIN_MCP_SCHEMA, mcpServers: {} };
+  if (typeof mcp.mcpServers !== 'object' || mcp.mcpServers === null) mcp.mcpServers = {};
+  const servers = mcp.mcpServers as Record<string, unknown>;
+
+  const manifestPath = path.join(pluginDir, PLUGIN_MANIFEST_FILE);
+  const manifest = await readJson(manifestPath);
+  if (manifest === null) {
+    console.warn(
+      `[plugins-migration] ${folderName}/${PLUGIN_MANIFEST_FILE} is missing or unparsable — ` +
+        'converted mcp servers get no auth/variable declarations until it is fixed.',
+    );
+  }
+
+  let wroteMcp = false;
+  let wroteManifest = false;
+  for (const m of manuals.sort((a, b) => a.name.localeCompare(b.name))) {
+    const { literal, credential } = splitHeaders(m.headers);
+    if (!(m.name in servers)) {
+      servers[m.name] = {
+        type: 'streamable-http',
+        url: m.url,
+        ...(Object.keys(literal).length > 0 ? { headers: literal } : {}),
+      };
+      wroteMcp = true;
+      notes.push(`${folderName}: ${m.name} → ${PLUGIN_MCP_FILE}`);
+    }
+
+    // The non-portable half: auth headers, variable declarations, local-only.
+    const extEntry = {
+      ...(Object.keys(credential).length > 0 ? { headers: credential } : {}),
+      ...(m.variables && m.variables.length > 0 ? { variables: m.variables } : {}),
+      ...(typeof m.description === 'string' ? { description: m.description } : {}),
+      ...(m.remote === false ? { local: true } : {}),
+    };
+    if (manifest !== null && Object.keys(extEntry).length > 0) {
+      const ext = (manifest.extensions ??= {}) as Record<string, unknown>;
+      const ns = (ext[HEXIS_EXTENSION_NS] ??= {}) as Record<string, unknown>;
+      const extServers = (ns.mcpServers ??= {}) as Record<string, unknown>;
+      if (!(m.name in extServers)) {
+        extServers[m.name] = extEntry;
+        wroteManifest = true;
+      }
+    }
+  }
+
+  if (wroteMcp) await fs.writeFile(mcpPath, `${JSON.stringify(mcp, null, 2)}\n`, 'utf8');
+  if (wroteManifest) {
+    await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    notes.push(`${folderName}: wrote mcp-server declarations into ${PLUGIN_MANIFEST_FILE}`);
+  }
+}
+
+/**
+ * Parse a `.tool`; a convertible MCP manual (has a url) parses to a
+ * descriptor, anything else — other types, or a file that will not parse —
+ * to `null` and is left as a `.tool`.
+ */
+async function asMcpManual(abs: string, repoRel: string): Promise<ToolManualDescriptor | null> {
+  try {
+    const content = await fs.readFile(abs, 'utf-8');
+    const d = normalizeToolManual(path.basename(abs).replace(/\.tool$/i, ''), repoRel, content);
+    return d.type === 'mcp' && d.url ? d : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Reorganise ONE plugin folder in place. Returns notes describing what changed. */
@@ -135,11 +205,25 @@ async function migratePluginFolder(pluginDir: string, folderName: string): Promi
   }
 
   const entries = await fs.readdir(pluginDir, { withFileTypes: true });
-  const mcpServers: { name: string; url: string; headers?: Record<string, string> }[] = [];
+  const converted: ToolManualDescriptor[] = [];
+
+  const convertOrMove = async (abs: string, name: string, note: string): Promise<void> => {
+    const manual = await asMcpManual(abs, `${PLUGINS_DIR}/${folderName}/${name}`);
+    if (manual) {
+      // CONVERTED, not moved: mcp.json is authoritative for MCP servers, and
+      // a surviving `.tool` twin would be a second source of truth.
+      converted.push(manual);
+      await fs.rm(abs, { force: true });
+      notes.push(`${folderName}: ${note} converted to an ${PLUGIN_MCP_FILE} entry`);
+      return;
+    }
+    const dest = path.join(pluginDir, ...HEXIS_TOOLS_DIR.split('/'), path.basename(abs));
+    if (abs !== dest && (await moveIfAbsent(abs, dest))) {
+      notes.push(`${folderName}: ${note} → ${HEXIS_TOOLS_DIR}/${path.basename(abs)}`);
+    }
+  };
 
   for (const entry of entries) {
-    // Dot-prefixed entries are parked/ignored by every scanner; the two fixed
-    // locations and our namespace are already where they belong.
     if (entry.name.startsWith('.')) continue;
     if (entry.name === PLUGIN_SKILLS_DIR || entry.name === PLUGIN_MANIFEST_FILE) continue;
     if (entry.name === PLUGIN_MCP_FILE || entry.name === 'access.md') continue;
@@ -157,41 +241,28 @@ async function migratePluginFolder(pluginDir: string, folderName: string): Promi
     }
 
     if (entry.isFile() && entry.name.toLowerCase().endsWith('.tool')) {
-      // Parse BEFORE moving: a manual that will not parse still moves (it is
-      // the user's file and the catalog already skips it), it just cannot be
-      // projected into mcp.json.
-      try {
-        const content = await fs.readFile(abs, 'utf-8');
-        const descriptor = normalizeToolManual(
-          entry.name.replace(/\.tool$/i, ''),
-          `${PLUGINS_DIR}/${folderName}/${entry.name}`,
-          content,
-        );
-        if (descriptor.type === 'mcp' && descriptor.url) {
-          mcpServers.push({
-            name: descriptor.name,
-            url: descriptor.url,
-            headers: descriptor.headers,
-          });
-        }
-      } catch {
-        notes.push(`${folderName}: ${entry.name} did not parse — moved without an mcp.json entry`);
-      }
-      const dest = path.join(pluginDir, ...HEXIS_TOOLS_DIR.split('/'), entry.name);
-      if (await moveIfAbsent(abs, dest)) {
-        notes.push(`${folderName}: ${entry.name} → ${HEXIS_TOOLS_DIR}/${entry.name}`);
+      await convertOrMove(abs, entry.name, entry.name);
+    }
+  }
+
+  // Second sweep: mcp `.tool`s an EARLIER run moved into the extension dir
+  // (when mcp.json was a projection, not the authority). Converting them here
+  // is what makes the migration complete itself rather than strand a twin.
+  const extToolsDir = path.join(pluginDir, ...HEXIS_TOOLS_DIR.split('/'));
+  if (await isDir(extToolsDir)) {
+    for (const entry of await fs.readdir(extToolsDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.tool')) continue;
+      const abs = path.join(extToolsDir, entry.name);
+      const manual = await asMcpManual(abs, `${PLUGINS_DIR}/${folderName}/${HEXIS_TOOLS_DIR}/${entry.name}`);
+      if (manual) {
+        converted.push(manual);
+        await fs.rm(abs, { force: true });
+        notes.push(`${folderName}: ${HEXIS_TOOLS_DIR}/${entry.name} converted to an ${PLUGIN_MCP_FILE} entry`);
       }
     }
   }
 
-  // Written only when there is something to say and nothing there already: a
-  // hand-edited mcp.json is a deliberate act, and this migration is not the
-  // place to overrule it.
-  if (mcpServers.length > 0 && !(await exists(path.join(pluginDir, PLUGIN_MCP_FILE)))) {
-    await fs.writeFile(path.join(pluginDir, PLUGIN_MCP_FILE), renderMcpJson(mcpServers), 'utf8');
-    notes.push(`${folderName}: wrote ${PLUGIN_MCP_FILE} (${mcpServers.length} server(s))`);
-  }
-
+  await foldIntoPluginFiles(pluginDir, folderName, converted, notes);
   return notes;
 }
 

@@ -34,9 +34,10 @@ import type { HexisMcpConfig } from './config.js';
 import {
   callKbTool,
   fetchAllManuals,
-  fetchLocalOnlyManualNames,
+  fetchLocalOnlyManuals,
   resolveMcpUrl,
 } from './deployment.js';
+import { materializePlugin, prepareStdioSpec, type StdioServerSpec } from './materialize.js';
 import { REMOTE_MANUAL_NAME, localManualTemplates, remoteManualTemplate } from './manuals.js';
 
 /** Reported on `initialize`; the version is stamped at build time by the package. */
@@ -147,6 +148,55 @@ export function listedTools(tools: ProxiedTool[]): McpTool[] {
 }
 
 /**
+ * Ready the local manuals for registration. Only stdio MCP servers need work:
+ * per the Agent Plugins runtime contract their plugin is MATERIALIZED locally
+ * (fetched into `~/.hexis/plugins/...`), placeholders are expanded, and the
+ * command is containment-checked — then `@utcp/mcp` spawns them like any other
+ * server config. A manual whose preparation fails is dropped WITH its reason;
+ * the rest of the toolset must not pay for one broken server.
+ */
+async function prepareLocalManuals(
+  config: HexisMcpConfig,
+  templates: CallTemplate[],
+  localOnly: ReadonlyMap<string, string>,
+): Promise<CallTemplate[]> {
+  const out: CallTemplate[] = [];
+  const materialized = new Map<string, Awaited<ReturnType<typeof materializePlugin>>>();
+  for (const template of templates) {
+    const config_ = (template as { config?: { mcpServers?: Record<string, StdioServerSpec & { transport?: string }> } })
+      .config;
+    const servers = config_?.mcpServers ?? {};
+    const stdioNames = Object.keys(servers).filter((k) => servers[k]?.transport === 'stdio');
+    if (stdioNames.length === 0) {
+      out.push(template);
+      continue;
+    }
+    try {
+      // `Plugins/<folder>/mcp.json` → the plugin to materialize.
+      const kbPath = localOnly.get(String(template.name)) ?? '';
+      const folder = kbPath.split('/')[1];
+      if (!folder) throw new Error(`cannot locate the plugin for "${String(template.name)}" (path "${kbPath}")`);
+      let plugin = materialized.get(folder);
+      if (!plugin) {
+        plugin = await materializePlugin(config, folder);
+        materialized.set(folder, plugin);
+        console.error(`[hexis-mcp] materialized plugin "${folder}" at ${plugin.pluginRoot}`);
+      }
+      for (const name of stdioNames) {
+        const prepared = await prepareStdioSpec(servers[name]!, plugin);
+        servers[name] = { ...prepared, transport: 'stdio' };
+      }
+      out.push(template);
+    } catch (err) {
+      console.error(
+        `[hexis-mcp] skipping local server "${String(template.name)}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  return out;
+}
+
+/**
  * Stand up the local MCP server: connect it to a transport and it is live.
  *
  * Discovery happens here, before the server is returned, so `tools/list` is
@@ -158,11 +208,15 @@ export async function createHexisMcpServer(
   version: string,
 ): Promise<Server> {
   const mcpUrl = await resolveMcpUrl(config);
-  const [allManuals, localOnlyNames] = await Promise.all([
+  const [allManuals, localOnly] = await Promise.all([
     fetchAllManuals(config),
-    fetchLocalOnlyManualNames(config),
+    fetchLocalOnlyManuals(config),
   ]);
-  const local = localManualTemplates(allManuals, localOnlyNames);
+  const local = await prepareLocalManuals(
+    config,
+    localManualTemplates(allManuals, new Set(localOnly.keys())),
+    localOnly,
+  );
   const remote = remoteManualTemplate(mcpUrl, config.connectionKey);
 
   const client = await buildClient(config, [remote, ...local]);

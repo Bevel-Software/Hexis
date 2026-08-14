@@ -71,7 +71,8 @@ describe('migrateGroupsToPlugins', () => {
     expect(await exists('Plugins/GTM/skills/outreach/SKILL.md')).toBe(true);
     // A skill folder moves whole; its bundled assets are part of the skill.
     expect(await exists('Plugins/GTM/skills/outreach/scripts/run.py')).toBe(true);
-    expect(await exists('Plugins/GTM/software.bevel.hexis/tools/notion.tool')).toBe(true);
+    // The mcp manual CONVERTED (mcp.json is authoritative); http/inline moved.
+    expect(await exists('Plugins/GTM/software.bevel.hexis/tools/notion.tool')).toBe(false);
     expect(await exists('Plugins/GTM/software.bevel.hexis/tools/web-search.tool')).toBe(true);
   });
 
@@ -87,7 +88,7 @@ describe('migrateGroupsToPlugins', () => {
     expect(Object.keys(manifest).sort()).toEqual(['$schema', 'name']);
   });
 
-  it('projects mcp-type manuals into mcp.json and leaves the others out of it', async () => {
+  it('converts mcp-type manuals into mcp.json entries and leaves the others out of it', async () => {
     await seedLegacyKb();
     await migrateGroupsToPlugins(repo);
     const mcp = JSON.parse(await read('Plugins/GTM/mcp.json'));
@@ -100,7 +101,7 @@ describe('migrateGroupsToPlugins', () => {
     expect(mcp.mcpServers.web_search).toBeUndefined();
   });
 
-  it('strips credential references from the projection, keeping literal headers', async () => {
+  it('splits headers: literals into mcp.json, credential references into plugin.json extensions', async () => {
     await write('Groups/GTM/access.md', 'write:\n  - Admin\n');
     await write(
       'Groups/GTM/vendor.tool',
@@ -117,10 +118,12 @@ describe('migrateGroupsToPlugins', () => {
     // but ${PLUGIN_ROOT}/${PLUGIN_DATA} — a copied ${VENDOR_KEY} would be sent
     // literally by a conformant client.
     expect(mcp.mcpServers.vendor.headers).toEqual({ 'X-Api-Version': '2' });
-    // The reference itself survives where this platform reads it.
-    expect(await read('Plugins/GTM/software.bevel.hexis/tools/vendor.tool')).toContain(
-      '${VENDOR_KEY}',
-    );
+    // The reference lives on in the extensions block, which is ours to interpret.
+    const manifest = JSON.parse(await read('Plugins/GTM/plugin.json'));
+    expect(manifest.extensions['software.bevel.hexis'].mcpServers.vendor.headers).toEqual({
+      Authorization: 'Bearer ${VENDOR_KEY}',
+    });
+    expect(await exists('Plugins/GTM/software.bevel.hexis/tools/vendor.tool')).toBe(false);
   });
 
   it('omits headers entirely when every one of them was a credential reference', async () => {
@@ -137,17 +140,48 @@ describe('migrateGroupsToPlugins', () => {
     await migrateGroupsToPlugins(repo);
     const mcp = JSON.parse(await read('Plugins/GTM/mcp.json'));
     // An empty `headers` object would assert "this server needs no auth".
-    // Saying nothing is the honest projection: where it is, not how to reach it.
+    // Saying nothing is the honest shape: where it is, not how to reach it.
     expect(mcp.mcpServers.vendor).toEqual({
       type: 'streamable-http',
       url: 'https://mcp.vendor.example/mcp',
     });
   });
 
-  it('keeps the .tool file for an mcp manual — mcp.json cannot carry its access verbs or secret namespace', async () => {
-    await seedLegacyKb();
+  it('converts an mcp .tool a previous run parked in the extension dir, second sweep', async () => {
+    // The earlier migration shape MOVED mcp .tools here and projected mcp.json;
+    // now that mcp.json is authoritative, a parked twin must convert away.
+    await write('Plugins/GTM/access.md', 'write:\n  - Admin\n');
+    await write('Plugins/GTM/plugin.json', '{ "name": "gtm" }');
+    await write(
+      'Plugins/GTM/software.bevel.hexis/tools/notion.tool',
+      JSON.stringify({ name: 'notion', type: 'mcp', url: 'https://mcp.notion.com/mcp' }),
+    );
+    const result = await migrateGroupsToPlugins(repo);
+    expect(result.migrated).toBe(true);
+    expect(await exists('Plugins/GTM/software.bevel.hexis/tools/notion.tool')).toBe(false);
+    const mcp = JSON.parse(await read('Plugins/GTM/mcp.json'));
+    expect(mcp.mcpServers.notion.url).toBe('https://mcp.notion.com/mcp');
+  });
+
+  it('moves declared variables and the local flag into the plugin.json extensions block', async () => {
+    await write('Plugins/GTM/access.md', 'write:\n  - Admin\n');
+    await write('Plugins/GTM/plugin.json', '{ "name": "gtm" }');
+    await write(
+      'Plugins/GTM/vendor.tool',
+      JSON.stringify({
+        name: 'vendor',
+        type: 'mcp',
+        url: 'http://localhost:9000/mcp',
+        remote: false,
+        variables: [{ name: 'VENDOR_KEY', scope: 'user', label: 'Your key' }],
+      }),
+    );
     await migrateGroupsToPlugins(repo);
-    expect(await exists('Plugins/GTM/software.bevel.hexis/tools/notion.tool')).toBe(true);
+    const manifest = JSON.parse(await read('Plugins/GTM/plugin.json'));
+    expect(manifest.extensions['software.bevel.hexis'].mcpServers.vendor).toEqual({
+      variables: [{ name: 'VENDOR_KEY', scope: 'user', label: 'Your key' }],
+      local: true,
+    });
   });
 
   it('is idempotent — a second run changes nothing', async () => {
@@ -189,11 +223,17 @@ describe('migrateGroupsToPlugins', () => {
     expect(await exists('Plugins/GTM/mcp.json')).toBe(false);
   });
 
-  it('never overwrites an mcp.json somebody already wrote', async () => {
+  it('merges into an existing mcp.json without clobbering what is already there', async () => {
     await seedLegacyKb();
-    await write('Groups/GTM/mcp.json', '{ "hand": "written" }');
+    await write(
+      'Groups/GTM/mcp.json',
+      JSON.stringify({ mcpServers: { notion: { type: 'streamable-http', url: 'https://hand.example/mcp' } } }),
+    );
     await migrateGroupsToPlugins(repo);
-    expect(JSON.parse(await read('Plugins/GTM/mcp.json'))).toEqual({ hand: 'written' });
+    const mcp = JSON.parse(await read('Plugins/GTM/mcp.json'));
+    // The hand-written notion entry WINS; the converted .tool is gone either way.
+    expect(mcp.mcpServers.notion.url).toBe('https://hand.example/mcp');
+    expect(await exists('Plugins/GTM/notion.tool')).toBe(false);
   });
 
   it('leaves a personal folder a valid plugin', async () => {
