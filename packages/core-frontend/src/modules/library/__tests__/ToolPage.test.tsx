@@ -29,7 +29,12 @@ const secretsMock = vi.hoisted(() => ({
 vi.mock('../../secrets-vault/services/tool-secrets.api', () => secretsMock);
 
 const toolsMock = vi.hoisted(() => ({ getToolDetail: vi.fn() }));
-vi.mock('../services/tools.api', () => ({ getToolDetail: toolsMock.getToolDetail }));
+vi.mock('../services/tools.api', () => ({
+  getToolDetail: toolsMock.getToolDetail,
+  // The server section self-hides on null — these frame tests are not about it.
+  getMcpServer: vi.fn(async () => null),
+  putMcpServer: vi.fn(),
+}));
 
 const libraryMock = vi.hoisted(() => ({ listSkills: vi.fn(), getSkill: vi.fn() }));
 vi.mock('../services/library.api', () => ({

@@ -6,6 +6,12 @@ import type { AttentionStatus, GemState } from '../utils/status';
 
 export interface LibraryCardProps {
   kind: 'skill' | 'integration';
+  /**
+   * How an integration is declared: an `mcp.json` server or a `.tool` UTCP
+   * manual. Two different files to edit and two different capability sets, so
+   * the card says which one this is — skills carry nothing here.
+   */
+  flavor?: 'mcp' | 'utcp';
   id: string;
   name: string;
   description: string;
@@ -58,6 +64,7 @@ export function LibraryCard({
   version,
   pending,
   onOpen,
+  flavor,
 }: LibraryCardProps) {
   /**
    * What the bottom-left says, and when it says anything at all.
@@ -103,6 +110,11 @@ export function LibraryCard({
             column of coloured squares that distinguish nothing. */}
         {kind === 'integration' && <ToolLogo slug={id} name={name} />}
         <span className="truncate text-lede font-semibold text-ink">{name}</span>
+        {kind === 'integration' && flavor && (
+          <Badge tone="outline" size="xs" className="shrink-0 uppercase">
+            {flavor === 'mcp' ? 'MCP server' : 'UTCP manual'}
+          </Badge>
+        )}
         {pending && (
           <Badge tone="wait" size="xs" className="shrink-0 uppercase">
             In review

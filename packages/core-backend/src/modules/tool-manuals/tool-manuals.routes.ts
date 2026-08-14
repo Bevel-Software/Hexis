@@ -8,6 +8,8 @@ import type { IAccessControl } from '../access/access-control.interface.js';
 import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
 import { type IToolManualService, EXTERNAL_KB_MANUAL_NAME } from './tool-manuals.contract.js';
+import { McpServerEditError, type McpServerEditService, type McpServerWrite } from './mcp-server-edit.service.js';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
 import '../tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
 
@@ -205,8 +207,53 @@ export function createToolManualsAgentRoutes(
  *                            literal sibling is shadowed by the param segment;
  *                            `preview` is POST-only, so it never collides.
  */
-export function createToolManualsBrowserRoutes(toolManualService: IToolManualService): express.Router {
+export function createToolManualsBrowserRoutes(
+  toolManualService: IToolManualService,
+  serverEdit?: { service: McpServerEditService; getUser: (userId: string) => Promise<AuthUser | undefined> },
+): express.Router {
   const router = express.Router();
+
+  /**
+   * Server-scoped read/write of one MCP server — the tool page's edit form.
+   * One server's truth spans mcp.json AND plugin.json's extensions block; a
+   * raw file editor shows a writer half of it at best, so the form talks to
+   * this pair instead. PUT commits both files together and refuses the states
+   * that would strand a half (see McpServerEditService).
+   */
+  router.get('/tools/:slug/server', async (req, res) => {
+    if (!serverEdit) return void res.status(404).json({ error: 'Not available' });
+    const email = req.userEmail;
+    if (!email) return void res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const view = await serverEdit.service.getServer(email, String(req.params.slug));
+      if (!view) return void res.status(404).json({ error: 'Not found' });
+      res.json(view);
+    } catch (err) {
+      console.error('[tool-manuals] server read failed:', err instanceof Error ? err.message : err);
+      res.status(500).json({ error: 'Failed to read the server' });
+    }
+  });
+
+  router.put('/tools/:slug/server', async (req, res) => {
+    if (!serverEdit) return void res.status(404).json({ error: 'Not available' });
+    if (!req.userId) return void res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const user = await serverEdit.getUser(req.userId);
+      if (!user) return void res.status(401).json({ error: 'Not authenticated' });
+      const result = await serverEdit.service.putServer(
+        user,
+        String(req.params.slug),
+        (req.body ?? {}) as McpServerWrite,
+      );
+      res.json(result);
+    } catch (err) {
+      if (err instanceof McpServerEditError) {
+        return void res.status(err.status).json({ error: err.message });
+      }
+      console.error('[tool-manuals] server write failed:', err instanceof Error ? err.message : err);
+      res.status(500).json({ error: 'Failed to save the server' });
+    }
+  });
 
   router.get('/tools', async (req, res) => {
     const email = req.userEmail;

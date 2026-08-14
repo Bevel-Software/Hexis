@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
 import { useToolPage } from '../../hooks/useToolPage';
+import { McpServerSection } from './McpServerSection';
 import { libraryHomeForItemPath, LIBRARY_ROOT } from '../../routes/library-paths';
 import { readOAuthFragment } from '../../utils/oauth-fragment';
 import type { ToolCapability } from '../../services/tools.api';
@@ -136,6 +137,16 @@ export function ToolPage({
       <ToolConnectionSection
         tool={tool}
         onChanged={() => {
+          setActionError(null);
+          page.reload();
+        }}
+        onError={setActionError}
+      />
+
+      <McpServerSection
+        slug={tool.slug}
+        configuredCount={tool.variables.filter((v) => v.adminConfigured || v.userConfigured).length}
+        onSaved={() => {
           setActionError(null);
           page.reload();
         }}

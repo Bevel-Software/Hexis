@@ -58,3 +58,49 @@ export async function getToolDetail(slug: string): Promise<ToolManualDetail> {
   if (!res.ok) await unwrap(res, "Couldn't load this tool.");
   return ((await res.json()) as { tool: ToolManualDetail }).tool;
 }
+
+/**
+ * The server-scoped view/edit surface for an mcp.json-backed tool. One
+ * server's truth spans two files (mcp.json + plugin.json's extensions block);
+ * these endpoints are the pair kept in step, so the form never shows a writer
+ * half of it. Absent (404) for `.tool`-backed manuals — those edit as files.
+ */
+export type McpTransport = 'streamable-http' | 'sse' | 'stdio';
+
+export interface McpServerView {
+  name: string;
+  transport: McpTransport;
+  url?: string;
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  literalHeaders: Record<string, string>;
+  authHeaders: Record<string, string>;
+  variables: { name: string; scope: 'admin' | 'user'; label?: string }[];
+  description?: string;
+  local: boolean;
+  canWrite: boolean;
+}
+
+export type McpServerWrite = Omit<Partial<McpServerView>, 'name' | 'canWrite'> & {
+  transport: McpTransport;
+  newName?: string;
+};
+
+export async function getMcpServer(slug: string): Promise<McpServerView | null> {
+  const res = await authFetch(`/api/tools/${encodeURIComponent(slug)}/server`);
+  if (res.status === 404) return null; // a .tool-backed manual — no server pair
+  if (!res.ok) await unwrap(res, "Couldn't load the server configuration.");
+  return (await res.json()) as McpServerView;
+}
+
+export async function putMcpServer(slug: string, write: McpServerWrite): Promise<{ name: string }> {
+  const res = await authFetch(`/api/tools/${encodeURIComponent(slug)}/server`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(write),
+  });
+  if (!res.ok) await unwrap(res, "Couldn't save the server configuration.");
+  return (await res.json()) as { name: string };
+}
