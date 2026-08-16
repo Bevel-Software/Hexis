@@ -149,16 +149,24 @@ export async function materializePlugin(
   // random suffix keeps the path out of any plugin folder's namespace and
   // apart from a concurrently-launched second instance's spill; the sweep
   // reclaims partials a hard kill (SIGKILL, shutdown) left behind, which the
-  // `finally` below can never see — this folder's only, because another
-  // instance may be mid-download on a sibling's.
-  const partialSuffix = (name: string) => `.${name}.zip.` as const;
+  // `finally` below can never see. Sweeping is folder-EXACT (the remainder
+  // after the prefix must be exactly the shape written below — a folder named
+  // `GTM.zip.x` must not lose its partials to `GTM`'s sweep) and AGE-GATED:
+  // a live download is at most the fetch timeout old, so a second instance
+  // mid-download on this same folder never has its spill reclaimed; only a
+  // partial nothing can still be writing is.
+  const partialPrefix = `.${folder}.zip.`;
+  const PARTIAL_SHAPE = /^[0-9a-f]{12}\.partial$/;
+  const SWEEP_AGE_MS = 10 * 60 * 1000;
   const keyDir = path.join(home, 'plugins', key);
   for (const entry of await fs.readdir(keyDir).catch(() => [] as string[])) {
-    if (entry.startsWith(partialSuffix(folder)) && entry.endsWith('.partial')) {
-      await fs.rm(path.join(keyDir, entry), { force: true }).catch(() => {});
-    }
+    if (!entry.startsWith(partialPrefix) || !PARTIAL_SHAPE.test(entry.slice(partialPrefix.length))) continue;
+    const abs = path.join(keyDir, entry);
+    const st = await fs.stat(abs).catch(() => null);
+    if (st === null || Date.now() - st.mtimeMs < SWEEP_AGE_MS) continue;
+    await fs.rm(abs, { force: true }).catch(() => {});
   }
-  const tmpArchive = path.join(keyDir, `${partialSuffix(folder)}${randomBytes(6).toString('hex')}.partial`);
+  const tmpArchive = path.join(keyDir, `${partialPrefix}${randomBytes(6).toString('hex')}.partial`);
   try {
     await readBodyCappedToFile(res.body, MAX_ARCHIVE_BYTES, `plugin "${folder}" archive`, tmpArchive);
     await extractArchive(tmpArchive, pluginRoot, folder, MAX_EXTRACTED_BYTES, MAX_ENTRIES);

@@ -130,12 +130,20 @@ describe('stdio end-to-end', () => {
         expect(mode & 0o111, 'materialized server lost its exec bit').toBeTruthy();
       }
       // A partial a hard-killed prior run left behind is reclaimed on the next
-      // materialization of the same folder, and a completed run leaves none.
+      // materialization of the same folder — but only an OLD one: a fresh
+      // partial could be a concurrent instance's live download, and the sweep
+      // must leave it alone. A completed run leaves none of its own.
       const keyDir = path.dirname(plugin.pluginRoot);
-      await fs.writeFile(path.join(keyDir, '.GTM.zip.deadbeef.partial'), 'junk');
+      const stale = path.join(keyDir, '.GTM.zip.aaaaaaaaaaaa.partial');
+      const fresh = path.join(keyDir, '.GTM.zip.bbbbbbbbbbbb.partial');
+      await fs.writeFile(stale, 'junk');
+      const past = new Date(Date.now() - 11 * 60 * 1000);
+      await fs.utimes(stale, past, past);
+      await fs.writeFile(fresh, 'junk');
       await materializePlugin(config, 'GTM');
       const partials = (await fs.readdir(keyDir)).filter((f) => f.endsWith('.partial'));
-      expect(partials).toEqual([]);
+      expect(partials).toEqual(['.GTM.zip.bbbbbbbbbbbb.partial']);
+      await fs.rm(fresh, { force: true });
 
       // The same preparation `prepareLocalManuals` applies before registration.
       const spec = await prepareStdioSpec(

@@ -53,7 +53,10 @@ export function isReservedVariableName(varName: string): boolean {
  */
 export function findReservedVariableRef(doc: unknown): string | null {
   const text = JSON.stringify(doc) ?? '';
-  for (const match of text.matchAll(VARIABLE_REFERENCE_RE)) {
+  // A fresh instance per scan: `matchAll` COPIES the source regex's
+  // `lastIndex` (spec), and the exported one is mutable module state — any
+  // future `.exec`/`.test` on it would make this scan start mid-string.
+  for (const match of text.matchAll(new RegExp(VARIABLE_REFERENCE_RE.source, VARIABLE_REFERENCE_RE.flags))) {
     const varName = match[1] ?? match[2] ?? '';
     if (isReservedVariableName(varName)) return match[0];
   }
