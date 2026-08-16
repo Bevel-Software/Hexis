@@ -1,6 +1,6 @@
 import {
   DEFAULT_BRANCH,
-  GROUPS_DIR,
+  PLUGINS_DIR,
   type ChangeRequest,
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
@@ -27,9 +27,9 @@ const SKILL_DOC = 'SKILL.md';
  *
  * WHO MAY SEE ONE is narrower than who may see the catalog: the author, and
  * whoever could approve it. "Could approve it" is not re-stated here as a
- * group-admin check — it is `canWrite` on the SKILL.md the request would
+ * plugin-admin check — it is `canWrite` on the SKILL.md the request would
  * create. The new folder carries no `access.md` of its own, so that verdict
- * inherits from the group folder, which IS the group's admin; asking the access
+ * inherits from the plugin folder, which IS the plugin's admin; asking the access
  * tree keeps this surface and the merge gate answering with one voice, and it
  * keeps working for skills nested in a category subfolder that carries rules of
  * its own.
@@ -80,7 +80,7 @@ export class PendingSkillsService implements IPendingSkillService {
     const authorHash = hashEmail(email);
 
     // One access load for every candidate. Resolved on the DEFAULT branch —
-    // the tree as it stands is what says who owns the group the skill is
+    // the tree as it stands is what says who owns the plugin the skill is
     // arriving into; the branch's own copy is written by the proposer and must
     // not get a say in who reviews them.
     const writable = await this.accessControl
@@ -148,16 +148,16 @@ export class PendingSkillsService implements IPendingSkillService {
 /**
  * Is this touched path a skill's own SKILL.md?
  *
- * `Groups/<group>/<skill>/SKILL.md` is the shallowest shape, hence four
+ * `Plugins/<plugin>/<skill>/SKILL.md` is the shallowest shape, hence four
  * segments; deeper ones are skills nested in a category subfolder, which the
- * catalog already supports. `Groups/<group>/SKILL.md` is NOT a skill — a group
+ * catalog already supports. `Plugins/<plugin>/SKILL.md` is NOT a skill — a plugin
  * folder is not itself one.
  */
 function isSkillDoc(repoRelPath: string): boolean {
   const segments = repoRelPath.split('/');
   return (
     segments.length >= 4 &&
-    segments[0] === GROUPS_DIR &&
+    segments[0] === PLUGINS_DIR &&
     segments[segments.length - 1] === SKILL_DOC
   );
 }

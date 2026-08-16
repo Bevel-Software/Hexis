@@ -31,7 +31,7 @@ const CATALOG = [
   {
     slug: 'weather',
     name: 'weather',
-    path: 'Groups/weather.tool',
+    path: 'Plugins/weather.tool',
     type: 'mcp' as const,
     setup: { kind: 'oauth-manual' as const, reason: 'no dynamic client registration' },
     variables: [{ name: 'SHARED_KEY', scope: 'admin' as const, label: null }],
@@ -39,7 +39,7 @@ const CATALOG = [
   {
     slug: 'billing',
     name: 'billing',
-    path: 'Groups/billing.tool',
+    path: 'Plugins/billing.tool',
     type: 'http' as const,
     variables: [{ name: 'ORG_KEY', scope: 'admin' as const, label: null }],
   },
@@ -54,7 +54,7 @@ const toolManualService = {
 
 const accessControl = {
   canWrite: vi.fn(
-    async (_ws: string, email: string, path: string) => email === ALICE.email && path === 'Groups/weather.tool',
+    async (_ws: string, email: string, path: string) => email === ALICE.email && path === 'Plugins/weather.tool',
   ),
 } as never;
 

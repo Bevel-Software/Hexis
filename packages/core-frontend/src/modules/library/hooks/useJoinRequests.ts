@@ -7,15 +7,15 @@ import {
   reconcileJoinRequest,
   type JoinProposal,
   type JoinRequest,
-} from '../services/groups.api';
+} from '../services/plugins.api';
 import { useLibraryToast } from '../state/toast.context';
 
 /**
- * The join requests one group's managers can answer, and the two ways to
+ * The join requests one plugin's managers can answer, and the two ways to
  * answer them.
  *
  * ACCEPTING IS A GRANT, NOT A MERGE. A proposal is "give this principal this
- * verb on the group folder", so accepting it calls the ordinary access-grant
+ * verb on the plugin folder", so accepting it calls the ordinary access-grant
  * API — the same endpoint the Manage-access dialog uses, with the same gate,
  * lock and commit. The request's branch is never merged, so nothing else it
  * carries can ride in on an approval, and a request naming five people can be
@@ -40,14 +40,14 @@ export interface JoinRequestsState {
   reload(): void;
 }
 
-export function useJoinRequests(group: string, folder: string | null): JoinRequestsState {
+export function useJoinRequests(plugin: string, folder: string | null): JoinRequestsState {
   const [requests, setRequests] = useState<JoinRequest[]>([]);
   const [revision, setRevision] = useState(0);
   const toast = useLibraryToast();
 
   useEffect(() => {
     let cancelled = false;
-    listJoinRequests(group)
+    listJoinRequests(plugin)
       .then((rows) => {
         if (!cancelled) setRequests(rows);
       })
@@ -58,7 +58,7 @@ export function useJoinRequests(group: string, folder: string | null): JoinReque
     return () => {
       cancelled = true;
     };
-  }, [group, revision]);
+  }, [plugin, revision]);
 
   const reload = useCallback(() => setRevision((r) => r + 1), []);
 
@@ -92,10 +92,10 @@ export function useJoinRequests(group: string, folder: string | null): JoinReque
         ),
       );
       toast(`${proposal.label} now has ${proposal.verb} access.`);
-      await reconcileJoinRequest(group, request.number).catch(() => false);
+      await reconcileJoinRequest(plugin, request.number).catch(() => false);
       setRevision((r) => r + 1);
     },
-    [folder, group, toast],
+    [folder, plugin, toast],
   );
 
   const decline = useCallback(

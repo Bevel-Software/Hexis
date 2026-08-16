@@ -16,9 +16,9 @@ beforeEach(() => {
 
 describe('useFileOnBranch', () => {
   it('returns the file once the read lands', async () => {
-    const { result } = renderHook(() => useFileOnBranch('main', 'Groups/Sales/deck/SKILL.md'));
+    const { result } = renderHook(() => useFileOnBranch('main', 'Plugins/Sales/deck/SKILL.md'));
     expect(result.current).toBeNull();
-    await waitFor(() => expect(result.current).toBe('content of Groups/Sales/deck/SKILL.md'));
+    await waitFor(() => expect(result.current).toBe('content of Plugins/Sales/deck/SKILL.md'));
   });
 
   /**

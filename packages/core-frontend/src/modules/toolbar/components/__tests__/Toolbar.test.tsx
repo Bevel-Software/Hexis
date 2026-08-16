@@ -276,7 +276,7 @@ describe('Toolbar', () => {
 
   // ONE nav toggle, first in the row and left of the brand, for the app's ONE
   // sidebar. There were two buttons here — same glyph, same spot, different
-  // state — until Knowledge's file tree and the Library's group list became
+  // state — until Knowledge's file tree and the Library's plugin list became
   // the same sidebar.
   describe('sidebar toggle', () => {
     beforeEach(() => setSidebarCollapsed(false));
@@ -306,7 +306,7 @@ describe('Toolbar', () => {
       // follow the claim — the old path test made it vanish here.
       [
         'a canonical /workspace item URL, by the claimed app',
-        '/workspace/main/knowledge-base/Groups/Sales/create-sales-deck/SKILL.md',
+        '/workspace/main/knowledge-base/Plugins/Sales/create-sales-deck/SKILL.md',
         false,
         'skills-tools',
       ],
@@ -391,7 +391,7 @@ describe('Toolbar', () => {
       await userEvent.click(screen.getByRole('button', { name: 'Test User' }));
     }
 
-    // The panel is a labelled GROUP of buttons, not a `role="menu"`: it has no
+    // The panel is a labelled PLUGIN of buttons, not a `role="menu"`: it has no
     // arrow-key navigation, so claiming the menu role would promise a keyboard
     // model it does not implement. Every assertion below is the one it always
     // was; only the selector moved.

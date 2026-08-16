@@ -1,6 +1,6 @@
 /**
  * The lock. One shape, three places: the sidebar's count box, the `Locked`
- * badge on a group's page, and the all-groups index rows.
+ * badge on a plugin's page, and the all-plugins index rows.
  *
  * Inline rather than an icon-library import because it is drawn ~20px wide in
  * a fixed slot and has to inherit `currentColor` from the row it sits in —

@@ -48,6 +48,8 @@ const TARGETS = [
   { dir: 'packages/shared', filter: '@bevel-software/platform-shared', title: '@bevel-software/platform-shared' },
   { dir: 'packages/core-backend', filter: '@bevel-software/platform-core-backend', title: '@bevel-software/platform-core-backend' },
   { dir: 'packages/core-frontend', filter: '@bevel-software/platform-core-frontend', title: '@bevel-software/platform-core-frontend' },
+  { dir: 'packages/mcp-core', filter: '@bevel-software/platform-mcp-core', title: '@bevel-software/platform-mcp-core' },
+  { dir: 'packages/hexis-mcp', filter: '@bevel-software/hexis-mcp', title: '@bevel-software/hexis-mcp' },
 ];
 
 /**

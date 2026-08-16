@@ -179,7 +179,7 @@ const CORE_BANNERS: BannerDef[] = [
 // other apps render their own full surface (see CORE_APPS).
 const CORE_PANES: PaneDef[] = [
   // The file tree is the SIDEBAR, not a panel — the same frame, at the same
-  // width, that Skills & Tools puts its group list in. It left the resizable
+  // width, that Skills & Tools puts its plugin list in. It left the resizable
   // group when the two navs were unified; `SidebarFrame` owns its width and
   // the shared store owns whether it is showing.
   { id: 'explorer', order: 10, node: <FileExplorer />, sidebar: true, collapsible: true },
@@ -189,7 +189,7 @@ const CORE_PANES: PaneDef[] = [
 /**
  * The core apps behind the toolbar's app switcher. Each app is a full
  * surface below the always-mounted toolbar. "Skills & Tools" mounts
- * `LibraryRoutes`, which owns its own nested route table (gallery, groups,
+ * `LibraryRoutes`, which owns its own nested route table (gallery, plugins,
  * items) below this path. Knowledge's path IS `KB_ROUTE_PREFIX` ('/workspace') — the KB file
  * links `kbFileUrl()` produces are absolute `/workspace/<branch>/<path>`
  * URLs, so they land inside the Knowledge surface by construction.
@@ -224,7 +224,7 @@ const CORE_APPS: AppDef[] = [
  *
  * Which surface renders is decided by URL SHAPE (`isLibraryLocation`): the KB
  * repo's two roots ARE the two apps — `KnowledgeBase/` paths get the pane
- * workspace, default-branch `Groups/` paths get the library. The catalog is
+ * workspace, default-branch `Plugins/` paths get the library. The catalog is
  * never consulted for the surface, so a just-created skill routes correctly
  * before any reload. Router state `rawFile` steps past the shape rule to the
  * raw file view (the tool page's "Edit the tool file"); it is state, not URL,
@@ -318,7 +318,7 @@ export function AppChrome() {
   const activeId = claimedApp ?? activeAppId(apps, location.pathname);
 
   // A narrow sidebar can be opened from the toolbar, but it must not cover
-  // the destination after the user chooses a group or file inside it.
+  // the destination after the user chooses a plugin or file inside it.
   useEffect(() => {
     if (narrow) setSidebarCollapsed(true);
   }, [location.pathname, narrow]);

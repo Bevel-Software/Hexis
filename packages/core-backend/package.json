@@ -36,6 +36,7 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@bevel-software/platform-mcp-core": "workspace:*",
     "@bevel-software/platform-shared": "workspace:*",
     "@mastra/core": "1.35.0",
     "@modelcontextprotocol/sdk": "^1.29.0",

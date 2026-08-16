@@ -21,36 +21,77 @@ change them.
 ```text
 knowledge-base/
 ├── KnowledgeBase/        ← the knowledge itself; organise it however suits you
-├── Groups/               ← one folder per group: its skills AND its tools
+├── Plugins/              ← one folder per plugin: its skills AND its tools
 ├── roles.yaml            ← identity → role mapping (Admin-only edits)
 └── access.md             ← repo-root access-control rules
 ```
 
-Only those two folders are structural, and only `Groups/` has a layout the
+Only those two folders are structural, and only `Plugins/` has a layout the
 platform reads:
 
 ```text
-Groups/<Group>/<skill>/SKILL.md   a skill
-Groups/<Group>/<name>.tool        a tool manual
-Groups/<Group>/access.md          who can read/write the whole group
-Groups/personal-<user-id>/…       one per person: their own skills, private
+Plugins/<Plugin>/plugin.json                  the manifest (Agent Plugins)
+Plugins/<Plugin>/skills/<skill>/SKILL.md      a skill
+Plugins/<Plugin>/mcp.json                     MCP servers (authoritative)
+Plugins/<Plugin>/software.bevel.hexis/tools/  `.tool` manuals
+Plugins/<Plugin>/access.md                    who can read/write the plugin
+Plugins/personal-<user-id>/…                  one per person: private
 ```
 
-Skills and tools live TOGETHER in a group because they share one access
-boundary: a tool a group cannot read is a skill that group cannot run.
+Skills and tools live TOGETHER in a plugin because they share one access
+boundary: a tool a plugin cannot read is a skill that plugin cannot run.
 
-**Group folders are made through the app, not by writing files.** A group
+**Symlinks are not supported anywhere under `Plugins/`.** Access control
+resolves rules by path, and a symlink is a second path to the same content —
+the two can disagree about who may read what. The platform never creates
+them and ignores any it finds (they can only arrive via a direct git push).
+
+**A plugin follows the [Agent Plugins](https://agent-plugins.org) specification**
+(v1.0.0), so another conformant client can load one: it reads `plugin.json`, the
+skills under `skills/`, and the servers in `mcp.json`, and ignores everything
+else. Two things here are ours and sit outside that portable core. `access.md`
+stays at the plugin root because access resolution walks root → file, so the
+same rules one level down would govern only that subtree. And `http`/`inline` `.tool`
+manuals live under the reverse-DNS `software.bevel.hexis/` namespace, because
+the specification describes MCP servers only and has no way to express them.
+
+**MCP servers belong in `mcp.json` — do not write `.tool` files for them.**
+Each `mcpServers` key is the server's identity: it is the namespace its vault
+secrets bind to (`<name>_<VAR>`), so renaming a key unbinds every configured
+secret and sign-in. The portable entry carries only where the server is
+(`type`, `url`, literal headers). Anything this platform needs beyond that —
+auth headers carrying `${VAR}` vault references, `variables` declarations,
+a `description`, or `local: true` for a server only reachable from a user's
+machine — goes in `plugin.json` under
+`extensions["software.bevel.hexis"].mcpServers[<name>]`, which other clients
+ignore by design. A `type: "stdio"` entry (a command run on the user's own
+machine) is always local: the hosted endpoint never spawns it; the local
+`hexis-mcp` server fetches the plugin's files to a local directory and runs it
+per the Agent Plugins runtime contract (`PLUGIN_ROOT`/`PLUGIN_DATA`, `./`
+commands contained to the plugin).
+
+**Secrets are never written into a plugin's portable files.** The specification
+defines no portable credential mechanism on purpose: authorization and
+credential storage are the client's business, header and `env` values are
+"visible package data", and a client must not expand anything except
+`${PLUGIN_ROOT}` and `${PLUGIN_DATA}`. So the Secrets Vault IS this platform's
+answer to that — and `mcp.json` carries only where a server is, never a
+`${VAR}` reference to how to authenticate with it. Those live in `plugin.json`
+under `extensions["software.bevel.hexis"].mcpServers[<name>]`, which is ours
+to interpret and which other clients ignore by design.
+
+**Plugin folders are made through the app, not by writing files.** A plugin
 exists exactly when its folder carries an `access.md` — a bare directory
-under `Groups/` is not a group and is never listed. A new
-direct child of `Groups/` needs an `access.md` naming who runs it, and the
+under `Plugins/` is not a plugin and is never listed. A new
+direct child of `Plugins/` needs an `access.md` naming who runs it, and the
 write gate refuses a plain write into an unused name there — so do not try to
-create a group by writing a skill into `Groups/<new-name>/…`; it will be
-denied. Send the user to the app's **New group** button (or its
-`POST /api/groups` endpoint), then write into the folder it made. Names
+create a plugin by writing a skill into `Plugins/<new-name>/…`; it will be
+denied. Send the user to the app's **New plugin** button (or its
+`POST /api/plugins` endpoint), then write into the folder it made. Names
 starting with `personal-` are reserved: one such folder exists per person,
 created automatically with their first personal skill, readable only by its
-owner and never listed as a group — a signed-in user's own skills belong
-there, and move into a group by moving the skill's folder.
+owner and never listed as a plugin — a signed-in user's own skills belong
+there, and move into a plugin by moving the skill's folder.
 
 Everything under `KnowledgeBase/` is yours to arrange. Subfolders, naming,
 whether a topic is one file or twenty — all of it is a judgement call about
@@ -99,7 +140,7 @@ File-level write access decides how a change lands on the default branch:
   review flow — and prefer a change request when in doubt, when the change is
   large, or when it touches content the user does not own.
 
-## Skills (`Groups/<Group>/<skill>/SKILL.md`)
+## Skills (`Plugins/<Plugin>/skills/<skill>/SKILL.md`)
 
 A skill is a folder holding a `SKILL.md` and whatever files it needs. The
 frontmatter names it and declares which tools it may use:
@@ -113,21 +154,25 @@ allowed-tools: [slack_post_message]
 ```
 
 The body is the instructions, in plain markdown. `allowed-tools` entries are
-tool names from the `.tool` manuals in the same group — a skill can only reach
-tools its group can read.
+tool names from the `.tool` manuals in the same plugin — a skill can only reach
+tools its plugin can read.
 
-## Tool Manuals (`Groups/<Group>/*.tool`)
+## Tool Manuals (`Plugins/<Plugin>/software.bevel.hexis/tools/*.tool`)
 
-Each group folder holds `*.tool` files — reusable **tool manuals** that let agents call external APIs. They are **not part of the knowledge graph** (never modelled as nodes) and are access-controlled like any other file via `access.md`. Any user who can *read* a `.tool` can use its tools; anyone who can *write* it sets its shared (admin) secrets (see below). Put each manual directly in the group folder whose skills use it. The same
-integration may exist in several groups as separate files (`Everyone/notion.tool`
-and `Finance/notion.tool`), each with its own credentials and access rule —
-a group is a folder, not a registry of unique names.
+Each plugin folder holds `*.tool` files — reusable **tool manuals** that let agents call external APIs. They are **not part of the knowledge graph** (never modelled as nodes) and are access-controlled like any other file via `access.md`. Any user who can *read* a `.tool` can use its tools; anyone who can *write* it sets its shared (admin) secrets (see below). Put each manual in the plugin's `software.bevel.hexis/tools/` directory, beside
+the skills that use it. The same integration may exist in several plugins as
+separate files (`Everyone/…/serper.tool` and `Finance/…/serper.tool`), each
+with its own credentials and access rule — a plugin is a folder, not a registry
+of unique names. Remember: `.tool` files are for `http` and `inline` manuals
+only; MCP servers belong in `mcp.json`.
 
 A `.tool` file is JSON or YAML. Its `type` decides how tools are discovered:
 
 - **`inline`** — the tools are embedded in the file (no network round-trip to list them).
 - **`http`** — `url` points to an endpoint that returns a UTCP manual.
-- **`mcp`** — `url` is a remote MCP server whose tools are discovered over MCP.
+
+(`type: mcp` is the LEGACY spelling of an MCP server as a `.tool`. The boot
+migration converts such files into `mcp.json` entries; do not write new ones.)
 
 **The tool is the frontmatter.** A `.tool` is one `---` YAML block holding *everything* — its `id`, its access verbs (`read:`/`write:`/`owner:`/`download:`), and its config (`type`/`url`/`variables`/…) — all in the same object. Anything after the closing `---` is free-form notes the parser ignores (like a `SKILL.md` body):
 
@@ -138,8 +183,8 @@ write:
   - Product Team
 owner:
   - Jane Doe <jane@x.com>
-type: mcp
-url: https://mcp.example.com
+type: http
+url: https://api.example.com/utcp
 ---
 ```
 
@@ -149,7 +194,15 @@ url: https://mcp.example.com
 
 **Frontmatter `id` = address.** This is generic, not tool-specific: ANY `.md` or `.tool` file whose frontmatter declares an `id` (or a lowercase snake_case/kebab `name`) is addressable at `/workspace/<branch>/<id>` in the app, exactly like a knowledge node — tools, skills (`SKILL.md`), and plain notes alike. Graph nodes win an id collision; files without frontmatter stay path-addressed.
 
-**Remote vs local (`remote`).** A tool is available to remote agents by default. Add `remote: false` for a tool that only works on the user's own machine (e.g. an mcp/http `url` on `localhost`): the hosted remote MCP endpoint then skips it and instead advertises it through the `list_local_tools` tool, which returns the `.tool`'s path so a local agent can read it and self-configure (e.g. add the MCP server to its own client).
+**Remote vs local (`remote`).** A tool is available to remote agents by default. Add `remote: false` for a tool that only works on the user's own machine (e.g. an `http` manual whose `url` is on `localhost`): the hosted remote MCP endpoint cannot reach it, so it skips the tool and advertises it through the `list_local_tools` tool instead. (An MCP server that is local-only declares `local: true` in the plugin.json extensions block instead — see above.)
+
+To actually USE those tools, run the workspace as a local MCP server:
+
+```
+npx @bevel-software/hexis-mcp --url <workspace-url> --key <connection-key>
+```
+
+It serves everything the hosted endpoint serves **plus** the local-only tools, because it runs on the machine where they exist. Remote tools still execute on the server, so their shared keys and OAuth sign-ins keep working untouched; a local-only tool's own `${VAR}`s come from the environment of whatever launched the command (your MCP client's config), since the Secrets Vault never leaves the server. Reading the `.tool` and wiring the server into your client by hand still works and is the fallback when the command is unavailable.
 
 ### Referencing secrets — `${VAR}` and the `variables` block
 
@@ -207,8 +260,8 @@ An `inline` manual with one tool:
 When asked to add/integrate a product as a tool (e.g. "add Notion", "wire up Linear"), **never invent an endpoint or write a placeholder URL** — a `.tool` pointing at a made-up host is useless:
 
 1. **Find the real endpoint from the vendor's own docs.** Prefer the vendor's official **remote MCP server** if one exists; otherwise fall back to their **REST API** base. No endpoint is named here on purpose — a URL copied into this file would be asserted long after it stopped being true, which is the failure this step exists to prevent. Use web search/extract to confirm the exact URL, transport, and auth scheme — don't answer from memory. If you have no web access or genuinely can't find it, **ask the user** for the endpoint URL and auth instead of guessing.
-2. **Pick the type from what you found.** An MCP server → `type: mcp` with the official `url` (the MCP transport is HTTP/streamable — use the `https://…` URL, **never** `ws://`/`wss://`). A plain REST/HTTP endpoint → `type: http`. Use `type: inline` only when hand-authoring the individual HTTP calls.
-3. **An OAuth-protected MCP server usually needs NOTHING beyond `type: mcp` + `url`.** Write just those two and let the app probe the server: it discovers the sign-in provider (MCP authorization spec), registers itself, and surfaces a per-user sign-in on the Connect page. That is the `oauth-auto` case, and for it you must NOT declare `variables` or `headers`.
+2. **Pick the home from what you found.** An MCP server → an entry in the plugin's `mcp.json` (`type: "streamable-http"` with the official `url` — use the `https://…` URL, **never** `ws://`/`wss://`). A plain REST/HTTP endpoint → a `.tool` with `type: http`. Use `type: inline` only when hand-authoring the individual HTTP calls.
+3. **An OAuth-protected MCP server usually needs NOTHING beyond its `mcp.json` entry.** Write just those two and let the app probe the server: it discovers the sign-in provider (MCP authorization spec), registers itself, and surfaces a per-user sign-in on the Connect page. That is the `oauth-auto` case, and for it you must NOT declare `variables` or `headers`.
 
    Some providers do not support automatic registration (`oauth-manual` — see the walkthrough below). Those DO need a sign-in variable to hold the client id, and an admin pastes the client secret on the tool's page. You do not have to guess which kind you are facing: write the two lines, then run `list_tool_setup` and read `setup.kind`.
 4. **For key-based auth, wire it as `variables`, never a hard-coded secret.** Reference credentials as `${VAR}` in `headers` (e.g. `Authorization: Bearer ${NOTION_TOKEN}`) and declare each in the `variables` block with a scope (`admin` = one shared value; `user` = per-user). Users fill the values in the Secrets Vault.
@@ -218,7 +271,7 @@ When asked to add/integrate a product as a tool (e.g. "add Notion", "wire up Lin
 
 Call the **`list_tool_setup`** tool to see, for every accessible `.tool`, what is configured and what is still missing. Use it whenever a tool isn't working, after adding a tool, or when asked "what do I need to set up?" — then EXPLAIN the remaining steps to the user rather than guessing. Per tool it reports:
 
-- **`setup.kind`** (for `type: mcp`): `open` = no credentials needed; `oauth-auto` = the platform registered itself with the server automatically and users just authorize on the **Connect page**; `oauth-manual` = the provider does not support automatic registration, so a tool writer must configure it by hand (below).
+- **`setup.kind`** (for MCP servers): `open` = no credentials needed; `oauth-auto` = the platform registered itself with the server automatically and users just authorize on the **Connect page**; `oauth-manual` = the provider does not support automatic registration, so a tool writer must configure it by hand (below).
 - **Per variable**: `adminConfigured` (the shared value — or, for a sign-in, the owner-side provider setup — is done), `userConfigured` / `authorized` (the CURRENT user's own value / sign-in), and `canWrite` (whether the current user may set the tool's shared config).
 
 The listing is scoped by the same access controls as everything else: a `.tool` the caller can't READ doesn't appear at all, and `canWrite` means write access **on that `.tool` file itself** — granted by its frontmatter `write:`/`owner:` verbs or the `access.md` chain, NOT by any platform role. The people who manage a `.tool` file are exactly the people who configure its shared secrets. To delegate a tool to someone, add them to the file's `write:` or `owner:` list (an edit you can make via change request); that alone lets them configure it.

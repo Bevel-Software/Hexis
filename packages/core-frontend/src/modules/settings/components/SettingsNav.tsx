@@ -9,18 +9,18 @@ export type LinkableItem = AdminMenuItem & { path: string };
 /**
  * `rail` is the sidebar column; `strip` is the horizontal row it becomes below
  * the `md` breakpoint. The rows are identical in both — only the axis and the
- * section label change, because a label that introduces a group beneath it is
+ * section label change, because a label that introduces a plugin beneath it is
  * a vertical-list device and reads as noise inline.
  */
 export type SettingsNavOrientation = 'rail' | 'strip';
 
 /**
  * The settings nav's CONTENTS — a pure view of the URL, in the same sense
- * `GroupsSidebar` is. It holds no state, decides no membership and fetches
+ * `PluginsSidebar` is. It holds no state, decides no membership and fetches
  * nothing; the layout works out which rows exist and which one is current,
  * and this renders them.
  *
- * Row styling is `GroupsSidebar`'s declaration token for token, minus the
+ * Row styling is `PluginsSidebar`'s declaration token for token, minus the
  * count slot it has no use for, plus `FileExplorer`'s inset focus ring — the
  * more complete of the two treatments. The two sidebars must not read as two
  * products, and the class string is what that rule actually protects.
@@ -99,7 +99,7 @@ export function SettingsNav({
 }
 
 /**
- * Copied from `GroupsSidebar`'s `SectionLabel` rather than extracted into a
+ * Copied from `PluginsSidebar`'s `SectionLabel` rather than extracted into a
  * shared component — the same call `FileExplorer` made about its own row
  * class. Three sidebars agreeing on a label's padding is not yet an
  * abstraction, and hoisting it would put a shared dependency between two

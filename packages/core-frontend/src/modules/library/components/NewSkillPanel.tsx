@@ -11,11 +11,11 @@ import { useLibraryToast } from '../state/toast.context';
 /**
  * Where the new skill lands.
  *
- *   - A GROUP destination carries the folder and the caller's write verdict
+ *   - A PLUGIN destination carries the folder and the caller's write verdict
  *     on it. `canWrite: null` (verdict not in yet) is treated as "not a
  *     writer", same rule the surrounding dialogs use: the cautious path —
  *     a change request — is correct either way, the confident one is not.
- *   - PERSONAL means the caller's own folder (`Groups/personal-<id>/`),
+ *   - PERSONAL means the caller's own folder (`Plugins/personal-<id>/`),
  *     which `createEmptySkill` ensures via the provisioning endpoint before
  *     writing. Always direct: the ensured folder is theirs by construction.
  */
@@ -60,8 +60,8 @@ export function NewSkillPanel({
   const trimmed = name.trim();
   /**
    * A skill name becomes a folder name, so the characters a path cannot carry
-   * are the characters a name cannot have — the same rule `NewGroupDialog`
-   * applies to groups, and the same one the backend enforces (`isSafeName`).
+   * are the characters a name cannot have — the same rule `NewPluginDialog`
+   * applies to plugins, and the same one the backend enforces (`isSafeName`).
    */
   const illegal = /[/\\]/.test(trimmed) || trimmed === '.' || trimmed === '..';
   /**
@@ -103,7 +103,7 @@ export function NewSkillPanel({
         // A proposal has no page yet — the skill exists only on the author's
         // branch. It appears right here as an "In review" card (the pending
         // shelf), which is also where its review happens.
-        toast(`Created ${trimmed}: sent to the group's owners for review.`, 'ok');
+        toast(`Created ${trimmed}: sent to the plugin's owners for review.`, 'ok');
       }
     } catch (err) {
       // The workspace API forwards the backend's own refusal (e.g. "You don't

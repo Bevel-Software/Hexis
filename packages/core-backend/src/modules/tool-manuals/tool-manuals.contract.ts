@@ -1,7 +1,7 @@
 import type { CallTemplate } from '@utcp/sdk';
 
 /**
- * Tool manuals — user-authored `*.tool` files under `Groups/` in the DEFAULT
+ * Tool manuals — user-authored `*.tool` files under `Plugins/` in the DEFAULT
  * branch KB. Each is a UTCP *manual* (a pointer to where tools come from), not a
  * flattened tool list. Access-controlled exactly like Skills (default-deny ACL
  * on the `.tool` file path). The MCP/UTCP endpoint serves every manual a user
@@ -85,8 +85,8 @@ export interface ToolManualSetup {
   reason?: string;
 }
 
-/** A parsed `.tool` file (normalized). */
-export interface ToolManualDescriptor {
+/** Fields common to every parsed manual — see {@link ToolManualDescriptor}. */
+export interface ToolManualDescriptorBase {
   /** URL-safe id derived from the file name (route `:slug`), unique in the catalog. */
   slug: string;
   /**
@@ -95,7 +95,7 @@ export interface ToolManualDescriptor {
    * catalog; namespacing doubles underscores in vault keys (`utcpNamespacedKey`).
    */
   name: string;
-  /** Repo-root-relative path of the `.tool` file (e.g. `Groups/Everyone/weather.tool`). */
+  /** Repo-root-relative path of the `.tool` file (e.g. `Plugins/Everyone/weather.tool`). */
   path: string;
   type: ToolManualType;
   /**
@@ -113,16 +113,39 @@ export interface ToolManualDescriptor {
   tools?: unknown[];
   /** Declared `${VAR}` scopes (see {@link ToolVariable}); empty when none declared. */
   variables?: ToolVariable[];
-  /**
-   * Whether this tool can run for a REMOTE consumer (Bevel's hosted MCP proxy).
-   * Absent/`true` ⇒ available remotely; `false` ⇒ LOCAL-ONLY — the remote endpoint
-   * skips it (it can't reach e.g. a `localhost` MCP server), and instead surfaces
-   * its path via the `list_local_tools` tool so a local agent can self-configure it.
-   */
-  remote?: boolean;
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
 }
+
+/** The spawn spec of a stdio-declared MCP server (a plugin `mcp.json` entry). */
+export interface ToolManualStdioSpec {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}
+
+/**
+ * A parsed manual (a `.tool` file or a plugin `mcp.json` entry, normalized).
+ *
+ * `remote` — whether the tool can run for a REMOTE consumer (Bevel's hosted
+ * MCP proxy). Absent/`true` ⇒ available remotely; `false` ⇒ LOCAL-ONLY — the
+ * remote endpoint skips it (it can't reach e.g. a `localhost` MCP server),
+ * and instead surfaces its path via the `list_local_tools` tool so a local
+ * agent can self-configure it.
+ *
+ * `stdio` — for a `type: mcp` server declared with a stdio transport in a
+ * plugin's `mcp.json`: the spawn spec. A UNION, not two optional fields,
+ * because a stdio spec REQUIRES `remote: false` — the hosted proxy can never
+ * spawn a subprocess out of knowledge-base content, so stdio servers are
+ * served only to local consumers, which run them per the Agent Plugins
+ * runtime contract (PLUGIN_ROOT/PLUGIN_DATA, `./` containment) — and the
+ * type refusing `remote: true` beside a spawn spec is what keeps every
+ * producer honest about that.
+ */
+export type ToolManualDescriptor =
+  | (ToolManualDescriptorBase & { remote?: boolean; stdio?: undefined })
+  | (ToolManualDescriptorBase & { remote: false; stdio: ToolManualStdioSpec });
 
 /** A validated UTCP manual dict (`{ utcp_version, manual_version, tools }`). */
 export type UtcpManualDict = Record<string, unknown>;
@@ -188,7 +211,7 @@ export interface IToolManualService {
   /**
    * Every manual in the catalog, UNFILTERED by access — the mirror of
    * `skillService.listSkills(undefined)`. For caller-INDEPENDENT counting only
-   * (the group index's "N tools", which a non-member is allowed to see as a
+   * (the plugin index's "N tools", which a non-member is allowed to see as a
    * number). Never surface a name, path or description from this to someone
    * who cannot read the file; `listAccessible` is the surface for that.
    */

@@ -119,7 +119,7 @@ describe('KbSeedService', () => {
         expect(await exists(path.join(dir, '.gitignore'))).toBe(true);
         // Core's two roots are seeded (kept present via their .gitkeep).
         expect(await exists(path.join(dir, 'KnowledgeBase/.gitkeep'))).toBe(true);
-        expect(await exists(path.join(dir, 'Groups/.gitkeep'))).toBe(true);
+        expect(await exists(path.join(dir, 'Plugins/.gitkeep'))).toBe(true);
         // …and only those two. `Data/`, `Agents/` and `Pipelines/` scaffold an
         // agentic execution layer this platform does not have, so seeding them
         // would hand every operator three empty folders nothing can fill.
@@ -156,7 +156,7 @@ describe('KbSeedService', () => {
         '.bevelignore': 'x',
         '.gitignore': 'x',
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
-        'Groups/.gitkeep': '',
+        'Plugins/.gitkeep': '',
       });
 
       await makeSeeder(upstream).ensureRemoteSeeded();
@@ -172,7 +172,7 @@ describe('KbSeedService', () => {
         'access.md': 'CUSTOM ACCESS RULES',
         // AGENTS.md / .bevelignore / .gitignore are absent → should be added.
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
-        'Groups/.gitkeep': '',
+        'Plugins/.gitkeep': '',
       });
 
       // Simulate the app loading the branch: a fresh clone, then top-up on it.
@@ -201,7 +201,7 @@ describe('KbSeedService', () => {
         '.gitignore': '',
         'access.md': 'CUSTOM ACCESS RULES',
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
-        'Groups/.gitkeep': '',
+        'Plugins/.gitkeep': '',
       });
 
       const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
@@ -240,7 +240,7 @@ describe('KbSeedService', () => {
         '.gitignore': '',
         'access.md': 'CUSTOM ACCESS RULES',
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
-        'Groups/.gitkeep': '',
+        'Plugins/.gitkeep': '',
       });
 
       const first = await checkout(root, upstream, DEFAULT_BRANCH);
@@ -254,7 +254,7 @@ describe('KbSeedService', () => {
       const upstream = await seededUpstream(PROTECTED, {
         'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
-        'Groups/.gitkeep': '',
+        'Plugins/.gitkeep': '',
       });
 
       const first = await checkout(root, upstream, DEFAULT_BRANCH);
@@ -268,6 +268,74 @@ describe('KbSeedService', () => {
       const after2 = await headCommitCount(root, upstream, DEFAULT_BRANCH);
 
       expect(after2).toBe(after1);
+    });
+
+    it('a note-only migration outcome stages nothing and raises no top-up warning', async () => {
+      const template = await fs.readFile(
+        path.join(__dirname, '../../../../kb-template/AGENTS.md'),
+        'utf8',
+      );
+      const upstream = await seededUpstream(PROTECTED, {
+        'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
+        'access.md': 'x',
+        'AGENTS.md': template,
+        '.bevelignore': 'AGENTS.md\nPlugins/\n',
+        '.gitignore': '',
+        'KnowledgeBase/Real/Knowledge/.gitkeep': '',
+        'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+        // An unparsable manifest keeps this manual a `.tool` — its variables
+        // have nowhere to go. The migration NOTES the refusal every run and
+        // changes nothing; staging on the note used to reach `git commit`
+        // with an empty index and warn about it on every boot.
+        'Plugins/GTM/plugin.json': '{ not json at all',
+        'Plugins/GTM/vendor.tool': JSON.stringify({
+          name: 'vendor',
+          type: 'mcp',
+          url: 'https://mcp.vendor.example/mcp',
+          variables: [{ name: 'VENDOR_KEY', scope: 'user' }],
+        }),
+      });
+      const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await makeSeeder(upstream).topUpWorkspace(repoDir, DEFAULT_BRANCH);
+        expect(warn.mock.calls.flat().join(' ')).not.toMatch(/top-up/i);
+      } finally {
+        warn.mockRestore();
+      }
+      // Only the pre-seed commit — a note is not a change.
+      expect(await headCommitCount(root, upstream, DEFAULT_BRANCH)).toBe(1);
+    });
+
+    it('the root rename rewrites the stale .bevelignore rule and commits it along', async () => {
+      const template = await fs.readFile(
+        path.join(__dirname, '../../../../kb-template/AGENTS.md'),
+        'utf8',
+      );
+      const upstream = await seededUpstream(PROTECTED, {
+        'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
+        'access.md': 'x',
+        'AGENTS.md': template,
+        // The pre-rename rule: without the rewrite the migrated KB has a rule
+        // for a root that no longer exists and none for the one that does.
+        '.bevelignore': 'AGENTS.md\nGroups/\n',
+        '.gitignore': '',
+        'KnowledgeBase/Real/Knowledge/.gitkeep': '',
+        'Groups/GTM/access.md': 'write:\n  - Admin\n',
+      });
+      const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
+      await makeSeeder(upstream).topUpWorkspace(repoDir, DEFAULT_BRANCH);
+
+      // An independent clone proves the rewrite was STAGED (the ignore file
+      // is a repo-root path outside the two roots' pathspecs) and pushed.
+      const dir = await checkout(root, upstream, DEFAULT_BRANCH);
+      expect(await exists(path.join(dir, 'Plugins/GTM/access.md'))).toBe(true);
+      const ignore = await fs.readFile(path.join(dir, '.bevelignore'), 'utf8');
+      expect(ignore.split('\n').map((l) => l.trim())).toContain('Plugins/');
+      expect(ignore).not.toContain('Groups/');
+      expect(ignore).toContain('AGENTS.md');
+      const log = await git(dir, ['log', '-1', '--pretty=%s']);
+      expect(log.trim()).toBe('Move Groups/ to Plugins/ (Agent Plugins layout)');
     });
 
   });
@@ -292,7 +360,7 @@ describe('KbSeedService', () => {
   describe('the pre-rename ignore file', () => {
     const legacy = (ignore: string): Record<string, string> => ({
       'KnowledgeBase/.gitkeep': '',
-      'Groups/.gitkeep': '',
+      'Plugins/.gitkeep': '',
       'access.md': '---\nwrite:\n  - Admin\n---\n',
       'roles.yaml': 'roles:\n  Admin:\n    - a@example.com\n',
       '.gitignore': '',
@@ -335,7 +403,7 @@ describe('KbSeedService', () => {
       const dir = await checkout(root, upstream, DEFAULT_BRANCH);
       // Core's two, still there.
       expect(await exists(path.join(dir, 'KnowledgeBase/.gitkeep'))).toBe(true);
-      expect(await exists(path.join(dir, 'Groups/.gitkeep'))).toBe(true);
+      expect(await exists(path.join(dir, 'Plugins/.gitkeep'))).toBe(true);
       // …and the three this distribution asked for.
       for (const claimed of ['Data', 'Agents', 'Pipelines']) {
         expect(await exists(path.join(dir, `${claimed}/.gitkeep`))).toBe(true);
@@ -379,7 +447,7 @@ describe('KbSeedService', () => {
     });
 
     /**
-     * A FILE named `Groups` used to satisfy the presence check — `fs.access`
+     * A FILE named `Plugins` used to satisfy the presence check — `fs.access`
      * answers "is there something here?" — so the seeder skipped it, said
      * nothing, and left a knowledge base permanently missing a root it claims
      * to guarantee. Now it says so.
@@ -396,18 +464,18 @@ describe('KbSeedService', () => {
         '.gitignore': '',
         'KnowledgeBase/.gitkeep': '',
         // Not a folder.
-        Groups: 'this is a file, not the groups root',
+        Plugins: 'this is a file, not the plugins root',
       });
       const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
         await makeSeeder(upstream).topUpWorkspace(repoDir, DEFAULT_BRANCH);
-        expect(warn.mock.calls.flat().join(' ')).toMatch(/Groups.*not a directory/);
+        expect(warn.mock.calls.flat().join(' ')).toMatch(/Plugins.*not a directory/);
       } finally {
         warn.mockRestore();
       }
       // …and it did not quietly replace the file either.
-      expect((await fs.lstat(path.join(repoDir, 'Groups'))).isFile()).toBe(true);
+      expect((await fs.lstat(path.join(repoDir, 'Plugins'))).isFile()).toBe(true);
     });
 
     /**
@@ -422,7 +490,7 @@ describe('KbSeedService', () => {
       const upstream = await seededUpstream(PROTECTED, {
         'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
         'KnowledgeBase/Real/Knowledge/.gitkeep': '',
-        'Groups/.gitkeep': '',
+        'Plugins/.gitkeep': '',
       });
       // Branch a suggestion off the default and load it.
       const seed = await checkout(root, upstream, DEFAULT_BRANCH);

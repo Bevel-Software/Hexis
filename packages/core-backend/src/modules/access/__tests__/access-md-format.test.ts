@@ -19,7 +19,7 @@ import { spliceGrant, spliceRevoke } from '../access-splice.js';
  *    govern itself (its readability follows the folder chain).
  *  - NEW: the body carries the folder's rules; the frontmatter — like every
  *    other file's — is about the FILE itself. `read: everyone` there makes
- *    the group discoverable (anyone may open the access.md and see who runs
+ *    the plugin discoverable (anyone may open the access.md and see who runs
  *    the folder) while the folder's contents stay locked.
  *
  * Compat rule under test: a file whose body is NOT parsable as rules resolves
@@ -35,7 +35,7 @@ const ROLES_YAML = `roles:
     - felix@example.com
 `;
 
-/** New-format group access.md: discoverable by everyone, readable by GTM Team. */
+/** New-format plugin access.md: discoverable by everyone, readable by GTM Team. */
 const NEW_FORMAT = `---
 read:
   - everyone
@@ -58,7 +58,7 @@ Some prose explaining this folder.
 describe('access.md format detection + parsing', () => {
   it('detects body rules (new format) and parses the BODY for the folder', () => {
     expect(accessMdDeclaresBodyRules(NEW_FORMAT)).toBe(true);
-    const parsed = parseAccessFile(NEW_FORMAT, 'Groups/GTM/access.md');
+    const parsed = parseAccessFile(NEW_FORMAT, 'Plugins/GTM/access.md');
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(parsed.file.entries.read).toEqual([
@@ -89,7 +89,7 @@ describe('access.md format detection + parsing', () => {
     // (possibly `read: everyone`) self-rules — a typo must fail loudly.
     const typo = '---\nread:\n  - everyone\n---\nread: GTM Team\n';
     expect(accessMdDeclaresBodyRules(typo)).toBe(true);
-    const parsed = parseAccessFile(typo, 'Groups/GTM/access.md');
+    const parsed = parseAccessFile(typo, 'Plugins/GTM/access.md');
     expect(parsed.ok).toBe(false);
     if (parsed.ok) return;
     expect(parsed.errors.join(' ')).toContain("'read:' must be a list");
@@ -110,7 +110,7 @@ describe('access.md splice targeting', () => {
   it("target 'folder' on a new-format file lands the grant in the BODY", () => {
     const r = spliceGrant(NEW_FORMAT, 'read', FELIX, { target: 'folder' });
     expect(r.changed).toBe(true);
-    const parsed = parseAccessFile(r.text, 'Groups/GTM/access.md');
+    const parsed = parseAccessFile(r.text, 'Plugins/GTM/access.md');
     expect(parsed.ok && parsed.file.entries.read.some((e) => e.kind === 'user' && e.email === 'ali@x.eu')).toBe(true);
     // The self-frontmatter is untouched.
     expect(accessMdSelfEntries(r.text)?.read).toEqual([
@@ -132,7 +132,7 @@ describe('access.md splice targeting', () => {
     expect(r.changed).toBe(true);
     expect(accessMdSelfEntries(r.text)?.read.some((e) => e.kind === 'user' && e.email === 'ali@x.eu')).toBe(true);
     // Folder rules untouched.
-    const parsed = parseAccessFile(r.text, 'Groups/GTM/access.md');
+    const parsed = parseAccessFile(r.text, 'Plugins/GTM/access.md');
     expect(parsed.ok && parsed.file.entries.read.some((e) => e.kind === 'user')).toBe(false);
   });
 
@@ -140,14 +140,14 @@ describe('access.md splice targeting', () => {
     const granted = spliceGrant(NEW_FORMAT, 'read', FELIX, { target: 'folder' }).text;
     const revoked = spliceRevoke(granted, 'read', FELIX, { target: 'folder' });
     expect(revoked.changed).toBe(true);
-    const parsed = parseAccessFile(revoked.text, 'Groups/GTM/access.md');
+    const parsed = parseAccessFile(revoked.text, 'Plugins/GTM/access.md');
     expect(parsed.ok && parsed.file.entries.read.some((e) => e.kind === 'user')).toBe(false);
   });
 });
 
-describe('end-to-end resolution over a new-format group', () => {
+describe('end-to-end resolution over a new-format plugin', () => {
   let root: string;
-  const workspaceId = 'ws-groups-fmt';
+  const workspaceId = 'ws-plugins-fmt';
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-accessfmt-'));
@@ -159,12 +159,12 @@ describe('end-to-end resolution over a new-format group', () => {
   async function seed(): Promise<AccessControlService> {
     const workspaceDir = path.join(root, workspaceId);
     const repo = path.join(workspaceDir, KB);
-    await fs.mkdir(path.join(repo, 'Groups', 'GTM'), { recursive: true });
+    await fs.mkdir(path.join(repo, 'Plugins', 'GTM'), { recursive: true });
     await fs.writeFile(path.join(repo, 'roles.yaml'), ROLES_YAML);
     await fs.writeFile(path.join(repo, 'access.md'), '---\nwrite:\n  - Admin\n---\n');
-    await fs.writeFile(path.join(repo, 'Groups', 'GTM', 'access.md'), NEW_FORMAT);
-    await fs.mkdir(path.join(repo, 'Groups', 'GTM', 'outreach'), { recursive: true });
-    await fs.writeFile(path.join(repo, 'Groups', 'GTM', 'outreach', 'SKILL.md'), '# outreach\n');
+    await fs.writeFile(path.join(repo, 'Plugins', 'GTM', 'access.md'), NEW_FORMAT);
+    await fs.mkdir(path.join(repo, 'Plugins', 'GTM', 'outreach'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'Plugins', 'GTM', 'outreach', 'SKILL.md'), '# outreach\n');
     const stub = {
       getWorkspacePath: async (id: string) => {
         if (id !== workspaceId) throw new Error(`unexpected workspace ${id}`);
@@ -177,15 +177,15 @@ describe('end-to-end resolution over a new-format group', () => {
   it('a NON-member can read the access.md itself (discovery) but nothing inside the folder', async () => {
     const svc = await seed();
     const outsider = 'sara@example.com';
-    expect(await svc.canRead(workspaceId, outsider, 'Groups/GTM/access.md')).toBe(true);
-    expect(await svc.canRead(workspaceId, outsider, 'Groups/GTM/outreach/SKILL.md')).toBe(false);
+    expect(await svc.canRead(workspaceId, outsider, 'Plugins/GTM/access.md')).toBe(true);
+    expect(await svc.canRead(workspaceId, outsider, 'Plugins/GTM/outreach/SKILL.md')).toBe(false);
   });
 
   it('a member reads both; body rules (not frontmatter) decide the folder', async () => {
     const svc = await seed();
     const member = 'felix@example.com';
-    expect(await svc.canRead(workspaceId, member, 'Groups/GTM/access.md')).toBe(true);
-    expect(await svc.canRead(workspaceId, member, 'Groups/GTM/outreach/SKILL.md')).toBe(true);
-    expect(await svc.canWrite(workspaceId, member, 'Groups/GTM/outreach/SKILL.md')).toBe(true);
+    expect(await svc.canRead(workspaceId, member, 'Plugins/GTM/access.md')).toBe(true);
+    expect(await svc.canRead(workspaceId, member, 'Plugins/GTM/outreach/SKILL.md')).toBe(true);
+    expect(await svc.canWrite(workspaceId, member, 'Plugins/GTM/outreach/SKILL.md')).toBe(true);
   });
 });

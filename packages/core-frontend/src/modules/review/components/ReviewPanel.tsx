@@ -10,7 +10,7 @@ import {
   stripJunkBeforeKbDir,
   KB_ROUTE_PREFIX,
 } from '../../workspace/routing/kb-routes';
-import { groupOfPath, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { pluginOfPath, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { ReviewFileRow } from './ReviewFileRow';
@@ -23,28 +23,28 @@ function isMarkdownPath(p: string): boolean {
 }
 
 /**
- * Whether a review-session path is a skill or tool — anything under `Groups/`.
+ * Whether a review-session path is a skill or tool — anything under `Plugins/`.
  *
  * The paths in a review session are WORKSPACE-relative: the diff module
  * resolves them against the workspace directory, so they arrive carrying the
- * KB clone as their first segment (`knowledge-base/Groups/GTM/x/SKILL.md`).
- * `groupOfPath` wants them REPO-relative, and `stripJunkBeforeKbDir` does not
+ * KB clone as their first segment (`knowledge-base/Plugins/GTM/x/SKILL.md`).
+ * `pluginOfPath` wants them REPO-relative, and `stripJunkBeforeKbDir` does not
  * get there on its own — it only drops junk BEFORE the kb dir and keeps the
  * segment itself, so it returns an already-well-formed path unchanged. Asking
- * `groupOfPath` about the workspace-relative form gets `null` for every path,
- * group or not, which is a check that silently never fires.
+ * `pluginOfPath` about the workspace-relative form gets `null` for every path,
+ * plugin or not, which is a check that silently never fires.
  *
  * Exported so it can be tested directly. The behaviour it guards lives behind
  * a dropdown the component tests cannot open, and a first attempt at covering
  * it through the UI passed with the guard deleted.
  */
-export function isGroupItemPath(path: string, kbDirName: string | null): boolean {
+export function isPluginItemPath(path: string, kbDirName: string | null): boolean {
   const withoutJunk = stripJunkBeforeKbDir(path, kbDirName);
   const repoRelative =
     kbDirName && withoutJunk.startsWith(`${kbDirName}/`)
       ? withoutJunk.slice(kbDirName.length + 1)
       : withoutJunk;
-  return groupOfPath(repoRelative) !== null;
+  return pluginOfPath(repoRelative) !== null;
 }
 
 /**
@@ -57,12 +57,12 @@ export function isGroupItemPath(path: string, kbDirName: string | null): boolean
  * Two reasons not to:
  *   - DELETED: navigating to a missing path lands FileRoute on its
  *     file-not-found state.
- *   - a group item ON THE DEFAULT BRANCH: that URL is a library location, so
+ *   - a plugin item ON THE DEFAULT BRANCH: that URL is a library location, so
  *     opening it switches the whole shell to Skills & Tools and the panel,
  *     the diff and the review vanish because someone clicked a row in a list.
  *
  * The branch is part of it, and this is the easy half to get wrong: only the
- * DEFAULT branch's `Groups/` URLs are library locations (`isLibraryLocation`
+ * DEFAULT branch's `Plugins/` URLs are library locations (`isLibraryLocation`
  * tests `segments[1] === DEFAULT_BRANCH`). The same skill on a draft branch
  * opens in Knowledge like any other file and switches nothing, so refusing to
  * open it there would cost the context this call exists to give and buy
@@ -78,7 +78,7 @@ export function shouldOpenBesideDiff(input: {
   branch: string | null;
 }): boolean {
   if (input.kind === 'deleted') return false;
-  const switchesApp = input.branch === DEFAULT_BRANCH && isGroupItemPath(input.path, input.kbDirName);
+  const switchesApp = input.branch === DEFAULT_BRANCH && isPluginItemPath(input.path, input.kbDirName);
   return !switchesApp;
 }
 

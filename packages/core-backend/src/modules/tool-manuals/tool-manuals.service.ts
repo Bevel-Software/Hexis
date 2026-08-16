@@ -9,11 +9,18 @@ import {
   DefaultVariableSubstitutor,
   type CallTemplate,
 } from '@utcp/sdk';
-import { DEFAULT_BRANCH, GROUPS_DIR } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_BRANCH,
+  PLUGINS_DIR,
+  PLUGIN_MANIFEST_FILE,
+  PLUGIN_MCP_FILE,
+} from '@bevel-software/platform-shared';
+import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
+import { RESERVED_VARIABLE_NAMES, findReservedVariableRef } from '../../shared/variable-refs.js';
 import { extractFrontmatter, resolveDeclaredId, isValidId, dedupeById } from '../../shared/frontmatter-id.js';
 import { walkFiles } from '../../shared/fs-walk.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
@@ -27,6 +34,7 @@ import {
   EXTERNAL_KB_MANUAL_NAME,
   type IToolManualService,
   type ToolManualDescriptor,
+  type ToolManualDescriptorBase,
   type ToolManualSummary,
   type ToolManualDetail,
   type ToolCapability,
@@ -60,46 +68,26 @@ const MAX_CAPABILITIES = 100;
 const RESERVED_TOOL_NAMESPACES = [INTERNAL_MANUAL_NAME, EXTERNAL_KB_MANUAL_NAME].map((n) => n.toLowerCase());
 
 /**
- * Variable names the platform seeds for its own (Bevel-hosted) manuals:
- * `<ns>_API_URL` points a manual at the backend and `<ns>_CONNECTION_KEY`
- * carries the platform bearer. No user `.tool` may REFERENCE them
- * (`${API_URL}` / `$API_URL`), in any `.tool` type: the only seeded user
- * namespace is an inline `.tool`'s (its discovery template is platform-served),
- * and a reference inside author-written content would resolve platform creds
- * into a request the author shaped. Refusing every `.tool` at the producing
- * boundary makes "user tools never carry platform credentials" structural
- * rather than dependent on which namespaces happen to be seeded.
+ * No user `.tool` may REFERENCE the platform-seeded variables (`${API_URL}` /
+ * `$API_URL`), in any `.tool` type: the only seeded user namespace is an
+ * inline `.tool`'s (its discovery template is platform-served), and a
+ * reference inside author-written content would resolve platform creds into a
+ * request the author shaped. Refusing every `.tool` at the producing boundary
+ * makes "user tools never carry platform credentials" structural rather than
+ * dependent on which namespaces happen to be seeded. The names and the
+ * reference grammar live in `shared/variable-refs.ts` — one definition for
+ * every boundary that classifies references.
  */
-const RESERVED_VARIABLE_NAMES: readonly string[] = ['API_URL', 'CONNECTION_KEY'];
-
-/** The SDK substitutor's reference grammar, exactly: `${VAR}` or `$VAR`. */
-const VARIABLE_REFERENCE_RE = /\$\{([a-zA-Z0-9_]+)\}|\$([a-zA-Z0-9_]+)/g;
-
-/**
- * A REFERENCE is reserved by SUFFIX, not by exact name: the substitutor looks a
- * variable up under the manual's UTCP namespace first, so `${<ns>_CONNECTION_KEY}`
- * resolves the very same seeded value the bare `${CONNECTION_KEY}` does. Matching
- * the bare name only would let a `.tool` reach the platform bearer just by
- * spelling the namespace out. Suffix matching also refuses harmless-looking
- * near-misses (`MY_API_URL`) — deliberately fail-closed: a `.tool` author who
- * wants their own base URL has the whole namespace minus two suffixes.
- */
-function isReservedVariableRef(varName: string): boolean {
-  return RESERVED_VARIABLE_NAMES.some((reserved) => varName.endsWith(reserved));
-}
 
 /** Throw if any string in the `.tool` document references a reserved variable. */
 function assertNoReservedVariableRefs(doc: unknown, name: string): void {
-  const text = JSON.stringify(doc) ?? '';
-  for (const match of text.matchAll(VARIABLE_REFERENCE_RE)) {
-    const varName = match[1] ?? match[2];
-    if (isReservedVariableRef(varName)) {
-      throw new Error(
-        `\`.tool\` "${name}" references the reserved variable "${match[0]}" — ` +
-          'API_URL and CONNECTION_KEY (bare or namespaced, e.g. `<namespace>_CONNECTION_KEY`) ' +
-          'are seeded by the platform for its own manuals and may not appear anywhere in a `.tool`.',
-      );
-    }
+  const ref = findReservedVariableRef(doc);
+  if (ref !== null) {
+    throw new Error(
+      `\`.tool\` "${name}" references the reserved variable "${ref}" — ` +
+        'API_URL and CONNECTION_KEY (bare or namespaced, e.g. `<namespace>_CONNECTION_KEY`) ' +
+        'are seeded by the platform for its own manuals and may not appear anywhere in a `.tool`.',
+    );
   }
 }
 
@@ -270,7 +258,7 @@ export class ToolManualService implements IToolManualService {
   async preview(content: string): Promise<ToolManualPreview> {
     let descriptor: ToolManualDescriptor;
     try {
-      descriptor = normalizeToolManual('draft', 'Groups/draft.tool', content);
+      descriptor = normalizeToolManual('draft', 'Plugins/draft.tool', content);
     } catch (err) {
       return { ok: false, errors: [err instanceof Error ? err.message : String(err)] };
     }
@@ -314,6 +302,28 @@ export class ToolManualService implements IToolManualService {
         url: `\${API_URL}/api/tools/${m.slug}/manual`,
         content_type: 'application/json',
         headers: { Authorization: 'Bearer ${CONNECTION_KEY}' },
+      };
+    }
+    if (m.type === 'mcp' && m.stdio) {
+      // A stdio server, for LOCAL consumers only (`remote: false` is implied
+      // at discovery). Command/args/env/cwd pass through verbatim — the Agent
+      // Plugins placeholders (`${PLUGIN_ROOT}`/`${PLUGIN_DATA}`) are expanded
+      // by the LOCAL runtime against its materialized plugin copy; this
+      // process has no such paths and must not guess them.
+      return {
+        name: m.name,
+        call_template_type: 'mcp',
+        config: {
+          mcpServers: {
+            [m.name]: {
+              transport: 'stdio',
+              command: m.stdio.command,
+              args: m.stdio.args,
+              ...(m.stdio.env ? { env: m.stdio.env } : {}),
+              ...(m.stdio.cwd ? { cwd: m.stdio.cwd } : {}),
+            },
+          },
+        },
       };
     }
     if (m.type === 'mcp') {
@@ -487,14 +497,41 @@ export class ToolManualService implements IToolManualService {
     }
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
-    // A `.tool` sits under `Groups/`, beside the skills that use it.
+    // A `.tool` sits under `Plugins/`, beside the skills that use it.
     const files: { abs: string; rel: string }[] = [];
-    const root = path.join(kbRoot, GROUPS_DIR);
+    const root = path.join(kbRoot, PLUGINS_DIR);
     for (const rel of await walkFiles(root, (n) => n.toLowerCase().endsWith('.tool'))) {
-      files.push({ abs: path.join(root, rel), rel: `${GROUPS_DIR}/${rel}` });
+      files.push({ abs: path.join(root, rel), rel: `${PLUGINS_DIR}/${rel}` });
     }
 
+    // MCP servers come from each plugin's mcp.json — the AUTHORITATIVE source
+    // (the Agent Plugins fixed location), synthesized into the same descriptor
+    // shape. Listed BEFORE the `.tool` files: on a name collision (a legacy
+    // mcp `.tool` the migration has not converted yet), the shared dedup keeps
+    // the first occurrence, and the authoritative source must be the one kept.
     const parsed: ToolManualDescriptor[] = [];
+    let pluginFolders: string[] = [];
+    try {
+      pluginFolders = (await fs.readdir(root, { withFileTypes: true }))
+        .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+        .map((e) => e.name)
+        .sort();
+    } catch {
+      /* no Plugins/ root — nothing to scan */
+    }
+    for (const folder of pluginFolders) {
+      let mcpJson: string;
+      try {
+        mcpJson = await fs.readFile(path.join(root, folder, PLUGIN_MCP_FILE), 'utf-8');
+      } catch {
+        continue; // no mcp.json is the common case, not an error
+      }
+      const pluginJson = await fs
+        .readFile(path.join(root, folder, PLUGIN_MANIFEST_FILE), 'utf-8')
+        .catch(() => null);
+      parsed.push(...descriptorsFromMcpJson(folder, mcpJson, pluginJson));
+    }
+
     for (const f of files) {
       let content: string;
       try {
@@ -654,7 +691,10 @@ export function normalizeToolManual(
   // reference the platform-seeded variables.
   assertNoReservedVariableRefs(obj, name);
 
-  const descriptor: ToolManualDescriptor = {
+  // The non-stdio constituent of the union, by name: `.tool` parsing can
+  // never produce a spawn spec, and the stdio side pins `remote: false`,
+  // which this builder must stay free to set from the file's own `remote:`.
+  const descriptor: ToolManualDescriptorBase & { remote?: boolean; stdio?: undefined } = {
     slug: provisionalSlug,
     name,
     path: repoPath,

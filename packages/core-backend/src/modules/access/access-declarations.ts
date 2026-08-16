@@ -14,9 +14,9 @@ import {
  * WHERE access rules are DECLARED inside a folder — a read-only inventory, not
  * a second resolver.
  *
- * A group's `access.md` is never the whole story: resolution is closeness-first,
+ * A plugin's `access.md` is never the whole story: resolution is closeness-first,
  * so a rule written on a single skill or `.tool` inside the folder overrides the
- * folder's rule for the principals it names. An admin looking at a group's share
+ * folder's rule for the principals it names. An admin looking at a plugin's share
  * list and seeing "GTM Team can read" would otherwise have no way to know that
  * one battlecard underneath says `deny read: everyone`.
  *
@@ -66,9 +66,9 @@ export interface AccessDeclaration {
 }
 
 /**
- * How many files one scan will read. A group folder is small by construction;
+ * How many files one scan will read. A plugin folder is small by construction;
  * this cap exists so a pathological folder (a whole ontology moved under
- * `Groups/`) degrades into an honest partial answer instead of pinning the
+ * `Plugins/`) degrades into an honest partial answer instead of pinning the
  * event loop. Callers surface `truncated` to the user.
  */
 export const DECLARATION_SCAN_FILE_CAP = 400;
@@ -163,7 +163,7 @@ function toEntries(byVerb: Record<Verb, ParsedEntry[]>): DeclarationEntry[] {
  *
  * Failure modes are asymmetric on purpose, matching the resolver: a node whose
  * frontmatter is malformed is skipped silently (a typo in a skill's `owner:`
- * must not make the group's access page unreadable), while a malformed
+ * must not make the plugin's access page unreadable), while a malformed
  * `access.md` is REPORTED with its `parseError` (that file was written to
  * control access and currently controls nothing).
  *

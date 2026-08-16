@@ -139,8 +139,10 @@ describe('GitService.commitFile — skipValidator', () => {
       'knowledge-base',
     );
 
-    const relPath = 'Purchasing/[Updated 03.09.2025] Purchasing_How to search_Product detail page.md';
-    await fs.mkdir(path.join(repo, 'Purchasing'), { recursive: true });
+    // Shape mirrors the reported filename (bracketed status prefix carrying a
+    // date, underscores, spaces) without reproducing anyone's actual content.
+    const relPath = 'Handbook/[Updated 03.09.2025] Handbook_How to search_Detail page.md';
+    await fs.mkdir(path.join(repo, 'Handbook'), { recursive: true });
     await fs.writeFile(path.join(repo, relPath), 'content\n');
 
     const change = await svc.commitFile(workspaceId, USER, relPath);
@@ -168,15 +170,18 @@ describe('GitService.commitFile — skipValidator', () => {
       'knowledge-base',
     );
 
+    // Synthetic segments matching the SHAPE of real deep-KB naming (numbered
+    // prefixes, parenthesised abbreviations, kebab tails) — the property under
+    // test is only the total length, asserted below.
     const deepDir = path.join(
-      'Product',
+      'Handbook',
       'Knowledge',
-      '1. Service Commitment Management',
-      '1.1 In - Architecture Layering (AL)',
-      '0-Governance',
-      '0.5-Layer-Group-Specific-Governance-Principles',
+      '1. First-Level Section With A Long Name',
+      '1.1 In - Second-Level Subsection (SL)',
+      '0-Reference',
+      '0.5-Third-Level-Reference-Naming-Convention',
     );
-    const fileName = '0.5.5-Buyer-Side-Commercial-Agreement-Governance.md';
+    const fileName = '0.5.5-A-Deeply-Nested-Reference-Document-With-A-Long-Name.md';
     const relPath = path.posix.join(deepDir.split(path.sep).join('/'), fileName);
     expect(`Update ${relPath}`.length).toBeGreaterThan(200);
 
