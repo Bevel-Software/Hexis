@@ -122,8 +122,12 @@ export class PluginProvisionService {
     // `personal-abc`) squats the namespace exactly as "personal-abc" would —
     // a name-only check let it through.
     if (pluginManifestName(name).startsWith(PERSONAL_PLUGIN_PREFIX)) {
+      // The message names the DERIVED slug: for a spelling like "Personal
+      // Abc" the reservation is invisible in the name itself, and a refusal
+      // the user can't trace to their input is a refusal they can't fix.
       throw new PluginProvisionError(
-        `Plugin names starting with "${PERSONAL_PLUGIN_PREFIX}" are reserved.`,
+        `"${name}" would publish the manifest name "${pluginManifestName(name)}" — ` +
+          `the "${PERSONAL_PLUGIN_PREFIX}" namespace is reserved for personal folders. Pick another name.`,
         422,
       );
     }
