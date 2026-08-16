@@ -11,7 +11,7 @@ import {
   KNOWLEDGE_BASE_DIR,
   KNOWLEDGE_DIR,
   PIPELINES_DIR,
-  GROUPS_DIR,
+  PLUGINS_DIR,
 } from '@bevel-software/platform-shared';
 import { branchForWorkspaceId, FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import type { WorkspaceService } from './workspace.service.js';
@@ -465,7 +465,7 @@ export function createWorkspaceRoutes(
       // The structural top-level folders are always shown as folders, even to
       // a user who can't read into them. Their existence isn't sensitive
       // (every KB has them), and keeping them visible lets the explorer render
-      // its Knowledge/Groups section view instead of collapsing to an empty
+      // its Knowledge/Plugins section view instead of collapsing to an empty
       // flat tree. A ROOT-LEVEL `Knowledge/` is the legacy pre-split layout's
       // knowledge root (kb-layout.ts calls it the neutral bucket) and gets the
       // same treatment so legacy clones don't collapse. Only the folders
@@ -476,7 +476,7 @@ export function createWorkspaceRoutes(
         DATA_DIR,
         AGENTS_DIR,
         PIPELINES_DIR,
-        GROUPS_DIR,
+        PLUGINS_DIR,
         KNOWLEDGE_DIR,
       ]);
       for (const wp of wsRelPaths) {

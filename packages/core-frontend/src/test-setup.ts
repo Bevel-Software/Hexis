@@ -2,6 +2,10 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
 import { afterEach, beforeEach } from 'vitest';
 import { configureBranchModel } from '@bevel-software/platform-shared';
+// The pure module, NOT the `shared/mcp` barrel: this file runs before every
+// test file, and the barrel would drag React components and their icon
+// imports into the setup of suites that never touch them.
+import { resetMcpUrlForTests } from './shared/mcp/connect-snippets';
 
 // The branch model is applied during boot now, not read from the environment
 // at import. In the browser that is `loadServerConfig()`; here it is this,
@@ -61,6 +65,13 @@ if (typeof window !== 'undefined' && window.localStorage !== globalThis.localSto
 
 beforeEach(() => {
   globalThis.localStorage?.clear?.();
+  /**
+   * The MCP endpoint is module-global, the way the branch model is. In the
+   * browser it is set once by `loadServerConfig()`; here nothing calls that,
+   * so tests start from the origin fallback and any suite that configures a
+   * real address cannot leak it into the next one.
+   */
+  resetMcpUrlForTests();
 });
 
 afterEach(() => {

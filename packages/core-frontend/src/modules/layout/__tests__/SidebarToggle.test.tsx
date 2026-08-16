@@ -28,7 +28,7 @@ beforeEach(() => {
 
 function frame() {
   const { container } = render(
-    <SidebarFrame label="Library groups">
+    <SidebarFrame label="Library plugins">
       <button type="button">Engineering</button>
     </SidebarFrame>,
   );
@@ -112,7 +112,7 @@ describe('SidebarFrame: collapsed', () => {
   // sizing something invisible (proto:98).
   it('withdraws the drag handle while hidden', () => {
     render(
-      <SidebarFrame label="Library groups">
+      <SidebarFrame label="Library plugins">
         <span>x</span>
       </SidebarFrame>,
     );
@@ -125,7 +125,7 @@ describe('SidebarFrame: collapsed', () => {
 describe('SidebarFrame: resize', () => {
   function grip() {
     render(
-      <SidebarFrame label="Library groups">
+      <SidebarFrame label="Library plugins">
         <span>x</span>
       </SidebarFrame>,
     );
@@ -190,7 +190,7 @@ describe('SidebarFrame: drag cleanup', () => {
 
   function startDrag() {
     const { unmount } = render(
-      <SidebarFrame label="Library groups">
+      <SidebarFrame label="Library plugins">
         <span>x</span>
       </SidebarFrame>,
     );

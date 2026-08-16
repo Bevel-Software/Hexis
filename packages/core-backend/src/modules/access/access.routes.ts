@@ -69,19 +69,19 @@ export function createAccessRoutes(
     workflowService,
     accessControl,
     kbDirName,
-    DEFAULT_BRANCH,
+    () => DEFAULT_BRANCH,
     eventBus,
   );
 
-  // Roles (groups) are authoritative on the DEFAULT branch — the Roles admin
-  // screen only ever edits roles.yaml there. Resolve the group list from the
+  // Roles (plugins) are authoritative on the DEFAULT branch — the Roles admin
+  // screen only ever edits roles.yaml there. Resolve the plugin list from the
   // default-branch workspace so the share dialog suggests (and the grant route
   // accepts) the same roles the Roles screen manages, regardless of which branch
   // the caller is viewing. People stay branch-local (the caller's own workspace).
-  const defaultBranchGroups = async (): Promise<string[]> => {
+  const defaultBranchPlugins = async (): Promise<string[]> => {
     await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
-    const { groups } = await accessControl.kbPrincipals(workspaceIdForBranch(DEFAULT_BRANCH));
-    return groups;
+    const { plugins } = await accessControl.kbPrincipals(workspaceIdForBranch(DEFAULT_BRANCH));
+    return plugins;
   };
 
   // Authentication gate only. Per PLAN §3 the workspace `:id` is a branch
@@ -177,7 +177,7 @@ export function createAccessRoutes(
    *
    * Every access declaration living INSIDE a folder — the descendant
    * `access.md` files and the node frontmatter that override the folder's own
-   * rules for the principals they name. Display-only: the group access surface
+   * rules for the principals they name. Display-only: the plugin access surface
    * shows it so nobody reads a folder's share list as the whole story.
    *
    * Gating is stricter than the sibling `GET /access`, which hands its eligible
@@ -267,9 +267,9 @@ export function createAccessRoutes(
 
   /**
    * GET /api/workspace/:id/access/suggest?q=<query>
-   * Autocomplete for the share dialog. Returns matching groups (roles.yaml role
+   * Autocomplete for the share dialog. Returns matching plugins (roles.yaml role
    * names — resolved from the DEFAULT branch, the authoritative roles source)
-   * and people (branch-local to `:id`). Groups are small + non-sensitive so they
+   * and people (branch-local to `:id`). Plugins are small + non-sensitive so they
    * always show;
    * PEOPLE are withheld until `q` is ≥ 2 chars, so an empty query can't dump the
    * whole directory (email-harvesting guard). People are the union of the
@@ -283,10 +283,10 @@ export function createAccessRoutes(
     const q = (typeof req.query.q === 'string' ? req.query.q : '').trim().toLowerCase();
     const CAP = 15;
     try {
-      const groups = await defaultBranchGroups();
+      const plugins = await defaultBranchPlugins();
       const { people: kbPeople } = await accessControl.kbPrincipals(req.params.id);
 
-      const matchedGroups = groups
+      const matchedPlugins = plugins
         .filter((g) => !q || g.toLowerCase().includes(q))
         .slice(0, CAP);
 
@@ -311,7 +311,7 @@ export function createAccessRoutes(
           .slice(0, CAP);
       }
 
-      res.json({ groups: matchedGroups, people, peopleWithheld: q.length < 2 });
+      res.json({ plugins: matchedPlugins, people, peopleWithheld: q.length < 2 });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -542,19 +542,19 @@ export function createAccessRoutes(
       }
       const { repoRelTarget, kind, principal } = parseMutationBody(req.body);
 
-      // For a group grant, the role must exist in roles.yaml (Slice 1 grants
-      // existing groups only; Create Group is Slice 2). Reject loudly otherwise.
+      // For a plugin grant, the role must exist in roles.yaml (Slice 1 grants
+      // existing plugins only; Create Plugin is Slice 2). Reject loudly otherwise.
       // Validate against the DEFAULT-branch roles (same authoritative source the
       // suggest autocomplete uses) so a default-branch role can't be suggested
       // then rejected here on a feature branch whose roles.yaml has diverged.
       if (principal.kind === 'role') {
-        const groups = await defaultBranchGroups();
-        const known = groups.some((g) => canonicalRoleName(g) === canonicalRoleName(principal.role));
+        const plugins = await defaultBranchPlugins();
+        const known = plugins.some((g) => canonicalRoleName(g) === canonicalRoleName(principal.role));
         if (!known) {
           throw new AccessMutationError(
-            `No group named "${principal.role}". Pick an existing group, or ask an admin to create it.`,
+            `No plugin named "${principal.role}". Pick an existing plugin, or ask an admin to create it.`,
             404,
-            { kind: 'unknown-group', role: principal.role },
+            { kind: 'unknown-plugin', role: principal.role },
           );
         }
         // The built-in `everyone` role is grantable from the share UI for READ
@@ -563,7 +563,7 @@ export function createAccessRoutes(
         // access.md edit.
         if (canonicalRoleName(principal.role) === EVERYONE_CANONICAL && verb !== 'read') {
           throw new AccessMutationError(
-            '"Everyone" can only be granted read access (public). Grant other access levels to specific people or groups.',
+            '"Everyone" can only be granted read access (public). Grant other access levels to specific people or plugins.',
           );
         }
       }
@@ -735,7 +735,7 @@ export function createAccessRoutes(
       // any source left is an `ancestor`. Distinguish "inherited" (still named in
       // an ancestor access.md — offer cascade/deny) from "no removable source
       // here" (nothing named in any file we can edit — a genuine no-op). A
-      // principal who only RESOLVES via a group / everyone / admin-rescue has no
+      // principal who only RESOLVES via a plugin / everyone / admin-rescue has no
       // source at all (it's not their own file entry) and so is correctly a 200
       // no-op: there is nothing to remove here and no Remove was ever offered for
       // them in the dialog. NEVER a silent unchanged-success when there IS a

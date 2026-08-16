@@ -242,7 +242,7 @@ function FrontmatterDiffPanel({
 // ── body diff helpers ───────────────────────────────────────────────────
 
 /**
- * Group consecutive same/changed runs into display blocks: runs of "same"
+ * Plugin consecutive same/changed runs into display blocks: runs of "same"
  * lines, and "conflict" blocks bundling consecutive removed+added runs
  * together — the same shape git uses for merge conflicts.
  */

@@ -6,12 +6,12 @@ import { urlForItemFile } from '../routes/library-paths';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
-import { GroupItemSections } from './group-page-parts';
+import { PluginItemSections } from './plugin-page-parts';
 import { PendingSkillReview } from './PendingSkillReview';
 
 /**
  * The Library gallery — the card grid at `/skills-and-tools/everything` and its
- * filtered views (`/owned`, and a group's cards).
+ * filtered views (`/owned`, and a plugin's cards).
  *
  * This is CONTENT only: the sidebar, the flex shell and the data live in
  * `LibraryLayout` + `LibraryProvider` above it. The filter arrives as a prop
@@ -23,10 +23,10 @@ import { PendingSkillReview } from './PendingSkillReview';
  *
  *  - the LOADOUT. It came from a retired mock; the prototype has no such
  *    concept, and it was a documented client-side stub, so nothing persisted
- *    was lost. Its rail is now the group nav.
- *  - Skills / Integrations filter chips. Groups are the structure, and a group
+ *    was lost. Its rail is now the plugin nav.
+ *  - Skills / Integrations filter chips. Plugins are the structure, and a plugin
  *    owns its skills AND the tools they need, so splitting the catalog by kind
- *    showed a group's integrations detached from the reason they exist.
+ *    showed a plugin's integrations detached from the reason they exist.
  */
 
 /** The h1 names what the sidebar has selected, so the two never disagree. */
@@ -39,7 +39,7 @@ function headingFor(filter: LibraryFilter): string {
     case 'ungrouped':
       return 'Yours alone';
     case 'group':
-      return filter.group;
+      return filter.plugin;
   }
 }
 
@@ -104,13 +104,13 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
           {emptyMessageFor(filter, query)}
         </div>
       ) : (
-        // Skills and tools, split — the same two bands a group page has.
+        // Skills and tools, split — the same two bands a plugin page has.
         // One undifferentiated grid made you read every card's body to learn
         // what kind of thing it was; the heading does that now, once, for a
         // whole band. A band with nothing in it is dropped rather than shown
         // empty: this is a search result, not an inventory of what could be.
         <div className="pb-14">
-          <GroupItemSections
+          <PluginItemSections
             skillItems={visible.filter((i) => i.kind === 'skill')}
             toolItems={visible.filter((i) => i.kind === 'integration')}
             onOpen={openItem}

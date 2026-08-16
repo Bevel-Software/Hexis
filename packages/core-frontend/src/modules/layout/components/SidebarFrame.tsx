@@ -33,7 +33,7 @@ const FOCUSABLE_SELECTOR =
  * The app's nav spine — the prototype's `.side` + `.resizer` + `.side-inner`
  * (proto:85-104, proto:4328-4370).
  *
- * ONE frame, filled by whichever surface you are on: the group list in Skills
+ * ONE frame, filled by whichever surface you are on: the plugin list in Skills
  * & Tools, the file tree in Knowledge. They were two components with two
  * different backgrounds, two paddings and only one of them resizable, which is
  * two products wearing one logo. The prototype has a single `<aside>` and two
@@ -57,7 +57,7 @@ export function SidebarFrame({
   header,
 }: {
   children: ReactNode;
-  /** Names the region and its resize handle, e.g. `Library groups`. */
+  /** Names the region and its resize handle, e.g. `Library plugins`. */
   label: string;
   /**
    * Pinned above `children`, outside whatever list the surface is holding.

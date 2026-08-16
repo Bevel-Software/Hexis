@@ -4,8 +4,26 @@ import { StatusDot } from './StatusDot';
 import { ToolLogo } from './ToolLogo';
 import type { AttentionStatus, GemState } from '../utils/status';
 
-export interface LibraryCardProps {
-  kind: 'skill' | 'integration';
+/**
+ * A discriminated union on `kind`, not a bag of optionals: an integration
+ * MUST say its flavor (a card silently missing the badge would compile fine
+ * with an optional), and a skill must not be able to carry one.
+ */
+export type LibraryCardProps = LibraryCardCommonProps &
+  (
+    | { kind: 'skill'; flavor?: never }
+    | {
+        kind: 'integration';
+        /**
+         * How the integration is declared: an `mcp.json` server or a `.tool`
+         * UTCP manual. Two different files to edit and two different
+         * capability sets, so the card says which one this is.
+         */
+        flavor: 'mcp' | 'utcp';
+      }
+  );
+
+export interface LibraryCardCommonProps {
   id: string;
   name: string;
   description: string;
@@ -58,6 +76,7 @@ export function LibraryCard({
   version,
   pending,
   onOpen,
+  flavor,
 }: LibraryCardProps) {
   /**
    * What the bottom-left says, and when it says anything at all.
@@ -103,6 +122,11 @@ export function LibraryCard({
             column of coloured squares that distinguish nothing. */}
         {kind === 'integration' && <ToolLogo slug={id} name={name} />}
         <span className="truncate text-lede font-semibold text-ink">{name}</span>
+        {kind === 'integration' && flavor && (
+          <Badge tone="outline" size="xs" className="shrink-0 uppercase">
+            {flavor === 'mcp' ? 'MCP server' : 'UTCP manual'}
+          </Badge>
+        )}
         {pending && (
           <Badge tone="wait" size="xs" className="shrink-0 uppercase">
             In review

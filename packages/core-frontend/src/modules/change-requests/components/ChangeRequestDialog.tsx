@@ -31,7 +31,7 @@ import { CrFileTree, type CrTreeFileState } from './CrFileTree';
  * so the owner can read the untouched parts of the thing under review too.
  */
 export interface ChangeRequestScope {
-  /** Repo-root-relative folder, no trailing slash (e.g. `Groups/gtm/rfi`). */
+  /** Repo-root-relative folder, no trailing slash (e.g. `Plugins/gtm/rfi`). */
   prefix: string;
   /** Files that ALWAYS list, relative to `prefix`, whether touched or not. */
   baseFiles: string[];

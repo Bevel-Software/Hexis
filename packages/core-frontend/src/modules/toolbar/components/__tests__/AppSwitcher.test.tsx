@@ -93,7 +93,7 @@ describe('AppSwitcher', () => {
    */
   it('honours a shell-provided active app over the URL prefix', () => {
     renderSwitcher({
-      path: '/workspace/main/knowledge-base/Groups/Sales/create-sales-deck/SKILL.md',
+      path: '/workspace/main/knowledge-base/Plugins/Sales/create-sales-deck/SKILL.md',
       shellActiveId: 'skills-tools',
     });
     expect(screen.getByRole('button', { name: 'Switch app' })).toHaveTextContent(

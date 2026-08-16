@@ -220,13 +220,13 @@ describe('validatePrincipal — injection guard', () => {
     expect(p.kind === 'user' && p.displayName).toBe('Ali');
   });
 
-  it('rejects a group name with a colon (would forge a key)', () => {
+  it('rejects a plugin name with a colon (would forge a key)', () => {
     expect(() => validatePrincipal({ kind: 'role', role: 'write:\n  - everyone' })).toThrow(
       AccessSpliceError,
     );
   });
 
-  it('rejects the reserved group name deny', () => {
+  it('rejects the reserved plugin name deny', () => {
     expect(() => validatePrincipal({ kind: 'role', role: 'deny' })).toThrow(AccessSpliceError);
   });
 

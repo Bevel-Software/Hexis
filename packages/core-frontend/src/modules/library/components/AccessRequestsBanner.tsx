@@ -1,9 +1,9 @@
 import { Banner, Button } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import type { JoinProposal, JoinRequest } from '../services/groups.api';
+import type { JoinProposal, JoinRequest } from '../services/plugins.api';
 
 /**
- * Somebody asked to join this group — the manager-side face of a join change
+ * Somebody asked to join this plugin — the manager-side face of a join change
  * request.
  *
  * It shows what the request PROPOSES, one row per grant, because that is what
@@ -23,8 +23,8 @@ import type { JoinProposal, JoinRequest } from '../services/groups.api';
  */
 
 export interface AccessRequestsBannerProps {
-  group: string;
-  /** Repo-relative group folder for `Manage access` (single-element today). */
+  plugin: string;
+  /** Repo-relative plugin folder for `Manage access` (single-element today). */
   folders: string[];
   requests: JoinRequest[];
   onManage(folder: string): void;
@@ -34,7 +34,7 @@ export interface AccessRequestsBannerProps {
 }
 
 export function AccessRequestsBanner({
-  group,
+  plugin,
   folders,
   requests,
   onManage,
@@ -48,8 +48,8 @@ export function AccessRequestsBanner({
     <Banner role="status" tone="wait" className={cn('mb-4', className)}>
       <p>
         {requests.length === 1
-          ? `${requests[0].requesterName} asked to join ${group}.`
-          : `${requests.length} people asked to join ${group}.`}
+          ? `${requests[0].requesterName} asked to join ${plugin}.`
+          : `${requests.length} people asked to join ${plugin}.`}
       </p>
 
       <div className="mt-2 flex flex-col gap-2">

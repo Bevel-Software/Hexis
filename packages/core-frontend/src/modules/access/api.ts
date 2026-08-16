@@ -15,7 +15,7 @@ export interface AccessReaders extends AccessEligible {
  * ONE place a principal is named for a verb (mirrors the backend `GrantSource`).
  * Both kinds are file-backed and removable from the dialog: `direct` → remove
  * here; `ancestor` → remove-from-parent or deny-here. A principal who only
- * resolves via a group / `everyone` / admin-rescue produces no source.
+ * resolves via a plugin / `everyone` / admin-rescue produces no source.
  */
 export type GrantSource =
   | { kind: 'direct' }
@@ -85,7 +85,7 @@ export function asInheritedError(err: unknown): InheritedRevokeError | null {
   return null;
 }
 
-/** A grantable principal — a person (by email) or a group (a roles.yaml role). */
+/** A grantable principal — a person (by email) or a plugin (a roles.yaml role). */
 export type Principal =
   | { kind: 'user'; email: string; displayName: string }
   | { kind: 'role'; role: string };
@@ -94,14 +94,14 @@ export type Principal =
 export type GrantVerb = 'read' | 'write' | 'owner' | 'download';
 
 export interface SuggestResponse {
-  groups: string[];
+  plugins: string[];
   people: { name: string; email: string }[];
-  /** True when the query was too short to return people (groups still shown). */
+  /** True when the query was too short to return people (plugins still shown). */
   peopleWithheld: boolean;
 }
 
 /**
- * Autocomplete the share dialog: matching groups (roles) + people. People are
+ * Autocomplete the share dialog: matching plugins (roles) + people. People are
  * withheld until the query is ≥ 2 chars (server-side harvesting guard).
  */
 export async function suggestPrincipals(

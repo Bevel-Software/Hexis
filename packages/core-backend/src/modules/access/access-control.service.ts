@@ -925,7 +925,7 @@ function scopeToGrantSource(
  * returning the WHOLE list of removable entries rather than just the winner.
  *
  * Only the principal's OWN named entry yields a source — a `user` by their email,
- * a `role` by its role token. A grant that reaches the user via a group they
+ * a `role` by its role token. A grant that reaches the user via a plugin they
  * belong to, the built-in `everyone`, or admin-rescue is NOT their entry, so it
  * never adds a source (the group/role shows as its own row instead). The list is:
  *   - `[]` (verb omitted by the caller) when the principal effectively holds no
@@ -941,7 +941,7 @@ function scopeToGrantSource(
  * under closest-wins), and the revoke flow needs the inherited remainder that
  * survives removing the direct entry. A group/everyone grant at some scope does
  * not add a source AND does not hide a farther own-entry the principal is named
- * in (removing it is still meaningful if the group grant is later removed).
+ * in (removing it is still meaningful if the plugin grant is later removed).
  */
 function resolveGrantSourcesForVerb(
   model: AccessModel,
@@ -1453,18 +1453,18 @@ export class AccessControlService implements IAccessControl {
 
   async kbPrincipals(
     workspaceId: string,
-  ): Promise<{ groups: string[]; people: { name: string; email: string }[] }> {
+  ): Promise<{ plugins: string[]; people: { name: string; email: string }[] }> {
     let model: AccessModel;
     try {
       model = await this.loadModel(workspaceId);
     } catch {
-      return { groups: [], people: [] };
+      return { plugins: [], people: [] };
     }
-    // Groups = the built-in `everyone` role plus every declared role's display
+    // Plugins = the built-in `everyone` role plus every declared role's display
     // name. `everyone` is surfaced so the share UI can grant public read; the
     // grant route gates it to the `read` verb only (write/owner/download
     // everyone stay a direct-access.md edit).
-    const groups = [
+    const plugins = [
       EVERYONE_DISPLAY,
       ...[...model.roles.byCanonical.values()].map((r) => r.displayName),
     ];
@@ -1487,7 +1487,7 @@ export class AccessControlService implements IAccessControl {
       name: name || email.split('@')[0],
       email,
     }));
-    return { groups, people };
+    return { plugins, people };
   }
 
   async findEmailByHash(

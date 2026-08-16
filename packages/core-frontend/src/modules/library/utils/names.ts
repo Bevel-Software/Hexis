@@ -1,7 +1,7 @@
 /**
  * Rendering people's names the way a person says them.
  *
- * Shared by the locked-group view (its request toast) and the owner-side
+ * Shared by the locked-plugin view (its request toast) and the owner-side
  * access-requests banner: both list requesters, and two copies of this drifted
  * into place once already.
  */

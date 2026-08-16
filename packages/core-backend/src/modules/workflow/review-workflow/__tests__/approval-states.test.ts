@@ -164,7 +164,7 @@ function makeAccessControl(byPath: EligibilityByPath): IAccessControl {
       return result;
     },
     findEmailByHash: async () => null,
-    kbPrincipals: async () => ({ groups: [], people: [] }),
+    kbPrincipals: async () => ({ plugins: [], people: [] }),
     validateRolesYaml: () => ({ ok: true }),
     referencesToRole: async () => [],
   };
