@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import {
@@ -18,6 +18,12 @@ const apiMock = vi.hoisted(() => ({ listFiles: vi.fn() }));
 vi.mock('../../workspace/services/workspace.api', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   listFiles: apiMock.listFiles,
+}));
+
+const navigateMock = vi.hoisted(() => vi.fn());
+vi.mock('react-router-dom', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useNavigate: () => navigateMock,
 }));
 
 import { ClientExtensionsSection } from '../components/PluginExtras';
@@ -52,6 +58,7 @@ function renderSection(workspace: Partial<WorkspaceContextValue>, folder = 'GTM'
 
 beforeEach(() => {
   apiMock.listFiles.mockReset();
+  navigateMock.mockReset();
 });
 
 describe('ClientExtensionsSection', () => {
@@ -82,6 +89,35 @@ describe('ClientExtensionsSection', () => {
     renderSection({ workspaceId: encodeURIComponent(DEFAULT_BRANCH), fileTree: wrapped });
     expect(await screen.findByText('com.example.client/')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'hooks/on-save.js' })).toBeInTheDocument();
+  });
+
+  /**
+   * `rawFile` steps past the app gate into the Knowledge editor — right for
+   * opaque client data, wrong for a `.tool`, which has a first-class tool
+   * page in this app. The same URL without the state renders that page.
+   */
+  it('opens a .tool in the library (no rawFile), other files in the Knowledge editor', async () => {
+    const withTool: FileTreeEntry = dir('root', [
+      dir('knowledge-base', [
+        dir('Plugins', [
+          dir('GTM', [
+            dir('com.example.client', [dir('hooks', [file('on-save.js')])]),
+            dir('software.bevel.hexis', [dir('tools', [file('web-search.tool')])]),
+          ]),
+        ]),
+      ]),
+    ]);
+    renderSection({ workspaceId: encodeURIComponent(DEFAULT_BRANCH), fileTree: withTool });
+    fireEvent.click(await screen.findByRole('button', { name: 'tools/web-search.tool' }));
+    expect(navigateMock).toHaveBeenLastCalledWith(
+      expect.stringContaining('web-search.tool'),
+      undefined,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'hooks/on-save.js' }));
+    expect(navigateMock).toHaveBeenLastCalledWith(
+      expect.stringContaining('on-save.js'),
+      { state: { rawFile: true } },
+    );
   });
 
   it('renders nothing for a plugin with no namespace dirs, still without fetching', async () => {

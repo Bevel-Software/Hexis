@@ -9,9 +9,11 @@ import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /**
  * The plugin page's two smallest sections, both pure REUSE of the Knowledge
- * surface: every link is a `kbFileUrl` + `rawFile` navigation into the same
- * raw editor the tool page's "Edit the tool file" uses — no new viewer, no new
- * backend.
+ * surface: links are `kbFileUrl` + `rawFile` navigations into the same raw
+ * editor the tool page's "Edit the tool file" uses — no new viewer, no new
+ * backend. The one exception is a `.tool` file in a namespace listing, which
+ * drops the `rawFile` state so the app gate renders its library tool page —
+ * the same destination its card in the Tools band reaches.
  *
  * MANIFEST: writers get a button to `plugin.json`. It is a button to the FILE,
  * not a form, deliberately: the fields worth hand-editing (`version`,
@@ -120,7 +122,7 @@ export function ClientExtensionsSection({
       </h2>
       <p className="mb-2 max-w-[62ch] text-detail text-ink-muted">
         Reverse-DNS directories carry data for a specific client; other clients ignore them. Files
-        open in the Knowledge editor.
+        open in the Knowledge editor; a .tool opens its tool page.
       </p>
       {listings.map((l) => (
         <div key={l.namespace} className="mb-2 rounded-md border border-line px-3.5 py-2.5">
@@ -132,9 +134,15 @@ export function ClientExtensionsSection({
                   type="button"
                   className="cursor-pointer font-mono text-detail text-ink-muted hover:text-ink hover:underline"
                   onClick={() =>
-                    navigate(kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${PLUGINS_DIR}/${folder}/${f}`), {
-                      state: { rawFile: true },
-                    })
+                    // `rawFile` steps past the app gate into the Knowledge
+                    // editor — right for opaque client data (hooks, configs),
+                    // wrong for a `.tool`: that file has a first-class tool
+                    // page, and the same URL without the state renders it
+                    // here in the library, exactly like its card above.
+                    navigate(
+                      kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${PLUGINS_DIR}/${folder}/${f}`),
+                      f.toLowerCase().endsWith('.tool') ? undefined : { state: { rawFile: true } },
+                    )
                   }
                 >
                   {f.slice(l.namespace.length + 1)}
