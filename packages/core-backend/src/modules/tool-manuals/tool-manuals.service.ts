@@ -20,7 +20,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
-import { RESERVED_VARIABLE_NAMES, VARIABLE_REFERENCE_RE } from '../../shared/variable-refs.js';
+import { RESERVED_VARIABLE_NAMES, findReservedVariableRef } from '../../shared/variable-refs.js';
 import { extractFrontmatter, resolveDeclaredId, isValidId, dedupeById } from '../../shared/frontmatter-id.js';
 import { walkFiles } from '../../shared/fs-walk.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
@@ -79,31 +79,15 @@ const RESERVED_TOOL_NAMESPACES = [INTERNAL_MANUAL_NAME, EXTERNAL_KB_MANUAL_NAME]
  * every boundary that classifies references.
  */
 
-/**
- * A REFERENCE is reserved by SUFFIX, not by exact name: the substitutor looks a
- * variable up under the manual's UTCP namespace first, so `${<ns>_CONNECTION_KEY}`
- * resolves the very same seeded value the bare `${CONNECTION_KEY}` does. Matching
- * the bare name only would let a `.tool` reach the platform bearer just by
- * spelling the namespace out. Suffix matching also refuses harmless-looking
- * near-misses (`MY_API_URL`) — deliberately fail-closed: a `.tool` author who
- * wants their own base URL has the whole namespace minus two suffixes.
- */
-function isReservedVariableRef(varName: string): boolean {
-  return RESERVED_VARIABLE_NAMES.some((reserved) => varName.endsWith(reserved));
-}
-
 /** Throw if any string in the `.tool` document references a reserved variable. */
 function assertNoReservedVariableRefs(doc: unknown, name: string): void {
-  const text = JSON.stringify(doc) ?? '';
-  for (const match of text.matchAll(VARIABLE_REFERENCE_RE)) {
-    const varName = match[1] ?? match[2];
-    if (isReservedVariableRef(varName)) {
-      throw new Error(
-        `\`.tool\` "${name}" references the reserved variable "${match[0]}" — ` +
-          'API_URL and CONNECTION_KEY (bare or namespaced, e.g. `<namespace>_CONNECTION_KEY`) ' +
-          'are seeded by the platform for its own manuals and may not appear anywhere in a `.tool`.',
-      );
-    }
+  const ref = findReservedVariableRef(doc);
+  if (ref !== null) {
+    throw new Error(
+      `\`.tool\` "${name}" references the reserved variable "${ref}" — ` +
+        'API_URL and CONNECTION_KEY (bare or namespaced, e.g. `<namespace>_CONNECTION_KEY`) ' +
+        'are seeded by the platform for its own manuals and may not appear anywhere in a `.tool`.',
+    );
   }
 }
 

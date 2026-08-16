@@ -129,6 +129,13 @@ describe('stdio end-to-end', () => {
         const mode = (await fs.stat(path.join(plugin.pluginRoot, 'bin', 'server.cjs'))).mode;
         expect(mode & 0o111, 'materialized server lost its exec bit').toBeTruthy();
       }
+      // A partial a hard-killed prior run left behind is reclaimed on the next
+      // materialization of the same folder, and a completed run leaves none.
+      const keyDir = path.dirname(plugin.pluginRoot);
+      await fs.writeFile(path.join(keyDir, '.GTM.zip.deadbeef.partial'), 'junk');
+      await materializePlugin(config, 'GTM');
+      const partials = (await fs.readdir(keyDir)).filter((f) => f.endsWith('.partial'));
+      expect(partials).toEqual([]);
 
       // The same preparation `prepareLocalManuals` applies before registration.
       const spec = await prepareStdioSpec(

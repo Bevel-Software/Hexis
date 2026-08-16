@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import AdmZip from 'adm-zip';
 import type { HexisMcpConfig } from './config.js';
 
@@ -77,7 +77,13 @@ export async function readBodyCappedToFile(
         await reader.cancel().catch(() => {});
         throw new Error(`${label} exceeds the ${cap / (1024 * 1024)}MB download limit — refusing to materialize`);
       }
-      await handle.write(value);
+      // A write may land short of the chunk (POSIX permits it); anything not
+      // re-driven to completion would be a silently truncated archive.
+      let written = 0;
+      while (written < value.byteLength) {
+        const { bytesWritten } = await handle.write(value, written, value.byteLength - written);
+        written += bytesWritten;
+      }
     }
   } finally {
     await handle.close();
@@ -139,8 +145,20 @@ export async function materializePlugin(
   const MAX_EXTRACTED_BYTES = 256 * 1024 * 1024;
   const MAX_ENTRIES = 5_000;
   // Spilled beside the (freshly emptied) plugin root, never inside it: the
-  // extraction below must not find the archive among its own outputs.
-  const tmpArchive = path.join(home, 'plugins', key, `.${folder}.zip.partial`);
+  // extraction below must not find the archive among its own outputs. The
+  // random suffix keeps the path out of any plugin folder's namespace and
+  // apart from a concurrently-launched second instance's spill; the sweep
+  // reclaims partials a hard kill (SIGKILL, shutdown) left behind, which the
+  // `finally` below can never see — this folder's only, because another
+  // instance may be mid-download on a sibling's.
+  const partialSuffix = (name: string) => `.${name}.zip.` as const;
+  const keyDir = path.join(home, 'plugins', key);
+  for (const entry of await fs.readdir(keyDir).catch(() => [] as string[])) {
+    if (entry.startsWith(partialSuffix(folder)) && entry.endsWith('.partial')) {
+      await fs.rm(path.join(keyDir, entry), { force: true }).catch(() => {});
+    }
+  }
+  const tmpArchive = path.join(keyDir, `${partialSuffix(folder)}${randomBytes(6).toString('hex')}.partial`);
   try {
     await readBodyCappedToFile(res.body, MAX_ARCHIVE_BYTES, `plugin "${folder}" archive`, tmpArchive);
     await extractArchive(tmpArchive, pluginRoot, folder, MAX_EXTRACTED_BYTES, MAX_ENTRIES);

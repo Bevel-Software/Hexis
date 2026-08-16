@@ -32,3 +32,30 @@ export function containsVariableReference(text: string): boolean {
  * names, and user content may not reference them (bare or namespaced).
  */
 export const RESERVED_VARIABLE_NAMES: readonly string[] = ['API_URL', 'CONNECTION_KEY'];
+
+/**
+ * A NAME is reserved by SUFFIX, not by exact match: the substitutor looks a
+ * variable up under the manual's UTCP namespace first, so `${<ns>_CONNECTION_KEY}`
+ * resolves the very same seeded value the bare `${CONNECTION_KEY}` does.
+ * Suffix matching also refuses harmless-looking near-misses (`MY_API_URL`) —
+ * deliberately fail-closed.
+ */
+export function isReservedVariableName(varName: string): boolean {
+  return RESERVED_VARIABLE_NAMES.some((reserved) => varName.endsWith(reserved));
+}
+
+/**
+ * The first reserved REFERENCE anywhere in `doc` (scanned as JSON text), or
+ * null. Built on the shared grammar above, so what counts as a reference here
+ * is exactly what counts everywhere else — `${ API_URL }` with spaces is not
+ * expandable, so it is a literal to every boundary, not reserved to one and
+ * portable to another.
+ */
+export function findReservedVariableRef(doc: unknown): string | null {
+  const text = JSON.stringify(doc) ?? '';
+  for (const match of text.matchAll(VARIABLE_REFERENCE_RE)) {
+    const varName = match[1] ?? match[2] ?? '';
+    if (isReservedVariableName(varName)) return match[0];
+  }
+  return null;
+}

@@ -10,7 +10,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch, type WorkspaceService } from '../workspace/workspace.service.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
-import { containsVariableReference } from '../../shared/variable-refs.js';
+import { containsVariableReference, findReservedVariableRef } from '../../shared/variable-refs.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { IToolManualService, ToolVariable } from './tool-manuals.contract.js';
 
@@ -103,16 +103,10 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  * The same reserved-reference policy discovery enforces, applied at SAVE: a
  * `${…API_URL}`/`${…CONNECTION_KEY}` persisted here would make discovery drop
  * the server on its next scan — an editor that can save self-invalidating
- * config is worse than a 422 naming the reference.
+ * config is worse than a 422 naming the reference. The same shared grammar
+ * both sides scan with is what makes "saveable" and "discoverable" agree.
  */
-function findReservedRef(doc: unknown): string | null {
-  const text = JSON.stringify(doc) ?? '';
-  for (const match of text.matchAll(/\$\{\s*([A-Za-z0-9_]+)\s*\}|\$([A-Za-z0-9_]+)/g)) {
-    const varName = match[1] ?? match[2] ?? '';
-    if (varName.endsWith('API_URL') || varName.endsWith('CONNECTION_KEY')) return match[0];
-  }
-  return null;
-}
+const findReservedRef = findReservedVariableRef;
 
 interface CommitDriver {
   runPendingCommit(

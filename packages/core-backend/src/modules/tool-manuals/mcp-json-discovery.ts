@@ -6,24 +6,18 @@ import {
 } from '@bevel-software/platform-shared';
 import type { ToolManualDescriptor, ToolVariable } from './tool-manuals.contract.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
-import { RESERVED_VARIABLE_NAMES } from '../../shared/variable-refs.js';
+import { RESERVED_VARIABLE_NAMES, findReservedVariableRef } from '../../shared/variable-refs.js';
 
 /**
  * The same reserved-reference policy `.tool` parsing enforces, applied to the
  * extension block: `API_URL`/`CONNECTION_KEY` (bare or namespaced) are seeded
  * by the platform for its own manuals, and an extension header referencing one
  * would be asking the substitutor to hand a third-party server the caller's
- * bearer. One rule, both declaration surfaces.
+ * bearer. One rule, both declaration surfaces — and one GRAMMAR deciding what
+ * a reference is (shared/variable-refs.ts), so nothing the migration or the
+ * editor classifies as a portable literal can be reserved here.
  */
-const RESERVED_VARIABLE_RE = /\$\{\s*([A-Za-z0-9_]+)\s*\}|\$([A-Za-z0-9_]+)/g;
-function referencesReservedVariable(doc: unknown): string | null {
-  const text = JSON.stringify(doc) ?? '';
-  for (const match of text.matchAll(RESERVED_VARIABLE_RE)) {
-    const varName = match[1] ?? match[2] ?? '';
-    if (varName.endsWith('API_URL') || varName.endsWith('CONNECTION_KEY')) return match[0];
-  }
-  return null;
-}
+const referencesReservedVariable = findReservedVariableRef;
 
 /**
  * MCP servers are declared in each plugin's `mcp.json` (the Agent Plugins
