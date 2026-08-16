@@ -67,14 +67,14 @@ describe('PluginJoinRequests', () => {
 
   it('names the requester and the exact grant being proposed', async () => {
     renderBanner();
-    expect(await screen.findByText(/Ali Baba asked to join GTM/)).toBeInTheDocument();
+    expect(await screen.findByText(/Ali Baba asked for access to GTM/)).toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: 'Grant read to Ali Baba' }),
     ).toBeInTheDocument();
   });
 
   it('states the VERB when a request asks for more than read', async () => {
-    // "asked to join" must never hide a write/owner request.
+    // "asked for access to" must never hide a write/owner request.
     pluginsMock.listJoinRequests.mockResolvedValue([
       request({
         proposals: [
@@ -162,7 +162,7 @@ describe('PluginJoinRequests', () => {
       </LibraryToastProvider>,
     );
     await waitFor(() => expect(pluginsMock.listJoinRequests).toHaveBeenCalled());
-    expect(container.textContent).not.toContain('asked to join');
+    expect(container.textContent).not.toContain('asked for access to');
   });
 
   it('stays silent when the listing fails. A manager surface must not break the page', async () => {

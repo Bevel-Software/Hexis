@@ -138,7 +138,7 @@ describe('PluginsIndexPage', () => {
       screen.getByText('A plugin carries skills and tools for the people in it.'),
     ).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Yours' })).toBeInTheDocument();
-    expect(await screen.findByRole('heading', { name: "Plugins you're in" })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: "Your plugins" })).toBeInTheDocument();
   });
 
   it("offers the caller's own plugin under Yours, and opens it", async () => {
@@ -165,7 +165,7 @@ describe('PluginsIndexPage', () => {
     expect(screen.queryByRole('button', { name: /^Owned by me/ })).not.toBeInTheDocument();
   });
 
-  it("puts a readable plugin under Plugins you're in, with its run-by line and totals", async () => {
+  it("puts a readable plugin under Your plugins, with its run-by line and totals", async () => {
     renderIndex();
     const gtm = await screen.findByRole('button', { name: /^GTM/ });
     expect(gtm).toHaveAccessibleName('GTM Run by Olga Ivanova 4 skills · 2 tools');
@@ -208,13 +208,13 @@ describe('PluginsIndexPage', () => {
     expect(await screen.findByRole('button', { name: /^GTM .* 1$/ })).toBeInTheDocument();
   });
 
-  it('lists a DISCOVERABLE locked plugin under Ask to join, Locked or Requested', async () => {
+  it('lists a DISCOVERABLE locked plugin under Request access, Locked or Requested', async () => {
     pluginsMock.listPlugins.mockResolvedValue([
       summary(),
       summary({ name: 'Finance', folders: ['Plugins/Finance'], canRead: false, canWrite: false }),
     ]);
     renderIndex();
-    expect(await screen.findByRole('heading', { name: 'Ask to join' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Request access' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^Finance/ })).toBeInTheDocument();
     expect(screen.getByTitle('Locked')).toBeInTheDocument();
 
@@ -241,7 +241,7 @@ describe('PluginsIndexPage', () => {
     renderIndex();
     await screen.findByRole('button', { name: /^GTM/ });
     expect(screen.queryByRole('button', { name: /^Finance/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: 'Ask to join' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Request access' })).not.toBeInTheDocument();
   });
 
   it('lists a plugin an item grant reaches inside, even without a summary', async () => {
@@ -267,7 +267,7 @@ describe('PluginsIndexPage', () => {
     const banner = await screen.findByRole('alert');
     expect(banner).toHaveTextContent("Couldn't load plugins.");
     expect(screen.getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: "Plugins you're in" })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: "Your plugins" })).not.toBeInTheDocument();
 
     pluginsMock.listPlugins.mockResolvedValue([summary()]);
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
