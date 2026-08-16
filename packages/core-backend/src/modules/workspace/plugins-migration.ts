@@ -146,7 +146,8 @@ async function foldIntoPluginFiles(
   if (manifest === null) {
     console.warn(
       `[plugins-migration] ${folderName}/${PLUGIN_MANIFEST_FILE} is missing or unparsable — ` +
-        'converted mcp servers get no auth/variable declarations until it is fixed.',
+        'mcp manuals WITHOUT auth/variable declarations still convert; ones carrying a ' +
+        'non-portable half stay `.tool` files until the manifest is fixed.',
     );
   }
 

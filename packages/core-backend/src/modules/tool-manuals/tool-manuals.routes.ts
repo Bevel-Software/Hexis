@@ -165,7 +165,10 @@ export function createToolManualsAgentRoutes(
         }
         // Unix mode rides in the zip attrs so a `./`-command stdio server is
         // still executable after materialization (0 on Windows — harmless).
-        zip.addFile(rel, await fs.readFile(abs), '', ((stat.mode & 0o7777) << 16) >>> 0);
+        // PLAIN mode, no shifting: adm-zip masks a numeric attr with 0xfff and
+        // positions it into the external-attribute high bits itself — a
+        // pre-shifted value is destroyed by that mask.
+        zip.addFile(rel, await fs.readFile(abs), '', stat.mode & 0o7777);
         included += 1;
       }
       // An all-filtered plugin looks exactly like an absent one — a 404 must

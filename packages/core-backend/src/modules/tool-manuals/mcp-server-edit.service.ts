@@ -164,8 +164,17 @@ export class McpServerEditService {
       // refuses — an unusable server with no error at the moment it was made.
       throw new McpServerEditError(`Unknown transport "${String(write.transport)}".`, 422);
     }
+    // The WHOLE writable surface, mirroring what discovery scans: a reserved
+    // ref smuggled through a stdio arg (`--url=${X_API_URL}`), env value, cwd
+    // or description would save with a 200 and then vanish from the catalog
+    // on the next scan — the exact self-invalidating state this 422 prevents.
     const reservedRef = findReservedRef({
       url: write.url,
+      command: write.command,
+      args: write.args,
+      env: write.env,
+      cwd: write.cwd,
+      description: write.description,
       literalHeaders: write.literalHeaders,
       authHeaders: write.authHeaders,
       variables: write.variables,
@@ -280,6 +289,13 @@ export class McpServerEditService {
     // past the first write put the originals back — the API reporting failure
     // while the workspace keeps half the edit is the state this exists to
     // prevent.
+    // Rollback scope is the WRITES only. A failed write restores both files
+    // (a half-written pair is the state this exists to prevent); a failed
+    // COMMIT must not — the pending-commit pipeline may already have created
+    // a local commit before the push refused, and rewriting the working tree
+    // to pre-edit bytes would leave it dirty AGAINST that commit, a state the
+    // workflow layer's own pull-rebase recovery then misreads. Commit-stage
+    // failures propagate as-is and the pipeline's recovery owns the cleanup.
     const [mcpBefore, manifestBefore] = await Promise.all([
       fs.readFile(mcpAbs, 'utf8').catch(() => null),
       fs.readFile(manifestAbs, 'utf8').catch(() => null),
@@ -289,19 +305,19 @@ export class McpServerEditService {
       if (manifest !== null) {
         await fs.writeFile(manifestAbs, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
       }
-      // One folder-scoped commit, ungated beyond the caller's own write access —
-      // both files or neither. The catalog cache is stale the moment it lands.
-      await this.commits.runPendingCommit(
-        workspaceIdForBranch(DEFAULT_BRANCH),
-        DEFAULT_BRANCH,
-        `${this.kbDirName}/${PLUGINS_DIR}/${folder}`,
-        user,
-      );
     } catch (err) {
       if (mcpBefore !== null) await fs.writeFile(mcpAbs, mcpBefore, 'utf8').catch(() => {});
       if (manifestBefore !== null) await fs.writeFile(manifestAbs, manifestBefore, 'utf8').catch(() => {});
       throw err;
     }
+    // One folder-scoped commit, ungated beyond the caller's own write access —
+    // both files or neither. The catalog cache is stale the moment it lands.
+    await this.commits.runPendingCommit(
+      workspaceIdForBranch(DEFAULT_BRANCH),
+      DEFAULT_BRANCH,
+      `${this.kbDirName}/${PLUGINS_DIR}/${folder}`,
+      user,
+    );
     this.toolManuals.invalidate();
     return { name: target };
   }

@@ -100,6 +100,17 @@ export async function materializePlugin(
     const abs = path.join(pluginRoot, ...entry.entryName.split('/'));
     // The archive names the paths; keep a hostile-looking one inside the root.
     if (!isWithin(pluginRoot, abs)) continue;
+    // DECLARED size before allocation: `getData()` allocates the uncompressed
+    // buffer, so checking after it would let one crafted entry OOM this
+    // process before the limit ever ran. The header's size is the archive's
+    // own claim; a lying header still cannot exceed the cap, because the
+    // post-decompress length is counted again below.
+    const declared = entry.header.size;
+    if (declared > MAX_EXTRACTED_BYTES || extracted + declared > MAX_EXTRACTED_BYTES) {
+      throw new Error(
+        `plugin "${folder}" exceeds the ${MAX_EXTRACTED_BYTES / (1024 * 1024)}MB extraction limit — refusing to materialize`,
+      );
+    }
     const data = entry.getData();
     extracted += data.length;
     if (extracted > MAX_EXTRACTED_BYTES) {
@@ -110,10 +121,16 @@ export async function materializePlugin(
     await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, data);
     // Unix mode rides in the zip attrs (high 16 bits); restoring the exec
-    // bits is what lets a `./`-command stdio server actually run. chmod is
-    // effectively a no-op on Windows — harmless either way.
+    // bits is what lets a `./`-command stdio server actually run. Only
+    // Windows gets a pass on failure — its permission model makes chmod a
+    // near-no-op; anywhere else a failed chmod is a real materialization
+    // problem that must not surface later as a confusing spawn EACCES.
     const mode = (entry.attr >>> 16) & 0o777;
-    if (mode & 0o111) await fs.chmod(abs, mode).catch(() => {});
+    if (mode & 0o111) {
+      await fs.chmod(abs, mode).catch((err: unknown) => {
+        if (process.platform !== 'win32') throw err;
+      });
+    }
   }
   return { pluginRoot, pluginData };
 }

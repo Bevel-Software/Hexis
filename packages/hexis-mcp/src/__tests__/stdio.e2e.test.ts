@@ -80,7 +80,9 @@ beforeAll(async () => {
     'mcp.json',
     Buffer.from(JSON.stringify({ mcpServers: { probe: { type: 'stdio', command: 'node' } } })),
   );
-  zip.addFile('bin/server.cjs', Buffer.from(FIXTURE_SERVER));
+  // Plain mode, as the backend's archive route now passes it — adm-zip masks
+  // a numeric attr with 0xfff and positions it into the high bits itself.
+  zip.addFile('bin/server.cjs', Buffer.from(FIXTURE_SERVER), '', 0o755);
   const archive = zip.toBuffer();
 
   httpServer = http.createServer((req, res) => {
@@ -116,6 +118,13 @@ describe('stdio end-to-end', () => {
       expect(await fs.readFile(path.join(plugin.pluginRoot, 'bin', 'server.cjs'), 'utf8')).toBe(
         FIXTURE_SERVER,
       );
+      // The exec bit survives the zip round trip — what lets a `./`-command
+      // stdio server actually run. Windows has no comparable mode bits, so
+      // the assertion is POSIX-only; the spawn below covers Windows.
+      if (process.platform !== 'win32') {
+        const mode = (await fs.stat(path.join(plugin.pluginRoot, 'bin', 'server.cjs'))).mode;
+        expect(mode & 0o111, 'materialized server lost its exec bit').toBeTruthy();
+      }
 
       // The same preparation `prepareLocalManuals` applies before registration.
       const spec = await prepareStdioSpec(
