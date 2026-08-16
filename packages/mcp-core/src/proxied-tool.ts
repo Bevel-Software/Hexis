@@ -61,7 +61,13 @@ export function toListedTool(tool: ProxiedTool): McpTool | null {
   // so a remote schema that declared something else — or a union like
   // `["object","null"]` — can't reject the whole tools/list.
   inputSchema.type = 'object';
-  if (typeof inputSchema.properties !== 'object' || inputSchema.properties === null) {
+  // An array passes `typeof === 'object'` but is not a property map, so it
+  // must coerce like any other non-object or it poisons the whole listing.
+  if (
+    typeof inputSchema.properties !== 'object' ||
+    inputSchema.properties === null ||
+    Array.isArray(inputSchema.properties)
+  ) {
     inputSchema.properties = {};
   }
   return {

@@ -154,6 +154,38 @@ describe('descriptorsFromMcpJson', () => {
     expect(
       declare([{ name: 'T', scope: 'user', oauth: { ...oauth, authorizationUrl: 'https://v.example/auth', authParams: { p: 'x' } } }]),
     ).toEqual(['vendor']);
+    // `clientId` must be non-empty after trimming, as in the `.tool` parser:
+    // a whitespace-only value would pass discovery only to fail the owner's
+    // client-secret setup later with "clientId is required".
+    expect(
+      declare([{ name: 'T', scope: 'user', oauth: { tokenUrl: 'https://v.example/token', authorizationUrl: 'https://v.example/auth', clientId: '   ' } }]),
+    ).toEqual([]);
+  });
+
+  it('trims a padded oauth clientId like the .tool parser does', () => {
+    const out = descriptorsFromMcpJson(
+      'GTM',
+      JSON.stringify({ mcpServers: { vendor: { type: 'streamable-http', url: 'https://v.example/mcp' } } }),
+      JSON.stringify({
+        name: 'gtm',
+        extensions: {
+          'software.bevel.hexis': {
+            mcpServers: {
+              vendor: {
+                variables: [
+                  {
+                    name: 'T',
+                    scope: 'user',
+                    oauth: { authorizationUrl: 'https://v.example/auth', tokenUrl: 'https://v.example/token', clientId: '  c-1  ' },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      }),
+    );
+    expect(out[0]?.variables?.[0]?.oauth?.clientId).toBe('c-1');
   });
 
   it('yields nothing for an unparsable file, quietly for an absent extensions block', () => {

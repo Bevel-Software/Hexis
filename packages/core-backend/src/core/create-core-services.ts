@@ -581,7 +581,12 @@ export async function createCoreServices(
   });
   // RFC 9728 pointer carried on every MCP 401 challenge so OAuth-capable
   // clients discover the AS. Single source of truth for the resource id.
+  // Userinfo is stripped for the same reason the server's own copy strips it
+  // (see create-core-server.ts): the pointer rides an unauthenticated 401
+  // challenge, and a `user:pass@` from PUBLIC_BACKEND_URL must not ride along.
   const mcpResourceUrl = new URL('/api/mcp', config.publicBackendUrl);
+  mcpResourceUrl.username = '';
+  mcpResourceUrl.password = '';
   const mcpResourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(mcpResourceUrl);
   const mcpAuthMiddleware = createMcpAuthMiddleware(
     authService,

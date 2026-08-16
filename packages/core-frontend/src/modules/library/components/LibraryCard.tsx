@@ -4,14 +4,26 @@ import { StatusDot } from './StatusDot';
 import { ToolLogo } from './ToolLogo';
 import type { AttentionStatus, GemState } from '../utils/status';
 
-export interface LibraryCardProps {
-  kind: 'skill' | 'integration';
-  /**
-   * How an integration is declared: an `mcp.json` server or a `.tool` UTCP
-   * manual. Two different files to edit and two different capability sets, so
-   * the card says which one this is — skills carry nothing here.
-   */
-  flavor?: 'mcp' | 'utcp';
+/**
+ * A discriminated union on `kind`, not a bag of optionals: an integration
+ * MUST say its flavor (a card silently missing the badge would compile fine
+ * with an optional), and a skill must not be able to carry one.
+ */
+export type LibraryCardProps = LibraryCardCommonProps &
+  (
+    | { kind: 'skill'; flavor?: never }
+    | {
+        kind: 'integration';
+        /**
+         * How the integration is declared: an `mcp.json` server or a `.tool`
+         * UTCP manual. Two different files to edit and two different
+         * capability sets, so the card says which one this is.
+         */
+        flavor: 'mcp' | 'utcp';
+      }
+  );
+
+export interface LibraryCardCommonProps {
   id: string;
   name: string;
   description: string;

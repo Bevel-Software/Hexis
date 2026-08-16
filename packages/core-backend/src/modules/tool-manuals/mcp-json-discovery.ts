@@ -80,8 +80,13 @@ const SERVER_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
  * `scope: user` declaration would hand one caller's slot to everyone. The
  * same stake applies here, at this file's per-server grain: a bad entry
  * invalidates the SERVER, never its siblings.
+ *
+ * Exported for the mcp-server editor: what it saves is what this scan reads
+ * on the next pass, so the two must judge a declaration with ONE function —
+ * a shape saveable there but undiscoverable here would be a server that
+ * silently vanishes from the catalog the moment its edit lands.
  */
-function validatedVariables(raw: unknown): ToolVariable[] | null {
+export function validatedVariables(raw: unknown): ToolVariable[] | null {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) return null;
   const out: ToolVariable[] = [];
@@ -105,10 +110,15 @@ function validatedVariables(raw: unknown): ToolVariable[] | null {
       // — a sign-in wired to a missing URL is a declaration, not a feature.
       if (!isRecord(entry.oauth) || scope !== 'user') return null;
       const o = entry.oauth;
+      // `clientId` is trimmed and must be non-empty, exactly as the `.tool`
+      // parser requires: a whitespace-only value would pass discovery and
+      // then fail the owner's client-secret setup with "clientId is
+      // required" — an error at the wrong surface, long after the save.
       if (
         typeof o.authorizationUrl !== 'string' ||
         typeof o.tokenUrl !== 'string' ||
-        typeof o.clientId !== 'string'
+        typeof o.clientId !== 'string' ||
+        !o.clientId.trim()
       ) {
         return null;
       }
@@ -131,7 +141,7 @@ function validatedVariables(raw: unknown): ToolVariable[] | null {
       oauth = {
         authorizationUrl: o.authorizationUrl,
         tokenUrl: o.tokenUrl,
-        clientId: o.clientId,
+        clientId: o.clientId.trim(),
         ...(Array.isArray(o.scopes) && o.scopes.every((s) => typeof s === 'string')
           ? { scopes: o.scopes as string[] }
           : {}),

@@ -145,7 +145,7 @@ export interface ToolManualStdioSpec {
  */
 export type ToolManualDescriptor =
   | (ToolManualDescriptorBase & { remote?: boolean; stdio?: undefined })
-  | (ToolManualDescriptorBase & { remote: false; stdio: ToolManualStdioSpec });
+  | (ToolManualDescriptorBase & { type: 'mcp'; remote: false; stdio: ToolManualStdioSpec });
 
 /** A validated UTCP manual dict (`{ utcp_version, manual_version, tools }`). */
 export type UtcpManualDict = Record<string, unknown>;

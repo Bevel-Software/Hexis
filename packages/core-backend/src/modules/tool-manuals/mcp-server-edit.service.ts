@@ -9,6 +9,7 @@ import {
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch, type WorkspaceService } from '../workspace/workspace.service.js';
+import { validatedVariables } from './mcp-json-discovery.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { containsVariableReference, findReservedVariableRef } from '../../shared/variable-refs.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -191,8 +192,23 @@ export class McpServerEditService {
       write.literalHeaders ?? (isRecord(prior.headers) ? (prior.headers as Record<string, string>) : {});
     const authIn =
       write.authHeaders ?? (isRecord(priorExt.headers) ? (priorExt.headers as Record<string, string>) : {});
-    const variables =
+    const variablesIn =
       write.variables ?? (Array.isArray(priorExt.variables) ? (priorExt.variables as ToolVariable[]) : []);
+    // Discovery's OWN validator, at save time (like the reserved-ref check
+    // below): a malformed declaration — bad name, duplicate, re-declared
+    // platform name, oauth on a shared scope or with a broken provider —
+    // persisted here would make discovery drop the whole server on its next
+    // scan. What comes back is the normalized form discovery would read, and
+    // that is what gets stored.
+    const variables = validatedVariables(variablesIn);
+    if (variables === null) {
+      throw new McpServerEditError(
+        'The `variables` declaration is malformed — each entry needs a unique, non-reserved ' +
+          'alphanumeric/underscore name, a scope of `admin` or `user`, and any `oauth` block must sit ' +
+          'on a `user`-scoped variable with valid https provider URLs and a client id.',
+        422,
+      );
+    }
     const description =
       write.description ?? (typeof priorExt.description === 'string' ? priorExt.description : undefined);
     const local = write.local ?? (priorExt.local === true);

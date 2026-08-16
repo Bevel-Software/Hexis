@@ -2,7 +2,8 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import type { Tool as UtcpTool } from '@utcp/sdk';
 import { flattenManualTool, type ProxiedTool } from '@bevel-software/platform-mcp-core';
 import { localManualTemplates, remoteManualTemplate, REMOTE_MANUAL_NAME } from '../manuals.js';
-import { discoverTools, listedTools, withoutRemoteMetaTools } from '../server.js';
+import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { discoverTools, getSkillPrompt, listSkillPrompts, listedTools, withoutRemoteMetaTools } from '../server.js';
 import { DeploymentError, fetchAllManuals, fetchLocalOnlyManuals, resolveMcpUrl } from '../deployment.js';
 
 function tool(mcpName: string, manualName = REMOTE_MANUAL_NAME): ProxiedTool {
@@ -205,6 +206,70 @@ describe('resolveMcpUrl', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('<!doctype html><title>login</title>', { status: 200 })));
     await expect(resolveMcpUrl(config)).rejects.toBeInstanceOf(DeploymentError);
     await expect(resolveMcpUrl(config)).rejects.toThrow(/not JSON/);
+  });
+});
+
+describe('getJson unauthorized messaging', () => {
+  const config = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' };
+
+  it('blames the connection key only on a request that actually carried it', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
+    await expect(fetchAllManuals(config)).rejects.toThrow(/connection key was rejected/);
+  });
+
+  it('keeps the key out of the story when the failing request carried no credentials', async () => {
+    // `/api/config` sends no Authorization header, so its 401 is an
+    // interceptor (SSO gate, proxy), not a bad key.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
+    const err = (await resolveMcpUrl(config).catch((e: unknown) => e)) as Error;
+    expect(err).toBeInstanceOf(DeploymentError);
+    expect(err.message).toMatch(/refused access \(HTTP 401\)/);
+    expect(err.message).not.toMatch(/connection key/);
+  });
+});
+
+describe('skill prompts', () => {
+  const config = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' };
+
+  it('lists skills as prompts', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ skills: [{ name: 'deploy', description: 'd' }] }), { status: 200 })),
+    );
+    expect(await listSkillPrompts(config)).toEqual({
+      prompts: [{ name: 'deploy', description: 'd', arguments: [] }],
+    });
+  });
+
+  it('propagates an upstream list failure instead of serving an empty prompt list', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('nope', { status: 500 })));
+    await expect(listSkillPrompts(config)).rejects.toBeInstanceOf(DeploymentError);
+  });
+
+  it('serves a loaded skill as its prompt text', async () => {
+    const skill = { name: 'deploy', description: 'd', body: 'Do.', path: 'skills/deploy', files: [] };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ok: true, kind: 'skill', skill }), { status: 200 })),
+    );
+    const res = await getSkillPrompt(config, 'deploy');
+    expect(res.messages[0]!.content).toEqual({ type: 'text', text: 'Do.' });
+  });
+
+  it('reserves "Unknown skill" (InvalidParams) for a lookup that succeeded and found nothing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ok: false, error: 'no such skill' }), { status: 200 })),
+    );
+    await expect(getSkillPrompt(config, 'ghost')).rejects.toMatchObject({
+      code: ErrorCode.InvalidParams,
+      message: expect.stringContaining('Unknown skill "ghost"'),
+    });
+  });
+
+  it('propagates an upstream get_skill failure rather than calling it the caller\'s mistake', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('nope', { status: 500 })));
+    await expect(getSkillPrompt(config, 'deploy')).rejects.toBeInstanceOf(DeploymentError);
   });
 });
 

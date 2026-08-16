@@ -1,5 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import { sanitizeInputSchema } from '../proxied-tool.js';
+import { sanitizeInputSchema, toListedTool, type ProxiedTool } from '../proxied-tool.js';
+
+describe('toListedTool', () => {
+  const proxied = (inputSchema: unknown): ProxiedTool => ({
+    utcpName: 'm.t',
+    mcpName: 't',
+    description: 'the t tool',
+    inputSchema: inputSchema as ProxiedTool['inputSchema'],
+    manualName: 'm',
+  });
+
+  it('coerces a `properties` ARRAY to {} — an array passes typeof but is not a property map', () => {
+    const listed = toListedTool(proxied({ type: 'object', properties: [{ name: 'x' }] }));
+    expect(listed?.inputSchema.properties).toEqual({});
+  });
+
+  it('keeps a well-formed properties object intact', () => {
+    const listed = toListedTool(proxied({ type: 'object', properties: { x: { type: 'string' } } }));
+    expect(listed?.inputSchema.properties).toEqual({ x: { type: 'string' } });
+  });
+});
 
 describe('sanitizeInputSchema', () => {
   it('drops a non-standard format keyword but keeps a standard one', () => {

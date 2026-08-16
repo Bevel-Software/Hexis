@@ -24,6 +24,7 @@ function stubClipboard(value: unknown) {
 afterEach(() => {
   restore?.();
   restore = null;
+  vi.useRealTimers();
 });
 
 describe('useCopyFeedback', () => {
@@ -69,6 +70,31 @@ describe('useCopyFeedback', () => {
    * of an earlier success used to leave the checkmark up, so the UI reported
    * that THIS copy worked when it did not.
    */
+  /**
+   * The counter, not a boolean: `setCopied(true)` on an already-true boolean
+   * bails out of the render, so the second copy's checkmark used to inherit
+   * the FIRST copy's deadline and could vanish almost immediately.
+   */
+  it('restarts the 1500ms window when a second copy lands inside the first one’s', async () => {
+    vi.useFakeTimers();
+    stubClipboard({ writeText: vi.fn().mockResolvedValue(undefined) });
+    const { result } = renderHook(() => useCopyFeedback());
+
+    await act(async () => result.current.copy('first'));
+    expect(result.current.copied).toBe(true);
+
+    act(() => vi.advanceTimersByTime(1000));
+    await act(async () => result.current.copy('second'));
+
+    // 1400ms after the second copy — past the first copy's old deadline, but
+    // inside the second's fresh window.
+    act(() => vi.advanceTimersByTime(1400));
+    expect(result.current.copied).toBe(true);
+
+    act(() => vi.advanceTimersByTime(200));
+    expect(result.current.copied).toBe(false);
+  });
+
   it('clears the checkmark when a copy fails right after one succeeded', async () => {
     const writeText = vi
       .fn()

@@ -13,7 +13,15 @@ export function describeToolFailure(err: unknown): string {
     if (typeof inner === 'string' && inner.length > 0) return inner;
   }
   if (typeof data === 'string' && data.length > 0) return data;
-  return err instanceof Error ? err.message : String(err);
+  // Total, like `safeJsonText`: a thrown value whose own `toString` throws
+  // (e.g. a null-prototype object) must still come back as a description —
+  // this function runs inside catch paths, where a second throw would turn
+  // a tool failure into a handler failure.
+  try {
+    return err instanceof Error ? err.message : String(err);
+  } catch {
+    return '(indescribable tool failure)';
+  }
 }
 
 /**

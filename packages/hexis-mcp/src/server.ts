@@ -279,32 +279,52 @@ export async function createHexisMcpServer(
    * tools and silently drops its prompts. We rebuild them from the same two KB
    * tools the hosted server uses, so a skill reads identically either way.
    */
-  server.setRequestHandler(ListPromptsRequestSchema, async () => {
-    const res = (await callKbTool(config, 'list_skills', {}).catch((err) => {
-      console.error('[hexis-mcp] could not list skills:', err instanceof Error ? err.message : err);
-      return null;
-    })) as { skills?: SkillSummary[] } | null;
-    const skills = Array.isArray(res?.skills) ? res.skills : [];
-    const prompts: Prompt[] = skills.map((s) => ({
-      name: s.name,
-      description: s.description,
-      arguments: [],
-    }));
-    return { prompts };
-  });
+  server.setRequestHandler(ListPromptsRequestSchema, async () => listSkillPrompts(config));
 
-  server.setRequestHandler(GetPromptRequestSchema, async (request): Promise<GetPromptResult> => {
-    const res = (await callKbTool(config, 'get_skill', { name: request.params.name }).catch(
-      () => null,
-    )) as { ok?: boolean; kind?: string; skill?: LoadedSkill } | null;
-    if (!res?.ok || res.kind !== 'skill' || !res.skill) {
-      throw new McpError(ErrorCode.InvalidParams, `Unknown skill "${request.params.name}".`);
-    }
-    return {
-      description: res.skill.description,
-      messages: [{ role: 'user', content: { type: 'text', text: skillPromptText(res.skill) } }],
-    };
-  });
+  server.setRequestHandler(GetPromptRequestSchema, async (request) =>
+    getSkillPrompt(config, request.params.name),
+  );
 
   return server;
+}
+
+/**
+ * The prompt list, rebuilt from the deployment's `list_skills`. An upstream
+ * failure PROPAGATES: a dead key or unreachable deployment must surface as the
+ * request's error, not as a workspace that "has no prompts". Exported for the
+ * catalog tests.
+ */
+export async function listSkillPrompts(config: HexisMcpConfig): Promise<{ prompts: Prompt[] }> {
+  const res = (await callKbTool(config, 'list_skills', {})) as { skills?: SkillSummary[] } | null;
+  const skills = Array.isArray(res?.skills) ? res.skills : [];
+  const prompts: Prompt[] = skills.map((s) => ({
+    name: s.name,
+    description: s.description,
+    arguments: [],
+  }));
+  return { prompts };
+}
+
+/**
+ * One skill as a prompt. `Unknown skill` (InvalidParams — the caller's mistake)
+ * is reserved for a lookup that SUCCEEDED and found nothing; an upstream
+ * failure propagates instead of masquerading as it. Exported for the catalog
+ * tests.
+ */
+export async function getSkillPrompt(
+  config: HexisMcpConfig,
+  name: string,
+): Promise<GetPromptResult> {
+  const res = (await callKbTool(config, 'get_skill', { name })) as {
+    ok?: boolean;
+    kind?: string;
+    skill?: LoadedSkill;
+  } | null;
+  if (!res?.ok || res.kind !== 'skill' || !res.skill) {
+    throw new McpError(ErrorCode.InvalidParams, `Unknown skill "${name}".`);
+  }
+  return {
+    description: res.skill.description,
+    messages: [{ role: 'user', content: { type: 'text', text: skillPromptText(res.skill) } }],
+  };
 }

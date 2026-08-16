@@ -71,6 +71,19 @@ describe('ClientExtensionsSection', () => {
     expect(apiMock.listFiles).toHaveBeenCalledWith(encodeURIComponent(DEFAULT_BRANCH));
   });
 
+  /**
+   * The fileTree can carry workspace/KB-clone wrapper levels above the kb dir
+   * (`findKbRoot` exists for exactly this shape). The section must find the
+   * plugin's namespace dirs through them, not assume the root's direct child
+   * is the kb dir.
+   */
+  it('finds the namespace dirs through wrapper levels above the kb dir', async () => {
+    const wrapped = dir('root', [dir('workspace-clone', TREE.children ?? [])]);
+    renderSection({ workspaceId: encodeURIComponent(DEFAULT_BRANCH), fileTree: wrapped });
+    expect(await screen.findByText('com.example.client/')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'hooks/on-save.js' })).toBeInTheDocument();
+  });
+
   it('renders nothing for a plugin with no namespace dirs, still without fetching', async () => {
     const { container } = renderSection(
       { workspaceId: encodeURIComponent(DEFAULT_BRANCH), fileTree: TREE },

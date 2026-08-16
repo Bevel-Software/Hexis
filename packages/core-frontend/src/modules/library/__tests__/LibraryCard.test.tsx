@@ -13,7 +13,11 @@ import { displayFirstName, personalPluginName } from '../utils/personal-plugin';
  */
 
 function card(over: Partial<LibraryCardProps> = {}) {
-  const props: LibraryCardProps = {
+  // The cast, not a typed literal: `LibraryCardProps` is a discriminated
+  // union on `kind`, and a base-plus-overrides spread cannot be proven to
+  // land on one arm. Integration overrides still pass `flavor`, as the union
+  // demands of real callers.
+  const props = {
     kind: 'skill',
     id: 'rfi',
     name: 'rfi',
@@ -22,7 +26,7 @@ function card(over: Partial<LibraryCardProps> = {}) {
     status: { state: 'ok', text: 'Ready' },
     onOpen: vi.fn(),
     ...over,
-  };
+  } as LibraryCardProps;
   render(<LibraryCard {...props} />);
 }
 
@@ -32,8 +36,22 @@ describe('LibraryCard', () => {
     expect(screen.queryByText(/^Skill$/i)).not.toBeInTheDocument();
 
     cleanup();
-    card({ kind: 'integration', id: 'slack', name: 'slack', status: { state: 'ok', text: 'Connected' } });
+    card({ kind: 'integration', flavor: 'utcp', id: 'slack', name: 'slack', status: { state: 'ok', text: 'Connected' } });
     expect(screen.queryByText(/^Integration$/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The one label an integration DOES carry: how it is declared, because that
+   * decides which file an owner edits. Required by the props union — an
+   * optional here shipped cards silently missing the badge.
+   */
+  it('says how an integration is declared', () => {
+    card({ kind: 'integration', flavor: 'mcp', id: 'linear', name: 'linear', status: { state: 'ok', text: 'Connected' } });
+    expect(screen.getByText('MCP server')).toBeInTheDocument();
+
+    cleanup();
+    card({ kind: 'integration', flavor: 'utcp', id: 'slack', name: 'slack', status: { state: 'ok', text: 'Connected' } });
+    expect(screen.getByText('UTCP manual')).toBeInTheDocument();
   });
 
   it('says nothing about a healthy skill', () => {
@@ -49,12 +67,13 @@ describe('LibraryCard', () => {
   });
 
   it('always states a tool’s connection, either way', () => {
-    card({ kind: 'integration', id: 'slack', name: 'slack', status: { state: 'ok', text: 'Connected' } });
+    card({ kind: 'integration', flavor: 'utcp', id: 'slack', name: 'slack', status: { state: 'ok', text: 'Connected' } });
     expect(screen.getByText('Connected')).toBeInTheDocument();
 
     cleanup();
     card({
       kind: 'integration',
+      flavor: 'utcp',
       id: 'notion',
       name: 'notion',
       status: { state: 'warn', text: 'Needs your sign-in' },

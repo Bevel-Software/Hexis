@@ -314,10 +314,20 @@ export function claudeInstallUrl(mcpUrl: string, name: string): string {
  * autonomous-agent variants that carry an external API key.
  * ------------------------------------------------------------------ */
 
+/**
+ * Escape a value for interpolation inside a double-quoted POSIX shell string.
+ * Backslash, `"`, `$` and backtick are the four characters the shell still
+ * reads there — a token carrying any of them would otherwise cut the pasted
+ * command short or expand into it.
+ */
+function escapeForDoubleQuotes(value: string): string {
+  return value.replace(/[\\"$`]/g, (c) => `\\${c}`);
+}
+
 /** The `claude mcp add` one-liner, with the key appended when there is one. */
 export function claudeCodeCommand(mcpUrl: string, bearer?: string): string {
   const base = `claude mcp add --transport http knowledge-base ${mcpUrl}`;
-  return bearer ? `${base} --header "Authorization: Bearer ${bearer}"` : base;
+  return bearer ? `${base} --header "Authorization: Bearer ${escapeForDoubleQuotes(bearer)}"` : base;
 }
 
 /** The JSON block for clients that read their servers from a config file. */

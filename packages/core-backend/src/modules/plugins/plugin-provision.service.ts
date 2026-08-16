@@ -38,6 +38,7 @@ import {
   DEFAULT_BRANCH,
   PLUGINS_DIR,
   PLUGIN_MANIFEST_FILE,
+  pluginManifestName,
   renderPluginManifest,
   PERSONAL_PLUGIN_PREFIX,
   isPersonalPluginFolder,
@@ -127,6 +128,19 @@ export class PluginProvisionService {
       const existing = await this.existingFolder(name);
       if (existing !== null) {
         throw new PluginProvisionError(`A plugin named "${existing}" already exists.`, 409);
+      }
+      // Folder uniqueness is not manifest uniqueness: the manifest `name` is
+      // a LOSSY slug of the folder (`Sales Team` and `Sales-Team` both
+      // become `sales-team`), and it is the identity a conformant client
+      // keys plugins on — two folders sharing it would be two plugins one
+      // key, with no telling which a client resolves.
+      const slugTwin = await this.manifestNameTwin(name);
+      if (slugTwin !== null) {
+        throw new PluginProvisionError(
+          `"${name}" and the existing plugin "${slugTwin}" would share the manifest name ` +
+            `"${pluginManifestName(name)}" — pick a more distinct name.`,
+          409,
+        );
       }
       await this.provision(user, name, pluginAccessMd(user));
       return { folder: name, created: true };
@@ -245,6 +259,22 @@ export class PluginProvisionService {
     }
     const lower = name.toLowerCase();
     return children.find((c) => c.toLowerCase() === lower) ?? null;
+  }
+
+  /** An existing folder whose derived manifest name equals `name`'s, or null. */
+  private async manifestNameTwin(name: string): Promise<string | null> {
+    const wsId = await this.readyWorkspaceId();
+    const wsDir = await this.workspaceService.getWorkspacePath(wsId);
+    let children: string[];
+    try {
+      children = await fs.readdir(path.join(wsDir, this.kbDirName, PLUGINS_DIR));
+    } catch {
+      return null; // no Plugins/ root yet — nothing can collide
+    }
+    const slug = pluginManifestName(name);
+    // Dot-prefixed entries (a parked delete, say) are invisible to every
+    // scanner and carry no manifest — they cannot claim a slug.
+    return children.find((c) => !c.startsWith('.') && pluginManifestName(c) === slug) ?? null;
   }
 
   private async provision(user: AuthUser, folder: string, accessMd: string): Promise<void> {

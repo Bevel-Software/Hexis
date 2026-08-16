@@ -265,16 +265,16 @@ When asked to add/integrate a product as a tool (e.g. "add Notion", "wire up Lin
 
    Some providers do not support automatic registration (`oauth-manual` — see the walkthrough below). Those DO need a sign-in variable to hold the client id, and an admin pastes the client secret on the tool's page. You do not have to guess which kind you are facing: write the two lines, then run `list_tool_setup` and read `setup.kind`.
 4. **For key-based auth, wire it as `variables`, never a hard-coded secret.** Reference credentials as `${VAR}` in `headers` (e.g. `Authorization: Bearer ${NOTION_TOKEN}`) and declare each in the `variables` block with a scope (`admin` = one shared value; `user` = per-user). Users fill the values in the Secrets Vault.
-5. **Set `remote: false`** only when the tool is reachable ONLY from the user's own machine (e.g. a `localhost` MCP server); otherwise leave it remote-capable.
+5. **Say so when a tool is reachable ONLY from the user's own machine.** For an MCP server (e.g. one on `localhost`), declare `local: true` on its entry in the plugin.json extensions block — `remote: false` is a `.tool` frontmatter field and means nothing in `mcp.json`. For an `http`/`inline` `.tool`, set `remote: false`. Otherwise leave the tool remote-capable.
 
 ### Checking what an admin still needs to configure
 
-Call the **`list_tool_setup`** tool to see, for every accessible `.tool`, what is configured and what is still missing. Use it whenever a tool isn't working, after adding a tool, or when asked "what do I need to set up?" — then EXPLAIN the remaining steps to the user rather than guessing. Per tool it reports:
+Call the **`list_tool_setup`** tool to see, for every accessible tool — `.tool` manuals and `mcp.json` servers alike — what is configured and what is still missing. Use it whenever a tool isn't working, after adding a tool, or when asked "what do I need to set up?" — then EXPLAIN the remaining steps to the user rather than guessing. Per tool it reports:
 
 - **`setup.kind`** (for MCP servers): `open` = no credentials needed; `oauth-auto` = the platform registered itself with the server automatically and users just authorize on the **Connect page**; `oauth-manual` = the provider does not support automatic registration, so a tool writer must configure it by hand (below).
 - **Per variable**: `adminConfigured` (the shared value — or, for a sign-in, the owner-side provider setup — is done), `userConfigured` / `authorized` (the CURRENT user's own value / sign-in), and `canWrite` (whether the current user may set the tool's shared config).
 
-The listing is scoped by the same access controls as everything else: a `.tool` the caller can't READ doesn't appear at all, and `canWrite` means write access **on that `.tool` file itself** — granted by its frontmatter `write:`/`owner:` verbs or the `access.md` chain, NOT by any platform role. The people who manage a `.tool` file are exactly the people who configure its shared secrets. To delegate a tool to someone, add them to the file's `write:` or `owner:` list (an edit you can make via change request); that alone lets them configure it.
+The listing is scoped by the same access controls as everything else: a tool the caller can't READ doesn't appear at all, and `canWrite` means write access **on the file that declares it** — the `.tool` file itself (via its frontmatter `write:`/`owner:` verbs or the `access.md` chain), or the plugin's `mcp.json` for an MCP server — NOT any platform role. The people who manage that file are exactly the people who configure its shared secrets. To delegate a tool to someone, add them to the file's `write:` or `owner:` list (an edit you can make via change request); that alone lets them configure it.
 
 **Agents never handle secret VALUES.** Never ask for an API key, token, or client secret in the conversation, and there is no tool to set one. Point the right person at the right surface instead:
 

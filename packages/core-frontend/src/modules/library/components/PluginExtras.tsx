@@ -4,6 +4,7 @@ import { DEFAULT_BRANCH, PLUGINS_DIR, type FileTreeEntry } from '@bevel-software
 import { Button } from '../../../shared/components';
 import { listFiles } from '../../workspace/services/workspace.api';
 import { useWorkspace } from '../../workspace/state/workspace.context';
+import { findKbRoot } from '../../workspace/utils/fileTree';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /**
@@ -94,13 +95,13 @@ export function ClientExtensionsSection({
     setListings([]);
     if (!kbDirName) return;
     if (reusableTree) {
-      setListings(namespaceListings(reusableTree, kbDirName, folder));
+      setListings(namespaceListings(reusableTree, folder));
       return;
     }
     let live = true;
     listFiles(workspaceId)
       .then((tree) => {
-        if (live) setListings(namespaceListings(tree, kbDirName, folder));
+        if (live) setListings(namespaceListings(tree, folder));
       })
       .catch(() => {
         /* the section renders nothing — a tree fetch failure is not this page's story */
@@ -147,9 +148,16 @@ export function ClientExtensionsSection({
   );
 }
 
-/** Walk the (already-loaded, ACL-filtered) tree down to this plugin's namespace dirs. */
-function namespaceListings(tree: FileTreeEntry, kbDirName: string, folder: string): NamespaceListing[] {
-  const pluginDir = descend(tree, [kbDirName, PLUGINS_DIR, folder]);
+/**
+ * Walk the (already-loaded, ACL-filtered) tree down to this plugin's namespace
+ * dirs. Through `findKbRoot`, not `[kbDirName, …]` from the literal root: the
+ * fileTree can carry workspace/KB-clone wrapper levels above the kb dir, and
+ * that helper is how the rest of the codebase reaches the well-known root
+ * dirs regardless.
+ */
+function namespaceListings(tree: FileTreeEntry, folder: string): NamespaceListing[] {
+  const kbRoot = findKbRoot(tree);
+  const pluginDir = kbRoot ? descend(kbRoot, [PLUGINS_DIR, folder]) : null;
   if (!pluginDir?.children) return [];
   const out: NamespaceListing[] = [];
   for (const child of pluginDir.children) {

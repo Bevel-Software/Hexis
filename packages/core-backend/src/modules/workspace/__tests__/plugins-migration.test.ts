@@ -310,6 +310,59 @@ describe('migrateGroupsToPlugins', () => {
     expect(result.notes.join(' ')).not.toContain('notion');
   });
 
+  it('refuses to convert an mcp .tool whose url is not directly parseable http(s)', async () => {
+    // A templated url (`${VENDOR_BASE}/mcp`) is legal in a `.tool`, where the
+    // substitutor expands it — but the mcp.json loader validates `new URL`
+    // and skips the entry, so converting would delete the source and write a
+    // dead entry: the integration would simply vanish.
+    await write('Groups/GTM/access.md', 'write:\n  - Admin\n');
+    await write(
+      'Groups/GTM/vendor.tool',
+      JSON.stringify({ name: 'vendor', type: 'mcp', url: '${VENDOR_BASE}/mcp' }),
+    );
+    await write(
+      'Groups/GTM/socket.tool',
+      JSON.stringify({ name: 'socket', type: 'mcp', url: 'wss://mcp.vendor.example/mcp' }),
+    );
+    await migrateGroupsToPlugins(repo);
+    // Both stay `.tool` files (moved with the other unconvertibles), and no
+    // mcp.json is invented for them.
+    expect(await exists('Plugins/GTM/software.bevel.hexis/tools/vendor.tool')).toBe(true);
+    expect(await exists('Plugins/GTM/software.bevel.hexis/tools/socket.tool')).toBe(true);
+    expect(await exists('Plugins/GTM/mcp.json')).toBe(false);
+  });
+
+  it('refuses to convert an mcp .tool whose url carries userinfo', async () => {
+    // `https://user:pass@…` copied into mcp.json would put a credential in
+    // the PORTABLE file — the exact thing the header split exists to prevent
+    // — and stripping it would break the server. The manual keeps its
+    // `.tool` form, where the credential stays platform-internal.
+    await write('Groups/GTM/access.md', 'write:\n  - Admin\n');
+    await write(
+      'Groups/GTM/vendor.tool',
+      JSON.stringify({ name: 'vendor', type: 'mcp', url: 'https://user:pass@mcp.vendor.example/mcp' }),
+    );
+    await migrateGroupsToPlugins(repo);
+    expect(await exists('Plugins/GTM/software.bevel.hexis/tools/vendor.tool')).toBe(true);
+    expect(await exists('Plugins/GTM/mcp.json')).toBe(false);
+  });
+
+  it('refuses to convert an mcp .tool that gates itself with frontmatter access verbs', async () => {
+    // The access resolver reads a `.tool`'s own verbs from the file itself;
+    // an mcp.json entry has no per-server home for them, so converting would
+    // silently widen who may configure and run the server.
+    await write('Groups/GTM/access.md', 'write:\n  - Admin\n');
+    await write(
+      'Groups/GTM/gated.tool',
+      '---\nname: gated\ntype: mcp\nurl: https://mcp.vendor.example/mcp\nwrite:\n  - Product Team\n---\n',
+    );
+    await migrateGroupsToPlugins(repo);
+    expect(await exists('Plugins/GTM/software.bevel.hexis/tools/gated.tool')).toBe(true);
+    expect(await exists('Plugins/GTM/mcp.json')).toBe(false);
+    // The verbs travel with the file — the moved copy still declares them.
+    expect(await read('Plugins/GTM/software.bevel.hexis/tools/gated.tool')).toContain('Product Team');
+  });
+
   it('reports a note-only run as not migrated — there is nothing to commit', async () => {
     // An unparsable manifest blocks conversion of a manual that carries
     // extension data; the refusal is a NOTE, not a file change, and saying

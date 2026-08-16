@@ -16,8 +16,17 @@ describe('skillPromptText', () => {
     });
     expect(text).toBe(
       'Do the thing.\n\n---\nSkill folder: skills/deploy\n' +
-        'Bundled files (fetch each with the get_skill tool: { name: "deploy", file }): checklist.md',
+        'Bundled files (fetch each with the get_skill tool: { name: "deploy", file }): "checklist.md"',
     );
+  });
+
+  it('quotes each file name so a comma INSIDE one cannot read as a list separator', () => {
+    const text = skillPromptText({
+      ...base,
+      name: 'deploy',
+      files: ['skills/deploy/a, b.md', 'skills/deploy/c.md'],
+    });
+    expect(text).toContain(': "a, b.md", "c.md"');
   });
 
   it('escapes a skill name containing quotes so the example call stays valid', () => {

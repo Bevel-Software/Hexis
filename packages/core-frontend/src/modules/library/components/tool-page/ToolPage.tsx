@@ -143,15 +143,21 @@ export function ToolPage({
         onError={setActionError}
       />
 
-      <McpServerSection
-        slug={tool.slug}
-        configuredCount={tool.variables.filter((v) => v.adminConfigured || v.userConfigured || v.authorized === true).length}
-        onSaved={() => {
-          setActionError(null);
-          page.reload();
-        }}
-        onError={setActionError}
-      />
+      {/* Only an mcp-type tool can have an mcp.json server pair — mounting the
+          section for inline/http manuals sends a `/server` GET whose 404 is
+          guaranteed. (A `.tool`-declared mcp manual still 404s and the section
+          self-hides on the null; the type cannot pre-decide that case.) */}
+      {tool.type === 'mcp' && (
+        <McpServerSection
+          slug={tool.slug}
+          configuredCount={tool.variables.filter((v) => v.adminConfigured || v.userConfigured || v.authorized === true).length}
+          onSaved={() => {
+            setActionError(null);
+            page.reload();
+          }}
+          onError={setActionError}
+        />
+      )}
 
       {page.detail && page.detail.capabilities.length > 0 && (
         <CapabilitiesSection capabilities={page.detail.capabilities} />

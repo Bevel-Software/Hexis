@@ -2,8 +2,10 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import AdmZip from 'adm-zip';
 import {
   expandPlaceholders,
+  extractArchive,
   prepareStdioSpec,
   readBodyCappedToFile,
   resolveCommand,
@@ -31,6 +33,46 @@ describe('expandPlaceholders', () => {
     expect(expandPlaceholders('${PLUGIN_DATA}/cache', m)).toBe(`${m.pluginData}/cache`);
     // The spec: "Unrecognized placeholder-like text MUST remain literal."
     expect(expandPlaceholders('${VENDOR_KEY}', m)).toBe('${VENDOR_KEY}');
+  });
+
+  it('never rescans replacement text — a directory whose PATH contains a token stays literal', () => {
+    const odd: MaterializedPlugin = { pluginRoot: '/odd/${PLUGIN_DATA}', pluginData: '/data' };
+    expect(expandPlaceholders('${PLUGIN_ROOT}/rules.yaml', odd)).toBe('/odd/${PLUGIN_DATA}/rules.yaml');
+  });
+});
+
+describe('extractArchive', () => {
+  const zipWith = async (name: string, entries: [string, string][]) => {
+    const zip = new AdmZip();
+    for (const [entryName, content] of entries) zip.addFile(entryName, Buffer.from(content));
+    const archive = path.join(root, name);
+    await fs.writeFile(archive, zip.toBuffer());
+    return archive;
+  };
+
+  it('counts EVERY entry against the cap, directory entries included', async () => {
+    // Two directory entries + two files = four entries; a cap of 3 must trip
+    // even though only two entries would ever be extracted.
+    const archive = await zipWith('caps.zip', [
+      ['d1/', ''],
+      ['d2/', ''],
+      ['d1/a.txt', 'a'],
+      ['d2/b.txt', 'b'],
+    ]);
+    const dest = path.join(root, 'out-refused');
+    await fs.mkdir(dest, { recursive: true });
+    await expect(extractArchive(archive, dest, 'p', 1024, 3)).rejects.toThrow(/more than 3 entries/);
+  });
+
+  it('extracts an archive that sits exactly at the cap', async () => {
+    const archive = await zipWith('fits.zip', [
+      ['d1/', ''],
+      ['d1/a.txt', 'a'],
+    ]);
+    const dest = path.join(root, 'out-fits');
+    await fs.mkdir(dest, { recursive: true });
+    await extractArchive(archive, dest, 'p', 1024, 2);
+    expect((await fs.readFile(path.join(dest, 'd1', 'a.txt'))).toString()).toBe('a');
   });
 });
 

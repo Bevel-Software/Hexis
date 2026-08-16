@@ -176,7 +176,8 @@ export async function materializePlugin(
   return { pluginRoot, pluginData };
 }
 
-async function extractArchive(
+/** Exported for direct testing; `materializePlugin` is the production caller. */
+export async function extractArchive(
   archivePath: string,
   pluginRoot: string,
   folder: string,
@@ -187,10 +188,13 @@ async function extractArchive(
   let extracted = 0;
   let count = 0;
   for (const entry of zip.getEntries()) {
-    if (entry.isDirectory) continue;
+    // EVERY entry counts against the cap, directories included — the cap
+    // bounds the archive as a whole, and a directory-heavy archive must not
+    // slip past it by being skipped before it is counted.
     if (++count > MAX_ENTRIES) {
       throw new Error(`plugin "${folder}" archive has more than ${MAX_ENTRIES} entries — refusing to materialize`);
     }
+    if (entry.isDirectory) continue;
     const abs = path.join(pluginRoot, ...entry.entryName.split('/'));
     // The archive names the paths; keep a hostile-looking one inside the root.
     if (!isWithin(pluginRoot, abs)) continue;
@@ -237,9 +241,13 @@ function isWithin(root: string, candidate: string): boolean {
  * Expansion per the spec: a single, non-recursive textual replacement of the
  * two placeholders — applied ONLY to `args` elements, `env` values and `cwd`,
  * never to `command` or `env` keys. Unrecognized `${…}` text stays literal.
+ * One pass over the input only: replacement text is never rescanned, so an
+ * expansion value that itself contains a placeholder token stays literal data.
  */
 export function expandPlaceholders(value: string, m: MaterializedPlugin): string {
-  return value.split('${PLUGIN_ROOT}').join(m.pluginRoot).split('${PLUGIN_DATA}').join(m.pluginData);
+  return value.replace(/\$\{PLUGIN_(ROOT|DATA)\}/g, (_token, which: string) =>
+    which === 'ROOT' ? m.pluginRoot : m.pluginData,
+  );
 }
 
 /**

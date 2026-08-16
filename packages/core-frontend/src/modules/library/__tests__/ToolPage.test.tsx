@@ -28,11 +28,14 @@ const secretsMock = vi.hoisted(() => ({
 }));
 vi.mock('../../secrets-vault/services/tool-secrets.api', () => secretsMock);
 
-const toolsMock = vi.hoisted(() => ({ getToolDetail: vi.fn() }));
-vi.mock('../services/tools.api', () => ({
-  getToolDetail: toolsMock.getToolDetail,
+const toolsMock = vi.hoisted(() => ({
+  getToolDetail: vi.fn(),
   // The server section self-hides on null — these frame tests are not about it.
   getMcpServer: vi.fn(async () => null),
+}));
+vi.mock('../services/tools.api', () => ({
+  getToolDetail: toolsMock.getToolDetail,
+  getMcpServer: toolsMock.getMcpServer,
   putMcpServer: vi.fn(),
 }));
 
@@ -120,6 +123,7 @@ beforeEach(() => {
   window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach');
   secretsMock.listToolSecrets.mockReset().mockResolvedValue([GITHUB]);
   toolsMock.getToolDetail.mockReset().mockResolvedValue(DETAIL);
+  toolsMock.getMcpServer.mockClear();
   libraryMock.listSkills.mockReset().mockResolvedValue([]);
   libraryMock.getSkill.mockReset().mockResolvedValue({ allowedTools: [] });
 });
@@ -280,6 +284,26 @@ describe('ToolPage: connection', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Forbidden');
+  });
+});
+
+describe('ToolPage: server section', () => {
+  /**
+   * Only an mcp-type tool can have an mcp.json server pair — mounting the
+   * section for the others would send a `/server` GET whose 404 is guaranteed,
+   * once per page view.
+   */
+  it('never asks for a server pair on a non-mcp tool', async () => {
+    renderPage(); // the fixture is `type: 'inline'`
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    expect(toolsMock.getMcpServer).not.toHaveBeenCalled();
+  });
+
+  it('still asks on an mcp tool, where the pair can exist', async () => {
+    secretsMock.listToolSecrets.mockResolvedValue([{ ...GITHUB, type: 'mcp' }]);
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    await waitFor(() => expect(toolsMock.getMcpServer).toHaveBeenCalledWith('heyreach'));
   });
 });
 

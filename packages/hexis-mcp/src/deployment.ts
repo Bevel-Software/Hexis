@@ -25,9 +25,16 @@ async function getJson(
     );
   }
   if (res.status === 401 || res.status === 403) {
+    // Only a request that actually carried the key can blame the key: the
+    // config endpoint is unauthenticated, so its 401/403 is something else
+    // (an SSO gate, a proxy) answering in the deployment's place.
+    const authed = 'Authorization' in ((init.headers ?? {}) as Record<string, unknown>);
     throw new DeploymentError(
-      `The connection key was rejected by ${init.label} (HTTP ${res.status}). ` +
-        'Mint a fresh one from the profile menu → External agent access.',
+      authed
+        ? `The connection key was rejected by ${init.label} (HTTP ${res.status}). ` +
+            'Mint a fresh one from the profile menu → External agent access.'
+        : `${init.label} refused access (HTTP ${res.status}) to a request that carries no credentials — ` +
+            'an SSO gate or proxy may be intercepting the deployment. Check that --url points at the workspace itself.',
     );
   }
   if (!res.ok) {

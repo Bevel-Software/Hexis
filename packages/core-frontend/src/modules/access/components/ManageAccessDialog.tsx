@@ -614,9 +614,10 @@ export function ManageAccessDialog({
     return { folders, external };
   }, [inheritedRows]);
 
-  /** Which folder plugin is expanded, or `'roles'`, or null. One at a time —
-   *  as in the prototype, where `state.accOpen` holds a single value. */
-  const [openPlugin, setOpenPlugin] = useState<string | null>(null);
+  /** Which inherited-access section is expanded — a granting folder's path, or
+   *  `'roles'`, or null. One at a time — as in the prototype, where
+   *  `state.accOpen` holds a single value. */
+  const [openSection, setOpenSection] = useState<string | null>(null);
 
   const governed = repoRelative !== null;
   // The dialog can mutate only if the current user can write this path's access
@@ -1337,14 +1338,14 @@ export function ManageAccessDialog({
             {inheritedRows.length > 0 && (
               <div className="mt-3 border-t border-line pt-2">
                 {inheritedByFolder.folders.map(([ancestor, rows]) => {
-                  const open = openPlugin === ancestor;
+                  const open = openSection === ancestor;
                   return (
                     <div key={ancestor}>
                       <button
                         type="button"
                         aria-expanded={open}
                         title={folderPath(ancestor)}
-                        onClick={() => setOpenPlugin(open ? null : ancestor)}
+                        onClick={() => setOpenSection(open ? null : ancestor)}
                         className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
                       >
                         <ChevronDown
@@ -1394,25 +1395,25 @@ export function ManageAccessDialog({
 
                 {/* A role that grants at the workspace level belongs to no
                     folder, so it cannot be filed under one. Named for what it
-                    is rather than swept into the folder plugins. */}
+                    is rather than swept into the folder sections. */}
                 {inheritedByFolder.external.length > 0 && (
                   <div>
                     <button
                       type="button"
-                      aria-expanded={openPlugin === 'roles'}
-                      onClick={() => setOpenPlugin(openPlugin === 'roles' ? null : 'roles')}
+                      aria-expanded={openSection === 'roles'}
+                      onClick={() => setOpenSection(openSection === 'roles' ? null : 'roles')}
                       className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
                     >
                       <ChevronDown
                         size={14}
-                        className={`shrink-0 transition-transform ${openPlugin === 'roles' ? 'rotate-180' : '-rotate-90'}`}
+                        className={`shrink-0 transition-transform ${openSection === 'roles' ? 'rotate-180' : '-rotate-90'}`}
                       />
                       <span className="min-w-0 truncate">People with access through a role</span>
                       <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
                         {inheritedByFolder.external.length}
                       </span>
                     </button>
-                    {openPlugin === 'roles' && (
+                    {openSection === 'roles' && (
                       <div className="mb-1">{inheritedByFolder.external.map(renderRow)}</div>
                     )}
                   </div>

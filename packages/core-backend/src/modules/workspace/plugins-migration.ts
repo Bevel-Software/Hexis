@@ -13,6 +13,7 @@ import {
 } from '@bevel-software/platform-shared';
 import type { ToolManualDescriptor } from '../tool-manuals/tool-manuals.contract.js';
 import { normalizeToolManual } from '../tool-manuals/tool-manuals.service.js';
+import { parseOwnAccessEntries } from '../access/access-control.service.js';
 import { containsVariableReference } from '../../shared/variable-refs.js';
 import { IGNORE_FILENAME } from './bevel-ignore.js';
 
@@ -262,7 +263,29 @@ async function asMcpManual(abs: string, repoRel: string): Promise<ToolManualDesc
     // a working integration and write an entry discovery then skips. Such a
     // manual stays a `.tool`.
     if (d.type !== 'mcp' || !d.url) return null;
-    return /^[a-z0-9][a-z0-9_-]*$/.test(d.name) ? d : null;
+    if (!/^[a-z0-9][a-z0-9_-]*$/.test(d.name)) return null;
+    // Same refusal for the url: the mcp.json loader accepts only a directly
+    // parseable http(s) url, so a templated one (`${BASE}/mcp` — legal in a
+    // `.tool`, where the substitutor expands it) would convert into an entry
+    // discovery then skips, with the source already deleted. And a parseable
+    // url carrying `user:pass@` may not land in the PORTABLE file at all —
+    // stripping it would break the server, so the manual keeps its `.tool`
+    // form, where the credential stays platform-internal.
+    let url: URL;
+    try {
+      url = new URL(d.url);
+    } catch {
+      return null;
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    if (url.username || url.password) return null;
+    // A `.tool` can gate ITSELF with frontmatter access verbs, read by the
+    // access resolver from the file's own path. An mcp.json entry has no
+    // per-server home for those — the file's ACL governs every server in it —
+    // so converting would silently widen who may configure and run the
+    // server. Such a manual stays a `.tool`, verbs and all.
+    if (parseOwnAccessEntries(content) !== null) return null;
+    return d;
   } catch {
     return null;
   }

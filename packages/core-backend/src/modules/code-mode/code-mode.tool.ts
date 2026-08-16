@@ -103,15 +103,29 @@ export function createToolsInfoTool(client: CodeModeUtcpClient) {
     execute: async (input) => {
       const interfaces: string[] = [];
       const notFound: string[] = [];
+      const errors: string[] = [];
       for (const name of input.tool_names) {
-        const found = await findToolByName(client, name);
-        if (found) {
-          interfaces.push(client.toolToTypeScriptInterface(found.tool));
-        } else {
-          notFound.push(name);
+        // Per-name, not per-call: `findToolByName` THROWS on an ambiguous
+        // sanitized name (two UTCP tools collapsing to one TS name), and one
+        // ambiguous entry aborting the whole batch would cost the agent every
+        // other answer in it. The error text says how to disambiguate, so it
+        // is the per-name answer, not a failure of the tool.
+        try {
+          const found = await findToolByName(client, name);
+          if (found) {
+            interfaces.push(client.toolToTypeScriptInterface(found.tool));
+          } else {
+            notFound.push(name);
+          }
+        } catch (err) {
+          errors.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      return { interfaces: interfaces.join('\n\n'), not_found: notFound };
+      return {
+        interfaces: interfaces.join('\n\n'),
+        not_found: notFound,
+        ...(errors.length > 0 ? { errors } : {}),
+      };
     },
   });
 }

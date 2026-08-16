@@ -25,6 +25,24 @@ import { canDeepLink, claudeInstallUrl, connectorName } from './connect-snippets
  * `PUBLIC_BACKEND_URL` is noise — they just get the copy-paste URL, which
  * works regardless.
  */
+/**
+ * The address with any userinfo removed, for rendering. `configureMcpUrl`
+ * strips credentials at the boot boundary, but this component is exported and
+ * takes `mcpUrl` as a prop — a caller that bypasses that door must not get a
+ * password printed into the hint. An unparseable value passes through: it is
+ * not a URL, so it has no userinfo component to strip.
+ */
+function withoutCredentials(mcpUrl: string): string {
+  try {
+    const parsed = new URL(mcpUrl);
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    return mcpUrl;
+  }
+}
+
 export function ClaudeInstallLink({
   mcpUrl,
   showHint = false,
@@ -47,7 +65,7 @@ export function ClaudeInstallLink({
          new copy goes on-scale even when it sits beside copy that is not. */
       <p className={cn('text-meta text-ink-muted leading-snug', className)}>
         One-click connect is off because this deployment&rsquo;s public address is{' '}
-        <code className="font-mono">{mcpUrl}</code>, which Claude cannot reach from the
+        <code className="font-mono">{withoutCredentials(mcpUrl)}</code>, which Claude cannot reach from the
         internet. Set <code className="font-mono">PUBLIC_BACKEND_URL</code> to the https
         address people actually use to turn it on. The URL below works either way.
       </p>

@@ -267,6 +267,45 @@ describe('putServer', () => {
     expect(commits.runPendingCommit).not.toHaveBeenCalled();
   });
 
+  it('422s a malformed variables declaration instead of persisting a server discovery will drop', async () => {
+    // Discovery's own validator, at save time: each of these shapes would
+    // save fine and then make the whole server vanish from the catalog on
+    // the next scan.
+    const bad: unknown[] = [
+      [{ name: 'bad name!', scope: 'user' }], // name outside [A-Za-z0-9_]+
+      [{ name: 'API_URL', scope: 'admin' }], // platform-seeded name re-declared
+      [{ name: 'K', scope: 'user' }, { name: 'K', scope: 'admin' }], // duplicate
+      [{ name: 'K', scope: 'team' }], // unknown scope
+      [
+        {
+          name: 'K',
+          scope: 'admin', // oauth demands per-caller scope
+          oauth: { authorizationUrl: 'https://v.example/auth', tokenUrl: 'https://v.example/token', clientId: 'c' },
+        },
+      ],
+      [
+        {
+          name: 'K',
+          scope: 'user', // whitespace-only clientId — same rule as discovery
+          oauth: { authorizationUrl: 'https://v.example/auth', tokenUrl: 'https://v.example/token', clientId: '   ' },
+        },
+      ],
+    ];
+    const before = await readJson('Plugins/GTM/plugin.json');
+    for (const variables of bad) {
+      await expect(
+        svc.putServer(USER, 'vendor', {
+          transport: 'streamable-http',
+          url: 'https://v.example/mcp',
+          variables: variables as never,
+        }),
+      ).rejects.toMatchObject({ status: 422 });
+    }
+    // Nothing landed: no commit, no file change.
+    expect(commits.runPendingCommit).not.toHaveBeenCalled();
+    expect(await readJson('Plugins/GTM/plugin.json')).toEqual(before);
+  });
+
   it('writes a stdio entry with command/args and no url', async () => {
     await svc.putServer(USER, 'vendor', {
       transport: 'stdio',

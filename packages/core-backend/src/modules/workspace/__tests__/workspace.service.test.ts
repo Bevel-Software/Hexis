@@ -460,6 +460,76 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
   });
 });
 
+describe('WorkspaceService — scaffolding top-up on restart-survivor clones', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    // The fake `.git` in seedBranchWorkspace makes normalizeCloneTracking's
+    // git calls fail; that path only warns, which is noise here.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  // The top-up MOVES files (the Groups→Plugins migration runs inside it), so a
+  // caller handed the workspace mid-run reads a tree with both halves missing.
+  it('makes a concurrent opener wait out the in-flight top-up instead of returning mid-migration', async () => {
+    await seedBranchWorkspace(root, 'target-company-state');
+    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const seed = {
+      ensureRemoteSeeded: vi.fn(async () => {}),
+      topUpWorkspace: vi.fn(() => gate),
+    };
+    svc.setSeedService(seed);
+
+    let aDone = false;
+    let bDone = false;
+    const a = svc.getOrCreateForBranch('target-company-state').then((v) => { aDone = true; return v; });
+    const b = svc.getOrCreateForBranch('target-company-state').then((v) => { bDone = true; return v; });
+    // Wait until the top-up has started (the fake clone makes the preceding
+    // git-config repair fail slowly, so poll rather than sleep), then give
+    // both callers time to settle against the gate.
+    await vi.waitFor(() => expect(seed.topUpWorkspace).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 30));
+    // Neither caller has been handed the workspace while the top-up runs —
+    // and the second did not start a rival run.
+    expect(aDone).toBe(false);
+    expect(bDone).toBe(false);
+    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(1);
+
+    release();
+    const [infoA, infoB] = await Promise.all([a, b]);
+    expect(infoA.id).toBe(infoB.id);
+  });
+
+  it('re-offers the top-up after deleteWorkspace — the claim died with the clone', async () => {
+    await seedBranchWorkspace(root, 'target-company-state');
+    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    const seed = {
+      ensureRemoteSeeded: vi.fn(async () => {}),
+      topUpWorkspace: vi.fn(async () => {}),
+    };
+    svc.setSeedService(seed);
+
+    await svc.getOrCreateForBranch('target-company-state');
+    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(1);
+
+    await svc.deleteWorkspace(workspaceIdForBranch('target-company-state'));
+    // A later bootstrap re-creates the clone (seeded by hand here); it must
+    // be offered the top-up afresh — the old claim was about a clone that no
+    // longer exists.
+    await seedBranchWorkspace(root, 'target-company-state');
+    await svc.getOrCreateForBranch('target-company-state');
+    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('WorkspaceService.readAllKbFiles', () => {
   let root: string;
   let svc: WorkspaceService;

@@ -101,6 +101,7 @@ Options
   -u, --url    Workspace base URL (or HEXIS_URL)
   -k, --key    Connection key from External agent access (or HEXIS_CONNECTION_KEY)
   -h, --help   Show this message
+  -v, --version  Print the version
 
 Every tool the hosted endpoint serves is available, plus the local-only tools it
 cannot reach. Credentials for local-only tools come from this process's

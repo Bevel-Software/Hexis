@@ -281,8 +281,9 @@ export interface IAccessControl {
 
   /**
    * Enumerate the grantable principals known to the KB, for the share-dialog
-   * autocomplete. `plugins` are the declared `roles.yaml` role display names
-   * (the built-in `everyone` is excluded — it isn't grantable from the UI).
+   * autocomplete. `plugins` are the built-in `everyone` role plus the declared
+   * `roles.yaml` role display names (`everyone` is surfaced so the UI can
+   * grant public read; the grant route gates it to the `read` verb only).
    * `people` are every email named in `roles.yaml` (name defaults to the local
    * part) unioned with every `Name <email>` grant in any `access.md` (named).
    * The login-only `users` table is unioned in by the caller — this method

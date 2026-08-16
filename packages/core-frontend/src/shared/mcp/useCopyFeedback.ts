@@ -12,12 +12,16 @@ import { useCallback, useEffect, useState } from 'react';
  * lints as `react-refresh/only-export-components`.
  */
 export function useCopyFeedback(): { copied: boolean; copy: (text: string) => void } {
-  const [copied, setCopied] = useState(false);
+  // A counter, not a boolean: `setState(true)` on an already-true boolean
+  // bails out of the render, so a second copy inside the 1500ms window would
+  // never restart the timer and its checkmark would vanish almost at once.
+  // Each success bumps the counter, which re-arms the effect below.
+  const [copyCount, setCopyCount] = useState(0);
   useEffect(() => {
-    if (!copied) return;
-    const timerId = window.setTimeout(() => setCopied(false), 1500);
+    if (copyCount === 0) return;
+    const timerId = window.setTimeout(() => setCopyCount(0), 1500);
     return () => window.clearTimeout(timerId);
-  }, [copied]);
+  }, [copyCount]);
   const copy = useCallback((text: string) => {
     /**
      * `navigator.clipboard` is absent in an insecure context — which this app
@@ -27,16 +31,16 @@ export function useCopyFeedback(): { copied: boolean; copy: (text: string) => vo
      * the click errors instead of failing quietly.
      */
     if (!navigator.clipboard?.writeText) {
-      setCopied(false);
+      setCopyCount(0);
       return;
     }
     void navigator.clipboard
       .writeText(text)
-      .then(() => setCopied(true))
+      .then(() => setCopyCount((n) => n + 1))
       // Clear rather than ignore: a failure inside the 1500ms window of an
       // earlier success would otherwise leave the checkmark up, reporting that
       // this copy worked when it did not.
-      .catch(() => setCopied(false));
+      .catch(() => setCopyCount(0));
   }, []);
-  return { copied, copy };
+  return { copied: copyCount > 0, copy };
 }

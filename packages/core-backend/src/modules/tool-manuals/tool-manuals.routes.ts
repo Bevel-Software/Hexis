@@ -104,7 +104,13 @@ export function createToolManualsAgentRoutes(
       // guards, no read-time re-resolution — complexity that existed only to
       // support what the platform has no use for. Starting with the plugin
       // folder itself: a symlinked `Plugins/<folder>` is not a plugin.
-      const folderStat = await fs.lstat(pluginDir).catch(() => null);
+      // Only ENOENT is an absence; an EACCES/EIO answered with 404 would
+      // dress a real read problem up as a missing plugin (the same contract
+      // as the realpath/open probes below).
+      const folderStat = await fs.lstat(pluginDir).catch((err: NodeJS.ErrnoException) => {
+        if (err.code === 'ENOENT') return null;
+        throw err;
+      });
       if (folderStat === null || !folderStat.isDirectory()) {
         return void res.status(404).json({ error: 'Not found' });
       }

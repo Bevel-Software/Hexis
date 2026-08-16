@@ -163,8 +163,16 @@ export async function createCoreServer(
    * carried the two-places version of this bug for a long time — six inline
    * sites each rebuilding the address, held together by a docstring asserting
    * they could not diverge — and a comment is not a mechanism.
+   *
+   * Userinfo is STRIPPED: a `PUBLIC_BACKEND_URL` spelled with `user:pass@`
+   * (a basic-auth proxy in front of the deployment, say) would otherwise be
+   * republished verbatim by the unauthenticated `/api/config` below — a
+   * credential handed to any caller. The address is ours to publish; the
+   * credential never was.
    */
   const mcpResourceUrl = new URL('/api/mcp', core.config.publicBackendUrl);
+  mcpResourceUrl.username = '';
+  mcpResourceUrl.password = '';
 
   /**
    * The handful of facts the browser needs BEFORE it can render anything, and

@@ -105,6 +105,23 @@ describe('PluginProvisionService.createPlugin', () => {
     await expect(h.svc.createPlugin(USER, 'gtm')).rejects.toMatchObject({ status: 409 });
   });
 
+  it('refuses a name whose manifest slug is already claimed by another folder with 409', async () => {
+    // The manifest `name` is a LOSSY slug of the folder — `Sales Team` and
+    // `Sales-Team` both become `sales-team` — and it is the identity a
+    // conformant client keys plugins on. Folder uniqueness alone would let
+    // two plugins publish one name.
+    await h.svc.createPlugin(USER, 'Sales Team');
+    await expect(h.svc.createPlugin(USER, 'Sales-Team')).rejects.toMatchObject({ status: 409 });
+    await expect(h.svc.createPlugin(USER, 'Sales_Team')).rejects.toMatchObject({ status: 409 });
+    // Only the first folder landed.
+    expect(await fs.readdir(path.join(h.dir, KB, 'Plugins'))).toEqual(['Sales Team']);
+    // A genuinely distinct slug still goes through.
+    await expect(h.svc.createPlugin(USER, 'Sales Ops')).resolves.toEqual({
+      folder: 'Sales Ops',
+      created: true,
+    });
+  });
+
   it('refuses names the filesystem or the model cannot carry with 422', async () => {
     for (const bad of ['', '  ', 'a/b', 'a\\b', '.', '..', '.hidden', 'personal-anything', 'a\u0000b', 'a\tb']) {
       await expect(h.svc.createPlugin(USER, bad)).rejects.toBeInstanceOf(PluginProvisionError);

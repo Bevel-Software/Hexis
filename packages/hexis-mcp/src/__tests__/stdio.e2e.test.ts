@@ -222,40 +222,49 @@ describe('stdio end-to-end', () => {
     // A hand-built plugin dir: refusal happens before any spawn, and
     // re-materializing GTM would race the previous test's teardown.
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hexis-e2e-orphan-'));
-    const plugin = { pluginRoot: path.join(dir, 'root'), pluginData: path.join(dir, 'data') };
-    await fs.mkdir(plugin.pluginRoot, { recursive: true });
-    await fs.mkdir(plugin.pluginData, { recursive: true });
-    const spec = await prepareStdioSpec(
-      { command: 'node', args: ['${PLUGIN_ROOT}/bin/server.cjs'], env: { KEY: '${ABSENT}' } },
-      plugin,
-    );
-    const bare = await CodeModeUtcpClient.create(
-      process.cwd(),
-      new UtcpClientConfigSerializer().validateDict({ variables: {} }),
-    );
     try {
-      const result = await registerManual(
-        bare,
-        new CallTemplateSerializer().validateDict({
-          name: 'orphan',
-          call_template_type: 'mcp',
-          config: { mcpServers: { probe: { transport: 'stdio', ...spec } } },
-        }),
+      const plugin = { pluginRoot: path.join(dir, 'root'), pluginData: path.join(dir, 'data') };
+      await fs.mkdir(plugin.pluginRoot, { recursive: true });
+      await fs.mkdir(plugin.pluginData, { recursive: true });
+      const spec = await prepareStdioSpec(
+        { command: 'node', args: ['${PLUGIN_ROOT}/bin/server.cjs'], env: { KEY: '${ABSENT}' } },
+        plugin,
       );
-      expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.error).toContain('orphan_ABSENT');
+      const bare = await CodeModeUtcpClient.create(
+        process.cwd(),
+        new UtcpClientConfigSerializer().validateDict({ variables: {} }),
+      );
+      try {
+        const result = await registerManual(
+          bare,
+          new CallTemplateSerializer().validateDict({
+            name: 'orphan',
+            call_template_type: 'mcp',
+            config: { mcpServers: { probe: { transport: 'stdio', ...spec } } },
+          }),
+        );
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error).toContain('orphan_ABSENT');
+      } finally {
+        await bare.close().catch(() => {});
+      }
     } finally {
-      await bare.close().catch(() => {});
+      // Per-test dirs get per-test cleanup — the shared afterAll only owns `home`.
+      await fs.rm(dir, { recursive: true, force: true });
     }
   });
 
   it('refuses an escaping cwd within the same composed flow', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hexis-e2e-escape-'));
-    const plugin = { pluginRoot: path.join(dir, 'root'), pluginData: path.join(dir, 'data') };
-    await fs.mkdir(plugin.pluginRoot, { recursive: true });
-    await fs.mkdir(plugin.pluginData, { recursive: true });
-    await expect(
-      prepareStdioSpec({ command: 'node', args: [], cwd: '../../outside' }, plugin),
-    ).rejects.toThrow(/escapes the plugin root|does not exist/);
+    try {
+      const plugin = { pluginRoot: path.join(dir, 'root'), pluginData: path.join(dir, 'data') };
+      await fs.mkdir(plugin.pluginRoot, { recursive: true });
+      await fs.mkdir(plugin.pluginData, { recursive: true });
+      await expect(
+        prepareStdioSpec({ command: 'node', args: [], cwd: '../../outside' }, plugin),
+      ).rejects.toThrow(/escapes the plugin root|does not exist/);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });

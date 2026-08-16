@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { toCallToolResult, renderProgress } from '../results.js';
+import { describeToolFailure, toCallToolResult, renderProgress } from '../results.js';
+
+describe('describeToolFailure', () => {
+  it('pulls the REST error body out of an axios-shaped failure', () => {
+    expect(describeToolFailure({ response: { data: { error: 'no such branch' } } })).toBe('no such branch');
+  });
+
+  it('never throws on a thrown value whose own toString throws', () => {
+    // A null-prototype object has no toString; String() on it throws — and a
+    // describe that throws inside a catch path turns a tool failure into a
+    // handler failure.
+    expect(describeToolFailure(Object.create(null))).toBe('(indescribable tool failure)');
+  });
+});
 
 describe('toCallToolResult', () => {
   it('passes an MCP-shaped result through untouched', () => {

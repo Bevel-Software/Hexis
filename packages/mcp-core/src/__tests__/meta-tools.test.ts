@@ -56,6 +56,27 @@ describe('dispatchMetaTool call_tool_chain', () => {
     await dispatchMetaTool(client, 'call_tool_chain', { code: 'return 1', timeout: 5000.9 });
     expect(callToolChain).toHaveBeenCalledWith('return 1', 5_000);
   });
+
+  it('refuses a missing or non-string code instead of executing an empty program', async () => {
+    const { client, callToolChain } = clientWith([]);
+    for (const args of [{}, { code: 42 }, { code: '' }]) {
+      const result = await dispatchMetaTool(client, 'call_tool_chain', args as Record<string, unknown>);
+      expect(result.isError).toBe(true);
+      expect(resultText(result)).toMatch(/"code"/);
+    }
+    expect(callToolChain).not.toHaveBeenCalled();
+  });
+
+  it('reports result_bytes in UTF-8 bytes on the no-spill truncation path — parity with the spill store', async () => {
+    const { client, callToolChain } = clientWith([]);
+    const value = 'é'.repeat(1200); // 2 UTF-8 bytes per char
+    callToolChain.mockResolvedValueOnce({ result: value, logs: [] });
+    const res = await dispatchMetaTool(client, 'call_tool_chain', { code: 'return 1', max_output_size: 1000 });
+    const payload = JSON.parse(resultText(res)) as { truncated: boolean; result_bytes: number };
+    const fullJson = JSON.stringify({ result: value, logs: [] }, null, 2);
+    expect(payload.truncated).toBe(true);
+    expect(payload.result_bytes).toBe(fullJson.length + 1200);
+  });
 });
 
 describe('dispatchMetaTool tools_info', () => {
@@ -75,5 +96,15 @@ describe('dispatchMetaTool tools_info', () => {
     const result = await dispatchMetaTool(client, 'tools_info', { tool_names: ['m.read_file'] });
     expect(result.isError).toBe(true);
     expect(resultText(result)).toMatch(/ambiguous.*"m\.read-file".*"m\.read\.file"/);
+  });
+
+  it('refuses a missing tool_names array or non-string entries with a named validation error', async () => {
+    const { client, getTool } = clientWith([]);
+    for (const args of [{}, { tool_names: 'm.read_file' }, { tool_names: ['ok', 42] }]) {
+      const result = await dispatchMetaTool(client, 'tools_info', args as Record<string, unknown>);
+      expect(result.isError).toBe(true);
+      expect(resultText(result)).toMatch(/tool_names/);
+    }
+    expect(getTool).not.toHaveBeenCalled();
   });
 });

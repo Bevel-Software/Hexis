@@ -386,6 +386,24 @@ describe('snippets: one builder per client, keyed or not', () => {
     });
   });
 
+  /**
+   * The command interpolates the key inside double quotes, where the shell
+   * still reads `"`, `$`, backtick and backslash. A key carrying one of them
+   * must not cut the pasted command short or expand into it.
+   */
+  it('escapes shell metacharacters in the key for the Claude Code command', () => {
+    expect(claudeCodeCommand(URL_UNDER_TEST, 'a"b$c`d\\e')).toBe(
+      `claude mcp add --transport http knowledge-base ${URL_UNDER_TEST} --header "Authorization: Bearer a\\"b\\$c\\\`d\\\\e"`,
+    );
+  });
+
+  // JSON is not a shell: the key goes through JSON.stringify untouched, and
+  // the client reading the file gets the exact bytes back.
+  it('does not shell-escape the key in the JSON config', () => {
+    const parsed = JSON.parse(jsonConfigSnippet(URL_UNDER_TEST, 'a"b$c'));
+    expect(parsed.mcpServers['knowledge-base'].headers.Authorization).toBe('Bearer a"b$c');
+  });
+
   it('spells the Langdock fields out separately', () => {
     expect(langdockSnippet(URL_UNDER_TEST, KEY)).toBe(
       `URL: ${URL_UNDER_TEST}\nHeader name: Authorization\nHeader value: Bearer ${KEY}`,

@@ -9,8 +9,8 @@ export type LinkableItem = AdminMenuItem & { path: string };
 /**
  * `rail` is the sidebar column; `strip` is the horizontal row it becomes below
  * the `md` breakpoint. The rows are identical in both — only the axis and the
- * section label change, because a label that introduces a plugin beneath it is
- * a vertical-list device and reads as noise inline.
+ * section label change, because a label that introduces a group of rows
+ * beneath it is a vertical-list device and reads as noise inline.
  */
 export type SettingsNavOrientation = 'rail' | 'strip';
 

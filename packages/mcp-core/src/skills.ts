@@ -25,8 +25,10 @@ export function skillPromptText(skill: LoadedSkill): string {
   const rel = skill.files.map((f) =>
     f.startsWith(`${skill.path}/`) ? f.slice(skill.path.length + 1) : f,
   );
+  // Each name is quoted: a comma inside a file name must not read as a list
+  // separator, and the quoted form is exactly the `file` value get_skill takes.
   const footer = rel.length
-    ? `\n\n---\nSkill folder: ${skill.path}\nBundled files (fetch each with the get_skill tool: { name: ${JSON.stringify(skill.name)}, file }): ${rel.join(', ')}`
+    ? `\n\n---\nSkill folder: ${skill.path}\nBundled files (fetch each with the get_skill tool: { name: ${JSON.stringify(skill.name)}, file }): ${rel.map((f) => JSON.stringify(f)).join(', ')}`
     : '';
   return `${skill.body}${footer}`;
 }

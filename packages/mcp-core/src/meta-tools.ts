@@ -69,6 +69,20 @@ export const META_TOOL_NAMES: ReadonlySet<string> = new Set(CODE_MODE_META_TOOLS
 export const CALL_TOOL_CHAIN_MAX_OUTPUT = 200_000;
 
 /**
+ * UTF-8 byte length without Node's `Buffer` — this module stays free of
+ * runtime-specific globals. Matches `Buffer.byteLength`: a lone surrogate
+ * encodes as the 3-byte replacement character.
+ */
+function utf8ByteLength(s: string): number {
+  let bytes = 0;
+  for (const ch of s) {
+    const cp = ch.codePointAt(0)!;
+    bytes += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+  }
+  return bytes;
+}
+
+/**
  * Where an oversized `call_tool_chain` payload goes. The hosted proxy hands in
  * the shared workspace spill store, whose refs `read_file` can read back. A
  * surface with nowhere to put it (the local server has no server-side store of
@@ -97,7 +111,14 @@ export async function dispatchMetaTool(
       return toCallToolResult({ tools: tools.map((t) => utcpNameToTsInterfaceName(t.name)) });
     }
     if (name === 'tools_info') {
-      const names = Array.isArray(args.tool_names) ? (args.tool_names as string[]) : [];
+      // The schema is advisory over a raw JSON-RPC call: a missing array or a
+      // non-string entry must be a named validation error here, not a generic
+      // failure out of a repository lookup it was never valid input for.
+      const rawNames = args.tool_names;
+      if (!Array.isArray(rawNames) || rawNames.some((n) => typeof n !== 'string')) {
+        return toolError('The "tools_info" tool requires "tool_names": an array of tool name strings.');
+      }
+      const names = rawNames as string[];
       const interfaces: string[] = [];
       const notFound: string[] = [];
       const resolved = await findToolsByNames(client, names);
@@ -109,7 +130,12 @@ export async function dispatchMetaTool(
       return toCallToolResult({ interfaces: interfaces.join('\n\n'), not_found: notFound });
     }
     // call_tool_chain
-    const code = typeof args.code === 'string' ? args.code : '';
+    // Same advisory-schema rule as above: a missing or non-string `code` must
+    // not silently execute an empty program and report success.
+    const code = args.code;
+    if (typeof code !== 'string' || code.length === 0) {
+      return toolError('The "call_tool_chain" tool requires a non-empty "code" string.');
+    }
     // Clamp both knobs to their schema bounds — the schema is advisory over a
     // raw JSON-RPC call, and an unclamped `timeout` would let one chain hold
     // the isolate far past the documented 120s cap.
@@ -135,7 +161,9 @@ export async function dispatchMetaTool(
       return toCallToolResult({
         success: true,
         truncated: true,
-        result_bytes: fullJson.length,
+        // Bytes, not chars: the spill branch reports the store's byte count,
+        // and `result_bytes` must mean one thing across both paths.
+        result_bytes: utf8ByteLength(fullJson),
         message:
           `Result+logs payload was ${fullJson.length} characters (exceeded max_output_size of ${maxOutputSize}), ` +
           'and this server has no spill store to park it in. Re-run a narrower chain that returns only what you ' +

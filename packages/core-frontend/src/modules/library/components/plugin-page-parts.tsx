@@ -134,17 +134,21 @@ export function CardGrid({
         // and until one of them merges neither is in the catalog to collide
         // with — so the name alone is not yet unique.
         const key = `${item.kind}:${item.id}:${item.pending?.changeRequestNumber ?? ''}`;
+        // The flavor badge names the DECLARATION file — which file an owner
+        // edits — not the transport: a `.tool` manual whose call template is
+        // `type: mcp` still edits as a UTCP manual, so the path suffix is the
+        // authoritative signal, not the tool's `type` metadata.
+        const kindProps =
+          item.kind === 'integration'
+            ? ({
+                kind: 'integration',
+                flavor: item.path.endsWith('/mcp.json') ? 'mcp' : 'utcp',
+              } as const)
+            : ({ kind: 'skill' } as const);
         const card = (
           <LibraryCard
             key={key}
-            kind={item.kind}
-            flavor={
-              item.kind === 'integration'
-                ? item.path.endsWith('/mcp.json')
-                  ? 'mcp'
-                  : 'utcp'
-                : undefined
-            }
+            {...kindProps}
             id={item.id}
             name={item.name}
             description={item.description}
