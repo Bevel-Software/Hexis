@@ -82,11 +82,12 @@ export class PluginProvisionError extends Error {
 
 export class PluginProvisionService {
   /**
-   * Serialises creations by NORMALIZED (lowercased) folder name. The wx write
-   * arbitrates same-path races, but on a case-sensitive filesystem `GTM` and
-   * `gtm` are different paths — without this lock two concurrent requests
-   * could both pass the collision check and both land, breaking the
-   * case-insensitive uniqueness the check promises.
+   * Serialises creations and deletions by MANIFEST SLUG
+   * (`pluginManifestName(name)`). The wx write arbitrates same-path races,
+   * but the identity the collision checks defend is the slug: case-variants
+   * (`GTM`/`gtm`) and distinct spellings (`Sales Team`/`Sales-Team`) all
+   * derive the same key, so no two requests that would publish one manifest
+   * name can hold the lock at once.
    */
   private readonly creations = new WorkspaceMutex();
 
@@ -116,9 +117,11 @@ export class PluginProvisionService {
         422,
       );
     }
-    if (name.toLowerCase().startsWith(PERSONAL_PLUGIN_PREFIX)) {
-      // Reserved: the personal-folder namespace. A plugin squatting there
-      // would collide with somebody's future personal folder.
+    // Reserved BY SLUG, which subsumes the folder-name spelling: personal
+    // folders publish manifests like any plugin, so "Personal Abc" (slug
+    // `personal-abc`) squats the namespace exactly as "personal-abc" would —
+    // a name-only check let it through.
+    if (pluginManifestName(name).startsWith(PERSONAL_PLUGIN_PREFIX)) {
       throw new PluginProvisionError(
         `Plugin names starting with "${PERSONAL_PLUGIN_PREFIX}" are reserved.`,
         422,
@@ -282,17 +285,15 @@ export class PluginProvisionService {
     }
     const slug = pluginManifestName(name);
     // Only what actually publishes a manifest claims a slug: a DIRECTORY
-    // that is neither dot-prefixed (a parked delete — invisible to every
-    // scanner) nor personal (never listed, never manifested). A loose file
-    // at the root (`Plugins/slack.tool`) is not a plugin and must not
-    // 409 a legitimate "Slack Tool".
+    // that is not dot-prefixed (a parked delete — invisible to every
+    // scanner). Personal folders count — they publish a plugin.json like
+    // any plugin (though the reservation above means a named plugin can
+    // never reach this check with a personal slug). A loose file at the
+    // root (`Plugins/slack.tool`) is not a plugin and must not 409 a
+    // legitimate "Slack Tool".
     return (
       children.find(
-        (c) =>
-          c.isDirectory() &&
-          !c.name.startsWith('.') &&
-          !isPersonalPluginFolder(c.name) &&
-          pluginManifestName(c.name) === slug,
+        (c) => c.isDirectory() && !c.name.startsWith('.') && pluginManifestName(c.name) === slug,
       )?.name ?? null
     );
   }

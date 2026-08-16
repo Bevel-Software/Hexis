@@ -16,7 +16,9 @@ vi.mock('../code-mode-names.js', async (importOriginal) => {
     ...actual,
     findToolByName: vi.fn(async (_client: unknown, name: string) => {
       if (name === 'a_b.fetch') {
-        throw new Error(
+        // The REAL sentinel class — the containment branches on instanceof,
+        // and a lookalike Error would test the wrong contract.
+        throw new actual.AmbiguousToolNameError(
           'Tool name "a_b.fetch" is ambiguous: "a-b.fetch", "a+b.fetch" all sanitize to it. ' +
             'Call the tool by its exact UTCP name instead.',
         );

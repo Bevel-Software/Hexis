@@ -67,4 +67,5 @@ export {
   utcpNameToTsInterfaceName,
   findToolByName,
   findToolsByNames,
+  AmbiguousToolNameError,
 } from './code-mode-names.js';

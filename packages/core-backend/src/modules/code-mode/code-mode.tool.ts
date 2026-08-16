@@ -3,7 +3,7 @@ import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import type { SpillStore } from '../workspace/spill-store.js';
-import { utcpNameToTsInterfaceName, findToolByName } from './code-mode-names.js';
+import { utcpNameToTsInterfaceName, findToolByName, AmbiguousToolNameError } from './code-mode-names.js';
 
 export function createCallToolChainTool(
   client: CodeModeUtcpClient,
@@ -121,10 +121,10 @@ export function createToolsInfoTool(client: CodeModeUtcpClient) {
           // Only AMBIGUITY is a per-name answer (the message says how to
           // disambiguate). Anything else — a repository outage, a catalog
           // failure — must fail the call: containing it would dress an
-          // outage up as a successful lookup with partial data.
-          const message = err instanceof Error ? err.message : String(err);
-          if (!message.includes('is ambiguous')) throw err;
-          errors.push(`${name}: ${message}`);
+          // outage up as a successful lookup with partial data. Typed, not
+          // message-matched: the wording belongs to another package.
+          if (!(err instanceof AmbiguousToolNameError)) throw err;
+          errors.push(`${name}: ${err.message}`);
         }
       }
       return {

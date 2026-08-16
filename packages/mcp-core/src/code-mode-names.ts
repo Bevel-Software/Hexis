@@ -45,12 +45,25 @@ function resolveSanitized(
   const bucket = index.get(name);
   if (!bucket || bucket.length === 0) return null;
   if (bucket.length > 1) {
-    throw new Error(
+    throw new AmbiguousToolNameError(
       `Tool name "${name}" is ambiguous: ${bucket.map((t) => `"${t.name}"`).join(', ')} ` +
         'all sanitize to it. Call the tool by its exact UTCP name instead.',
     );
   }
   return { tool: bucket[0]!, utcpName: bucket[0]!.name };
+}
+
+/**
+ * The TYPED half of the ambiguity contract: callers that contain ambiguity
+ * per-name while letting real failures (an outage, a broken repository)
+ * fail the call need something sturdier to branch on than the message text
+ * of a bare Error thrown in another package.
+ */
+export class AmbiguousToolNameError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AmbiguousToolNameError';
+  }
 }
 
 /**

@@ -150,7 +150,7 @@ describe('PluginProvisionService.createPlugin', () => {
   });
 
   it('refuses names the filesystem or the model cannot carry with 422', async () => {
-    for (const bad of ['', '  ', 'a/b', 'a\\b', '.', '..', '.hidden', 'personal-anything', 'a\u0000b', 'a\tb']) {
+    for (const bad of ['', '  ', 'a/b', 'a\\b', '.', '..', '.hidden', 'personal-anything', 'Personal Abc', 'a\u0000b', 'a\tb']) {
       await expect(h.svc.createPlugin(USER, bad)).rejects.toBeInstanceOf(PluginProvisionError);
       await expect(h.svc.createPlugin(USER, bad)).rejects.toMatchObject({ status: 422 });
     }

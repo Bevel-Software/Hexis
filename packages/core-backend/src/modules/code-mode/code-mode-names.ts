@@ -8,4 +8,5 @@ export {
   sanitizeIdentifier,
   utcpNameToTsInterfaceName,
   findToolByName,
+  AmbiguousToolNameError,
 } from '@bevel-software/platform-mcp-core';
