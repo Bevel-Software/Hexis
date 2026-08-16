@@ -258,7 +258,7 @@ describe('migrateGroupsToPlugins', () => {
     expect(manifest.name).toMatch(/^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/);
   });
 
-  it('routes a bare $VAR header to the extensions block, but not a $5 literal', async () => {
+  it('routes anything the substitutor would expand to the extensions block — non-name ${…} stays literal', async () => {
     await write('Groups/GTM/access.md', 'write:\n  - Admin\n');
     await write(
       'Groups/GTM/vendor.tool',
@@ -266,17 +266,23 @@ describe('migrateGroupsToPlugins', () => {
         name: 'vendor',
         type: 'mcp',
         url: 'https://mcp.vendor.example/mcp',
-        // Both spellings the substitutor expands are credential references;
-        // a dollar amount is not (a variable name can't start with a digit).
-        headers: { Authorization: 'Bearer $VENDOR_KEY', 'X-Price': '$5 per call' },
+        // The substitutor's grammar decides: bare `$VENDOR_KEY` and the
+        // digit-leading `$5` in the price BOTH expand, so both route to the
+        // non-portable half; `${not-a-name}` is not expandable and stays.
+        headers: {
+          Authorization: 'Bearer $VENDOR_KEY',
+          'X-Price': '$5 per call',
+          'X-Tag': 'v ${not-a-name}',
+        },
       }),
     );
     await migrateGroupsToPlugins(repo);
     const mcp = JSON.parse(await read('Plugins/GTM/mcp.json'));
-    expect(mcp.mcpServers.vendor.headers).toEqual({ 'X-Price': '$5 per call' });
+    expect(mcp.mcpServers.vendor.headers).toEqual({ 'X-Tag': 'v ${not-a-name}' });
     const manifest = JSON.parse(await read('Plugins/GTM/plugin.json'));
     expect(manifest.extensions['software.bevel.hexis'].mcpServers.vendor.headers).toEqual({
       Authorization: 'Bearer $VENDOR_KEY',
+      'X-Price': '$5 per call',
     });
   });
 

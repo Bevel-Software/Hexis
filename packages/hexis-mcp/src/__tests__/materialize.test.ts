@@ -5,7 +5,7 @@ import path from 'node:path';
 import {
   expandPlaceholders,
   prepareStdioSpec,
-  readBodyCapped,
+  readBodyCappedToFile,
   resolveCommand,
   type MaterializedPlugin,
 } from '../materialize.js';
@@ -34,7 +34,7 @@ describe('expandPlaceholders', () => {
   });
 });
 
-describe('readBodyCapped', () => {
+describe('readBodyCappedToFile', () => {
   const stream = (...chunks: string[]) =>
     new ReadableStream<Uint8Array>({
       start(controller) {
@@ -43,11 +43,13 @@ describe('readBodyCapped', () => {
       },
     });
 
-  it('buffers a body under the cap byte-for-byte', async () => {
-    expect((await readBodyCapped(stream('ab', 'cd'), 10, 'the archive')).toString()).toBe('abcd');
+  it('spills a body under the cap to the file byte-for-byte', async () => {
+    const dest = path.join(root, 'body.bin');
+    await readBodyCappedToFile(stream('ab', 'cd'), 10, 'the archive', dest);
+    expect((await fs.readFile(dest)).toString()).toBe('abcd');
   });
 
-  it('refuses AS the cap is crossed — the oversized body is never held in memory', async () => {
+  it('refuses AS the cap is crossed — the oversized body is never held', async () => {
     // A pull-based endless stream: the pull count proves the refusal happened
     // at the cap, not after the producer finished.
     let pulls = 0;
@@ -57,12 +59,15 @@ describe('readBodyCapped', () => {
         controller.enqueue(new Uint8Array(4));
       },
     });
-    await expect(readBodyCapped(endless, 10, 'the archive')).rejects.toThrow(/download limit/);
+    const dest = path.join(root, 'body.bin');
+    await expect(readBodyCappedToFile(endless, 10, 'the archive', dest)).rejects.toThrow(/download limit/);
     expect(pulls).toBeLessThan(10);
   });
 
-  it('treats a missing body as empty', async () => {
-    expect((await readBodyCapped(null, 10, 'the archive')).length).toBe(0);
+  it('treats a missing body as an empty file', async () => {
+    const dest = path.join(root, 'body.bin');
+    await readBodyCappedToFile(null, 10, 'the archive', dest);
+    expect((await fs.readFile(dest)).length).toBe(0);
   });
 });
 

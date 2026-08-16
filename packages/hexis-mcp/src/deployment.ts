@@ -95,10 +95,12 @@ export async function resolveMcpUrl(config: HexisMcpConfig): Promise<string> {
   // already have (it holds the key that gets attached). But it is also the one
   // place a compromised deployment could point this process at an address the
   // user never typed, so the redirection is named rather than silent.
-  const configuredHost = new URL(config.baseUrl).host;
-  if (parsed.host !== configuredHost) {
+  // Origin, not host: an https→http swap on the same host re-routes the key
+  // over plaintext and deserves the same named notice as a host change.
+  const configuredOrigin = new URL(config.baseUrl).origin;
+  if (parsed.origin !== configuredOrigin) {
     console.error(
-      `[hexis-mcp] the deployment routes MCP through ${parsed.host}, not ${configuredHost} — expected for a proxied workspace, worth noticing otherwise.`,
+      `[hexis-mcp] the deployment routes MCP through ${parsed.origin}, not ${configuredOrigin} — expected for a proxied workspace, worth noticing otherwise.`,
     );
   }
   return parsed.toString();

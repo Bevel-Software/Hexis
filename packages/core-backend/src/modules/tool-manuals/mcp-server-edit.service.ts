@@ -10,6 +10,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch, type WorkspaceService } from '../workspace/workspace.service.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
+import { containsVariableReference } from '../../shared/variable-refs.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { IToolManualService, ToolVariable } from './tool-manuals.contract.js';
 
@@ -89,10 +90,10 @@ export class McpServerEditError extends Error {
 /** Same shape the discovery accepts: the key is a namespace, not prose. */
 const SERVER_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
-// Both spellings the substitutor expands — `${VAR}` and bare `$VAR` — are
-// references; `$5` is not (a name starts with a letter or underscore). The
-// same rule the migration's header split applies.
-const hasVarRef = (v: string): boolean => /\$(\{[^}]+\}|[A-Za-z_][A-Za-z0-9_]*)/.test(v);
+// The substitutor's own grammar (shared/variable-refs.ts) decides what is a
+// reference: `${A-B}` is not (stays a literal header), `$5` is (digit-leading
+// names are legal). The migration's header split applies the same predicate.
+const hasVarRef = containsVariableReference;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);

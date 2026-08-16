@@ -13,6 +13,7 @@ import {
 } from '@bevel-software/platform-shared';
 import type { ToolManualDescriptor } from '../tool-manuals/tool-manuals.contract.js';
 import { normalizeToolManual } from '../tool-manuals/tool-manuals.service.js';
+import { containsVariableReference } from '../../shared/variable-refs.js';
 import { IGNORE_FILENAME } from './bevel-ignore.js';
 
 /**
@@ -93,14 +94,14 @@ async function moveIfAbsent(from: string, to: string): Promise<boolean> {
 
 /**
  * A header value referencing a vault variable rather than carrying a literal.
- * Both spellings the substitutor expands — `${VAR}` and bare `$VAR` — count:
- * either one copied into mcp.json would be transmitted verbatim by a
- * conformant client. `$5` and friends are not references (a name starts with
- * a letter or underscore), so a price in a header stays the literal it is.
+ * The substitutor's own grammar decides (shared/variable-refs.ts): both
+ * spellings it expands — `${VAR}` and bare `$VAR`, digit-leading names
+ * included — count, because either one copied into mcp.json would be
+ * transmitted verbatim by a conformant client. That means a prose `$5` in a
+ * header routes to the non-portable half too: over-classifying costs a header
+ * its portability, under-classifying leaks whatever `$5TOKEN` expands to.
  */
-function isCredentialReference(value: string): boolean {
-  return /\$(\{[^}]+\}|[A-Za-z_][A-Za-z0-9_]*)/.test(value);
-}
+const isCredentialReference = containsVariableReference;
 
 /** Split a manual's headers into what mcp.json may carry and what may not. */
 function splitHeaders(headers: Record<string, string> | undefined): {

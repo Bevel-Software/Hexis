@@ -83,6 +83,10 @@ describe('resolveConfig', () => {
       /query or fragment/,
     );
     expect(() => resolveConfig(['--url', 'https://x.example/#top', '--key', KEY])).toThrow(/query or fragment/);
+    // A BARE delimiter parses to an empty query/fragment (which the parsed
+    // URL's search/hash cannot see) yet still survives serialization.
+    expect(() => resolveConfig(['--url', 'https://x.example?', '--key', KEY])).toThrow(/query or fragment/);
+    expect(() => resolveConfig(['--url', 'https://x.example/#', '--key', KEY])).toThrow(/query or fragment/);
     expect(() => resolveConfig(['--url', 'https://user:pass@x.example', '--key', KEY])).toThrow(
       /must not embed credentials/,
     );

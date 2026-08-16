@@ -48,32 +48,40 @@ export interface MaterializedPlugin {
 }
 
 /**
- * Buffer a response body under a hard byte cap, counting as bytes ARRIVE — the
- * whole point is refusing before the allocation exists, so `arrayBuffer()`
- * (which buffers everything first) cannot be the mechanism. The stream is
- * cancelled on refusal, which also releases the connection.
+ * Stream a response body to a file under a hard byte cap, counting as bytes
+ * ARRIVE — the whole point is refusing before the allocation exists, so
+ * `arrayBuffer()` (which buffers everything first) cannot be the mechanism.
+ * A file, not an in-memory accumulation: chunks-then-concat holds the payload
+ * twice at its peak, so the cap would bound the download but not the memory it
+ * was set to protect. Each chunk is written and released; the cap bounds disk,
+ * and memory stays at chunk size. The stream is cancelled on refusal, which
+ * also releases the connection.
  * Exported for direct testing; the cap in production is `MAX_ARCHIVE_BYTES`.
  */
-export async function readBodyCapped(
+export async function readBodyCappedToFile(
   body: ReadableStream<Uint8Array> | null,
   cap: number,
   label: string,
-): Promise<Buffer> {
-  if (!body) return Buffer.alloc(0);
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    received += value.byteLength;
-    if (received > cap) {
-      await reader.cancel().catch(() => {});
-      throw new Error(`${label} exceeds the ${cap / (1024 * 1024)}MB download limit — refusing to materialize`);
+  dest: string,
+): Promise<void> {
+  const handle = await fs.open(dest, 'w', 0o600);
+  try {
+    if (!body) return;
+    const reader = body.getReader();
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > cap) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`${label} exceeds the ${cap / (1024 * 1024)}MB download limit — refusing to materialize`);
+      }
+      await handle.write(value);
     }
-    chunks.push(value);
+  } finally {
+    await handle.close();
   }
-  return Buffer.concat(chunks);
 }
 
 /**
@@ -130,7 +138,26 @@ export async function materializePlugin(
   const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
   const MAX_EXTRACTED_BYTES = 256 * 1024 * 1024;
   const MAX_ENTRIES = 5_000;
-  const zip = new AdmZip(await readBodyCapped(res.body, MAX_ARCHIVE_BYTES, `plugin "${folder}" archive`));
+  // Spilled beside the (freshly emptied) plugin root, never inside it: the
+  // extraction below must not find the archive among its own outputs.
+  const tmpArchive = path.join(home, 'plugins', key, `.${folder}.zip.partial`);
+  try {
+    await readBodyCappedToFile(res.body, MAX_ARCHIVE_BYTES, `plugin "${folder}" archive`, tmpArchive);
+    await extractArchive(tmpArchive, pluginRoot, folder, MAX_EXTRACTED_BYTES, MAX_ENTRIES);
+  } finally {
+    await fs.rm(tmpArchive, { force: true });
+  }
+  return { pluginRoot, pluginData };
+}
+
+async function extractArchive(
+  archivePath: string,
+  pluginRoot: string,
+  folder: string,
+  MAX_EXTRACTED_BYTES: number,
+  MAX_ENTRIES: number,
+): Promise<void> {
+  const zip = new AdmZip(archivePath);
   let extracted = 0;
   let count = 0;
   for (const entry of zip.getEntries()) {
@@ -173,7 +200,6 @@ export async function materializePlugin(
       });
     }
   }
-  return { pluginRoot, pluginData };
 }
 
 function isWithin(root: string, candidate: string): boolean {

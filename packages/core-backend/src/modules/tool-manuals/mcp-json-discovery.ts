@@ -6,6 +6,7 @@ import {
 } from '@bevel-software/platform-shared';
 import type { ToolManualDescriptor, ToolVariable } from './tool-manuals.contract.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
+import { RESERVED_VARIABLE_NAMES } from '../../shared/variable-refs.js';
 
 /**
  * The same reserved-reference policy `.tool` parsing enforces, applied to the
@@ -90,9 +91,16 @@ function validatedVariables(raw: unknown): ToolVariable[] | null {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) return null;
   const out: ToolVariable[] = [];
+  const declared = new Set<string>();
   for (const entry of raw) {
     if (!isRecord(entry)) return null;
     if (typeof entry.name !== 'string' || !/^[A-Za-z0-9_]+$/.test(entry.name)) return null;
+    // The `.tool` parser's declaration rules, at this file's grain: a
+    // platform-seeded name may not be re-declared (it would shadow the
+    // seeding), and a duplicate would make later scope resolution depend on
+    // declaration order.
+    if (RESERVED_VARIABLE_NAMES.includes(entry.name) || declared.has(entry.name)) return null;
+    declared.add(entry.name);
     const scope = entry.scope ?? 'admin';
     if (scope !== 'admin' && scope !== 'user') return null;
     let oauth: ToolVariable['oauth'];
@@ -110,6 +118,22 @@ function validatedVariables(raw: unknown): ToolVariable[] | null {
       ) {
         return null;
       }
+      // The same https + SSRF gate the `.tool` parser runs on these URLs: a
+      // sign-in or token exchange aimed at an internal host is a declaration
+      // this surface must refuse exactly like the other one does.
+      try {
+        assertSafeFetchUrl(o.authorizationUrl, { requireHttps: true, label: `${entry.name} oauth.authorizationUrl` });
+        assertSafeFetchUrl(o.tokenUrl, { requireHttps: true, label: `${entry.name} oauth.tokenUrl` });
+      } catch {
+        return null;
+      }
+      // Forwarded verbatim as query params later — a non-string value here is
+      // a malformed declaration, not something to coerce.
+      if (o.authParams !== undefined) {
+        if (!isRecord(o.authParams) || !Object.values(o.authParams).every((v) => typeof v === 'string')) {
+          return null;
+        }
+      }
       oauth = {
         authorizationUrl: o.authorizationUrl,
         tokenUrl: o.tokenUrl,
@@ -117,7 +141,7 @@ function validatedVariables(raw: unknown): ToolVariable[] | null {
         ...(Array.isArray(o.scopes) && o.scopes.every((s) => typeof s === 'string')
           ? { scopes: o.scopes as string[] }
           : {}),
-        ...(isRecord(o.authParams) ? { authParams: o.authParams as Record<string, string> } : {}),
+        ...(o.authParams !== undefined ? { authParams: o.authParams as Record<string, string> } : {}),
       };
     }
     out.push({

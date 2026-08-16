@@ -82,6 +82,10 @@ export function ClientExtensionsSection({
   // second full-tree round-trip per page view. The fetch survives only for
   // the case the reuse cannot cover: a context sitting on a draft branch,
   // whose tree could list files these default-branch links cannot open.
+  // The reused tree is as stale as the context's — which is the freshness
+  // the file explorer beside this page renders from, deliberately: one
+  // section refetching on its own would show files the tree next to it
+  // doesn't, and the context refresh cycle is where staleness is fixed.
   const reusableTree = contextWorkspaceId === workspaceId ? contextTree : null;
 
   useEffect(() => {

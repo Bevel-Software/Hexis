@@ -128,6 +128,34 @@ describe('descriptorsFromMcpJson', () => {
     expect(out.map((d) => d.name)).toEqual(['ok']);
   });
 
+  it('applies the .tool declaration rules: no reserved names, no duplicates, gated OAuth URLs, string authParams', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const declare = (variables: unknown) =>
+      descriptorsFromMcpJson(
+        'GTM',
+        JSON.stringify({ mcpServers: { vendor: { type: 'streamable-http', url: 'https://v.example/mcp' } } }),
+        JSON.stringify({
+          name: 'gtm',
+          extensions: { 'software.bevel.hexis': { mcpServers: { vendor: { variables } } } },
+        }),
+      ).map((d) => d.name);
+    // A re-declared platform-seeded name would shadow the seeding; a
+    // duplicate makes scope resolution order-dependent.
+    expect(declare([{ name: 'CONNECTION_KEY', scope: 'user' }])).toEqual([]);
+    expect(declare([{ name: 'K', scope: 'user' }, { name: 'K', scope: 'admin' }])).toEqual([]);
+    const oauth = { tokenUrl: 'https://v.example/token', clientId: 'c' };
+    // Same https + SSRF gate the .tool parser runs on OAuth endpoints.
+    expect(declare([{ name: 'T', scope: 'user', oauth: { ...oauth, authorizationUrl: 'http://v.example/auth' } }])).toEqual([]);
+    expect(declare([{ name: 'T', scope: 'user', oauth: { ...oauth, authorizationUrl: 'https://169.254.169.254/auth' } }])).toEqual([]);
+    // authParams travel verbatim as query params — non-strings are malformed.
+    expect(
+      declare([{ name: 'T', scope: 'user', oauth: { ...oauth, authorizationUrl: 'https://v.example/auth', authParams: { p: 1 } } }]),
+    ).toEqual([]);
+    expect(
+      declare([{ name: 'T', scope: 'user', oauth: { ...oauth, authorizationUrl: 'https://v.example/auth', authParams: { p: 'x' } } }]),
+    ).toEqual(['vendor']);
+  });
+
   it('yields nothing for an unparsable file, quietly for an absent extensions block', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(descriptorsFromMcpJson('GTM', '{ not json', null)).toEqual([]);

@@ -31,6 +31,21 @@ describe('toCallToolResult', () => {
     expect(result.content).toEqual([{ type: 'text', text: '{"a":{"x":1},"b":{"x":1}}' }]);
   });
 
+  it('keeps shared references intact on the degraded path too — a BigInt elsewhere must not turn siblings circular', () => {
+    // The BigInt forces the replacer pass, where only an ACTIVE-descent check
+    // tells a diamond share (visited once per parent) from a real cycle.
+    const shared = { x: 1 };
+    const result = toCallToolResult({ a: shared, b: shared, n: 10n });
+    expect(result.content).toEqual([{ type: 'text', text: '{"a":{"x":1},"b":{"x":1},"n":"10"}' }]);
+  });
+
+  it('still labels a real cycle on the degraded path', () => {
+    const value: Record<string, unknown> = { n: 10n };
+    value.self = value;
+    const result = toCallToolResult(value);
+    expect(result.content).toEqual([{ type: 'text', text: '{"n":"10","self":"[Circular]"}' }]);
+  });
+
   it('survives a toJSON that throws', () => {
     const value = {
       toJSON() {

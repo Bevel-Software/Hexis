@@ -20,6 +20,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
+import { RESERVED_VARIABLE_NAMES, VARIABLE_REFERENCE_RE } from '../../shared/variable-refs.js';
 import { extractFrontmatter, resolveDeclaredId, isValidId, dedupeById } from '../../shared/frontmatter-id.js';
 import { walkFiles } from '../../shared/fs-walk.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
@@ -67,20 +68,16 @@ const MAX_CAPABILITIES = 100;
 const RESERVED_TOOL_NAMESPACES = [INTERNAL_MANUAL_NAME, EXTERNAL_KB_MANUAL_NAME].map((n) => n.toLowerCase());
 
 /**
- * Variable names the platform seeds for its own (Bevel-hosted) manuals:
- * `<ns>_API_URL` points a manual at the backend and `<ns>_CONNECTION_KEY`
- * carries the platform bearer. No user `.tool` may REFERENCE them
- * (`${API_URL}` / `$API_URL`), in any `.tool` type: the only seeded user
- * namespace is an inline `.tool`'s (its discovery template is platform-served),
- * and a reference inside author-written content would resolve platform creds
- * into a request the author shaped. Refusing every `.tool` at the producing
- * boundary makes "user tools never carry platform credentials" structural
- * rather than dependent on which namespaces happen to be seeded.
+ * No user `.tool` may REFERENCE the platform-seeded variables (`${API_URL}` /
+ * `$API_URL`), in any `.tool` type: the only seeded user namespace is an
+ * inline `.tool`'s (its discovery template is platform-served), and a
+ * reference inside author-written content would resolve platform creds into a
+ * request the author shaped. Refusing every `.tool` at the producing boundary
+ * makes "user tools never carry platform credentials" structural rather than
+ * dependent on which namespaces happen to be seeded. The names and the
+ * reference grammar live in `shared/variable-refs.ts` — one definition for
+ * every boundary that classifies references.
  */
-const RESERVED_VARIABLE_NAMES: readonly string[] = ['API_URL', 'CONNECTION_KEY'];
-
-/** The SDK substitutor's reference grammar, exactly: `${VAR}` or `$VAR`. */
-const VARIABLE_REFERENCE_RE = /\$\{([a-zA-Z0-9_]+)\}|\$([a-zA-Z0-9_]+)/g;
 
 /**
  * A REFERENCE is reserved by SUFFIX, not by exact name: the substitutor looks a

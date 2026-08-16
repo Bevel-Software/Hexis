@@ -98,7 +98,16 @@ export async function discoverTools(
     );
   }
   for (const name of META_TOOL_NAMES) {
-    await client.config.tool_repository.removeTool(`${REMOTE_MANUAL_NAME}.${name}`);
+    // A refused removal must not cost the startup: the listing filter below
+    // still keeps the copy out of the MCP surface, so the degradation is
+    // "chains can see it", not "the server never came up". Named, not silent.
+    try {
+      await client.config.tool_repository.removeTool(`${REMOTE_MANUAL_NAME}.${name}`);
+    } catch (err) {
+      console.error(
+        `[hexis-mcp] could not remove the deployment's "${name}" from the registry: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
   for (const manual of local) {
     const result = await registerManual(client, manual);

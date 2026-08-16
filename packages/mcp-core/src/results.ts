@@ -46,7 +46,7 @@ function isMcpContentBlock(entry: unknown): boolean {
  * turn into a crash at the serialization step. The plain stringify runs first
  * so well-formed values (shared non-circular references included) come out
  * exactly as before; only a value it rejects degrades to the replacer pass
- * (BigInt → decimal string, re-visited object → '[Circular]'), and a value even
+ * (BigInt → decimal string, its own ancestor → '[Circular]'), and a value even
  * that can't take (e.g. a throwing `toJSON`) falls back to `String(value)`.
  */
 function safeJsonText(value: unknown): string {
@@ -57,12 +57,19 @@ function safeJsonText(value: unknown): string {
     // BigInt / circular / throwing toJSON — degrade below.
   }
   try {
-    const seen = new WeakSet<object>();
-    const text = JSON.stringify(value, (_key, v: unknown) => {
+    // Circularity is being one's own ANCESTOR, not being visited twice: a
+    // shared (diamond) reference is legal JSON and stringify visits it once
+    // per parent, so a grown-only "seen" set would mislabel every sibling
+    // share as circular. The stack tracks only the active descent — the
+    // holder (`this`) of the current key is necessarily the innermost live
+    // ancestor, so popping down to it discards branches already unwound.
+    const ancestors: object[] = [];
+    const text = JSON.stringify(value, function (this: unknown, _key, v: unknown) {
       if (typeof v === 'bigint') return v.toString();
       if (v && typeof v === 'object') {
-        if (seen.has(v)) return '[Circular]';
-        seen.add(v);
+        while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+        if (ancestors.includes(v)) return '[Circular]';
+        ancestors.push(v);
       }
       return v;
     });

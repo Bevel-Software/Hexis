@@ -56,7 +56,10 @@ function normalizeBaseUrl(raw: string): string {
   if (parsed.username || parsed.password) {
     throw new ConfigError(`"${raw}" must not embed credentials — the connection key is how this server authenticates.`);
   }
-  if (parsed.search || parsed.hash) {
+  // The raw string, not `parsed.search`/`parsed.hash`: a bare trailing `?` or
+  // `#` parses to an EMPTY query/fragment yet survives serialization, and a
+  // surviving delimiter corrupts concatenation exactly like a populated one.
+  if (/[?#]/.test(raw)) {
     throw new ConfigError(`"${raw}" must not have a query or fragment. Pass the workspace's base address only.`);
   }
   return parsed.toString().replace(/\/+$/, '');

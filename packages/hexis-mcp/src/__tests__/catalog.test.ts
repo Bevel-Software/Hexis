@@ -190,7 +190,15 @@ describe('resolveMcpUrl', () => {
     stubConfigEndpoint({ mcpUrl: 'https://other.example/api/mcp' });
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(await resolveMcpUrl(config)).toBe('https://other.example/api/mcp');
-    expect(spy).toHaveBeenCalledWith(expect.stringContaining('routes MCP through other.example'));
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('routes MCP through https://other.example'));
+  });
+
+  it('a same-host scheme swap is a different origin too — a downgrade must be named', async () => {
+    const host = new URL(config.baseUrl).host;
+    stubConfigEndpoint({ mcpUrl: `http://${host}/api/mcp` });
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await resolveMcpUrl(config)).toBe(`http://${host}/api/mcp`);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining(`routes MCP through http://${host}`));
   });
 
   it('reports a 200 that is not JSON as a deployment problem, not a parser bug', async () => {
