@@ -146,16 +146,39 @@ export function createToolManualsAgentRoutes(
       // The zip is built in memory; without a ceiling one plugin full of large
       // assets is a backend OOM any key holder can trigger.
       const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
+      // Canonical base for the read-time identity check below. The folder was
+      // lstat-verified a real directory above, so this is normalization
+      // (case, 8.3 names, drive spelling), not link resolution.
+      const pluginRealBase = await fs.realpath(pluginDir);
       for (const rel of rels) {
         // Fail closed, per file — only an explicit `true` verdict is included.
         if (verdicts.get(`${PLUGINS_DIR}/${folder}/${rel}`) !== true) continue;
         const abs = path.join(pluginDir, ...rel.split('/'));
-        // lstat, not stat: the walk saw a regular file, but the no-symlink
-        // rule is re-checked at read time so a path swapped for a link in
-        // between is skipped rather than followed. Also gives the size
-        // BEFORE content — rejecting after readFile would already have
-        // spiked memory by exactly the payload the limit exists to refuse.
-        const stat = await fs.lstat(abs).catch(() => null);
+        // The no-symlink rule, re-checked at read time over the WHOLE path.
+        // lstat guards only the final component — a PARENT directory swapped
+        // for a link between walk and read makes `abs` traverse the link with
+        // the final component still a regular file. realpath resolves every
+        // component, so demanding it equal the spelled path is exactly
+        // "no component is a link": identity, not mere containment.
+        const realNow = await fs.realpath(abs).catch((err: NodeJS.ErrnoException) => {
+          if (err.code === 'ENOENT') return null; // deleted since the walk — an absence, not a failure
+          throw err;
+        });
+        if (realNow === null || realNow !== path.join(pluginRealBase, ...rel.split('/'))) {
+          if (realNow !== null) {
+            console.warn(`[tool-manuals] archive of "${folder}": ${rel} no longer resolves to itself — skipped.`);
+          }
+          continue;
+        }
+        // lstat (not stat) still types the final component and gives the size
+        // BEFORE content — rejecting after readFile would already have spiked
+        // memory by exactly the payload the limit exists to refuse. Only an
+        // ENOENT is a skip; any other failure is a real read problem that must
+        // surface as a 500, not ship as a silently partial archive.
+        const stat = await fs.lstat(abs).catch((err: NodeJS.ErrnoException) => {
+          if (err.code === 'ENOENT') return null;
+          throw err;
+        });
         if (stat === null || !stat.isFile()) continue;
         bytes += stat.size;
         if (bytes > MAX_ARCHIVE_BYTES) {

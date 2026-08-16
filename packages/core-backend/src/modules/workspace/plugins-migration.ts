@@ -146,8 +146,9 @@ async function foldIntoPluginFiles(
   if (manifest === null) {
     console.warn(
       `[plugins-migration] ${folderName}/${PLUGIN_MANIFEST_FILE} is missing or unparsable — ` +
-        'mcp manuals WITHOUT auth/variable declarations still convert; ones carrying a ' +
-        'non-portable half stay `.tool` files until the manifest is fixed.',
+        'mcp manuals convert only when they carry NOTHING for the extensions block; any ' +
+        'non-portable half (auth headers, variables, a description, or the local-only flag) ' +
+        'keeps the manual a `.tool` until the manifest is fixed.',
     );
   }
 
@@ -171,7 +172,8 @@ async function foldIntoPluginFiles(
     if (manifest === null && Object.keys(extEntryPreview).length > 0) {
       notes.push(
         `${folderName}: ${item.note} NOT converted — ${PLUGIN_MANIFEST_FILE} is missing/unparsable ` +
-          'and the manual declares auth or variables that would be lost; fix the manifest first.',
+          'and the manual carries declarations (auth headers, variables, a description, or the ' +
+          'local-only flag) that would be lost; fix the manifest first.',
       );
       continue;
     }
