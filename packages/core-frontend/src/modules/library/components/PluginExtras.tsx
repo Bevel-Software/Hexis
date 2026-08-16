@@ -60,14 +60,18 @@ interface NamespaceListing {
 }
 
 export function ClientExtensionsSection({
-  workspaceId,
   kbDirName,
   folder,
 }: {
-  workspaceId: string | null;
   kbDirName: string | null;
   folder: string;
 }) {
+  // LISTING and LINKS must agree on a branch. The links are pinned to the
+  // default branch (plugins are default-branch content), so the tree read is
+  // too — the context's workspace may sit on a draft branch, and a listing
+  // from there would render files these links then cannot open. Workspace id
+  // IS the encoded branch, by the platform's own contract.
+  const workspaceId = encodeURIComponent(DEFAULT_BRANCH);
   const navigate = useNavigate();
   const [listings, setListings] = useState<NamespaceListing[]>([]);
 
@@ -75,7 +79,7 @@ export function ClientExtensionsSection({
     // Reset FIRST: on a folder change or a failed refetch, stale state would
     // keep rendering the previous plugin's files under the new plugin's name.
     setListings([]);
-    if (!workspaceId || !kbDirName) return;
+    if (!kbDirName) return;
     let live = true;
     listFiles(workspaceId)
       .then((tree) => {

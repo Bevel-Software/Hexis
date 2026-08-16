@@ -303,7 +303,9 @@ export class KbSeedService implements IKbSeedService {
       // `add` would commit the new tree while leaving `Plugins/` in the index.
       await this.git(repoDir, ['add', '-A', '--', ...added]);
       const message = migration.migrated
-        ? `Move ${LEGACY_GROUPS_DIR}/ to ${PLUGINS_DIR}/ (Agent Plugins layout)`
+        ? migration.renamed
+          ? `Move ${LEGACY_GROUPS_DIR}/ to ${PLUGINS_DIR}/ (Agent Plugins layout)`
+          : `Reorganise ${PLUGINS_DIR}/ to the Agent Plugins layout`
         : agentsRefreshed && added.length === 1
           ? 'Update AGENTS.md to the current platform template'
           : `Add missing KB scaffolding: ${added.join(', ')}`;

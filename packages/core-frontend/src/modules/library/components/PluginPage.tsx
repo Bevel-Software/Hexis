@@ -45,7 +45,7 @@ export function PluginPage() {
   const data = useLibrary();
   const toast = useLibraryToast();
   const navigate = useNavigate();
-  const { kbDirName, workspaceId } = useWorkspace();
+  const { kbDirName } = useWorkspace();
   const [addOpen, setAddOpen] = useState(false);
   // The Skills band's two controls. `filterOn` narrows the band to what is
   // waiting on the reader; `refresh` re-reads the catalog and then says when it
@@ -193,7 +193,7 @@ export function PluginPage() {
           }}
           onManage={setManageFolder}
         />
-{manageDialog}
+        {manageDialog}
       </>
     );
   }
@@ -365,7 +365,7 @@ export function PluginPage() {
         />
       )}
 
-      <ClientExtensionsSection workspaceId={workspaceId} kbDirName={kbDirName} folder={plugin} />
+      <ClientExtensionsSection kbDirName={kbDirName} folder={plugin} />
       {manageDialog}
     </div>
   );

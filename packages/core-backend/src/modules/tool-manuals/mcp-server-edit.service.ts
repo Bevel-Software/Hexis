@@ -83,6 +83,21 @@ const SERVER_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
 const hasVarRef = (v: string): boolean => /\$\{[^}]+\}/.test(v);
 
+/**
+ * The same reserved-reference policy discovery enforces, applied at SAVE: a
+ * `${…API_URL}`/`${…CONNECTION_KEY}` persisted here would make discovery drop
+ * the server on its next scan — an editor that can save self-invalidating
+ * config is worse than a 422 naming the reference.
+ */
+function findReservedRef(doc: unknown): string | null {
+  const text = JSON.stringify(doc) ?? '';
+  for (const match of text.matchAll(/\$\{\s*([A-Za-z0-9_]+)\s*\}|\$([A-Za-z0-9_]+)/g)) {
+    const varName = match[1] ?? match[2] ?? '';
+    if (varName.endsWith('API_URL') || varName.endsWith('CONNECTION_KEY')) return match[0];
+  }
+  return null;
+}
+
 interface CommitDriver {
   runPendingCommit(
     workspaceId: string,
@@ -148,6 +163,19 @@ export class McpServerEditService {
       // Persisting an unknown transport would save an entry discovery then
       // refuses — an unusable server with no error at the moment it was made.
       throw new McpServerEditError(`Unknown transport "${String(write.transport)}".`, 422);
+    }
+    const reservedRef = findReservedRef({
+      url: write.url,
+      literalHeaders: write.literalHeaders,
+      authHeaders: write.authHeaders,
+      variables: write.variables,
+    });
+    if (reservedRef !== null) {
+      throw new McpServerEditError(
+        `"${reservedRef}" references a platform-seeded variable (API_URL / CONNECTION_KEY) — ` +
+          'discovery refuses servers that name them, so this cannot be saved.',
+        422,
+      );
     }
     const target = write.newName?.trim() || name;
     if (!SERVER_NAME_RE.test(target)) {
@@ -248,18 +276,32 @@ export class McpServerEditService {
       if (Object.keys(extEntry).length > 0) extServers[target] = extEntry;
     }
 
-    await fs.writeFile(mcpAbs, `${JSON.stringify(mcp, null, 2)}\n`, 'utf8');
-    if (manifest !== null) {
-      await fs.writeFile(manifestAbs, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    // All-or-nothing for real: snapshot both files first, and on ANY failure
+    // past the first write put the originals back — the API reporting failure
+    // while the workspace keeps half the edit is the state this exists to
+    // prevent.
+    const [mcpBefore, manifestBefore] = await Promise.all([
+      fs.readFile(mcpAbs, 'utf8').catch(() => null),
+      fs.readFile(manifestAbs, 'utf8').catch(() => null),
+    ]);
+    try {
+      await fs.writeFile(mcpAbs, `${JSON.stringify(mcp, null, 2)}\n`, 'utf8');
+      if (manifest !== null) {
+        await fs.writeFile(manifestAbs, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+      }
+      // One folder-scoped commit, ungated beyond the caller's own write access —
+      // both files or neither. The catalog cache is stale the moment it lands.
+      await this.commits.runPendingCommit(
+        workspaceIdForBranch(DEFAULT_BRANCH),
+        DEFAULT_BRANCH,
+        `${this.kbDirName}/${PLUGINS_DIR}/${folder}`,
+        user,
+      );
+    } catch (err) {
+      if (mcpBefore !== null) await fs.writeFile(mcpAbs, mcpBefore, 'utf8').catch(() => {});
+      if (manifestBefore !== null) await fs.writeFile(manifestAbs, manifestBefore, 'utf8').catch(() => {});
+      throw err;
     }
-    // One folder-scoped commit, ungated beyond the caller's own write access —
-    // both files or neither. The catalog cache is stale the moment it lands.
-    await this.commits.runPendingCommit(
-      workspaceIdForBranch(DEFAULT_BRANCH),
-      DEFAULT_BRANCH,
-      `${this.kbDirName}/${PLUGINS_DIR}/${folder}`,
-      user,
-    );
     this.toolManuals.invalidate();
     return { name: target };
   }

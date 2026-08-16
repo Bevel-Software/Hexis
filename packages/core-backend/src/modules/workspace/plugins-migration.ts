@@ -117,10 +117,17 @@ async function readJson(p: string): Promise<Record<string, unknown> | null> {
  * the newer intent. The extension block merges the same way. A plugin.json
  * that does not parse costs the extension write (logged), not the migration.
  */
+interface ConvertedManual {
+  manual: ToolManualDescriptor;
+  /** The source `.tool`, deleted only once the fold has landed. */
+  abs: string;
+  note: string;
+}
+
 async function foldIntoPluginFiles(
   pluginDir: string,
   folderName: string,
-  manuals: ToolManualDescriptor[],
+  manuals: ConvertedManual[],
   notes: string[],
 ): Promise<void> {
   if (manuals.length === 0) return;
@@ -145,8 +152,29 @@ async function foldIntoPluginFiles(
 
   let wroteMcp = false;
   let wroteManifest = false;
-  for (const m of manuals.sort((a, b) => a.name.localeCompare(b.name))) {
+  const folded: ConvertedManual[] = [];
+  for (const item of manuals.sort((a, b) => a.manual.name.localeCompare(b.manual.name))) {
+    const m = item.manual;
     const { literal, credential } = splitHeaders(m.headers);
+    // A manual whose non-portable half (auth headers, variables, local flag)
+    // has nowhere to go — the manifest is missing or unparsable — is NOT
+    // converted at all: writing only its portable half and deleting the
+    // source would silently discard the credential wiring. It stays a
+    // `.tool` until the manifest is fixed.
+    const extEntryPreview = {
+      ...(Object.keys(credential).length > 0 ? { headers: credential } : {}),
+      ...(m.variables && m.variables.length > 0 ? { variables: m.variables } : {}),
+      ...(typeof m.description === 'string' ? { description: m.description } : {}),
+      ...(m.remote === false ? { local: true } : {}),
+    };
+    if (manifest === null && Object.keys(extEntryPreview).length > 0) {
+      notes.push(
+        `${folderName}: ${item.note} NOT converted — ${PLUGIN_MANIFEST_FILE} is missing/unparsable ` +
+          'and the manual declares auth or variables that would be lost; fix the manifest first.',
+      );
+      continue;
+    }
+    folded.push(item);
     // Own-property check: `in` sees `constructor` and friends on the prototype,
     // which would silently skip a legitimately named server.
     if (!Object.prototype.hasOwnProperty.call(servers, m.name)) {
@@ -160,12 +188,7 @@ async function foldIntoPluginFiles(
     }
 
     // The non-portable half: auth headers, variable declarations, local-only.
-    const extEntry = {
-      ...(Object.keys(credential).length > 0 ? { headers: credential } : {}),
-      ...(m.variables && m.variables.length > 0 ? { variables: m.variables } : {}),
-      ...(typeof m.description === 'string' ? { description: m.description } : {}),
-      ...(m.remote === false ? { local: true } : {}),
-    };
+    const extEntry = extEntryPreview;
     if (manifest !== null && Object.keys(extEntry).length > 0) {
       // Normalize each level: a parseable manifest can still carry a string or
       // array where an object belongs, and mutating that would throw mid-run.
@@ -192,6 +215,13 @@ async function foldIntoPluginFiles(
   if (wroteManifest) {
     await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
     notes.push(`${folderName}: wrote mcp-server declarations into ${PLUGIN_MANIFEST_FILE}`);
+  }
+  // Sources go LAST, once everything they carried is on disk elsewhere. A
+  // failure anywhere above leaves every `.tool` in place for the next run —
+  // which re-converts idempotently, since the fold never clobbers a key.
+  for (const item of folded) {
+    await fs.rm(item.abs, { force: true });
+    notes.push(`${folderName}: ${item.note} converted to an ${PLUGIN_MCP_FILE} entry`);
   }
 }
 
@@ -229,16 +259,17 @@ async function migratePluginFolder(pluginDir: string, folderName: string): Promi
   }
 
   const entries = await fs.readdir(pluginDir, { withFileTypes: true });
-  const converted: ToolManualDescriptor[] = [];
+  const converted: ConvertedManual[] = [];
 
   const convertOrMove = async (abs: string, name: string, note: string): Promise<void> => {
     const manual = await asMcpManual(abs, `${PLUGINS_DIR}/${folderName}/${name}`);
     if (manual) {
-      // CONVERTED, not moved: mcp.json is authoritative for MCP servers, and
-      // a surviving `.tool` twin would be a second source of truth.
-      converted.push(manual);
-      await fs.rm(abs, { force: true });
-      notes.push(`${folderName}: ${note} converted to an ${PLUGIN_MCP_FILE} entry`);
+      // QUEUED for conversion — the `.tool` is deleted only AFTER its entry
+      // has actually landed in the output files (see foldIntoPluginFiles).
+      // Deleting first left a window where a failed fold stranded the
+      // non-portable half (auth headers, variables) with no source to retry
+      // from: the file IS the recovery path until the fold succeeds.
+      converted.push({ manual, abs, note });
       return;
     }
     const dest = path.join(pluginDir, ...HEXIS_TOOLS_DIR.split('/'), path.basename(abs));
@@ -278,11 +309,7 @@ async function migratePluginFolder(pluginDir: string, folderName: string): Promi
       if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.tool')) continue;
       const abs = path.join(extToolsDir, entry.name);
       const manual = await asMcpManual(abs, `${PLUGINS_DIR}/${folderName}/${HEXIS_TOOLS_DIR}/${entry.name}`);
-      if (manual) {
-        converted.push(manual);
-        await fs.rm(abs, { force: true });
-        notes.push(`${folderName}: ${HEXIS_TOOLS_DIR}/${entry.name} converted to an ${PLUGIN_MCP_FILE} entry`);
-      }
+      if (manual) converted.push({ manual, abs, note: `${HEXIS_TOOLS_DIR}/${entry.name}` });
     }
   }
 

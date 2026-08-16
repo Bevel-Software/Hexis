@@ -97,6 +97,18 @@ export function createToolManualsAgentRoutes(
       const pluginDir = path.join(wsDir, kbDirName, PLUGINS_DIR, folder);
       const pluginReal = await fs.realpath(pluginDir).catch(() => null);
       if (pluginReal === null) return void res.status(404).json({ error: 'Not found' });
+      // The folder ENTRY itself must live inside the canonical Plugins root:
+      // a symlinked `Plugins/<folder>` would otherwise archive an arbitrary
+      // tree while the ACL judged paths spelled `Plugins/<folder>/…`.
+      const pluginsRootReal = await fs.realpath(path.join(wsDir, kbDirName, PLUGINS_DIR)).catch(() => null);
+      if (
+        pluginsRootReal === null ||
+        path.relative(pluginsRootReal, pluginReal).startsWith('..') ||
+        path.isAbsolute(path.relative(pluginsRootReal, pluginReal)) ||
+        path.relative(pluginsRootReal, pluginReal) === ''
+      ) {
+        return void res.status(404).json({ error: 'Not found' });
+      }
       const rels: string[] = [];
       // Cycle guard by ANCESTOR STACK, not a global visited set: a symlink
       // into the walker's own ancestry recurses forever (an unbounded-CPU
@@ -164,16 +176,29 @@ export function createToolManualsAgentRoutes(
         // Fail closed, per file — only an explicit `true` verdict is included.
         if (verdicts.get(`${PLUGINS_DIR}/${folder}/${rel}`) !== true) continue;
         const abs = path.join(pluginDir, ...rel.split('/'));
+        // Re-resolve AT READ TIME: the walk's containment check is a moment
+        // in the past, and a symlink retargeted between walk and read would
+        // hand readFile an outside path the ACL never judged. Reading from
+        // the re-checked realpath closes the race.
+        const realNow = await fs.realpath(abs).catch(() => null);
+        if (realNow === null) continue;
+        const relNow = path.relative(pluginReal, realNow);
+        if (relNow.startsWith('..') || path.isAbsolute(relNow)) {
+          console.warn(`[tool-manuals] archive of "${folder}": ${rel} resolved outside the plugin at read time — skipped.`);
+          continue;
+        }
         // Size BEFORE content: rejecting after readFile would already have
         // spiked memory by exactly the payload the limit exists to refuse.
-        const size = (await fs.stat(abs)).size;
-        bytes += size;
+        const stat = await fs.stat(realNow);
+        bytes += stat.size;
         if (bytes > MAX_ARCHIVE_BYTES) {
           return void res.status(413).json({
             error: `Plugin "${folder}" exceeds the ${MAX_ARCHIVE_BYTES / (1024 * 1024)}MB archive limit.`,
           });
         }
-        zip.addFile(rel, await fs.readFile(abs));
+        // Unix mode rides in the zip attrs so a `./`-command stdio server is
+        // still executable after materialization (0 on Windows — harmless).
+        zip.addFile(rel, await fs.readFile(realNow), '', ((stat.mode & 0o7777) << 16) >>> 0);
         included += 1;
       }
       // An all-filtered plugin looks exactly like an absent one — a 404 must

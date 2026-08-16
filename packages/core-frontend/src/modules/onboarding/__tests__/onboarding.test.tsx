@@ -474,7 +474,7 @@ describe('WelcomePage', () => {
   });
 
   /**
-   * `role="radioplugin"` is a promise about the keyboard, not just a label for
+   * `role="radiogroup"` is a promise about the keyboard, not just a label for
    * a screen reader: arrows select, and selection follows focus. The plugin
    * wraps, because three options in a row have no edge worth stopping at.
    */

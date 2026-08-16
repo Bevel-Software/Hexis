@@ -184,6 +184,19 @@ export function descriptorsFromMcpJson(
       // private ranges, or the cloud metadata endpoint. A `local: true` entry
       // is exempt because loopback is exactly what local MEANS, and only the
       // user's own machine ever dials it.
+      // Scheme first, for EVERYONE: `local: true` exempts a server from the
+      // private-network reachability policy, not from being http(s) at all.
+      let schemeOk = false;
+      try {
+        const u = new URL(raw.url);
+        schemeOk = u.protocol === 'http:' || u.protocol === 'https:';
+      } catch {
+        schemeOk = false;
+      }
+      if (!schemeOk) {
+        console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: url must be http(s).`);
+        continue;
+      }
       if (ext.local !== true) {
         try {
           assertSafeFetchUrl(raw.url, { label: `mcp server "${name}" url` });

@@ -75,7 +75,7 @@ export function McpServerSection({
     setTransport(server.transport);
     setUrl(server.url ?? '');
     setCommand(server.command ?? '');
-    setArgs((server.args ?? []).join(' '));
+    setArgs((server.args ?? []).join('\n'));
     setLiteralHeaders(headersToLines(server.literalHeaders));
     setAuthHeaders(headersToLines(server.authHeaders));
     setLocal(server.local);
@@ -85,7 +85,10 @@ export function McpServerSection({
 
   const save = async () => {
     const renaming = name.trim() !== server.name;
-    if (renaming && !confirmingRename && configuredCount > 0) {
+    // EVERY rename confirms: this caller's page only knows their own and the
+    // shared credentials — other members' user-scoped values and sign-ins are
+    // invisible here, so a zero count proves nothing about what disconnects.
+    if (renaming && !confirmingRename) {
       setConfirmingRename(true);
       return;
     }
@@ -96,11 +99,13 @@ export function McpServerSection({
         ...(renaming ? { newName: name.trim() } : {}),
         transport,
         ...(transport === 'stdio'
-          ? { command: command.trim(), args: args.trim() ? args.trim().split(/\s+/) : [] }
+          ? { command: command.trim(), args: args.split('\n').map((a) => a.trim()).filter(Boolean) }
           : { url: url.trim() }),
         literalHeaders: linesToHeaders(literalHeaders),
         authHeaders: linesToHeaders(authHeaders),
-        variables: variables.filter((v) => v.name.trim().length > 0),
+        variables: variables
+          .map((v) => ({ ...v, name: v.name.trim(), label: v.label?.trim() || undefined }))
+          .filter((v) => v.name.length > 0),
         ...(server.description ? { description: server.description } : {}),
         local,
       });
@@ -184,8 +189,8 @@ export function McpServerSection({
             <>
               <LabeledInput label="Command" value={command} onChange={setCommand} mono
                 hint="A bare executable name, or a ./ path inside the plugin." />
-              <LabeledInput label="Arguments" value={args} onChange={setArgs} mono
-                hint="Space-separated. ${PLUGIN_ROOT} and ${PLUGIN_DATA} expand at launch." />
+              <LabeledTextarea label="Arguments" value={args} onChange={setArgs}
+                hint="One argument per line — spaces inside an argument survive. ${PLUGIN_ROOT} and ${PLUGIN_DATA} expand at launch." />
             </>
           ) : (
             <LabeledInput label="URL" value={url} onChange={setUrl} mono />
@@ -215,9 +220,11 @@ export function McpServerSection({
       {confirmingRename && (
         <Dialog open onClose={() => setConfirmingRename(false)} title="Rename this server?">
           <Banner tone="danger" role="alert" className="mb-3">
-            Renaming <b>{server.name}</b> to <b>{name.trim()}</b> disconnects{' '}
-            {configuredCount === 1 ? '1 configured secret or sign-in' : `${configuredCount} configured secrets and sign-ins`}{' '}
-            — they are stored under the old name and every one must be set up again.
+            Renaming <b>{server.name}</b> to <b>{name.trim()}</b> disconnects every secret and
+            sign-in stored under the old name
+            {configuredCount > 0
+              ? ` — at least ${configuredCount === 1 ? 'one is' : `${configuredCount} are`} configured from your view alone, and other members' sign-ins disconnect too.`
+              : " — including other members' values, which this page cannot see."}
           </Banner>
           <div className="flex justify-end gap-2">
             <Button variant="quiet" size="sm" onClick={() => setConfirmingRename(false)}>

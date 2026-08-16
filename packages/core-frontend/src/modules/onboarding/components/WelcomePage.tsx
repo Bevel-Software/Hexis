@@ -280,7 +280,7 @@ export function WelcomePage() {
             you use is a decision made before this page existed, so it is a
             control rather than something to scroll past.
 
-            A radioplugin, not three `aria-pressed` toggles: these are mutually
+            A radiogroup, not three `aria-pressed` toggles: these are mutually
             exclusive and one is always chosen, which is what `radio` means and
             what `pressed` does not — three independent toggles tell a screen
             reader that any combination, including none, is possible. */}

@@ -76,6 +76,20 @@ describe('McpServerSection', () => {
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
   });
 
+  it('confirms a rename even when this caller sees nothing configured', async () => {
+    // Other members' user-scoped values and sign-ins are invisible to this
+    // page, so a zero count proves nothing — the confirm must still gate.
+    apiMock.getMcpServer.mockResolvedValue(VIEW);
+    renderSection(0);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit server' }));
+    fireEvent.change(screen.getByRole('textbox', { name: /Name/ }), {
+      target: { value: 'vendor_eu' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(apiMock.putMcpServer).not.toHaveBeenCalled();
+    expect(await screen.findByText(/other members' values, which this page cannot see/)).toBeInTheDocument();
+  });
+
   it('interrupts a rename with the disconnect count, and saves only on "Rename anyway"', async () => {
     apiMock.getMcpServer.mockResolvedValue(VIEW);
     renderSection(2);
@@ -87,7 +101,7 @@ describe('McpServerSection', () => {
 
     // The save did NOT fire — the dialog is the gate, and it says the cost.
     expect(apiMock.putMcpServer).not.toHaveBeenCalled();
-    expect(await screen.findByText(/2 configured secrets and sign-ins/)).toBeInTheDocument();
+    expect(await screen.findByText(/at least 2 are configured from your view alone/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Rename anyway' }));
     await waitFor(() => expect(apiMock.putMcpServer).toHaveBeenCalledTimes(1));

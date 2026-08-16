@@ -84,14 +84,36 @@ export async function materializePlugin(
   if (!res.ok) {
     throw new Error(`could not fetch plugin "${folder}": HTTP ${res.status}`);
   }
+  // Client-side ceilings, independent of the server's own cap: this function
+  // is the boundary that protects the MEMBER's machine, and its disk/memory
+  // must not be fully delegated to the deployment's good behavior.
+  const MAX_EXTRACTED_BYTES = 256 * 1024 * 1024;
+  const MAX_ENTRIES = 5_000;
   const zip = new AdmZip(Buffer.from(await res.arrayBuffer()));
+  let extracted = 0;
+  let count = 0;
   for (const entry of zip.getEntries()) {
     if (entry.isDirectory) continue;
+    if (++count > MAX_ENTRIES) {
+      throw new Error(`plugin "${folder}" archive has more than ${MAX_ENTRIES} entries — refusing to materialize`);
+    }
     const abs = path.join(pluginRoot, ...entry.entryName.split('/'));
     // The archive names the paths; keep a hostile-looking one inside the root.
     if (!isWithin(pluginRoot, abs)) continue;
+    const data = entry.getData();
+    extracted += data.length;
+    if (extracted > MAX_EXTRACTED_BYTES) {
+      throw new Error(
+        `plugin "${folder}" exceeds the ${MAX_EXTRACTED_BYTES / (1024 * 1024)}MB extraction limit — refusing to materialize`,
+      );
+    }
     await fs.mkdir(path.dirname(abs), { recursive: true });
-    await fs.writeFile(abs, entry.getData());
+    await fs.writeFile(abs, data);
+    // Unix mode rides in the zip attrs (high 16 bits); restoring the exec
+    // bits is what lets a `./`-command stdio server actually run. chmod is
+    // effectively a no-op on Windows — harmless either way.
+    const mode = (entry.attr >>> 16) & 0o777;
+    if (mode & 0o111) await fs.chmod(abs, mode).catch(() => {});
   }
   return { pluginRoot, pluginData };
 }
