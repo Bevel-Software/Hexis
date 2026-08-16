@@ -3,7 +3,7 @@ import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api'
 import {
   emptyMessageFor,
   filterLibraryItems,
-  groupCounts,
+  pluginCounts,
   neededToolsFor,
   skillStatus,
   toolStatus,
@@ -94,14 +94,14 @@ describe('neededToolsFor / skillStatus', () => {
 
 describe('filterLibraryItems (sidebar selection + search)', () => {
   const items: LibraryFilterable[] = [
-    { kind: 'skill', name: 'Weekly newsletter', description: 'drafts the Friday newsletter', owned: true, group: 'Everyone' },
-    { kind: 'skill', name: 'RFI responder', description: 'answers requests', owned: false, group: 'GTM' },
-    { kind: 'integration', name: 'Slack', description: 'messages', owned: false, group: 'Everyone' },
-    { kind: 'integration', name: 'GitHub', description: 'code and change requests', owned: true, group: null },
+    { kind: 'skill', name: 'Weekly newsletter', description: 'drafts the Friday newsletter', owned: true, plugin: 'Everyone' },
+    { kind: 'skill', name: 'RFI responder', description: 'answers requests', owned: false, plugin: 'GTM' },
+    { kind: 'integration', name: 'Slack', description: 'messages', owned: false, plugin: 'Everyone' },
+    { kind: 'integration', name: 'GitHub', description: 'code and change requests', owned: true, plugin: null },
   ];
 
-  it('narrows to a group. Skills and tools together, not split by kind', () => {
-    expect(filterLibraryItems(items, { kind: 'group', group: 'Everyone' }, '').map((i) => i.name)).toEqual([
+  it('narrows to a plugin. Skills and tools together, not split by kind', () => {
+    expect(filterLibraryItems(items, { kind: 'group', plugin: 'Everyone' }, '').map((i) => i.name)).toEqual([
       'Weekly newsletter',
       'Slack',
     ]);
@@ -129,28 +129,28 @@ describe('filterLibraryItems (sidebar selection + search)', () => {
       'GitHub',
     ]);
     // The query is applied INSIDE the selection, so a match outside it stays out.
-    expect(filterLibraryItems(items, { kind: 'group', group: 'GTM' }, 'slack')).toEqual([]);
+    expect(filterLibraryItems(items, { kind: 'group', plugin: 'GTM' }, 'slack')).toEqual([]);
   });
 });
 
-describe('groupCounts', () => {
-  it('counts per group, skips ungrouped, and sorts by name not by count', () => {
+describe('pluginCounts', () => {
+  it('counts per plugin, skips ungrouped, and sorts by name not by count', () => {
     const items: LibraryFilterable[] = [
-      { kind: 'skill', name: 'a', description: '', owned: false, group: 'Zeta' },
-      { kind: 'skill', name: 'b', description: '', owned: false, group: 'Alpha' },
-      { kind: 'integration', name: 'c', description: '', owned: false, group: 'Zeta' },
-      { kind: 'skill', name: 'd', description: '', owned: false, group: null },
+      { kind: 'skill', name: 'a', description: '', owned: false, plugin: 'Zeta' },
+      { kind: 'skill', name: 'b', description: '', owned: false, plugin: 'Alpha' },
+      { kind: 'integration', name: 'c', description: '', owned: false, plugin: 'Zeta' },
+      { kind: 'skill', name: 'd', description: '', owned: false, plugin: null },
     ];
     // Alpha first despite having fewer items — a nav that reorders itself when
-    // a group gains an item moves under the pointer.
-    expect(groupCounts(items)).toEqual([
-      { group: 'Alpha', count: 1 },
-      { group: 'Zeta', count: 2 },
+    // a plugin gains an item moves under the pointer.
+    expect(pluginCounts(items)).toEqual([
+      { plugin: 'Alpha', count: 1 },
+      { plugin: 'Zeta', count: 2 },
     ]);
   });
 
   it('is empty when nothing is grouped', () => {
-    expect(groupCounts([{ kind: 'skill', name: 'a', description: '', owned: true, group: null }])).toEqual([]);
+    expect(pluginCounts([{ kind: 'skill', name: 'a', description: '', owned: true, plugin: null }])).toEqual([]);
   });
 });
 

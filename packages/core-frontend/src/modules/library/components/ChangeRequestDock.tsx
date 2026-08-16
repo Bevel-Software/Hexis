@@ -14,7 +14,7 @@ interface ChangeRequestDockProps {
  *
  * It anchors to the VIEWPORT's right edge. It used to sit at
  * `right: calc(50% + 22.5rem)` — left of a centred dialog — and when the skill
- * detail became a page that put it on top of the group sidebar. A page has no
+ * detail became a page that put it on top of the plugin sidebar. A page has no
  * centred panel to hang off, so the edge is the only stable anchor.
  *
  * Renders nothing when there is nothing to review: an empty box floating beside

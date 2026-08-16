@@ -31,7 +31,7 @@ Mint the key from the profile menu → **External agent access**.
 
 ## What you get
 
-Everything the hosted endpoint serves — the knowledge-base tools, your groups' `.tool` integrations, and your skills as slash commands — **plus** the local-only tools. `call_tool_chain` here runs over the merged set, so one script can read a page from the workspace and hand it to a tool running on your laptop.
+Everything the hosted endpoint serves — the knowledge-base tools, your plugins' `.tool` integrations, and your skills as slash commands — **plus** the local-only tools. `call_tool_chain` here runs over the merged set, so one script can read a page from the workspace and hand it to a tool running on your laptop.
 
 ## Where credentials come from
 

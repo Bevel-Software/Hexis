@@ -21,7 +21,7 @@ import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
 import { registerSkillsTools, createSkillsRoutes } from '../modules/skills/index.js';
-import { createGroupsRoutes } from '../modules/groups/index.js';
+import { createPluginsRoutes } from '../modules/plugins/index.js';
 import type { SessionOntologyGate } from '../modules/workspace/session-ontology.gate.js';
 import {
   createSecretsVaultRoutes,
@@ -30,7 +30,7 @@ import {
 import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
-import { DEFAULT_BRANCH, PROTECTED_BRANCHES } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PROTECTED_BRANCHES, type AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -331,6 +331,7 @@ export async function createCoreServer(
     core.toolManualService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
+    { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName },
   ));
   app.use('/api', toolsRouter);
 
@@ -386,17 +387,17 @@ export async function createCoreServer(
     core.authMiddleware,
     createSkillsRoutes(core.skillService, core.pendingSkillsService),
   );
-  // Group enumeration + join requests. Browser-only (JWT), and fail-closed
-  // like every other read surface: groups the caller cannot access (member,
+  // Plugin enumeration + join requests. Browser-only (JWT), and fail-closed
+  // like every other read surface: plugins the caller cannot access (member,
   // manager, or discoverable via the access.md file's own read grant) are
   // absent from the list. A join request is a plain change request.
-  app.use('/api', core.authMiddleware, createGroupsRoutes(
-    core.groupIndexService,
+  app.use('/api', core.authMiddleware, createPluginsRoutes(
+    core.pluginIndexService,
     core.accessControl,
     core.workflowService,
     core.workspaceService,
     core.joinRequestsService,
-    core.groupProvisionService,
+    core.pluginProvisionService,
     core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
   ));
@@ -414,7 +415,13 @@ export async function createCoreServer(
   // workspace — it has to work on a deployment that has no knowledge base yet,
   // which is the whole reason it exists.
   app.use('/api', core.authMiddleware, createSetupRoutes(core.settings, core.adminAccess));
-  app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService));
+  app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
+    service: core.mcpServerEditService,
+    getUser: async (userId) => {
+      const u = await core.authService.getUserById(userId);
+      return u ? ({ id: u.id, email: u.email, name: u.name } as AuthUser) : undefined;
+    },
+  }));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe
   // the pending authorization and, on Finish, to mint the one-time code. The

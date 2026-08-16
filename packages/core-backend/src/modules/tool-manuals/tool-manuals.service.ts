@@ -9,7 +9,13 @@ import {
   DefaultVariableSubstitutor,
   type CallTemplate,
 } from '@utcp/sdk';
-import { DEFAULT_BRANCH, GROUPS_DIR } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_BRANCH,
+  PLUGINS_DIR,
+  PLUGIN_MANIFEST_FILE,
+  PLUGIN_MCP_FILE,
+} from '@bevel-software/platform-shared';
+import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -270,7 +276,7 @@ export class ToolManualService implements IToolManualService {
   async preview(content: string): Promise<ToolManualPreview> {
     let descriptor: ToolManualDescriptor;
     try {
-      descriptor = normalizeToolManual('draft', 'Groups/draft.tool', content);
+      descriptor = normalizeToolManual('draft', 'Plugins/draft.tool', content);
     } catch (err) {
       return { ok: false, errors: [err instanceof Error ? err.message : String(err)] };
     }
@@ -314,6 +320,28 @@ export class ToolManualService implements IToolManualService {
         url: `\${API_URL}/api/tools/${m.slug}/manual`,
         content_type: 'application/json',
         headers: { Authorization: 'Bearer ${CONNECTION_KEY}' },
+      };
+    }
+    if (m.type === 'mcp' && m.stdio) {
+      // A stdio server, for LOCAL consumers only (`remote: false` is implied
+      // at discovery). Command/args/env/cwd pass through verbatim — the Agent
+      // Plugins placeholders (`${PLUGIN_ROOT}`/`${PLUGIN_DATA}`) are expanded
+      // by the LOCAL runtime against its materialized plugin copy; this
+      // process has no such paths and must not guess them.
+      return {
+        name: m.name,
+        call_template_type: 'mcp',
+        config: {
+          mcpServers: {
+            [m.name]: {
+              transport: 'stdio',
+              command: m.stdio.command,
+              args: m.stdio.args,
+              ...(m.stdio.env ? { env: m.stdio.env } : {}),
+              ...(m.stdio.cwd ? { cwd: m.stdio.cwd } : {}),
+            },
+          },
+        },
       };
     }
     if (m.type === 'mcp') {
@@ -487,14 +515,41 @@ export class ToolManualService implements IToolManualService {
     }
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
-    // A `.tool` sits under `Groups/`, beside the skills that use it.
+    // A `.tool` sits under `Plugins/`, beside the skills that use it.
     const files: { abs: string; rel: string }[] = [];
-    const root = path.join(kbRoot, GROUPS_DIR);
+    const root = path.join(kbRoot, PLUGINS_DIR);
     for (const rel of await walkFiles(root, (n) => n.toLowerCase().endsWith('.tool'))) {
-      files.push({ abs: path.join(root, rel), rel: `${GROUPS_DIR}/${rel}` });
+      files.push({ abs: path.join(root, rel), rel: `${PLUGINS_DIR}/${rel}` });
     }
 
+    // MCP servers come from each plugin's mcp.json — the AUTHORITATIVE source
+    // (the Agent Plugins fixed location), synthesized into the same descriptor
+    // shape. Listed BEFORE the `.tool` files: on a name collision (a legacy
+    // mcp `.tool` the migration has not converted yet), the shared dedup keeps
+    // the first occurrence, and the authoritative source must be the one kept.
     const parsed: ToolManualDescriptor[] = [];
+    let pluginFolders: string[] = [];
+    try {
+      pluginFolders = (await fs.readdir(root, { withFileTypes: true }))
+        .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+        .map((e) => e.name)
+        .sort();
+    } catch {
+      /* no Plugins/ root — nothing to scan */
+    }
+    for (const folder of pluginFolders) {
+      let mcpJson: string;
+      try {
+        mcpJson = await fs.readFile(path.join(root, folder, PLUGIN_MCP_FILE), 'utf-8');
+      } catch {
+        continue; // no mcp.json is the common case, not an error
+      }
+      const pluginJson = await fs
+        .readFile(path.join(root, folder, PLUGIN_MANIFEST_FILE), 'utf-8')
+        .catch(() => null);
+      parsed.push(...descriptorsFromMcpJson(folder, mcpJson, pluginJson));
+    }
+
     for (const f of files) {
       let content: string;
       try {

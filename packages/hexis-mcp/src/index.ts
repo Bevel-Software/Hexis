@@ -19,6 +19,6 @@
  * exported for embedding it in another process.
  */
 export { type HexisMcpConfig, ConfigError, resolveConfig, USAGE } from './config.js';
-export { DeploymentError, resolveMcpUrl, fetchAllManuals, fetchLocalOnlyManualNames } from './deployment.js';
+export { DeploymentError, resolveMcpUrl, fetchAllManuals, fetchLocalOnlyManuals } from './deployment.js';
 export { REMOTE_MANUAL_NAME, remoteManualTemplate, localManualTemplates } from './manuals.js';
 export { createHexisMcpServer, listedTools } from './server.js';

@@ -47,7 +47,7 @@ describe('narrow-layout source parity', () => {
   });
 
   it('keeps the library card track capable of shrinking to the viewport', () => {
-    const source = readSource('modules/library/components/group-page-parts.tsx');
+    const source = readSource('modules/library/components/plugin-page-parts.tsx');
 
     expect(source).toContain(
       'grid-cols-[repeat(auto-fill,minmax(min(236px,100%),1fr))]',

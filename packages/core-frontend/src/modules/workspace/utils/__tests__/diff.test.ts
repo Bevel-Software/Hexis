@@ -8,7 +8,7 @@ import { computeDiff } from '../diff';
  */
 describe('computeDiff', () => {
   it('emits removed before added within one change run', () => {
-    // `groupDiffBlocks` in MarkdownDiffViewer bundles consecutive
+    // `pluginDiffBlocks` in MarkdownDiffViewer bundles consecutive
     // removed+added runs into one red/green block — interleaving would split
     // a single edit into several blocks.
     const out = computeDiff('a\nold line\nz', 'a\nnew line\nz');

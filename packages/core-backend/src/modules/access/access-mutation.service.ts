@@ -49,7 +49,7 @@ import { WorkflowDomainError } from '../workflow/workflow.errors.js';
 /** Whether the dialog target is a folder (edit folder access.md) or a file (edit node frontmatter). */
 export type TargetKind = 'folder' | 'file';
 
-/** Bad-request-class mutation failure (invalid principal, unknown group, lockout). */
+/** Bad-request-class mutation failure (invalid principal, unknown plugin, lockout). */
 export class AccessMutationError extends WorkflowDomainError {
   constructor(message: string, status = 400, payload?: Record<string, unknown>) {
     super(message, status, payload);
@@ -305,7 +305,7 @@ export class AccessMutationService {
    * access — not just "is there a removable file entry."
    *
    * For a USER, that distinction matters: effective access includes admin-rescue
-   * on `access.md`/`roles.yaml`, group membership, and the built-in `everyone` —
+   * on `access.md`/`roles.yaml`, plugin membership, and the built-in `everyone` —
    * none of which `grantSources` reports (it is MECE over file-backed
    * direct/ancestor entries only). So we ask the same `canRead/canWrite/
    * canDownload/canOwner` resolver every real access decision uses; if the
@@ -351,7 +351,7 @@ export class AccessMutationService {
    * asynchronously in the route (it needs the roles model). Here we only run the
    * cheap injection/shape validation so a malformed principal never reaches the
    * splice. Role-exists-in-roles.yaml is the route's job (so it can offer
-   * "Create Group" for an unknown group, an admin-only flow).
+   * "Create Plugin" for an unknown plugin, an admin-only flow).
    */
   private assertPrincipalSafe(principal: Principal): void {
     try {

@@ -113,9 +113,9 @@ function close(s: Server): Promise<void> {
 const fm = (body: string) => `---\n${body}\n---\n\n# Body\n`;
 
 const FILES = {
-  [`${KB}/Groups/GTM/access.md`]: fm('read:\n  - GTM Team'),
-  [`${KB}/Groups/GTM/battlecards/access.md`]: fm('read:\n  - deny everyone'),
-  [`${KB}/Groups/GTM/slack.tool`]: fm('owner: Ali <ali@bevel.software>'),
+  [`${KB}/Plugins/GTM/access.md`]: fm('read:\n  - GTM Team'),
+  [`${KB}/Plugins/GTM/battlecards/access.md`]: fm('read:\n  - deny everyone'),
+  [`${KB}/Plugins/GTM/slack.tool`]: fm('owner: Ali <ali@bevel.software>'),
 };
 
 describe('GET /access/overrides', () => {
@@ -133,20 +133,20 @@ describe('GET /access/overrides', () => {
   it('returns the declarations under a folder the caller can read', async () => {
     h = await makeHarness({ files: FILES });
 
-    const res = await get('Groups/GTM');
+    const res = await get('Plugins/GTM');
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       truncated: false,
       overrides: [
         {
-          path: 'Groups/GTM/battlecards/access.md',
-          governs: 'Groups/GTM/battlecards',
+          path: 'Plugins/GTM/battlecards/access.md',
+          governs: 'Plugins/GTM/battlecards',
           source: 'access-md',
           entries: [{ verb: 'read', deny: true, principal: { kind: 'everyone' } }],
         },
         {
-          path: 'Groups/GTM/slack.tool',
-          governs: 'Groups/GTM/slack.tool',
+          path: 'Plugins/GTM/slack.tool',
+          governs: 'Plugins/GTM/slack.tool',
           source: 'frontmatter',
           entries: [
             {
@@ -163,7 +163,7 @@ describe('GET /access/overrides', () => {
   it('403s a caller who cannot read the folder', async () => {
     h = await makeHarness({ files: FILES, canRead: () => false });
 
-    const res = await get('Groups/GTM');
+    const res = await get('Plugins/GTM');
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: 'You do not have access to this folder.' });
   });
@@ -171,21 +171,21 @@ describe('GET /access/overrides', () => {
   it('drops rows governing something the caller cannot read', async () => {
     h = await makeHarness({
       files: FILES,
-      rowReadable: (p) => p !== 'Groups/GTM/battlecards',
+      rowReadable: (p) => p !== 'Plugins/GTM/battlecards',
     });
 
-    const res = await get('Groups/GTM');
+    const res = await get('Plugins/GTM');
     const body = (await res.json()) as { overrides: { path: string }[] };
-    expect(body.overrides.map((o) => o.path)).toEqual(['Groups/GTM/slack.tool']);
+    expect(body.overrides.map((o) => o.path)).toEqual(['Plugins/GTM/slack.tool']);
   });
 
   it('accepts a workspace-relative path exactly like a repo-relative one', async () => {
     h = await makeHarness({ files: FILES });
 
-    const repoRel = (await (await get('Groups/GTM')).json()) as unknown;
-    const wsRel = (await (await get(`${KB}/Groups/GTM`)).json()) as unknown;
+    const repoRel = (await (await get('Plugins/GTM')).json()) as unknown;
+    const wsRel = (await (await get(`${KB}/Plugins/GTM`)).json()) as unknown;
     expect(wsRel).toEqual(repoRel);
-    expect(h.canRead).toHaveBeenCalledWith(WS, USER.email, 'Groups/GTM');
+    expect(h.canRead).toHaveBeenCalledWith(WS, USER.email, 'Plugins/GTM');
   });
 
   it('400s a path that escapes the KB repo', async () => {
@@ -198,7 +198,7 @@ describe('GET /access/overrides', () => {
   it('400s a target that is a file, not a folder', async () => {
     h = await makeHarness({ files: FILES });
 
-    const res = await get('Groups/GTM/slack.tool');
+    const res = await get('Plugins/GTM/slack.tool');
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'path must be a folder' });
   });

@@ -95,7 +95,7 @@ export function MarkdownDiffViewer({ payload, onOpenFile, onOpenNodeId, scroll =
       tooLarge: false as const,
       rawLineCount,
       lines,
-      bodyBlocks: groupDiffBlocks(split.body),
+      bodyBlocks: pluginDiffBlocks(split.body),
       frontmatterChanged: split.frontmatter.some((l) => l.type !== 'same'),
       oldFrontmatter: parseFrontmatter(baseline).data,
       newFrontmatter: parseFrontmatter(current).data,
@@ -242,7 +242,7 @@ function FrontmatterDiffPanel({
 // ── body diff helpers ───────────────────────────────────────────────────
 
 /**
- * Group consecutive same/changed runs into display blocks: runs of "same"
+ * Plugin consecutive same/changed runs into display blocks: runs of "same"
  * lines, and "conflict" blocks bundling consecutive removed+added runs
  * together — the same shape git uses for merge conflicts.
  */
@@ -250,7 +250,7 @@ type DisplayBlock =
   | { type: 'same'; lines: string[] }
   | { type: 'conflict'; removed: string[]; added: string[] };
 
-function groupDiffBlocks(lines: DiffLine[]): DisplayBlock[] {
+function pluginDiffBlocks(lines: DiffLine[]): DisplayBlock[] {
   const result: DisplayBlock[] = [];
   let i = 0;
   while (i < lines.length) {

@@ -8,7 +8,7 @@ import { useLibraryToast } from '../../library/state/toast.context';
 import { copyToClipboard, COPY_FAILED_TOAST } from '../../library/utils/clipboard';
 import { pathForLibraryFilter } from '../../library/routes/library-paths';
 import { useAppRegistry } from '../../../core/registry';
-import { displayFirstName } from '../../library/utils/personal-group';
+import { displayFirstName } from '../../library/utils/personal-plugin';
 import { setSidebarCollapsed } from '../../layout/state/sidebar';
 import { ClaudeInstallLink, mcpEndpointUrl } from '../../../shared/mcp';
 import { AGENT_CLIENTS, type AgentClient } from '../agent-clients';
@@ -157,8 +157,8 @@ export function WelcomePage() {
   // The deployment's own address, not the browser's — see `shared/mcp`.
   const mcpUrl = mcpEndpointUrl();
   const snippet = client.snip(mcpUrl);
-  // Capitalized by the same function that spells the group heading — "Welcome,
-  // juan" over a sidebar reading "Juan's Group" is the app misspelling someone
+  // Capitalized by the same function that spells the plugin heading — "Welcome,
+  // juan" over a sidebar reading "Juan's Plugin" is the app misspelling someone
   // to their face on the one page addressed to them.
   const firstName = displayFirstName(user?.name) || 'there';
 
@@ -171,13 +171,13 @@ export function WelcomePage() {
    * defines how it is driven: arrows select, Tab leaves. Claiming the role
    * while only answering clicks describes a control the keyboard cannot work.
    *
-   * Selection FOLLOWS focus, which is the pattern's default for a group this
+   * Selection FOLLOWS focus, which is the pattern's default for a plugin this
    * cheap to change — picking a client re-renders one snippet, nothing is
    * submitted, so there is no cost to arriving on an option and no reason to
    * make people confirm. Wraps at both ends: three options in a row have no
    * meaningful edge to stop at.
    *
-   * Paired with the roving `tabIndex` below — one stop for the whole group,
+   * Paired with the roving `tabIndex` below — one stop for the whole plugin,
    * not one per option, so Tab moves past the picker rather than through it.
    */
   function onRadioKeyDown(event: React.KeyboardEvent, index: number) {
@@ -295,7 +295,7 @@ export function WelcomePage() {
               type="button"
               role="radio"
               aria-checked={c.id === client.id}
-              // Roving: only the chosen option is a tab stop, so the group
+              // Roving: only the chosen option is a tab stop, so the plugin
               // costs ONE Tab rather than one per client.
               tabIndex={c.id === client.id ? 0 : -1}
               ref={(el) => {

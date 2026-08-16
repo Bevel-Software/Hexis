@@ -1,7 +1,7 @@
 import type { CallTemplate } from '@utcp/sdk';
 
 /**
- * Tool manuals — user-authored `*.tool` files under `Groups/` in the DEFAULT
+ * Tool manuals — user-authored `*.tool` files under `Plugins/` in the DEFAULT
  * branch KB. Each is a UTCP *manual* (a pointer to where tools come from), not a
  * flattened tool list. Access-controlled exactly like Skills (default-deny ACL
  * on the `.tool` file path). The MCP/UTCP endpoint serves every manual a user
@@ -95,7 +95,7 @@ export interface ToolManualDescriptor {
    * catalog; namespacing doubles underscores in vault keys (`utcpNamespacedKey`).
    */
   name: string;
-  /** Repo-root-relative path of the `.tool` file (e.g. `Groups/Everyone/weather.tool`). */
+  /** Repo-root-relative path of the `.tool` file (e.g. `Plugins/Everyone/weather.tool`). */
   path: string;
   type: ToolManualType;
   /**
@@ -122,6 +122,14 @@ export interface ToolManualDescriptor {
   remote?: boolean;
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
+  /**
+   * For a `type: mcp` server declared with a stdio transport in a plugin's
+   * `mcp.json`: the spawn spec. Implies `remote: false` — the hosted proxy
+   * can never spawn a subprocess out of knowledge-base content, so stdio
+   * servers are served only to local consumers, which run them per the Agent
+   * Plugins runtime contract (PLUGIN_ROOT/PLUGIN_DATA, `./` containment).
+   */
+  stdio?: { command: string; args: string[]; env?: Record<string, string>; cwd?: string };
 }
 
 /** A validated UTCP manual dict (`{ utcp_version, manual_version, tools }`). */
@@ -188,7 +196,7 @@ export interface IToolManualService {
   /**
    * Every manual in the catalog, UNFILTERED by access — the mirror of
    * `skillService.listSkills(undefined)`. For caller-INDEPENDENT counting only
-   * (the group index's "N tools", which a non-member is allowed to see as a
+   * (the plugin index's "N tools", which a non-member is allowed to see as a
    * number). Never surface a name, path or description from this to someone
    * who cannot read the file; `listAccessible` is the surface for that.
    */

@@ -49,9 +49,9 @@ describe('assertValidRelativePath', () => {
     // now sets `GIT_LITERAL_PATHSPECS=1` on every git subprocess, so KB files
     // arriving with bracketed prefixes (`[Approved]`, `[New]`, `[Updated …]`)
     // or other glob metacharacters round-trip through commit cleanly.
-    '[Approved] Purchasing_Order archive.docx',
-    'Purchasing/[New] Purchasing_E-Invoicing DE.docx',
-    'Purchasing/[Updated 03.09.2025] Purchasing_How to search_Product detail page.docx',
+    '[Approved] Handbook_Order archive.docx',
+    'Handbook/[New] Handbook_E-Invoicing DE.docx',
+    'Handbook/[Updated 03.09.2025] Handbook_How to search_Detail page.docx',
     'docs/wildcard*name.md',
     'docs/question?name.md',
     'docs/bang!name.md',

@@ -124,7 +124,7 @@ let offsetHeightDescriptor: PropertyDescriptor | undefined;
 beforeEach(() => {
   vi.clearAllMocks();
   api.fetchFileAccess.mockResolvedValue(VIEW);
-  api.suggestPrincipals.mockResolvedValue({ groups: [], people: [], peopleWithheld: false });
+  api.suggestPrincipals.mockResolvedValue({ plugins: [], people: [], peopleWithheld: false });
 
   rects.clear();
   watchers = [];

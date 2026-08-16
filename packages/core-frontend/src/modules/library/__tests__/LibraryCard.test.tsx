@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { LibraryCard, type LibraryCardProps } from '../components/LibraryCard';
-import { displayFirstName, personalGroupName } from '../utils/personal-group';
+import { displayFirstName, personalPluginName } from '../utils/personal-plugin';
 
 /**
  * What a card says when it has nothing to report, and what it says when it has.
@@ -116,17 +116,17 @@ describe('LibraryCard', () => {
   });
 });
 
-describe('personalGroupName', () => {
+describe('personalPluginName', () => {
   it('uses the first name, as a colleague would say it out loud', () => {
-    expect(personalGroupName('Juan Viera')).toBe("Juan's Group");
-    expect(personalGroupName('juan')).toBe("Juan's Group");
+    expect(personalPluginName('Juan Viera')).toBe("Juan's Plugin");
+    expect(personalPluginName('juan')).toBe("Juan's Plugin");
   });
 
   it('still names the place when nobody is signed in', () => {
     // The space exists either way and still needs a heading — and "Yours" is
     // true for whoever is reading it.
-    expect(personalGroupName(null)).toBe('Yours');
-    expect(personalGroupName('   ')).toBe('Yours');
+    expect(personalPluginName(null)).toBe('Yours');
+    expect(personalPluginName('   ')).toBe('Yours');
   });
 });
 
@@ -140,7 +140,7 @@ describe('displayFirstName', () => {
   });
 
   // Empty rather than a fallback, because the two callers want different
-  // words for it — "Yours" on the group heading, "there" on the welcome page.
+  // words for it — "Yours" on the plugin heading, "there" on the welcome page.
   it('gives nothing back when there is no name, and lets the caller decide', () => {
     expect(displayFirstName(null)).toBe('');
     expect(displayFirstName(undefined)).toBe('');

@@ -1,4 +1,4 @@
-import { DEFAULT_BRANCH, GROUPS_DIR, type PullRequestSummary } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR, type PullRequestSummary } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
 import { createBranch } from '../../git/services/git.api';
@@ -6,7 +6,7 @@ import { deleteFile, getOrCreateWorkspace, writeFile } from '../../workspace/ser
 import { openChangeRequest } from '../../pr/services/pr-open.api';
 import { postPrComment } from '../../pr/services/pr-comments.api';
 import { branchSegment } from '../../change-requests/services/propose.api';
-import { ensurePersonalGroup } from './groups.api';
+import { ensurePersonalPlugin } from './plugins.api';
 
 /**
  * Library data access. Skills come from the browser skill routes
@@ -31,7 +31,7 @@ export interface LibrarySkillSummary {
   name: string;
   description: string;
   version?: string;
-  /** Repo-root-relative skill folder, e.g. `Groups/Everyone/rfi`. */
+  /** Repo-root-relative skill folder, e.g. `Plugins/Everyone/rfi`. */
   path: string;
 }
 
@@ -204,7 +204,7 @@ export type CreateSkillInput = {
   userName: string;
 } & (
   | {
-      /** Repo-root-relative group folder the skill lands in — `Groups/GTM`. */
+      /** Repo-root-relative plugin folder the skill lands in — `Plugins/GTM`. */
       parentPath: string;
       /** False (or unknown) routes the new file through a change request instead. */
       canWrite: boolean;
@@ -212,7 +212,7 @@ export type CreateSkillInput = {
   | {
       /**
        * The skill is the caller's own: it lands in their personal folder
-       * (`Groups/personal-<id>/`), which the provisioning endpoint ensures —
+       * (`Plugins/personal-<id>/`), which the provisioning endpoint ensures —
        * and commits — first. Always a direct write: the ensured folder's
        * access.md names the caller as owner, so the write gate passes on its
        * own, with no permission special-case anywhere.
@@ -248,7 +248,7 @@ export interface CreatedSkill {
 export async function createEmptySkill(input: CreateSkillInput): Promise<CreatedSkill> {
   const parentPath =
     'personal' in input
-      ? `${GROUPS_DIR}/${(await ensurePersonalGroup()).folder}`
+      ? `${PLUGINS_DIR}/${(await ensurePersonalPlugin()).folder}`
       : input.parentPath;
   const repoRelativePath = `${parentPath}/${input.name}/SKILL.md`;
 
@@ -279,11 +279,11 @@ export async function createEmptySkill(input: CreateSkillInput): Promise<Created
 }
 
 /**
- * Delete a skill folder or tool file from the default branch — the group
- * manager's "remove from group". One call for both shapes: the backend's
+ * Delete a skill folder or tool file from the default branch — the plugin
+ * manager's "remove from plugin". One call for both shapes: the backend's
  * delete route recurses a folder into per-file lock+commit cycles, and every
  * one of those locks runs the per-path ACL gate, so a caller who does not
- * manage the group is refused by the same rule that governs editing it.
+ * manage the plugin is refused by the same rule that governs editing it.
  */
 export async function removeLibraryItem(repoRelativePath: string): Promise<void> {
   const { workspace } = await getOrCreateWorkspace(DEFAULT_BRANCH);
