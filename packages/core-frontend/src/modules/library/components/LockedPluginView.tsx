@@ -57,7 +57,7 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
       await requestPluginAccess(plugin.name);
       setRequested(true);
       toast(
-        `Asked ${admins.length > 0 ? joinNames(firstNames(admins)) : 'the admins'}. You get its skills and tools if they let you in.`,
+        `Asked ${admins.length > 0 ? joinNames(firstNames(admins)) : 'the admins'}. You get its skills and tools once they grant access.`,
       );
       onRequested();
     } catch (err) {
@@ -100,14 +100,14 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
       <p className="mt-1 text-lede text-ink-muted">{`Run by ${adminsText}.`}</p>
 
       {/* Volume, never contents. A number tells you whether it is worth asking
-          to join; a name would tell you what is inside. */}
+          for access; a name would tell you what is inside. */}
       <p className="mt-1 text-ui text-ink-muted">{countsLine(plugin)}</p>
 
       <div className="mt-5">
         {pending ? (
           <Surface tone="sunken" radius="lg" elevation="none" padded className="max-w-lg">
             <p className="text-body">
-              {`Requested: ${adminsText} ${admins.length === 1 ? 'decides' : 'decide'} who joins.`}
+              {`Requested: ${adminsText} ${admins.length === 1 ? 'decides' : 'decide'} who gets access.`}
             </p>
           </Surface>
         ) : (
@@ -137,7 +137,7 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
 function countsLine(plugin: Pick<PluginSummary, 'skillCount' | 'toolCount'>): string {
   const skills = `${plugin.skillCount} ${plugin.skillCount === 1 ? 'skill' : 'skills'}`;
   const tools = `${plugin.toolCount} ${plugin.toolCount === 1 ? 'tool' : 'tools'}`;
-  return `${skills} · ${tools}. Visible to members only.`;
+  return `${skills} · ${tools}. Visible once you have access.`;
 }
 
 /**

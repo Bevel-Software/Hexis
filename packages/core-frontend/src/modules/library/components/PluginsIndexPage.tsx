@@ -113,7 +113,7 @@ export function PluginsIndexPage() {
         <div className="py-16 text-center text-ui text-ink-faint">Loading plugins…</div>
       ) : (
         <>
-          <SectionHead count={mine.length}>{"Plugins you're in"}</SectionHead>
+          <SectionHead count={mine.length}>Your plugins</SectionHead>
           <RowList>
             {mine.map((entry) => (
               <PluginIndexRow
@@ -141,7 +141,7 @@ export function PluginsIndexPage() {
 
           {locked.length > 0 && (
             <>
-              <SectionHead count={locked.length}>Ask to join</SectionHead>
+              <SectionHead count={locked.length}>Request access</SectionHead>
               <RowList>
                 {locked.map((entry) => (
                   <PluginIndexRow

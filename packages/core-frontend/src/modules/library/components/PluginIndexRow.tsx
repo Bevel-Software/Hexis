@@ -10,7 +10,7 @@ export interface PluginIndexRowProps {
   meta?: string;
   /**
    * After the counts: the amber attention count on a plugin you are in, or —
-   * on an "Ask to join" row — the `Locked` chip, which becomes `Requested`
+   * on a "Request access" row — the `Locked` chip, which becomes `Requested`
    * once the caller has a pending access request. A slot rather than a
    * boolean, which is why those three states cost this file nothing.
    */

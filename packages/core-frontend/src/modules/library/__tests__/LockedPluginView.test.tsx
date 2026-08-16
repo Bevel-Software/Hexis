@@ -73,7 +73,7 @@ describe('LockedPluginView', () => {
     expect(screen.getByRole('heading', { name: 'Finance', level: 1 })).toBeInTheDocument();
     expect(screen.getByText('Locked')).toBeInTheDocument();
     expect(screen.getByText('Run by Olga Ivanova.')).toBeInTheDocument();
-    expect(screen.getByText('2 skills · 1 tool. Visible to members only.')).toBeInTheDocument();
+    expect(screen.getByText('2 skills · 1 tool. Visible once you have access.')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'All plugins' })).toHaveAttribute(
       'href',
       '/skills-and-tools',
@@ -91,7 +91,7 @@ describe('LockedPluginView', () => {
 
   it('pluralises the counts line honestly', () => {
     renderLocked(finance({ skillCount: 1, toolCount: 0 }));
-    expect(screen.getByText('1 skill · 0 tools. Visible to members only.')).toBeInTheDocument();
+    expect(screen.getByText('1 skill · 0 tools. Visible once you have access.')).toBeInTheDocument();
   });
 
   it('asks once, disables while in flight, and flips to the Requested box', async () => {
@@ -111,7 +111,7 @@ describe('LockedPluginView', () => {
 
     release();
     expect(
-      await screen.findByText('Requested: Olga Ivanova decides who joins.'),
+      await screen.findByText('Requested: Olga Ivanova decides who gets access.'),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole('button', { name: 'Subscribe to its skills and tools' }),
@@ -123,13 +123,13 @@ describe('LockedPluginView', () => {
     renderLocked();
     fireEvent.click(askButton());
     expect(
-      await screen.findByText('Asked Olga. You get its skills and tools if they let you in.'),
+      await screen.findByText('Asked Olga. You get its skills and tools once they grant access.'),
     ).toBeInTheDocument();
   });
 
   it('shows the Requested box with no button when the server already has one', () => {
     renderLocked(finance({ hasRequested: true }));
-    expect(screen.getByText('Requested: Olga Ivanova decides who joins.')).toBeInTheDocument();
+    expect(screen.getByText('Requested: Olga Ivanova decides who gets access.')).toBeInTheDocument();
     expect(
       screen.queryByRole('button', { name: 'Subscribe to its skills and tools' }),
     ).not.toBeInTheDocument();
@@ -141,11 +141,11 @@ describe('LockedPluginView', () => {
     fireEvent.click(askButton());
     expect(
       await screen.findByText(
-        'Asked the admins. You get its skills and tools if they let you in.',
+        'Asked the admins. You get its skills and tools once they grant access.',
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByText('Requested: the workspace admins decide who joins.'),
+      screen.getByText('Requested: the workspace admins decide who gets access.'),
     ).toBeInTheDocument();
   });
 
