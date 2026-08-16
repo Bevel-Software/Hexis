@@ -119,6 +119,13 @@ export class WorkspaceService implements IWorkspaceService {
    */
   private readonly inFlightBootstraps = new Map<string, Promise<void>>();
 
+  /**
+   * Branches whose EXISTING clone already got this process's scaffolding
+   * top-up. Per-process on purpose: each boot of a new build re-offers the
+   * top-up once, which is exactly when an upgrade's migrations must run.
+   */
+  private readonly toppedUpBranches = new Set<string>();
+
   /** Per-workspace-dir `git fetch origin` timestamp + in-flight tracker. */
   private readonly lastFetchAt = new Map<string, number>();
   private readonly inFlightFetches = new Map<string, Promise<void>>();
@@ -338,6 +345,22 @@ export class WorkspaceService implements IWorkspaceService {
       // pulls it. Once per branch per process — the cached paths above return
       // before reaching here.
       await this.normalizeCloneTracking(repoDir, branch);
+      // Same restart-survivor reasoning for the scaffolding top-up: an
+      // UPGRADED deployment reuses this clone, so a top-up bound to fresh
+      // clones alone never runs a new build's scaffolding or migrations —
+      // the Groups→Plugins rename sat out an upgrade exactly this way. Once
+      // per branch per process, best-effort like the fresh-clone call.
+      if (this.seedService && !this.toppedUpBranches.has(branch)) {
+        this.toppedUpBranches.add(branch);
+        try {
+          await this.seedService.topUpWorkspace(repoDir, branch);
+        } catch (topUpErr) {
+          console.error(
+            `[workspace] scaffolding top-up failed for branch "${branch}" (clone kept):`,
+            redactError(topUpErr),
+          );
+        }
+      }
       this.branchDirs.set(branch, workspaceDir);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     } catch {
@@ -498,6 +521,23 @@ export class WorkspaceService implements IWorkspaceService {
         // it never touches the working tree, and a drifted config is what
         // breaks the next pull.
         await this.normalizeCloneTracking(targetDir, branch);
+        // An upgraded deployment REUSES this persistent clone, so a top-up
+        // bound to fresh clones alone never runs a new build's scaffolding
+        // or migrations here — the Groups→Plugins rename sat out an upgrade
+        // for exactly this reason. Once per process per branch (bootstraps
+        // are single-flighted, so no same-branch concurrency), best-effort
+        // like the fresh-clone call below.
+        if (this.seedService && !this.toppedUpBranches.has(branch)) {
+          this.toppedUpBranches.add(branch);
+          try {
+            await this.seedService.topUpWorkspace(targetDir, branch);
+          } catch (topUpErr) {
+            console.error(
+              `[workspace] scaffolding top-up failed for branch "${branch}" (clone kept):`,
+              redactError(topUpErr),
+            );
+          }
+        }
         return;
       }
       // Half-built dir — wipe and re-clone.
@@ -544,6 +584,7 @@ export class WorkspaceService implements IWorkspaceService {
       // try/catch — like the onWorkspaceCloned listener above — so even a future
       // change that lets it throw can never roll back an otherwise-good clone.
       if (this.seedService) {
+        this.toppedUpBranches.add(branch);
         try {
           await this.seedService.topUpWorkspace(targetDir, branch);
         } catch (topUpErr) {

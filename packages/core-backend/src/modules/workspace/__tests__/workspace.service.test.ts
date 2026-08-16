@@ -435,6 +435,29 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
     await svc.getOrCreateForBranch('alice/draft');
     expect(cloned).toEqual([workspaceIdForBranch('alice/draft')]);
   });
+
+  // An upgraded deployment REUSES the persistent clone, so a top-up bound to
+  // fresh clones alone never runs a new build's scaffolding or migrations —
+  // the Groups→Plugins rename sat out an upgrade exactly this way. Every boot
+  // must offer the top-up to an existing clone once.
+  it('offers the scaffolding top-up to an existing clone once per process', async () => {
+    const seed = {
+      ensureRemoteSeeded: vi.fn(async () => {}),
+      topUpWorkspace: vi.fn(async () => {}),
+    };
+    const firstBoot = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base');
+    firstBoot.setSeedService(seed);
+    await firstBoot.getOrCreateForBranch('target-company-state');
+    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(1); // the fresh clone
+
+    // A new process over the same workspaces dir — the deployed-upgrade case:
+    // the clone exists, and the top-up must still run, once, not per access.
+    const nextBoot = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base');
+    nextBoot.setSeedService(seed);
+    await nextBoot.getOrCreateForBranch('target-company-state');
+    await nextBoot.getOrCreateForBranch('target-company-state');
+    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('WorkspaceService.readAllKbFiles', () => {
