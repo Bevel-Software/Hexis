@@ -148,8 +148,15 @@ export function createToolManualsAgentRoutes(
       const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
       // Canonical base for the read-time identity check below. The folder was
       // lstat-verified a real directory above, so this is normalization
-      // (case, 8.3 names, drive spelling), not link resolution.
-      const pluginRealBase = await fs.realpath(pluginDir);
+      // (case, 8.3 names, drive spelling), not link resolution — but that
+      // verification is a moment old, and a plugin deleted since (a workspace
+      // reset, a merged deletion) is an ABSENCE, the same 404 it would have
+      // been a moment earlier, not an internal error.
+      const pluginRealBase = await fs.realpath(pluginDir).catch((err: NodeJS.ErrnoException) => {
+        if (err.code === 'ENOENT') return null;
+        throw err;
+      });
+      if (pluginRealBase === null) return void res.status(404).json({ error: 'Not found' });
       for (const rel of rels) {
         // Fail closed, per file — only an explicit `true` verdict is included.
         if (verdicts.get(`${PLUGINS_DIR}/${folder}/${rel}`) !== true) continue;
