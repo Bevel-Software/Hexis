@@ -20,7 +20,15 @@ export class ConfigError extends Error {}
 function readFlag(argv: string[], long: string, short?: string): string | undefined {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
-    if (arg === `--${long}` || (short && arg === `-${short}`)) return argv[i + 1];
+    if (arg === `--${long}` || (short && arg === `-${short}`)) {
+      const next = argv[i + 1];
+      // `--url --key k` is a forgotten value, not a value spelled `--key` —
+      // silently consuming the next flag would misconfigure BOTH options.
+      if (next === undefined || next.startsWith('-')) {
+        throw new ConfigError(`${arg} expects a value, e.g. ${arg} <${long}>.`);
+      }
+      return next;
+    }
     if (arg.startsWith(`--${long}=`)) return arg.slice(long.length + 3);
   }
   return undefined;
@@ -29,6 +37,11 @@ function readFlag(argv: string[], long: string, short?: string): string | undefi
 /**
  * Trailing slashes are stripped so `new URL(path, baseUrl)` and plain
  * concatenation agree; a base with a path (`https://host/hexis`) keeps it.
+ * A query, fragment or embedded credentials are refused rather than stripped:
+ * everything downstream appends `/api/…` by plain concatenation, so a
+ * surviving `?x` or `#x` would silently change every request — and the
+ * connection key is the credential, so a `user:pass@` here is a mistake worth
+ * naming, not forwarding.
  */
 function normalizeBaseUrl(raw: string): string {
   let parsed: URL;
@@ -39,6 +52,12 @@ function normalizeBaseUrl(raw: string): string {
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new ConfigError(`"${raw}" must be an http(s) URL.`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new ConfigError(`"${raw}" must not embed credentials — the connection key is how this server authenticates.`);
+  }
+  if (parsed.search || parsed.hash) {
+    throw new ConfigError(`"${raw}" must not have a query or fragment. Pass the workspace's base address only.`);
   }
   return parsed.toString().replace(/\/+$/, '');
 }
@@ -52,8 +71,10 @@ function normalizeBaseUrl(raw: string): string {
  * place to configure this is a second place for it to be wrong.
  */
 export function resolveConfig(argv: string[], env: NodeJS.ProcessEnv = {}): HexisMcpConfig {
-  const rawUrl = readFlag(argv, 'url', 'u') ?? env.HEXIS_URL ?? env.BEVEL_URL;
-  const key = readFlag(argv, 'key', 'k') ?? env.HEXIS_CONNECTION_KEY ?? env.BEVEL_CONNECTION_KEY;
+  // Trimmed BEFORE the presence checks: copy buttons and shell quoting add
+  // whitespace, and a whitespace-only value is a missing one, not a config.
+  const rawUrl = (readFlag(argv, 'url', 'u') ?? env.HEXIS_URL ?? env.BEVEL_URL)?.trim();
+  const key = (readFlag(argv, 'key', 'k') ?? env.HEXIS_CONNECTION_KEY ?? env.BEVEL_CONNECTION_KEY)?.trim();
 
   if (!rawUrl) {
     throw new ConfigError(
@@ -66,7 +87,7 @@ export function resolveConfig(argv: string[], env: NodeJS.ProcessEnv = {}): Hexi
         'Mint one from the profile menu → External agent access.',
     );
   }
-  return { baseUrl: normalizeBaseUrl(rawUrl), connectionKey: key.trim() };
+  return { baseUrl: normalizeBaseUrl(rawUrl), connectionKey: key };
 }
 
 export const USAGE = `hexis-mcp — run a Hexis workspace as a local MCP server.

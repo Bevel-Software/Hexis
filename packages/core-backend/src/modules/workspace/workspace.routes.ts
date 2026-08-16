@@ -849,7 +849,7 @@ export function createWorkspaceRoutes(
       // the unwind commits each side's release in reverse order, which
       // produces two single-file commits (one create, one delete) —
       // not a single merge-style rename commit, but git's log/blame
-      // rename detection still plugins them visually after the fact.
+      // rename detection still groups them visually after the fact.
       const [firstLock, secondLock] = oldPath < newPath ? [oldPath, newPath] : [newPath, oldPath];
       await withLock(id, user, firstLock, () =>
         withLock(id, user, secondLock, () =>

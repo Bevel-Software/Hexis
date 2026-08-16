@@ -99,6 +99,22 @@ describe('getServer', () => {
     });
   });
 
+  it('shape-checks hand-editable fields — malformed values read as empty, not as nonsense', async () => {
+    await write('Plugins/GTM/plugin.json', {
+      name: 'gtm',
+      extensions: {
+        'software.bevel.hexis': {
+          // A string where an array/object belongs — the form would `.map`
+          // and `Object.entries` these; they must arrive as empty instead.
+          mcpServers: { vendor: { headers: 'oops', variables: 'not-an-array' } },
+        },
+      },
+    });
+    const view = await svc.getServer(USER.email, 'vendor');
+    expect(view?.variables).toEqual([]);
+    expect(view?.authHeaders).toEqual({});
+  });
+
   it('answers null for an unknown slug and for a legacy .tool-backed manual alike', async () => {
     expect(await svc.getServer(USER.email, 'nope')).toBeNull();
     // A `.tool`-backed mcp manual predates the authoritative file; the form
@@ -144,22 +160,79 @@ describe('putServer', () => {
     const ext = (manifest.extensions as Record<string, { mcpServers: Record<string, { headers?: unknown }> }>)[
       'software.bevel.hexis'
     ];
-    expect(ext.mcpServers.vendor.headers).toEqual({ 'X-Key': '${SNEAKY}' });
+    // The rerouted header lands BESIDE the stored auth (omitted, so kept) —
+    // rerouting must add to the extensions half, not replace it.
+    expect(ext.mcpServers.vendor.headers).toEqual({
+      Authorization: 'Bearer ${VENDOR_KEY}',
+      'X-Key': '${SNEAKY}',
+    });
   });
 
-  it('renames across BOTH files, refusing a taken key', async () => {
+  it('renames across BOTH files, carrying every omitted field to the new key', async () => {
     await svc.putServer(USER, 'vendor', {
       newName: 'vendor_eu',
       transport: 'streamable-http',
       url: 'https://v.example/mcp',
       authHeaders: { Authorization: 'Bearer ${VENDOR_KEY}' },
     });
+    // FULL file contents, not just the key set: a rename that dropped the
+    // literal header or the variable declaration would still move the key.
     const mcp = await readJson('Plugins/GTM/mcp.json');
-    expect(Object.keys(mcp.mcpServers as object)).toEqual(['vendor_eu']);
+    expect(mcp.mcpServers).toEqual({
+      vendor_eu: {
+        type: 'streamable-http',
+        url: 'https://v.example/mcp',
+        headers: { 'X-V': '2' },
+      },
+    });
     const manifest = await readJson('Plugins/GTM/plugin.json');
-    const servers = (manifest.extensions as Record<string, { mcpServers: object }>)['software.bevel.hexis']
-      .mcpServers;
-    expect(Object.keys(servers)).toEqual(['vendor_eu']);
+    const servers = (
+      manifest.extensions as Record<string, { mcpServers: Record<string, unknown> }>
+    )['software.bevel.hexis'].mcpServers;
+    expect(servers).toEqual({
+      vendor_eu: {
+        headers: { Authorization: 'Bearer ${VENDOR_KEY}' },
+        variables: [{ name: 'VENDOR_KEY', scope: 'user' }],
+      },
+    });
+  });
+
+  it('preserves fields the write does not surface, and clears on explicit empties', async () => {
+    // Nothing surfaced beyond the transport: everything stored survives.
+    await svc.putServer(USER, 'vendor', { transport: 'streamable-http' });
+    let mcp = await readJson('Plugins/GTM/mcp.json');
+    expect((mcp.mcpServers as Record<string, unknown>).vendor).toEqual({
+      type: 'streamable-http',
+      url: 'https://v.example/mcp',
+      headers: { 'X-V': '2' },
+    });
+    let manifest = await readJson('Plugins/GTM/plugin.json');
+    let servers = (
+      manifest.extensions as Record<string, { mcpServers: Record<string, unknown> }>
+    )['software.bevel.hexis'].mcpServers;
+    expect(servers.vendor).toEqual({
+      headers: { Authorization: 'Bearer ${VENDOR_KEY}' },
+      variables: [{ name: 'VENDOR_KEY', scope: 'user' }],
+    });
+
+    // Present-but-empty is an explicit CLEAR, not an omission.
+    await svc.putServer(USER, 'vendor', {
+      transport: 'streamable-http',
+      literalHeaders: {},
+      authHeaders: {},
+      variables: [],
+    });
+    mcp = await readJson('Plugins/GTM/mcp.json');
+    expect((mcp.mcpServers as Record<string, unknown>).vendor).toEqual({
+      type: 'streamable-http',
+      url: 'https://v.example/mcp',
+    });
+    manifest = await readJson('Plugins/GTM/plugin.json');
+    servers = (
+      manifest.extensions as Record<string, { mcpServers: Record<string, unknown> }>
+    )['software.bevel.hexis'].mcpServers;
+    // An emptied extension entry is REMOVED, not left as `{}`.
+    expect(servers.vendor).toBeUndefined();
   });
 
   it('refuses a rename onto a taken key with 409, committing nothing', async () => {

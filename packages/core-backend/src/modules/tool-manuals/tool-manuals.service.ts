@@ -33,6 +33,7 @@ import {
   EXTERNAL_KB_MANUAL_NAME,
   type IToolManualService,
   type ToolManualDescriptor,
+  type ToolManualDescriptorBase,
   type ToolManualSummary,
   type ToolManualDetail,
   type ToolCapability,
@@ -709,7 +710,10 @@ export function normalizeToolManual(
   // reference the platform-seeded variables.
   assertNoReservedVariableRefs(obj, name);
 
-  const descriptor: ToolManualDescriptor = {
+  // The non-stdio constituent of the union, by name: `.tool` parsing can
+  // never produce a spawn spec, and the stdio side pins `remote: false`,
+  // which this builder must stay free to set from the file's own `remote:`.
+  const descriptor: ToolManualDescriptorBase & { remote?: boolean; stdio?: undefined } = {
     slug: provisionalSlug,
     name,
     path: repoPath,

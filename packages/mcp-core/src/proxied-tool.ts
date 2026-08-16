@@ -109,12 +109,16 @@ export function sanitizeInputSchema(schema: unknown): unknown {
     }
     return node;
   };
-  const walk = (node: unknown, depth: number): unknown => {
+  // `isPropertyMap` marks the value of `properties`/`patternProperties`: its
+  // keys are the tool's OWN field names, not schema keywords, so a field
+  // literally named `format`, `$ref` or `definitions` must survive untouched
+  // (its VALUE is still a schema and is walked as one).
+  const walk = (node: unknown, depth: number, isPropertyMap = false): unknown => {
     if (depth > 20) return {}; // recursion/cycle guard — permissive fallback
     if (Array.isArray(node)) return node.map((item) => walk(item, depth + 1));
     if (!node || typeof node !== 'object') return node;
     const obj = node as Record<string, unknown>;
-    if (typeof obj.$ref === 'string') {
+    if (!isPropertyMap && typeof obj.$ref === 'string') {
       const target = resolvePointer(obj.$ref);
       // JSON Schema allows siblings next to $ref; keep them, target wins ties.
       const siblings: Record<string, unknown> = { ...obj };
@@ -128,13 +132,17 @@ export function sanitizeInputSchema(schema: unknown): unknown {
     }
     const out: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
+      if (isPropertyMap) {
+        out[key] = walk(value, depth + 1);
+        continue;
+      }
       if (key === '$defs' || key === 'definitions') continue; // inlined above
       // Drop a non-standard `format` (OpenAPI `int32`/`byte`/…) — the validator
       // only allows the JSON-Schema-standard set; the annotation is non-load-bearing.
       if (key === 'format' && (typeof value !== 'string' || !SUPPORTED_SCHEMA_FORMATS.has(value))) {
         continue;
       }
-      out[key] = walk(value, depth + 1);
+      out[key] = walk(value, depth + 1, key === 'properties' || key === 'patternProperties');
     }
     return out;
   };

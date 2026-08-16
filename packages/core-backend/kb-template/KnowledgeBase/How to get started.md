@@ -42,9 +42,9 @@ space and can move into a plugin later.
 - On a plugin page, **+** adds a skill: name it and an empty skill file opens,
   ready for instructions. Write it the way you would brief a careful new
   colleague: what to load, what to do, what to record.
-- Tools are added as small manual files in the plugin. Sign-ins and keys are
-  entered on the **Connect** page or the tool's own page, never written into
-  files.
+- Tools live in the plugin too: most are small manual files, and MCP servers
+  go in the plugin's `mcp.json`. Sign-ins and keys are entered on the
+  **Connect** page or the tool's own page, never written into files.
 
 ## Connect your AI agent
 

@@ -9,7 +9,7 @@ import { PluginsIndexPage } from '../components/PluginsIndexPage';
 import { PersonalPluginPage } from '../components/PersonalPluginPage';
 import { WelcomePage } from '../../onboarding/components/WelcomePage';
 import { WorkspaceItemRoute } from './WorkspaceItemRoute';
-import { decodePluginSegment, LIBRARY_ROOT, urlForItemFile, urlForSkillFile } from './library-paths';
+import { decodePluginSegment, LIBRARY_ROOT, pathForPlugin, urlForItemFile, urlForSkillFile } from './library-paths';
 
 /**
  * The Skills & Tools surface — everything under `/skills-and-tools/*`.
@@ -88,6 +88,13 @@ export function LibraryRoutes() {
           <Route path="tools/:slug" element={<LegacyToolRedirect />} />
           <Route path="skills/:name" element={<LegacySkillRedirect />} />
 
+          {/* LEGACY plugin addresses: `groups/…` is the pre-rename URL shape,
+              and links to it exist in the wild. Same posture as the other
+              legacy routes — a redirect to the current URL, outside the
+              layout route. */}
+          <Route path="groups" element={<Navigate to={LIBRARY_ROOT} replace />} />
+          <Route path="groups/:plugin" element={<LegacyGroupRedirect />} />
+
           {/* An unknown subpath is a stale or mistyped link, not an error page —
               send it home. Outside the layout route so a redirect never paints
               a sidebar on its way through. */}
@@ -96,6 +103,12 @@ export function LibraryRoutes() {
       </LibraryProvider>
     </LibraryToastProvider>
   );
+}
+
+/** `groups/:plugin` → `plugins/:plugin` — the pre-rename plugin URL. */
+function LegacyGroupRedirect() {
+  const { plugin = '' } = useParams<{ plugin: string }>();
+  return <Navigate to={pathForPlugin(decodePluginSegment(plugin))} replace />;
 }
 
 /** `skills/:name` → the skill's canonical workspace URL (its SKILL.md). */

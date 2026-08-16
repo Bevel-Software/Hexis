@@ -49,7 +49,7 @@ Local-only tools are the exception, necessarily: they run here, so their variabl
 }
 ```
 
-The name is the UTCP-namespaced form, `<manual-id>_<VAR>` — the `id` from the `.tool` file, then the variable it references. There is no way to read a Secrets Vault value from here, and that is deliberate: a vault secret arriving on a laptop is a wider exposure than the one tool it unlocks.
+The name is the UTCP-namespaced form: the `id` from the `.tool` file, an underscore, then the variable it references. UTCP sanitizes the id first — every character that is not a letter, digit or underscore becomes `_`, and then every `_` is **doubled** — so a plain alphanumeric id keeps the simple shape (`mytool` + `API_KEY` → `mytool_API_KEY`), while `my-tool` or `my_tool` + `API_KEY` both become `my__tool_API_KEY`. There is no way to read a Secrets Vault value from here, and that is deliberate: a vault secret arriving on a laptop is a wider exposure than the one tool it unlocks.
 
 ## Options
 
@@ -67,7 +67,7 @@ Diagnostics go to **stderr** (stdout carries the protocol), and MCP clients surf
 
 - *"The connection key was rejected"* — the key was revoked or belongs to another workspace. Mint a new one.
 - **A local tool is missing from the list** — it registered but failed; the log names it and why. A tool whose local server is not running is the usual cause.
-- **A local tool is listed but its calls fail on credentials** — its `${VAR}` is not in this process's environment. See above; note the `<manual-id>_` prefix.
+- **A local tool is listed but its calls fail on credentials** — its `${VAR}` is not in this process's environment. See above; note the namespaced prefix, with `-`/`_` in the tool id becoming `__`.
 - **A tool is missing entirely** — the workspace hides tools whose per-user credentials you have not set up yet, on key-authenticated sessions. Configure it on the workspace's Connect page.
 
 ## Licence

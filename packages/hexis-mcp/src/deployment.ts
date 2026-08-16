@@ -33,7 +33,18 @@ async function getJson(
   if (!res.ok) {
     throw new DeploymentError(`${init.label} returned HTTP ${res.status} from ${url}.`);
   }
-  return res.json();
+  // A 200 that is not JSON is a proxy or SPA fallback answering in the
+  // deployment's place (a login page, a catch-all index.html). That is a
+  // deployment problem the person can act on, so it must not escape as a raw
+  // SyntaxError — the CLI prints those as stack traces, treating them as bugs.
+  try {
+    return await res.json();
+  } catch {
+    throw new DeploymentError(
+      `${init.label} at ${url} answered with something that is not JSON — ` +
+        'a proxy or login page may be intercepting the deployment. Check that --url points at the workspace itself.',
+    );
+  }
 }
 
 /**
@@ -71,6 +82,25 @@ export async function resolveMcpUrl(config: HexisMcpConfig): Promise<string> {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new DeploymentError(`The deployment advertised a non-http MCP endpoint: "${advertised}".`);
   }
+  // Embedded credentials never travel: the connection key is the credential,
+  // and every MCP request would otherwise carry a misconfigured `user:pass@`
+  // to the endpoint alongside it.
+  if (parsed.username || parsed.password) {
+    parsed.username = '';
+    parsed.password = '';
+    console.error('[hexis-mcp] dropped credentials embedded in the advertised MCP endpoint — the connection key is the credential.');
+  }
+  // A cross-origin endpoint is legitimate — a proxy or second domain is the
+  // reason this field exists — and it adds no exposure the deployment does not
+  // already have (it holds the key that gets attached). But it is also the one
+  // place a compromised deployment could point this process at an address the
+  // user never typed, so the redirection is named rather than silent.
+  const configuredHost = new URL(config.baseUrl).host;
+  if (parsed.host !== configuredHost) {
+    console.error(
+      `[hexis-mcp] the deployment routes MCP through ${parsed.host}, not ${configuredHost} — expected for a proxied workspace, worth noticing otherwise.`,
+    );
+  }
   return parsed.toString();
 }
 
@@ -89,7 +119,14 @@ export async function fetchAllManuals(config: HexisMcpConfig): Promise<RawManual
     label: 'the tool manual list',
     headers: { Authorization: `Bearer ${config.connectionKey}` },
   })) as { manuals?: unknown };
-  return Array.isArray(body?.manuals) ? (body.manuals as RawManual[]) : [];
+  // Shape drift is loud, not empty: an `[]` here would let the server start,
+  // log success, and quietly serve none of the local-only tools it exists for.
+  if (!Array.isArray(body?.manuals)) {
+    throw new DeploymentError(
+      'The tool manual list did not have the expected shape (no "manuals" array) — is --url pointing at a Hexis deployment?',
+    );
+  }
+  return body.manuals as RawManual[];
 }
 
 /**
@@ -107,7 +144,14 @@ export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map
     },
     body: '{}',
   })) as { tools?: unknown };
-  const tools = Array.isArray(body?.tools) ? body.tools : [];
+  // Same loudness as `fetchAllManuals`: losing this list silently is losing
+  // exactly the tools this server exists to add.
+  if (!Array.isArray(body?.tools)) {
+    throw new DeploymentError(
+      'The local-only tool list did not have the expected shape (no "tools" array) — is --url pointing at a Hexis deployment?',
+    );
+  }
+  const tools = body.tools;
   // name → KB path of its declaration. The path is what locates the PLUGIN a
   // stdio server belongs to (`Plugins/<folder>/mcp.json`), which is what gets
   // materialized locally before the server can spawn.

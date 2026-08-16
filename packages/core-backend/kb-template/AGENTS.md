@@ -194,7 +194,7 @@ url: https://api.example.com/utcp
 
 **Frontmatter `id` = address.** This is generic, not tool-specific: ANY `.md` or `.tool` file whose frontmatter declares an `id` (or a lowercase snake_case/kebab `name`) is addressable at `/workspace/<branch>/<id>` in the app, exactly like a knowledge node — tools, skills (`SKILL.md`), and plain notes alike. Graph nodes win an id collision; files without frontmatter stay path-addressed.
 
-**Remote vs local (`remote`).** A tool is available to remote agents by default. Add `remote: false` for a tool that only works on the user's own machine (e.g. an mcp/http `url` on `localhost`): the hosted remote MCP endpoint cannot reach it, so it skips the tool and advertises it through the `list_local_tools` tool instead.
+**Remote vs local (`remote`).** A tool is available to remote agents by default. Add `remote: false` for a tool that only works on the user's own machine (e.g. an `http` manual whose `url` is on `localhost`): the hosted remote MCP endpoint cannot reach it, so it skips the tool and advertises it through the `list_local_tools` tool instead. (An MCP server that is local-only declares `local: true` in the plugin.json extensions block instead — see above.)
 
 To actually USE those tools, run the workspace as a local MCP server:
 

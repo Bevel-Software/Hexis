@@ -162,11 +162,11 @@ export function createToolManualsAgentRoutes(
         if (verdicts.get(`${PLUGINS_DIR}/${folder}/${rel}`) !== true) continue;
         const abs = path.join(pluginDir, ...rel.split('/'));
         // The no-symlink rule, re-checked at read time over the WHOLE path.
-        // lstat guards only the final component — a PARENT directory swapped
-        // for a link between walk and read makes `abs` traverse the link with
-        // the final component still a regular file. realpath resolves every
-        // component, so demanding it equal the spelled path is exactly
-        // "no component is a link": identity, not mere containment.
+        // The open below guards only the final component — a PARENT directory
+        // swapped for a link between walk and read makes `abs` traverse the
+        // link with the final component still a regular file. realpath
+        // resolves every component, so demanding it equal the spelled path is
+        // exactly "no component is a link": identity, not mere containment.
         const realNow = await fs.realpath(abs).catch((err: NodeJS.ErrnoException) => {
           if (err.code === 'ENOENT') return null; // deleted since the walk — an absence, not a failure
           throw err;
@@ -177,29 +177,50 @@ export function createToolManualsAgentRoutes(
           }
           continue;
         }
-        // lstat (not stat) still types the final component and gives the size
-        // BEFORE content — rejecting after readFile would already have spiked
-        // memory by exactly the payload the limit exists to refuse. Only an
-        // ENOENT is a skip; any other failure is a real read problem that must
-        // surface as a 500, not ship as a silently partial archive.
-        const stat = await fs.lstat(abs).catch((err: NodeJS.ErrnoException) => {
-          if (err.code === 'ENOENT') return null;
-          throw err;
-        });
-        if (stat === null || !stat.isFile()) continue;
-        bytes += stat.size;
-        if (bytes > MAX_ARCHIVE_BYTES) {
-          return void res.status(413).json({
-            error: `Plugin "${folder}" exceeds the ${MAX_ARCHIVE_BYTES / (1024 * 1024)}MB archive limit.`,
+        // Check and read through ONE file handle, so the bytes that land in
+        // the zip come from the very inode the checks passed — a path-based
+        // stat-then-readFile pair leaves a window where the path is swapped
+        // between the two and the archive ships bytes the ACL never judged.
+        // O_NOFOLLOW makes a final-component symlink fail the open itself
+        // where the platform defines it (Linux — production; Windows test
+        // runs fall back to the realpath identity check above alone). Only an
+        // ENOENT is a skip; any other failure is a real read problem that
+        // must surface as a 500, not ship as a silently partial archive.
+        const handle = await fs
+          .open(abs, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
+          .catch((err: NodeJS.ErrnoException) => {
+            if (err.code === 'ENOENT') return null; // deleted since the walk — an absence
+            if (err.code === 'ELOOP') {
+              // O_NOFOLLOW's spelling of "the final component is a symlink".
+              console.warn(`[tool-manuals] archive of "${folder}": ${rel} is a symlink — not supported in plugins, skipped.`);
+              return null;
+            }
+            throw err;
           });
+        if (handle === null) continue;
+        try {
+          // fstat on the handle types and sizes the OPENED file — the size
+          // still gates BEFORE content, because rejecting after the read
+          // would already have spiked memory by exactly the payload the
+          // limit exists to refuse.
+          const stat = await handle.stat();
+          if (!stat.isFile()) continue;
+          bytes += stat.size;
+          if (bytes > MAX_ARCHIVE_BYTES) {
+            return void res.status(413).json({
+              error: `Plugin "${folder}" exceeds the ${MAX_ARCHIVE_BYTES / (1024 * 1024)}MB archive limit.`,
+            });
+          }
+          // Unix mode rides in the zip attrs so a `./`-command stdio server is
+          // still executable after materialization (0 on Windows — harmless).
+          // PLAIN mode, no shifting: adm-zip masks a numeric attr with 0xfff and
+          // positions it into the external-attribute high bits itself — a
+          // pre-shifted value is destroyed by that mask.
+          zip.addFile(rel, await handle.readFile(), '', stat.mode & 0o7777);
+          included += 1;
+        } finally {
+          await handle.close();
         }
-        // Unix mode rides in the zip attrs so a `./`-command stdio server is
-        // still executable after materialization (0 on Windows — harmless).
-        // PLAIN mode, no shifting: adm-zip masks a numeric attr with 0xfff and
-        // positions it into the external-attribute high bits itself — a
-        // pre-shifted value is destroyed by that mask.
-        zip.addFile(rel, await fs.readFile(abs), '', stat.mode & 0o7777);
-        included += 1;
       }
       // An all-filtered plugin looks exactly like an absent one — a 404 must
       // not confirm to a keyless caller that the folder exists.

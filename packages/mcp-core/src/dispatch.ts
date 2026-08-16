@@ -77,5 +77,12 @@ export async function dispatchToolCall(
     return toolError(`The "${tool.mcpName}" tool failed: ${describeToolFailure(err)}`);
   }
 
+  // A stream that closes without ever yielding is a transport fault, not an
+  // empty result — every tool kind yields at least its final value (see above).
+  // Say so, instead of serializing the never-assigned `prev` into a "null".
+  if (!hasPrev) {
+    return toolError(`The "${tool.mcpName}" tool produced no output: its stream ended without a result.`);
+  }
+
   return toCallToolResult(prev);
 }

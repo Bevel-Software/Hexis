@@ -1,8 +1,9 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import type { ProxiedTool } from '@bevel-software/platform-mcp-core';
+import type { Tool as UtcpTool } from '@utcp/sdk';
+import { flattenManualTool, type ProxiedTool } from '@bevel-software/platform-mcp-core';
 import { localManualTemplates, remoteManualTemplate, REMOTE_MANUAL_NAME } from '../manuals.js';
-import { listedTools, withoutRemoteMetaTools } from '../server.js';
-import { resolveMcpUrl } from '../deployment.js';
+import { discoverTools, listedTools, withoutRemoteMetaTools } from '../server.js';
+import { DeploymentError, fetchAllManuals, fetchLocalOnlyManuals, resolveMcpUrl } from '../deployment.js';
 
 function tool(mcpName: string, manualName = REMOTE_MANUAL_NAME): ProxiedTool {
   return {
@@ -69,6 +70,29 @@ describe('localManualTemplates', () => {
   });
 });
 
+describe('discoverTools', () => {
+  it('removes the deployment\'s meta-tool copies from the REGISTRY, not just the listing', async () => {
+    // A chain and the local `list_tools` reflect over the tool repository, so
+    // a remote `hexis.call_tool_chain` left registered would stay reachable —
+    // and would run against the remote registry that cannot see local tools.
+    const repo = new Map<string, UtcpTool>();
+    for (const name of ['read_file', 'list_tools', 'tools_info', 'call_tool_chain']) {
+      repo.set(
+        `${REMOTE_MANUAL_NAME}.${name}`,
+        { name: `${REMOTE_MANUAL_NAME}.${name}`, description: '', inputs: { type: 'object' } } as unknown as UtcpTool,
+      );
+    }
+    const client = {
+      registerManual: async () => ({ success: true }),
+      getTools: async () => [...repo.values()],
+      config: { tool_repository: { removeTool: async (n: string) => repo.delete(n) } },
+    };
+    const tools = await discoverTools(client as never, { name: REMOTE_MANUAL_NAME } as never, []);
+    expect([...repo.keys()]).toEqual([`${REMOTE_MANUAL_NAME}.read_file`]);
+    expect(tools.map((t) => t.mcpName)).toEqual(['read_file']);
+  });
+});
+
 describe('withoutRemoteMetaTools', () => {
   it('drops the deployment\'s meta-tools, which describe the wrong registry', () => {
     const kept = withoutRemoteMetaTools([
@@ -89,11 +113,24 @@ describe('listedTools', () => {
     expect(names).toContain('read_file');
   });
 
-  it('lets the workspace tool win a name collision with a local one', () => {
+  it('lets the workspace tool win the one collision flattening can actually produce', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const listed = listedTools([tool('read_file'), tool('read_file', 'localbox')]);
-    expect(listed.filter((t) => t.name === 'read_file')).toHaveLength(1);
-    expect(spy).toHaveBeenCalledWith(expect.stringContaining('read_file (duplicate)'));
+    // A local manual's tools are always namespaced (`localbox.read_file` →
+    // `localbox_read_file`), so a bare workspace name like `read_file` can
+    // never be shadowed. The reachable collision is between FLATTENED names:
+    // the workspace serving a tool literally NAMED `localbox_read_file`.
+    const utcp = (name: string, description: string) =>
+      ({ name, description, inputs: { type: 'object', properties: {} } }) as unknown as UtcpTool;
+    const flattened = [
+      utcp('hexis.localbox_read_file', 'the workspace copy'),
+      utcp('localbox.read_file', 'the local copy'),
+    ].map((t) => flattenManualTool(t, REMOTE_MANUAL_NAME));
+    expect(flattened.map((t) => t.mcpName)).toEqual(['localbox_read_file', 'localbox_read_file']);
+    const survivors = listedTools(flattened).filter((t) => t.name === 'localbox_read_file');
+    expect(survivors).toHaveLength(1);
+    // Remote-first discovery order is what makes the workspace copy the winner.
+    expect(survivors[0]!.description).toBe('the workspace copy');
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('localbox_read_file (duplicate)'));
   });
 
   it('drops a tool a meta-tool would shadow, so the listing never advertises an uncallable name', () => {
@@ -116,6 +153,7 @@ describe('resolveMcpUrl', () => {
 
   it('uses the endpoint the deployment advertises, not one we compute', async () => {
     stubConfigEndpoint({ mcpUrl: 'https://proxied.example/api/mcp' });
+    vi.spyOn(console, 'error').mockImplementation(() => {}); // the cross-origin note, tested below
     expect(await resolveMcpUrl(config)).toBe('https://proxied.example/api/mcp');
   });
 
@@ -139,5 +177,47 @@ describe('resolveMcpUrl', () => {
       }),
     );
     await expect(resolveMcpUrl(config)).rejects.toThrow(/Could not reach the deployment config/);
+  });
+
+  it('strips credentials embedded in the advertised endpoint, and says so', async () => {
+    stubConfigEndpoint({ mcpUrl: 'https://user:pass@proxied.example/api/mcp' });
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await resolveMcpUrl(config)).toBe('https://proxied.example/api/mcp');
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('dropped credentials'));
+  });
+
+  it('names a cross-origin endpoint on stderr instead of following it silently', async () => {
+    stubConfigEndpoint({ mcpUrl: 'https://other.example/api/mcp' });
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await resolveMcpUrl(config)).toBe('https://other.example/api/mcp');
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('routes MCP through other.example'));
+  });
+
+  it('reports a 200 that is not JSON as a deployment problem, not a parser bug', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<!doctype html><title>login</title>', { status: 200 })));
+    await expect(resolveMcpUrl(config)).rejects.toBeInstanceOf(DeploymentError);
+    await expect(resolveMcpUrl(config)).rejects.toThrow(/not JSON/);
+  });
+});
+
+describe('fetchAllManuals / fetchLocalOnlyManuals', () => {
+  const config = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' };
+
+  it('fails loudly on shape drift — an empty toolset must not look like success', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ unexpected: true }), { status: 200 })),
+    );
+    await expect(fetchAllManuals(config)).rejects.toBeInstanceOf(DeploymentError);
+    await expect(fetchLocalOnlyManuals(config)).rejects.toThrow(/expected shape/);
+  });
+
+  it('treats an EMPTY list as valid — no local-only tools is a state, not drift', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ manuals: [], tools: [] }), { status: 200 })),
+    );
+    expect(await fetchAllManuals(config)).toEqual([]);
+    expect((await fetchLocalOnlyManuals(config)).size).toBe(0);
   });
 });

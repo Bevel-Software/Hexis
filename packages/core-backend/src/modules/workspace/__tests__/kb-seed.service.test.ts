@@ -270,6 +270,74 @@ describe('KbSeedService', () => {
       expect(after2).toBe(after1);
     });
 
+    it('a note-only migration outcome stages nothing and raises no top-up warning', async () => {
+      const template = await fs.readFile(
+        path.join(__dirname, '../../../../kb-template/AGENTS.md'),
+        'utf8',
+      );
+      const upstream = await seededUpstream(PROTECTED, {
+        'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
+        'access.md': 'x',
+        'AGENTS.md': template,
+        '.bevelignore': 'AGENTS.md\nPlugins/\n',
+        '.gitignore': '',
+        'KnowledgeBase/Real/Knowledge/.gitkeep': '',
+        'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+        // An unparsable manifest keeps this manual a `.tool` — its variables
+        // have nowhere to go. The migration NOTES the refusal every run and
+        // changes nothing; staging on the note used to reach `git commit`
+        // with an empty index and warn about it on every boot.
+        'Plugins/GTM/plugin.json': '{ not json at all',
+        'Plugins/GTM/vendor.tool': JSON.stringify({
+          name: 'vendor',
+          type: 'mcp',
+          url: 'https://mcp.vendor.example/mcp',
+          variables: [{ name: 'VENDOR_KEY', scope: 'user' }],
+        }),
+      });
+      const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await makeSeeder(upstream).topUpWorkspace(repoDir, DEFAULT_BRANCH);
+        expect(warn.mock.calls.flat().join(' ')).not.toMatch(/top-up/i);
+      } finally {
+        warn.mockRestore();
+      }
+      // Only the pre-seed commit — a note is not a change.
+      expect(await headCommitCount(root, upstream, DEFAULT_BRANCH)).toBe(1);
+    });
+
+    it('the root rename rewrites the stale .bevelignore rule and commits it along', async () => {
+      const template = await fs.readFile(
+        path.join(__dirname, '../../../../kb-template/AGENTS.md'),
+        'utf8',
+      );
+      const upstream = await seededUpstream(PROTECTED, {
+        'roles.yaml': 'roles:\n  Admin:\n    - keep@example.com\n',
+        'access.md': 'x',
+        'AGENTS.md': template,
+        // The pre-rename rule: without the rewrite the migrated KB has a rule
+        // for a root that no longer exists and none for the one that does.
+        '.bevelignore': 'AGENTS.md\nGroups/\n',
+        '.gitignore': '',
+        'KnowledgeBase/Real/Knowledge/.gitkeep': '',
+        'Groups/GTM/access.md': 'write:\n  - Admin\n',
+      });
+      const repoDir = await checkout(root, upstream, DEFAULT_BRANCH);
+      await makeSeeder(upstream).topUpWorkspace(repoDir, DEFAULT_BRANCH);
+
+      // An independent clone proves the rewrite was STAGED (the ignore file
+      // is a repo-root path outside the two roots' pathspecs) and pushed.
+      const dir = await checkout(root, upstream, DEFAULT_BRANCH);
+      expect(await exists(path.join(dir, 'Plugins/GTM/access.md'))).toBe(true);
+      const ignore = await fs.readFile(path.join(dir, '.bevelignore'), 'utf8');
+      expect(ignore.split('\n').map((l) => l.trim())).toContain('Plugins/');
+      expect(ignore).not.toContain('Groups/');
+      expect(ignore).toContain('AGENTS.md');
+      const log = await git(dir, ['log', '-1', '--pretty=%s']);
+      expect(log.trim()).toBe('Move Groups/ to Plugins/ (Agent Plugins layout)');
+    });
+
   });
 
   /**

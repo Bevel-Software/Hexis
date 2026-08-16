@@ -18,6 +18,8 @@
   "files": [
     "dist",
     "src",
+    "!src/__tests__",
+    "!dist/__tests__",
     "README.md",
     "THIRD-PARTY-NOTICES.md"
   ],

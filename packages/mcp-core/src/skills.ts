@@ -26,7 +26,7 @@ export function skillPromptText(skill: LoadedSkill): string {
     f.startsWith(`${skill.path}/`) ? f.slice(skill.path.length + 1) : f,
   );
   const footer = rel.length
-    ? `\n\n---\nSkill folder: ${skill.path}\nBundled files (fetch each with the get_skill tool: { name: "${skill.name}", file }): ${rel.join(', ')}`
+    ? `\n\n---\nSkill folder: ${skill.path}\nBundled files (fetch each with the get_skill tool: { name: ${JSON.stringify(skill.name)}, file }): ${rel.join(', ')}`
     : '';
   return `${skill.body}${footer}`;
 }

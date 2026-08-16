@@ -13,6 +13,7 @@ import {
 } from '@bevel-software/platform-shared';
 import type { ToolManualDescriptor } from '../tool-manuals/tool-manuals.contract.js';
 import { normalizeToolManual } from '../tool-manuals/tool-manuals.service.js';
+import { IGNORE_FILENAME } from './bevel-ignore.js';
 
 /**
  * One-way migration of a knowledge base from `Groups/` to the Agent Plugins
@@ -43,16 +44,27 @@ import { normalizeToolManual } from '../tool-manuals/tool-manuals.service.js';
  */
 
 export interface PluginsMigrationResult {
+  /**
+   * Whether this run CHANGED FILES. Notes alone (a manual that could not be
+   * converted, say) do not set it — the caller stages and commits on this
+   * flag, and a note-only run has nothing to commit.
+   */
   migrated: boolean;
   /** Whether the `Groups/` → `Plugins/` root rename itself happened this run. */
   renamed: boolean;
+  /** Whether the KB's own `.bevelignore` had its `Groups/` rule rewritten (a repo-root file, staged separately). */
+  ignoreRewritten: boolean;
   /** Human-readable summary lines (plugin names, tool moves) for the seed log. */
   notes: string[];
 }
 
+// lstat, both helpers: SYMLINKS ARE NOT SUPPORTED IN PLUGINS, anywhere, so a
+// link never counts as the thing it points at — following one here would let
+// a symlinked directory pull files from outside the plugin into the sweep
+// (and delete them from wherever they really live).
 async function exists(p: string): Promise<boolean> {
   try {
-    await fs.stat(p);
+    await fs.lstat(p);
     return true;
   } catch {
     return false;
@@ -61,7 +73,7 @@ async function exists(p: string): Promise<boolean> {
 
 async function isDir(p: string): Promise<boolean> {
   try {
-    return (await fs.stat(p)).isDirectory();
+    return (await fs.lstat(p)).isDirectory();
   } catch {
     return false;
   }
@@ -79,9 +91,15 @@ async function moveIfAbsent(from: string, to: string): Promise<boolean> {
   return true;
 }
 
-/** A header value referencing a vault variable rather than carrying a literal. */
+/**
+ * A header value referencing a vault variable rather than carrying a literal.
+ * Both spellings the substitutor expands — `${VAR}` and bare `$VAR` — count:
+ * either one copied into mcp.json would be transmitted verbatim by a
+ * conformant client. `$5` and friends are not references (a name starts with
+ * a letter or underscore), so a price in a header stays the literal it is.
+ */
 function isCredentialReference(value: string): boolean {
-  return /\$\{[^}]+\}/.test(value);
+  return /\$(\{[^}]+\}|[A-Za-z_][A-Za-z0-9_]*)/.test(value);
 }
 
 /** Split a manual's headers into what mcp.json may carry and what may not. */
@@ -129,8 +147,8 @@ async function foldIntoPluginFiles(
   folderName: string,
   manuals: ConvertedManual[],
   notes: string[],
-): Promise<void> {
-  if (manuals.length === 0) return;
+): Promise<boolean> {
+  if (manuals.length === 0) return false;
 
   const mcpPath = path.join(pluginDir, PLUGIN_MCP_FILE);
   const mcp = (await readJson(mcpPath)) ?? { $schema: PLUGIN_MCP_SCHEMA, mcpServers: {} };
@@ -226,6 +244,7 @@ async function foldIntoPluginFiles(
     await fs.rm(item.abs, { force: true });
     notes.push(`${folderName}: ${item.note} converted to an ${PLUGIN_MCP_FILE} entry`);
   }
+  return wroteMcp || wroteManifest || folded.length > 0;
 }
 
 /**
@@ -248,9 +267,13 @@ async function asMcpManual(abs: string, repoRel: string): Promise<ToolManualDesc
   }
 }
 
-/** Reorganise ONE plugin folder in place. Returns notes describing what changed. */
-async function migratePluginFolder(pluginDir: string, folderName: string): Promise<string[]> {
+/** Reorganise ONE plugin folder in place. Returns notes + whether files changed. */
+async function migratePluginFolder(
+  pluginDir: string,
+  folderName: string,
+): Promise<{ notes: string[]; changed: boolean }> {
   const notes: string[] = [];
+  let changed = false;
 
   if (!(await exists(path.join(pluginDir, PLUGIN_MANIFEST_FILE)))) {
     await fs.writeFile(
@@ -259,6 +282,7 @@ async function migratePluginFolder(pluginDir: string, folderName: string): Promi
       'utf8',
     );
     notes.push(`${folderName}: wrote ${PLUGIN_MANIFEST_FILE}`);
+    changed = true;
   }
 
   const entries = await fs.readdir(pluginDir, { withFileTypes: true });
@@ -278,6 +302,7 @@ async function migratePluginFolder(pluginDir: string, folderName: string): Promi
     const dest = path.join(pluginDir, ...HEXIS_TOOLS_DIR.split('/'), path.basename(abs));
     if (abs !== dest && (await moveIfAbsent(abs, dest))) {
       notes.push(`${folderName}: ${note} → ${HEXIS_TOOLS_DIR}/${path.basename(abs)}`);
+      changed = true;
     }
   };
 
@@ -294,6 +319,7 @@ async function migratePluginFolder(pluginDir: string, folderName: string): Promi
       const dest = path.join(pluginDir, PLUGIN_SKILLS_DIR, entry.name);
       if (await moveIfAbsent(abs, dest)) {
         notes.push(`${folderName}: ${entry.name}/ → ${PLUGIN_SKILLS_DIR}/${entry.name}/`);
+        changed = true;
       }
       continue;
     }
@@ -306,6 +332,9 @@ async function migratePluginFolder(pluginDir: string, folderName: string): Promi
   // Second sweep: mcp `.tool`s an EARLIER run moved into the extension dir
   // (when mcp.json was a projection, not the authority). Converting them here
   // is what makes the migration complete itself rather than strand a twin.
+  // `isDir` is lstat-based, so a SYMLINK planted at this path is not swept:
+  // this sweep DELETES what it converts, and following a link would delete
+  // `.tool` files from wherever the link really points.
   const extToolsDir = path.join(pluginDir, ...HEXIS_TOOLS_DIR.split('/'));
   if (await isDir(extToolsDir)) {
     for (const entry of await fs.readdir(extToolsDir, { withFileTypes: true })) {
@@ -316,15 +345,46 @@ async function migratePluginFolder(pluginDir: string, folderName: string): Promi
     }
   }
 
-  await foldIntoPluginFiles(pluginDir, folderName, converted, notes);
-  return notes;
+  changed = (await foldIntoPluginFiles(pluginDir, folderName, converted, notes)) || changed;
+  return { notes, changed };
+}
+
+/**
+ * Rewrite the KB's `.bevelignore` rule for the renamed root: the exact line
+ * `Groups/` becomes `Plugins/`. Without this a migrated KB is left with a
+ * stale rule for a folder that no longer exists and NO rule for the new one,
+ * so plugin internals start showing up in the file tree and agent view.
+ *
+ * The file is the operator's — this touches ONE line, the one the platform's
+ * own rename invalidated, and only when `Plugins/` is not already listed
+ * (in which case the stale line is harmlessly dead and left alone).
+ */
+async function rewriteIgnoreRootRule(repoDir: string, notes: string[]): Promise<boolean> {
+  const ignorePath = path.join(repoDir, IGNORE_FILENAME);
+  let current: string;
+  try {
+    current = await fs.readFile(ignorePath, 'utf-8');
+  } catch {
+    return false; // no ignore file — nothing went stale
+  }
+  const legacyRule = `${LEGACY_GROUPS_DIR}/`;
+  const newRule = `${PLUGINS_DIR}/`;
+  const lines = current.split('\n');
+  if (lines.some((l) => l.trim() === newRule)) return false;
+  const idx = lines.findIndex((l) => l.trim() === legacyRule);
+  if (idx === -1) return false;
+  lines[idx] = newRule;
+  await fs.writeFile(ignorePath, lines.join('\n'), 'utf-8');
+  notes.push(`${IGNORE_FILENAME}: ${legacyRule} → ${newRule}`);
+  return true;
 }
 
 /**
  * Migrate `repoDir` in place. Safe to call on every top-up.
  *
- * Returns `migrated: false` when there was nothing to do — which is the steady
- * state, so the caller commits nothing.
+ * Returns `migrated: false` when no FILE changed — which is the steady state,
+ * so the caller commits nothing. Advisory `notes` may still be present (a
+ * manual that refuses to convert reports itself every run) and set nothing.
  */
 export async function migrateGroupsToPlugins(repoDir: string): Promise<PluginsMigrationResult> {
   const legacyDir = path.join(repoDir, LEGACY_GROUPS_DIR);
@@ -343,25 +403,32 @@ export async function migrateGroupsToPlugins(repoDir: string): Promise<PluginsMi
       `[plugins-migration] both ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ exist — leaving both alone. ` +
         `Merge ${LEGACY_GROUPS_DIR}/ into ${PLUGINS_DIR}/ by hand; nothing is being migrated automatically.`,
     );
-    return { migrated: false, renamed: false, notes };
+    return { migrated: false, renamed: false, ignoreRewritten: false, notes };
   }
 
   let renamed = false;
+  let ignoreRewritten = false;
   if (hasLegacy) {
     await fs.rename(legacyDir, pluginsDir);
     renamed = true;
     notes.push(`${LEGACY_GROUPS_DIR}/ → ${PLUGINS_DIR}/`);
+    // Rides WITH the rename, not on every run: the rename is what turned the
+    // ignore rule stale, so the run that renames is the run that heals it.
+    ignoreRewritten = await rewriteIgnoreRootRule(repoDir, notes);
   } else if (!hasPlugins) {
-    return { migrated: false, renamed: false, notes };
+    return { migrated: false, renamed: false, ignoreRewritten: false, notes };
   }
 
   // Runs whether or not the rename just happened, so a KB already on
   // `Plugins/` still gets missing manifests and any half-done reorganisation
   // finished. That is what makes this idempotent rather than once-only.
+  let changed = renamed || ignoreRewritten;
   for (const entry of await fs.readdir(pluginsDir, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
-    notes.push(...(await migratePluginFolder(path.join(pluginsDir, entry.name), entry.name)));
+    const folder = await migratePluginFolder(path.join(pluginsDir, entry.name), entry.name);
+    notes.push(...folder.notes);
+    changed = changed || folder.changed;
   }
 
-  return { migrated: notes.length > 0, renamed, notes };
+  return { migrated: changed, renamed, ignoreRewritten, notes };
 }

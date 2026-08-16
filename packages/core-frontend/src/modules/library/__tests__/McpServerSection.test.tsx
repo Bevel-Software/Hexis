@@ -90,6 +90,34 @@ describe('McpServerSection', () => {
     expect(await screen.findByText(/other members' values, which this page cannot see/)).toBeInTheDocument();
   });
 
+  it('round-trips cwd/env on a stdio save — the form has no fields for them', async () => {
+    // The PUT rebuilds the entry from the payload, so omitting `cwd`/`env`
+    // would erase values a hand-edited mcp.json carries.
+    apiMock.getMcpServer.mockResolvedValue({
+      name: 'vendor',
+      transport: 'stdio',
+      command: 'npx',
+      args: ['-y', 'vendor'],
+      cwd: './srv',
+      env: { VENDOR_MODE: 'ci' },
+      literalHeaders: {},
+      authHeaders: {},
+      variables: [],
+      local: true,
+      canWrite: true,
+    });
+    renderSection();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit server' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(apiMock.putMcpServer).toHaveBeenCalledTimes(1));
+    expect(apiMock.putMcpServer.mock.calls[0]![1]).toMatchObject({
+      command: 'npx',
+      args: ['-y', 'vendor'],
+      cwd: './srv',
+      env: { VENDOR_MODE: 'ci' },
+    });
+  });
+
   it('interrupts a rename with the disconnect count, and saves only on "Rename anyway"', async () => {
     apiMock.getMcpServer.mockResolvedValue(VIEW);
     renderSection(2);

@@ -86,6 +86,48 @@ describe('descriptorsFromMcpJson', () => {
     expect(out.map((d) => d.name)).toEqual(['ok']);
   });
 
+  it('ignores malformed extension headers instead of spreading them into keys', () => {
+    // A string spread into the merge would scatter its indices ('0', '1', …)
+    // into header names; a malformed extension must cost its own data only.
+    const out = descriptorsFromMcpJson(
+      'GTM',
+      JSON.stringify({
+        mcpServers: { vendor: { type: 'streamable-http', url: 'https://v.example/mcp', headers: { 'X-V': '2' } } },
+      }),
+      JSON.stringify({
+        name: 'gtm',
+        extensions: { 'software.bevel.hexis': { mcpServers: { vendor: { headers: 'Bearer oops' } } } },
+      }),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0].headers).toEqual({ 'X-V': '2' });
+  });
+
+  it('skips a server whose variables declaration is malformed, keeping siblings', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // A dropped declaration would silently re-scope a credential (undeclared
+    // defaults to the shared admin row), so a bad entry takes the SERVER
+    // offline — never just the entry, and never its siblings.
+    const out = descriptorsFromMcpJson(
+      'GTM',
+      JSON.stringify({
+        mcpServers: {
+          vendor: { type: 'streamable-http', url: 'https://v.example/mcp' },
+          ok: { type: 'streamable-http', url: 'https://ok.example/mcp' },
+        },
+      }),
+      JSON.stringify({
+        name: 'gtm',
+        extensions: {
+          'software.bevel.hexis': {
+            mcpServers: { vendor: { variables: [{ name: 'bad name!', scope: 'user' }] } },
+          },
+        },
+      }),
+    );
+    expect(out.map((d) => d.name)).toEqual(['ok']);
+  });
+
   it('yields nothing for an unparsable file, quietly for an absent extensions block', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(descriptorsFromMcpJson('GTM', '{ not json', null)).toEqual([]);

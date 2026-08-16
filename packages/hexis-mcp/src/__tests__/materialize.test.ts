@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
   expandPlaceholders,
   prepareStdioSpec,
+  readBodyCapped,
   resolveCommand,
   type MaterializedPlugin,
 } from '../materialize.js';
@@ -30,6 +31,38 @@ describe('expandPlaceholders', () => {
     expect(expandPlaceholders('${PLUGIN_DATA}/cache', m)).toBe(`${m.pluginData}/cache`);
     // The spec: "Unrecognized placeholder-like text MUST remain literal."
     expect(expandPlaceholders('${VENDOR_KEY}', m)).toBe('${VENDOR_KEY}');
+  });
+});
+
+describe('readBodyCapped', () => {
+  const stream = (...chunks: string[]) =>
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(new TextEncoder().encode(c));
+        controller.close();
+      },
+    });
+
+  it('buffers a body under the cap byte-for-byte', async () => {
+    expect((await readBodyCapped(stream('ab', 'cd'), 10, 'the archive')).toString()).toBe('abcd');
+  });
+
+  it('refuses AS the cap is crossed — the oversized body is never held in memory', async () => {
+    // A pull-based endless stream: the pull count proves the refusal happened
+    // at the cap, not after the producer finished.
+    let pulls = 0;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new Uint8Array(4));
+      },
+    });
+    await expect(readBodyCapped(endless, 10, 'the archive')).rejects.toThrow(/download limit/);
+    expect(pulls).toBeLessThan(10);
+  });
+
+  it('treats a missing body as empty', async () => {
+    expect((await readBodyCapped(null, 10, 'the archive')).length).toBe(0);
   });
 });
 

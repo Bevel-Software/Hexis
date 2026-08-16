@@ -33,7 +33,7 @@ export function Toolbar() {
    * Which surfaces HAVE a sidebar is asked three ways, because they answer it
    * differently: Knowledge declares a `sidebar` pane (so the layout controller
    * can say `canToggleExplorer`), while Skills & Tools and the settings pages
-   * have no pane plugin at all and are identified by their paths.
+   * have no pane group at all and are identified by their paths.
    *
    * The settings clause is `&& !isCompact` because below `md` the settings
    * layout mounts no `SidebarFrame` at all — the nav is a strip inside the

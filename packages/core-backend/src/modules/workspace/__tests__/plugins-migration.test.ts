@@ -56,7 +56,12 @@ afterEach(async () => {
 describe('migrateGroupsToPlugins', () => {
   it('does nothing to a knowledge base that has neither root', async () => {
     await write('KnowledgeBase/.gitkeep', '');
-    expect(await migrateGroupsToPlugins(repo)).toEqual({ migrated: false, renamed: false, notes: [] });
+    expect(await migrateGroupsToPlugins(repo)).toEqual({
+      migrated: false,
+      renamed: false,
+      ignoreRewritten: false,
+      notes: [],
+    });
   });
 
   it('moves the root, the skills and the tools, and writes the manifest', async () => {
@@ -188,7 +193,12 @@ describe('migrateGroupsToPlugins', () => {
     await seedLegacyKb();
     await migrateGroupsToPlugins(repo);
     const before = await read('Plugins/GTM/plugin.json');
-    expect(await migrateGroupsToPlugins(repo)).toEqual({ migrated: false, renamed: false, notes: [] });
+    expect(await migrateGroupsToPlugins(repo)).toEqual({
+      migrated: false,
+      renamed: false,
+      ignoreRewritten: false,
+      notes: [],
+    });
     expect(await read('Plugins/GTM/plugin.json')).toBe(before);
   });
 
@@ -206,7 +216,12 @@ describe('migrateGroupsToPlugins', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     await write('Groups/GTM/access.md', 'write:\n  - Admin\n');
     await write('Plugins/GTM/access.md', 'write:\n  - Admin\n');
-    expect(await migrateGroupsToPlugins(repo)).toEqual({ migrated: false, renamed: false, notes: [] });
+    expect(await migrateGroupsToPlugins(repo)).toEqual({
+      migrated: false,
+      renamed: false,
+      ignoreRewritten: false,
+      notes: [],
+    });
     // Both left exactly as they were — merging would pick a winner nobody chose.
     expect(await exists('Groups/GTM/access.md')).toBe(true);
     expect(await exists('Plugins/GTM/access.md')).toBe(true);
@@ -241,5 +256,108 @@ describe('migrateGroupsToPlugins', () => {
     await migrateGroupsToPlugins(repo);
     const manifest = JSON.parse(await read('Plugins/personal-u-123/plugin.json'));
     expect(manifest.name).toMatch(/^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/);
+  });
+
+  it('routes a bare $VAR header to the extensions block, but not a $5 literal', async () => {
+    await write('Groups/GTM/access.md', 'write:\n  - Admin\n');
+    await write(
+      'Groups/GTM/vendor.tool',
+      JSON.stringify({
+        name: 'vendor',
+        type: 'mcp',
+        url: 'https://mcp.vendor.example/mcp',
+        // Both spellings the substitutor expands are credential references;
+        // a dollar amount is not (a variable name can't start with a digit).
+        headers: { Authorization: 'Bearer $VENDOR_KEY', 'X-Price': '$5 per call' },
+      }),
+    );
+    await migrateGroupsToPlugins(repo);
+    const mcp = JSON.parse(await read('Plugins/GTM/mcp.json'));
+    expect(mcp.mcpServers.vendor.headers).toEqual({ 'X-Price': '$5 per call' });
+    const manifest = JSON.parse(await read('Plugins/GTM/plugin.json'));
+    expect(manifest.extensions['software.bevel.hexis'].mcpServers.vendor.headers).toEqual({
+      Authorization: 'Bearer $VENDOR_KEY',
+    });
+  });
+
+  it('does not follow a symlinked extension tools dir in the second sweep', async () => {
+    // The second sweep DELETES what it converts — following a link would
+    // convert-and-delete `.tool` files from wherever the link really points.
+    await write('Plugins/GTM/access.md', 'write:\n  - Admin\n');
+    await write('Plugins/GTM/plugin.json', '{ "name": "gtm" }');
+    await write(
+      'elsewhere/tools/notion.tool',
+      JSON.stringify({ name: 'notion', type: 'mcp', url: 'https://mcp.notion.com/mcp' }),
+    );
+    await fs.mkdir(path.join(repo, 'Plugins/GTM/software.bevel.hexis'), { recursive: true });
+    // 'junction' so the link is creatable without privileges on Windows; on
+    // POSIX the type argument is ignored and a plain dir symlink is made.
+    await fs.symlink(
+      path.join(repo, 'elsewhere/tools'),
+      path.join(repo, 'Plugins/GTM/software.bevel.hexis/tools'),
+      'junction',
+    );
+    const result = await migrateGroupsToPlugins(repo);
+    // The linked-to file is untouched — not converted, not deleted.
+    expect(await exists('elsewhere/tools/notion.tool')).toBe(true);
+    expect(await exists('Plugins/GTM/mcp.json')).toBe(false);
+    expect(result.notes.join(' ')).not.toContain('notion');
+  });
+
+  it('reports a note-only run as not migrated — there is nothing to commit', async () => {
+    // An unparsable manifest blocks conversion of a manual that carries
+    // extension data; the refusal is a NOTE, not a file change, and saying
+    // `migrated` anyway would send the caller into an empty commit every boot.
+    await write('Plugins/GTM/access.md', 'write:\n  - Admin\n');
+    await write('Plugins/GTM/plugin.json', '{ not json at all');
+    await write(
+      'Plugins/GTM/vendor.tool',
+      JSON.stringify({
+        name: 'vendor',
+        type: 'mcp',
+        url: 'https://mcp.vendor.example/mcp',
+        variables: [{ name: 'VENDOR_KEY', scope: 'user' }],
+      }),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await migrateGroupsToPlugins(repo);
+    warn.mockRestore();
+    expect(result.migrated).toBe(false);
+    expect(result.notes.join(' ')).toContain('NOT converted');
+    // The source stays, ready for the run after the manifest is fixed.
+    expect(await exists('Plugins/GTM/vendor.tool')).toBe(true);
+  });
+
+  describe('the .bevelignore root rule', () => {
+    it('follows the rename, preserving every other line', async () => {
+      await seedLegacyKb();
+      await write('.bevelignore', '# mine\nGroups/\nMy-Own-Rule/\n');
+      const result = await migrateGroupsToPlugins(repo);
+      expect(result.ignoreRewritten).toBe(true);
+      const ignore = await read('.bevelignore');
+      expect(ignore.split('\n')).toContain('Plugins/');
+      expect(ignore).not.toContain('Groups/');
+      expect(ignore).toContain('# mine');
+      expect(ignore).toContain('My-Own-Rule/');
+    });
+
+    it('is left alone when Plugins/ is already listed', async () => {
+      await seedLegacyKb();
+      await write('.bevelignore', 'Groups/\nPlugins/\n');
+      const result = await migrateGroupsToPlugins(repo);
+      expect(result.ignoreRewritten).toBe(false);
+      // The stale line is harmlessly dead; deleting it would be editing the
+      // operator's file beyond what the rename made stale.
+      expect(await read('.bevelignore')).toBe('Groups/\nPlugins/\n');
+    });
+
+    it('is not touched by a run that does not rename', async () => {
+      await write('Plugins/GTM/access.md', 'write:\n  - Admin\n');
+      await write('Plugins/GTM/outreach/SKILL.md', '# Outreach\n');
+      await write('.bevelignore', 'Groups/\n');
+      const result = await migrateGroupsToPlugins(repo);
+      expect(result.ignoreRewritten).toBe(false);
+      expect(await read('.bevelignore')).toBe('Groups/\n');
+    });
   });
 });

@@ -90,7 +90,15 @@ export type McpServerWrite = Omit<Partial<McpServerView>, 'name' | 'canWrite'> &
 
 export async function getMcpServer(slug: string): Promise<McpServerView | null> {
   const res = await authFetch(`/api/tools/${encodeURIComponent(slug)}/server`);
-  if (res.status === 404) return null; // a .tool-backed manual — no server pair
+  if (res.status === 404) {
+    // Two 404s share this status and only ONE is an absence: `Not found` is
+    // the expected no-server-pair case (a .tool-backed manual), while `Not
+    // available` means the edit service isn't wired at all — a deployment
+    // fault that must surface, not render as a quietly server-less page.
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    if (body?.error === 'Not found') return null;
+    throw new Error(body?.error ?? "Couldn't load the server configuration.");
+  }
   if (!res.ok) await unwrap(res, "Couldn't load the server configuration.");
   return (await res.json()) as McpServerView;
 }

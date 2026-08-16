@@ -76,8 +76,16 @@ async function buildClient(
  * toolset and the client would come up looking empty for no stated reason. A
  * local manual failing is isolated and logged — one unreachable localhost
  * server must not cost the caller everything else.
+ *
+ * The deployment's copies of the code-mode meta-tools are removed from the
+ * REGISTRY, not merely hidden from the MCP listing: `list_tools` and
+ * `call_tool_chain` here reflect over the client's tool repository, so a copy
+ * left registered would still be advertised to — and callable from — a chain,
+ * which would run it against the remote registry that cannot see a local-only
+ * tool. This process serves its own trio instead, over the merged registry.
+ * Exported for the catalog tests.
  */
-async function discoverTools(
+export async function discoverTools(
   client: CodeModeUtcpClient,
   remote: CallTemplate,
   local: CallTemplate[],
@@ -88,6 +96,9 @@ async function discoverTools(
       `Could not load the workspace's tools: ${remoteResult.error}. ` +
         'Check the URL and that the connection key is still valid.',
     );
+  }
+  for (const name of META_TOOL_NAMES) {
+    await client.config.tool_repository.removeTool(`${REMOTE_MANUAL_NAME}.${name}`);
   }
   for (const manual of local) {
     const result = await registerManual(client, manual);
@@ -100,13 +111,9 @@ async function discoverTools(
 }
 
 /**
- * Drop the deployment's copies of the code-mode meta-tools.
- *
- * They arrive through the remote manual like any other tool, but they describe
- * the REMOTE client's registry — a `call_tool_chain` run there cannot see a
- * local-only tool, and its `list_tools` would advertise a catalog that is
- * missing exactly the tools this server exists to add. This process serves its
- * own trio instead, over the merged registry.
+ * Belt to `discoverTools`'s registry removal: whatever a repository
+ * implementation declined to remove must still never reach the MCP listing,
+ * where a remote `list_tools` would shadow — or duplicate — the local trio.
  */
 export function withoutRemoteMetaTools(tools: ProxiedTool[]): ProxiedTool[] {
   return tools.filter((t) => !META_TOOL_NAMES.has(t.mcpName));

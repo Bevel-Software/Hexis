@@ -330,6 +330,31 @@ describe('LibraryRoutes', () => {
     );
   });
 
+  it('redirects a legacy /groups/:plugin deep link to the plugin page', async () => {
+    // The pre-rename URL shape. Links to it exist in the wild; without the
+    // alias the `*` fallback would send them home instead of to the plugin.
+    renderAt('/skills-and-tools/groups/GTM');
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools/plugins/GTM'));
+    expect(await screen.findByRole('heading', { name: 'GTM', level: 1 })).toBeInTheDocument();
+  });
+
+  it('redirects a legacy /groups link with a URL-hostile name, encoding intact', async () => {
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      skills: [{ name: 'pricing', description: '', path: 'Plugins/Sales & Ops/pricing' }],
+      tools: [],
+    });
+    renderAt(`/skills-and-tools/groups/${encodeURIComponent('Sales & Ops')}`);
+    await waitFor(() =>
+      expect(pathname()).toBe(`/skills-and-tools/plugins/${encodeURIComponent('Sales & Ops')}`),
+    );
+  });
+
+  it('sends the legacy /groups index home, like /plugins', async () => {
+    renderAt('/skills-and-tools/groups');
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
+  });
+
   it('/skills-and-tools/tools/:slug redirects to the canonical workspace URL, hash intact', async () => {
     // The legacy address is the OAuth callback's landing target, so the
     // redirect must carry the `#…` outcome fragment to the canonical page.

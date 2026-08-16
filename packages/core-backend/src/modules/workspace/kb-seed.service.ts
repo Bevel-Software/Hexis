@@ -240,6 +240,13 @@ export class KbSeedService implements IKbSeedService {
       // the migration refuses a destination that already exists — so the
       // scaffolding would quietly block the very migration it precedes.
       const migration = await migrateGroupsToPlugins(repoDir);
+      // Notes are logged unconditionally: an advisory note (a manual that
+      // refuses to convert) is exactly the run where the operator needs to
+      // hear about it, and such a run changes no files.
+      for (const note of migration.notes) console.log(`[plugins-migration] ${note}`);
+      // `migrated` means FILES CHANGED — a note-only run stages nothing, or
+      // the commit below would fail empty on every boot with a warning about
+      // a migration that did nothing.
       if (migration.migrated) {
         // Stage the legacy root ONLY when the rename happened this run: `git
         // add -A -- Groups Plugins` fails outright on a pathspec that matches
@@ -247,7 +254,9 @@ export class KbSeedService implements IKbSeedService {
         // no Groups/ to stage.
         if (migration.renamed) added.push(LEGACY_GROUPS_DIR);
         added.push(PLUGINS_DIR);
-        for (const note of migration.notes) console.log(`[plugins-migration] ${note}`);
+        // The rename's companion edit to the repo-root ignore file — outside
+        // the two roots, so it needs its own pathspec to land in the commit.
+        if (migration.ignoreRewritten) added.push(IGNORE_FILENAME);
       }
       for (const rel of REQUIRED_FILES) {
         if (!(await this.exists(path.join(repoDir, rel)))) {

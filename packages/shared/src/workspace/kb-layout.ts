@@ -190,7 +190,7 @@ export function isPersonalPluginFolder(folderName: string): boolean {
  *
  *   Plugins/GTM/skills/heyreach-campaign/SKILL.md → 'GTM'
  *   Plugins/GTM/mcp.json                          → 'GTM'
- *   Plugins/loose-skill/SKILL.md                  → null    (no plugin folder)
+ *   Plugins/loose-skill/SKILL.md                  → 'loose-skill' (the folder IS the plugin)
  *   KnowledgeBase/Product/…                       → null    (not a plugin root)
  *
  * Returns null rather than throwing because a plugin is a property SOME paths

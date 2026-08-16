@@ -58,9 +58,33 @@ describe('resolveConfig', () => {
     expect(() => resolveConfig([], {})).toThrow(ConfigError);
   });
 
+  it('treats a whitespace-only value as missing, not as configuration', () => {
+    expect(() => resolveConfig(['--url', 'https://x.example', '--key', '   '])).toThrow(
+      /Missing the connection key/,
+    );
+    expect(() => resolveConfig([], { HEXIS_URL: ' \n', HEXIS_CONNECTION_KEY: KEY })).toThrow(
+      /Missing the workspace URL/,
+    );
+  });
+
+  it('refuses a value flag followed by another flag instead of eating it', () => {
+    expect(() => resolveConfig(['--url', '--key', KEY])).toThrow(/--url expects a value/);
+    expect(() => resolveConfig(['--url', 'https://x.example', '--key'])).toThrow(/--key expects a value/);
+  });
+
   it('refuses a URL that is not http(s) — including scheme smuggling', () => {
     expect(() => resolveConfig(['--url', 'notaurl', '--key', KEY])).toThrow(/not a valid URL/);
     expect(() => resolveConfig(['--url', 'javascript:alert(1)', '--key', KEY])).toThrow(/must be an http/);
     expect(() => resolveConfig(['--url', 'file:///etc/passwd', '--key', KEY])).toThrow(/must be an http/);
+  });
+
+  it('refuses a query, fragment, or embedded credentials — concatenation would corrupt every request', () => {
+    expect(() => resolveConfig(['--url', 'https://x.example/hexis?preview=1', '--key', KEY])).toThrow(
+      /query or fragment/,
+    );
+    expect(() => resolveConfig(['--url', 'https://x.example/#top', '--key', KEY])).toThrow(/query or fragment/);
+    expect(() => resolveConfig(['--url', 'https://user:pass@x.example', '--key', KEY])).toThrow(
+      /must not embed credentials/,
+    );
   });
 });

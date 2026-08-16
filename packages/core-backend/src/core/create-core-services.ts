@@ -391,10 +391,10 @@ export async function createCoreServices(
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
   const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
-  // Plugin provisioning — the one privileged door that brings `Plugins/<name>/`
-  // folders into existence (named plugins and personal folders alike). Commits
-  // INLINE through the same pipeline the pending-commits worker uses, so the
-  // folder's rules are at HEAD before the endpoint answers.
+  // Server-scoped MCP editing — the tool page's edit form. One server's truth
+  // spans a plugin's mcp.json AND plugin.json extensions block, and this is
+  // the ONE writer that rewrites both entries and commits them together (see
+  // McpServerEditService).
   const mcpServerEditService = new McpServerEditService(
     workspaceService,
     workflowService,
@@ -403,6 +403,10 @@ export async function createCoreServices(
     kbDirName,
   );
 
+  // Plugin provisioning — the one privileged door that brings `Plugins/<name>/`
+  // folders into existence (named plugins and personal folders alike). Commits
+  // INLINE through the same pipeline the pending-commits worker uses, so the
+  // folder's rules are at HEAD before the endpoint answers.
   const pluginProvisionService = new PluginProvisionService(
     workspaceService,
     workflowService,

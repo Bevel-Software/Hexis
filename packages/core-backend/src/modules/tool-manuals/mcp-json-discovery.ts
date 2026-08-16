@@ -78,6 +78,59 @@ function extensionServers(pluginJson: unknown): Record<string, HexisMcpServerExt
 const SERVER_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
 /**
+ * Validate an extension entry's `variables` declarations, or `null` when any
+ * entry is malformed. The `.tool` parser THROWS on a bad entry so the whole
+ * file is skipped — a variable silently dropped or mis-read is not cosmetic:
+ * an undeclared reference defaults to the shared `admin` scope, so losing a
+ * `scope: user` declaration would hand one caller's slot to everyone. The
+ * same stake applies here, at this file's per-server grain: a bad entry
+ * invalidates the SERVER, never its siblings.
+ */
+function validatedVariables(raw: unknown): ToolVariable[] | null {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) return null;
+  const out: ToolVariable[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) return null;
+    if (typeof entry.name !== 'string' || !/^[A-Za-z0-9_]+$/.test(entry.name)) return null;
+    const scope = entry.scope ?? 'admin';
+    if (scope !== 'admin' && scope !== 'user') return null;
+    let oauth: ToolVariable['oauth'];
+    if (entry.oauth !== undefined) {
+      // OAuth is inherently per-caller (same rule the `.tool` parser
+      // enforces): an admin-shared OAuth token would leak one user's token
+      // to all callers. The provider config's required halves must be there
+      // — a sign-in wired to a missing URL is a declaration, not a feature.
+      if (!isRecord(entry.oauth) || scope !== 'user') return null;
+      const o = entry.oauth;
+      if (
+        typeof o.authorizationUrl !== 'string' ||
+        typeof o.tokenUrl !== 'string' ||
+        typeof o.clientId !== 'string'
+      ) {
+        return null;
+      }
+      oauth = {
+        authorizationUrl: o.authorizationUrl,
+        tokenUrl: o.tokenUrl,
+        clientId: o.clientId,
+        ...(Array.isArray(o.scopes) && o.scopes.every((s) => typeof s === 'string')
+          ? { scopes: o.scopes as string[] }
+          : {}),
+        ...(isRecord(o.authParams) ? { authParams: o.authParams as Record<string, string> } : {}),
+      };
+    }
+    out.push({
+      name: entry.name,
+      scope,
+      ...(typeof entry.label === 'string' && entry.label.trim() ? { label: entry.label.trim() } : {}),
+      ...(oauth ? { oauth } : {}),
+    });
+  }
+  return out;
+}
+
+/**
  * Descriptors for one plugin's `mcp.json`. Malformed entries are skipped with
  * a logged reason — one bad server must not take the plugin's others offline —
  * and a missing/unparsable file yields `[]` (the caller decides whether that
@@ -134,7 +187,11 @@ export function descriptorsFromMcpJson(
       console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: no transport type.`);
       continue;
     }
-    const ext = extensions[name] ?? {};
+    // The extension entry is knowledge-base content too — same zero-trust
+    // parse as the rest: a non-object entry reads as "no extension data".
+    const ext: HexisMcpServerExtension = isRecord(extensions[name])
+      ? (extensions[name] as HexisMcpServerExtension)
+      : {};
     // The EFFECTIVE declaration, not just the extension block: a reserved
     // reference in mcp.json's own url or literal headers would be expanded
     // into outbound requests exactly the same way.
@@ -147,13 +204,22 @@ export function descriptorsFromMcpJson(
       );
       continue;
     }
+    const variables = validatedVariables(ext.variables);
+    if (variables === null) {
+      console.warn(
+        `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: its plugin.json \`variables\` ` +
+          'declaration is malformed — a dropped declaration would silently re-scope a credential, so ' +
+          'the server stays offline until the manifest is fixed.',
+      );
+      continue;
+    }
     const shared = {
       slug: name,
       name,
       path: mcpJsonPath,
       type: 'mcp' as const,
       ...(typeof ext.description === 'string' ? { description: ext.description } : {}),
-      ...(Array.isArray(ext.variables) && ext.variables.length > 0 ? { variables: ext.variables } : {}),
+      ...(variables.length > 0 ? { variables } : {}),
     };
 
     if (raw.type === 'stdio') {
@@ -211,7 +277,12 @@ export function descriptorsFromMcpJson(
       // Extension headers (auth, `${VAR}` refs) win over mcp.json's literal
       // ones on a key collision: the portable file cannot carry a credential,
       // so when both name the same header the extension is the operative one.
-      const headers = { ...(isRecord(raw.headers) ? (raw.headers as Record<string, string>) : {}), ...ext.headers };
+      // Both sides pass the isRecord gate — spreading a malformed non-object
+      // value (a string, say) would scatter its indices into header keys.
+      const headers = {
+        ...(isRecord(raw.headers) ? (raw.headers as Record<string, string>) : {}),
+        ...(isRecord(ext.headers) ? (ext.headers as Record<string, string>) : {}),
+      };
       out.push({
         ...shared,
         url: raw.url,

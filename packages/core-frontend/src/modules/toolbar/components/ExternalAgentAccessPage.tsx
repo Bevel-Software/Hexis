@@ -149,7 +149,7 @@ export function ExternalAgentAccessPage() {
   const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_LABEL_LEN && !creating;
 
   // Surface the keys that matter: active keys first (most-recently-used at the
-  // top, never-used ones last within that plugin), with disconnected keys sunk
+  // top, never-used ones last among the active), with disconnected keys sunk
   // to the bottom. Non-destructive — nothing is hidden or deleted, just ordered
   // so a long list of stale/test keys doesn't bury the ones in use.
   const sortedKeys = [...keys].sort((a, b) => {

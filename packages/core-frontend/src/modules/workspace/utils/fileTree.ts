@@ -86,7 +86,7 @@ function collectFilesByBasename(tree: FileTreeEntry | null, basename: string, ac
  * Returns a freshly-allocated tree; the input is not mutated. Children at
  * each level are re-sorted so synthesized entries appear in the same order
  * a server refresh would render them: directories first, then files,
- * alphabetical within each plugin.
+ * alphabetical within each group.
  */
 export function mergePendingIntoTree(
   tree: FileTreeEntry,

@@ -1105,7 +1105,7 @@ export function FileExplorer() {
     const otherDirs = kids.filter(
       (c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name),
     );
-    // Present Knowledge, Data and Plugins as named roots. Knowledge is
+    // Present Knowledge, Data, Agents and Pipelines as named roots. Knowledge is
     // synthetic so it can relabel `KnowledgeBase` and absorb the stray
     // content folders; it reuses KnowledgeBase's own path so file ops on the
     // row still resolve.

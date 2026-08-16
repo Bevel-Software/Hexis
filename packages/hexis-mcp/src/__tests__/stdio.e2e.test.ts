@@ -66,11 +66,13 @@ rl.on('line', (line) => {
 
 let httpServer: http.Server | null = null;
 let home = '';
+let priorHexisHome: string | undefined;
 let config: HexisMcpConfig;
 let client: CodeModeUtcpClient | null = null;
 
 beforeAll(async () => {
   home = await fs.mkdtemp(path.join(os.tmpdir(), 'hexis-e2e-'));
+  priorHexisHome = process.env.HEXIS_HOME;
   process.env.HEXIS_HOME = home;
 
   // The faked deployment: ONLY the archive endpoint, serving a real zip.
@@ -104,7 +106,9 @@ beforeAll(async () => {
 afterAll(async () => {
   await client?.close().catch(() => {});
   if (httpServer) await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
-  delete process.env.HEXIS_HOME;
+  // Restored, not deleted: a developer's own HEXIS_HOME must survive the suite.
+  if (priorHexisHome === undefined) delete process.env.HEXIS_HOME;
+  else process.env.HEXIS_HOME = priorHexisHome;
   await fs.rm(home, { recursive: true, force: true });
 });
 

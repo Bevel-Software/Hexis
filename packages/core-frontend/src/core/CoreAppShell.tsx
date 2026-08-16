@@ -180,7 +180,7 @@ const CORE_BANNERS: BannerDef[] = [
 const CORE_PANES: PaneDef[] = [
   // The file tree is the SIDEBAR, not a panel — the same frame, at the same
   // width, that Skills & Tools puts its plugin list in. It left the resizable
-  // plugin when the two navs were unified; `SidebarFrame` owns its width and
+  // group when the two navs were unified; `SidebarFrame` owns its width and
   // the shared store owns whether it is showing.
   { id: 'explorer', order: 10, node: <FileExplorer />, sidebar: true, collapsible: true },
   { id: 'viewer', order: 20, node: <ViewerRoutes />, minSize: '30%' },

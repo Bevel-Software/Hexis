@@ -206,7 +206,7 @@ describe('buildSandboxedHtml', () => {
   });
 
   it('does NOT reference NodeType-class identifiers in the globals literal', () => {
-    // Regression: NodeType classes (Process, ValueSlice, ValuePlugin, …) are
+    // Regression: NodeType classes (Process, ValueSlice, ValueGroup, …) are
     // created at runtime by the parser, not exported as bare identifiers.
     // Listing them in the globals object literal throws `ReferenceError:
     // Process is not defined` before `globalThis.bevel` is assigned, which
@@ -216,7 +216,7 @@ describe('buildSandboxedHtml', () => {
     const literal = out.match(/globalThis\.bevel\s*=\s*\{([^}]*)\}/)?.[1] ?? '';
     expect(literal).not.toMatch(/\bProcess\b/);
     expect(literal).not.toMatch(/\bValueSlice\b/);
-    expect(literal).not.toMatch(/\bValuePlugin\b/);
+    expect(literal).not.toMatch(/\bValueGroup\b/);
     expect(literal).not.toMatch(/\bNODE_CLASS_MAP\b/);
   });
 

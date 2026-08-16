@@ -39,6 +39,44 @@ function isMcpContentBlock(entry: unknown): boolean {
   return typeof entry === 'object' && entry !== null && typeof (entry as { type?: unknown }).type === 'string';
 }
 
+/**
+ * `JSON.stringify`, made total. A tool can legally hand back a value JSON
+ * refuses verbatim — a BigInt or circular object (throws), a bare
+ * function/symbol (stringifies to `undefined`) — and a COMPLETED call must not
+ * turn into a crash at the serialization step. The plain stringify runs first
+ * so well-formed values (shared non-circular references included) come out
+ * exactly as before; only a value it rejects degrades to the replacer pass
+ * (BigInt → decimal string, re-visited object → '[Circular]'), and a value even
+ * that can't take (e.g. a throwing `toJSON`) falls back to `String(value)`.
+ */
+function safeJsonText(value: unknown): string {
+  try {
+    const text = JSON.stringify(value);
+    if (text !== undefined) return text;
+  } catch {
+    // BigInt / circular / throwing toJSON — degrade below.
+  }
+  try {
+    const seen = new WeakSet<object>();
+    const text = JSON.stringify(value, (_key, v: unknown) => {
+      if (typeof v === 'bigint') return v.toString();
+      if (v && typeof v === 'object') {
+        if (seen.has(v)) return '[Circular]';
+        seen.add(v);
+      }
+      return v;
+    });
+    if (text !== undefined) return text;
+  } catch {
+    // fall through to the value's own toString
+  }
+  try {
+    return String(value);
+  } catch {
+    return '(unserializable tool output)';
+  }
+}
+
 export function toCallToolResult(value: unknown): CallToolResult {
   // Already in MCP agentic format — pass through untouched, but only when every
   // `content` entry is a real content block (has a string `type`).
@@ -46,12 +84,12 @@ export function toCallToolResult(value: unknown): CallToolResult {
   if (value && typeof value === 'object' && Array.isArray(content) && content.every(isMcpContentBlock)) {
     return value as CallToolResult;
   }
-  const text = typeof value === 'string' ? value : JSON.stringify(value ?? null);
+  const text = typeof value === 'string' ? value : safeJsonText(value ?? null);
   return { content: [{ type: 'text', text: text || '(tool produced no output)' }] };
 }
 
 export function renderProgress(chunk: unknown): string {
-  const s = typeof chunk === 'string' ? chunk : JSON.stringify(chunk);
+  const s = typeof chunk === 'string' ? chunk : safeJsonText(chunk);
   return s.length > 500 ? s.slice(0, 497) + '...' : s;
 }
 

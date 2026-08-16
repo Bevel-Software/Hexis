@@ -95,7 +95,7 @@ export function MarkdownDiffViewer({ payload, onOpenFile, onOpenNodeId, scroll =
       tooLarge: false as const,
       rawLineCount,
       lines,
-      bodyBlocks: pluginDiffBlocks(split.body),
+      bodyBlocks: groupDiffBlocks(split.body),
       frontmatterChanged: split.frontmatter.some((l) => l.type !== 'same'),
       oldFrontmatter: parseFrontmatter(baseline).data,
       newFrontmatter: parseFrontmatter(current).data,
@@ -250,7 +250,7 @@ type DisplayBlock =
   | { type: 'same'; lines: string[] }
   | { type: 'conflict'; removed: string[]; added: string[] };
 
-function pluginDiffBlocks(lines: DiffLine[]): DisplayBlock[] {
+function groupDiffBlocks(lines: DiffLine[]): DisplayBlock[] {
   const result: DisplayBlock[] = [];
   let i = 0;
   while (i < lines.length) {

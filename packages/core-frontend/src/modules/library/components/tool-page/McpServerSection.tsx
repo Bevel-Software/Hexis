@@ -99,7 +99,15 @@ export function McpServerSection({
         ...(renaming ? { newName: name.trim() } : {}),
         transport,
         ...(transport === 'stdio'
-          ? { command: command.trim(), args: args.split('\n').map((a) => a.trim()).filter(Boolean) }
+          ? {
+              command: command.trim(),
+              args: args.split('\n').map((a) => a.trim()).filter(Boolean),
+              // `cwd`/`env` have no fields in this form. The PUT preserves
+              // omitted fields, but echoing them as read keeps values a
+              // hand-edited mcp.json carries safe on any backend semantics.
+              ...(server.cwd ? { cwd: server.cwd } : {}),
+              ...(server.env ? { env: server.env } : {}),
+            }
           : { url: url.trim() }),
         literalHeaders: linesToHeaders(literalHeaders),
         authHeaders: linesToHeaders(authHeaders),

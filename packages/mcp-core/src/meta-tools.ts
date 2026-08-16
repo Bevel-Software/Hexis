@@ -1,6 +1,6 @@
 import type { Tool as McpTool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { CodeModeUtcpClient } from '@utcp/code-mode';
-import { utcpNameToTsInterfaceName, findToolByName } from './code-mode-names.js';
+import { utcpNameToTsInterfaceName, findToolsByNames } from './code-mode-names.js';
 import { toCallToolResult, toolError, describeToolFailure } from './results.js';
 
 /**
@@ -100,8 +100,9 @@ export async function dispatchMetaTool(
       const names = Array.isArray(args.tool_names) ? (args.tool_names as string[]) : [];
       const interfaces: string[] = [];
       const notFound: string[] = [];
+      const resolved = await findToolsByNames(client, names);
       for (const n of names) {
-        const found = await findToolByName(client, n);
+        const found = resolved.get(n);
         if (found) interfaces.push(client.toolToTypeScriptInterface(found.tool));
         else notFound.push(n);
       }
@@ -109,11 +110,17 @@ export async function dispatchMetaTool(
     }
     // call_tool_chain
     const code = typeof args.code === 'string' ? args.code : '';
-    const timeout = typeof args.timeout === 'number' ? args.timeout : 30_000;
+    // Clamp both knobs to their schema bounds — the schema is advisory over a
+    // raw JSON-RPC call, and an unclamped `timeout` would let one chain hold
+    // the isolate far past the documented 120s cap.
+    const timeout =
+      typeof args.timeout === 'number' && Number.isFinite(args.timeout)
+        ? Math.min(120_000, Math.max(1_000, Math.trunc(args.timeout)))
+        : 30_000;
     // Clamp to [1000, 1_000_000] so a caller can't force oversized inline
-    // output past the spill (schema bounds are advisory over a raw JSON-RPC call).
+    // output past the spill.
     const maxOutputSize =
-      typeof args.max_output_size === 'number'
+      typeof args.max_output_size === 'number' && Number.isFinite(args.max_output_size)
         ? Math.min(1_000_000, Math.max(1_000, Math.trunc(args.max_output_size)))
         : CALL_TOOL_CHAIN_MAX_OUTPUT;
     const { result, logs } = await client.callToolChain(code, timeout);

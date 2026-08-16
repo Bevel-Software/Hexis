@@ -48,6 +48,35 @@ export interface MaterializedPlugin {
 }
 
 /**
+ * Buffer a response body under a hard byte cap, counting as bytes ARRIVE — the
+ * whole point is refusing before the allocation exists, so `arrayBuffer()`
+ * (which buffers everything first) cannot be the mechanism. The stream is
+ * cancelled on refusal, which also releases the connection.
+ * Exported for direct testing; the cap in production is `MAX_ARCHIVE_BYTES`.
+ */
+export async function readBodyCapped(
+  body: ReadableStream<Uint8Array> | null,
+  cap: number,
+  label: string,
+): Promise<Buffer> {
+  if (!body) return Buffer.alloc(0);
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > cap) {
+      await reader.cancel().catch(() => {});
+      throw new Error(`${label} exceeds the ${cap / (1024 * 1024)}MB download limit — refusing to materialize`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
  * Fetch the plugin into the local root, byte-for-byte. The archive is built
  * server-side and filtered per file by the caller's own read access — a file
  * the key cannot read is a file that stays remote.
@@ -61,13 +90,22 @@ export async function materializePlugin(
   const key = hostKey(config.baseUrl);
   const pluginRoot = path.join(home, 'plugins', key, folder);
   const pluginData = path.join(home, 'plugin-data', key, folder);
-  await fs.mkdir(pluginData, { recursive: true });
+  // Owner-only: both trees hold what the caller's key could read — plugin
+  // files and whatever state a server accumulates — none of which belongs to
+  // other local users. `mode` applies to every directory `recursive` creates
+  // on POSIX and is a no-op on Windows (the profile dir is already private
+  // there); the chmod re-asserts it for a PLUGIN_DATA dir that predates this
+  // policy, with the same Windows pass the exec-bit restore below gets.
+  await fs.mkdir(pluginData, { recursive: true, mode: 0o700 });
+  await fs.chmod(pluginData, 0o700).catch((err: unknown) => {
+    if (process.platform !== 'win32') throw err;
+  });
 
   // Refresh from scratch each start: correctness over cleverness. Staleness
   // becomes bounded by process lifetime, and there is no cache-invalidation
   // protocol to get wrong. The tree is small (a plugin, not a repo).
   await fs.rm(pluginRoot, { recursive: true, force: true });
-  await fs.mkdir(pluginRoot, { recursive: true });
+  await fs.mkdir(pluginRoot, { recursive: true, mode: 0o700 });
 
   // One request, byte-for-byte: the deployment's plugin-archive endpoint zips
   // the folder server-side, filtered per file by the caller's own read access.
@@ -86,10 +124,13 @@ export async function materializePlugin(
   }
   // Client-side ceilings, independent of the server's own cap: this function
   // is the boundary that protects the MEMBER's machine, and its disk/memory
-  // must not be fully delegated to the deployment's good behavior.
+  // must not be fully delegated to the deployment's good behavior. The
+  // download cap is enforced WHILE the body streams in — a response big
+  // enough to matter must be refused before it is ever held in memory.
+  const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
   const MAX_EXTRACTED_BYTES = 256 * 1024 * 1024;
   const MAX_ENTRIES = 5_000;
-  const zip = new AdmZip(Buffer.from(await res.arrayBuffer()));
+  const zip = new AdmZip(await readBodyCapped(res.body, MAX_ARCHIVE_BYTES, `plugin "${folder}" archive`));
   let extracted = 0;
   let count = 0;
   for (const entry of zip.getEntries()) {

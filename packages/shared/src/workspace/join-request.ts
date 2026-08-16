@@ -72,6 +72,12 @@ function shortTag(input: string): string {
 
 /** The exact-plugin tag — recomputable from the plugin name alone. */
 function pluginTag(plugin: string): string {
+  // `g:` predates the group→plugin rename, and it STAYS: the prefix is baked
+  // into every join branch already on a remote, and `isJoinBranchFor`
+  // recomputes this tag to recognise them. Changing it to `p:` would change
+  // every recomputed tag and orphan every in-flight join request. The prefix
+  // only disambiguates this tag's input from `u:<email>` — any stable byte
+  // does that, so there is nothing to gain by renaming it.
   return shortTag(`g:${plugin}`);
 }
 

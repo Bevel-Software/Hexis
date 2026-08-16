@@ -53,6 +53,14 @@ export interface McpServerView {
   canWrite: boolean;
 }
 
+/**
+ * PATCH semantics, field by field: `undefined` means "the client did not
+ * surface this field" and the stored value survives; a present-but-empty
+ * value (`{}`, `[]`, `''`) is an explicit clear. A full-replace contract
+ * would make every client responsible for echoing back fields it does not
+ * edit — and the one that forgot would silently destroy the literal headers
+ * in mcp.json or the variable declarations behind `${VAR}` references.
+ */
 export interface McpServerWrite {
   newName?: string;
   transport: McpTransport;
@@ -81,7 +89,14 @@ export class McpServerEditError extends Error {
 /** Same shape the discovery accepts: the key is a namespace, not prose. */
 const SERVER_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
-const hasVarRef = (v: string): boolean => /\$\{[^}]+\}/.test(v);
+// Both spellings the substitutor expands — `${VAR}` and bare `$VAR` — are
+// references; `$5` is not (a name starts with a letter or underscore). The
+// same rule the migration's header split applies.
+const hasVarRef = (v: string): boolean => /\$(\{[^}]+\}|[A-Za-z_][A-Za-z0-9_]*)/.test(v);
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
 
 /**
  * The same reserved-reference policy discovery enforces, applied at SAVE: a
@@ -135,9 +150,12 @@ export class McpServerEditService {
       ...(Array.isArray(raw.args) ? { args: raw.args.map(String) } : {}),
       ...(typeof raw.cwd === 'string' ? { cwd: raw.cwd } : {}),
       ...(raw.env && typeof raw.env === 'object' ? { env: raw.env as Record<string, string> } : {}),
-      literalHeaders: (raw.headers as Record<string, string>) ?? {},
-      authHeaders: (ext.headers as Record<string, string>) ?? {},
-      variables: (ext.variables as ToolVariable[]) ?? [],
+      // Shape-checked, not merely null-coalesced: both files are hand-editable
+      // knowledge-base content, and a string where an object/array belongs
+      // would flow into the form's Object.entries/`.map` as nonsense.
+      literalHeaders: isRecord(raw.headers) ? (raw.headers as Record<string, string>) : {},
+      authHeaders: isRecord(ext.headers) ? (ext.headers as Record<string, string>) : {},
+      variables: Array.isArray(ext.variables) ? (ext.variables as ToolVariable[]) : [],
       ...(typeof ext.description === 'string' ? { description: ext.description } : {}),
       local: ext.local === true || raw.type === 'stdio',
       canWrite: await this.accessControl.canWrite(wsId, userEmail, mcpJsonPath),
@@ -164,20 +182,41 @@ export class McpServerEditService {
       // refuses — an unusable server with no error at the moment it was made.
       throw new McpServerEditError(`Unknown transport "${String(write.transport)}".`, 422);
     }
-    // The WHOLE writable surface, mirroring what discovery scans: a reserved
-    // ref smuggled through a stdio arg (`--url=${X_API_URL}`), env value, cwd
-    // or description would save with a 200 and then vanish from the catalog
-    // on the next scan — the exact self-invalidating state this 422 prevents.
+    // The EFFECTIVE value of every field, PATCH-over-stored (see
+    // McpServerWrite): `undefined` keeps what the files already say, a
+    // present value — empty included — replaces it.
+    const prior = isRecord(servers[name]) ? (servers[name] as Record<string, unknown>) : {};
+    const priorExt = this.extensionEntry(manifest, name);
+    const url = write.url ?? (typeof prior.url === 'string' ? prior.url : undefined);
+    const command = write.command ?? (typeof prior.command === 'string' ? prior.command : undefined);
+    const args = write.args ?? (Array.isArray(prior.args) ? prior.args.map(String) : undefined);
+    const env = write.env ?? (isRecord(prior.env) ? (prior.env as Record<string, string>) : undefined);
+    const cwd = write.cwd ?? (typeof prior.cwd === 'string' ? prior.cwd : undefined);
+    const literalIn =
+      write.literalHeaders ?? (isRecord(prior.headers) ? (prior.headers as Record<string, string>) : {});
+    const authIn =
+      write.authHeaders ?? (isRecord(priorExt.headers) ? (priorExt.headers as Record<string, string>) : {});
+    const variables =
+      write.variables ?? (Array.isArray(priorExt.variables) ? (priorExt.variables as ToolVariable[]) : []);
+    const description =
+      write.description ?? (typeof priorExt.description === 'string' ? priorExt.description : undefined);
+    const local = write.local ?? (priorExt.local === true);
+
+    // The WHOLE writable surface, mirroring what discovery scans — effective
+    // values, not just the incoming patch: a reserved ref smuggled through a
+    // stdio arg (`--url=${X_API_URL}`), env value, cwd or description would
+    // save with a 200 and then vanish from the catalog on the next scan —
+    // the exact self-invalidating state this 422 prevents.
     const reservedRef = findReservedRef({
-      url: write.url,
-      command: write.command,
-      args: write.args,
-      env: write.env,
-      cwd: write.cwd,
-      description: write.description,
-      literalHeaders: write.literalHeaders,
-      authHeaders: write.authHeaders,
-      variables: write.variables,
+      url,
+      command,
+      args,
+      env,
+      cwd,
+      description,
+      literalHeaders: literalIn,
+      authHeaders: authIn,
+      variables,
     });
     if (reservedRef !== null) {
       throw new McpServerEditError(
@@ -202,27 +241,27 @@ export class McpServerEditService {
     // no-credentials rule — reroute it to the extensions block instead of
     // trusting the frontend's split.
     const literal: Record<string, string> = {};
-    const auth: Record<string, string> = { ...(write.authHeaders ?? {}) };
-    for (const [k, v] of Object.entries(write.literalHeaders ?? {})) {
+    const auth: Record<string, string> = { ...authIn };
+    for (const [k, v] of Object.entries(literalIn)) {
       if (hasVarRef(v)) auth[k] = v;
       else literal[k] = v;
     }
 
     let entry: Record<string, unknown>;
     if (write.transport === 'stdio') {
-      const command = write.command?.trim();
-      if (!command) throw new McpServerEditError('A stdio server needs a command.', 422);
+      const cmd = command?.trim();
+      if (!cmd) throw new McpServerEditError('A stdio server needs a command.', 422);
       entry = {
         type: 'stdio',
-        command,
-        ...(write.args && write.args.length > 0 ? { args: write.args } : {}),
-        ...(write.env && Object.keys(write.env).length > 0 ? { env: write.env } : {}),
-        ...(write.cwd ? { cwd: write.cwd } : {}),
+        command: cmd,
+        ...(args && args.length > 0 ? { args } : {}),
+        ...(env && Object.keys(env).length > 0 ? { env } : {}),
+        ...(cwd ? { cwd } : {}),
       };
     } else {
       let parsed: URL;
       try {
-        parsed = new URL(write.url ?? '');
+        parsed = new URL(url ?? '');
       } catch {
         throw new McpServerEditError('The server needs a valid http(s) URL.', 422);
       }
@@ -233,9 +272,9 @@ export class McpServerEditService {
       // succeeds and the server then silently disappears from the catalog —
       // an edit flow that eats its own output. Local-only servers are exempt;
       // loopback is what local means.
-      if (write.local !== true) {
+      if (local !== true) {
         try {
-          assertSafeFetchUrl(write.url ?? '', { label: 'Server URL' });
+          assertSafeFetchUrl(url ?? '', { label: 'Server URL' });
         } catch (err) {
           throw new McpServerEditError(
             `${err instanceof Error ? err.message : 'The URL is not reachable from the workspace'} — ` +
@@ -246,7 +285,7 @@ export class McpServerEditService {
       }
       entry = {
         type: write.transport,
-        url: write.url,
+        url,
         ...(Object.keys(literal).length > 0 ? { headers: literal } : {}),
       };
     }
@@ -259,9 +298,9 @@ export class McpServerEditService {
     // store — silently dropping a credential mapping is worse than an error.
     const extEntry = {
       ...(Object.keys(auth).length > 0 ? { headers: auth } : {}),
-      ...(write.variables && write.variables.length > 0 ? { variables: write.variables } : {}),
-      ...(write.description ? { description: write.description } : {}),
-      ...(write.local === true && write.transport !== 'stdio' ? { local: true } : {}),
+      ...(variables.length > 0 ? { variables } : {}),
+      ...(description ? { description } : {}),
+      ...(local === true && write.transport !== 'stdio' ? { local: true } : {}),
     };
     if (manifest === null && Object.keys(extEntry).length > 0) {
       throw new McpServerEditError(`${PLUGIN_MANIFEST_FILE} is missing or unparsable — fix the file first.`, 422);

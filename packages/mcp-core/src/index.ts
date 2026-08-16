@@ -66,4 +66,5 @@ export {
   sanitizeIdentifier,
   utcpNameToTsInterfaceName,
   findToolByName,
+  findToolsByNames,
 } from './code-mode-names.js';

@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { Button } from '../../../shared/components';
 import { listFiles } from '../../workspace/services/workspace.api';
+import { useWorkspace } from '../../workspace/state/workspace.context';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /**
@@ -44,7 +45,7 @@ export function ManifestButton({
       variant="quiet"
       size="sm"
       onClick={() =>
-        navigate(kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/Plugins/${folder}/plugin.json`), {
+        navigate(kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${PLUGINS_DIR}/${folder}/plugin.json`), {
           state: { rawFile: true },
         })
       }
@@ -73,13 +74,25 @@ export function ClientExtensionsSection({
   // IS the encoded branch, by the platform's own contract.
   const workspaceId = encodeURIComponent(DEFAULT_BRANCH);
   const navigate = useNavigate();
+  const { workspaceId: contextWorkspaceId, fileTree: contextTree } = useWorkspace();
   const [listings, setListings] = useState<NamespaceListing[]>([]);
+
+  // The workspace context has usually ALREADY loaded this exact tree — it
+  // bootstraps on the default branch — so the common case must not pay a
+  // second full-tree round-trip per page view. The fetch survives only for
+  // the case the reuse cannot cover: a context sitting on a draft branch,
+  // whose tree could list files these default-branch links cannot open.
+  const reusableTree = contextWorkspaceId === workspaceId ? contextTree : null;
 
   useEffect(() => {
     // Reset FIRST: on a folder change or a failed refetch, stale state would
     // keep rendering the previous plugin's files under the new plugin's name.
     setListings([]);
     if (!kbDirName) return;
+    if (reusableTree) {
+      setListings(namespaceListings(reusableTree, kbDirName, folder));
+      return;
+    }
     let live = true;
     listFiles(workspaceId)
       .then((tree) => {
@@ -91,7 +104,7 @@ export function ClientExtensionsSection({
     return () => {
       live = false;
     };
-  }, [workspaceId, kbDirName, folder]);
+  }, [workspaceId, kbDirName, folder, reusableTree]);
 
   if (listings.length === 0) return null;
 
@@ -114,7 +127,7 @@ export function ClientExtensionsSection({
                   type="button"
                   className="cursor-pointer font-mono text-detail text-ink-muted hover:text-ink hover:underline"
                   onClick={() =>
-                    navigate(kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/Plugins/${folder}/${f}`), {
+                    navigate(kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${PLUGINS_DIR}/${folder}/${f}`), {
                       state: { rawFile: true },
                     })
                   }
@@ -132,7 +145,7 @@ export function ClientExtensionsSection({
 
 /** Walk the (already-loaded, ACL-filtered) tree down to this plugin's namespace dirs. */
 function namespaceListings(tree: FileTreeEntry, kbDirName: string, folder: string): NamespaceListing[] {
-  const pluginDir = descend(tree, [kbDirName, 'Plugins', folder]);
+  const pluginDir = descend(tree, [kbDirName, PLUGINS_DIR, folder]);
   if (!pluginDir?.children) return [];
   const out: NamespaceListing[] = [];
   for (const child of pluginDir.children) {

@@ -85,8 +85,8 @@ export interface ToolManualSetup {
   reason?: string;
 }
 
-/** A parsed `.tool` file (normalized). */
-export interface ToolManualDescriptor {
+/** Fields common to every parsed manual — see {@link ToolManualDescriptor}. */
+export interface ToolManualDescriptorBase {
   /** URL-safe id derived from the file name (route `:slug`), unique in the catalog. */
   slug: string;
   /**
@@ -113,24 +113,39 @@ export interface ToolManualDescriptor {
   tools?: unknown[];
   /** Declared `${VAR}` scopes (see {@link ToolVariable}); empty when none declared. */
   variables?: ToolVariable[];
-  /**
-   * Whether this tool can run for a REMOTE consumer (Bevel's hosted MCP proxy).
-   * Absent/`true` ⇒ available remotely; `false` ⇒ LOCAL-ONLY — the remote endpoint
-   * skips it (it can't reach e.g. a `localhost` MCP server), and instead surfaces
-   * its path via the `list_local_tools` tool so a local agent can self-configure it.
-   */
-  remote?: boolean;
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
-  /**
-   * For a `type: mcp` server declared with a stdio transport in a plugin's
-   * `mcp.json`: the spawn spec. Implies `remote: false` — the hosted proxy
-   * can never spawn a subprocess out of knowledge-base content, so stdio
-   * servers are served only to local consumers, which run them per the Agent
-   * Plugins runtime contract (PLUGIN_ROOT/PLUGIN_DATA, `./` containment).
-   */
-  stdio?: { command: string; args: string[]; env?: Record<string, string>; cwd?: string };
 }
+
+/** The spawn spec of a stdio-declared MCP server (a plugin `mcp.json` entry). */
+export interface ToolManualStdioSpec {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}
+
+/**
+ * A parsed manual (a `.tool` file or a plugin `mcp.json` entry, normalized).
+ *
+ * `remote` — whether the tool can run for a REMOTE consumer (Bevel's hosted
+ * MCP proxy). Absent/`true` ⇒ available remotely; `false` ⇒ LOCAL-ONLY — the
+ * remote endpoint skips it (it can't reach e.g. a `localhost` MCP server),
+ * and instead surfaces its path via the `list_local_tools` tool so a local
+ * agent can self-configure it.
+ *
+ * `stdio` — for a `type: mcp` server declared with a stdio transport in a
+ * plugin's `mcp.json`: the spawn spec. A UNION, not two optional fields,
+ * because a stdio spec REQUIRES `remote: false` — the hosted proxy can never
+ * spawn a subprocess out of knowledge-base content, so stdio servers are
+ * served only to local consumers, which run them per the Agent Plugins
+ * runtime contract (PLUGIN_ROOT/PLUGIN_DATA, `./` containment) — and the
+ * type refusing `remote: true` beside a spawn spec is what keeps every
+ * producer honest about that.
+ */
+export type ToolManualDescriptor =
+  | (ToolManualDescriptorBase & { remote?: boolean; stdio?: undefined })
+  | (ToolManualDescriptorBase & { remote: false; stdio: ToolManualStdioSpec });
 
 /** A validated UTCP manual dict (`{ utcp_version, manual_version, tools }`). */
 export type UtcpManualDict = Record<string, unknown>;

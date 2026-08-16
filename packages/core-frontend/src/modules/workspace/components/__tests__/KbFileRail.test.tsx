@@ -43,7 +43,7 @@ describe('KbFileRail', () => {
   it('labels the count Characters and never claims a byte size', () => {
     renderRail({ charCount: 4218 });
     expect(screen.getByText('Characters')).toBeInTheDocument();
-    // Plugined through the runner's own locale, not a hard-coded `4,218`: the
+    // Grouped through the runner's own locale, not a hard-coded `4,218`: the
     // rail calls `toLocaleString()`, so an en-DE machine renders `4.218` and a
     // literal would fail there while the component is perfectly correct.
     expect(screen.getByText((4218).toLocaleString())).toBeInTheDocument();
