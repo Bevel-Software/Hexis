@@ -1284,6 +1284,11 @@ export class WorkspaceService implements IWorkspaceService {
       try {
         await fs.rm(dir, { recursive: true, force: true });
         this.branchDirs.delete(branchForWorkspaceId(entry.name));
+        // The top-up claim dies with the clone (same rule as every other
+        // eviction site): a branch re-created after the sweep gets a fresh
+        // clone that must be OFFERED the scaffolding top-up, not judged by
+        // the fate of a directory that no longer exists.
+        this.toppedUpBranches.delete(branchForWorkspaceId(entry.name));
         removed.push(entry.name);
       } catch (err) {
         console.warn(

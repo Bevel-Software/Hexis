@@ -306,6 +306,30 @@ describe('putServer', () => {
     expect(await readJson('Plugins/GTM/plugin.json')).toEqual(before);
   });
 
+  it('422s malformed STORED variables on a save that never touched them — not a silent clear', async () => {
+    // A hand-edited plugin.json whose declarations went bad: coercing them
+    // to [] before validation would let any unrelated save erase them.
+    await write('Plugins/GTM/plugin.json', {
+      name: 'gtm',
+      extensions: {
+        'software.bevel.hexis': { mcpServers: { vendor: { variables: 'corrupt' } } },
+      },
+    });
+    const before = await readJson('Plugins/GTM/plugin.json');
+    await expect(
+      svc.putServer(USER, 'vendor', { transport: 'streamable-http', url: 'https://v.example/mcp' }),
+    ).rejects.toMatchObject({ status: 422 });
+    expect(commits.runPendingCommit).not.toHaveBeenCalled();
+    expect(await readJson('Plugins/GTM/plugin.json')).toEqual(before);
+    // Supplying valid declarations IS the repair path — that save lands.
+    await svc.putServer(USER, 'vendor', {
+      transport: 'streamable-http',
+      url: 'https://v.example/mcp',
+      variables: [{ name: 'VENDOR_KEY', scope: 'user' }],
+    });
+    expect(commits.runPendingCommit).toHaveBeenCalledTimes(1);
+  });
+
   it('writes a stdio entry with command/args and no url', async () => {
     await svc.putServer(USER, 'vendor', {
       transport: 'stdio',

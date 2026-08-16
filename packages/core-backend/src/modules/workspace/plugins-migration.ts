@@ -251,10 +251,13 @@ async function foldIntoPluginFiles(
 
 /**
  * Parse a `.tool`; a convertible MCP manual (has a url) parses to a
- * descriptor, anything else — other types, or a file that will not parse —
- * to `null` and is left as a `.tool`.
+ * descriptor. A non-candidate (other types, a file that will not parse)
+ * is `null` and moves as a plain `.tool`; an MCP manual REFUSED conversion
+ * comes back as the reason string, so the migration log distinguishes a
+ * deliberately-retained integration from one that silently failed — the
+ * same courtesy the manifest-missing refusal already extends.
  */
-async function asMcpManual(abs: string, repoRel: string): Promise<ToolManualDescriptor | null> {
+async function asMcpManual(abs: string, repoRel: string): Promise<ToolManualDescriptor | string | null> {
   try {
     const content = await fs.readFile(abs, 'utf-8');
     const d = normalizeToolManual(path.basename(abs).replace(/\.tool$/i, ''), repoRel, content);
@@ -263,7 +266,9 @@ async function asMcpManual(abs: string, repoRel: string): Promise<ToolManualDesc
     // a working integration and write an entry discovery then skips. Such a
     // manual stays a `.tool`.
     if (d.type !== 'mcp' || !d.url) return null;
-    if (!/^[a-z0-9][a-z0-9_-]*$/.test(d.name)) return null;
+    if (!/^[a-z0-9][a-z0-9_-]*$/.test(d.name)) {
+      return `its id "${d.name}" is not a valid mcp.json server name`;
+    }
     // Same refusal for the url: the mcp.json loader accepts only a directly
     // parseable http(s) url, so a templated one (`${BASE}/mcp` — legal in a
     // `.tool`, where the substitutor expands it) would convert into an entry
@@ -275,16 +280,22 @@ async function asMcpManual(abs: string, repoRel: string): Promise<ToolManualDesc
     try {
       url = new URL(d.url);
     } catch {
-      return null;
+      return 'its url is not directly parseable (a templated url only a .tool can carry)';
     }
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-    if (url.username || url.password) return null;
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      return `its url scheme "${url.protocol}" cannot land in mcp.json (http(s) only)`;
+    }
+    if (url.username || url.password) {
+      return 'its url embeds credentials, which may not land in the portable mcp.json';
+    }
     // A `.tool` can gate ITSELF with frontmatter access verbs, read by the
     // access resolver from the file's own path. An mcp.json entry has no
     // per-server home for those — the file's ACL governs every server in it —
     // so converting would silently widen who may configure and run the
     // server. Such a manual stays a `.tool`, verbs and all.
-    if (parseOwnAccessEntries(content) !== null) return null;
+    if (parseOwnAccessEntries(content) !== null) {
+      return 'it gates itself with frontmatter access verbs, which mcp.json cannot carry';
+    }
     return d;
   } catch {
     return null;
@@ -314,7 +325,7 @@ async function migratePluginFolder(
 
   const convertOrMove = async (abs: string, name: string, note: string): Promise<void> => {
     const manual = await asMcpManual(abs, `${PLUGINS_DIR}/${folderName}/${name}`);
-    if (manual) {
+    if (manual !== null && typeof manual !== 'string') {
       // QUEUED for conversion — the `.tool` is deleted only AFTER its entry
       // has actually landed in the output files (see foldIntoPluginFiles).
       // Deleting first left a window where a failed fold stranded the
@@ -322,6 +333,11 @@ async function migratePluginFolder(
       // from: the file IS the recovery path until the fold succeeds.
       converted.push({ manual, abs, note });
       return;
+    }
+    if (typeof manual === 'string') {
+      // The operator's answer to "why is this integration not in mcp.json":
+      // a refused conversion must read as the deliberate retention it is.
+      notes.push(`${folderName}: ${note} NOT converted — ${manual}; kept as a .tool`);
     }
     const dest = path.join(pluginDir, ...HEXIS_TOOLS_DIR.split('/'), path.basename(abs));
     if (abs !== dest && (await moveIfAbsent(abs, dest))) {
@@ -365,7 +381,12 @@ async function migratePluginFolder(
       if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.tool')) continue;
       const abs = path.join(extToolsDir, entry.name);
       const manual = await asMcpManual(abs, `${PLUGINS_DIR}/${folderName}/${HEXIS_TOOLS_DIR}/${entry.name}`);
-      if (manual) converted.push({ manual, abs, note: `${HEXIS_TOOLS_DIR}/${entry.name}` });
+      // A refusal reason here is a SETTLED resident of the tools dir — it
+      // was named the run it moved in, and this sweep repeats every boot,
+      // so re-noting it would be log spam. Only a convertible manual queues.
+      if (manual !== null && typeof manual !== 'string') {
+        converted.push({ manual, abs, note: `${HEXIS_TOOLS_DIR}/${entry.name}` });
+      }
     }
   }
 

@@ -124,7 +124,13 @@ export class PluginProvisionService {
         422,
       );
     }
-    return this.creations.run(`plugin:${name.toLowerCase()}`, async () => {
+    // Locked on the manifest SLUG, not the lowercased folder: the slug is the
+    // identity the twin check below defends, and two spellings that collide
+    // on it ("Sales Team" / "Sales-Team") must take the SAME lock or both
+    // pass the check concurrently. Case-variants share a slug too, so this
+    // key subsumes the old lowercase one — and deletion (below) derives its
+    // key the same way, keeping delete/re-create of one name serialized.
+    return this.creations.run(`plugin:${pluginManifestName(name)}`, async () => {
       const existing = await this.existingFolder(name);
       if (existing !== null) {
         throw new PluginProvisionError(`A plugin named "${existing}" already exists.`, 409);
@@ -153,7 +159,7 @@ export class PluginProvisionService {
    */
   async ensurePersonalPlugin(user: AuthUser): Promise<ProvisionedPlugin> {
     const folder = personalPluginFolderName(user.id);
-    return this.creations.run(`plugin:${folder.toLowerCase()}`, async () => {
+    return this.creations.run(`plugin:${pluginManifestName(folder)}`, async () => {
       if ((await this.existingFolder(folder)) !== null) {
         return { folder, created: false };
       }
@@ -187,8 +193,9 @@ export class PluginProvisionService {
    * plugin exactly as it was — never half-gone on disk while origin still
    * carries it.
    *
-   * Serialised on the same per-name lock creations use, so a delete can
-   * never interleave with a re-creation of the same name.
+   * Serialised on the same slug-keyed lock creations use, so a delete can
+   * never interleave with a re-creation of the same name (the key derives
+   * from the name, so both spell it identically).
    */
   async deletePlugin(user: AuthUser, rawName: string): Promise<void> {
     const name = rawName.trim();
@@ -198,7 +205,7 @@ export class PluginProvisionService {
       // nobody deletes somebody's private shelf through the plugin door.
       throw new PluginProvisionError('Unknown plugin', 404);
     }
-    return this.creations.run(`plugin:${name.toLowerCase()}`, async () => {
+    return this.creations.run(`plugin:${pluginManifestName(name)}`, async () => {
       const existing = await this.existingFolder(name);
       // Exact match only — the catalog hands the route the on-disk casing,
       // so a mismatch means the plugin is gone (or was never there).
@@ -261,20 +268,33 @@ export class PluginProvisionService {
     return children.find((c) => c.toLowerCase() === lower) ?? null;
   }
 
-  /** An existing folder whose derived manifest name equals `name`'s, or null. */
+  /** An existing PLUGIN FOLDER whose derived manifest name equals `name`'s, or null. */
   private async manifestNameTwin(name: string): Promise<string | null> {
     const wsId = await this.readyWorkspaceId();
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-    let children: string[];
+    let children: Array<{ name: string; isDirectory(): boolean }>;
     try {
-      children = await fs.readdir(path.join(wsDir, this.kbDirName, PLUGINS_DIR));
+      children = await fs.readdir(path.join(wsDir, this.kbDirName, PLUGINS_DIR), {
+        withFileTypes: true,
+      });
     } catch {
       return null; // no Plugins/ root yet — nothing can collide
     }
     const slug = pluginManifestName(name);
-    // Dot-prefixed entries (a parked delete, say) are invisible to every
-    // scanner and carry no manifest — they cannot claim a slug.
-    return children.find((c) => !c.startsWith('.') && pluginManifestName(c) === slug) ?? null;
+    // Only what actually publishes a manifest claims a slug: a DIRECTORY
+    // that is neither dot-prefixed (a parked delete — invisible to every
+    // scanner) nor personal (never listed, never manifested). A loose file
+    // at the root (`Plugins/slack.tool`) is not a plugin and must not
+    // 409 a legitimate "Slack Tool".
+    return (
+      children.find(
+        (c) =>
+          c.isDirectory() &&
+          !c.name.startsWith('.') &&
+          !isPersonalPluginFolder(c.name) &&
+          pluginManifestName(c.name) === slug,
+      )?.name ?? null
+    );
   }
 
   private async provision(user: AuthUser, folder: string, accessMd: string): Promise<void> {

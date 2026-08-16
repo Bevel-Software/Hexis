@@ -324,12 +324,17 @@ describe('migrateGroupsToPlugins', () => {
       'Groups/GTM/socket.tool',
       JSON.stringify({ name: 'socket', type: 'mcp', url: 'wss://mcp.vendor.example/mcp' }),
     );
-    await migrateGroupsToPlugins(repo);
+    const result = await migrateGroupsToPlugins(repo);
     // Both stay `.tool` files (moved with the other unconvertibles), and no
     // mcp.json is invented for them.
     expect(await exists('Plugins/GTM/software.bevel.hexis/tools/vendor.tool')).toBe(true);
     expect(await exists('Plugins/GTM/software.bevel.hexis/tools/socket.tool')).toBe(true);
     expect(await exists('Plugins/GTM/mcp.json')).toBe(false);
+    // The refusal is NAMED in the log — an operator must be able to tell a
+    // deliberately-retained integration from one that silently failed.
+    // (socket.tool never reaches the named refusals: its wss url fails
+    // `.tool` normalization itself, the not-a-candidate path.)
+    expect(result.notes.some((n) => /vendor\.tool.*NOT converted/.test(n))).toBe(true);
   });
 
   it('refuses to convert an mcp .tool whose url carries userinfo', async () => {

@@ -21,6 +21,7 @@ vi.mock('../code-mode-names.js', async (importOriginal) => {
             'Call the tool by its exact UTCP name instead.',
         );
       }
+      if (name === 'down.run') throw new Error('repository unavailable: ECONNREFUSED');
       if (name === 'solo.run') return { tool: { name: 'solo.run' }, utcpName: 'solo.run' };
       return null;
     }),
@@ -56,5 +57,9 @@ describe('tools_info', () => {
     expect(result.interfaces).toBe('interface solo.run');
     expect(result.not_found).toEqual(['nope']);
     expect(result.errors).toBeUndefined();
+  });
+
+  it('contains ONLY ambiguity — an outage rethrows instead of posing as partial success', async () => {
+    await expect(run(['solo.run', 'down.run'])).rejects.toThrow(/repository unavailable/);
   });
 });

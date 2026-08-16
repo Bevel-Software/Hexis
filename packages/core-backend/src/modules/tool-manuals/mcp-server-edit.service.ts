@@ -192,8 +192,11 @@ export class McpServerEditService {
       write.literalHeaders ?? (isRecord(prior.headers) ? (prior.headers as Record<string, string>) : {});
     const authIn =
       write.authHeaders ?? (isRecord(priorExt.headers) ? (priorExt.headers as Record<string, string>) : {});
-    const variablesIn =
-      write.variables ?? (Array.isArray(priorExt.variables) ? (priorExt.variables as ToolVariable[]) : []);
+    // RAW on the stored side, no shape fallback: coercing malformed stored
+    // declarations to [] here would let a save that never touched variables
+    // silently CLEAR them — the validator below owes that case a 422, same
+    // as any other malformed input.
+    const variablesIn = write.variables ?? priorExt.variables;
     // Discovery's OWN validator, at save time (like the reserved-ref check
     // below): a malformed declaration — bad name, duplicate, re-declared
     // platform name, oauth on a shared scope or with a broken provider —

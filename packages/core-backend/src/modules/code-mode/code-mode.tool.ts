@@ -118,7 +118,13 @@ export function createToolsInfoTool(client: CodeModeUtcpClient) {
             notFound.push(name);
           }
         } catch (err) {
-          errors.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
+          // Only AMBIGUITY is a per-name answer (the message says how to
+          // disambiguate). Anything else — a repository outage, a catalog
+          // failure — must fail the call: containing it would dress an
+          // outage up as a successful lookup with partial data.
+          const message = err instanceof Error ? err.message : String(err);
+          if (!message.includes('is ambiguous')) throw err;
+          errors.push(`${name}: ${message}`);
         }
       }
       return {

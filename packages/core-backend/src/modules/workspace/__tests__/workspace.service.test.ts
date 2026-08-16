@@ -528,6 +528,29 @@ describe('WorkspaceService — scaffolding top-up on restart-survivor clones', (
     await svc.getOrCreateForBranch('target-company-state');
     expect(seed.topUpWorkspace).toHaveBeenCalledTimes(2);
   });
+
+  it('re-offers the top-up after the orphan sweep removes the clone — same eviction rule', async () => {
+    await seedBranchWorkspace(root, 'target-company-state');
+    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    const seed = {
+      ensureRemoteSeeded: vi.fn(async () => {}),
+      topUpWorkspace: vi.fn(async () => {}),
+    };
+    svc.setSeedService(seed);
+
+    await svc.getOrCreateForBranch('target-company-state');
+    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(1);
+
+    // The branch vanishes from the known set; the sweep reclaims its clone.
+    const { removed } = await svc.sweepOrphanedWorkspaces([]);
+    expect(removed).toContain(workspaceIdForBranch('target-company-state'));
+
+    // Re-created before any restart: the fresh clone must still get its one
+    // top-up — the claim died with the directory the sweep removed.
+    await seedBranchWorkspace(root, 'target-company-state');
+    await svc.getOrCreateForBranch('target-company-state');
+    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('WorkspaceService.readAllKbFiles', () => {

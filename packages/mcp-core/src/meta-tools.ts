@@ -115,8 +115,10 @@ export async function dispatchMetaTool(
       // non-string entry must be a named validation error here, not a generic
       // failure out of a repository lookup it was never valid input for.
       const rawNames = args.tool_names;
-      if (!Array.isArray(rawNames) || rawNames.some((n) => typeof n !== 'string')) {
-        return toolError('The "tools_info" tool requires "tool_names": an array of tool name strings.');
+      // Empty included — the schema says minItems 1, and an empty success
+      // payload for invalid input would read as "no tools exist".
+      if (!Array.isArray(rawNames) || rawNames.length === 0 || rawNames.some((n) => typeof n !== 'string')) {
+        return toolError('The "tools_info" tool requires "tool_names": a non-empty array of tool name strings.');
       }
       const names = rawNames as string[];
       const interfaces: string[] = [];

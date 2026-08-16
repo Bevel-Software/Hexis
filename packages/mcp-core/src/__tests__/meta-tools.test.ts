@@ -100,7 +100,9 @@ describe('dispatchMetaTool tools_info', () => {
 
   it('refuses a missing tool_names array or non-string entries with a named validation error', async () => {
     const { client, getTool } = clientWith([]);
-    for (const args of [{}, { tool_names: 'm.read_file' }, { tool_names: ['ok', 42] }]) {
+    // Empty included: the schema's minItems is 1, and an empty success
+    // payload for invalid input would read as "no tools exist".
+    for (const args of [{}, { tool_names: 'm.read_file' }, { tool_names: ['ok', 42] }, { tool_names: [] }]) {
       const result = await dispatchMetaTool(client, 'tools_info', args as Record<string, unknown>);
       expect(result.isError).toBe(true);
       expect(resultText(result)).toMatch(/tool_names/);

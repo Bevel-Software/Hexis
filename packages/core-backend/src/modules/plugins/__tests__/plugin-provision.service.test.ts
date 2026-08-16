@@ -122,6 +122,33 @@ describe('PluginProvisionService.createPlugin', () => {
     });
   });
 
+  it('serialises concurrent creations of two SPELLINGS of one slug — exactly one lands', async () => {
+    // Different lowercased names take different name-keyed locks; only a
+    // slug-keyed lock makes the twin check above hold under concurrency.
+    const results = await Promise.allSettled([
+      h.svc.createPlugin(USER, 'Growth Team'),
+      h.svc.createPlugin(USER, 'Growth-Team'),
+    ]);
+    const ok = results.filter((r) => r.status === 'fulfilled');
+    const failed = results.filter(
+      (r) => r.status === 'rejected' && (r.reason as { status?: number }).status === 409,
+    );
+    expect(ok).toHaveLength(1);
+    expect(failed).toHaveLength(1);
+    expect(await fs.readdir(path.join(h.dir, KB, 'Plugins'))).toHaveLength(1);
+  });
+
+  it('a loose file at the Plugins root claims no slug — "Slack Tool" is not its twin', async () => {
+    // Loose files are not plugins (the catalog skips them); only a real
+    // plugin FOLDER publishes a manifest identity.
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins', 'slack.tool'), 'id: slack\n', 'utf-8');
+    await expect(h.svc.createPlugin(USER, 'Slack Tool')).resolves.toEqual({
+      folder: 'Slack Tool',
+      created: true,
+    });
+  });
+
   it('refuses names the filesystem or the model cannot carry with 422', async () => {
     for (const bad of ['', '  ', 'a/b', 'a\\b', '.', '..', '.hidden', 'personal-anything', 'a\u0000b', 'a\tb']) {
       await expect(h.svc.createPlugin(USER, bad)).rejects.toBeInstanceOf(PluginProvisionError);
