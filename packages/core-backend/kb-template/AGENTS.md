@@ -41,6 +41,11 @@ Plugins/personal-<user-id>/…                  one per person: private
 Skills and tools live TOGETHER in a plugin because they share one access
 boundary: a tool a plugin cannot read is a skill that plugin cannot run.
 
+**Symlinks are not supported anywhere under `Plugins/`.** Access control
+resolves rules by path, and a symlink is a second path to the same content —
+the two can disagree about who may read what. The platform never creates
+them and ignores any it finds (they can only arrive via a direct git push).
+
 **A plugin follows the [Agent Plugins](https://agent-plugins.org) specification**
 (v1.0.0), so another conformant client can load one: it reads `plugin.json`, the
 skills under `skills/`, and the servers in `mcp.json`, and ignores everything

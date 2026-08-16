@@ -95,27 +95,20 @@ export function createToolManualsAgentRoutes(
       await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
       const wsDir = await workspaceService.getWorkspacePath(wsId);
       const pluginDir = path.join(wsDir, kbDirName, PLUGINS_DIR, folder);
-      const pluginReal = await fs.realpath(pluginDir).catch(() => null);
-      if (pluginReal === null) return void res.status(404).json({ error: 'Not found' });
-      // The folder ENTRY itself must live inside the canonical Plugins root:
-      // a symlinked `Plugins/<folder>` would otherwise archive an arbitrary
-      // tree while the ACL judged paths spelled `Plugins/<folder>/…`.
-      const pluginsRootReal = await fs.realpath(path.join(wsDir, kbDirName, PLUGINS_DIR)).catch(() => null);
-      if (
-        pluginsRootReal === null ||
-        path.relative(pluginsRootReal, pluginReal).startsWith('..') ||
-        path.isAbsolute(path.relative(pluginsRootReal, pluginReal)) ||
-        path.relative(pluginsRootReal, pluginReal) === ''
-      ) {
+      // SYMLINKS ARE NOT SUPPORTED IN PLUGINS, anywhere. Access control
+      // resolves rules by path, and a symlink is a second path to the same
+      // content — a standing invitation for the spelling the ACL judged and
+      // the bytes served to diverge. The platform's own write paths never
+      // create one (they arrive only via direct git pushes), so every symlink
+      // is skipped rather than resolved: no target following, no cycle
+      // guards, no read-time re-resolution — complexity that existed only to
+      // support what the platform has no use for. Starting with the plugin
+      // folder itself: a symlinked `Plugins/<folder>` is not a plugin.
+      const folderStat = await fs.lstat(pluginDir).catch(() => null);
+      if (folderStat === null || !folderStat.isDirectory()) {
         return void res.status(404).json({ error: 'Not found' });
       }
       const rels: string[] = [];
-      // Cycle guard by ANCESTOR STACK, not a global visited set: a symlink
-      // into the walker's own ancestry recurses forever (an unbounded-CPU
-      // hang any key holder could craft), but two different symlink routes to
-      // one directory are a diamond — both are legitimate archive paths, and
-      // a global dedupe would silently drop the second.
-      const ancestry = new Set<string>([pluginReal]);
       const walk = async (dir: string, rel: string): Promise<void> => {
         let entries;
         try {
@@ -130,32 +123,13 @@ export function createToolManualsAgentRoutes(
         for (const e of entries) {
           if (e.name === '.git') continue;
           const childRel = rel ? `${rel}/${e.name}` : e.name;
-          const abs = path.join(dir, e.name);
-          if (e.isDirectory()) await walk(abs, childRel);
+          // Dirent's isDirectory/isFile are both false for a symlink, so a
+          // link is never walked and never listed — but say so, once, because
+          // an author who committed one deserves to know it went nowhere.
+          if (e.isDirectory()) await walk(path.join(dir, e.name), childRel);
           else if (e.isFile()) rels.push(childRel);
           else if (e.isSymbolicLink()) {
-            // A symlink materializes as its target CONTENT — but only when the
-            // resolved target stays inside the plugin. A link reaching outside
-            // would zip content the per-file ACL below never judged (verdicts
-            // key on the plugin-relative path, not the target), so it is
-            // dropped, loudly rather than silently.
-            const real = await fs.realpath(abs).catch(() => null);
-            if (real === null) continue;
-            const relToRoot = path.relative(pluginReal, real);
-            if (relToRoot.startsWith('..') || path.isAbsolute(relToRoot)) {
-              console.warn(`[tool-manuals] archive of "${folder}": symlink ${childRel} points outside the plugin — skipped.`);
-              continue;
-            }
-            const st = await fs.stat(abs).catch(() => null);
-            if (st?.isDirectory()) {
-              if (ancestry.has(real)) continue; // a cycle, not a subtree
-              ancestry.add(real);
-              try {
-                await walk(abs, childRel);
-              } finally {
-                ancestry.delete(real);
-              }
-            } else if (st?.isFile()) rels.push(childRel);
+            console.warn(`[tool-manuals] archive of "${folder}": ${childRel} is a symlink — not supported in plugins, skipped.`);
           }
         }
       };
@@ -176,20 +150,13 @@ export function createToolManualsAgentRoutes(
         // Fail closed, per file — only an explicit `true` verdict is included.
         if (verdicts.get(`${PLUGINS_DIR}/${folder}/${rel}`) !== true) continue;
         const abs = path.join(pluginDir, ...rel.split('/'));
-        // Re-resolve AT READ TIME: the walk's containment check is a moment
-        // in the past, and a symlink retargeted between walk and read would
-        // hand readFile an outside path the ACL never judged. Reading from
-        // the re-checked realpath closes the race.
-        const realNow = await fs.realpath(abs).catch(() => null);
-        if (realNow === null) continue;
-        const relNow = path.relative(pluginReal, realNow);
-        if (relNow.startsWith('..') || path.isAbsolute(relNow)) {
-          console.warn(`[tool-manuals] archive of "${folder}": ${rel} resolved outside the plugin at read time — skipped.`);
-          continue;
-        }
-        // Size BEFORE content: rejecting after readFile would already have
+        // lstat, not stat: the walk saw a regular file, but the no-symlink
+        // rule is re-checked at read time so a path swapped for a link in
+        // between is skipped rather than followed. Also gives the size
+        // BEFORE content — rejecting after readFile would already have
         // spiked memory by exactly the payload the limit exists to refuse.
-        const stat = await fs.stat(realNow);
+        const stat = await fs.lstat(abs).catch(() => null);
+        if (stat === null || !stat.isFile()) continue;
         bytes += stat.size;
         if (bytes > MAX_ARCHIVE_BYTES) {
           return void res.status(413).json({
@@ -198,7 +165,7 @@ export function createToolManualsAgentRoutes(
         }
         // Unix mode rides in the zip attrs so a `./`-command stdio server is
         // still executable after materialization (0 on Windows — harmless).
-        zip.addFile(rel, await fs.readFile(realNow), '', ((stat.mode & 0o7777) << 16) >>> 0);
+        zip.addFile(rel, await fs.readFile(abs), '', ((stat.mode & 0o7777) << 16) >>> 0);
         included += 1;
       }
       // An all-filtered plugin looks exactly like an absent one — a 404 must
