@@ -31,9 +31,9 @@ it, and how to undo it. An agent can only do what the person running it can do,
 resolved per file, and it never holds the credentials it uses. Runs on your
 infrastructure, behind your own SSO.
 
-### Why it's different from MCP gateways: review changes
+### Why it's different from MCP gateways:
 
-MCP gateways are unidirectional; users can consume plugins, skills or tools but there is no mechanism here for users to propose changes or share new skills and MCP servers. You can do this via GitHub in the back, but this is not accessible to non-technical users and there is no fine-grained access control for either viewing or the review process.
+MCP gateways are uni-directional; users can consume plugins, skills or tools but there is no mechanism here for users to propose changes or share new skills and MCP servers. You can do this via GitHub in the back, but this is not accessible to non-technical users and there is no fine-grained access control for either viewing or the review process.
 
 Hexis can do all of the above specified capabilities for distribution, and has this bidirectionality needed for management.
 
