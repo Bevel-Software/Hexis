@@ -28,7 +28,7 @@ function setViewportWidth(width: number): void {
 /** Mount a frame and hand back the `<aside>` — what most assertions here are about. */
 function renderFrame(): HTMLElement {
   const { container } = render(
-    <SidebarFrame label="Library groups">
+    <SidebarFrame label="Library plugins">
       <button type="button">Engineering</button>
     </SidebarFrame>,
   );
@@ -42,7 +42,7 @@ function renderFrame(): HTMLElement {
  */
 function renderFrameWithContainer() {
   return render(
-    <SidebarFrame label="Library groups">
+    <SidebarFrame label="Library plugins">
       <button type="button">Engineering</button>
     </SidebarFrame>,
   );
@@ -123,7 +123,7 @@ describe('SidebarFrame: narrow viewport', () => {
     expect(aside).not.toHaveAttribute('inert');
   });
 
-  it.each(['File explorer', 'Library groups'])(
+  it.each(['File explorer', 'Library plugins'])(
     'opens %s as the same modal drawer over a backdrop',
     (label) => {
       setViewportWidth(375);
@@ -191,7 +191,7 @@ describe('SidebarFrame: narrow viewport', () => {
     render(
       <>
         <Probe />
-        <SidebarFrame label="Library groups">
+        <SidebarFrame label="Library plugins">
           <button type="button">Engineering</button>
         </SidebarFrame>
       </>,

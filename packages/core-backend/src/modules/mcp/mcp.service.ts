@@ -19,11 +19,24 @@ import {
   UtcpClientConfigSerializer,
   CallTemplateSerializer,
   type CallTemplate,
-  type JsonSchema,
   type Tool as UtcpTool,
 } from '@utcp/sdk';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { utcpNameToTsInterfaceName, findToolByName } from '../code-mode/code-mode-names.js';
+import {
+  CODE_MODE_META_TOOLS,
+  META_TOOL_NAMES,
+  dispatchMetaTool,
+  dispatchToolCall,
+  registerManual,
+  flattenManualTool,
+  toListedTool,
+  toolError,
+  needsAuthorizationResult,
+  skillPromptText,
+  type ProxiedTool,
+  type SkillSummary,
+  type LoadedSkill,
+} from '@bevel-software/platform-mcp-core';
 import { bevelSecretsLoaderConfig } from '../secrets-vault/index.js';
 import { scopesCovered, type ISecretsVaultService } from '../secrets-vault/secrets-vault.contract.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
@@ -49,9 +62,6 @@ export interface McpProxyOptions {
   publicFrontendUrl: string;
 }
 
-/** Default cap on a `call_tool_chain` result's stringified size before it spills. */
-const CALL_TOOL_CHAIN_MAX_OUTPUT = 200_000;
-
 /**
  * Upper bound on one `loopbackJson` round-trip (manual list, skill fetch) so a
  * hung loopback can't stall `createSession`. Generous: these endpoints answer
@@ -70,85 +80,6 @@ const LOOPBACK_TIMEOUT_MS = 15_000;
 const MCP_LOOPBACK_TOKEN_TTL_MS = 5 * 60 * 60 * 1000;
 
 const callTemplateSerializer = new CallTemplateSerializer();
-
-/**
- * Code-mode meta-tools exposed ALONGSIDE the direct tools. They let an external
- * agent batch many Bevel calls into one isolated-vm run (`call_tool_chain`)
- * instead of one MCP round-trip per call — the same efficiency our own agent
- * gets. `call_tool_chain`'s description carries the code-mode protocol (there is
- * no system prompt over MCP), so the client learns the convention from the tool
- * itself; `list_tools`/`tools_info` are how it discovers what to call.
- *
- * Security is identical to the direct surface: the chain runs in our isolated-vm
- * but calls tools over loopback with the CALLER's key against the external
- * catalog — internal-only tools aren't in that catalog, so a chain can't reach
- * them either.
- */
-const CALL_TOOL_CHAIN_DESCRIPTION = [
-  'Execute a short JavaScript program with direct access to every registered UTCP tool as a synchronous function. Call tools as `KNOWLEDGE_BASE.<tool>({ body: { ...args } })` with NO `await` (results are already resolved), and `return` the final value. The runtime is plain JavaScript (no type annotations / no TypeScript-only syntax).',
-  'Discover first: `list_tools` lists every tool in callable form (e.g. `KNOWLEDGE_BASE.read_file`); `tools_info` returns their exact argument + return shapes — do not guess. Batch multiple tool calls into one chain to avoid a round-trip per call. The chain runs with your own connection key, so it can only reach the tools you can already call directly.',
-  'Large results: if the combined result+logs exceed `max_output_size` (default 200000 chars) the full JSON is spilled to a shared store and you get back a `__tool_chain_spill__/…` ref instead. Read it with `read_file` (pass that ref as `path` — `branch` is ignored — plus `offset`/`limit` to slice it), or better, re-run a narrower chain that returns only what you need.',
-].join('\n\n');
-
-const CODE_MODE_META_TOOLS: McpTool[] = [
-  {
-    name: 'list_tools',
-    description:
-      'List every UTCP tool currently registered, in TypeScript-accessible form (e.g. `KNOWLEDGE_BASE.read_file`) for use inside `call_tool_chain`.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false } as McpTool['inputSchema'],
-  },
-  {
-    name: 'tools_info',
-    description:
-      'Get full TypeScript interface definitions for named tools (names from `list_tools`). The schemas are the source of truth — do not guess shapes.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        tool_names: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Tool names to describe.' },
-      },
-      required: ['tool_names'],
-      additionalProperties: false,
-    } as McpTool['inputSchema'],
-  },
-  {
-    name: 'call_tool_chain',
-    description: CALL_TOOL_CHAIN_DESCRIPTION,
-    inputSchema: {
-      type: 'object',
-      properties: {
-        code: { type: 'string', minLength: 1, description: 'JavaScript to execute against the registered tools.' },
-        timeout: { type: 'integer', minimum: 1000, maximum: 120000, description: 'Timeout in ms (default 30000).' },
-        max_output_size: { type: 'integer', minimum: 1000, maximum: 1000000, description: 'Max result+logs size in chars before spilling (default 200000, max 1000000).' },
-      },
-      required: ['code'],
-      additionalProperties: false,
-    } as McpTool['inputSchema'],
-  },
-];
-
-const META_TOOL_NAMES = new Set(CODE_MODE_META_TOOLS.map((t) => t.name));
-
-/** Minimal skill shapes the prompt bridge needs (kept local so the proxy stays decoupled from `modules/skills`). */
-interface SkillSummary {
-  name: string;
-  description: string;
-}
-interface LoadedSkill extends SkillSummary {
-  body: string;
-  path: string;
-  files: string[];
-}
-
-/** The prompt message text for a loaded skill: its instructions body + a pointer to bundled files. */
-function skillPromptText(skill: LoadedSkill): string {
-  const rel = skill.files.map((f) =>
-    f.startsWith(`${skill.path}/`) ? f.slice(skill.path.length + 1) : f,
-  );
-  const footer = rel.length
-    ? `\n\n---\nSkill folder: ${skill.path}\nBundled files (fetch each with the get_skill tool: { name: "${skill.name}", file }): ${rel.join(', ')}`
-    : '';
-  return `${skill.body}${footer}`;
-}
 
 /**
  * The MCP server is a GENERIC proxy over the UTCP tool surface. It owns no tool
@@ -544,27 +475,20 @@ export class McpService {
       // memo while registration is in flight, the stale failure from the OLD
       // credential must not resurrect an entry the clear removed.
       const generation = this.manualFailures.currentGeneration;
-      try {
-        const result = await client.registerManual(m);
-        if (result && result.success === false) {
-          const errs = Array.isArray(result.errors) ? result.errors.join('; ') : 'unknown error';
-          if (isKb) throw new Error(`Bevel tool discovery failed: ${errs}`);
-          this.manualFailures.recordFailure(userId, name, errs, generation);
-          console.warn(`[mcp] skipping manual "${name}": ${errs}`);
-        } else if (!isKb) {
-          this.manualFailures.clear(userId, name);
-        }
-      } catch (err) {
-        // Registration (network/discovery) failure — the templates are already
-        // validated, so this is a runtime, not a schema, problem.
-        if (isKb) throw err;
-        const message = err instanceof Error ? err.message : String(err);
-        this.manualFailures.recordFailure(userId, name, message, generation);
-        console.warn(`[mcp] skipping manual "${name}": ${message}`);
+      // `registerManual` never throws: a discovery/network failure and a
+      // validation failure both come back as `{ ok: false }`, because the retry
+      // policy — this memo — is ours, not the shared layer's.
+      const result = await registerManual(client, m);
+      if (!result.ok) {
+        if (isKb) throw new Error(`Bevel tool discovery failed: ${result.error}`);
+        this.manualFailures.recordFailure(userId, name, result.error, generation);
+        console.warn(`[mcp] skipping manual "${name}": ${result.error}`);
+      } else if (!isKb) {
+        this.manualFailures.clear(userId, name);
       }
     }
     const utcpTools = await client.getTools();
-    return utcpTools.map((tool: UtcpTool) => flattenManualTool(tool));
+    return utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME));
   }
 
   /**
@@ -661,351 +585,49 @@ export class McpService {
     // handler used; the strict ServerNotification type requires the token.
     extra: { sessionId?: string; sendNotification: (n: any) => Promise<void> },
   ): Promise<CallToolResult> {
-    const args = request.params.arguments ?? {};
-
     const progressToken = request.params._meta?.progressToken;
-    let prev: unknown;
-    let hasPrev = false;
-    let progress = 0;
-
-    try {
-      // Args pass through to UTCP verbatim — each communication protocol does
-      // its own serialization (http reads the template's `body_field` out of the
-      // args, mcp forwards them untouched as MCP `arguments`). The advertised
-      // schema is the tool's UTCP `inputs` verbatim too, so what the caller
-      // sends is already in the shape the protocol expects; any reshaping here
-      // would be wrong for at least one protocol.
-      for await (const chunk of client.callToolStreaming(tool.utcpName, args)) {
-        if (hasPrev) {
-          progress += 1;
-          await extra
-            .sendNotification({
-              method: 'notifications/progress',
-              params: {
-                ...(progressToken !== undefined ? { progressToken } : {}),
-                progress,
-                message: renderProgress(prev),
-              },
-            })
-            .catch((err) => console.warn('[mcp] progress notification failed:', err));
-        }
-        prev = chunk;
-        hasPrev = true;
-      }
-    } catch (err) {
-      return toolError(`The "${tool.mcpName}" tool failed: ${describeToolFailure(err)}`);
-    }
-
-    return toCallToolResult(prev);
+    return dispatchToolCall(client, tool, request.params.arguments ?? {}, (progress, message) =>
+      extra.sendNotification({
+        method: 'notifications/progress',
+        params: {
+          ...(progressToken !== undefined ? { progressToken } : {}),
+          progress,
+          message,
+        },
+      }),
+    );
   }
 
   /**
-   * Handle a code-mode meta-tool. `list_tools`/`tools_info` reflect on the
-   * session client's discovered catalog; `call_tool_chain` runs the caller's
-   * JavaScript in the client's isolated-vm, where every tool is reachable as
-   * `<manual>.tool(...)` and resolves over loopback with the caller's key.
+   * Handle a code-mode meta-tool. The shared implementation reflects on this
+   * session's client, so `list_tools`/`tools_info` describe exactly the catalog
+   * this session discovered and `call_tool_chain` runs in that client's
+   * isolated-vm — resolving over loopback with the caller's key. The workspace
+   * spill store is passed in so an oversized chain result comes back as a
+   * `read_file`-able ref rather than a wall of JSON.
    */
   private async dispatchMetaTool(
     client: CodeModeUtcpClient,
     name: string,
     args: Record<string, unknown>,
   ): Promise<CallToolResult> {
-    try {
-      if (name === 'list_tools') {
-        const tools = await client.config.tool_repository.getTools();
-        return toCallToolResult({ tools: tools.map((t) => utcpNameToTsInterfaceName(t.name)) });
-      }
-      if (name === 'tools_info') {
-        const names = Array.isArray(args.tool_names) ? (args.tool_names as string[]) : [];
-        const interfaces: string[] = [];
-        const notFound: string[] = [];
-        for (const n of names) {
-          const found = await findToolByName(client, n);
-          if (found) interfaces.push(client.toolToTypeScriptInterface(found.tool));
-          else notFound.push(n);
-        }
-        return toCallToolResult({ interfaces: interfaces.join('\n\n'), not_found: notFound });
-      }
-      // call_tool_chain
-      const code = typeof args.code === 'string' ? args.code : '';
-      const timeout = typeof args.timeout === 'number' ? args.timeout : 30_000;
-      // Clamp to [1000, 1_000_000] so a caller can't force oversized inline
-      // output past the spill (schema bounds are advisory over a raw JSON-RPC call).
-      const maxOutputSize =
-        typeof args.max_output_size === 'number'
-          ? Math.min(1_000_000, Math.max(1_000, Math.trunc(args.max_output_size)))
-          : CALL_TOOL_CHAIN_MAX_OUTPUT;
-      const { result, logs } = await client.callToolChain(code, timeout);
-      // Bound the payload: an external session has no ambient workspace, so an
-      // oversized result spills to the shared store and we return only a ref —
-      // parity with the in-process agent's `call_tool_chain`.
-      if (JSON.stringify({ success: true, result, logs }).length <= maxOutputSize) {
-        return toCallToolResult({ success: true, result, logs });
-      }
-      const fullJson = JSON.stringify({ result, logs }, null, 2);
-      const { ref, bytes } = await this.opts.spillStore.write(fullJson);
-      return toCallToolResult({
-        success: true,
-        truncated: true,
-        result_ref: ref,
-        result_bytes: bytes,
-        message: `Result+logs payload was ${fullJson.length} characters (exceeded max_output_size of ${maxOutputSize}). Full JSON saved to the shared spill store as \`${ref}\`. Read it back with \`read_file\` (pass that ref as \`path\`, \`branch\` ignored, plus \`offset\`/\`limit\` to slice), or re-run a narrower chain that returns only what you need.`,
-      });
-    } catch (err) {
-      return toolError(`The "${name}" tool failed: ${describeToolFailure(err)}`);
-    }
+    return dispatchMetaTool(client, name, args, this.opts.spillStore);
   }
 }
 
-/** A tool discovered from the manual, flattened into what the proxy advertises. */
-export interface ProxiedTool {
-  utcpName: string;
-  mcpName: string;
-  description: string;
-  inputSchema: JsonSchema;
-  /** The UTCP manual this tool came from (the `<manual>` in `<manual>.<tool>`),
-   * used to look up the manual's declared per-user credentials before dispatch. */
-  manualName: string;
-}
-
 /**
- * Flatten a discovered UTCP tool (`<manual>.<tool>`) into the proxy's advertised
- * shape when MULTIPLE manuals are registered. KB tools keep their bare name (so
- * existing external agents still call `read_file`); a user `.tool`'s tool is
- * namespaced as `<manual>_<tool>` to guarantee a unique, dot-free MCP name.
+ * The pieces of the proxy that are shared with the local MCP server now live in
+ * `@bevel-software/platform-mcp-core`. Re-exported here because this module is
+ * where they have always been imported from — inside this package and by its
+ * tests — and moving a file is not a reason to churn every call site.
  */
-/**
- * MCP tool-name grammar (also the Anthropic API's), and a length bound. A
- * remote MCP server can expose a tool whose flattened name breaks this — too
- * long, or an illegal char the `<manual>_<name>` flattening didn't remove — and
- * an MCP client (or the model API behind it) rejects the ENTIRE `tools/list`
- * response when a single entry is non-conforming. That makes EVERY tool vanish
- * the moment one bad tool from a newly-added server enters the catalog, with no
- * server-side error (the rejection is the client's). `toListedTool` isolates it
- * per tool: drop the offender (logged), normalize an odd schema, keep the rest.
- */
-const MCP_TOOL_NAME_RE = /^[a-zA-Z0-9_-]+$/;
-// The Anthropic API caps a tool name at 128 chars — but the MCP CLIENT (Claude
-// Code, claude.ai) prepends `mcp__<server>__` (≈20+ chars) before sending it,
-// and that FULL name is what the 128 applies to. So budget for the prefix here,
-// or a long `googlecalendar_…` name we pass gets the whole request 400'd. This
-// is deliberately conservative; a dropped tool is logged so it's diagnosable.
-const MCP_TOOL_NAME_MAX = 100;
-
-/** A discovered tool as an MCP listing entry, or null if its name can't be listed. */
-export function toListedTool(tool: ProxiedTool): McpTool | null {
-  if (!MCP_TOOL_NAME_RE.test(tool.mcpName) || tool.mcpName.length > MCP_TOOL_NAME_MAX) {
-    console.warn(
-      `[mcp] dropping tool "${tool.mcpName}" from the listing — not a valid MCP tool name ` +
-        `(must match ${MCP_TOOL_NAME_RE} and be ≤${MCP_TOOL_NAME_MAX} chars). ` +
-        'One non-conforming tool would otherwise make the whole toolset disappear on the client.',
-    );
-    return null;
-  }
-  // MCP requires an object inputSchema. A remote server's schema that isn't a
-  // plain object (or omits `type: 'object'`) can invalidate the whole response,
-  // so normalize it — keeping any declared properties — rather than pass it
-  // through verbatim.
-  const raw = tool.inputSchema;
-  let inputSchema: Record<string, unknown> =
-    raw && typeof raw === 'object' && !Array.isArray(raw)
-      ? { type: 'object', ...(raw as Record<string, unknown>) }
-      : { type: 'object', properties: {} };
-  // Sanitize the schema into what the Anthropic tool validator accepts. A
-  // remote server that emits a construct the validator rejects — Google's
-  // gmail/calendar use `$ref`/`$defs` AND OpenAPI `format` values like
-  // `int32`/`byte` — makes the CLIENT reject the ENTIRE tools/list response,
-  // so all tools vanish and nothing registers. Sanitizing per-tool means one
-  // odd server can't blank the whole toolset.
-  inputSchema = sanitizeInputSchema(inputSchema) as Record<string, unknown>;
-  // The MCP/Anthropic validator requires the top-level `type` to be exactly
-  // "object" and (for the Anthropic API) `properties` to be present. Force both
-  // so a remote schema that declared something else — or a union like
-  // `["object","null"]` — can't reject the whole tools/list.
-  inputSchema.type = 'object';
-  if (typeof inputSchema.properties !== 'object' || inputSchema.properties === null) {
-    inputSchema.properties = {};
-  }
-  return {
-    name: tool.mcpName,
-    description: tool.description,
-    inputSchema: inputSchema as McpTool['inputSchema'],
-  };
-}
-
-/** JSON-Schema string `format` values the Anthropic tool validator accepts. */
-const SUPPORTED_SCHEMA_FORMATS = new Set([
-  'date-time',
-  'time',
-  'date',
-  'duration',
-  'email',
-  'hostname',
-  'uri',
-  'ipv4',
-  'ipv6',
-  'uuid',
-]);
-
-/**
- * Make a remote server's JSON Schema safe for the Anthropic tool validator:
- *  - inline local `$ref` pointers (`#/$defs/...`, `#/definitions/...`) and drop
- *    the now-unreferenced `$defs`/`definitions` blocks (the API restricts `$ref`
- *    and MCP clients converting our schemas reject it outright);
- *  - drop non-standard `format` values (OpenAPI's `int32`/`byte`/… — only the
- *    JSON-Schema-standard formats above are accepted; `format` is advisory, so
- *    dropping it doesn't change tool behavior).
- * Depth-bounded so a recursive schema degrades to a permissive `{}` node instead
- * of hanging or emitting the unsupported recursion; non-local/external refs
- * degrade the same way. Exported for direct testing.
- */
-export function sanitizeInputSchema(schema: unknown): unknown {
-  const root = schema;
-  const resolvePointer = (pointer: string): unknown => {
-    if (!pointer.startsWith('#/')) return undefined;
-    let node: unknown = root;
-    for (const partRaw of pointer.slice(2).split('/')) {
-      const part = partRaw.replace(/~1/g, '/').replace(/~0/g, '~');
-      if (!node || typeof node !== 'object') return undefined;
-      node = (node as Record<string, unknown>)[part];
-    }
-    return node;
-  };
-  const walk = (node: unknown, depth: number): unknown => {
-    if (depth > 20) return {}; // recursion/cycle guard — permissive fallback
-    if (Array.isArray(node)) return node.map((item) => walk(item, depth + 1));
-    if (!node || typeof node !== 'object') return node;
-    const obj = node as Record<string, unknown>;
-    if (typeof obj.$ref === 'string') {
-      const target = resolvePointer(obj.$ref);
-      // JSON Schema allows siblings next to $ref; keep them, target wins ties.
-      const { $ref: _ref, ...siblings } = obj;
-      const resolved = walk(target ?? {}, depth + 1);
-      return resolved && typeof resolved === 'object' && !Array.isArray(resolved)
-        ? { ...siblings, ...(resolved as Record<string, unknown>) }
-        : Object.keys(siblings).length
-          ? siblings
-          : resolved ?? {};
-    }
-    const out: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj)) {
-      if (key === '$defs' || key === 'definitions') continue; // inlined above
-      // Drop a non-standard `format` (OpenAPI `int32`/`byte`/…) — the validator
-      // only allows the JSON-Schema-standard set; the annotation is non-load-bearing.
-      if (key === 'format' && (typeof value !== 'string' || !SUPPORTED_SCHEMA_FORMATS.has(value))) {
-        continue;
-      }
-      out[key] = walk(value, depth + 1);
-    }
-    return out;
-  };
-  return walk(schema, 0);
-}
-
-export function flattenManualTool(tool: UtcpTool): ProxiedTool {
-  const dot = tool.name.indexOf('.');
-  const manual = dot >= 0 ? tool.name.slice(0, dot) : '';
-  const bare = dot >= 0 ? tool.name.slice(dot + 1) : tool.name;
-  const mcpName = manual === EXTERNAL_KB_MANUAL_NAME ? bare : tool.name.replace(/\./g, '_');
-  return {
-    utcpName: tool.name,
-    mcpName,
-    description: tool.description,
-    inputSchema: tool.inputs,
-    manualName: manual,
-  };
-}
-
-/**
- * Flatten one discovered UTCP tool into the proxy's advertised shape: strip the
- * `<manual>.` namespace prefix for the MCP name and keep the UTCP input schema
- * verbatim (Bevel-hosted HTTP tools show their `{body}` envelope, exactly as in
- * `call_tool_chain`).
- */
-export function flattenDiscoveredTool(prefix: string, tool: UtcpTool): ProxiedTool {
-  return {
-    utcpName: tool.name,
-    mcpName: tool.name.startsWith(prefix) ? tool.name.slice(prefix.length) : tool.name,
-    description: tool.description,
-    inputSchema: tool.inputs,
-    // `prefix` is `<manual>.`; the manual is that without the trailing dot.
-    manualName: prefix.endsWith('.') ? prefix.slice(0, -1) : prefix,
-  };
-}
-
-/**
- * Extract a human-meaningful failure message from a tool-call error. UTCP's
- * HTTP protocol surfaces a non-2xx as an axios-style error whose `.response.data`
- * is the REST endpoint's JSON body (`{ error: "..." }`). Pull that out so the
- * MCP caller sees the tool's real message instead of a bare "status code 500".
- */
-export function describeToolFailure(err: unknown): string {
-  const data = (err as { response?: { data?: unknown } })?.response?.data;
-  if (data && typeof data === 'object') {
-    const inner = (data as { error?: unknown }).error;
-    if (typeof inner === 'string' && inner.length > 0) return inner;
-  }
-  if (typeof data === 'string' && data.length > 0) return data;
-  return err instanceof Error ? err.message : String(err);
-}
-
-/**
- * Turn a tool's final value into an MCP result:
- *  - a tool that already returns the MCP agentic shape (`{ content: [...] }`,
- *    each entry a real content block) is passed through unchanged;
- *  - a bare string becomes the text content;
- *  - anything else is JSON-stringified into one text block.
- *
- * Note we do NOT collapse a structured object down to its `text` field: doing
- * so silently dropped the other fields (e.g. `ask`'s `status` / `sessionId`,
- * the id a caller must echo back to poll or continue a conversation).
- * Stringifying the whole object keeps every field, so the caller always sees
- * the id it is responsible for echoing.
- *
- * The passthrough guard checks the entries, not just that `content` is an array:
- * a domain value that merely happens to carry a `content` array of non-blocks
- * (e.g. `{ content: ['a', 'b'] }`) is data, not an MCP result, so it falls
- * through to JSON-stringify and survives intact instead of being emitted as a
- * malformed result the client can't parse.
- */
-function isMcpContentBlock(entry: unknown): boolean {
-  return typeof entry === 'object' && entry !== null && typeof (entry as { type?: unknown }).type === 'string';
-}
-
-export function toCallToolResult(value: unknown): CallToolResult {
-  // Already in MCP agentic format — pass through untouched, but only when every
-  // `content` entry is a real content block (has a string `type`).
-  const content = (value as { content?: unknown })?.content;
-  if (value && typeof value === 'object' && Array.isArray(content) && content.every(isMcpContentBlock)) {
-    return value as CallToolResult;
-  }
-  const text = typeof value === 'string' ? value : JSON.stringify(value ?? null);
-  return { content: [{ type: 'text', text: text || '(tool produced no output)' }] };
-}
-
-function renderProgress(chunk: unknown): string {
-  const s = typeof chunk === 'string' ? chunk : JSON.stringify(chunk);
-  return s.length > 500 ? s.slice(0, 497) + '...' : s;
-}
-
-function toolError(message: string): CallToolResult {
-  return { isError: true, content: [{ type: 'text', text: message }] };
-}
-
-/**
- * The result returned when the caller is missing personal credentials a tool
- * needs. Marked `isError` so the external agent surfaces it to the person rather
- * than treating it as tool output. Names the tool, lists the missing items, and
- * gives the absolute setup-page URL so the person can provide them and retry.
- */
-export function needsAuthorizationResult(
-  toolName: string,
-  missing: string[],
-  connectUrl: string,
-): CallToolResult {
-  const items = missing.join(', ');
-  const text =
-    `The "${toolName}" tool needs credentials you haven't set up yet: ${items}. ` +
-    `Open ${connectUrl} to connect your accounts and enter your keys, then run the tool again.`;
-  return { isError: true, content: [{ type: 'text', text }] };
-}
+export {
+  type ProxiedTool,
+  toListedTool,
+  sanitizeInputSchema,
+  flattenManualTool,
+  flattenDiscoveredTool,
+  describeToolFailure,
+  toCallToolResult,
+  needsAuthorizationResult,
+} from '@bevel-software/platform-mcp-core';

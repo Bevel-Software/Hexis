@@ -17,7 +17,7 @@ Use the app switcher in the top-left corner to move between the two views:
 
 - **Knowledge** is the reading and writing surface: a file tree on the left,
   the document on the right.
-- **Skills & Tools** is the library: groups of skills and tools, who runs
+- **Skills & Tools** is the library: plugins holding skills and tools, who runs
   them, and what still needs setting up.
 
 ## Write your first document
@@ -29,22 +29,22 @@ someone else, you get **Propose changes** instead. A proposal becomes a
 nothing moves until they approve it. That is the whole safety model, and it
 applies to agents exactly as it applies to people.
 
-## Set up your group
+## Set up your plugin
 
-In Skills & Tools, use **New group** to make a place for your team. Creating
-a group makes you the one who runs it: you approve its change requests,
+In Skills & Tools, use **New plugin** to make a place for your team. Creating
+a plugin makes you the one who runs it: you approve its change requests,
 answer join requests, and manage who can see what (the **Share** button on
-the group page). Skills you create outside any group land in your own private
-space and can move into a group later.
+the plugin page). Skills you create outside any plugin land in your own private
+space and can move into a plugin later.
 
 ## Give your agents skills and tools
 
-- On a group page, **+** adds a skill: name it and an empty skill file opens,
+- On a plugin page, **+** adds a skill: name it and an empty skill file opens,
   ready for instructions. Write it the way you would brief a careful new
   colleague: what to load, what to do, what to record.
-- Tools are added as small manual files in the group. Sign-ins and keys are
-  entered on the **Connect** page or the tool's own page, never written into
-  files.
+- Tools live in the plugin too: most are small manual files, and MCP servers
+  go in the plugin's `mcp.json`. Sign-ins and keys are entered on the
+  **Connect** page or the tool's own page, never written into files.
 
 ## Connect your AI agent
 

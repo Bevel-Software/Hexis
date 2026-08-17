@@ -7,6 +7,8 @@
   "fixed": [
     [
       "@bevel-software/platform-shared",
+      "@bevel-software/platform-mcp-core",
+      "@bevel-software/hexis-mcp",
       "@bevel-software/platform-core-backend",
       "@bevel-software/platform-core-frontend"
     ]

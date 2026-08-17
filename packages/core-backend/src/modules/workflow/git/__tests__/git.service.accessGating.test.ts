@@ -124,7 +124,7 @@ function recordingAccessControl(opts: {
     eligibleWritersForPathsAtRef: async (_w, _ref, paths) =>
       new Map(paths.map((p) => [p, { roles: [], users: [], emails: new Set<string>() }])),
     findEmailByHash: async () => null,
-    kbPrincipals: async () => ({ groups: [], people: [] }),
+    kbPrincipals: async () => ({ plugins: [], people: [] }),
     validateRolesYaml: () => ({ ok: true }),
     referencesToRole: async () => [],
   };
@@ -279,8 +279,8 @@ describe('GitService — push gate uses origin/<branch> (not HEAD or working tre
   });
 
   it('systemAuthorized skips the gate entirely, and the push still lands', async () => {
-    // The group-provisioning path: its endpoint IS the authorization (any
-    // signed-in user may claim an unused name under Groups/), and the gate
+    // The plugin-provisioning path: its endpoint IS the authorization (any
+    // signed-in user may claim an unused name under Plugins/), and the gate
     // could only read the new folder's chain at origin as `write: Admin`.
     const { svc, calls } = await setupWithOrigin();
     await svc.push(workspaceId, USER, { systemAuthorized: true });

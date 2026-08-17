@@ -188,7 +188,7 @@ function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: numb
         name: 'newsletter',
         description: skillSummary.description,
         owned,
-        group: null,
+        plugin: null,
         path: skillSummary.path,
         status: { state: 'ok', text: '' },
       },
@@ -200,10 +200,10 @@ function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: numb
     loading: false,
     error: null,
     reload: () => {},
-    groupSummaries: [],
-    groupsLoading: false,
-    groupsError: null,
-    reloadGroups: () => {},
+    pluginSummaries: [],
+    pluginsLoading: false,
+    pluginsError: null,
+    reloadPlugins: () => {},
   } as unknown as LibraryContextValue;
 }
 
@@ -457,7 +457,7 @@ describe('SkillPage', () => {
     await screen.findByRole('heading', { name: 'newsletter' });
 
     expect(screen.getByText('Owner')).toBeInTheDocument();
-    // A skill inherits its group folder's rules; the group's Share panel is the
+    // A skill inherits its plugin folder's rules; the plugin's Share panel is the
     // one place they are decided, for owner and non-owner alike.
     expect(screen.queryByRole('button', { name: 'Manage access' })).toBeNull();
   });
@@ -621,7 +621,7 @@ describe('SkillPage', () => {
    * resolved by reading the folder name, which is the skill's id only when no
    * frontmatter declares one — so a failed fetch under a loading catalog is
    * not evidence the skill is missing, just that we asked with the wrong name.
-   * GroupPage already refuses to decide this early; this is the same call.
+   * PluginPage already refuses to decide this early; this is the same call.
    */
   describe('a PROVISIONAL name — one the route guessed from the URL', () => {
     // The route reads the folder name when the catalog can't resolve a URL,
@@ -825,7 +825,7 @@ describe('SkillPage: deciding on a change', () => {
    *
    * The merge gate requires a non-stale approval from an eligible approver for
    * every markdown file that has owners — which is every SKILL.md governed by a
-   * group's `access.md`, i.e. exactly what this page exists for. Going straight
+   * plugin's `access.md`, i.e. exactly what this page exists for. Going straight
    * to the merge is refused with "Waiting on approval for …", so a page that
    * only merged had an Approve button that could not approve anything.
    */

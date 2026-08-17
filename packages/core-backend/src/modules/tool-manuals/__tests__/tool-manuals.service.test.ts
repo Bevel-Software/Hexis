@@ -68,7 +68,7 @@ describe('ToolManualService', () => {
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'tools-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(join(tools, 'weather.tool'), INLINE_TOOL);
     await writeFile(join(tools, 'billing.tool'), HTTP_TOOL);
@@ -88,13 +88,13 @@ describe('ToolManualService', () => {
   });
 
   test('listAllSummaries returns every manual regardless of caller access', async () => {
-    // The group index counts a group's tools for people who cannot read them,
+    // The plugin index counts a plugin's tools for people who cannot read them,
     // so this surface must ignore the ACL that `listAccessible` applies.
     const service = svc(denyBilling);
     expect((await service.listAccessible('user@x.eu')).map((m) => m.name)).toEqual(['weather']);
     const all = await service.listAllSummaries();
     expect(all.map((m) => m.name).sort()).toEqual(['billing', 'weather']);
-    expect(all.map((m) => m.path).sort()).toEqual(['Groups/billing.tool', 'Groups/weather.tool']);
+    expect(all.map((m) => m.path).sort()).toEqual(['Plugins/billing.tool', 'Plugins/weather.tool']);
   });
 
   test('builds an inline manual as an http sub-manual call-template', async () => {
@@ -123,7 +123,7 @@ describe('ToolManualService', () => {
 
   test('manual names are alphanumeric (no underscores) for variable namespacing', async () => {
     root = await mkdtemp(join(tmpdir(), 'tools2-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(join(tools, 'my_cool-tool.tool'), JSON.stringify({ type: 'http', url: 'https://x.example.com/m' }));
     const list = await svc().listAccessible('user@x.eu');
@@ -133,7 +133,7 @@ describe('ToolManualService', () => {
 
   test('refuses a `.tool` whose manual name collides (no silent suffix)', async () => {
     root = await mkdtemp(join(tmpdir(), 'tools3-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     // Both names normalize to `stripe`. The scanner keeps the first (sorted path
     // order) and REFUSES the duplicate rather than renaming it `stripe2` — a
@@ -144,12 +144,12 @@ describe('ToolManualService', () => {
     await writeFile(join(tools, 'b.tool'), JSON.stringify({ name: 'stripe!', type: 'http', url: 'https://b.example.com/m' }));
     const list = await svc().listAccessible('user@x.eu');
     expect(list.map((m) => m.name)).toEqual(['stripe']);
-    expect(list[0].path).toBe('Groups/a.tool');
+    expect(list[0].path).toBe('Plugins/a.tool');
   });
 
   test('parses `variables` scopes (default admin, explicit user/admin)', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsv-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(
       join(tools, 'weather.tool'),
@@ -174,7 +174,7 @@ describe('ToolManualService', () => {
 
   test('skips a `.tool` with a malformed `variables` entry (never silently mis-scoped)', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsvbad-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(
       join(tools, 'weather.tool'),
@@ -185,7 +185,7 @@ describe('ToolManualService', () => {
 
   test('scopeOfVariable: declared scope wins; undeclared/unknown default to admin', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsscope-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(
       join(tools, 'weather.tool'),
@@ -221,7 +221,7 @@ describe('ToolManualService', () => {
   });
   const writeOAuthTool = async (variable: unknown) => {
     root = await mkdtemp(join(tmpdir(), 'toolsoauth-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(
       join(tools, 'g.tool'),
@@ -268,7 +268,7 @@ describe('ToolManualService', () => {
 
   test('parses `remote`: default true, explicit false, rejects non-boolean', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsrem-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(join(tools, 'pub.tool'), JSON.stringify({ name: 'pub', type: 'http', url: 'https://x/m' }));
     await writeFile(join(tools, 'loc.tool'), JSON.stringify({ name: 'loc', type: 'mcp', url: 'https://x/m', remote: false }));
@@ -281,21 +281,21 @@ describe('ToolManualService', () => {
 
   test('remoteOnly excludes local-only manuals; listLocalOnly returns them', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsrem2-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(join(tools, 'pub.tool'), JSON.stringify({ name: 'pub', type: 'http', url: 'https://x/m' }));
     await writeFile(join(tools, 'loc.tool'), JSON.stringify({ name: 'loc', type: 'http', url: 'https://x/m', remote: false }));
     const s = svc();
     expect((await s.toManualCallTemplates('user@x.eu', { remoteOnly: true })).map((t) => t.name).sort()).toEqual(['pub']);
     expect((await s.toManualCallTemplates('user@x.eu')).map((t) => t.name).sort()).toEqual(['loc', 'pub']);
-    expect(await s.listLocalOnly('user@x.eu')).toEqual([{ name: 'loc', path: 'Groups/loc.tool' }]);
+    expect(await s.listLocalOnly('user@x.eu')).toEqual([{ name: 'loc', path: 'Plugins/loc.tool' }]);
     // The local-only manual is still browsable/editable regardless of the remote flag.
     expect((await s.listAccessible('user@x.eu')).map((m) => m.name).sort()).toEqual(['loc', 'pub']);
   });
 
   test('refuses a `.tool` that reproduces a reserved built-in namespace', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsresv-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     // A `.tool` named exactly like the internal manual, or with the KB namespace as
     // an explicit id, would resolve the loopback creds seeded under that namespace.
@@ -308,7 +308,7 @@ describe('ToolManualService', () => {
 
   test('refuses a remote `.tool` whose url is a private/loopback/metadata host (SSRF)', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsssrf-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(join(tools, 'imds.tool'), JSON.stringify({ name: 'imds', type: 'http', url: 'http://169.254.169.254/latest/meta-data' }));
     await writeFile(join(tools, 'loop.tool'), JSON.stringify({ name: 'loop', type: 'mcp', url: 'http://127.0.0.1:9000/mcp' }));
@@ -322,7 +322,7 @@ describe('ToolManualService', () => {
 
   test('SSRF guard still applies when a private host is combined with a template token in the query', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsssrf3-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     // A `${VAR}` in the QUERY doesn't make the authority templated — the host is
     // still the literal metadata endpoint, so the guard must reject it. Only a
@@ -335,7 +335,7 @@ describe('ToolManualService', () => {
 
   test('refuses any `.tool` that references a platform-seeded variable (API_URL / CONNECTION_KEY)', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsresvvar-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     // Both reference forms (`${VAR}` and `$VAR`), in any `.tool` type and any
     // field — url query, header, an inline tool's call template. All refused at
@@ -358,7 +358,7 @@ describe('ToolManualService', () => {
 
   test('refuses a `.tool` that references a NAMESPACED reserved variable (`<ns>_API_URL` / `<ns>_CONNECTION_KEY`)', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsresvns-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     // The substitutor resolves a manual's variables under its UTCP namespace, so
     // `${BEVEL_CONNECTION_KEY}` reaches the same seeded platform bearer the bare
@@ -386,7 +386,7 @@ describe('ToolManualService', () => {
 
   test('refuses a `.tool` that declares a variable named API_URL or CONNECTION_KEY', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsresvdecl-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(
       join(tools, 'decl.tool'),
@@ -402,7 +402,7 @@ describe('ToolManualService', () => {
 
   test('SSRF guard validates the literal host even when userinfo or port are templated', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsssrf4-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     // A `${VAR}` in the USERINFO or PORT doesn't make the hostname dynamic — the
     // fetch still targets the literal metadata IP, so the guard must reject it.
@@ -427,7 +427,7 @@ describe('ToolManualService', () => {
 
   test('SSRF guard exempts a local-only (remote:false) `.tool` and a templated url', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsssrf2-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     // remote:false is never fetched server-side; a `${VAR}` url resolves at call time.
     await writeFile(join(tools, 'local.tool'), JSON.stringify({ name: 'localmcp', type: 'mcp', url: 'http://localhost:3333/mcp', remote: false }));
@@ -447,7 +447,7 @@ describe('ToolManualService', () => {
 
   test('parses `.tool` frontmatter: id is the manual name/namespace', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsfm-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     // The tool IS the frontmatter: id + config in the one `---` block.
     await writeFile(
@@ -461,7 +461,7 @@ describe('ToolManualService', () => {
 
   test('snake_case id resolves scope via the UTCP doubled key', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolssnake-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(
       join(tools, 't.tool'),
@@ -475,7 +475,7 @@ describe('ToolManualService', () => {
 
   test('rejects a non-snake_case explicit id (file skipped)', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsbadid-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(join(tools, 'x.tool'), '---\nid: My-Tool\ntype: http\nurl: https://x/m\n---\n');
     expect(await svc().listAccessible('user@x.eu')).toHaveLength(0);
@@ -483,7 +483,7 @@ describe('ToolManualService', () => {
 
   test('config after the closing fence is ignored (the tool is the frontmatter)', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsnotes-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     // `type`/`url` live in the fence; the JSON after it is free-form notes.
     await writeFile(
@@ -497,7 +497,7 @@ describe('ToolManualService', () => {
 
   test('parses `description` onto the descriptor, trimmed', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsdesc-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(
       join(tools, 'gh.tool'),
@@ -512,7 +512,7 @@ describe('ToolManualService', () => {
     // one must not: `description` buys a reader one sentence, and no sentence is
     // worth removing a working integration from the catalog.
     root = await mkdtemp(join(tmpdir(), 'toolsdescbad-'));
-    const tools = join(root, wsId, KB_DIR, 'Groups');
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(tools, { recursive: true });
     await writeFile(join(tools, 'num.tool'), JSON.stringify({ name: 'num', type: 'http', url: 'https://x/m', description: 42 }));
     await writeFile(join(tools, 'obj.tool'), JSON.stringify({ name: 'obj', type: 'http', url: 'https://x/m', description: { a: 1 } }));

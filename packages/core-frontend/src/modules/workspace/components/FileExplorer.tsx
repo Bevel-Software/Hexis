@@ -21,7 +21,7 @@ import {
   validateFilename,
   KNOWLEDGE_BASE_DIR,
   DATA_DIR,
-  GROUPS_DIR,
+  PLUGINS_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
@@ -43,7 +43,7 @@ import { useAppRegistry } from '../../../core/registry';
 /**
  * The tree row — the prototype's `.trow` (proto:684-693), and token for token
  * the same string as the Library sidebar's `rowClass`
- * (`GroupsSidebar.tsx:68-72`). Two sidebars in one app should not read as two
+ * (`PluginsSidebar.tsx:68-72`). Two sidebars in one app should not read as two
  * different products, and the only way to guarantee that is for both to be
  * this one declaration.
  *
@@ -982,7 +982,7 @@ export function FileExplorer() {
      * read gates). The client cannot evaluate those rules itself, but it can
      * read their verdict off the tree: if the path's top-level folder under
      * the repo root is absent, the whole subtree is hidden (a skill proposal
-     * under a bevelignored `Groups/` was the observed leak), so the overlay
+     * under a bevelignored `Plugins/` was the observed leak), so the overlay
      * must not resurrect it. The known cost: a proposal that CREATES a new
      * top-level root folder shows no row until it merges.
      */
@@ -1073,12 +1073,12 @@ export function FileExplorer() {
   // below a divider. Clones that predate the split (none of the well-known root
   // dirs) fall back to the flat tree.
   //
-  // `Groups/` is NOT among them. It is the Skills & Tools app's storage — one
-  // folder per group holding its skills and its tools — and that app presents
-  // it as groups, skills and tools rather than as files. Listing it here too
+  // `Plugins/` is NOT among them. It is the Skills & Tools app's storage — one
+  // folder per plugin holding its skills and its tools — and that app presents
+  // it as plugins, skills and tools rather than as files. Listing it here too
   // offered a second, worse way in: raw markdown editing of a SKILL.md with
   // none of the surrounding affordances, on a folder whose access is managed
-  // from the group page. Deep links into a group file still resolve; the
+  // from the plugin page. Deep links into a plugin file still resolve; the
   // folder just is not a browsing destination in Knowledge.
   //
   // `Data/`, `Agents/` and `Pipelines/` are rendered when PRESENT but never
@@ -1095,17 +1095,17 @@ export function FileExplorer() {
     const data = findDir(DATA_DIR);
     const agents = findDir(AGENTS_DIR);
     const pipelines = findDir(PIPELINES_DIR);
-    // Groups counts toward "is this a split layout?" even though it is never
+    // Plugins counts toward "is this a split layout?" even though it is never
     // rendered: its presence proves the split just as well as the others, and
-    // without it a KB whose only root is Groups would fail this check, fall
+    // without it a KB whose only root is Plugins would fail this check, fall
     // back to the flat tree, and show the folder that way instead.
-    const groups = findDir(GROUPS_DIR);
-    if (!knowledgeBase && !data && !agents && !pipelines && !groups) return null;
+    const plugins = findDir(PLUGINS_DIR);
+    if (!knowledgeBase && !data && !agents && !pipelines && !plugins) return null;
     // Any other top-level content folder (e.g. a stray `Legal/`) folds into Knowledge.
     const otherDirs = kids.filter(
       (c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name),
     );
-    // Present Knowledge, Data and Groups as named roots. Knowledge is
+    // Present Knowledge, Data, Agents and Pipelines as named roots. Knowledge is
     // synthetic so it can relabel `KnowledgeBase` and absorb the stray
     // content folders; it reuses KnowledgeBase's own path so file ops on the
     // row still resolve.

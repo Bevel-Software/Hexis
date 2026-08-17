@@ -12,6 +12,7 @@ import { RootLanding } from '../components/RootLanding';
 import { POST_LOGIN_REDIRECT_KEY } from '../../auth/services/sso';
 import { WELCOME_PATH } from '../paths';
 import { resetOnboardingForTests } from '../state/onboarding';
+import { configureMcpUrl } from '../../../shared/mcp';
 import { setSidebarCollapsed, useSidebar } from '../../layout/state/sidebar';
 
 /**
@@ -214,7 +215,7 @@ describe('WelcomePage', () => {
       <Routes>
         <Route path={WELCOME_PATH} element={<WelcomePage />} />
         <Route path="/skills-and-tools" element={<div>library</div>} />
-        <Route path="/skills-and-tools/yours" element={<div>your group</div>} />
+        <Route path="/skills-and-tools/yours" element={<div>your plugin</div>} />
       </Routes>,
       auth,
       route,
@@ -287,7 +288,7 @@ describe('WelcomePage', () => {
     expect(sidebarState()).toMatchObject({ collapsed: true, instant: true });
   });
 
-  it('leaves it collapsed when you go to your own group', async () => {
+  it('leaves it collapsed when you go to your own plugin', async () => {
     setSidebarCollapsed(false);
     mountPage(newUser(), greeted);
     await userEvent.click(screen.getByRole('button', { name: /Go to your skills/ }));
@@ -343,6 +344,83 @@ describe('WelcomePage', () => {
     expect(screen.getByText(/mcpServers/)).toBeInTheDocument();
   });
 
+  /**
+   * One click instead of a menu path. It is Claude-only because Claude is the
+   * only client with a documented install link, and it appears only when
+   * Anthropic could actually reach this deployment — see `canDeepLink`. The
+   * copy block stays either way; it is the route that always works.
+   */
+  describe('the Add to Claude link', () => {
+    it('offers one-click connect on a reachable deployment', () => {
+      configureMcpUrl('https://kb.acme.com/api/mcp');
+      mountPage();
+      const link = screen.getByRole('link', { name: 'Add to Claude' });
+      const href = new URL(link.getAttribute('href')!);
+      expect(href.origin + href.pathname).toBe('https://claude.ai/customize/connectors');
+      expect(href.searchParams.get('connectorUrl')).toBe('https://kb.acme.com/api/mcp');
+      expect(href.searchParams.get('connectorName')).toBe('Hexis — kb.acme.com');
+    });
+
+    /**
+     * The default install: `PUBLIC_BACKEND_URL` unset means localhost, which
+     * claude.ai cannot reach. A dead button on the first screen a self-hoster
+     * sees reads as a broken product.
+     */
+    it('offers nothing to click on a localhost deployment', () => {
+      configureMcpUrl('http://localhost:3001/api/mcp');
+      mountPage();
+      expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
+      // …and the route that always works is still there.
+      expect(screen.getByText('http://localhost:3001/api/mcp')).toBeInTheDocument();
+    });
+
+    /**
+     * No `PUBLIC_BACKEND_URL` hint on THIS surface. The reader is a new
+     * employee who cannot change deployment config; naming an env var at them
+     * is noise. The settings page, whose reader plausibly can, says it there.
+     */
+    it('does not lecture a new employee about deployment config', () => {
+      configureMcpUrl('http://localhost:3001/api/mcp');
+      mountPage();
+      expect(screen.queryByText(/PUBLIC_BACKEND_URL/)).toBeNull();
+    });
+
+    it('belongs to Claude alone', async () => {
+      configureMcpUrl('https://kb.acme.com/api/mcp');
+      mountPage();
+      expect(screen.getByRole('link', { name: 'Add to Claude' })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
+      expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
+      await userEvent.click(screen.getByRole('radio', { name: 'Cursor & Others' }));
+      expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
+    });
+
+    // Opening claude.ai must not hand it a handle on this window.
+    it('opens in a new tab safely', () => {
+      configureMcpUrl('https://kb.acme.com/api/mcp');
+      mountPage();
+      const link = screen.getByRole('link', { name: 'Add to Claude' });
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    });
+
+    /**
+     * The whole point of the canonical URL: what the button hands Claude and
+     * what the copy block shows a human must be the same string, or one of
+     * them is lying.
+     */
+    it('hands Claude exactly the URL the copy block shows', () => {
+      configureMcpUrl('https://kb.acme.com/api/mcp');
+      mountPage();
+      const href = new URL(
+        screen.getByRole('link', { name: 'Add to Claude' }).getAttribute('href')!,
+      );
+      expect(href.searchParams.get('connectorUrl')).toBe(
+        screen.getByText(/\/api\/mcp$/).textContent,
+      );
+    });
+  });
+
   it('copies the visible snippet without concluding anything', async () => {
     const writeText = stubClipboard();
     mountPage();
@@ -354,9 +432,9 @@ describe('WelcomePage', () => {
   });
 
   // Exact, not a substring: `/skills-and-tools` is a PREFIX of the personal
-  // group's path, so a loose match would pass even if Done dropped someone in
+  // plugin's path, so a loose match would pass even if Done dropped someone in
   // the whole company's catalog instead of their own shelf.
-  it('Done concludes: server write + landing in your own group', async () => {
+  it('Done concludes: server write + landing in your own plugin', async () => {
     mountPage();
     await userEvent.click(screen.getByRole('button', { name: 'Done' }));
     expect(authFetchMock).toHaveBeenCalledWith(
@@ -397,7 +475,7 @@ describe('WelcomePage', () => {
 
   /**
    * `role="radiogroup"` is a promise about the keyboard, not just a label for
-   * a screen reader: arrows select, and selection follows focus. The group
+   * a screen reader: arrows select, and selection follows focus. The plugin
    * wraps, because three options in a row have no edge worth stopping at.
    */
   it('drives the picker with the arrow keys, wrapping at both ends', async () => {
@@ -429,9 +507,9 @@ describe('WelcomePage', () => {
     ]);
   });
 
-  // Into the person's OWN group, not the whole catalog — the same place the
+  // Into the person's OWN plugin, not the whole catalog — the same place the
   // sidebar's personal row goes.
-  it('the skip link leaves for your own group, without concluding', async () => {
+  it('the skip link leaves for your own plugin, without concluding', async () => {
     mountPage();
     await userEvent.click(screen.getByRole('button', { name: /Go to your skills/ }));
     expect(authFetchMock).not.toHaveBeenCalled();
@@ -478,7 +556,7 @@ describe('WelcomePage', () => {
         <AppRegistryContext.Provider value={{ ...EMPTY_REGISTRY, welcomeExit }}>
           <Routes>
             <Route path={WELCOME_PATH} element={<WelcomePage />} />
-            <Route path="/skills-and-tools/yours" element={<div>your group</div>} />
+            <Route path="/skills-and-tools/yours" element={<div>your plugin</div>} />
             <Route path="/workspace" element={<div>knowledge</div>} />
           </Routes>
         </AppRegistryContext.Provider>,

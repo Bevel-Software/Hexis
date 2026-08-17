@@ -1,9 +1,9 @@
 import { Banner, Button } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
-import type { JoinProposal, JoinRequest } from '../services/groups.api';
+import type { JoinProposal, JoinRequest } from '../services/plugins.api';
 
 /**
- * Somebody asked to join this group — the manager-side face of a join change
+ * Somebody asked for access to this plugin — the manager-side face of a join change
  * request.
  *
  * It shows what the request PROPOSES, one row per grant, because that is what
@@ -14,7 +14,7 @@ import type { JoinProposal, JoinRequest } from '../services/groups.api';
  * the grants can ride in on a click.
  *
  * Naming the verb is not pedantry: a request may propose `write` or `owner`
- * rather than `read`, and "asked to join" would hide that. Whatever the
+ * rather than `read`, and "asked for access to" would hide that. Whatever the
  * branch asks for is what the row says.
  *
  * Decline rejects the whole request. Manage access is the third path — a
@@ -23,8 +23,8 @@ import type { JoinProposal, JoinRequest } from '../services/groups.api';
  */
 
 export interface AccessRequestsBannerProps {
-  group: string;
-  /** Repo-relative group folder for `Manage access` (single-element today). */
+  plugin: string;
+  /** Repo-relative plugin folder for `Manage access` (single-element today). */
   folders: string[];
   requests: JoinRequest[];
   onManage(folder: string): void;
@@ -34,7 +34,7 @@ export interface AccessRequestsBannerProps {
 }
 
 export function AccessRequestsBanner({
-  group,
+  plugin,
   folders,
   requests,
   onManage,
@@ -48,8 +48,8 @@ export function AccessRequestsBanner({
     <Banner role="status" tone="wait" className={cn('mb-4', className)}>
       <p>
         {requests.length === 1
-          ? `${requests[0].requesterName} asked to join ${group}.`
-          : `${requests.length} people asked to join ${group}.`}
+          ? `${requests[0].requesterName} asked for access to ${plugin}.`
+          : `${requests.length} people asked for access to ${plugin}.`}
       </p>
 
       <div className="mt-2 flex flex-col gap-2">

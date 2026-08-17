@@ -3,7 +3,7 @@ import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import type { SpillStore } from '../workspace/spill-store.js';
-import { utcpNameToTsInterfaceName, findToolByName } from './code-mode-names.js';
+import { utcpNameToTsInterfaceName, findToolByName, AmbiguousToolNameError } from './code-mode-names.js';
 
 export function createCallToolChainTool(
   client: CodeModeUtcpClient,
@@ -103,15 +103,35 @@ export function createToolsInfoTool(client: CodeModeUtcpClient) {
     execute: async (input) => {
       const interfaces: string[] = [];
       const notFound: string[] = [];
+      const errors: string[] = [];
       for (const name of input.tool_names) {
-        const found = await findToolByName(client, name);
-        if (found) {
-          interfaces.push(client.toolToTypeScriptInterface(found.tool));
-        } else {
-          notFound.push(name);
+        // Per-name, not per-call: `findToolByName` THROWS on an ambiguous
+        // sanitized name (two UTCP tools collapsing to one TS name), and one
+        // ambiguous entry aborting the whole batch would cost the agent every
+        // other answer in it. The error text says how to disambiguate, so it
+        // is the per-name answer, not a failure of the tool.
+        try {
+          const found = await findToolByName(client, name);
+          if (found) {
+            interfaces.push(client.toolToTypeScriptInterface(found.tool));
+          } else {
+            notFound.push(name);
+          }
+        } catch (err) {
+          // Only AMBIGUITY is a per-name answer (the message says how to
+          // disambiguate). Anything else — a repository outage, a catalog
+          // failure — must fail the call: containing it would dress an
+          // outage up as a successful lookup with partial data. Typed, not
+          // message-matched: the wording belongs to another package.
+          if (!(err instanceof AmbiguousToolNameError)) throw err;
+          errors.push(`${name}: ${err.message}`);
         }
       }
-      return { interfaces: interfaces.join('\n\n'), not_found: notFound };
+      return {
+        interfaces: interfaces.join('\n\n'),
+        not_found: notFound,
+        ...(errors.length > 0 ? { errors } : {}),
+      };
     },
   });
 }

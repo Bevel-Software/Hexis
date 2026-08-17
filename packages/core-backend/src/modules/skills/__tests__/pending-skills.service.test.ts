@@ -40,7 +40,7 @@ function cr(over: Partial<ChangeRequest> = {}): ChangeRequest {
     base: 'main',
     state: 'open',
     createdAt: '2026-08-06T09:00:00.000Z',
-    touchedNodePaths: ['Groups/Engineering/weekly-newsletter/SKILL.md'],
+    touchedNodePaths: ['Plugins/Engineering/weekly-newsletter/SKILL.md'],
     review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
     url: '/change-requests/7',
     ...over,
@@ -56,7 +56,7 @@ function harness(opts: {
   writers?: Record<string, string[]>;
 }) {
   const branchFiles = opts.branchFiles ?? {
-    'agent/weekly-newsletter:Groups/Engineering/weekly-newsletter/SKILL.md': SKILL_MD,
+    'agent/weekly-newsletter:Plugins/Engineering/weekly-newsletter/SKILL.md': SKILL_MD,
   };
   const workspaceService = {
     ensureRemotesFetched: async () => undefined,
@@ -81,7 +81,7 @@ function harness(opts: {
 }
 
 const ADMIN_WRITES = {
-  'Groups/Engineering/weekly-newsletter/SKILL.md': [ADMIN],
+  'Plugins/Engineering/weekly-newsletter/SKILL.md': [ADMIN],
 };
 
 describe('PendingSkillsService', () => {
@@ -93,7 +93,7 @@ describe('PendingSkillsService', () => {
         name: 'weekly-newsletter',
         description: 'Drafts the Friday newsletter.',
         version: '0.1.0',
-        path: 'Groups/Engineering/weekly-newsletter',
+        path: 'Plugins/Engineering/weekly-newsletter',
         changeRequestNumber: 7,
         branch: 'agent/weekly-newsletter',
         authorName: 'Ali Raza',
@@ -110,7 +110,7 @@ describe('PendingSkillsService', () => {
 
   /**
    * The decision that shapes this surface: a proposal is between its author and
-   * the people who can approve it, and nobody else. A member of the group who
+   * the people who can approve it, and nobody else. A member of the plugin who
    * cannot write the folder is not one of those people.
    */
   test('hides it from everyone else', async () => {
@@ -143,7 +143,7 @@ describe('PendingSkillsService', () => {
         {
           name: 'weekly-newsletter',
           description: 'Drafts the Friday newsletter.',
-          path: 'Groups/Engineering/weekly-newsletter',
+          path: 'Plugins/Engineering/weekly-newsletter',
         },
       ],
       writers: ADMIN_WRITES,
@@ -156,9 +156,9 @@ describe('PendingSkillsService', () => {
       crs: [
         cr({
           touchedNodePaths: [
-            'Groups/Engineering/access.md',
-            'Groups/Engineering/SKILL.md', // a group folder is not a skill
-            'Groups/Engineering/weekly-newsletter/reference.md',
+            'Plugins/Engineering/access.md',
+            'Plugins/Engineering/SKILL.md', // a plugin folder is not a skill
+            'Plugins/Engineering/weekly-newsletter/reference.md',
           ],
         }),
       ],
@@ -185,7 +185,7 @@ describe('PendingSkillsService', () => {
     const svc = harness({
       crs: [cr()],
       branchFiles: {
-        'agent/weekly-newsletter:Groups/Engineering/weekly-newsletter/SKILL.md':
+        'agent/weekly-newsletter:Plugins/Engineering/weekly-newsletter/SKILL.md':
           '---\ndescription: No name declared.\n---\n\n# Body\n',
       },
       writers: ADMIN_WRITES,
@@ -222,17 +222,17 @@ describe('PendingSkillsService', () => {
           number: 3,
           createdAt: '2026-08-01T12:00:00.000Z',
           branch: 'agent/older',
-          touchedNodePaths: ['Groups/Engineering/older/SKILL.md'],
+          touchedNodePaths: ['Plugins/Engineering/older/SKILL.md'],
         }),
       ],
       branchFiles: {
-        'agent/weekly-newsletter:Groups/Engineering/weekly-newsletter/SKILL.md': SKILL_MD,
-        'agent/older:Groups/Engineering/older/SKILL.md':
+        'agent/weekly-newsletter:Plugins/Engineering/weekly-newsletter/SKILL.md': SKILL_MD,
+        'agent/older:Plugins/Engineering/older/SKILL.md':
           '---\nname: older\ndescription: Older.\n---\n',
       },
       writers: {
         ...ADMIN_WRITES,
-        'Groups/Engineering/older/SKILL.md': [ADMIN],
+        'Plugins/Engineering/older/SKILL.md': [ADMIN],
       },
     });
     expect((await svc.listPendingSkills(ADMIN)).map((p) => p.changeRequestNumber)).toEqual([3, 9]);
