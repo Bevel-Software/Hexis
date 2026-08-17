@@ -9,8 +9,17 @@ import { authFetch } from '../../../lib/api';
 export interface RoleRosterEntry {
   canonical: string;
   displayName: string;
+  /** Individual members — emails only; group assignments live in `groups`. */
   members: string[];
+  /** Canonical names of groups assigned to this role. */
+  groups: string[];
   isAdmin: boolean;
+  /**
+   * What the role DOES. `null` marks a legacy people-set role (no capability
+   * behind it) — those get the "Convert to group" action instead of group
+   * assignment being meaningful.
+   */
+  capability: { description: string; groupAssignable: boolean } | null;
   referencedBy: { path: string; verb: string }[];
 }
 
@@ -131,6 +140,45 @@ export async function removeMember(
   const res = await authFetch(
     `/api/access/roles/${encodeURIComponent(canonical)}/members/${encodeURIComponent(email)}${qs}`,
     { method: 'DELETE' },
+  );
+  return parseRoster(res);
+}
+
+/** Assign a GROUP to a role — everyone in the group gets the capability. */
+export async function assignGroup(
+  canonical: string,
+  group: string,
+): Promise<RoleRosterEntry[]> {
+  const res = await authFetch(
+    `/api/access/roles/${encodeURIComponent(canonical)}/groups`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group }),
+    },
+  );
+  return parseRoster(res);
+}
+
+export async function unassignGroup(
+  canonical: string,
+  group: string,
+): Promise<RoleRosterEntry[]> {
+  const res = await authFetch(
+    `/api/access/roles/${encodeURIComponent(canonical)}/groups/${encodeURIComponent(group)}`,
+    { method: 'DELETE' },
+  );
+  return parseRoster(res);
+}
+
+/**
+ * Convert a legacy people-set role into a manual group. Grants keep working —
+ * the name is unchanged; it just moves to the groups file.
+ */
+export async function convertRoleToGroup(canonical: string): Promise<RoleRosterEntry[]> {
+  const res = await authFetch(
+    `/api/access/roles/${encodeURIComponent(canonical)}/convert-to-group`,
+    { method: 'POST' },
   );
   return parseRoster(res);
 }

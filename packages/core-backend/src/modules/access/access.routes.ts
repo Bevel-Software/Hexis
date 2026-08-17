@@ -879,6 +879,50 @@ export function createAccessRoutes(
     }
   });
 
+  // Assign / unassign a GROUP to a role (capability-follows-membership; the
+  // editor refuses Admin — individuals only for the blast-radius role).
+  router.post('/access/roles/:canonical/groups', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      await assertRolesAdmin(user.email);
+      const canonical = canonicalRoleName(req.params.canonical);
+      const group = requireNonEmptyString((req.body ?? {}).group, 'group');
+      res.json({ roles: await rolesAdmin.assignGroup(user, canonical, group) });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  router.delete('/access/roles/:canonical/groups/:group', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      await assertRolesAdmin(user.email);
+      const canonical = canonicalRoleName(req.params.canonical);
+      res.json({ roles: await rolesAdmin.unassignGroup(user, canonical, String(req.params.group)) });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  // Convert a legacy people-set role into a manual group (atomic two-file
+  // move; grants keep working because the name is unchanged).
+  router.post('/access/roles/:canonical/convert-to-group', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      await assertRolesAdmin(user.email);
+      const canonical = canonicalRoleName(req.params.canonical);
+      res.json({ roles: await rolesAdmin.convertRoleToGroup(user, canonical) });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
   /**
    * GET /access/roles/health
    * Auth-only (NOT admin-gated): a corrupted roles.yaml resolves nobody as

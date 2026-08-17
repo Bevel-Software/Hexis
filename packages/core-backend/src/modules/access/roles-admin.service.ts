@@ -61,9 +61,16 @@ import {
   addMember as editAddMember,
   removeMember as editRemoveMember,
   renameRoleDisplay as editRenameRoleDisplay,
+  addRoleGroupRef as editAddGroupRef,
+  removeRoleGroupRef as editRemoveGroupRef,
+  isGroupRefMember,
   RolesEditError,
   type EditResult,
 } from './roles-edit.js';
+import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from './group-files.js';
+import { createGroup as editCreateGroup, addGroupMember as editAddGroupMember, GroupsEditError } from './groups-edit.js';
+import { capabilityRoleFor } from './capability-registry.js';
+import { GROUP_REF_PREFIX } from './access-control.service.js';
 
 /** A mutation that cannot proceed (invariant violation, contention, not found). */
 export class RolesAdminError extends WorkflowDomainError {
@@ -77,8 +84,17 @@ export class RolesAdminError extends WorkflowDomainError {
 export interface RoleRosterEntry {
   canonical: string;
   displayName: string;
+  /** Individual member EMAILS (group assignments are split into `groups`). */
   members: string[];
+  /** Canonical names of groups this role is assigned to (`group:` members). */
+  groups: string[];
   isAdmin: boolean;
+  /**
+   * Registry metadata when this is a CAPABILITY role (Admin today); null for
+   * a legacy pre-split people-set role, which the UI flags with a
+   * convert-to-group action.
+   */
+  capability: { description: string; groupAssignable: boolean } | null;
   /**
    * Every access rule referencing this role — folder `access.md` AND node
    * frontmatter. Sound: this is the SAME scan the rename rewrite uses, so the
@@ -266,11 +282,18 @@ export class RolesAdminService {
     const out: RoleRosterEntry[] = [];
     for (const role of model) {
       const canonical = canonicalRoleName(role.displayName);
+      const registryEntry = capabilityRoleFor(role.displayName);
       out.push({
         canonical,
         displayName: role.displayName,
-        members: role.members,
+        members: role.members.filter((m) => !isGroupRefMember(m)),
+        groups: role.members
+          .filter(isGroupRefMember)
+          .map((m) => canonicalRoleName(m.slice(GROUP_REF_PREFIX.length))),
         isAdmin: canonical === ADMIN_CANONICAL,
+        capability: registryEntry
+          ? { description: registryEntry.description, groupAssignable: registryEntry.groupAssignable }
+          : null,
         referencedBy: referencesByRole.get(canonical) ?? [],
       });
     }
@@ -407,6 +430,100 @@ export class RolesAdminService {
       return editRemoveMember(text, canonical, email);
     });
     return this.getRoster();
+  }
+
+  /** Assign a role to a group (Admin refused by the editor — see roles-edit). */
+  async assignGroup(actor: AuthUser, canonical: string, groupName: string): Promise<RoleRosterEntry[]> {
+    await this.runEdit(actor, (text) => editAddGroupRef(text, canonical, groupName));
+    return this.getRoster();
+  }
+
+  async unassignGroup(actor: AuthUser, canonical: string, groupName: string): Promise<RoleRosterEntry[]> {
+    await this.runEdit(actor, (text) => editRemoveGroupRef(text, canonical, groupName));
+    return this.getRoster();
+  }
+
+  /**
+   * Convert a LEGACY people-set role into a manual group — the migration the
+   * roles/groups split defines: "Product" was never a capability, it was a
+   * team. Atomic two-file move (roles.yaml loses the role, groups.yaml gains
+   * the group with the same members) in ONE commit; grant references keep
+   * working untouched because the NAME does not change.
+   *
+   * Refusals: capability roles (they ARE roles — Admin included), roles with
+   * group assignments (unwind those first: a group containing a group is
+   * nesting), IdP mode (groups are managed in the identity provider — this
+   * would write a retired file), and a groups.yaml name collision (from the
+   * group editor).
+   */
+  async convertRoleToGroup(actor: AuthUser, canonical: string): Promise<RoleRosterEntry[]> {
+    const workspaceId = await this.ensureWorkspace();
+    if (capabilityRoleFor(canonical)) {
+      throw new RolesAdminError(`'${canonical}' is a capability role — it cannot become a group`, 422);
+    }
+    if ((await this.readKbFile(workspaceId, SYNCED_GROUPS_YAML)) !== null) {
+      throw new RolesAdminError(
+        'Groups are synced from your identity provider — recreate this team there instead.',
+        409,
+        { kind: 'idp-mode' },
+      );
+    }
+    await this.assertRolesUnlocked(workspaceId, actor);
+
+    const rolesText = await this.readRolesYaml(workspaceId);
+    const role = parseRolesModel(rolesText).find((r) => canonicalRoleName(r.displayName) === canonical);
+    if (!role) throw new RolesAdminError(`role not found: ${canonical}`, 404);
+    const groupRefs = role.members.filter(isGroupRefMember);
+    if (groupRefs.length > 0) {
+      throw new RolesAdminError(
+        'This role is assigned to groups — remove those assignments before converting it.',
+        422,
+      );
+    }
+
+    // Build both candidates BEFORE any write, and validate both.
+    const rolesEdit = this.guardEdit(() => editDeleteRole(rolesText, canonical));
+    this.assertLoadable(rolesEdit.text);
+    const groupsText = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
+    let groupsCandidate: string;
+    try {
+      groupsCandidate = editCreateGroup(groupsText, role.displayName).text;
+      for (const email of role.members) {
+        groupsCandidate = editAddGroupMember(groupsCandidate, canonical, email).text;
+      }
+    } catch (err) {
+      if (err instanceof GroupsEditError) throw new RolesAdminError(err.message, err.status);
+      throw err;
+    }
+    const groupsValid = validateGroupsFile(groupsCandidate, GROUPS_YAML);
+    if (!groupsValid.ok) {
+      throw new RolesAdminError(`groups.yaml would be invalid: ${groupsValid.errors.join('; ')}`, 422);
+    }
+
+    const fsys = await this.lockingFsForActor(workspaceId, actor);
+    await this.mapLockContention(() =>
+      fsys.writeFiles(
+        [
+          { path: `${this.kbDirName}/${ROLES_YAML}`, content: rolesEdit.text },
+          { path: `${this.kbDirName}/${GROUPS_YAML}`, content: groupsCandidate },
+        ],
+        `Convert role ${role.displayName} to a group`,
+      ),
+    );
+    this.accessControl.invalidate(workspaceId);
+    this.emitWrites(workspaceId, actor, [ROLES_YAML, GROUPS_YAML]);
+    return this.getRoster();
+  }
+
+  /** Read a KB-root file; null when absent. */
+  private async readKbFile(workspaceId: string, repoRel: string): Promise<string | null> {
+    try {
+      return await this.workspaceService.readFile(workspaceId, path.posix.join(this.kbDirName, repoRel));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+      throw err;
+    }
   }
 
   /**

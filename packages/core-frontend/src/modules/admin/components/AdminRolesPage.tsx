@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { Check, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { Check, Loader2, Pencil, Plus, Trash2, UsersRound, X } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { useAdmin } from '../state/admin.context';
 import {
   addMember,
+  assignGroup,
+  convertRoleToGroup,
   createRole,
   deleteRole,
   fetchRoles,
   removeMember,
   renameRole,
   RolesApiError,
+  unassignGroup,
   type RoleRosterEntry,
 } from '../services/roles.api';
 import { suggestPrincipals } from '../../access/api';
@@ -164,6 +167,10 @@ export function AdminRolesPage() {
         canonical,
         displayName: displayName.trim(),
         members: [],
+        // A UI-created role has no capability behind it (legacy people-set
+        // shape) and no group assignments yet — matches what the server makes.
+        groups: [],
+        capability: null,
         isAdmin: false,
         referencedBy: [],
       };
@@ -421,6 +428,10 @@ function RoleCard({
   // Dialogs.
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [selfRemove, setSelfRemove] = useState<SelfRemoveTarget | null>(null);
+  const [convertOpen, setConvertOpen] = useState(false);
+
+  // Assign-group input (roles with a group-assignable capability only).
+  const [groupName, setGroupName] = useState('');
 
   // Name shown in the UI = optimistic rename target while a rename is in flight,
   // else the authoritative display name.
@@ -585,6 +596,33 @@ function RoleCard({
     if (ok) setSelfRemove(null);
   };
 
+  const submitAssignGroup = async () => {
+    if (renamePending) return;
+    const group = groupName.trim();
+    if (!group) {
+      setError('Enter a group name.');
+      return;
+    }
+    // Not optimistic: unlike a member email, a group name may simply not exist
+    // and the server's 404/422 is the interesting outcome — a chip that appears
+    // then vanishes would just look like a glitch.
+    const ok = await run(() => assignGroup(role.canonical, group));
+    if (ok) setGroupName('');
+  };
+
+  const handleRemoveGroup = async (group: string) => {
+    if (renamePending) return;
+    await run(() => unassignGroup(role.canonical, group));
+  };
+
+  const confirmConvert = async () => {
+    if (renamePending) return;
+    // On success the role leaves the roster (it lives in the groups file now);
+    // on refusal `run` records the backend's message, shown on the card.
+    await run(() => convertRoleToGroup(role.canonical));
+    setConvertOpen(false);
+  };
+
   const confirmDelete = async () => {
     if (renamePending) return;
     // Optimistic: close the dialog and let the card vanish immediately. The
@@ -654,6 +692,17 @@ function RoleCard({
 
         {!renaming && (
           <div className="flex items-center gap-1 shrink-0">
+            {role.capability === null && !role.isAdmin && (
+              <button
+                type="button"
+                onClick={() => setConvertOpen(true)}
+                disabled={busy || renamePending}
+                className="px-2 py-1 text-xs rounded border border-line hover:bg-hover text-ink-muted disabled:opacity-50"
+                title="Convert this people-set role into a group"
+              >
+                Convert to group
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -682,6 +731,12 @@ function RoleCard({
           </div>
         )}
       </div>
+
+      {/* What the role DOES. Absent on legacy people-set roles — those get the
+          Convert action instead. */}
+      {role.capability && (
+        <p className="mt-1 text-xs text-ink-muted">{role.capability.description}</p>
+      )}
 
       {/* Member chips — optimistically hides members pending removal. */}
       <div className="mt-3 flex flex-wrap gap-2">
@@ -780,6 +835,64 @@ function RoleCard({
         </button>
       </div>
 
+      {/* Group assignments — everyone in an assigned group holds the role.
+          Hidden for Admin (individuals only: its blast radius must not follow
+          IdP-managed membership) and for capabilities that opt out. */}
+      {!role.isAdmin && role.capability?.groupAssignable !== false && (
+        <div className="mt-3 pt-3 border-t border-line">
+          <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1.5">
+            Assigned groups
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {role.groups.length === 0 ? (
+              <span className="text-xs text-ink-faint">No groups assigned.</span>
+            ) : (
+              role.groups.map((group) => (
+                <span
+                  key={group}
+                  className="inline-flex max-w-full items-center gap-1.5 px-1.5 py-1 bg-sunken border border-line rounded-full text-xs text-ink"
+                >
+                  <UsersRound size={12} className="shrink-0 text-ink-muted" />
+                  <span className="min-w-0 truncate max-w-[14rem]">{group}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveGroup(group)}
+                    disabled={busy || renamePending}
+                    className="shrink-0 rounded-full p-0.5 text-ink-faint hover:text-red-600 hover:bg-red-50 disabled:opacity-50"
+                    title="Unassign group"
+                    aria-label={`Remove group ${group}`}
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              ))
+            )}
+          </div>
+          <div className="mt-2 flex items-center gap-1.5">
+            <input
+              value={groupName}
+              onChange={(e) => setGroupName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submitAssignGroup();
+              }}
+              placeholder="Assign group by name"
+              disabled={busy || renamePending}
+              className="text-xs px-2 py-1 border border-line rounded focus:outline-none focus:border-accent flex-1 min-w-0 max-w-[16rem]"
+              aria-label="Assign group"
+              autoComplete="off"
+            />
+            <button
+              type="button"
+              onClick={submitAssignGroup}
+              disabled={busy || renamePending}
+              className="shrink-0 px-3 py-1 text-xs rounded border border-line hover:bg-hover disabled:opacity-50"
+            >
+              Assign
+            </button>
+          </div>
+        </div>
+      )}
+
       {(error ?? deleteError) && (
         <div className="mt-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">
           {error ?? deleteError}
@@ -813,6 +926,21 @@ function RoleCard({
           ) : (
             <p className="text-sm text-ink">This role has no access rules.</p>
           )}
+        </ConfirmDialog>
+      )}
+
+      {convertOpen && (
+        <ConfirmDialog
+          title={`Convert "${displayName}" to a group?`}
+          confirmLabel="Convert"
+          busy={busy}
+          onCancel={() => setConvertOpen(false)}
+          onConfirm={confirmConvert}
+        >
+          <p className="text-sm text-ink">
+            Grants keep working — the name stays; it just becomes a group. Manage its
+            members on the Groups page afterwards.
+          </p>
         </ConfirmDialog>
       )}
 

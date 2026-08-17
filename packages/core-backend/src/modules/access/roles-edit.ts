@@ -36,7 +36,9 @@ import {
   parseYamlSubset,
   canonicalRoleName,
   canonicalEmail,
+  ADMIN_CANONICAL,
   EMAIL_REGEX,
+  GROUP_REF_PREFIX,
   RESERVED_ROLE_NAMES,
 } from './access-control.service.js';
 
@@ -221,6 +223,52 @@ export function removeMember(text: string, canonical: string, rawEmail: string):
   const role = findRole(model, canonical);
   if (!role) throw new RolesEditError(`role not found: ${canonical}`, 404);
   const idx = role.members.indexOf(email);
+  if (idx < 0) return { text: emitRolesModel(model), changed: false };
+  role.members.splice(idx, 1);
+  return reemit(text, model);
+}
+
+/**
+ * A role member entry that assigns the role to a GROUP (`group:<name>`).
+ * Kept in `members` as the normalized `group:<canonical>` string — the
+ * parse/emit round-trip preserves it, so unrelated edits can never strip a
+ * group assignment.
+ */
+export function isGroupRefMember(member: string): boolean {
+  return member.startsWith(GROUP_REF_PREFIX);
+}
+
+function groupRefFor(groupName: string): string {
+  const canonical = canonicalRoleName(groupName);
+  if (!canonical) throw new RolesEditError('group name must not be empty');
+  return `${GROUP_REF_PREFIX}${canonical}`;
+}
+
+/**
+ * Assign a role to a group. Refused for Admin — same carve-out the resolver's
+ * parser enforces (see GROUP_REF_PREFIX): a group must never decide who is
+ * admin. Idempotent; 404 unknown role.
+ */
+export function addRoleGroupRef(text: string, canonical: string, groupName: string): EditResult {
+  if (canonical === ADMIN_CANONICAL) {
+    throw new RolesEditError('the Admin role cannot be assigned to a group — add individual members instead');
+  }
+  const ref = groupRefFor(groupName);
+  const model = parseRolesModel(text);
+  const role = findRole(model, canonical);
+  if (!role) throw new RolesEditError(`role not found: ${canonical}`, 404);
+  if (role.members.includes(ref)) return { text: emitRolesModel(model), changed: false };
+  role.members.push(ref);
+  return reemit(text, model);
+}
+
+/** Remove a role's group assignment. 404 unknown role; no-op if not assigned. */
+export function removeRoleGroupRef(text: string, canonical: string, groupName: string): EditResult {
+  const ref = groupRefFor(groupName);
+  const model = parseRolesModel(text);
+  const role = findRole(model, canonical);
+  if (!role) throw new RolesEditError(`role not found: ${canonical}`, 404);
+  const idx = role.members.indexOf(ref);
   if (idx < 0) return { text: emitRolesModel(model), changed: false };
   role.members.splice(idx, 1);
   return reemit(text, model);

@@ -27,6 +27,8 @@ const ENGINEERING: RoleRosterEntry = {
   canonical: 'engineering',
   displayName: 'Engineering',
   members: [],
+  groups: [],
+  capability: null,
   isAdmin: false,
   referencedBy: [],
 };

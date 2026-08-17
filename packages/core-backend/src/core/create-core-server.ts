@@ -28,6 +28,7 @@ import {
   createSecretsVaultPublicRoutes,
 } from '../modules/secrets-vault/index.js';
 import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js';
+import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
 import { DEFAULT_BRANCH, PROTECTED_BRANCHES, type AuthUser } from '@bevel-software/platform-shared';
@@ -412,6 +413,13 @@ export async function createCoreServer(
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));
+  // Groups admin (manual-mode CRUD; typed refusals in IdP mode) —
+  // admin-gated inside.
+  app.use('/api', core.authMiddleware, createGroupsAdminRoutes({
+    groupsAdmin: core.groupsAdminService,
+    adminAccess: core.adminAccess,
+    getUserById: async (id) => (await core.authService.getUserById(id)) ?? null,
+  }));
   // Account management (list/create password accounts, GDPR erasure) —
   // admin-gated inside.
   app.use('/api', core.authMiddleware, createAccountRoutes(
