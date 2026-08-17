@@ -1360,6 +1360,15 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = this.workspaceDirWithinRoot(workspaceId);
     try {
       await fs.access(path.join(workspaceDir, this.kbDirName, '.git'));
+      // The same restart-survivor duty getOrCreateForBranch's disk path
+      // carries: this is the OTHER door through which a previous process's
+      // clone enters `branchDirs` (an id-addressed request, a distribution's
+      // boot preflight), and registering here without the offer pins the
+      // fast path — the branch then sits out every migration for the
+      // process lifetime. Exactly how the Groups→Plugins rename missed a
+      // deployment whose preflight resolved the workspace before anything
+      // called getOrCreateForBranch.
+      await this.topUpScaffolding(path.join(workspaceDir, this.kbDirName), branch);
       this.branchDirs.set(branch, workspaceDir);
       return workspaceDir;
     } catch {

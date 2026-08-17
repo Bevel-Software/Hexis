@@ -529,6 +529,30 @@ describe('WorkspaceService — scaffolding top-up on restart-survivor clones', (
     expect(seed.topUpWorkspace).toHaveBeenCalledTimes(2);
   });
 
+  // The OTHER door: an id-addressed resolution (a boot preflight, a direct
+  // /api/workspace/:id request) registers a survived clone into the cache
+  // without ever passing through getOrCreateForBranch's disk path. Left
+  // unoffered, that registration pins the fast path and the branch sits out
+  // every migration for the process lifetime — how the Groups→Plugins rename
+  // missed a deployment whose preflight always resolves first.
+  it('offers the top-up when an id-addressed resolution registers the surviving clone', async () => {
+    await seedBranchWorkspace(root, 'target-company-state');
+    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    const seed = {
+      ensureRemoteSeeded: vi.fn(async () => {}),
+      topUpWorkspace: vi.fn(async () => {}),
+    };
+    svc.setSeedService(seed);
+
+    // The preflight's move: resolve by workspace id, never by branch.
+    await svc.getWorkspacePath(workspaceIdForBranch('target-company-state'));
+    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(1);
+
+    // The later branch-addressed load finds the claim already made.
+    await svc.getOrCreateForBranch('target-company-state');
+    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(1);
+  });
+
   it('re-offers the top-up after the orphan sweep removes the clone — same eviction rule', async () => {
     await seedBranchWorkspace(root, 'target-company-state');
     const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
