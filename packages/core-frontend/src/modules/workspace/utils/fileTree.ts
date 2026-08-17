@@ -51,7 +51,7 @@ const READABLE_PAGE = /\.(md|markdown)$/i;
  * section heading rather than the fifth file inside the first folder.
  *
  * Scoped to exactly what the explorer browses under "Knowledge" —
- * `KnowledgeBase/` plus any stray content folder. `Groups/` is the Skills &
+ * `KnowledgeBase/` plus any stray content folder. `Plugins/` is the Skills &
  * Tools app's storage and is not a browsing destination here, and the loose
  * files at the root (`access.md`, `roles.yaml`) are how the deployment is
  * configured, not something to read. A clone that predates the split has no
@@ -84,7 +84,7 @@ export function suggestedPages(tree: FileTreeEntry | null, limit: number): FileT
       if (entry.name.startsWith('.')) continue;
       if (entry.type === 'file') {
         if (READABLE_PAGE.test(entry.name)) pages.push(entry);
-      } else if (entry.name !== GROUPS_DIR) {
+      } else if (entry.name !== PLUGINS_DIR) {
         next.push(...(entry.children ?? []));
       }
     }

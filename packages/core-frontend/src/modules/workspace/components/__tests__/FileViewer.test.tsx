@@ -989,13 +989,13 @@ describe('FileViewer: nothing open', () => {
         ],
       },
       {
-        name: 'Groups',
-        relativePath: 'knowledge-base/Groups',
+        name: 'Plugins',
+        relativePath: 'knowledge-base/Plugins',
         type: 'directory',
         children: [
           {
             name: 'SKILL.md',
-            relativePath: 'knowledge-base/Groups/team-a/SKILL.md',
+            relativePath: 'knowledge-base/Plugins/team-a/SKILL.md',
             type: 'file',
           },
         ],
@@ -1029,7 +1029,7 @@ describe('FileViewer: nothing open', () => {
   it('offers nothing that is not a document', async () => {
     render(<ViewerHarness filePath={null} fileTree={TREE} />);
     await screen.findByRole('button', { name: /Handbook/ });
-    // An image is not a page; `Groups/` belongs to Skills & Tools and is not a
+    // An image is not a page; `Plugins/` belongs to Skills & Tools and is not a
     // browsing destination here; the loose root files configure the
     // deployment rather than saying anything.
     expect(screen.queryByRole('button', { name: /logo/ })).toBeNull();
