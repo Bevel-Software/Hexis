@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { configureBranchModel, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { loadServerConfig } from '../bootstrap';
+import { mcpEndpointUrl } from '../../shared/mcp';
 
 /**
  * The bootstrap runs before React does, and it is the ONLY thing between a
@@ -27,8 +28,8 @@ afterEach(() => {
   configureBranchModel(CONFIGURED);
 });
 
-const respond = (branchModel: unknown) =>
-  fetchMock.mockResolvedValue({ ok: true, json: async () => ({ branchModel }) });
+const respond = (branchModel: unknown, rest: Record<string, unknown> = {}) =>
+  fetchMock.mockResolvedValue({ ok: true, json: async () => ({ branchModel, ...rest }) });
 
 describe('loadServerConfig', () => {
   it('applies a configured model', async () => {
@@ -59,5 +60,49 @@ describe('loadServerConfig', () => {
   it('still fails when the request itself does', async () => {
     fetchMock.mockResolvedValue({ ok: false, status: 502 });
     await expect(loadServerConfig()).rejects.toThrow(/Could not load configuration/);
+  });
+
+  /**
+   * The MCP endpoint travels on the same payload, for the same reason the
+   * branch model does: it is a property of the deployment, and the frontend
+   * cannot work it out for itself. `window.location.origin` is the browser's
+   * idea of our address; behind a proxy or on a second domain it is not the
+   * one the OAuth metadata publishes, and that is the one that decides
+   * whether a connector works.
+   */
+  describe('the MCP endpoint', () => {
+    it('applies what the server said', async () => {
+      respond(CONFIGURED, { mcpUrl: 'https://kb.acme.com/api/mcp' });
+      await loadServerConfig();
+      expect(mcpEndpointUrl()).toBe('https://kb.acme.com/api/mcp');
+    });
+
+    /**
+     * A cached bundle can outlive the server it came from. A backend that
+     * predates the field must still let the app boot — the connect snippets
+     * fall back to the origin, which is what they did before it existed.
+     */
+    it('falls back to the origin when the server does not send one', async () => {
+      respond(CONFIGURED);
+      await expect(loadServerConfig()).resolves.toBeUndefined();
+      expect(mcpEndpointUrl()).toBe(`${window.location.origin}/api/mcp`);
+    });
+
+    it('falls back rather than trusting a value it cannot parse', async () => {
+      respond(CONFIGURED, { mcpUrl: 'not a url' });
+      await expect(loadServerConfig()).resolves.toBeUndefined();
+      expect(mcpEndpointUrl()).toBe(`${window.location.origin}/api/mcp`);
+    });
+
+    /**
+     * Deliberately NOT gated on the branch model being valid. A deployment
+     * nobody has set up yet still has a real address, and the setup screen is
+     * exactly where someone might want to see it.
+     */
+    it('applies even on a deployment that has not been set up yet', async () => {
+      respond({ defaultBranch: '', protectedBranches: [] }, { mcpUrl: 'https://kb.acme.com/api/mcp' });
+      await loadServerConfig();
+      expect(mcpEndpointUrl()).toBe('https://kb.acme.com/api/mcp');
+    });
   });
 });

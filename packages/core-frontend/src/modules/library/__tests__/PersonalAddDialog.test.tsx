@@ -16,7 +16,7 @@ import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
  * It carried one door until now — copy a prompt — because its first half used
  * to be a LINK into the destination folder and this page is defined as the
  * items in no folder. Writing needs no such destination: an ungrouped skill
- * lives in the caller's own `Groups/personal-<id>/` folder, so the door is back.
+ * lives in the caller's own `Plugins/personal-<id>/` folder, so the door is back.
  *
  * The load-bearing assertion is that it creates DIRECTLY. A skill you make
  * here is yours — the new folder's `access.md` is seeded naming you as owner
@@ -96,8 +96,8 @@ describe('PersonalAddDialog', () => {
   beforeEach(() => {
     apiMock.createEmptySkill.mockReset();
     apiMock.createEmptySkill.mockResolvedValue({
-      repoRelativePath: 'Groups/scratch/SKILL.md',
-      workspacePath: 'knowledge-base/Groups/scratch/SKILL.md',
+      repoRelativePath: 'Plugins/scratch/SKILL.md',
+      workspacePath: 'knowledge-base/Plugins/scratch/SKILL.md',
       branch: 'target-company-state',
       direct: true,
     });
@@ -115,7 +115,7 @@ describe('PersonalAddDialog', () => {
     const { field } = renderDialog();
     expect(field()).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
-    expect(screen.getByText(/Yours alone until you add it to a group/)).toBeInTheDocument();
+    expect(screen.getByText(/Yours alone until you add it to a plugin/)).toBeInTheDocument();
   });
 
   it('creates the skill as PERSONAL. Destination resolution belongs to the api layer', async () => {
@@ -134,7 +134,7 @@ describe('PersonalAddDialog', () => {
     // The skill's own library page, editor invited open — not the Knowledge app.
     // The canonical address: the new SKILL.md's own workspace URL.
     await waitFor(() =>
-      expect(href()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Groups/scratch/SKILL.md`),
+      expect(href()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/scratch/SKILL.md`),
     );
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -156,7 +156,7 @@ describe('PersonalAddDialog', () => {
     expect(screen.queryByText(/sent for review/)).not.toBeInTheDocument();
   });
 
-  it('refuses a name a group’s skill already holds', async () => {
+  it('refuses a name a plugin’s skill already holds', async () => {
     const { field, create } = renderDialog(['rfi']);
     fireEvent.change(field(), { target: { value: 'RFI' } });
     expect(screen.getByRole('alert')).toHaveTextContent('already exists');
@@ -171,7 +171,7 @@ describe('PersonalAddDialog', () => {
     expect(screen.queryByRole('textbox', { name: 'Skill name' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
     expect(screen.getByText(/Tell your agent what you need/)).toBeInTheDocument();
-    expect(screen.getByText(/Yours alone until you add it to a group/)).toBeInTheDocument();
+    expect(screen.getByText(/Yours alone until you add it to a plugin/)).toBeInTheDocument();
     expect(apiMock.createEmptySkill).not.toHaveBeenCalled();
   });
 });

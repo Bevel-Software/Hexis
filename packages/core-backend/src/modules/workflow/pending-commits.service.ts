@@ -276,18 +276,7 @@ export class PendingCommitsService {
   async claimNext(rawWorkspaceId: string, now: Date): Promise<PendingCommit | null> {
     // Match the canonical form `enqueue` stores (see `canonicalWorkspaceId`).
     const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
-    // Backoff schedule as a SQL CASE so the gate runs server-side instead
-    // of round-tripping the row to compute eligibility. Index in BACKOFF_MS
-    // matches `attempts` directly — covers `attempts == 0` (a recovery-reset
-    // row whose `lastAttemptedAt` is non-null; without this, it would fall
-    // into ELSE = max backoff and be stuck waiting 30s after every recovery).
-    const caseArms = BACKOFF_MS.map((ms, i) => sql`WHEN ${i} THEN ${ms}`);
-    const lastMs = BACKOFF_MS[BACKOFF_MS.length - 1];
-    const backoffMsExpr = sql`(CASE ${pendingCommits.attempts} ${sql.join(caseArms, sql` `)} ELSE ${lastMs} END)`;
-    const readyExpr = or(
-      isNull(pendingCommits.lastAttemptedAt),
-      sql`${pendingCommits.lastAttemptedAt} + (${backoffMsExpr} || ' milliseconds')::interval <= ${now}`,
-    );
+    const readyExpr = readyPredicate(now);
     const claimed = await this.db
       .update(pendingCommits)
       .set({ status: 'running', lastAttemptedAt: now })
@@ -304,6 +293,32 @@ export class PendingCommitsService {
       )
       .returning();
     return claimed.length > 0 ? rowToPending(claimed[0]) : null;
+  }
+
+  /**
+   * Whether another row is ready for `workspaceId` right now — a peek, with
+   * the same readiness rule `claimNext` uses but claiming nothing.
+   *
+   * The worker asks this AFTER claiming a row, to learn whether the one in
+   * hand is the last of a burst. Everything before the last can skip the
+   * advisory commit validator: it parses the whole KB to produce a report
+   * that is only logged, and re-parsing per file made a bulk change (a
+   * migration, an agent run) cost one full parse per commit.
+   */
+  async hasReadyRow(rawWorkspaceId: string, now: Date): Promise<boolean> {
+    const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
+    const rows = await this.db
+      .select({ id: pendingCommits.id })
+      .from(pendingCommits)
+      .where(
+        and(
+          eq(pendingCommits.workspaceId, workspaceId),
+          eq(pendingCommits.status, 'pending'),
+          readyPredicate(now),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
   }
 
   /**
@@ -481,3 +496,24 @@ export class PendingCommitsService {
   }
 }
 
+
+/**
+ * The "ready to attempt" gate, shared by `claimNext` and `hasReadyRow` so a
+ * peek can never disagree with the claim that follows it.
+ *
+ * Backoff is a SQL CASE so the gate runs server-side instead of round-tripping
+ * every row to compute eligibility. The index into `BACKOFF_MS` is `attempts`
+ * directly, not `attempts - 1`: that covers the recovery-reset case where
+ * `attempts` is 0 but `lastAttemptedAt` is non-null, which would otherwise
+ * fall into the default arm and idle for the maximum backoff after every
+ * recovery run.
+ */
+function readyPredicate(now: Date) {
+  const caseArms = BACKOFF_MS.map((ms, i) => sql`WHEN ${i} THEN ${ms}`);
+  const lastMs = BACKOFF_MS[BACKOFF_MS.length - 1];
+  const backoffMsExpr = sql`(CASE ${pendingCommits.attempts} ${sql.join(caseArms, sql` `)} ELSE ${lastMs} END)`;
+  return or(
+    isNull(pendingCommits.lastAttemptedAt),
+    sql`${pendingCommits.lastAttemptedAt} + (${backoffMsExpr} || ' milliseconds')::interval <= ${now}`,
+  );
+}

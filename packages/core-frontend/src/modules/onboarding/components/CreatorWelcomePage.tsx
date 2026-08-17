@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { Sparkles, Users } from 'lucide-react';
 import { Button, Dialog, Surface } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
-import { NewGroupDialog } from '../../library/components/NewGroupDialog';
+import { NewPluginDialog } from '../../library/components/NewPluginDialog';
 import { NewSkillPanel } from '../../library/components/NewSkillPanel';
 import { useLibrary } from '../../library/state/library-data';
-import { displayFirstName } from '../../library/utils/personal-group';
+import { displayFirstName } from '../../library/utils/personal-plugin';
 import { useOnboarding } from '../state/onboarding';
 
 /**
@@ -14,13 +14,13 @@ import { useOnboarding } from '../state/onboarding';
  * A regular account needs to connect an agent before the library becomes
  * useful. The first admin has a different job: make the shared structure that
  * everyone else will find. This page offers the two smallest real beginnings,
- * using the same group and skill creation flows available everywhere else.
+ * using the same plugin and skill creation flows available everywhere else.
  */
 export function CreatorWelcomePage() {
   const { user } = useAuth();
   const onboarding = useOnboarding();
   const data = useLibrary();
-  const [newGroupOpen, setNewGroupOpen] = useState(false);
+  const [newPluginOpen, setNewPluginOpen] = useState(false);
   const [newSkillOpen, setNewSkillOpen] = useState(false);
   /**
    * The skill panel's in-flight state, lifted. A create that has started
@@ -37,14 +37,14 @@ export function CreatorWelcomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one idempotent welcome record per mount
   }, []);
 
-  const groupNames = useMemo(
+  const pluginNames = useMemo(
     () => [
       ...new Set([
-        ...data.groupSummaries.map((group) => group.name),
-        ...data.items.flatMap((item) => (item.group ? [item.group] : [])),
+        ...data.pluginSummaries.map((plugin) => plugin.name),
+        ...data.items.flatMap((item) => (item.plugin ? [item.plugin] : [])),
       ]),
     ],
-    [data.groupSummaries, data.items],
+    [data.pluginSummaries, data.items],
   );
   const skillNames = useMemo(
     () => data.items.filter((item) => item.kind === 'skill').map((item) => item.name),
@@ -56,7 +56,7 @@ export function CreatorWelcomePage() {
     <div className="mx-auto mt-[9vh] max-w-[580px] pb-14">
       <h1 className="text-display font-bold">Welcome, {firstName}</h1>
       <p className="mt-3 max-w-[54ch] text-lede text-ink-muted">
-        Build the shared library your team and AI agents work from. Start with a group for a
+        Build the shared library your team and AI agents work from. Start with a plugin for a
         team or project, or create a skill in your own space.
       </p>
 
@@ -64,16 +64,16 @@ export function CreatorWelcomePage() {
       <div className="mt-2.5 grid gap-3 sm:grid-cols-2">
         <Surface as="section" elevation="none" padded className="flex min-h-48 flex-col">
           <Users size={19} className="text-accent" aria-hidden="true" />
-          <h2 className="mt-3 text-strong font-semibold text-ink">Create a group</h2>
+          <h2 className="mt-3 text-strong font-semibold text-ink">Create a plugin</h2>
           <p className="mt-1 text-ui text-ink-muted">
             Organize skills and tools for a team, then invite the people who need them.
           </p>
           <Button
             variant="primary"
             className="mt-auto self-start"
-            onClick={() => setNewGroupOpen(true)}
+            onClick={() => setNewPluginOpen(true)}
           >
-            Create a group
+            Create a plugin
           </Button>
         </Surface>
 
@@ -81,7 +81,7 @@ export function CreatorWelcomePage() {
           <Sparkles size={19} className="text-accent" aria-hidden="true" />
           <h2 className="mt-3 text-strong font-semibold text-ink">Create a skill</h2>
           <p className="mt-1 text-ui text-ink-muted">
-            Capture repeatable instructions for an AI agent. You can add the skill to a group
+            Capture repeatable instructions for an AI agent. You can add the skill to a plugin
             later.
           </p>
           <Button
@@ -94,13 +94,13 @@ export function CreatorWelcomePage() {
         </Surface>
       </div>
 
-      {newGroupOpen && (
-        <NewGroupDialog
-          existing={groupNames}
-          onClose={() => setNewGroupOpen(false)}
+      {newPluginOpen && (
+        <NewPluginDialog
+          existing={pluginNames}
+          onClose={() => setNewPluginOpen(false)}
           onCreated={() => {
             data.reload();
-            data.reloadGroups();
+            data.reloadPlugins();
           }}
         />
       )}
@@ -122,7 +122,7 @@ export function CreatorWelcomePage() {
           }
         >
           <p className="text-ui text-ink-muted">
-            Start in your own space. You can move the skill into a shared group when it is ready.
+            Start in your own space. You can move the skill into a shared plugin when it is ready.
           </p>
           <NewSkillPanel
             destination={{ personal: true }}

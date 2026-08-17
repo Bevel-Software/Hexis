@@ -3,6 +3,7 @@ import { parse as parseYaml } from 'yaml';
 import { extractFrontmatter } from '@bevel-software/platform-shared';
 import type { FileRendererProps, RendererSaveState } from './types';
 import { authFetch } from '../../../../lib/api';
+import { Surface } from '../../../../shared/components';
 import { Markdown } from '../../../../shared/markdown/Markdown';
 import { ToolForm } from './ToolForm';
 import { ToolSecretsPanel } from '../../../secrets-vault/components/ToolSecretsPanel';
@@ -268,7 +269,11 @@ export function ToolRenderer({
   );
 
   return (
-    <div className="flex h-full min-h-0">
+    // The same framed look every prose file gets from its pane card — this
+    // renderer is full-bleed (it owns a definite-height two-column layout the
+    // auto-height card would collapse), so it draws the frame itself; without
+    // it the form floats on the page unlike every other document.
+    <Surface tone="surface" radius="lg" elevation="card" className="flex h-full min-h-0 overflow-hidden">
       <div className="flex min-h-0 flex-1 flex-col border-r border-line">
         <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
           <span className="text-xs font-medium text-ink-muted">{filePath.split('/').pop()}</span>
@@ -412,6 +417,6 @@ export function ToolRenderer({
           )}
         </section>
       </aside>
-    </div>
+    </Surface>
   );
 }

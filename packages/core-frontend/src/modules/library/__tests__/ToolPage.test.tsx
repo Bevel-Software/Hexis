@@ -28,8 +28,16 @@ const secretsMock = vi.hoisted(() => ({
 }));
 vi.mock('../../secrets-vault/services/tool-secrets.api', () => secretsMock);
 
-const toolsMock = vi.hoisted(() => ({ getToolDetail: vi.fn() }));
-vi.mock('../services/tools.api', () => ({ getToolDetail: toolsMock.getToolDetail }));
+const toolsMock = vi.hoisted(() => ({
+  getToolDetail: vi.fn(),
+  // The server section self-hides on null — these frame tests are not about it.
+  getMcpServer: vi.fn(async () => null),
+}));
+vi.mock('../services/tools.api', () => ({
+  getToolDetail: toolsMock.getToolDetail,
+  getMcpServer: toolsMock.getMcpServer,
+  putMcpServer: vi.fn(),
+}));
 
 const libraryMock = vi.hoisted(() => ({ listSkills: vi.fn(), getSkill: vi.fn() }));
 vi.mock('../services/library.api', () => ({
@@ -45,7 +53,7 @@ import { ToolPage } from '../components/tool-page/ToolPage';
 const GITHUB: ToolSecrets = {
   slug: 'heyreach',
   name: 'heyreach',
-  path: 'Groups/GTM/heyreach.tool',
+  path: 'Plugins/GTM/heyreach.tool',
   type: 'inline',
   setup: null,
   canWrite: false,
@@ -55,7 +63,7 @@ const GITHUB: ToolSecrets = {
 const DETAIL: ToolManualDetail = {
   slug: 'heyreach',
   name: 'heyreach',
-  path: 'Groups/GTM/heyreach.tool',
+  path: 'Plugins/GTM/heyreach.tool',
   type: 'inline',
   description: 'Runs LinkedIn outreach campaigns.',
   capabilities: [
@@ -115,6 +123,7 @@ beforeEach(() => {
   window.history.replaceState(null, '', '/skills-and-tools/tools/heyreach');
   secretsMock.listToolSecrets.mockReset().mockResolvedValue([GITHUB]);
   toolsMock.getToolDetail.mockReset().mockResolvedValue(DETAIL);
+  toolsMock.getMcpServer.mockClear();
   libraryMock.listSkills.mockReset().mockResolvedValue([]);
   libraryMock.getSkill.mockReset().mockResolvedValue({ allowedTools: [] });
 });
@@ -142,8 +151,8 @@ describe('ToolPage: frame', () => {
     expect(screen.queryByText(/Tool · /)).toBeNull();
   });
 
-  it("goes back to the tool's own group from the back link", async () => {
-    // Not the Library root: the reader opened this tool off its group page,
+  it("goes back to the tool's own plugin from the back link", async () => {
+    // Not the Library root: the reader opened this tool off its plugin page,
     // and "back" should land where the tool lives. Derived from the path, so
     // a deep link gets the same destination as a click.
     renderPage();
@@ -151,7 +160,7 @@ describe('ToolPage: frame', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '‹ GTM' }));
     await waitFor(() =>
-      expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools/groups/GTM'),
+      expect(screen.getByLabelText('pathname').textContent).toBe('/skills-and-tools/plugins/GTM'),
     );
   });
 
@@ -212,8 +221,8 @@ describe('ToolPage: capabilities', () => {
 describe('ToolPage: powers these skills', () => {
   it('links each matching skill at the reserved skill route', async () => {
     libraryMock.listSkills.mockResolvedValue([
-      { name: 'outreach', description: '', path: 'Groups/GTM/outreach' },
-      { name: 'roadmap', description: '', path: 'Groups/Product/roadmap' },
+      { name: 'outreach', description: '', path: 'Plugins/GTM/outreach' },
+      { name: 'roadmap', description: '', path: 'Plugins/Product/roadmap' },
     ]);
     libraryMock.getSkill.mockImplementation(async (name: string) =>
       name === 'outreach' ? { allowedTools: ['heyreach_add_leads'] } : { allowedTools: ['Bash'] },
@@ -278,11 +287,31 @@ describe('ToolPage: connection', () => {
   });
 });
 
+describe('ToolPage: server section', () => {
+  /**
+   * Only an mcp-type tool can have an mcp.json server pair — mounting the
+   * section for the others would send a `/server` GET whose 404 is guaranteed,
+   * once per page view.
+   */
+  it('never asks for a server pair on a non-mcp tool', async () => {
+    renderPage(); // the fixture is `type: 'inline'`
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    expect(toolsMock.getMcpServer).not.toHaveBeenCalled();
+  });
+
+  it('still asks on an mcp tool, where the pair can exist', async () => {
+    secretsMock.listToolSecrets.mockResolvedValue([{ ...GITHUB, type: 'mcp' }]);
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    await waitFor(() => expect(toolsMock.getMcpServer).toHaveBeenCalledWith('heyreach'));
+  });
+});
+
 describe('ToolPage: manage access', () => {
   it('offers none, to anyone, including an admin', async () => {
-    // Access is decided at the GROUP. A tool inherits its folder's rules, so an
-    // editor here would either duplicate the group's or quietly write a
-    // per-file override nobody looking at the group would ever see.
+    // Access is decided at the PLUGIN. A tool inherits its folder's rules, so an
+    // editor here would either duplicate the plugin's or quietly write a
+    // per-file override nobody looking at the plugin would ever see.
     renderPage({ isAdmin: true });
     await screen.findByRole('heading', { name: 'heyreach', level: 1 });
     expect(screen.queryByRole('button', { name: 'Manage access' })).toBeNull();

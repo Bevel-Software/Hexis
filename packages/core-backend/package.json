@@ -1,6 +1,6 @@
 {
   "name": "@bevel-software/platform-core-backend",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Open-source core backend of the Bevel platform: git-backed knowledge workspace, workflow (branches/change requests/locks/SSE), skills, tools, secrets vault, access control and the remote MCP surface.",
   "type": "module",
   "main": "./dist/index.js",
@@ -36,6 +36,7 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@bevel-software/platform-mcp-core": "workspace:*",
     "@bevel-software/platform-shared": "workspace:*",
     "@mastra/core": "1.35.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -44,7 +45,7 @@
     "@utcp/http": "^1.1.7",
     "@utcp/mcp": "^1.1.3",
     "@utcp/sdk": "^1.1.1",
-    "adm-zip": "^0.5.17",
+    "adm-zip": "^0.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.0",
     "drizzle-orm": "^0.45.2",
@@ -67,7 +68,7 @@
     "drizzle-kit": "^0.31.10",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0",
-    "vitest": "^2.1.9"
+    "vitest": "^3.2.6"
   },
   "license": "Apache-2.0",
   "repository": {

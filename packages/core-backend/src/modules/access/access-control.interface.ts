@@ -20,8 +20,8 @@
  *
  * Only a principal NAMED in a file (a direct user grant `Name <email>`, or a
  * group/role token) produces sources. A USER who merely RESOLVES to access via a
- * group they belong to, the built-in `everyone`, or admin-rescue is NOT a
- * per-target file entry and produces NO source (the group itself shows as its own
+ * plugin they belong to, the built-in `everyone`, or admin-rescue is NOT a
+ * per-target file entry and produces NO source (the plugin itself shows as its own
  * row instead).
  */
 export type GrantSource =
@@ -138,8 +138,8 @@ export interface IAccessControl {
 
   /**
    * Batched `canOwner` — one config load per call, same `owner:`-lists-only
-   * resolution (no admin rescue). Used by group enumeration to answer "which
-   * of these folders does the caller own?" without one model load per group.
+   * resolution (no admin rescue). Used by plugin enumeration to answer "which
+   * of these folders does the caller own?" without one model load per plugin.
    */
   canOwnerBatch(
     workspaceId: string,
@@ -281,8 +281,9 @@ export interface IAccessControl {
 
   /**
    * Enumerate the grantable principals known to the KB, for the share-dialog
-   * autocomplete. `groups` are the declared `roles.yaml` role display names
-   * (the built-in `everyone` is excluded — it isn't grantable from the UI).
+   * autocomplete. `plugins` are the built-in `everyone` role plus the declared
+   * `roles.yaml` role display names (`everyone` is surfaced so the UI can
+   * grant public read; the grant route gates it to the `read` verb only).
    * `people` are every email named in `roles.yaml` (name defaults to the local
    * part) unioned with every `Name <email>` grant in any `access.md` (named).
    * The login-only `users` table is unioned in by the caller — this method
@@ -290,7 +291,7 @@ export interface IAccessControl {
    */
   kbPrincipals(
     workspaceId: string,
-  ): Promise<{ groups: string[]; people: { name: string; email: string }[] }>;
+  ): Promise<{ plugins: string[]; people: { name: string; email: string }[] }>;
 
   /**
    * Reverse-lookup an email by its SHA-256 hash (per `hashEmail` semantics)

@@ -116,15 +116,15 @@ export function skillStatus(neededTools: ToolSecrets[]): AttentionStatus {
  * What the sidebar has selected.
  *
  * Note there is no 'skills' / 'integrations' member. The design does not split
- * the catalog by kind: a group owns its skills AND the tools those skills need,
- * so filtering to "just tools" would show a group's integrations detached from
+ * the catalog by kind: a plugin owns its skills AND the tools those skills need,
+ * so filtering to "just tools" would show a plugin's integrations detached from
  * the reason any of them are there. Kind is a property of a card, not a view.
  */
 export type LibraryFilter =
   | { kind: 'all' }
   | { kind: 'owned' }
-  | { kind: 'group'; group: string }
-  /** Owned by someone, in no group — the prototype calls these "yours alone". */
+  | { kind: 'group'; plugin: string }
+  /** Owned by someone, in no plugin — the prototype calls these "yours alone". */
   | { kind: 'ungrouped' };
 
 /**
@@ -150,8 +150,8 @@ export interface LibraryFilterable {
   name: string;
   description: string;
   owned: boolean;
-  /** Folder group from the item's KB path, or null when it sits in none. */
-  group: string | null;
+  /** Folder plugin from the item's KB path, or null when it sits in none. */
+  plugin: string | null;
 }
 
 /** Sidebar selection narrows; the query matches name/description within it. */
@@ -171,29 +171,29 @@ export function filterLibraryItems<T extends LibraryFilterable>(
       case 'owned':
         return item.owned;
       case 'group':
-        return item.group === filter.group;
+        return item.plugin === filter.plugin;
       case 'ungrouped':
-        return item.group === null;
+        return item.plugin === null;
     }
   });
 }
 
 /**
- * Group names present in the catalog, with how many items each holds.
+ * Plugin names present in the catalog, with how many items each holds.
  *
  * Sorted by name rather than by count so the sidebar does not reorder itself
- * when a group gains an item — a nav that moves under the pointer is worse
- * than one that buries the biggest group in the middle.
+ * when a plugin gains an item — a nav that moves under the pointer is worse
+ * than one that buries the biggest plugin in the middle.
  */
-export function groupCounts<T extends LibraryFilterable>(
+export function pluginCounts<T extends LibraryFilterable>(
   items: T[],
-): { group: string; count: number }[] {
+): { plugin: string; count: number }[] {
   const counts = new Map<string, number>();
   for (const item of items) {
-    if (item.group === null) continue;
-    counts.set(item.group, (counts.get(item.group) ?? 0) + 1);
+    if (item.plugin === null) continue;
+    counts.set(item.plugin, (counts.get(item.plugin) ?? 0) + 1);
   }
   return [...counts.entries()]
-    .map(([group, count]) => ({ group, count }))
-    .sort((a, b) => a.group.localeCompare(b.group));
+    .map(([plugin, count]) => ({ plugin, count }))
+    .sort((a, b) => a.plugin.localeCompare(b.plugin));
 }

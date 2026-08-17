@@ -5,7 +5,7 @@ import {
   configureBranchModel,
   validateBranchModel,
   PROTECTED_BRANCHES,
-  GROUPS_DIR,
+  PLUGINS_DIR,
 } from '@bevel-software/platform-shared';
 import { CoreConfig } from '../core-config.js';
 import { getDb, type Database } from '../modules/database/connection.js';
@@ -33,7 +33,8 @@ import { AccessControlService } from '../modules/access/access-control.service.j
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
-import { GroupIndexService, GroupProvisionService, JoinRequestsService } from '../modules/groups/index.js';
+import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
+import { PluginIndexService, PluginProvisionService, JoinRequestsService } from '../modules/plugins/index.js';
 import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
@@ -102,8 +103,9 @@ export interface CoreServices {
   skillService: SkillService;
   pendingSkillsService: PendingSkillsService;
   toolManualService: ToolManualService;
-  groupIndexService: GroupIndexService;
-  groupProvisionService: GroupProvisionService;
+  mcpServerEditService: McpServerEditService;
+  pluginIndexService: PluginIndexService;
+  pluginProvisionService: PluginProvisionService;
   joinRequestsService: JoinRequestsService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
@@ -260,15 +262,15 @@ export async function createCoreServices(
   const routineWritePolicy = new RoutineWritePolicyService();
   // Skills: discovered from the default-branch workspace only (global catalog).
   const skillService = new SkillService(workspaceService, accessControl, kbDirName);
-  // Tool manuals: user-authored `*.tool` files under `Groups/` in the default
+  // Tool manuals: user-authored `*.tool` files under `Plugins/` in the default
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
   const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName);
-  // Groups: the folders under `Groups/` that carry a
+  // Plugins: the folders under `Plugins/` that carry a
   // team's skills AND the tools they need. Enumerated for EVERY authenticated
-  // caller — a group they cannot read still exists for them, as a locked one —
+  // caller — a plugin they cannot read still exists for them, as a locked one —
   // with the counts read off the two catalogs above rather than a second scan.
-  const groupIndexService = new GroupIndexService(
+  const pluginIndexService = new PluginIndexService(
     workspaceService,
     accessControl,
     skillService,
@@ -384,16 +386,28 @@ export async function createCoreServices(
     workflowHooks,
   );
 
-  // Join requests: derived entirely from two copies of a group's `access.md`
+  // Join requests: derived entirely from two copies of a plugin's `access.md`
   // (the request's branch vs the default branch), so it holds no state — it
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
   const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
-  // Group provisioning — the one privileged door that brings `Groups/<name>/`
-  // folders into existence (named groups and personal folders alike). Commits
+  // Server-scoped MCP editing — the tool page's edit form. One server's truth
+  // spans a plugin's mcp.json AND plugin.json extensions block, and this is
+  // the ONE writer that rewrites both entries and commits them together (see
+  // McpServerEditService).
+  const mcpServerEditService = new McpServerEditService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    toolManualService,
+    kbDirName,
+  );
+
+  // Plugin provisioning — the one privileged door that brings `Plugins/<name>/`
+  // folders into existence (named plugins and personal folders alike). Commits
   // INLINE through the same pipeline the pending-commits worker uses, so the
   // folder's rules are at HEAD before the endpoint answers.
-  const groupProvisionService = new GroupProvisionService(
+  const pluginProvisionService = new PluginProvisionService(
     workspaceService,
     workflowService,
     accessControl,
@@ -422,16 +436,16 @@ export async function createCoreServices(
   // caches are independent, so the split preserves behavior.)
   fileChangeNotifier.onFilesChanged(({ branch, paths }) => {
     if (branch !== DEFAULT_BRANCH) return;
-    // Skills, tools and the group index all live under `Groups/`, so one
+    // Skills, tools and the plugin index all live under `Plugins/`, so one
     // touch check drives all three caches. An access grant lands as a
-    // default-branch change to `Groups/<group>/access.md`, so this is also
-    // what makes a newly-granted group unlock within one round-trip instead
+    // default-branch change to `Plugins/<plugin>/access.md`, so this is also
+    // what makes a newly-granted plugin unlock within one round-trip instead
     // of one TTL.
-    const touched = paths.some((p) => p.startsWith(`${kbDirName}/${GROUPS_DIR}/`));
+    const touched = paths.some((p) => p.startsWith(`${kbDirName}/${PLUGINS_DIR}/`));
     if (touched) {
       toolManualService.invalidate();
       skillService.invalidate();
-      groupIndexService.invalidate();
+      pluginIndexService.invalidate();
     }
   });
 
@@ -448,7 +462,7 @@ export async function createCoreServices(
     if (!('branch' in event) || event.branch !== DEFAULT_BRANCH) return;
     toolManualService.invalidate();
     skillService.invalidate();
-    groupIndexService.invalidate();
+    pluginIndexService.invalidate();
   });
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the
@@ -567,7 +581,12 @@ export async function createCoreServices(
   });
   // RFC 9728 pointer carried on every MCP 401 challenge so OAuth-capable
   // clients discover the AS. Single source of truth for the resource id.
+  // Userinfo is stripped for the same reason the server's own copy strips it
+  // (see create-core-server.ts): the pointer rides an unauthenticated 401
+  // challenge, and a `user:pass@` from PUBLIC_BACKEND_URL must not ride along.
   const mcpResourceUrl = new URL('/api/mcp', config.publicBackendUrl);
+  mcpResourceUrl.username = '';
+  mcpResourceUrl.password = '';
   const mcpResourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(mcpResourceUrl);
   const mcpAuthMiddleware = createMcpAuthMiddleware(
     authService,
@@ -622,10 +641,14 @@ export async function createCoreServices(
   );
   const pendingCommitsWorker = new PendingCommitsWorker({
     service: pendingCommitsService,
-    workflow: {
-      runPendingCommit: (workspaceId, branch, path, user) =>
-        workflowService.runPendingCommit(workspaceId, branch, path, user),
-    },
+    // The service IS the driver — passed directly rather than wrapped in a
+    // forwarding lambda. A lambda that names its parameters silently drops any
+    // the interface later adds (TypeScript accepts a shorter parameter list),
+    // and that is not hypothetical: the wrapper here took four arguments and
+    // swallowed the `opts` carrying `skipValidation`, so the burst-validation
+    // skip was a no-op in production while every unit test — which stubs this
+    // port — passed. No wrapper, no gap to fall through.
+    workflow: workflowService,
     // Both escalation sinks come through CorePorts: the recovery agent and the
     // notice sink are enterprise-owned (background-agent factory / feedback
     // dashboard); core defaults skip recovery and log to stderr.
@@ -671,6 +694,7 @@ export async function createCoreServices(
   return {
     config,
     db,
+    mcpServerEditService,
     workspaceService,
     kbSeedService,
     settings,
@@ -683,8 +707,8 @@ export async function createCoreServices(
     skillService,
     pendingSkillsService,
     toolManualService,
-    groupIndexService,
-    groupProvisionService,
+    pluginIndexService,
+    pluginProvisionService,
     joinRequestsService,
     authService,
     authMiddleware,

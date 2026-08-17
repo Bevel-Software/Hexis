@@ -14,7 +14,7 @@ import {
  * (proto:3012-3025).
  *
  * Everyone sees all three, and they do the same thing for everyone. That is
- * the whole point of the component existing: the group page used to render
+ * the whole point of the component existing: the plugin page used to render
  * `canWrite ? "Add skills or tools" : "Propose a skill or tool"` — the same
  * button, in the same spot, opening a different flow with different words
  * depending on who pressed it. In the prototype's words, "the person who
@@ -33,7 +33,7 @@ import {
 export interface PageActionsProps {
   /**
    * Opens Manage access. Omitted when there is no folder to manage — the
-   * personal page is the live case: its items are the ones in NO group, so
+   * personal page is the live case: its items are the ones in NO plugin, so
    * there is no `access.md` behind them and a Share button would promise an
    * editor with nothing to edit.
    */
@@ -139,7 +139,7 @@ export function PageActions({
                 >
                   <span className="flex items-center gap-2.5">
                     <Trash2 size={14} />
-                    Delete group
+                    Delete plugin
                   </span>
                 </MenuItem>
               )}

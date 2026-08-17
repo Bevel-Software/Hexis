@@ -42,7 +42,7 @@ export interface ApplyChangeRequest {
  * 1. **Approving is not merging.** The merge gate requires a recorded per-file
  *    approval from an eligible approver for every markdown file that has
  *    owners — which is precisely the case the skill page is built for, since a
- *    SKILL.md inside a group folder inherits that folder's `access.md`. Going
+ *    SKILL.md inside a plugin folder inherits that folder's `access.md`. Going
  *    straight to merge is refused with "Waiting on approval for …". So the
  *    owner's click records the approvals FIRST, then merges. Files the caller
  *    is not eligible for are skipped rather than treated as failures: the gate

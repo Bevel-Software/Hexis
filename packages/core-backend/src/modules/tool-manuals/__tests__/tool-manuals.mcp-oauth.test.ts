@@ -46,7 +46,7 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'tools-oauth-'));
-    const toolsDir = join(root, wsId, KB_DIR, 'Groups');
+    const toolsDir = join(root, wsId, KB_DIR, 'Plugins');
     await mkdir(toolsDir, { recursive: true });
     await writeFile(join(toolsDir, 'notion.tool'), BARE_MCP_TOOL);
     await writeFile(join(toolsDir, 'jira.tool'), KEYED_MCP_TOOL);
@@ -109,7 +109,7 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
   });
 
   test('referenced-but-undeclared ${VAR}s are auto-surfaced as admin keys (any tool type)', async () => {
-    const toolsDir = join(root, wsId, KB_DIR, 'Groups');
+    const toolsDir = join(root, wsId, KB_DIR, 'Plugins');
     await writeFile(
       join(toolsDir, 'billing.tool'),
       JSON.stringify({

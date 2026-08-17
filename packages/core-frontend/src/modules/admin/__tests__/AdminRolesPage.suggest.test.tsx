@@ -55,7 +55,7 @@ beforeEach(() => {
   vi.mocked(suggestPrincipals)
     .mockReset()
     .mockResolvedValue({
-      groups: [],
+      plugins: [],
       people: [{ name: 'Alice', email: 'alice@example.com' }],
       peopleWithheld: false,
     });

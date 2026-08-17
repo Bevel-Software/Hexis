@@ -15,13 +15,13 @@ import { WELCOME_PATH } from '../paths';
 import { resetOnboardingForTests } from '../state/onboarding';
 
 const serviceMocks = vi.hoisted(() => ({
-  createGroup: vi.fn(),
+  createPlugin: vi.fn(),
   createEmptySkill: vi.fn(),
 }));
 
-vi.mock('../../library/services/groups.api', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../library/services/groups.api')>();
-  return { ...actual, createGroup: serviceMocks.createGroup };
+vi.mock('../../library/services/plugins.api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../library/services/plugins.api')>();
+  return { ...actual, createPlugin: serviceMocks.createPlugin };
 });
 
 vi.mock('../../library/services/library.api', async (importOriginal) => {
@@ -42,10 +42,10 @@ function library(over: Partial<LibraryContextValue> = {}): LibraryContextValue {
     myCrNumbers: new Set(),
     reload: vi.fn(),
     items: [],
-    groupSummaries: [],
-    groupsLoading: false,
-    groupsError: null,
-    reloadGroups: vi.fn(),
+    pluginSummaries: [],
+    pluginsLoading: false,
+    pluginsError: null,
+    reloadPlugins: vi.fn(),
     ...over,
   };
 }
@@ -117,7 +117,7 @@ function welcomeUi(options: WelcomeOptions = {}) {
         <>
           <Routes>
             <Route path={WELCOME_PATH} element={<WelcomeRoute />} />
-            <Route path="/skills-and-tools/groups/:group" element={<div>group page</div>} />
+            <Route path="/skills-and-tools/plugins/:plugin" element={<div>plugin page</div>} />
             <Route path="/skills-and-tools/skills/:skill" element={<div>skill page</div>} />
           </Routes>
           <LocationProbe />
@@ -135,12 +135,12 @@ function renderWelcome(options: WelcomeOptions = {}) {
 beforeEach(() => {
   resetOnboardingForTests();
   setSidebarCollapsed(false, true);
-  serviceMocks.createGroup.mockReset();
-  serviceMocks.createGroup.mockResolvedValue({ folder: 'Design' });
+  serviceMocks.createPlugin.mockReset();
+  serviceMocks.createPlugin.mockResolvedValue({ folder: 'Design' });
   serviceMocks.createEmptySkill.mockReset();
   serviceMocks.createEmptySkill.mockResolvedValue({
-    repoRelativePath: 'Groups/personal-u1/weekly-report/SKILL.md',
-    workspacePath: 'knowledge-base/Groups/personal-u1/weekly-report/SKILL.md',
+    repoRelativePath: 'Plugins/personal-u1/weekly-report/SKILL.md',
+    workspacePath: 'knowledge-base/Plugins/personal-u1/weekly-report/SKILL.md',
     branch: 'dev',
     direct: true,
   });
@@ -152,7 +152,7 @@ describe('creator welcome routing', () => {
 
     expect(screen.getByRole('heading', { name: 'Welcome, Juan' })).toBeInTheDocument();
     expect(screen.getByText(/Build the shared library/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Create a group' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create a plugin' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Create a skill' })).toBeInTheDocument();
     expect(screen.queryByRole('radiogroup', { name: 'Your agent' })).toBeNull();
   });
@@ -161,7 +161,7 @@ describe('creator welcome routing', () => {
     renderWelcome({ admin: { isAdmin: false } });
 
     expect(screen.getByRole('radiogroup', { name: 'Your agent' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Create a group' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Create a plugin' })).toBeNull();
   });
 
   it('keeps the external-agent welcome when the admin already has content', () => {
@@ -175,7 +175,7 @@ describe('creator welcome routing', () => {
             description: 'Keeps the roadmap current.',
             owned: true,
             status: { state: 'ok', text: 'Ready' },
-            group: null,
+            plugin: null,
             path: 'Skills/roadmap',
           },
         ],
@@ -183,17 +183,17 @@ describe('creator welcome routing', () => {
     });
 
     expect(screen.getByRole('radiogroup', { name: 'Your agent' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Create a group' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Create a plugin' })).toBeNull();
   });
 
-  it('does not mistake loading or failed group data for an empty library', () => {
+  it('does not mistake loading or failed plugin data for an empty library', () => {
     // While the ADMIN verdict is unknown the hold says nothing about a
     // library — the reader may be headed for the agent welcome, where theirs
     // is beside the point.
     const { rerender } = renderWelcome({ admin: { isAdminLoading: true } });
     expect(screen.getByText('One moment…')).toBeInTheDocument();
 
-    rerender(welcomeUi({ library: { groupsError: "Couldn't load groups." } }));
+    rerender(welcomeUi({ library: { pluginsError: "Couldn't load plugins." } }));
 
     expect(screen.getByRole('radiogroup', { name: 'Your agent' })).toBeInTheDocument();
   });
@@ -222,7 +222,7 @@ describe('creator welcome routing', () => {
     renderWelcome({ greeted: false });
 
     expect(screen.getByRole('radiogroup', { name: 'Your agent' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Create a group' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Create a plugin' })).toBeNull();
   });
 
   it('collapses the sidebar before the creator welcome is shown', () => {
@@ -235,20 +235,20 @@ describe('creator welcome routing', () => {
 });
 
 describe('creator welcome actions', () => {
-  it('creates a group through the shared dialog and refreshes both indexes', async () => {
+  it('creates a plugin through the shared dialog and refreshes both indexes', async () => {
     const data = library();
     const user = userEvent.setup();
     renderWelcome({ library: data });
 
-    await user.click(screen.getByRole('button', { name: 'Create a group' }));
-    await user.type(screen.getByRole('textbox', { name: 'Group name' }), 'Design');
-    await user.click(screen.getByRole('button', { name: 'Create group' }));
+    await user.click(screen.getByRole('button', { name: 'Create a plugin' }));
+    await user.type(screen.getByRole('textbox', { name: 'Plugin name' }), 'Design');
+    await user.click(screen.getByRole('button', { name: 'Create plugin' }));
 
-    await waitFor(() => expect(serviceMocks.createGroup).toHaveBeenCalledWith('Design'));
+    await waitFor(() => expect(serviceMocks.createPlugin).toHaveBeenCalledWith('Design'));
     expect(data.reload).toHaveBeenCalledOnce();
-    expect(data.reloadGroups).toHaveBeenCalledOnce();
+    expect(data.reloadPlugins).toHaveBeenCalledOnce();
     expect(screen.getByLabelText('pathname')).toHaveTextContent(
-      '/skills-and-tools/groups/Design',
+      '/skills-and-tools/plugins/Design',
     );
   });
 
@@ -276,7 +276,7 @@ describe('creator welcome actions', () => {
     // owns this navigation, so the welcome page inherits whatever the rest of
     // the Library does, which is the point of routing through it.
     expect(screen.getByLabelText('pathname')).toHaveTextContent(
-      '/workspace/target-company-state/knowledge-base/Groups/personal-u1/weekly-report/SKILL.md',
+      '/workspace/target-company-state/knowledge-base/Plugins/personal-u1/weekly-report/SKILL.md',
     );
   });
 
@@ -290,8 +290,8 @@ describe('creator welcome actions', () => {
         new Promise((resolve) => {
           release = () =>
             resolve({
-              repoRelativePath: 'Groups/personal-u1/weekly-report/SKILL.md',
-              workspacePath: 'knowledge-base/Groups/personal-u1/weekly-report/SKILL.md',
+              repoRelativePath: 'Plugins/personal-u1/weekly-report/SKILL.md',
+              workspacePath: 'knowledge-base/Plugins/personal-u1/weekly-report/SKILL.md',
               branch: 'dev',
               direct: true,
             });
@@ -311,7 +311,7 @@ describe('creator welcome actions', () => {
     release();
     await waitFor(() =>
       expect(screen.getByLabelText('pathname')).toHaveTextContent(
-        '/workspace/target-company-state/knowledge-base/Groups/personal-u1/weekly-report/SKILL.md',
+        '/workspace/target-company-state/knowledge-base/Plugins/personal-u1/weekly-report/SKILL.md',
       ),
     );
   });

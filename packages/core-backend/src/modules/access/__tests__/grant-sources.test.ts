@@ -109,19 +109,19 @@ describe('AccessControlService.grantSources', () => {
     expect(src.write).toEqual([{ kind: 'ancestor', path: 'Knowledge/access.md' }]);
   });
 
-  it('a USER who holds a verb only via a group they belong to has NO source (the group row carries it)', async () => {
+  it('a USER who holds a verb only via a plugin they belong to has NO source (the plugin row carries it)', async () => {
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Engineer\n---\n');
-    // Ali is an Engineer (per roles.yaml) — his write flows through the GROUP, not
+    // Ali is an Engineer (per roles.yaml) — his write flows through the PLUGIN, not
     // a per-user file entry. He isn't named in any file, so there's nothing to
-    // remove for HIM here; the Engineering group is the removable principal.
+    // remove for HIM here; the Engineering plugin is the removable principal.
     const src = await svc.grantSources(workspaceId, 'folder', 'Knowledge', ALI);
     expect(src.write).toBeUndefined();
     expect(src).toEqual({}); // no verb resolves to a per-user file entry
   });
 
-  it('the GROUP principal itself resolves to its own file scope (direct/ancestor)', async () => {
+  it('the PLUGIN principal itself resolves to its own file scope (direct/ancestor)', async () => {
     // The same Engineer grant, asked about as the ROLE principal, IS a removable
-    // file entry — the group is named directly on Knowledge/access.md.
+    // file entry — the plugin is named directly on Knowledge/access.md.
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
     await writeFile(repo, 'Knowledge/access.md', '---\nwrite:\n  - Engineer\n---\n');
     const src = await svc.grantSources(workspaceId, 'folder', 'Knowledge', {
@@ -150,20 +150,20 @@ describe('AccessControlService.grantSources', () => {
     expect(src).toEqual({});
   });
 
-  it("a folder-target admin whose access is via the Admin GROUP has NO per-user source", async () => {
-    // Razvan's effective write comes from the `Admin` group grant, not a per-user
+  it("a folder-target admin whose access is via the Admin PLUGIN has NO per-user source", async () => {
+    // Razvan's effective write comes from the `Admin` plugin grant, not a per-user
     // entry — so as a USER principal he has no removable source here (the Admin
-    // group row carries it, exactly like any other group).
+    // plugin row carries it, exactly like any other plugin).
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
     const src = await svc.grantSources(workspaceId, 'folder', 'Knowledge', RAZVAN);
     expect(src.write).toBeUndefined();
     expect(src).toEqual({});
   });
 
-  it("a user named DIRECTLY in a file keeps a source even if they're also in a group", async () => {
-    // Razvan is in the Admin group AND named inline on Knowledge — the inline
+  it("a user named DIRECTLY in a file keeps a source even if they're also in a plugin", async () => {
+    // Razvan is in the Admin plugin AND named inline on Knowledge — the inline
     // entry is a removable file grant, so his source is direct (tier-1 email
-    // beats the group at the same scope).
+    // beats the plugin at the same scope).
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
     await writeFile(
       repo,
@@ -177,7 +177,7 @@ describe('AccessControlService.grantSources', () => {
   it('a role principal is matched by its own scope entry, not a role indirection', async () => {
     await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
     await writeFile(repo, 'Knowledge/access.md', '---\nwrite:\n  - Engineer\n---\n');
-    // The Engineer GROUP itself is granted on Knowledge — for the role principal that's a direct grant.
+    // The Engineer PLUGIN itself is granted on Knowledge — for the role principal that's a direct grant.
     const src = await svc.grantSources(workspaceId, 'folder', 'Knowledge', {
       kind: 'role',
       role: 'Engineer',

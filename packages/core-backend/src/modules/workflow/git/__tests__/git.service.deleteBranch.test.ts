@@ -134,7 +134,7 @@ function fakeAccessControl(adminEmails: string[]): IAccessControl {
     canOwner: async () => notImpl(),
     invalidate: () => {},
     findEmailByHash: async () => null,
-    kbPrincipals: async () => ({ groups: [], people: [] }),
+    kbPrincipals: async () => ({ plugins: [], people: [] }),
     validateRolesYaml: () => ({ ok: true }),
     referencesToRole: async () => [],
     canWriteAtRef: async () => null,

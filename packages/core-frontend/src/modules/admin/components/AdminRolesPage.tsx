@@ -371,7 +371,7 @@ function RoleCard({
   const [renamePending, setRenamePending] = useState(false);
 
   // Add-member input + people autocomplete (same suggest source as Manage
-  // Access, scoped to people/emails — a role's members are emails, not groups).
+  // Access, scoped to people/emails — a role's members are emails, not plugins).
   const [memberEmail, setMemberEmail] = useState('');
   const [suggestions, setSuggestions] = useState<{ name: string; email: string }[]>([]);
   const [showSuggest, setShowSuggest] = useState(false);

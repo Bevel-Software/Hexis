@@ -29,6 +29,23 @@ interface MarkdownDiffViewerProps {
   onOpenFile?: (href: string) => void;
   /** Same contract as {@link onOpenFile}, for bare node-id links. */
   onOpenNodeId?: (id: string) => void;
+  /**
+   * Whether this view owns a scroller and its own padding. `true` (the
+   * default) keeps the self-contained box the change-request dialog and the
+   * file-history panel rely on.
+   *
+   * Pass `false` when the PARENT is the scroller. The review panel is: a
+   * centred column whose CHILD scrolls leaves the gutters either side outside
+   * the scroll hit area, so the wheel does nothing over them. Making the
+   * panel-width parent scroll and putting the measure on an inner container
+   * fixes that — but only if this stops owning `overflow-auto`, since two
+   * nested `h-full overflow-auto` boxes leave the outer one unable to scroll
+   * and stack both paddings.
+   *
+   * Mirrors `KbMarkdownView.scroll`, for the same reason and with the same
+   * default.
+   */
+  scroll?: boolean;
 }
 
 /**
@@ -50,7 +67,7 @@ interface MarkdownDiffViewerProps {
  * routes, which sit outside those providers entirely. A `useNavigate()` in
  * here would be a runtime crash in all three.
  */
-export function MarkdownDiffViewer({ payload, onOpenFile, onOpenNodeId }: MarkdownDiffViewerProps) {
+export function MarkdownDiffViewer({ payload, onOpenFile, onOpenNodeId, scroll = true }: MarkdownDiffViewerProps) {
   const data = useMemo(() => {
     const baseline = payload.baseline ?? '';
     const current = payload.current ?? '';
@@ -96,7 +113,7 @@ export function MarkdownDiffViewer({ payload, onOpenFile, onOpenNodeId }: Markdo
   }
 
   return (
-    <div className="h-full overflow-auto bg-white px-4 py-3">
+    <div className={scroll ? 'h-full overflow-auto bg-white px-4 py-3' : 'min-w-0'}>
       {data.frontmatterChanged && (
         <FrontmatterDiffPanel
           oldData={data.oldFrontmatter}
@@ -225,7 +242,7 @@ function FrontmatterDiffPanel({
 // ── body diff helpers ───────────────────────────────────────────────────
 
 /**
- * Group consecutive same/changed runs into display blocks: runs of "same"
+ * Plugin consecutive same/changed runs into display blocks: runs of "same"
  * lines, and "conflict" blocks bundling consecutive removed+added runs
  * together — the same shape git uses for merge conflicts.
  */

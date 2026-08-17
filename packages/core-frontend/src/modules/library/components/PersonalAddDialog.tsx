@@ -16,15 +16,15 @@ export interface PersonalAddDialogProps {
  * "Add a skill or tool" for a person's own list — the prototype's
  * `personalAddModal` (proto:3366-3369).
  *
- * The same role split as a group's add flow. Everyone can copy a prompt for
+ * The same role split as a plugin's add flow. Everyone can copy a prompt for
  * their agent. Admins can also start an empty skill directly; non-admins do
  * not get a placeholder they would have to finish in a separate follow-up.
  *
  * This page used to have no first door at all. The reason was real but narrow:
- * the group dialog's first half was a LINK into the destination folder, and
+ * the plugin dialog's first half was a LINK into the destination folder, and
  * this page is defined as the items in no folder, so there was nothing to open.
  * That objection died with the link: a personal skill has a perfectly definite
- * home — the caller's own `Groups/personal-<id>/` folder, which
+ * home — the caller's own `Plugins/personal-<id>/` folder, which
  * `createEmptySkill` ensures through the provisioning endpoint before the
  * first write. The folder's seeded access.md names you as its owner, so the
  * write that follows passes the ordinary gate on its own merits — no
@@ -33,7 +33,7 @@ export interface PersonalAddDialogProps {
 export function PersonalAddDialog({ name, existingSkills, onClose }: PersonalAddDialogProps) {
   const { isAdmin } = useAdmin();
   const toast = useLibraryToast();
-  const prompt = `Help me build a new skill or tool at Bevel. Keep it to myself for now. It goes in my own list, not a group.`;
+  const prompt = `Help me build a new skill or tool at Bevel. Keep it to myself for now. It goes in my own list, not a plugin.`;
 
   async function copyPrompt() {
     const copied = await copyToClipboard(prompt);
@@ -57,7 +57,7 @@ export function PersonalAddDialog({ name, existingSkills, onClose }: PersonalAdd
       }
     >
       <p className="text-ui text-ink-muted">
-        {`It lands in ${name}. Yours alone until you add it to a group.`}
+        {`It lands in ${name}. Yours alone until you add it to a plugin.`}
       </p>
 
       {isAdmin && (

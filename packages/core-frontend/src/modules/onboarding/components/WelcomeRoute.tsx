@@ -32,7 +32,7 @@ export function WelcomeRoute() {
   // reason they came. The library can be built after the link is kept.
   if (!greeting || returnTo || (!isAdminLoading && !isAdmin)) return <WelcomePage />;
 
-  if (isAdminLoading || data.loading || data.groupsLoading) {
+  if (isAdminLoading || data.loading || data.pluginsLoading) {
     // Two phases, two truths. While the ADMIN verdict is unknown the reader
     // may be headed for the agent welcome, where their library is beside the
     // point — so the hold says nothing about one. Once the verdict says
@@ -49,9 +49,9 @@ export function WelcomeRoute() {
 
   const libraryIsEmpty =
     !data.error &&
-    !data.groupsError &&
+    !data.pluginsError &&
     data.items.length === 0 &&
-    data.groupSummaries.length === 0;
+    data.pluginSummaries.length === 0;
 
   return libraryIsEmpty ? <CreatorWelcomePage /> : <WelcomePage />;
 }
