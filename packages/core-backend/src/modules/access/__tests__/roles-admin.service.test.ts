@@ -160,7 +160,7 @@ describe('RolesAdminService', () => {
     access = new AccessControlService(ws, KB);
     workflow = stubWorkflow();
     bus = stubEventBus();
-    svc = new RolesAdminService(ws, workflow.svc, access, KB, DEFAULT_BRANCH, bus.bus);
+    svc = new RolesAdminService(ws, workflow.svc, access, KB, () => DEFAULT_BRANCH, bus.bus);
   });
 
   afterEach(async () => {
@@ -172,6 +172,18 @@ describe('RolesAdminService', () => {
     expect(roster.map((r) => r.canonical)).toEqual(['admin', 'sales']);
     expect(roster.find((r) => r.canonical === 'admin')!.isAdmin).toBe(true);
     expect(roster.find((r) => r.canonical === 'sales')!.members).toEqual(['felix@example.com']);
+  });
+
+  it('resolves the default branch per call, not at construction', async () => {
+    // The deployment shape this guards: a service built during boot, before
+    // `configureBranchModel()` has applied the branch model, saw an empty
+    // `DEFAULT_BRANCH` and froze it — every roles route then failed branch
+    // validation with `Invalid branch name "": empty name` until a restart.
+    let branch = '';
+    const late = new RolesAdminService(ws, workflow.svc, access, KB, () => branch, bus.bus);
+    branch = DEFAULT_BRANCH;
+    const roster = await late.getRoster();
+    expect(roster.map((r) => r.canonical)).toEqual(['admin', 'sales']);
   });
 
   it('getHealth reports ok for a valid file and corrupted for a broken one', async () => {

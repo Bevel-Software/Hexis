@@ -21,7 +21,7 @@ import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
 import { registerSkillsTools, createSkillsRoutes } from '../modules/skills/index.js';
-import { createGroupsRoutes } from '../modules/groups/index.js';
+import { createPluginsRoutes } from '../modules/plugins/index.js';
 import type { SessionOntologyGate } from '../modules/workspace/session-ontology.gate.js';
 import {
   createSecretsVaultRoutes,
@@ -30,7 +30,7 @@ import {
 import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
-import { DEFAULT_BRANCH, PROTECTED_BRANCHES } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PROTECTED_BRANCHES, type AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -151,6 +151,30 @@ export async function createCoreServer(
   });
 
   /**
+   * This deployment's MCP endpoint, derived ONCE.
+   *
+   * Two consumers must agree on it: `/api/config` below, which is where the
+   * frontend learns what address to show people, and the OAuth
+   * `resourceServerUrl` further down, which is the resource identifier the
+   * protected-resource metadata publishes and therefore the one that decides
+   * whether a connection actually works.
+   *
+   * A constant rather than the same expression written twice. The frontend
+   * carried the two-places version of this bug for a long time — six inline
+   * sites each rebuilding the address, held together by a docstring asserting
+   * they could not diverge — and a comment is not a mechanism.
+   *
+   * Userinfo is STRIPPED: a `PUBLIC_BACKEND_URL` spelled with `user:pass@`
+   * (a basic-auth proxy in front of the deployment, say) would otherwise be
+   * republished verbatim by the unauthenticated `/api/config` below — a
+   * credential handed to any caller. The address is ours to publish; the
+   * credential never was.
+   */
+  const mcpResourceUrl = new URL('/api/mcp', core.config.publicBackendUrl);
+  mcpResourceUrl.username = '';
+  mcpResourceUrl.password = '';
+
+  /**
    * The handful of facts the browser needs BEFORE it can render anything, and
    * therefore before it can authenticate: the branch model.
    *
@@ -174,8 +198,38 @@ export async function createCoreServer(
       // instead of failing at them. Discloses nothing: the demo says the
       // same thing to every visitor in its own copy.
       publicDemo: core.config.publicDemo,
+      /**
+       * The same value the OAuth metadata publishes (see `mcpResourceUrl`).
+       *
+       * The frontend used to build this from `window.location.origin`, which
+       * is the browser's idea of our address rather than ours. The two agree
+       * on a simple deployment and disagree behind a proxy, on a second
+       * domain, or on an internal hostname — and the one that decides whether
+       * a connection works is this one.
+       *
+       * That was survivable while every surface was copy-paste: a human sees
+       * the host before pasting it. It stops being survivable the moment we
+       * hand the URL to a third party (a connector install link), where
+       * nobody reads it and the failure surfaces inside someone else's UI.
+       */
+      mcpUrl: mcpResourceUrl.toString(),
     });
   });
+
+  // Close change requests whose source branch has been deleted. Not awaited:
+  // it fetches from origin, and a slow or unreachable remote must not hold up
+  // the server — nothing downstream depends on the result, and the requests it
+  // closes have been unusable since the branch went away, so landing a few
+  // seconds into uptime is soon enough. Errors are swallowed inside the sweep,
+  // which fails safe by closing nothing.
+  void core.workflowService
+    .closeChangeRequestsWithDeletedBranches()
+    .then((n) => {
+      if (n > 0) {
+        console.log(`[cr] closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
+      }
+    })
+    .catch((err) => console.warn('[cr] deleted-branch sweep failed:', err));
 
   // Overlay boot-time side effects (startup reconciles, periodic sweeps).
   await ext.onBoot?.(core);
@@ -214,7 +268,7 @@ export async function createCoreServer(
   app.use(mcpAuthRouter({
     provider: core.mcpOAuthProvider,
     issuerUrl: new URL(core.config.publicBackendUrl),
-    resourceServerUrl: new URL('/api/mcp', core.config.publicBackendUrl),
+    resourceServerUrl: mcpResourceUrl,
     scopesSupported: ['mcp'],
     resourceName: 'Bevel MCP',
   }));
@@ -289,6 +343,7 @@ export async function createCoreServer(
     core.toolManualService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
+    { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName },
   ));
   app.use('/api', toolsRouter);
 
@@ -344,17 +399,17 @@ export async function createCoreServer(
     core.authMiddleware,
     createSkillsRoutes(core.skillService, core.pendingSkillsService),
   );
-  // Group enumeration + join requests. Browser-only (JWT), and fail-closed
-  // like every other read surface: groups the caller cannot access (member,
+  // Plugin enumeration + join requests. Browser-only (JWT), and fail-closed
+  // like every other read surface: plugins the caller cannot access (member,
   // manager, or discoverable via the access.md file's own read grant) are
   // absent from the list. A join request is a plain change request.
-  app.use('/api', core.authMiddleware, createGroupsRoutes(
-    core.groupIndexService,
+  app.use('/api', core.authMiddleware, createPluginsRoutes(
+    core.pluginIndexService,
     core.accessControl,
     core.workflowService,
     core.workspaceService,
     core.joinRequestsService,
-    core.groupProvisionService,
+    core.pluginProvisionService,
     core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
     core.config.publicDemo,
@@ -373,7 +428,13 @@ export async function createCoreServer(
   // workspace — it has to work on a deployment that has no knowledge base yet,
   // which is the whole reason it exists.
   app.use('/api', core.authMiddleware, createSetupRoutes(core.settings, core.adminAccess));
-  app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService));
+  app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
+    service: core.mcpServerEditService,
+    getUser: async (userId) => {
+      const u = await core.authService.getUserById(userId);
+      return u ? ({ id: u.id, email: u.email, name: u.name } as AuthUser) : undefined;
+    },
+  }));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe
   // the pending authorization and, on Finish, to mint the one-time code. The

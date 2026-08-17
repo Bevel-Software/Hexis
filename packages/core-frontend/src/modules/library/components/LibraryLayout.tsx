@@ -4,15 +4,15 @@ import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { useAuth } from '../../auth/state/auth.context';
 import { attentionOf, useLibrary } from '../state/library-data';
-import { personalGroupName } from '../utils/personal-group';
+import { personalPluginName } from '../utils/personal-plugin';
 import {
-  isGroupsIndexPath,
+  isPluginsIndexPath,
   libraryFilterForPath,
-  pathForGroupsIndex,
+  pathForPluginsIndex,
   pathForLibraryFilter,
 } from '../routes/library-paths';
-import { groupCounts, type LibraryFilter } from '../utils/status';
-import { primaryFolderOf } from '../utils/group-summary';
+import { pluginCounts, type LibraryFilter } from '../utils/status';
+import { primaryFolderOf } from '../utils/plugin-summary';
 import { LINK_COPIED_TOAST, LINK_COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 import { useLibraryToast } from '../state/toast.context';
 import { useSidebar } from '../../layout/state/sidebar';
@@ -20,16 +20,16 @@ import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { ConnectAgentPill } from '../../onboarding/components/ConnectAgentPill';
-import { GroupsSidebar, type SidebarContextTarget } from './GroupsSidebar';
-import { GroupsSidebarMenu } from './GroupsSidebarMenu';
-import { AddToGroupDialog } from './AddToGroupDialog';
-import { DeleteGroupDialog } from './DeleteGroupDialog';
-import { NewGroupDialog } from './NewGroupDialog';
+import { PluginsSidebar, type SidebarContextTarget } from './PluginsSidebar';
+import { PluginsSidebarMenu } from './PluginsSidebarMenu';
+import { AddToPluginDialog } from './AddToPluginDialog';
+import { DeletePluginDialog } from './DeletePluginDialog';
+import { NewPluginDialog } from './NewPluginDialog';
 import { PublicDemoDialog } from './PublicDemoDialog';
 import { isPublicDemo } from '../../../core/bootstrap';
 
 /**
- * The shell every Library page renders inside: the group nav on the left, the
+ * The shell every Library page renders inside: the plugin nav on the left, the
  * page in the scrolling column on the right.
  *
  * It is also the ONE place the URL and the sidebar meet — the path becomes a
@@ -38,16 +38,16 @@ import { isPublicDemo } from '../../../core/bootstrap';
  * can take its filter as a plain prop and the sidebar can hold no state.
  */
 export function LibraryLayout() {
-  const { items, groupSummaries, reload, reloadGroups } = useLibrary();
+  const { items, pluginSummaries, reload, reloadPlugins } = useLibrary();
   const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuth();
   const { kbDirName } = useWorkspace();
   const toast = useLibraryToast();
-  const [newGroupOpen, setNewGroupOpen] = useState(false);
+  const [newPluginOpen, setNewPluginOpen] = useState(false);
   /**
    * The sidebar's right-click menu, and the two sheets it can open. All three
-   * live HERE rather than in `GroupsSidebar` because the verbs need the group
+   * live HERE rather than in `PluginsSidebar` because the verbs need the plugin
    * summaries and the workspace's KB dir — the sidebar is handed a list of
    * names and counts and knows neither. The sidebar reports the click; this
    * decides what is true about what was clicked.
@@ -56,7 +56,7 @@ export function LibraryLayout() {
   /**
    * Captured whole at pick time, not looked up at render time: the menu closes
    * as it hands over, so by the time the dialog paints there is no `menu` left
-   * to re-derive the group from.
+   * to re-derive the plugin from.
    */
   const [addTo, setAddTo] = useState<{
     name: string;
@@ -65,7 +65,7 @@ export function LibraryLayout() {
   } | null>(null);
   const [manageFolder, setManageFolder] = useState<string | null>(null);
   /**
-   * The group whose delete confirmation is up — captured whole at pick time
+   * The plugin whose delete confirmation is up — captured whole at pick time
    * for the same reason `addTo` is: the menu is gone by the time the dialog
    * paints, and the counts belong in the dialog's copy.
    */
@@ -92,48 +92,48 @@ export function LibraryLayout() {
   const filter = libraryFilterForPath(location.pathname);
 
   /**
-   * The member rows: every group the caller can READ (or manages), whether or
+   * The member rows: every plugin the caller can READ (or manages), whether or
    * not anything is in it yet. Counts come from the catalog, membership does
-   * not — a freshly created group has no skills or tools, and deriving the
+   * not — a freshly created plugin has no skills or tools, and deriving the
    * rows from the items alone made it vanish from the very nav that says
-   * "Included in your MCP". Being in a group is what puts it in your MCP;
+   * "Included in your MCP". Being in a plugin is what puts it in your MCP;
    * having content is not. The catalog still contributes names the summaries
    * miss (a per-file grant can surface one skill from an otherwise unreadable
    * folder), so the two witnesses are merged rather than either winning.
    */
-  const groups = useMemo(() => {
-    const counts = new Map(groupCounts(items).map((g) => [g.group, g.count]));
+  const plugins = useMemo(() => {
+    const counts = new Map(pluginCounts(items).map((g) => [g.plugin, g.count]));
     const names = new Set<string>(counts.keys());
-    for (const g of groupSummaries) {
+    for (const g of pluginSummaries) {
       if (g.canRead || g.canWrite) names.add(g.name);
     }
     return [...names]
       .sort((a, b) => a.localeCompare(b))
-      .map((group) => ({
-        group,
-        count: counts.get(group) ?? 0,
-        attention: attentionOf(items, group),
+      .map((plugin) => ({
+        plugin,
+        count: counts.get(plugin) ?? 0,
+        attention: attentionOf(items, plugin),
       }));
-  }, [items, groupSummaries]);
+  }, [items, pluginSummaries]);
   /**
-   * Groups the caller cannot get into, alphabetical.
+   * Plugins the caller cannot get into, alphabetical.
    *
    * `canRead` is the folder verdict; the catalog is the other witness, and it
    * wins when it disagrees. Access resolves closeness-first, so a per-file grant
    * can hand somebody one skill inside a folder they cannot read — showing that
-   * group locked while its skill sits in the gallery above would be the Library
-   * contradicting itself. Same rule as `GroupPage`'s member-vs-locked decision,
+   * plugin locked while its skill sits in the gallery above would be the Library
+   * contradicting itself. Same rule as `PluginPage`'s member-vs-locked decision,
    * which is what keeps the row and the page it opens in agreement.
    */
-  const lockedGroups = useMemo(() => {
-    const visible = new Set(items.map((i) => i.group).filter((g): g is string => g !== null));
-    return groupSummaries
-      // A manager (canWrite via admin-rescue) is not locked out — their group
+  const lockedPlugins = useMemo(() => {
+    const visible = new Set(items.map((i) => i.plugin).filter((g): g is string => g !== null));
+    return pluginSummaries
+      // A manager (canWrite via admin-rescue) is not locked out — their plugin
       // belongs with the ones they run, not below the gap.
       .filter((g) => !g.canRead && !g.canWrite && !visible.has(g.name))
       .map((g) => g.name)
       .sort((a, b) => a.localeCompare(b));
-  }, [groupSummaries, items]);
+  }, [pluginSummaries, items]);
 
   const ownedCount = useMemo(() => items.filter((i) => i.owned).length, [items]);
   /**
@@ -145,7 +145,7 @@ export function LibraryLayout() {
     () => items.filter((i) => i.owned && i.status.state !== 'ok').length,
     [items],
   );
-  const ungroupedCount = useMemo(() => items.filter((i) => i.group === null).length, [items]);
+  const ungroupedCount = useMemo(() => items.filter((i) => i.plugin === null).length, [items]);
   const attentionCount = useMemo(
     () => items.filter((i) => i.kind === 'integration' && i.status.state !== 'ok').length,
     [items],
@@ -154,12 +154,12 @@ export function LibraryLayout() {
   /**
    * What the open menu is pointing at.
    *
-   * A group row resolves to its summary, which is where the folder behind it
+   * A plugin row resolves to its summary, which is where the folder behind it
    * lives — and therefore whether `Add a skill or tool` and `Manage access`
    * have anything to act on at all. A LENS row resolves to nothing, because
    * neither lens is a folder: "Owned by me" and your own space are slices of
    * the catalog, and there is no `access.md` behind a slice. That is the same
-   * call the group page's `PageActions` already makes when it hides `Share` on
+   * call the plugin page's `PageActions` already makes when it hides `Share` on
    * the personal page, and the menu has to make it the same way or the two
    * surfaces disagree about what a lens is.
    *
@@ -168,10 +168,10 @@ export function LibraryLayout() {
    * this shared with?" should answer.
    */
   const menuFilter = menu?.filter ?? null;
-  const menuGroup = menuFilter?.kind === 'group' ? menuFilter.group : null;
+  const menuPlugin = menuFilter?.kind === 'group' ? menuFilter.plugin : null;
   const menuSummary = useMemo(
-    () => (menuGroup ? groupSummaries.find((g) => g.name === menuGroup) : undefined),
-    [groupSummaries, menuGroup],
+    () => (menuPlugin ? pluginSummaries.find((g) => g.name === menuPlugin) : undefined),
+    [pluginSummaries, menuPlugin],
   );
   const menuFolder = menuSummary ? primaryFolderOf(menuSummary) : null;
 
@@ -197,7 +197,7 @@ export function LibraryLayout() {
 
   return (
     <div className="flex h-full min-h-0 bg-canvas text-ink">
-      {/* The connect-your-agent CTA sits above the group list — the one row
+      {/* The connect-your-agent CTA sits above the plugin list — the one row
           that has to be true before the rows under it mean anything. Passed
           IN rather than mounted by the frame: which reminder belongs at the
           top of this nav is the surface's call, and `SidebarFrame` is the
@@ -206,21 +206,21 @@ export function LibraryLayout() {
           place — a person who skipped the welcome page and stayed in
           Knowledge still sees it. It renders nothing once onboarding is
           done. */}
-      <SidebarFrame label="Library groups" header={<ConnectAgentPill />}>
-        <GroupsSidebar
+      <SidebarFrame label="Library plugins" header={<ConnectAgentPill />}>
+        <PluginsSidebar
           filter={filter}
           onSelect={(next) => navigate(pathForLibraryFilter(next))}
-          groups={groups}
-          lockedGroups={lockedGroups}
+          plugins={plugins}
+          lockedPlugins={lockedPlugins}
           ownedCount={ownedCount}
           ownedAttention={ownedAttention}
-          personalGroupLabel={personalGroupName(user?.name)}
+          personalPluginLabel={personalPluginName(user?.name)}
           ungroupedCount={ungroupedCount}
           attentionCount={attentionCount}
           onFinishSetup={() => navigate('/connect')}
-          onCreateGroup={() => setNewGroupOpen(true)}
-          groupsIndexActive={isGroupsIndexPath(location.pathname)}
-          onOpenGroupsIndex={() => navigate(pathForGroupsIndex())}
+          onCreatePlugin={() => setNewPluginOpen(true)}
+          pluginsIndexActive={isPluginsIndexPath(location.pathname)}
+          onOpenPluginsIndex={() => navigate(pathForPluginsIndex())}
           onContextMenu={openContextMenu}
         />
       </SidebarFrame>
@@ -230,22 +230,22 @@ export function LibraryLayout() {
           gesture two different ways. Rendered HERE, outside the frame, because
           it is fixed to the pointer rather than laid out in the column. */}
       {menu && (
-        <GroupsSidebarMenu
+        <PluginsSidebarMenu
           x={menu.x}
           y={menu.y}
           label={menu.label}
           onClose={() => setMenu(null)}
           onAdd={
-            menuGroup && menuFolder && menuSummary
+            menuPlugin && menuFolder && menuSummary
               ? () =>
                   setAddTo({
-                    name: menuGroup,
+                    name: menuPlugin,
                     primaryPath: menuFolder,
                     canWrite: menuSummary.canWrite,
                   })
               : undefined
           }
-          onCreateGroup={() => setNewGroupOpen(true)}
+          onCreatePlugin={() => setNewPluginOpen(true)}
           onCopyLink={menuFilter ? () => void copyLink(menuFilter) : undefined}
           onManageAccess={menuFolder && kbDirName ? () => setManageFolder(menuFolder) : undefined}
           // The OWNER's verb, and only theirs — `isOwner` is the same verdict
@@ -266,11 +266,11 @@ export function LibraryLayout() {
       )}
 
       {addTo && (
-        <AddToGroupDialog
+        <AddToPluginDialog
           name={addTo.name}
           primaryPath={addTo.primaryPath}
           canWrite={addTo.canWrite}
-          // Every skill, not just this group's: a skill's id is its name and
+          // Every skill, not just this plugin's: a skill's id is its name and
           // ids are global, so that is the collision the create half must catch.
           existingSkills={items.filter((i) => i.kind === 'skill').map((i) => i.name)}
           onClose={() => setAddTo(null)}
@@ -287,50 +287,50 @@ export function LibraryLayout() {
           onClose={() => {
             setManageFolder(null);
             // Granting through the dialog can settle a pending join request —
-            // refresh the roster and the catalog together, exactly as the group
+            // refresh the roster and the catalog together, exactly as the plugin
             // page does when its copy of this dialog closes.
-            reloadGroups();
+            reloadPlugins();
             reload();
           }}
         />
       )}
 
       {deleting && (
-        <DeleteGroupDialog
+        <DeletePluginDialog
           name={deleting.name}
           skillCount={deleting.skillCount}
           toolCount={deleting.toolCount}
           onClose={() => setDeleting(null)}
           onDeleted={() => {
             toast(`Deleted ${deleting.name}.`);
-            // Standing inside the group that just ceased to exist would
-            // render "This group doesn't exist yet" — the index is the
+            // Standing inside the plugin that just ceased to exist would
+            // render "This plugin doesn't exist yet" — the index is the
             // honest place to land. Any other page is unaffected.
-            if (filter?.kind === 'group' && filter.group === deleting.name) {
-              navigate(pathForGroupsIndex());
+            if (filter?.kind === 'group' && filter.plugin === deleting.name) {
+              navigate(pathForPluginsIndex());
             }
             reload();
-            reloadGroups();
+            reloadPlugins();
           }}
         />
       )}
 
-      {newGroupOpen && isPublicDemo() && (
-        // The demo's answer to "New group": why it is off here, and where the
+      {newPluginOpen && isPublicDemo() && (
+        // The demo's answer to "New plugin": why it is off here, and where the
         // real thing lives. The endpoint refuses independently — this is the
         // honest face of that gate, not the gate.
-        <PublicDemoDialog onClose={() => setNewGroupOpen(false)} />
+        <PublicDemoDialog onClose={() => setNewPluginOpen(false)} />
       )}
-      {newGroupOpen && !isPublicDemo() && (
-        <NewGroupDialog
+      {newPluginOpen && !isPublicDemo() && (
+        <NewPluginDialog
           // Every name the workspace already knows, readable or not: creating
-          // `Groups/GTM` when a locked `GTM` exists would not make a group, it
+          // `Plugins/GTM` when a locked `GTM` exists would not make a plugin, it
           // would drop items into somebody else's.
-          existing={[...new Set([...groups.map((g) => g.group), ...groupSummaries.map((g) => g.name)])]}
-          onClose={() => setNewGroupOpen(false)}
+          existing={[...new Set([...plugins.map((g) => g.plugin), ...pluginSummaries.map((g) => g.name)])]}
+          onClose={() => setNewPluginOpen(false)}
           onCreated={() => {
             reload();
-            reloadGroups();
+            reloadPlugins();
           }}
         />
       )}

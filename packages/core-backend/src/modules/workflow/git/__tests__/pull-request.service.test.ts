@@ -64,7 +64,7 @@ function makeAccessControl(byRef: WritersByRefAndPath): IAccessControl {
     eligibleWritersAtRef: async () => null,
     eligibleWritersForPathsAtRef: async () => null,
     findEmailByHash: async () => null,
-    kbPrincipals: async () => ({ groups: [], people: [] }),
+    kbPrincipals: async () => ({ plugins: [], people: [] }),
     validateRolesYaml: () => ({ ok: true }),
     referencesToRole: async () => [],
   };

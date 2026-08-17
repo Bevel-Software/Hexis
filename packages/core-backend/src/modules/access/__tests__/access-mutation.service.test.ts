@@ -80,11 +80,11 @@ describe('AccessMutationService', () => {
     expect(text).toContain('# Sales folder');
   });
 
-  it('kbPrincipals surfaces the built-in Everyone group alongside declared roles', async () => {
-    const { groups } = await access.kbPrincipals(WS);
-    expect(groups).toContain('Everyone');
-    expect(groups).toContain('Admin');
-    expect(groups).toContain('Product Team');
+  it('kbPrincipals surfaces the built-in Everyone plugin alongside declared roles', async () => {
+    const { plugins } = await access.kbPrincipals(WS);
+    expect(plugins).toContain('Everyone');
+    expect(plugins).toContain('Admin');
+    expect(plugins).toContain('Product Team');
   });
 
   it('grant everyone read makes the folder publicly readable (read: everyone)', async () => {

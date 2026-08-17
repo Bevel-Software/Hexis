@@ -1,6 +1,6 @@
 {
   "name": "@bevel-software/platform-core-frontend",
-  "version": "0.4.1",
+  "version": "0.8.1",
   "description": "Open-source core UI of the Bevel platform (raw TS/TSX source): workspace explorer/viewer, branches & change requests, Library, secrets, tools, access control.",
   "type": "module",
   "main": "./src/index.ts",
@@ -14,7 +14,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "src"
+    "src",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -34,7 +35,7 @@
     "clsx": "^2.1.1",
     "lucide-react": "^1.7.0",
     "mammoth": "^1.12.0",
-    "mermaid": "^11.14.0",
+    "mermaid": "^11.16.1",
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^4.10.0",
     "rehype-raw": "^7.0.0",
@@ -43,7 +44,7 @@
     "remark-frontmatter": "^5.0.0",
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.5.0",
-    "xlsx": "^0.18.5",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
@@ -58,12 +59,12 @@
     "react-router-dom": "^7.1.1",
     "tailwindcss": "^4.2.2",
     "typescript": "~5.9.3",
-    "vitest": "^2.1.9"
+    "vitest": "^3.2.6"
   },
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Bevel-Software/skill-and-tool-management.git",
+    "url": "git+https://github.com/Bevel-Software/Hexis.git",
     "directory": "packages/core-frontend"
   },
   "publishConfig": {

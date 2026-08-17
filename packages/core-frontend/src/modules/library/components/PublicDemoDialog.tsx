@@ -1,10 +1,10 @@
 import { Button, Dialog } from '../../../shared/components';
 
 /** Where the demo sends people who want the real thing. */
-const REPO_URL = 'https://github.com/Bevel-Software/skill-and-tool-management';
+const REPO_URL = 'https://github.com/Bevel-Software/Hexis';
 
 /**
- * What "New group" opens on a public-demo deployment (`isPublicDemo()`)
+ * What "New plugin" opens on a public-demo deployment (`isPublicDemo()`)
  * instead of the create dialog.
  *
  * Shown INSTEAD of a disabled button, deliberately: a grey button reads as
@@ -33,11 +33,11 @@ export function PublicDemoDialog({ onClose }: { onClose(): void }) {
       }
     >
       <p className="text-ui text-ink-muted">
-        This demo is shared by everyone who visits, so creating groups is turned off here —
-        a visitor&apos;s group would become part of what every other visitor sees.
+        This demo is shared by everyone who visits, so creating plugins is turned off here —
+        a visitor&apos;s plugin would become part of what every other visitor sees.
       </p>
       <p className="mt-2.5 text-ui text-ink-muted">
-        Bevel is open source. Self-host your own deployment and all of this — groups, skills,
+        Bevel is open source. Self-host your own deployment and all of this — plugins, skills,
         tools, your own agents — is yours without limits.
       </p>
     </Dialog>

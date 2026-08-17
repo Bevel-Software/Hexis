@@ -7,9 +7,11 @@ import { useAuth } from '../../auth/state/auth.context';
 import { useLibraryToast } from '../../library/state/toast.context';
 import { copyToClipboard, COPY_FAILED_TOAST } from '../../library/utils/clipboard';
 import { pathForLibraryFilter } from '../../library/routes/library-paths';
-import { displayFirstName } from '../../library/utils/personal-group';
+import { useAppRegistry } from '../../../core/registry';
+import { displayFirstName } from '../../library/utils/personal-plugin';
 import { setSidebarCollapsed } from '../../layout/state/sidebar';
-import { AGENT_CLIENTS, mcpUrlFromOrigin, type AgentClient } from '../agent-clients';
+import { ClaudeInstallLink, mcpEndpointUrl } from '../../../shared/mcp';
+import { AGENT_CLIENTS, type AgentClient } from '../agent-clients';
 import { useOnboarding } from '../state/onboarding';
 
 /**
@@ -152,9 +154,11 @@ export function WelcomePage() {
   }, []);
 
   const client = AGENT_CLIENTS.find((c) => c.id === clientId) ?? AGENT_CLIENTS[0]!;
-  const snippet = client.snip(mcpUrlFromOrigin(window.location.origin));
-  // Capitalized by the same function that spells the group heading — "Welcome,
-  // juan" over a sidebar reading "Juan's Group" is the app misspelling someone
+  // The deployment's own address, not the browser's — see `shared/mcp`.
+  const mcpUrl = mcpEndpointUrl();
+  const snippet = client.snip(mcpUrl);
+  // Capitalized by the same function that spells the plugin heading — "Welcome,
+  // juan" over a sidebar reading "Juan's Plugin" is the app misspelling someone
   // to their face on the one page addressed to them.
   const firstName = displayFirstName(user?.name) || 'there';
 
@@ -167,13 +171,13 @@ export function WelcomePage() {
    * defines how it is driven: arrows select, Tab leaves. Claiming the role
    * while only answering clicks describes a control the keyboard cannot work.
    *
-   * Selection FOLLOWS focus, which is the pattern's default for a group this
+   * Selection FOLLOWS focus, which is the pattern's default for a plugin this
    * cheap to change — picking a client re-renders one snippet, nothing is
    * submitted, so there is no cost to arriving on an option and no reason to
    * make people confirm. Wraps at both ends: three options in a row have no
    * meaningful edge to stop at.
    *
-   * Paired with the roving `tabIndex` below — one stop for the whole group,
+   * Paired with the roving `tabIndex` below — one stop for the whole plugin,
    * not one per option, so Tab moves past the picker rather than through it.
    */
   function onRadioKeyDown(event: React.KeyboardEvent, index: number) {
@@ -214,12 +218,20 @@ export function WelcomePage() {
     resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
   }
 
-  // Both exits land in the same place — the person's own group. Whether you
-  // connected an agent or walked past it, where you want to be next is your
-  // own shelf, not the whole company's catalog. Unless a deep link brought
-  // them here: then both exits keep its promise instead.
-  const yourGroup = pathForLibraryFilter({ kind: 'ungrouped' });
-  const exitTo = returnTo ?? yourGroup;
+  // Both exits land in the same place. Whether you connected an agent or
+  // walked past it, where you want to be next is somewhere you can start —
+  // by default your own shelf, not the whole company's catalog. A deep link
+  // still outranks it: someone who followed a link is owed that link.
+  //
+  // `welcomeExit` lets a distribution move that destination, because WHERE a
+  // new person should start is a property of the product. A deployment built
+  // around the knowledge graph would otherwise greet someone and then leave
+  // them in a surface they did not come for. The label travels with the path
+  // so the two cannot contradict each other.
+  const { welcomeExit } = useAppRegistry();
+  const defaultExit = { path: pathForLibraryFilter({ kind: 'ungrouped' }), label: 'Go to your skills' };
+  const exit = welcomeExit ?? defaultExit;
+  const exitTo = returnTo ?? exit.path;
 
   /**
    * Conclude the onboarding and leave. The toast says where the setup went,
@@ -283,7 +295,7 @@ export function WelcomePage() {
               type="button"
               role="radio"
               aria-checked={c.id === client.id}
-              // Roving: only the chosen option is a tab stop, so the group
+              // Roving: only the chosen option is a tab stop, so the plugin
               // costs ONE Tab rather than one per client.
               tabIndex={c.id === client.id ? 0 : -1}
               ref={(el) => {
@@ -304,6 +316,14 @@ export function WelcomePage() {
         </div>
 
         <p className="mt-2.5 text-meta leading-normal text-ink-faint">{client.hint}</p>
+
+        {/* Claude only, because Claude is the only client with an install
+            link — and it renders nothing at all when this deployment is one
+            Anthropic could not reach, rather than offering a shortcut that
+            dead-ends. No `showHint`: the reader here is a new employee, and
+            naming an env var they cannot change is noise. The copy block
+            below is the route that always works. */}
+        {client.id === 'claude' && <ClaudeInstallLink mcpUrl={mcpUrl} className="mt-3.5" />}
 
         {/* The copy rides the block it copies. */}
         <div className="relative mt-3.5">
@@ -346,16 +366,17 @@ export function WelcomePage() {
             Done
           </Button>
           {/* The same destination Done goes to — one value drives both exits,
-              so they cannot drift apart. Ordinarily that is your own shelf
-              ("your skills" over "your library": the library is the whole
-              company's); when a deep link brought you here, both exits keep
-              its promise instead, and the label says so. */}
+              so they cannot drift apart. Ordinarily that is wherever the
+              deployment says a new person should start (core: your own shelf
+              — "your skills" over "your library", since the library is the
+              whole company's); when a deep link brought you here, both exits
+              keep its promise instead, and the label says so. */}
           <button
             type="button"
             onClick={() => navigate(exitTo)}
             className="text-detail text-ink-faint transition-colors hover:text-ink"
           >
-            {returnTo ? 'Continue to your link →' : 'Go to your skills →'}
+            {returnTo ? 'Continue to your link →' : `${exit.label} →`}
           </button>
         </div>
       </div>

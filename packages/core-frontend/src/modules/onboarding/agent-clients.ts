@@ -1,12 +1,22 @@
+import { jsonConfigSnippet } from '../../shared/mcp';
+
 /**
  * The three ways an agent connects, named by PRODUCT rather than surface —
  * someone knows which assistant they use before they know which build of it
  * they are in (prototype `AGENT_CLIENTS`).
  *
- * The endpoint is derived from the page's own origin, exactly as the
- * External agent access page derives it (`ExternalAgentAccessPage.tsx`), so
- * the welcome page and the settings page can never hand out different URLs.
- * Passed in rather than read from `window` here, so tests can pin it.
+ * This file is now the welcome page's PICKER and nothing else: which clients
+ * to offer, what to call them, and how to say where the snippet goes. The
+ * snippets themselves, and the endpoint they are built from, live in
+ * `shared/mcp` — which is what makes the welcome page and the External agent
+ * access page agree.
+ *
+ * They did not, before. The docstring here used to claim the two surfaces
+ * "can never hand out different URLs" because the settings page derived the
+ * endpoint "exactly as" this file did. It never imported this file. It
+ * hand-built the same address in six places, and the two agreed by convention
+ * rather than by construction — which held only as long as nobody edited
+ * either one.
  */
 
 export interface AgentClient {
@@ -28,21 +38,15 @@ export const AGENT_CLIENTS: AgentClient[] = [
   {
     id: 'chatgpt',
     label: 'ChatGPT',
-    hint: 'Settings → Connectors → Create, then paste this.',
+    // Developer mode first: it is off by default, and every "Create" button
+    // someone hunts for is behind it.
+    hint: 'Settings → Apps & Connectors → Advanced → turn on Developer mode, then Create and paste this.',
     snip: (url) => url,
   },
   {
     id: 'other',
     label: 'Cursor & Others',
     hint: 'For clients that read their servers from a JSON config, like Cursor, Windsurf and Cline.',
-    snip: (url) =>
-      JSON.stringify({ mcpServers: { 'knowledge-base': { type: 'http', url } } }, null, 2),
+    snip: (url) => jsonConfigSnippet(url),
   },
 ];
-
-/**
- * The MCP endpoint for a given page origin — the one URL every snippet above
- * is built from. Derived rather than configured, so a deployment on any host
- * hands out its own address without anyone remembering to update a constant.
- */
-export const mcpUrlFromOrigin = (origin: string): string => `${origin}/api/mcp`;

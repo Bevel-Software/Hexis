@@ -9,8 +9,12 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 
 # Copy package.json files for all workspace members so pnpm can resolve the
-# lockfile before sources are copied.
+# lockfile before sources are copied. hexis-mcp is not shipped in this image,
+# but its manifest keeps the workspace faithful to the lockfile and lets the
+# licence-notices gate below resolve its dependency graph too.
 COPY packages/shared/package.json packages/shared/
+COPY packages/mcp-core/package.json packages/mcp-core/
+COPY packages/hexis-mcp/package.json packages/hexis-mcp/
 COPY packages/core-backend/package.json packages/core-backend/
 COPY packages/core-frontend/package.json packages/core-frontend/
 COPY apps/server/package.json apps/server/
@@ -22,6 +26,7 @@ RUN pnpm install --frozen-lockfile
 
 # Copy source code
 COPY packages/shared/ packages/shared/
+COPY packages/mcp-core/ packages/mcp-core/
 COPY packages/core-backend/ packages/core-backend/
 COPY packages/core-frontend/ packages/core-frontend/
 COPY apps/server/ apps/server/
@@ -37,8 +42,19 @@ COPY apps/web/ apps/web/
 # Build shared + core-backend (tsc → dist), then the SPA (Vite). `pnpm --filter`
 # routes through pnpm's workspace binary links.
 RUN pnpm --filter @bevel-software/platform-shared run build
+RUN pnpm --filter @bevel-software/platform-mcp-core run build
 RUN pnpm --filter @bevel-software/platform-core-backend run build
 RUN pnpm --filter @bevel-software/web run build
+
+# Third-party licence notices for the image. MIT/BSD/Apache all permit
+# redistribution only if their copyright notice ships with the distribution,
+# and Vite strips comments out of the bundle — so the notices are re-attached
+# as a file here. Generated rather than copied in: the file is .gitignore'd
+# because its content depends on which platform's optional binaries are
+# installed, and this stage is the one that resolved them. Also fails the build
+# outright on a denied licence (GPL/AGPL/…), so a bad dependency cannot ship.
+COPY scripts/ scripts/
+RUN node scripts/generate-license-notices.mjs
 
 # Stage 2: Production image
 FROM node:22-slim AS production
@@ -57,9 +73,12 @@ RUN npm install -g tsx@4.21.0
 
 WORKDIR /app
 
-# Copy workspace config
+# Copy workspace config. mcp-core is a runtime dependency of core-backend
+# (the shared MCP layer its dist imports); hexis-mcp stays out — it is the
+# member-machine CLI, not part of this server.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/shared/package.json packages/shared/
+COPY packages/mcp-core/package.json packages/mcp-core/
 COPY packages/core-backend/package.json packages/core-backend/
 COPY packages/core-frontend/package.json packages/core-frontend/
 COPY apps/server/package.json apps/server/
@@ -73,6 +92,7 @@ RUN pnpm install --frozen-lockfile --prod
 # `defaultKbTemplateDir()` resolve these relative to the package root, so the
 # layout must mirror the source tree.
 COPY --from=builder /app/packages/shared/dist packages/shared/dist
+COPY --from=builder /app/packages/mcp-core/dist packages/mcp-core/dist
 COPY --from=builder /app/packages/core-backend/dist packages/core-backend/dist
 COPY --from=builder /app/packages/core-backend/migrations packages/core-backend/migrations
 COPY --from=builder /app/packages/core-backend/kb-template packages/core-backend/kb-template
@@ -80,6 +100,11 @@ COPY --from=builder /app/packages/core-backend/kb-template packages/core-backend
 # The server shell (tsx runs TypeScript directly) + the built SPA it serves.
 COPY --from=builder /app/apps/server/src apps/server/src
 COPY --from=builder /app/apps/web/dist apps/web/dist
+
+# Attribution for every third-party package in the production graph, plus our
+# own licence. Both must be present in the shipped image, not just the repo.
+COPY --from=builder /app/THIRD-PARTY-NOTICES.md ./
+COPY LICENSE ./
 
 ENV NODE_ENV=production
 ENV PORT=3001

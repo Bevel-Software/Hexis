@@ -188,7 +188,7 @@ function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: numb
         name: 'newsletter',
         description: skillSummary.description,
         owned,
-        group: null,
+        plugin: null,
         path: skillSummary.path,
         status: { state: 'ok', text: '' },
       },
@@ -200,10 +200,10 @@ function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: numb
     loading: false,
     error: null,
     reload: () => {},
-    groupSummaries: [],
-    groupsLoading: false,
-    groupsError: null,
-    reloadGroups: () => {},
+    pluginSummaries: [],
+    pluginsLoading: false,
+    pluginsError: null,
+    reloadPlugins: () => {},
   } as unknown as LibraryContextValue;
 }
 
@@ -236,8 +236,12 @@ function renderPage(
   mine: number[] = [],
   bus: EventBusContextValue = makeFakeBus(),
   routerState?: Record<string, unknown>,
+  /** Catalog-state overrides — e.g. `{ loading: true }` for the early case. */
+  library?: Partial<LibraryContextValue>,
+  /** Props the canonical /workspace mount passes; the legacy route passes none. */
+  pageProps?: { provisional?: boolean },
 ) {
-  libraryMock.value = libraryValue(owned, crs, mine);
+  libraryMock.value = { ...libraryValue(owned, crs, mine), ...library };
   return render(
     <MemoryRouter
       initialEntries={[
@@ -253,7 +257,10 @@ function renderPage(
                 leave the one assertion that matters unmakeable. */}
             <LibraryToastProvider>
               <Routes>
-                <Route path="/skills-and-tools/skills/:name" element={<SkillPage />} />
+                <Route
+                  path="/skills-and-tools/skills/:name"
+                  element={<SkillPage {...(pageProps ?? {})} />}
+                />
               </Routes>
             </LibraryToastProvider>
           </EventBusContext.Provider>
@@ -450,7 +457,7 @@ describe('SkillPage', () => {
     await screen.findByRole('heading', { name: 'newsletter' });
 
     expect(screen.getByText('Owner')).toBeInTheDocument();
-    // A skill inherits its group folder's rules; the group's Share panel is the
+    // A skill inherits its plugin folder's rules; the plugin's Share panel is the
     // one place they are decided, for owner and non-owner alike.
     expect(screen.queryByRole('button', { name: 'Manage access' })).toBeNull();
   });
@@ -608,6 +615,62 @@ describe('SkillPage', () => {
       await screen.findByText(/doesn't exist, or you don't have access to it/),
     ).toBeInTheDocument();
   });
+
+  /**
+   * The name can be PROVISIONAL. A URL the catalog hasn't answered for is
+   * resolved by reading the folder name, which is the skill's id only when no
+   * frontmatter declares one — so a failed fetch under a loading catalog is
+   * not evidence the skill is missing, just that we asked with the wrong name.
+   * PluginPage already refuses to decide this early; this is the same call.
+   */
+  describe('a PROVISIONAL name — one the route guessed from the URL', () => {
+    // The route reads the folder name when the catalog can't resolve a URL,
+    // and that is the id only when no frontmatter declares one. So a failed
+    // lookup may just mean we asked with the wrong name.
+    const early = { loading: true, items: [] };
+    const failed = { loading: false, error: "Couldn't load the catalog.", items: [] };
+
+    it.each([
+      ['still loading', early],
+      // `loading: false` also describes a catalog that FAILED — "we couldn't
+      // ask" is not "there is no such skill", so absence stays unconcluded and
+      // a valid declared-id skill never turns into a permanent error page.
+      ['failed to load', failed],
+    ])('holds the "doesn\'t exist" verdict while the catalog %s', async (_label, lib) => {
+      apiMock.getSkill.mockRejectedValueOnce(new Error('nope'));
+      renderPage(false, [], [], makeFakeBus(), undefined, lib, { provisional: true });
+
+      await waitFor(() => expect(apiMock.getSkill).toHaveBeenCalled());
+      expect(
+        screen.queryByText(/doesn't exist, or you don't have access to it/),
+      ).not.toBeInTheDocument();
+      // …and says so as a LOADING state, not a blank page: an empty render
+      // would satisfy the assertion above while telling the reader nothing.
+      expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-busy', 'true');
+    });
+
+    it('does conclude absence once the catalog has answered', async () => {
+      apiMock.getSkill.mockRejectedValueOnce(new Error('nope'));
+      renderPage(false, [], [], makeFakeBus(), undefined, { loading: false, error: null }, {
+        provisional: true,
+      });
+
+      expect(
+        await screen.findByText(/doesn't exist, or you don't have access to it/),
+      ).toBeInTheDocument();
+    });
+
+    it('never holds it for a name the catalog confirmed', async () => {
+      // A confirmed name's detail error is real — report it immediately, even
+      // mid-refresh. Suppressing it would hide a genuine access failure.
+      apiMock.getSkill.mockRejectedValueOnce(new Error('nope'));
+      renderPage(false, [], [], makeFakeBus(), undefined, early);
+
+      expect(
+        await screen.findByText(/doesn't exist, or you don't have access to it/),
+      ).toBeInTheDocument();
+    });
+  });
 });
 
 describe('SkillPage: proposing a change', () => {
@@ -762,7 +825,7 @@ describe('SkillPage: deciding on a change', () => {
    *
    * The merge gate requires a non-stale approval from an eligible approver for
    * every markdown file that has owners — which is every SKILL.md governed by a
-   * group's `access.md`, i.e. exactly what this page exists for. Going straight
+   * plugin's `access.md`, i.e. exactly what this page exists for. Going straight
    * to the merge is refused with "Waiting on approval for …", so a page that
    * only merged had an Approve button that could not approve anything.
    */

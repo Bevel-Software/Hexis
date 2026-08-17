@@ -53,7 +53,7 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
     <div className="flex flex-col gap-3.5">
       <SetupBanner setup={tool.setup} />
       {adminVars.length > 0 && (
-        <VarGroup
+        <VarPlugin
           title="Set by the tool owner"
           hint={tool.canWrite ? 'Shared by everyone who uses this tool.' : 'Only a tool writer can set these.'}
           slug={tool.slug}
@@ -66,7 +66,7 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
         />
       )}
       {userVars.length > 0 && (
-        <VarGroup
+        <VarPlugin
           title="Set by you"
           hint="Your own value: not shared with other users."
           slug={tool.slug}
@@ -115,7 +115,7 @@ function SetupBanner({ setup }: { setup: ToolSetup | null }) {
   );
 }
 
-function VarGroup({
+function VarPlugin({
   title,
   hint,
   slug,

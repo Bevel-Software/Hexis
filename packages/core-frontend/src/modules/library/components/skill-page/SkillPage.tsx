@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   DEFAULT_BRANCH,
-  groupOfPath,
+  pluginOfPath,
   type PullRequestSummary,
 } from '@bevel-software/platform-shared';
 import '../../library.css';
@@ -22,7 +22,7 @@ import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast.context';
 import { libraryHomeForItemPath, urlForSkillFile } from '../../routes/library-paths';
 import { changeAuthorName, formatWhen } from '../../../change-requests/utils/author';
-import { ownersTextOf } from '../../utils/group-summary';
+import { ownersTextOf } from '../../utils/plugin-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
 import { StatusDot } from '../StatusDot';
 import { ChangeRequestDock } from '../ChangeRequestDock';
@@ -56,6 +56,7 @@ import { isBinaryFile } from '../../../workspace/components/renderers';
 export function SkillPage({
   name: nameProp,
   activeFile,
+  provisional = false,
 }: {
   /**
    * Both provided when the page is mounted at its CANONICAL address — the
@@ -66,6 +67,14 @@ export function SkillPage({
    */
   name?: string;
   activeFile?: string;
+  /**
+   * Whether `name` is a GUESS the catalog never confirmed — read off the URL's
+   * folder name, which is the skill's id only when no frontmatter declares
+   * one. A failed lookup for a provisional name is not evidence of absence
+   * until the catalog has actually answered; it may simply be the wrong name.
+   * Default `false`: a caller that says nothing is naming a skill it knows.
+   */
+  provisional?: boolean;
 } = {}) {
   const { name: rawName = '' } = useParams<{ name: string }>();
   const name = nameProp ?? safeDecode(rawName);
@@ -98,16 +107,16 @@ export function SkillPage({
   const prefix = `${skillPath}/`;
 
   /**
-   * Who has to say yes. A skill has no owner of its own — it inherits its group
+   * Who has to say yes. A skill has no owner of its own — it inherits its plugin
    * folder's `access.md` — so the people who review a change to it are the
-   * group's owners. Naming the wrong reviewer is worse than naming none, hence
-   * the neutral fallback when the group index hasn't resolved.
+   * plugin's owners. Naming the wrong reviewer is worse than naming none, hence
+   * the neutral fallback when the plugin index hasn't resolved.
    */
   const ownerName = useMemo(() => {
-    const group = skill ? groupOfPath(skill.path) : null;
-    const summary = group ? data.groupSummaries.find((g) => g.name === group) : undefined;
+    const plugin = skill ? pluginOfPath(skill.path) : null;
+    const summary = plugin ? data.pluginSummaries.find((g) => g.name === plugin) : undefined;
     return summary ? ownersTextOf(summary) : 'the owner';
-  }, [skill, data.groupSummaries]);
+  }, [skill, data.pluginSummaries]);
 
   const files = useMemo(
     () => ['SKILL.md', ...(skill?.files ?? []).map((f) => f.slice(prefix.length))],
@@ -368,7 +377,7 @@ export function SkillPage({
   }
 
   // The page the skill lives on, not the Library root: "back" from a skill
-  // you opened off its group page must land on that group page. Derived from
+  // you opened off its plugin page must land on that plugin page. Derived from
   // the path, so a deep link gets the same honest destination as a click.
   const home = libraryHomeForItemPath(skillPath);
   const backLink = (
@@ -377,7 +386,18 @@ export function SkillPage({
     </Button>
   );
 
-  if (!detail.loading && (detail.error || !skill)) {
+  // "Doesn't exist" is a VERDICT, and a provisional name has not earned one:
+  // the route guessed it from the URL's folder name, so a failed lookup may
+  // just mean we asked with the wrong name. Only the catalog can correct that,
+  // and only a SUCCESSFUL catalog response counts — `loading: false` also
+  // describes a catalog that failed, which is "we couldn't ask", not "there is
+  // no such skill". The same distinction PluginPage draws a few files over.
+  //
+  // A confirmed name (the catalog resolved this URL to it) is unaffected: its
+  // detail error is real and gets reported immediately.
+  const catalogAnswered = !data.loading && !data.error;
+  const mayConcludeAbsence = !provisional || catalogAnswered;
+  if (!detail.loading && mayConcludeAbsence && (detail.error || !skill)) {
     return (
       <Article>
         {backLink}
@@ -431,8 +451,8 @@ export function SkillPage({
             and its frontmatter panel already says what the skill is for.
             Repeating it above the pane said the same sentence twice on the
             first screenful. */}
-        {/* No `Manage access` here, deliberately — a skill inherits its group
-            folder's `access.md`, and the group's Share panel is the one place
+        {/* No `Manage access` here, deliberately — a skill inherits its plugin
+            folder's `access.md`, and the plugin's Share panel is the one place
             those rules are decided. Same call the tool page made. */}
       </header>
 

@@ -23,13 +23,29 @@ let diagramCounter = 0;
 
 interface MermaidDiagramProps {
   code: string;
+  /**
+   * What to render instead of the error box when `code` fails to parse.
+   *
+   * Exists for the diff viewer. A diff is rendered as independent fragments
+   * split at change boundaries, so an EDITED diagram arrives here with its
+   * ```mermaid fence truncated — it cannot parse, by construction, every time.
+   * The error box would then replace the red/green source lines, which are the
+   * only useful content in that block, with a message about syntax. Passing
+   * the original fenced code block back means an edited diagram shows its
+   * changed source and an untouched one (wholly inside a single unchanged
+   * fragment) still renders as a diagram.
+   *
+   * Omitted → the error box, which is right for a document view: there a
+   * broken diagram is a real defect the author wants to see.
+   */
+  errorFallback?: React.ReactNode;
 }
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 20;
 const ZOOM_FACTOR = 0.15;
 
-export const MermaidDiagram = memo(function MermaidDiagram({ code }: MermaidDiagramProps) {
+export const MermaidDiagram = memo(function MermaidDiagram({ code, errorFallback }: MermaidDiagramProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const svgContainerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -194,6 +210,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({ code }: MermaidDiag
   }, [rerender]);
 
   if (error) {
+    if (errorFallback !== undefined) return <>{errorFallback}</>;
     return (
       <div className="rounded-lg border border-danger/30 bg-danger-soft p-4 my-4">
         <p className="text-xs text-danger font-medium mb-1">Mermaid diagram error</p>

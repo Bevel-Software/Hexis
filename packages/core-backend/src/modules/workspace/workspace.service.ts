@@ -119,6 +119,22 @@ export class WorkspaceService implements IWorkspaceService {
    */
   private readonly inFlightBootstraps = new Map<string, Promise<void>>();
 
+  /**
+   * Branches whose clone already got this process's scaffolding top-up.
+   * Per-process on purpose: each boot of a new build re-offers the top-up
+   * once, which is exactly when an upgrade's migrations must run. Cleared
+   * wherever `branchDirs` forgets a branch (delete, failed bootstrap), so a
+   * re-created clone is offered the top-up again rather than judged by the
+   * fate of one that no longer exists.
+   *
+   * `inFlightTopUps` is the concurrency half: membership in the Set is
+   * claimed BEFORE the (slow, file-moving) top-up finishes, so a concurrent
+   * caller that finds the branch claimed must still await the in-flight run
+   * — returning early would hand out a workspace mid-migration.
+   */
+  private readonly toppedUpBranches = new Set<string>();
+  private readonly inFlightTopUps = new Map<string, Promise<void>>();
+
   /** Per-workspace-dir `git fetch origin` timestamp + in-flight tracker. */
   private readonly lastFetchAt = new Map<string, number>();
   private readonly inFlightFetches = new Map<string, Promise<void>>();
@@ -338,6 +354,11 @@ export class WorkspaceService implements IWorkspaceService {
       // pulls it. Once per branch per process — the cached paths above return
       // before reaching here.
       await this.normalizeCloneTracking(repoDir, branch);
+      // Same restart-survivor reasoning for the scaffolding top-up: an
+      // UPGRADED deployment reuses this clone, so a top-up bound to fresh
+      // clones alone never runs a new build's scaffolding or migrations —
+      // the Groups→Plugins rename sat out an upgrade exactly this way.
+      await this.topUpScaffolding(repoDir, branch);
       this.branchDirs.set(branch, workspaceDir);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     } catch {
@@ -376,6 +397,9 @@ export class WorkspaceService implements IWorkspaceService {
       resolveBootstrap();
     } catch (err) {
       this.branchDirs.delete(branch);
+      // The clone was rolled back, and any top-up claim belonged to it — a
+      // retried bootstrap must be offered the top-up afresh.
+      this.toppedUpBranches.delete(branch);
       rejectBootstrap(err);
       throw err;
     } finally {
@@ -420,6 +444,7 @@ export class WorkspaceService implements IWorkspaceService {
       await pending;
     } catch (err) {
       this.branchDirs.delete(branch);
+      this.toppedUpBranches.delete(branch);
       throw err;
     }
   }
@@ -447,6 +472,44 @@ export class WorkspaceService implements IWorkspaceService {
         `[workspace] could not normalize the tracking config of the "${branch}" clone:`,
         redactError(err),
       );
+    }
+  }
+
+  /**
+   * The ONE spelling of the best-effort scaffolding top-up (three call sites:
+   * the restart-survivor path in `getOrCreateForBranch`, and the
+   * already-cloned / fresh-clone paths in `cloneProcessMapForBranch`). Once
+   * per branch per process, and SINGLE-FLIGHT: the branch is claimed in
+   * `toppedUpBranches` before the run starts, so a concurrent caller that
+   * finds it claimed awaits the in-flight run instead of returning a
+   * workspace the migration is still moving files under. Never throws — a
+   * failed top-up costs the upgrade, not the clone.
+   */
+  private async topUpScaffolding(repoDir: string, branch: string): Promise<void> {
+    const seedService = this.seedService;
+    if (!seedService) return;
+    if (this.toppedUpBranches.has(branch)) {
+      await this.inFlightTopUps.get(branch);
+      return;
+    }
+    this.toppedUpBranches.add(branch);
+    const run = (async () => {
+      try {
+        await seedService.topUpWorkspace(repoDir, branch);
+      } catch (topUpErr) {
+        console.error(
+          `[workspace] scaffolding top-up failed for branch "${branch}" (clone kept):`,
+          redactError(topUpErr),
+        );
+      }
+    })();
+    this.inFlightTopUps.set(branch, run);
+    try {
+      await run;
+    } finally {
+      if (this.inFlightTopUps.get(branch) === run) {
+        this.inFlightTopUps.delete(branch);
+      }
     }
   }
 
@@ -498,6 +561,11 @@ export class WorkspaceService implements IWorkspaceService {
         // it never touches the working tree, and a drifted config is what
         // breaks the next pull.
         await this.normalizeCloneTracking(targetDir, branch);
+        // An upgraded deployment REUSES this persistent clone, so a top-up
+        // bound to fresh clones alone never runs a new build's scaffolding
+        // or migrations here — the Groups→Plugins rename sat out an upgrade
+        // for exactly this reason.
+        await this.topUpScaffolding(targetDir, branch);
         return;
       }
       // Half-built dir — wipe and re-clone.
@@ -539,20 +607,14 @@ export class WorkspaceService implements IWorkspaceService {
         );
       }
       // Fill in any base scaffolding this branch is missing, now that it's
-      // freshly checked out. Runs on whichever branch the user loaded (not just
-      // protected ones), only on a fresh clone (this block). Isolated in its own
-      // try/catch — like the onWorkspaceCloned listener above — so even a future
-      // change that lets it throw can never roll back an otherwise-good clone.
-      if (this.seedService) {
-        try {
-          await this.seedService.topUpWorkspace(targetDir, branch);
-        } catch (topUpErr) {
-          console.error(
-            `[workspace] scaffolding top-up failed for branch "${branch}" (clone kept):`,
-            redactError(topUpErr),
-          );
-        }
-      }
+      // freshly checked out. Runs on whichever branch the user loaded (not
+      // just protected ones). Best-effort inside the helper — like the
+      // onWorkspaceCloned listener above — so even a future change that lets
+      // it throw can never roll back an otherwise-good clone. (The
+      // once-per-process guard is a formality here: a branch being freshly
+      // cloned was either never topped up or had its claim cleared with the
+      // clone it belonged to.)
+      await this.topUpScaffolding(targetDir, branch);
     } catch (err) {
       const redacted = redactError(err);
       console.error(`[workspace] Failed to clone for branch "${branch}":`, redacted);
@@ -581,6 +643,10 @@ export class WorkspaceService implements IWorkspaceService {
     await fs.rm(workspaceDir, { recursive: true, force: true });
     const branch = branchForWorkspaceId(workspaceId);
     this.branchDirs.delete(branch);
+    // The top-up claim died with the clone it was made against — a branch
+    // re-created later gets a fresh clone and must be offered it again (and
+    // without this, long-lived processes would accumulate dead branch names).
+    this.toppedUpBranches.delete(branch);
   }
 
   async listFiles(workspaceId: string, readFilter?: ReadTreeFilter): Promise<FileTreeEntry> {
@@ -1218,6 +1284,11 @@ export class WorkspaceService implements IWorkspaceService {
       try {
         await fs.rm(dir, { recursive: true, force: true });
         this.branchDirs.delete(branchForWorkspaceId(entry.name));
+        // The top-up claim dies with the clone (same rule as every other
+        // eviction site): a branch re-created after the sweep gets a fresh
+        // clone that must be OFFERED the scaffolding top-up, not judged by
+        // the fate of a directory that no longer exists.
+        this.toppedUpBranches.delete(branchForWorkspaceId(entry.name));
         removed.push(entry.name);
       } catch (err) {
         console.warn(
@@ -1289,6 +1360,15 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = this.workspaceDirWithinRoot(workspaceId);
     try {
       await fs.access(path.join(workspaceDir, this.kbDirName, '.git'));
+      // The same restart-survivor duty getOrCreateForBranch's disk path
+      // carries: this is the OTHER door through which a previous process's
+      // clone enters `branchDirs` (an id-addressed request, a distribution's
+      // boot preflight), and registering here without the offer pins the
+      // fast path — the branch then sits out every migration for the
+      // process lifetime. Exactly how the Groups→Plugins rename missed a
+      // deployment whose preflight resolved the workspace before anything
+      // called getOrCreateForBranch.
+      await this.topUpScaffolding(path.join(workspaceDir, this.kbDirName), branch);
       this.branchDirs.set(branch, workspaceDir);
       return workspaceDir;
     } catch {

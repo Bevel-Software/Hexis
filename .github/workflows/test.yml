@@ -8,6 +8,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Building and testing a fork PR runs that contributor's code on the runner
+    # — unavoidable, and fine, because the run holds nothing worth stealing: no
+    # secrets, and GitHub forces a read-only token on fork PRs anyway. Stating
+    # the scope here keeps that true if the repo-wide default workflow
+    # permission is ever flipped back to read/write in settings.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -24,6 +31,13 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      # Licence policy gate. Fails on any dependency that offers no permissive
+      # licence (GPL/AGPL/SSPL/…) or declares one we have not classified, so a
+      # new dep can't quietly put copyleft into a shipped artifact. `pnpm build`
+      # runs the same check, but as a separate step ahead of it the failure is
+      # unambiguous and costs no compile time.
+      - run: pnpm run notices:check
 
       - run: pnpm build
 

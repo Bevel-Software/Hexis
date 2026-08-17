@@ -42,7 +42,7 @@ interface Props {
    * it edits the branch the user is looking at.
    *
    * The Library is the other case: its surfaces describe the DEFAULT branch
-   * regardless of which branch happens to be open, so a group's access edit
+   * regardless of which branch happens to be open, so a plugin's access edit
    * has to be pinned to it. Without this the same click would splice
    * `access.md` on whatever branch the context last had open — a rule written
    * into a draft nobody merges, silently doing nothing.
@@ -214,7 +214,7 @@ const ROLE_TO_KEY: Record<Role, keyof VerbSet> = {
   'Can download': 'download',
 };
 
-/** The built-in `everyone` group — grantable as public READ only (see backend). */
+/** The built-in `everyone` plugin — grantable as public READ only (see backend). */
 function isEveryoneRole(p: Principal): boolean {
   return p.kind === 'role' && p.role.trim().toLowerCase() === 'everyone';
 }
@@ -362,7 +362,7 @@ function AnchoredMenu({
 /**
  * Google-Drive-style "Manage access" sheet. Reads the resolved access for a KB
  * path and lets anyone who can write the path's access config share it: add one
- * or more people/groups as chips and grant them a shared verb (Owner / Can edit /
+ * or more people/plugins as chips and grant them a shared verb (Owner / Can edit /
  * Can read / Can download). Each existing grantee's verbs are editable inline via
  * a multi-select checklist (independent verbs); toggling a box grants or revokes
  * that single verb. Grants/revokes write the folder's `access.md` (folder target)
@@ -569,7 +569,7 @@ export function ManageAccessDialog({
   );
 
   /**
-   * The inherited rows, ONE GROUP PER GRANTING FOLDER — the prototype's shape
+   * The inherited rows, ONE PLUGIN PER GRANTING FOLDER — the prototype's shape
    * (proto:3637-3649) and, more to the point, its reasoning:
    *
    *   "Inheritance, said as a sentence instead of labelled as a concept.
@@ -614,9 +614,10 @@ export function ManageAccessDialog({
     return { folders, external };
   }, [inheritedRows]);
 
-  /** Which folder group is expanded, or `'roles'`, or null. One at a time —
-   *  as in the prototype, where `state.accOpen` holds a single value. */
-  const [openGroup, setOpenGroup] = useState<string | null>(null);
+  /** Which inherited-access section is expanded — a granting folder's path, or
+   *  `'roles'`, or null. One at a time — as in the prototype, where
+   *  `state.accOpen` holds a single value. */
+  const [openSection, setOpenSection] = useState<string | null>(null);
 
   const governed = repoRelative !== null;
   // The dialog can mutate only if the current user can write this path's access
@@ -625,12 +626,12 @@ export function ManageAccessDialog({
   const canManage = !!data?.canWrite;
 
   // Resolve the CURRENT typed query into a principal to append as a chip: an
-  // exact group match or a free-typed email. (Suggestion clicks append directly.)
+  // exact plugin match or a free-typed email. (Suggestion clicks append directly.)
   const addPending: Principal | null = useMemo(() => {
     const q = query.trim();
     if (!q) return null;
-    const groupHit = suggest?.groups.find((g) => g.toLowerCase() === q.toLowerCase());
-    if (groupHit) return { kind: 'role', role: groupHit };
+    const pluginHit = suggest?.plugins.find((g) => g.toLowerCase() === q.toLowerCase());
+    if (pluginHit) return { kind: 'role', role: pluginHit };
     if (EMAIL_RE.test(q)) return { kind: 'user', email: q, displayName: q.split('@')[0] };
     return null;
   }, [query, suggest]);
@@ -1007,7 +1008,7 @@ export function ManageAccessDialog({
             </Button>
           </div>
         ) : canManage && p.manage === 'external' ? (
-          // No file-backed grant to remove here — managed elsewhere (a group's
+          // No file-backed grant to remove here — managed elsewhere (a plugin's
           // membership, the everyone policy, or admin rescue).
           <span
             className="ml-auto shrink-0 text-detail text-ink-faint"
@@ -1145,9 +1146,9 @@ export function ManageAccessDialog({
                     className="min-w-32 flex-1 bg-transparent px-1 py-1 text-ui text-ink placeholder:text-ink-faint focus:outline-none"
                   />
                 </div>
-                {query.trim() && suggest && (suggest.groups.length > 0 || suggest.people.length > 0) && (
+                {query.trim() && suggest && (suggest.plugins.length > 0 || suggest.people.length > 0) && (
                   <AnchoredMenu width="anchor" align="left" className="max-h-56 overflow-auto">
-                    {suggest.groups.map((g) => (
+                    {suggest.plugins.map((g) => (
                       <MenuItem
                         key={`g:${g}`}
                         onClick={() => addChip({ kind: 'role', role: g })}
@@ -1337,14 +1338,14 @@ export function ManageAccessDialog({
             {inheritedRows.length > 0 && (
               <div className="mt-3 border-t border-line pt-2">
                 {inheritedByFolder.folders.map(([ancestor, rows]) => {
-                  const open = openGroup === ancestor;
+                  const open = openSection === ancestor;
                   return (
                     <div key={ancestor}>
                       <button
                         type="button"
                         aria-expanded={open}
                         title={folderPath(ancestor)}
-                        onClick={() => setOpenGroup(open ? null : ancestor)}
+                        onClick={() => setOpenSection(open ? null : ancestor)}
                         className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
                       >
                         <ChevronDown
@@ -1394,25 +1395,25 @@ export function ManageAccessDialog({
 
                 {/* A role that grants at the workspace level belongs to no
                     folder, so it cannot be filed under one. Named for what it
-                    is rather than swept into the folder groups. */}
+                    is rather than swept into the folder sections. */}
                 {inheritedByFolder.external.length > 0 && (
                   <div>
                     <button
                       type="button"
-                      aria-expanded={openGroup === 'roles'}
-                      onClick={() => setOpenGroup(openGroup === 'roles' ? null : 'roles')}
+                      aria-expanded={openSection === 'roles'}
+                      onClick={() => setOpenSection(openSection === 'roles' ? null : 'roles')}
                       className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
                     >
                       <ChevronDown
                         size={14}
-                        className={`shrink-0 transition-transform ${openGroup === 'roles' ? 'rotate-180' : '-rotate-90'}`}
+                        className={`shrink-0 transition-transform ${openSection === 'roles' ? 'rotate-180' : '-rotate-90'}`}
                       />
                       <span className="min-w-0 truncate">People with access through a role</span>
                       <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
                         {inheritedByFolder.external.length}
                       </span>
                     </button>
-                    {openGroup === 'roles' && (
+                    {openSection === 'roles' && (
                       <div className="mb-1">{inheritedByFolder.external.map(renderRow)}</div>
                     )}
                   </div>

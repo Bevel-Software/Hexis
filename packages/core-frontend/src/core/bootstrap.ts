@@ -1,16 +1,27 @@
 import { configureBranchModel, validateBranchModel } from '@bevel-software/platform-shared';
+// The pure module, NOT the `shared/mcp` barrel — the same reason `test-setup.ts`
+// avoids it. This runs BEFORE React renders, and the barrel would drag the
+// components and their icon imports into the boot path to set one string.
+import { configureMcpUrl } from '../shared/mcp/connect-snippets';
 
 /** What `GET /api/config` serves. Unauthenticated — see the route's comment. */
 interface ServerConfig {
   branchModel: { defaultBranch: string; protectedBranches: string[] };
   publicDemo?: boolean;
+  /**
+   * Optional because a browser can outlive the server it loaded from — a
+   * cached bundle talking to a backend that predates this field must still
+   * boot. `configureMcpUrl` falls back to the origin when it is absent, which
+   * is what every connect surface did before this existed.
+   */
+  mcpUrl?: string;
 }
 
 let publicDemo = false;
 
 /**
  * Whether this deployment runs in public-demo lockdown (`CoreConfig.publicDemo`):
- * visitors can write nowhere, and the provisioning doors (New group, personal
+ * visitors can write nowhere, and the provisioning doors (New plugin, personal
  * folder) refuse. Set once by {@link loadServerConfig} before React renders, so
  * a plain read is always current — no context needed.
  */
@@ -55,6 +66,15 @@ export async function loadServerConfig(): Promise<void> {
   const problem = validateBranchModel(config.branchModel);
   if (!problem) configureBranchModel(config.branchModel);
   publicDemo = config.publicDemo === true;
+
+  /**
+   * Unconditional, and deliberately not guarded by the branch-model check
+   * above: an unconfigured deployment still has a real address, and the
+   * connect surfaces are among the few things worth showing on one. Absent or
+   * unparseable input is not an error here either — it falls back to the
+   * origin rather than taking down the boot for a snippet.
+   */
+  configureMcpUrl(config.mcpUrl);
 }
 
 /**

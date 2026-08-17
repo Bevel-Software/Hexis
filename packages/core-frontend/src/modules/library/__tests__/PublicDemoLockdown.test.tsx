@@ -10,17 +10,17 @@ import { AdminContext } from '../../admin/state/admin.context';
 import type { LibraryData } from '../hooks/useLibraryData';
 
 /**
- * The public-demo lockdown's face: "New group" answers with the
+ * The public-demo lockdown's face: "New plugin" answers with the
  * self-host-it dialog instead of the create form. The endpoint refusal is the
- * backend's test (groups.routes.test.ts); this one proves a visitor is TOLD,
+ * backend's test (plugins.routes.test.ts); this one proves a visitor is TOLD,
  * not just refused.
  */
 
 const dataMock = vi.hoisted(() => ({ useLibraryData: vi.fn() }));
 vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryData }));
 
-vi.mock('../services/groups.api', () => ({
-  listGroups: vi.fn().mockResolvedValue([]),
+vi.mock('../services/plugins.api', () => ({
+  listPlugins: vi.fn().mockResolvedValue([]),
   listJoinRequests: vi.fn().mockResolvedValue([]),
 }));
 
@@ -84,23 +84,23 @@ beforeEach(() => {
 });
 
 describe('public-demo lockdown', () => {
-  it('New group opens the self-host dialog instead of the create form', async () => {
+  it('New plugin opens the self-host dialog instead of the create form', async () => {
     bootstrapMock.isPublicDemo.mockReturnValue(true);
     renderLibrary();
-    fireEvent.click(await screen.findByRole('button', { name: 'New group' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'New plugin' }));
 
     expect(await screen.findByText('Not in this demo')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Get your own on GitHub' })).toBeInTheDocument();
     // The create form never mounts — there is nothing to fill in.
-    expect(screen.queryByLabelText('Group name')).toBeNull();
+    expect(screen.queryByLabelText('Plugin name')).toBeNull();
   });
 
-  it('outside the demo, New group still opens the create form', async () => {
+  it('outside the demo, New plugin still opens the create form', async () => {
     bootstrapMock.isPublicDemo.mockReturnValue(false);
     renderLibrary();
-    fireEvent.click(await screen.findByRole('button', { name: 'New group' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'New plugin' }));
 
-    expect(await screen.findByLabelText('Group name')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Plugin name')).toBeInTheDocument();
     expect(screen.queryByText('Not in this demo')).toBeNull();
   });
 });
