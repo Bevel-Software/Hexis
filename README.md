@@ -33,8 +33,9 @@ infrastructure, behind your own SSO.
 
 ### Why it's different from MCP gateways: review changes
 
-A gateway decides which tools an agent may call. It has no opinion on whether
-the skill telling that agent what to do is any good.
+MCP gateways are unidirectional; users can consume plugins, skills or tools but there is no mechanism here for users to propose changes or share new skills and MCP servers. You can do this via GitHub in the back, but this is not accessible to non-technical users and there is no fine-grained access control for either viewing or the review process.
+
+Hexis can do all of the above specified capabilities for distribution, and has this bidirectionality needed for management.
 
 In Hexis, skills and tool manuals are reviewable files. Anyone can propose a
 change; on protected branches it reaches the owners of the files it touches and
