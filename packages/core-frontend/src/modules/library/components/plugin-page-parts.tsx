@@ -174,7 +174,7 @@ export function CardGrid({
           // child the way the outer grid stretched the bare card — without it
           // the <button> shrinks to its content and the overlay floats in the
           // leftover width, off the card's own edge.
-          <div key={key} className="group/removable relative grid">
+          <div key={key} className="group/removable relative grid min-w-0">
             {card}
             <button
               type="button"
