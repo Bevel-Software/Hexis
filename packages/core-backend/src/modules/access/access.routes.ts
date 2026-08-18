@@ -61,6 +61,8 @@ export function createAccessRoutes(
   eventBus: WorkflowEventBus,
   db: Database,
   kbDirName: string,
+  /** This deployment's configured admins — the break-glass recovery roster. */
+  recoveryAdmins: readonly string[] = [],
 ): express.Router {
   const router = express.Router({ mergeParams: true });
   const mutation = new AccessMutationService(workspaceService, accessControl, kbDirName);
@@ -71,6 +73,7 @@ export function createAccessRoutes(
     kbDirName,
     () => DEFAULT_BRANCH,
     eventBus,
+    recoveryAdmins,
   );
 
   // Roles (plugins) are authoritative on the DEFAULT branch — the Roles admin

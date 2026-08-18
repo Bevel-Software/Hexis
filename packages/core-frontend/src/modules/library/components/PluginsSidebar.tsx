@@ -1,6 +1,7 @@
 import type { MouseEvent, ReactNode } from 'react';
 import { cn } from '../../../lib/utils';
 import type { LibraryFilter } from '../utils/status';
+import { ChalkArrow } from './plugin-page-parts';
 import { LockGlyph } from './LockGlyph';
 
 /**
@@ -48,6 +49,25 @@ export interface PluginsSidebarProps {
   onFinishSetup(): void;
   /** Start a new plugin. The layout owns the dialog; this is only the intent. */
   onCreatePlugin(): void;
+  /**
+   * Whether to spell the first plugin out in words, with the chalk arrow. The
+   * hover-revealed `+` is unchanged for everyone; this is only the teaching
+   * mark, and it is an administrator's — see the empty-state block below.
+   *
+   * The caller passes a SETTLED verdict, not just a role: the layout derives
+   * it from `workspaceHasNoPlugins`, which stays false while plugin discovery
+   * is loading or has failed. Without that, an admin whose plugins were still
+   * arriving would briefly read "Create a plugin" over a workspace that has
+   * twenty. The empty-`plugins` check below is therefore structural (where the
+   * row may appear), while WHETHER it may appear is the caller's call.
+   *
+   * Optional, defaulting to OFF, for the same reason `isAdminLoading` is
+   * optional on the admin context: this props type is public, and a host
+   * application rendering the nav must stay source-compatible across the
+   * upgrade. Omitting it reproduces the nav exactly as it shipped, which had
+   * no written-out CTA at all.
+   */
+  canCreatePlugin?: boolean;
   /**
    * The all-plugins index is showing. Beside `filter` rather than inside it: the
    * index lists PLACES, not a filtered slice of the catalog, so it is not a
@@ -99,6 +119,7 @@ export function PluginsSidebar({
   attentionCount,
   onFinishSetup,
   onCreatePlugin,
+  canCreatePlugin = false,
   pluginsIndexActive,
   onOpenPluginsIndex,
   onContextMenu,
@@ -265,6 +286,35 @@ export function PluginsSidebar({
               attention > 0 ? attention : count,
               attention > 0 ? 'pending' : 'count',
             ),
+          )}
+          {/* The heading's `+` is hover-revealed, and a person with no plugins
+              yet is exactly the person who has not learned to hover it. While
+              the workspace holds no plugins AT ALL, the way to the first one is
+              said in words, as a row where it would sit — with a chalk arrow
+              from the empty space below, the same margin-note voice as the
+              empty plugin page. It stands down the moment any plugin exists,
+              readable or locked: a locked plugin means someone already created
+              one, and this is a doorway for an untouched workspace, not a
+              permanent duplicate of the `+`.
+
+              Administrators only. On an untouched workspace the first plugin is
+              theirs to make, and telling everyone else to make it points them
+              at a decision that is not theirs. The `+` above is untouched for
+              every caller — this is the teaching mark, not the affordance. */}
+          {canCreatePlugin && plugins.length === 0 && lockedPlugins.length === 0 && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={onCreatePlugin}
+                className="flex items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-hover hover:text-ink"
+              >
+                <span aria-hidden="true">+</span>
+                <span className="truncate">Create a plugin</span>
+              </button>
+              {/* Mirrored, so the tip points up-left at the row's words from
+                  the room an empty nav is guaranteed to have beneath it. */}
+              <ChalkArrow className="pointer-events-none absolute left-[22px] top-[30px] h-[52px] w-[64px] -scale-x-100 text-ink-faint" />
+            </div>
           )}
           {/* Locked plugins, after the prototype's 14px `.navgap`. The gap is the
               whole statement: these are in the same list because they are in the

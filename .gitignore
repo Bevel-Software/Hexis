@@ -11,3 +11,4 @@ tool-chain-spills/
 # that ships it keeps it matching the artifact. The output is deterministic
 # across platforms, so committing it with a drift check is a viable alternative.
 THIRD-PARTY-NOTICES.md
+.claude/

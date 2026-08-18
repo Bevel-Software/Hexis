@@ -18,6 +18,14 @@ import { getRolesHealth, recoverRoles } from '../services/roles.api';
 // test, or a host app supplying its own admin state) has to be able to say so.
 export interface AdminContextValue {
   isAdmin: boolean;
+  /**
+   * True until the signed-in person's admin verdict has settled.
+   *
+   * Optional so host applications and older test harnesses that provide this
+   * public context directly remain source-compatible. The built-in provider
+   * always supplies it.
+   */
+  isAdminLoading?: boolean;
   /** Number of feedback rows submitted after `lastSeen` (or total if null). */
   unreadCount: number;
   /** ISO timestamp; null means the admin has never opened the inbox. */
@@ -59,6 +67,7 @@ export function AdminProvider({ children }: { children: ReactNode }) {
   const countUnread = useAppRegistry().adminUnreadCount;
 
   const [isAdmin, setIsAdmin] = useState(false);
+  const [isAdminLoading, setIsAdminLoading] = useState(true);
   const [lastSeen, setLastSeen] = useState<string | null>(null);
   const [unreadCount, setUnreadCount] = useState(0);
   const [rolesConfigCorrupted, setRolesConfigCorrupted] = useState(false);
@@ -77,6 +86,7 @@ export function AdminProvider({ children }: { children: ReactNode }) {
   // failure falls back to "no admin" rather than stale access.
   useEffect(() => {
     setIsAdmin(false);
+    setIsAdminLoading(Boolean(email));
     setLastSeen(null);
     setUnreadCount(0);
     if (!email) return;
@@ -94,6 +104,9 @@ export function AdminProvider({ children }: { children: ReactNode }) {
         setIsAdmin(false);
         setLastSeen(null);
         setUnreadCount(0);
+      })
+      .finally(() => {
+        if (!cancelled) setIsAdminLoading(false);
       });
     return () => {
       cancelled = true;
@@ -202,6 +215,7 @@ export function AdminProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AdminContextValue>(
     () => ({
       isAdmin,
+      isAdminLoading,
       unreadCount,
       lastSeen,
       markSeen,
@@ -212,6 +226,7 @@ export function AdminProvider({ children }: { children: ReactNode }) {
     }),
     [
       isAdmin,
+      isAdminLoading,
       unreadCount,
       lastSeen,
       markSeen,

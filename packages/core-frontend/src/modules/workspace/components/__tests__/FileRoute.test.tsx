@@ -152,6 +152,26 @@ describe('FileRoute', () => {
     expect(setPersistenceBranch).toHaveBeenCalledWith('alice/draft');
   });
 
+  /**
+   * A branch name may legitimately contain a percent sign. The router already
+   * percent-decodes path params, so decoding again read `my%20branch` as
+   * `my branch` and bootstrapped the workspace under a branch nobody has.
+   */
+  it('takes the branch as the router decoded it, percent sign and all', async () => {
+    const setPersistenceBranch = vi.fn();
+    const workspace = makeWorkspace({
+      hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () =>
+        makeHydrateResult({ surviving: ['Knowledge/Foo.md'] }),
+      ),
+      setPersistenceBranch,
+    });
+    const git = makeGit({ status: makeStatus('my%20branch') });
+
+    renderAt('/workspace/my%2520branch/Knowledge/Foo.md', { git, workspace });
+
+    await waitFor(() => expect(setPersistenceBranch).toHaveBeenCalledWith('my%20branch'));
+  });
+
   it('redirects to the new branch via setPersistenceBranch when URL points elsewhere (no git checkout)', async () => {
     // Under the per-branch workspace model, "switching branches" in
     // FileRoute is just calling setPersistenceBranch — useWorkspaceState

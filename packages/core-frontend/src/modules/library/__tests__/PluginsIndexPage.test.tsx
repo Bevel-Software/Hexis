@@ -28,6 +28,7 @@ import {
   WorkspaceContext,
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
+import { AdminContext, type AdminContextValue } from '../../admin/state/admin.context';
 import { PluginsIndexPage } from '../components/PluginsIndexPage';
 import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
 
@@ -103,19 +104,35 @@ const WORKSPACE = {
   kbDirName: 'knowledge-base',
 } as unknown as WorkspaceContextValue;
 
-function renderIndex() {
+const nonAdmin: AdminContextValue = {
+  isAdmin: false,
+  unreadCount: 0,
+  lastSeen: null,
+  markSeen: vi.fn(),
+  refresh: vi.fn(),
+  rolesConfigCorrupted: false,
+  rolesConfigErrors: [],
+  runRolesRecovery: vi.fn(),
+};
+
+/** The same caller with the admin bit set — the empty index's CTA is theirs. */
+const asAdmin: AdminContextValue = { ...nonAdmin, isAdmin: true };
+
+function renderIndex(admin: AdminContextValue = nonAdmin) {
   return render(
     <MemoryRouter initialEntries={['/skills-and-tools']}>
       {withAuth(
-      <WorkspaceContext.Provider value={WORKSPACE}>
-        <LibraryProvider>
-          <Routes>
-            <Route path="/skills-and-tools" element={<PluginsIndexPage />} />
-            <Route path="*" element={<div />} />
-          </Routes>
-          <LocationProbe />
-        </LibraryProvider>
-      </WorkspaceContext.Provider>,
+      <AdminContext.Provider value={admin}>
+        <WorkspaceContext.Provider value={WORKSPACE}>
+          <LibraryProvider>
+            <Routes>
+              <Route path="/skills-and-tools" element={<PluginsIndexPage />} />
+              <Route path="*" element={<div />} />
+            </Routes>
+            <LocationProbe />
+          </LibraryProvider>
+        </WorkspaceContext.Provider>
+      </AdminContext.Provider>,
       )}
     </MemoryRouter>,
   );
@@ -259,6 +276,69 @@ describe('PluginsIndexPage', () => {
     // One skill and one tool in Plugins/GTM, and nothing claiming to know who
     // runs it — so the row states what it can count, not what it cannot.
     expect(await screen.findByRole('button', { name: 'GTM 1 skills · 1 tools' })).toBeInTheDocument();
+  });
+
+  /** An untouched workspace: no summaries, and only unfiled items. */
+  function untouchedWorkspace() {
+    pluginsMock.listPlugins.mockResolvedValue([]);
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      skills: [{ name: 'scratch', description: '', path: 'Skills/scratch' }],
+      tools: [
+        tool({ slug: 'slack', name: 'slack', path: 'Tools/slack.tool' }),
+      ],
+    });
+  }
+
+  it('turns an untouched index into a create CTA for an admin, and the CTA into the dialog', async () => {
+    untouchedWorkspace();
+    renderIndex(asAdmin);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create the first plugin' }));
+    expect(await screen.findByRole('textbox', { name: 'Plugin name' })).toBeInTheDocument();
+  });
+
+  it('never offers the first plugin to a non-admin — that call is not theirs to make', async () => {
+    untouchedWorkspace();
+    renderIndex();
+    await screen.findByText('Your plugins');
+    expect(
+      screen.queryByRole('button', { name: 'Create the first plugin' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('keeps the create CTA out of the way once the caller is in a plugin', async () => {
+    renderIndex(asAdmin); // default fixture: member of GTM
+    await screen.findByRole('button', { name: /^GTM/ });
+    expect(
+      screen.queryByRole('button', { name: 'Create the first plugin' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('stands the CTA down when plugins exist that the admin is simply not in', async () => {
+    // Locked entries are plugins too: "the first plugin" would be a lie here,
+    // even though `Your plugins` is empty.
+    pluginsMock.listPlugins.mockResolvedValue([
+      summary({ name: 'Finance', folders: ['Plugins/Finance'], canRead: false, canWrite: false }),
+    ]);
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+    renderIndex(asAdmin);
+    await screen.findByRole('button', { name: /^Finance/ });
+    expect(
+      screen.queryByRole('button', { name: 'Create the first plugin' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('does not promise the first plugin while the catalog is still loading', async () => {
+    // The initial empty `items` is an unanswered question, not an untouched
+    // workspace: a catalog-derived plugin may still be on its way in.
+    pluginsMock.listPlugins.mockResolvedValue([]);
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
+    renderIndex(asAdmin);
+    await screen.findByText('Your plugins');
+    expect(
+      screen.queryByRole('button', { name: 'Create the first plugin' }),
+    ).not.toBeInTheDocument();
   });
 
   it('offers a retry when the plugins endpoint fails, and keeps Yours', async () => {

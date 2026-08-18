@@ -54,6 +54,7 @@ import {
   parseAccessEntry,
 } from './access-control.service.js';
 import { makeRolesYamlWriteValidator } from './roles-yaml-guard.js';
+import { renderRolesYaml } from './render-roles-yaml.js';
 import {
   parseRolesModel,
   createRole as editCreateRole,
@@ -92,20 +93,21 @@ const ROLES_YAML = 'roles.yaml';
 const OLD_ROLES_YAML = 'old-roles.yaml';
 
 /**
- * The known-good `roles.yaml` the break-glass recovery restores. Mirrors the
- * canonical Bevel roster — it is the ONLY content recovery ever writes, so it
- * MUST parse (the post-recovery resolver loads it immediately). Keep the Admin
- * list in sync with the canonical `osapiens-kb/roles.yaml`.
+ * The known-good `roles.yaml` the break-glass recovery restores — generated
+ * from THIS deployment's configured admins, exactly like ordinary seeding
+ * (`ADMIN_EMAIL`), never a roster baked into the build: hard-coded emails
+ * would land one company's admins in every customer's recovered file. It is
+ * the ONLY content recovery ever writes, so it MUST parse (the post-recovery
+ * resolver loads it immediately) — guaranteed by delegating to the shared
+ * validated renderer, which parse-backs its output and throws an actionable
+ * message on a malformed ADMIN_EMAIL (instead of the write-validator
+ * rejecting the finished file deep in the write path). `null` provenance:
+ * the seed-time "generated at KB-seed time" comment would mislead on a
+ * recovery-restored file.
  */
-const RECOVERY_DEFAULT_ROLES_YAML = `# Identity → role mapping for access control.
-# Role names are case- and whitespace-insensitive. The \`Admin\` role is special:
-# only Admins may edit this file, and at least one Admin must always exist.
-roles:
-  Admin:
-    - razvan.radulescu@bevel.software
-    - ali.raza@bevel.software
-    - juan@bevel.software
-`;
+function renderRecoveryRolesYaml(admins: readonly string[]): string {
+  return renderRolesYaml(admins, null);
+}
 
 /** Health of the default-branch roles.yaml: does the resolver's parser accept it? */
 export interface RolesConfigHealth {
@@ -135,6 +137,13 @@ export class RolesAdminService {
      * open tab keeps a now-stale read verdict until a manual reload.
      */
     private readonly eventBus?: WorkflowEventBus,
+    /**
+     * This deployment's configured admins (`ADMIN_EMAIL`), the roster the
+     * break-glass recovery restores. Recovery refuses outright when empty: a
+     * recovered roles.yaml with no Admin is exactly the unusable state
+     * recovery exists to escape.
+     */
+    private readonly recoveryAdmins: readonly string[] = [],
   ) {}
 
   /** Resolved per call — see the constructor note on `defaultBranchOf`. */
@@ -340,6 +349,15 @@ export class RolesAdminService {
       );
     }
 
+    if (this.recoveryAdmins.length === 0) {
+      throw new RolesAdminError(
+        'Recovery needs a configured admin (ADMIN_EMAIL) to restore — a roles.yaml ' +
+          'with no Admin is exactly the unusable state recovery exists to escape.',
+        500,
+        { kind: 'no-recovery-admins' },
+      );
+    }
+
     await this.assertRolesUnlocked(workspaceId, actor);
 
     // Back up the corrupted bytes and restore the good default atomically. The
@@ -349,7 +367,7 @@ export class RolesAdminService {
       fsys.writeFiles(
         [
           { path: `${this.kbDirName}/${OLD_ROLES_YAML}`, content: current },
-          { path: `${this.kbDirName}/${ROLES_YAML}`, content: RECOVERY_DEFAULT_ROLES_YAML },
+          { path: `${this.kbDirName}/${ROLES_YAML}`, content: renderRecoveryRolesYaml(this.recoveryAdmins) },
         ],
         'Bevel recovery: reset corrupted roles.yaml',
       ),

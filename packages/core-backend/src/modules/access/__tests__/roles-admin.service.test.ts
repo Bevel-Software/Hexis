@@ -160,7 +160,9 @@ describe('RolesAdminService', () => {
     access = new AccessControlService(ws, KB);
     workflow = stubWorkflow();
     bus = stubEventBus();
-    svc = new RolesAdminService(ws, workflow.svc, access, KB, () => DEFAULT_BRANCH, bus.bus);
+    svc = new RolesAdminService(ws, workflow.svc, access, KB, () => DEFAULT_BRANCH, bus.bus, [
+      'recovery-admin@example.com',
+    ]);
   });
 
   afterEach(async () => {
@@ -219,9 +221,29 @@ describe('RolesAdminService', () => {
     const restored = await readRoles();
     expect(access.validateRolesYaml(restored).ok).toBe(true);
     expect(roster.find((r) => r.canonical === 'admin')?.isAdmin).toBe(true);
-    expect(roster.find((r) => r.canonical === 'admin')!.members.length).toBeGreaterThan(0);
+    // The roster is THIS deployment's configured admin — never a list baked
+    // into the build (hard-coded emails would land one company's admins in
+    // every customer's recovered file).
+    expect(roster.find((r) => r.canonical === 'admin')!.members).toEqual([
+      'recovery-admin@example.com',
+    ]);
+    expect(restored).not.toContain('bevel.software');
     // And the file is now healthy.
     expect(await svc.getHealth()).toEqual({ ok: true, errors: [] });
+  });
+
+  it('recover refuses when no admin is configured — an adminless roster is the disease, not the cure', async () => {
+    const corrupt = 'roles:\n  Admin:\n    - a@x.eu\n  Admin:\n    - b@x.eu\n';
+    await write(repo, 'roles.yaml', corrupt);
+    access.invalidate(WS);
+    const adminless = new RolesAdminService(ws, workflow.svc, access, KB, () => DEFAULT_BRANCH, bus.bus);
+    await expect(adminless.recover(ADMIN)).rejects.toMatchObject({
+      status: 500,
+      payload: { kind: 'no-recovery-admins' },
+    });
+    // Nothing parked, nothing overwritten.
+    await expect(fs.readFile(path.join(repo, 'old-roles.yaml'), 'utf-8')).rejects.toThrow();
+    expect(await fs.readFile(path.join(repo, 'roles.yaml'), 'utf-8')).toBe(corrupt);
   });
 
   it("getRoster's referencedBy is sound — finds node-frontmatter refs, not just folder access.md", async () => {

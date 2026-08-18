@@ -3,7 +3,8 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { useAuth } from '../../auth/state/auth.context';
-import { attentionOf, useLibrary } from '../state/library-data';
+import { useAdmin } from '../../admin/state/admin.context';
+import { attentionOf, useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
 import {
   isPluginsIndexPath,
@@ -36,10 +37,12 @@ import { NewPluginDialog } from './NewPluginDialog';
  * can take its filter as a plain prop and the sidebar can hold no state.
  */
 export function LibraryLayout() {
-  const { items, pluginSummaries, reload, reloadPlugins } = useLibrary();
+  const lib = useLibrary();
+  const { items, pluginSummaries, reload, reloadPlugins } = lib;
   const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { isAdmin } = useAdmin();
   const { kbDirName } = useWorkspace();
   const toast = useLibraryToast();
   const [newPluginOpen, setNewPluginOpen] = useState(false);
@@ -217,6 +220,12 @@ export function LibraryLayout() {
           attentionCount={attentionCount}
           onFinishSetup={() => navigate('/connect')}
           onCreatePlugin={() => setNewPluginOpen(true)}
+          // The whole verdict, not just the role: the create-a-plugin row is a
+          // claim that the workspace holds no plugins AT ALL, and that claim is
+          // only honest once both plugin witnesses have settled successfully —
+          // while they load (or after they fail) an empty list is an unanswered
+          // question, not an untouched workspace.
+          canCreatePlugin={isAdmin && workspaceHasNoPlugins(lib)}
           pluginsIndexActive={isPluginsIndexPath(location.pathname)}
           onOpenPluginsIndex={() => navigate(pathForPluginsIndex())}
           onContextMenu={openContextMenu}
