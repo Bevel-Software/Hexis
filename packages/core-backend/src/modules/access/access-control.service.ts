@@ -292,6 +292,11 @@ function tokenise(
 ): YamlErr | { ok: true; tokens: Token[] } {
   const lines = text.split(/\r?\n/);
   const tokens: Token[] = [];
+  // Tolerated blank keys are uniquified as runs of spaces so a SECOND blank
+  // key doesn't trip the duplicate-key check (which would retire every valid
+  // group after it). All-whitespace keys still canonicalize to '' downstream,
+  // so the entry-level "empty group name — skipped" handling sees them all.
+  let blankKeySeq = 0;
   for (let i = 0; i < lines.length; i++) {
     const stripped = stripComment(lines[i]).replace(/\s+$/, '');
     if (!stripped.trim()) continue;
@@ -309,14 +314,17 @@ function tokenise(
     if (colonIdx < 0) {
       return { ok: false, error: `line ${lineNum}: expected 'key:' or '- value' but got '${content}'` };
     }
-    const key = content.slice(0, colonIdx).trim();
+    let key = content.slice(0, colonIdx).trim();
     const valuePart = content.slice(colonIdx + 1).trim();
     // An empty key is normally a hard error (roles.yaml/access.md want loud
     // failures), but a parser with ENTRY-level forgiveness (the group files:
-    // one bad entry must not retire every other group) keeps it as an ''
-    // key for its own skip-with-warning handling.
-    if (!key && !opts?.tolerateEmptyKeys) {
-      return { ok: false, error: `line ${lineNum}: empty mapping key` };
+    // one bad entry must not retire every other group) keeps it as a
+    // whitespace key for its own skip-with-warning handling.
+    if (!key) {
+      if (!opts?.tolerateEmptyKeys) {
+        return { ok: false, error: `line ${lineNum}: empty mapping key` };
+      }
+      key = ' '.repeat(++blankKeySeq);
     }
     tokens.push({ lineNum, indent, kind: 'kv', key, value: valuePart });
   }
@@ -1798,9 +1806,6 @@ export class AccessControlService implements IAccessControl {
       excludedEmails?: Set<string>;
     }
   > | null> {
-    const loaded = await this.loadModelAtRef(workspaceId, ref);
-    if (!loaded) return null;
-    const repoDir = await this.repoDir(workspaceId);
     const result = new Map<
       string,
       {
@@ -1810,19 +1815,27 @@ export class AccessControlService implements IAccessControl {
         excludedEmails?: Set<string>;
       }
     >();
-    // One `git cat-file --batch` for the whole path set — see canWriteBatchAtRef.
-    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
+    // Machine-owned paths resolve without the model — same answer
+    // eligibleWritersAtRef gives (including at a ref with no usable
+    // roles.yaml), so batched consumers (CR owner-routing, approval state)
+    // agree with the single-path surface.
     for (const p of relativePaths) {
       if (p === SYNCED_GROUPS_YAML) {
-        // Machine-owned — same answer eligibleWritersAtRef gives, so batched
-        // consumers (CR owner-routing, approval state) agree with it.
         result.set(p, {
           roles: [],
           users: [{ name: DIRECTORY_SYNC_BOT_NAME, email: DIRECTORY_SYNC_BOT_EMAIL }],
           emails: new Set([DIRECTORY_SYNC_BOT_EMAIL]),
         });
-        continue;
       }
+    }
+    if (result.size === relativePaths.length) return result;
+    const loaded = await this.loadModelAtRef(workspaceId, ref);
+    if (!loaded) return null;
+    const repoDir = await this.repoDir(workspaceId);
+    // One `git cat-file --batch` for the whole path set — see canWriteBatchAtRef.
+    const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
+    for (const p of relativePaths) {
+      if (result.has(p)) continue;
       const own = owns.get(p) ?? null;
       const display = eligibleHoldersResolved(loaded.model, 'write', p, own);
       const emails = new Set(eligibleHolderEmailsResolved(loaded.model, 'write', p, own).keys());

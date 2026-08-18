@@ -50,13 +50,19 @@ export function DirectoryGroupsPage() {
   // All roster mutations queue through here — see useExclusiveRunner.
   const runExclusive = useExclusiveRunner();
 
-  // Bump on every load so a stale in-flight response never overwrites the
-  // current roster.
+  // Bump on every refresh so a superseded refresh response (an older refresh
+  // overlapped by a newer one) is dropped rather than applied out of order.
   const requestId = useRef(0);
 
+  // Refreshes queue through the SAME exclusive runner as the mutations, so a
+  // refresh and a mutation can never interleave: whichever queued first runs —
+  // and applies its roster — first. (Ordering refreshes against mutations by
+  // bumping requestId in applyRoster instead was backwards: a panel-triggered
+  // refresh resolving before an older slow mutation made the late mutation
+  // response "look newer" and restore a stale roster/mode.)
   const refresh = useCallback(() => {
     const myReq = ++requestId.current;
-    getGroupsRoster()
+    runExclusive(getGroupsRoster)
       .then((r) => {
         if (myReq !== requestId.current) return;
         setRoster(r);
@@ -68,18 +74,17 @@ export function DirectoryGroupsPage() {
         // Keep whatever was already on screen — a failed reload is a banner,
         // not an empty page.
       });
-  }, []);
+  }, [runExclusive]);
 
   useEffect(() => {
     if (isAdmin) refresh();
   }, [isAdmin, refresh]);
 
   // Any mutation on the groups roster returns the authoritative roster — set
-  // it directly rather than refetching.
+  // it directly rather than refetching. No requestId bump needed: mutations
+  // share the exclusive queue with refresh(), so their responses already apply
+  // in a strict total order.
   const applyRoster = useCallback((r: GroupsRoster) => {
-    // Bump so an in-flight refresh() result is dropped in favour of this
-    // fresher mutation response.
-    requestId.current++;
     setRoster(r);
     // A stale banner from an earlier failed reload no longer describes what's
     // on screen.
@@ -118,7 +123,7 @@ export function DirectoryGroupsPage() {
         <div className="space-y-4">
           {error && (
             <div
-              className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-sm px-2 py-1.5"
+              className="text-xs text-danger bg-danger-soft border border-danger/30 rounded-sm px-2 py-1.5"
               role="alert"
             >
               {error}
@@ -175,7 +180,7 @@ export function DirectoryGroupsPage() {
             <button
               onClick={handleDeleteGroup}
               disabled={working}
-              className="px-3 py-1.5 text-sm rounded-sm bg-red-600 hover:bg-red-700 text-white disabled:opacity-50"
+              className="px-3 py-1.5 text-sm rounded-sm bg-danger hover:bg-danger/90 text-white disabled:opacity-50"
             >
               {working ? 'Working…' : 'Delete group'}
             </button>
@@ -301,7 +306,7 @@ function CreateGroupForm({
         </button>
       </div>
       {error && (
-        <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-sm px-2 py-1">
+        <div className="text-xs text-danger bg-danger-soft border border-danger/30 rounded-sm px-2 py-1">
           {error}
         </div>
       )}
@@ -364,7 +369,7 @@ function ManualGroupCard({
           type="button"
           onClick={() => onDeleteRequest(group)}
           disabled={busy}
-          className="p-1.5 rounded hover:bg-red-50 text-red-600 disabled:opacity-50 shrink-0"
+          className="p-1.5 rounded-sm hover:bg-danger-soft text-danger disabled:opacity-50 shrink-0"
           title="Delete group"
           aria-label={`Delete ${group.displayName}`}
         >
@@ -386,7 +391,7 @@ function ManualGroupCard({
                 type="button"
                 onClick={() => submitRemove(member)}
                 disabled={busy}
-                className="shrink-0 rounded-full p-0.5 text-ink-faint hover:text-red-600 hover:bg-red-50 disabled:opacity-50"
+                className="shrink-0 rounded-full p-0.5 text-ink-faint hover:text-danger hover:bg-danger-soft disabled:opacity-50"
                 title="Remove member"
                 aria-label={`Remove ${member}`}
               >
@@ -423,7 +428,7 @@ function ManualGroupCard({
       </div>
 
       {error && (
-        <div className="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-sm px-2 py-1">
+        <div className="mt-2 text-xs text-danger bg-danger-soft border border-danger/30 rounded-sm px-2 py-1">
           {error}
         </div>
       )}

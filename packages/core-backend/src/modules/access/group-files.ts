@@ -143,6 +143,12 @@ export function validateGroupsFile(
   text: string,
   filename: string,
 ): { ok: true } | { ok: false; errors: string[] } {
+  // Strict PARSE first (no empty-key tolerance): the read side forgives a
+  // blank key entry-level so other groups keep resolving, but a WRITE that
+  // contains one — anywhere, including outside the `groups:` mapping — must
+  // refuse rather than land bytes the tolerant reader silently drops.
+  const strict = parseYamlSubset(text.trim() ? text : 'groups:');
+  if (!strict.ok) return { ok: false, errors: [`${filename}: ${strict.error}`] };
   const parsed = parseGroupsFile(text, filename);
   if (!parsed.ok) return { ok: false, errors: parsed.errors };
   if (parsed.warnings.length > 0) return { ok: false, errors: parsed.warnings };

@@ -104,12 +104,16 @@ export function renderSyncedGroupsYaml(groups: SyncedGroupRecord[]): RenderedSyn
     if (byName !== 0) return byName;
     const byExternalId = codeUnitCompare(a.externalId ?? '', b.externalId ?? '');
     if (byExternalId !== 0) return byExternalId;
-    // Full-key duplicates: break the tie on membership so which record wins
-    // the first-wins dedup below never depends on source array order.
-    return codeUnitCompare(
+    // Full-key duplicates: break the tie on membership, then on the RAW
+    // display name (same canonical can differ in case/spacing, and the winner
+    // of the first-wins dedup below decides the emitted name) — so the bytes
+    // never depend on source array order.
+    const byMembers = codeUnitCompare(
       a.members.map((m) => `${m.email ?? ''}:${m.active}`).sort(codeUnitCompare).join(','),
       b.members.map((m) => `${m.email ?? ''}:${m.active}`).sort(codeUnitCompare).join(','),
     );
+    if (byMembers !== 0) return byMembers;
+    return codeUnitCompare(a.displayName, b.displayName);
   });
 
   for (const group of sorted) {
@@ -148,8 +152,11 @@ export function renderSyncedGroupsYaml(groups: SyncedGroupRecord[]): RenderedSyn
       // The directory is UNTRUSTED input: a "email" carrying a newline or
       // entry-grammar characters would corrupt the emitted YAML or inject
       // memberships. Canonicalize and validate before it may become a line.
+      // A leading '#' passes the regex but the emitted `- #…` reads back as a
+      // comment (stripComment) — the member would silently vanish on the next
+      // resolver read, so refuse it here where it at least gets a warning.
       const email = canonicalEmail(member.email);
-      if (!EMAIL_REGEX.test(email)) {
+      if (!EMAIL_REGEX.test(email) || email.startsWith('#')) {
         malformedMembers++;
         continue;
       }

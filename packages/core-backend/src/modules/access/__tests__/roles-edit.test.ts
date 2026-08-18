@@ -155,6 +155,18 @@ describe('roles-edit: mutations', () => {
     expect(r.changed).toBe(false);
   });
 
+  it('renameGroupRefs rewrites EVERY matching ref in a role, collapsing to one', () => {
+    // Two differently-formatted refs to the same group: both must follow the
+    // rename (a straggler would point at the renamed-away name forever), and
+    // only one ref to the new name survives.
+    const text = 'roles:\n  Ops:\n    - group:gtm team\n    - group:gtm  team\n';
+    const r = renameGroupRefs(text, 'gtm team', 'go to market');
+    expect(r.changed).toBe(true);
+    const ops = parseRolesModel(r.text).find((x) => x.displayName === 'Ops')!;
+    expect(ops.members.filter((m) => m === 'group:go to market')).toHaveLength(1);
+    expect(ops.members.some((m) => m.includes('gtm'))).toBe(false);
+  });
+
   it('group-ref matching is canonical: an un-normalized hand-written ref still matches', () => {
     // The resolver canonicalizes the ref's suffix (collapsing runs of
     // spaces), so a hand-written `group:gtm  team` grants — the editors must

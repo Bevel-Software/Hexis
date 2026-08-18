@@ -128,14 +128,33 @@ describe('AdminRolesPage: capabilities, groups, and legacy conversion', () => {
     await waitFor(() => expect(unassignGroup).toHaveBeenCalledWith('editor', 'engineering'));
   });
 
-  it('legacy roles get Convert instead of group assignment — never both', async () => {
+  it('a legacy role WITHOUT assignments gets Convert and no assigned-groups section', async () => {
     renderPage();
     const legacyCard = within(await findCard('Product'));
     expect(legacyCard.getByRole('button', { name: 'Convert to group' })).toBeInTheDocument();
-    // A group-assigned role can't be converted, so offering assignment here
-    // would dead-end the Convert path.
+    // Nothing assigned and nothing assignable — no section at all. Offering
+    // the assign input here would dead-end the Convert path (a group-assigned
+    // role can't be converted).
     expect(legacyCard.queryByText('Assigned groups')).not.toBeInTheDocument();
     expect(legacyCard.queryByRole('textbox', { name: 'Assign group' })).not.toBeInTheDocument();
+  });
+
+  it('a legacy role WITH assignments keeps the chips and remove control — but no add input', async () => {
+    // A legacy role can already carry assignments (hand-edited roles.yaml, or
+    // assigned before the gating existed). convertRoleToGroup refuses until
+    // they're removed, so the unassign controls MUST stay reachable.
+    const legacyAssigned: RoleRosterEntry = { ...LEGACY, groups: ['engineering'] };
+    vi.mocked(fetchRoles).mockResolvedValue([ADMIN, EDITOR, legacyAssigned]);
+    renderPage();
+    const legacyCard = within(await findCard('Product'));
+    expect(legacyCard.getByText('Assigned groups')).toBeInTheDocument();
+    expect(legacyCard.getByText('engineering')).toBeInTheDocument();
+    // The add input stays hidden — only removal is offered on a legacy role.
+    expect(legacyCard.queryByRole('textbox', { name: 'Assign group' })).not.toBeInTheDocument();
+    expect(legacyCard.queryByRole('button', { name: 'Assign' })).not.toBeInTheDocument();
+    // The remove control works and hits the endpoint.
+    await userEvent.click(legacyCard.getByRole('button', { name: 'Remove group engineering' }));
+    await waitFor(() => expect(unassignGroup).toHaveBeenCalledWith('product', 'engineering'));
   });
 
   it('legacy role converts only after an explicit confirm, refreshing from the response', async () => {

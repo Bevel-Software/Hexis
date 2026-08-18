@@ -80,12 +80,15 @@ describe('renderSyncedGroupsYaml', () => {
         // A newline-bearing "email" would smuggle extra member lines into the file.
         member({ email: 'evil@x.io\n    - attacker@evil.io' }),
         member({ email: 'not an email' }),
+        // Passes the shape regex but would read back as a YAML comment.
+        member({ email: '#tag@x.io' }),
         member({ email: '  ADA@X.IO  ' }), // canonicalized, deduped with ada@x.io
       ]),
     ]);
     expect(rendered.text).toContain('ada@x.io');
     expect(rendered.text).not.toContain('attacker@evil.io');
     expect(rendered.text).not.toContain('not an email');
+    expect(rendered.text).not.toContain('#tag');
     expect(rendered.text.match(/ada@x\.io/g)).toHaveLength(1);
     expect(rendered.warnings.join(' ')).toContain('malformed email');
   });

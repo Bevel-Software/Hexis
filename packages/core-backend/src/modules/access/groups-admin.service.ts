@@ -216,6 +216,21 @@ export class GroupsAdminService {
     const newCanonical = canonicalRoleName(newDisplayName);
     if (newCanonical !== canonical) await this.assertRoleNameFree(newDisplayName);
 
+    // Both roster files are read AND rewritten from snapshots — hold their
+    // locks across the whole build so a concurrent roster edit can't land in
+    // between and be overwritten by the batch.
+    return this.withFileLocks(workspaceId, actor, [GROUPS_YAML, ROLES_YAML], () =>
+      this.renameGroupLocked(workspaceId, actor, canonical, newCanonical, newDisplayName),
+    );
+  }
+
+  private async renameGroupLocked(
+    workspaceId: string,
+    actor: AuthUser,
+    canonical: string,
+    newCanonical: string,
+    newDisplayName: string,
+  ): Promise<GroupsRoster> {
     const text = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
     const groupsEdit = this.guardEdit(() => editRenameDisplay(text, canonical, newDisplayName));
     const writes: { repoRelativePath: string; content: string }[] = [];
@@ -329,9 +344,66 @@ export class GroupsAdminService {
     }
   }
 
+  /**
+   * Run `fn` while HOLDING the named KB-file locks — read-modify-write flows
+   * must keep the lock across the READ, or two concurrent edits (another tab,
+   * a conversion writing groups.yaml) both snapshot the same base and the
+   * second write silently discards the first. Mirrors the roles admin's
+   * helper: failure discards (like LockingFilesystem's catch arm); a no-write
+   * success releases WITH commit (a clean tree makes that a no-op) so a
+   * still-queued earlier commit's bytes are never thrown away; a write inside
+   * `fn` has already released the rows, making both calls no-ops.
+   */
+  private async withFileLocks<T>(
+    workspaceId: string,
+    actor: AuthUser,
+    repoRelFiles: string[],
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const paths = repoRelFiles.map((f) => `${this.kbDirName}/${f}`).sort();
+    const held: string[] = [];
+    let failed = false;
+    try {
+      for (const p of paths) {
+        const res = await this.workflowService.acquireLock(workspaceId, this.defaultBranch, p, actor);
+        if (!res.acquired) {
+          throw new GroupsAdminError(
+            `Groups are being edited by ${res.lock.holderName || 'another admin'}. Try again in a moment.`,
+            409,
+          );
+        }
+        held.push(p);
+      }
+      return await fn();
+    } catch (err) {
+      failed = true;
+      throw err;
+    } finally {
+      for (const h of held) {
+        try {
+          if (failed) {
+            await this.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
+          } else {
+            await this.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
+          }
+        } catch { /* already released by the write's own commit pipeline */ }
+      }
+    }
+  }
+
   private async runEdit(actor: AuthUser, pre: (text: string) => GroupsEditResult): Promise<void> {
     const workspaceId = await this.ensureWorkspace();
     await this.assertManualMode(workspaceId);
+    return this.withFileLocks(workspaceId, actor, [GROUPS_YAML], () =>
+      this.runEditLocked(workspaceId, actor, pre),
+    );
+  }
+
+  private async runEditLocked(
+    workspaceId: string,
+    actor: AuthUser,
+    pre: (text: string) => GroupsEditResult,
+  ): Promise<void> {
     const text = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
     const result = this.guardEdit(() => pre(text));
     if (!result.changed) return;

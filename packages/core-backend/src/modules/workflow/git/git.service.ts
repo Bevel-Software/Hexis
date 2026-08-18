@@ -1021,11 +1021,16 @@ export class GitService implements IGitService {
       }
 
       // Scoped → stage exactly the touched set (`add -A -- <paths>` covers
-      // modifications and deletions alike); `git commit` then takes the index,
-      // leaving the other dirty paths for their own queued commits.
-      if (onlyPaths) await this.git(cwd, ['add', '-A', '--', ...touched]);
-      else await this.git(cwd, ['add', '-A']);
-      await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject]);
+      // modifications and deletions alike) and commit WITH the pathspec:
+      // pathspec'd `git commit` records only those paths, so an unrelated
+      // entry someone left in the index can't ride along either.
+      if (onlyPaths) {
+        await this.git(cwd, ['add', '-A', '--', ...touched]);
+        await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject, '--', ...touched]);
+      } else {
+        await this.git(cwd, ['add', '-A']);
+        await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject]);
+      }
 
       const { stdout } = await this.git(cwd, [
         'log', '-1', '--pretty=format:%H%x00%an%x00%ae%x00%s%x00%aI',

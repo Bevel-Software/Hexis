@@ -91,20 +91,21 @@ export function parseGroupsModel(text: string): GroupsModel {
   const seenCanonicals = new Set<string>();
   for (const [displayName, value] of Object.entries(groupsNode as Record<string, unknown>)) {
     const canonical = canonicalRoleName(displayName);
-    if (!canonical || RESERVED_ROLE_NAMES.has(canonical) || seenCanonicals.has(canonical)) {
+    if (
+      !canonical ||
+      RESERVED_ROLE_NAMES.has(canonical) ||
+      seenCanonicals.has(canonical) ||
+      (value !== null && !Array.isArray(value)) // scalar value — resolver skips it
+    ) {
       continue; // resolver-skipped entry — invisible to the editor too
-    }
-    if (value !== null && !Array.isArray(value)) {
-      throw new GroupsEditError(`groups.yaml: group '${displayName.trim()}' must be a list of emails`);
     }
     seenCanonicals.add(canonical);
     const members: string[] = [];
     if (Array.isArray(value)) {
       const seen = new Set<string>();
       for (const raw of value) {
-        if (typeof raw !== 'string') {
-          throw new GroupsEditError(`groups.yaml: group '${displayName.trim()}' has a non-string member`);
-        }
+        // Non-string / malformed members are resolver-skipped — same here.
+        if (typeof raw !== 'string') continue;
         const email = canonicalEmail(raw);
         if (!email || !EMAIL_REGEX.test(email) || seen.has(email)) continue;
         seen.add(email);

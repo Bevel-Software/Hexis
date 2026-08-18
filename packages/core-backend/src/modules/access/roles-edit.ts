@@ -291,11 +291,20 @@ export function renameGroupRefs(text: string, oldCanonical: string, newCanonical
   const model = parseRolesModel(text);
   let changed = false;
   for (const role of model) {
-    const idx = role.members.findIndex((m) => groupRefCanonical(m) === oldCanonical);
-    if (idx < 0) continue;
-    if (role.members.some((m) => groupRefCanonical(m) === newCanonical)) role.members.splice(idx, 1);
-    else role.members[idx] = newRef;
-    changed = true;
+    // A role may carry SEVERAL differently-formatted refs to the same group
+    // (un-normalized hand edits) — rewrite them all, or the stragglers point
+    // at the renamed-away name and accumulate resolver warnings. Exactly one
+    // ref to the new name survives.
+    let hasNew = role.members.some((m) => groupRefCanonical(m) === newCanonical);
+    for (let i = role.members.length - 1; i >= 0; i--) {
+      if (groupRefCanonical(role.members[i]) !== oldCanonical) continue;
+      if (hasNew) role.members.splice(i, 1);
+      else {
+        role.members[i] = newRef;
+        hasNew = true;
+      }
+      changed = true;
+    }
   }
   if (!changed) return { text: emitRolesModel(model), changed: false };
   return reemit(text, model);
@@ -304,6 +313,7 @@ export function renameGroupRefs(text: string, oldCanonical: string, newCanonical
 /** Remove a role's group assignment. 404 unknown role; no-op if not assigned. */
 export function removeRoleGroupRef(text: string, canonical: string, groupName: string): EditResult {
   const refCanonical = canonicalRoleName(groupName);
+  if (!refCanonical) throw new RolesEditError('group name must not be empty');
   const model = parseRolesModel(text);
   const role = findRole(model, canonical);
   if (!role) throw new RolesEditError(`role not found: ${canonical}`, 404);

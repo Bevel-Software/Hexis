@@ -250,7 +250,7 @@ export function AdminRolesPage() {
           <Loader2 size={14} className="animate-spin" /> Loading…
         </div>
       ) : error ? (
-        <div className="p-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded">
+        <div className="p-3 text-sm text-danger bg-danger-soft border border-danger/30 rounded-sm">
           {error}
         </div>
       ) : visibleRoster.length === 0 ? (
@@ -312,7 +312,7 @@ function NewRoleControl({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="px-3 py-1.5 text-xs rounded border border-line hover:bg-hover flex items-center gap-1.5"
+        className="px-3 py-1.5 text-xs rounded-sm border border-line hover:bg-hover flex items-center gap-1.5"
       >
         <Plus size={12} /> New role
       </button>
@@ -331,27 +331,27 @@ function NewRoleControl({
             if (e.key === 'Escape') reset();
           }}
           placeholder="Role name"
-          className="text-xs px-2 py-1 border border-line rounded focus:outline-none focus:border-accent w-48 max-w-full min-w-0"
+          className="text-xs px-2 py-1 border border-line rounded-sm focus:outline-none focus:border-accent w-48 max-w-full min-w-0"
           aria-label="New role name"
         />
         <button
           type="button"
           onClick={submit}
-          className="px-2 py-1 text-xs rounded bg-accent hover:bg-accent-hover text-white disabled:opacity-50 flex items-center gap-1"
+          className="px-2 py-1 text-xs rounded-sm bg-accent hover:bg-accent-hover text-white disabled:opacity-50 flex items-center gap-1"
         >
           Add
         </button>
         <button
           type="button"
           onClick={reset}
-          className="p-1 rounded hover:bg-hover text-ink-muted"
+          className="p-1 rounded-sm hover:bg-hover text-ink-muted"
           aria-label="Cancel"
         >
           <X size={14} />
         </button>
       </div>
       {error && (
-        <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1">
+        <div className="text-xs text-danger bg-danger-soft border border-danger/30 rounded-sm px-2 py-1">
           {error}
         </div>
       )}
@@ -632,6 +632,18 @@ function RoleCard({
     setConvertOpen(false);
   };
 
+  // Group assignment is offered on capability roles that don't opt out — and
+  // never on Admin (individuals only: its blast radius must not follow
+  // IdP-managed membership). Legacy people-set roles get "Convert to group"
+  // instead, and a group-assigned role can no longer be converted.
+  const groupAssignable =
+    !role.isAdmin && role.capability !== null && role.capability.groupAssignable !== false;
+  // ...but a role can already CARRY assignments it isn't allowed to receive
+  // here (a hand-edited roles.yaml, or grants made before this gating). Those
+  // must stay visible — with their remove controls — or there is no UI left to
+  // unassign them, and convertRoleToGroup refuses until they're gone.
+  const showGroupsSection = groupAssignable || role.groups.length > 0;
+
   const confirmDelete = async () => {
     if (renamePending) return;
     // Optimistic: close the dialog and let the card vanish immediately. The
@@ -660,14 +672,14 @@ function RoleCard({
                   }
                 }}
                 disabled={busy}
-                className="text-base font-semibold px-2 py-1 border border-line rounded focus:outline-none focus:border-accent min-w-0"
+                className="text-base font-semibold px-2 py-1 border border-line rounded-sm focus:outline-none focus:border-accent min-w-0"
                 aria-label="Role name"
               />
               <button
                 type="button"
                 onClick={submitRename}
                 disabled={busy}
-                className="p-1 rounded hover:bg-hover text-ink-muted disabled:opacity-50 shrink-0"
+                className="p-1 rounded-sm hover:bg-hover text-ink-muted disabled:opacity-50 shrink-0"
                 aria-label="Save name"
               >
                 {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
@@ -679,7 +691,7 @@ function RoleCard({
                   setRenaming(false);
                 }}
                 disabled={busy}
-                className="p-1 rounded hover:bg-hover text-ink-muted shrink-0"
+                className="p-1 rounded-sm hover:bg-hover text-ink-muted shrink-0"
                 aria-label="Cancel rename"
               >
                 <X size={14} />
@@ -691,7 +703,7 @@ function RoleCard({
                 {displayName}
               </h2>
               {role.isAdmin && (
-                <span className="text-[10px] uppercase tracking-wide text-ink-muted border border-line rounded px-1.5 py-0.5">
+                <span className="text-[10px] uppercase tracking-wide text-ink-muted border border-line rounded-sm px-1.5 py-0.5">
                   Required
                 </span>
               )}
@@ -706,7 +718,7 @@ function RoleCard({
                 type="button"
                 onClick={() => setConvertOpen(true)}
                 disabled={busy || renamePending}
-                className="px-2 py-1 text-xs rounded border border-line hover:bg-hover text-ink-muted disabled:opacity-50"
+                className="px-2 py-1 text-xs rounded-sm border border-line hover:bg-hover text-ink-muted disabled:opacity-50"
                 title="Convert this people-set role into a group"
               >
                 Convert to group
@@ -719,7 +731,7 @@ function RoleCard({
                 setRenaming(true);
               }}
               disabled={busy || renamePending}
-              className="p-1.5 rounded hover:bg-hover text-ink-muted disabled:opacity-50"
+              className="p-1.5 rounded-sm hover:bg-hover text-ink-muted disabled:opacity-50"
               title="Rename"
               aria-label="Rename role"
             >
@@ -730,7 +742,7 @@ function RoleCard({
                 type="button"
                 onClick={() => setDeleteTarget({ role })}
                 disabled={busy || renamePending}
-                className="p-1.5 rounded hover:bg-red-50 text-red-600 disabled:opacity-50"
+                className="p-1.5 rounded-sm hover:bg-danger-soft text-danger disabled:opacity-50"
                 title="Delete role"
                 aria-label="Delete role"
               >
@@ -767,7 +779,7 @@ function RoleCard({
                   type="button"
                   onClick={() => handleRemoveMember(email)}
                   disabled={busy || renamePending || isLastAdminMember}
-                  className="shrink-0 rounded-full p-0.5 text-ink-faint hover:text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:hover:text-ink-faint disabled:hover:bg-transparent"
+                  className="shrink-0 rounded-full p-0.5 text-ink-faint hover:text-danger hover:bg-danger-soft disabled:cursor-not-allowed disabled:hover:text-ink-faint disabled:hover:bg-transparent"
                   title={
                     isLastAdminMember
                       ? 'Admin must keep at least one member'
@@ -805,12 +817,12 @@ function RoleCard({
             }}
             placeholder="Add member by email"
             disabled={busy || renamePending}
-            className="text-xs px-2 py-1 border border-line rounded focus:outline-none focus:border-accent w-full min-w-0"
+            className="text-xs px-2 py-1 border border-line rounded-sm focus:outline-none focus:border-accent w-full min-w-0"
             aria-label="Member email"
             autoComplete="off"
           />
           {showSuggest && suggestions.length > 0 && (
-            <ul className="absolute z-10 mt-1 w-full sm:w-72 max-w-full max-h-56 overflow-auto bg-white border border-line rounded shadow-lg py-1">
+            <ul className="absolute z-10 mt-1 w-full sm:w-72 max-w-full max-h-56 overflow-auto bg-white border border-line rounded-lg shadow-lg py-1">
               {suggestions.map((p) => (
                 <li key={p.email}>
                   <button
@@ -837,7 +849,7 @@ function RoleCard({
           type="button"
           onClick={() => submitAddMember()}
           disabled={busy || renamePending}
-          className="shrink-0 px-3 py-1 text-xs rounded border border-line hover:bg-hover disabled:opacity-50 flex items-center gap-1"
+          className="shrink-0 px-3 py-1 text-xs rounded-sm border border-line hover:bg-hover disabled:opacity-50 flex items-center gap-1"
         >
           {busy && <Loader2 size={12} className="animate-spin" />}
           Add
@@ -845,13 +857,14 @@ function RoleCard({
       </div>
 
       {/* Group assignments — everyone in an assigned group holds the role.
-          Hidden for Admin (individuals only: its blast radius must not follow
-          IdP-managed membership), for capabilities that opt out, and for
-          legacy people-set roles — those get "Convert to group" instead, and a
-          group-assigned role can no longer be converted. */}
-      {!role.isAdmin && role.capability !== null && role.capability.groupAssignable !== false && (
+          The section shows whenever there is something to see: assignments the
+          role already carries (even a legacy/opted-out role — hiding them
+          would leave no way to unassign, dead-ending Convert), or a
+          group-assignable capability. The ADD control is stricter: only
+          group-assignable capability roles may gain assignments here. */}
+      {showGroupsSection && (
         <div className="mt-3 pt-3 border-t border-line">
-          <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1.5">
+          <div className="text-label uppercase text-ink-faint mb-1.5">
             Assigned groups
           </div>
           <div className="flex flex-wrap gap-2">
@@ -869,7 +882,7 @@ function RoleCard({
                     type="button"
                     onClick={() => handleRemoveGroup(group)}
                     disabled={busy || renamePending}
-                    className="shrink-0 rounded-full p-0.5 text-ink-faint hover:text-red-600 hover:bg-red-50 disabled:opacity-50"
+                    className="shrink-0 rounded-full p-0.5 text-ink-faint hover:text-danger hover:bg-danger-soft disabled:opacity-50"
                     title="Unassign group"
                     aria-label={`Remove group ${group}`}
                   >
@@ -879,33 +892,35 @@ function RoleCard({
               ))
             )}
           </div>
-          <div className="mt-2 flex items-center gap-1.5">
-            <input
-              value={groupName}
-              onChange={(e) => setGroupName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') submitAssignGroup();
-              }}
-              placeholder="Assign group by name"
-              disabled={busy || renamePending}
-              className="text-xs px-2 py-1 border border-line rounded focus:outline-none focus:border-accent flex-1 min-w-0 max-w-[16rem]"
-              aria-label="Assign group"
-              autoComplete="off"
-            />
-            <button
-              type="button"
-              onClick={submitAssignGroup}
-              disabled={busy || renamePending}
-              className="shrink-0 px-3 py-1 text-xs rounded border border-line hover:bg-hover disabled:opacity-50"
-            >
-              Assign
-            </button>
-          </div>
+          {groupAssignable && (
+            <div className="mt-2 flex items-center gap-1.5">
+              <input
+                value={groupName}
+                onChange={(e) => setGroupName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') submitAssignGroup();
+                }}
+                placeholder="Assign group by name"
+                disabled={busy || renamePending}
+                className="text-xs px-2 py-1 border border-line rounded-sm focus:outline-none focus:border-accent flex-1 min-w-0 max-w-[16rem]"
+                aria-label="Assign group"
+                autoComplete="off"
+              />
+              <button
+                type="button"
+                onClick={submitAssignGroup}
+                disabled={busy || renamePending}
+                className="shrink-0 px-3 py-1 text-xs rounded-sm border border-line hover:bg-hover disabled:opacity-50"
+              >
+                Assign
+              </button>
+            </div>
+          )}
         </div>
       )}
 
       {(error ?? deleteError) && (
-        <div className="mt-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">
+        <div className="mt-3 text-sm text-danger bg-danger-soft border border-danger/30 rounded-sm px-3 py-2">
           {error ?? deleteError}
         </div>
       )}
@@ -1066,7 +1081,7 @@ function ConfirmDialog({
             type="button"
             onClick={onCancel}
             disabled={busy}
-            className="px-3 py-1.5 text-xs rounded border border-line hover:bg-hover disabled:opacity-50"
+            className="px-3 py-1.5 text-xs rounded-sm border border-line hover:bg-hover disabled:opacity-50"
           >
             Cancel
           </button>
@@ -1074,8 +1089,8 @@ function ConfirmDialog({
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            className={`px-3 py-1.5 text-xs rounded text-white disabled:opacity-50 flex items-center gap-1 ${
-              danger ? 'bg-red-600 hover:bg-red-700' : 'bg-accent hover:bg-accent-hover'
+            className={`px-3 py-1.5 text-xs rounded-sm text-white disabled:opacity-50 flex items-center gap-1 ${
+              danger ? 'bg-danger hover:bg-danger/90' : 'bg-accent hover:bg-accent-hover'
             }`}
           >
             {busy && <Loader2 size={12} className="animate-spin" />}

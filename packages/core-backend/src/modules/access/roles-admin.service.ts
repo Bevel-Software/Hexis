@@ -447,17 +447,21 @@ export class RolesAdminService {
     }
     // The ref must name a group the ACTIVE source knows: mergeGroupsIntoRoles
     // ignores an unknown ref with only a log warning, so a typo here would be
-    // accepted and then silently grant the role to nobody. Fail loudly instead.
+    // accepted and then silently grant the role to nobody. Fail loudly instead
+    // — and hold the manual group file's lock across validate + write, so a
+    // concurrent group deletion/rename can't invalidate the ref in between.
     const workspaceId = await this.ensureWorkspace();
-    const { groups } = await loadActiveGroups((f) => this.readKbFile(workspaceId, f));
-    if (!groups.has(canonicalRoleName(groupName))) {
-      throw new RolesAdminError(`No group named "${groupName.trim()}". Pick an existing group.`, 404, {
-        kind: 'unknown-group',
-        group: groupName.trim(),
-      });
-    }
-    await this.runEdit(actor, (text) => editAddGroupRef(text, canonical, groupName));
-    return this.getRoster();
+    return this.withFileLocks(workspaceId, actor, [GROUPS_YAML], async () => {
+      const { groups } = await loadActiveGroups((f) => this.readKbFile(workspaceId, f));
+      if (!groups.has(canonicalRoleName(groupName))) {
+        throw new RolesAdminError(`No group named "${groupName.trim()}". Pick an existing group.`, 404, {
+          kind: 'unknown-group',
+          group: groupName.trim(),
+        });
+      }
+      await this.runEdit(actor, (text) => editAddGroupRef(text, canonical, groupName));
+      return this.getRoster();
+    });
   }
 
   async unassignGroup(actor: AuthUser, canonical: string, groupName: string): Promise<RoleRosterEntry[]> {
@@ -500,23 +504,26 @@ export class RolesAdminService {
     // write commits, release without committing.
     const lockPaths = [GROUPS_YAML, ROLES_YAML].map((f) => `${this.kbDirName}/${f}`).sort();
     const held: string[] = [];
-    for (const p of lockPaths) {
-      const res = await this.workflowService.acquireLock(workspaceId, this.defaultBranch, p, actor);
-      if (!res.acquired) {
-        for (const h of held) {
-          try {
-            await this.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
-          } catch { /* best-effort unwind */ }
-        }
-        throw new RolesAdminError(
-          `Roles are being edited by ${res.lock.holderName || 'another admin'}. Try again in a moment.`,
-          409,
-        );
+    const releaseHeld = async (): Promise<void> => {
+      for (const h of held) {
+        try {
+          await this.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
+        } catch { /* best-effort unwind */ }
       }
-      held.push(p);
-    }
-
+    };
+    // The acquisition loop itself sits inside the unwind: a THROW from the
+    // second acquire (not just a refusal) must still release the first lock.
     try {
+      for (const p of lockPaths) {
+        const res = await this.workflowService.acquireLock(workspaceId, this.defaultBranch, p, actor);
+        if (!res.acquired) {
+          throw new RolesAdminError(
+            `Roles are being edited by ${res.lock.holderName || 'another admin'}. Try again in a moment.`,
+            409,
+          );
+        }
+        held.push(p);
+      }
       const rolesText = await this.readRolesYaml(workspaceId);
       const role = parseRolesModel(rolesText).find((r) => canonicalRoleName(r.displayName) === canonical);
       if (!role) throw new RolesAdminError(`role not found: ${canonical}`, 404);
@@ -561,11 +568,7 @@ export class RolesAdminService {
       // The batch write releases the locks itself after a successful commit;
       // on the failure paths above (including a failed write, which already
       // released its own acquisitions) drop OUR holds so nothing stays locked.
-      for (const h of held) {
-        try {
-          await this.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
-        } catch { /* already released */ }
-      }
+      await releaseHeld();
       throw err;
     }
     this.accessControl.invalidate(workspaceId);
@@ -680,12 +683,72 @@ export class RolesAdminService {
    * (a beat after the write); the HTTP response reads the working tree, which is
    * already on disk, so the returned roster is correct.
    */
+  /**
+   * Run `fn` while HOLDING the named KB-file locks (sorted, all-or-nothing):
+   * read-modify-write flows must keep the lock across the READ too, or two
+   * concurrent edits (another tab, another admin, a conversion) both snapshot
+   * the same base and the second write silently discards the first. Same-user
+   * re-acquire is idempotent, so the LockingFilesystem write inside `fn` may
+   * take the locks again; the finally-release tolerates rows the inner write
+   * already released (its release IS the commit).
+   */
+  private async withFileLocks<T>(
+    workspaceId: string,
+    actor: AuthUser,
+    repoRelFiles: string[],
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const paths = repoRelFiles.map((f) => `${this.kbDirName}/${f}`).sort();
+    const held: string[] = [];
+    let failed = false;
+    try {
+      for (const p of paths) {
+        const res = await this.workflowService.acquireLock(workspaceId, this.defaultBranch, p, actor);
+        if (!res.acquired) {
+          throw new RolesAdminError(
+            `Roles are being edited by ${res.lock.holderName || 'another admin'}. Try again in a moment.`,
+            409,
+          );
+        }
+        held.push(p);
+      }
+      return await fn();
+    } catch (err) {
+      failed = true;
+      throw err;
+    } finally {
+      for (const h of held) {
+        try {
+          // Failure → discard, exactly like LockingFilesystem's catch arm.
+          // Success with NO write (a no-op edit) must NOT discard: the lock
+          // row may still be ours while some earlier release's commit is
+          // still queued, and a discard would revert those bytes — release
+          // WITH commit instead (a clean tree makes it a no-op). A write
+          // inside `fn` already released these rows, so both calls no-op then.
+          if (failed) {
+            await this.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
+          } else {
+            await this.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
+          }
+        } catch { /* already released by the write's own commit pipeline */ }
+      }
+    }
+  }
+
   private async runEdit(
     actor: AuthUser,
     pre: (currentText: string) => EditResult,
   ): Promise<void> {
     const workspaceId = await this.ensureWorkspace();
     await this.assertRolesUnlocked(workspaceId, actor);
+    return this.withFileLocks(workspaceId, actor, [ROLES_YAML], () => this.runEditLocked(workspaceId, actor, pre));
+  }
+
+  private async runEditLocked(
+    workspaceId: string,
+    actor: AuthUser,
+    pre: (currentText: string) => EditResult,
+  ): Promise<void> {
     const text = await this.readRolesYaml(workspaceId);
     const result = this.guardEdit(() => pre(text));
     if (!result.changed) return;
