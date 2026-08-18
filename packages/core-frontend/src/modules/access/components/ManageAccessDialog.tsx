@@ -632,12 +632,24 @@ export function ManageAccessDialog({
     if (!q) return null;
     const pluginHit = suggest?.plugins.find((g) => g.toLowerCase() === q.toLowerCase());
     if (pluginHit) return { kind: 'role', role: pluginHit };
+    const groupHit = suggest?.groups.find((g) => g.toLowerCase() === q.toLowerCase());
+    if (groupHit) return { kind: 'group', group: groupHit };
     if (EMAIL_RE.test(q)) return { kind: 'user', email: q, displayName: q.split('@')[0] };
     return null;
   }, [query, suggest]);
 
+  // Groups share the `r:` namespace with plugins: in the written grant they
+  // are the same bare-name token, so a group chip and a plugin chip with one
+  // name ARE one principal and must dedupe.
   const principalKey = (p: Principal): string =>
-    p.kind === 'role' ? `r:${p.role.toLowerCase()}` : `u:${p.email.toLowerCase()}`;
+    p.kind === 'role'
+      ? `r:${p.role.toLowerCase()}`
+      : p.kind === 'group'
+        ? `r:${p.group.toLowerCase()}`
+        : `u:${p.email.toLowerCase()}`;
+
+  const principalLabel = (p: Principal): string =>
+    p.kind === 'role' ? p.role : p.kind === 'group' ? p.group : p.displayName || p.email;
 
   const addChip = useCallback((p: Principal) => {
     setPickedChips((chips) =>
@@ -687,7 +699,7 @@ export function ManageAccessDialog({
     const failures: string[] = [];
     try {
       for (const principal of pickedChips) {
-        const label = principal.kind === 'role' ? principal.role : principal.email;
+        const label = principalLabel(principal);
         // `everyone` is public-read only — the backend rejects any other verb for
         // it, so clamp here to avoid a guaranteed failure when a higher verb is
         // also selected for the other chips.
@@ -797,15 +809,16 @@ export function ManageAccessDialog({
         // so one uncheck finishes the job instead of a half-removal (the direct
         // bit gone, the inherited bit silently remaining and the box re-checking).
         if (currentlyOn) {
-          const key = principal.kind === 'role'
-            ? `r:${principal.role.toLowerCase()}`
-            : `u:${principal.email.toLowerCase()}`;
+          const key = principalKey(principal);
           const stillForVerb = res.sources?.[key]?.[grantVerb] ?? [];
           const ancestors = ancestorsFromSources({ [grantVerb]: stillForVerb });
           if (ancestors.length > 0) {
-            const label =
-              principal.kind === 'role' ? principal.role : principal.displayName || principal.email;
-            setConfirmRemove({ principal, label, ancestors, verb: grantVerb });
+            setConfirmRemove({
+              principal,
+              label: principalLabel(principal),
+              ancestors,
+              verb: grantVerb,
+            });
           }
         }
       } catch (err) {
@@ -815,8 +828,7 @@ export function ManageAccessDialog({
         // "Remove from parent?" flow a Remove uses, instead of a raw error toast.
         const inherited = asInheritedError(err);
         if (inherited) {
-          const label =
-            principal.kind === 'role' ? principal.role : principal.displayName || principal.email;
+          const label = principalLabel(principal);
           // Scope the confirmation to the single verb the user unchecked, so
           // "Restrict just this file" / "Remove from parent" act on THAT verb
           // only and leave the principal's other (e.g. direct download) verbs.
@@ -1115,7 +1127,7 @@ export function ManageAccessDialog({
                     treatment as the primitive, wrapped so the chips can wrap. */}
                 <div className="flex w-full flex-wrap items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2 py-1 focus-within:border-transparent focus-within:outline-2 focus-within:-outline-offset-1 focus-within:outline-accent">
                   {pickedChips.map((c) => {
-                    const label = c.kind === 'role' ? c.role : c.displayName || c.email;
+                    const label = principalLabel(c);
                     return (
                       <span
                         key={principalKey(c)}
@@ -1142,11 +1154,11 @@ export function ManageAccessDialog({
                         addChip(addPending);
                       }
                     }}
-                    placeholder={pickedChips.length ? '' : 'Add people or roles…'}
+                    placeholder={pickedChips.length ? '' : 'Add people, groups, or roles…'}
                     className="min-w-32 flex-1 bg-transparent px-1 py-1 text-ui text-ink placeholder:text-ink-faint focus:outline-none"
                   />
                 </div>
-                {query.trim() && suggest && (suggest.plugins.length > 0 || suggest.people.length > 0) && (
+                {query.trim() && suggest && (suggest.plugins.length > 0 || suggest.groups.length > 0 || suggest.people.length > 0) && (
                   <AnchoredMenu width="anchor" align="left" className="max-h-56 overflow-auto">
                     {suggest.plugins.map((g) => (
                       <MenuItem
@@ -1154,6 +1166,20 @@ export function ManageAccessDialog({
                         onClick={() => addChip({ kind: 'role', role: g })}
                         trailing={
                           <span className="text-label uppercase text-ink-faint">role</span>
+                        }
+                      >
+                        <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
+                          {initials(g)}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate">{g}</span>
+                      </MenuItem>
+                    ))}
+                    {suggest.groups.map((g) => (
+                      <MenuItem
+                        key={`grp:${g}`}
+                        onClick={() => addChip({ kind: 'group', group: g })}
+                        trailing={
+                          <span className="text-label uppercase text-ink-faint">group</span>
                         }
                       >
                         <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">

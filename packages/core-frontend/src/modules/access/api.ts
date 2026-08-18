@@ -85,16 +85,25 @@ export function asInheritedError(err: unknown): InheritedRevokeError | null {
   return null;
 }
 
-/** A grantable principal — a person (by email) or a plugin (a roles.yaml role). */
+/**
+ * A grantable principal — a person (by email), a plugin (a roles.yaml role),
+ * or a group (a people-set from the active group source — IdP-synced or
+ * manual). In the written grant a group is the same bare-name token as a
+ * plugin; the separate kind exists so the backend validates against the right
+ * namespace.
+ */
 export type Principal =
   | { kind: 'user'; email: string; displayName: string }
-  | { kind: 'role'; role: string };
+  | { kind: 'role'; role: string }
+  | { kind: 'group'; group: string };
 
 /** Verbs the share dialog can grant. */
 export type GrantVerb = 'read' | 'write' | 'owner' | 'download';
 
 export interface SuggestResponse {
   plugins: string[];
+  /** Active-source groups; names colliding with a plugin are withheld server-side. */
+  groups: string[];
   people: { name: string; email: string }[];
   /** True when the query was too short to return people (plugins still shown). */
   peopleWithheld: boolean;

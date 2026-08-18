@@ -293,3 +293,50 @@ describe('ManageAccessDialog: naming the rules', () => {
     expect(screen.queryByRole('button', { name: /Manage Sales →/ })).not.toBeInTheDocument();
   });
 });
+
+// ── group principals in the picker ──
+describe('ManageAccessDialog: group principals', () => {
+  const VIEW = {
+    canRead: true,
+    canWrite: true,
+    canDownload: false,
+    canOwner: false,
+    eligible: { roles: [], users: [A] },
+    readers: { restricted: true, roles: [], users: [A] },
+    owners: { roles: [], users: [] },
+    downloaders: { roles: [], users: [] },
+    sources: { 'u:alice@x.com': { read: [{ kind: 'direct' }], write: [{ kind: 'direct' }] } },
+  } as AccessResponse;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.fetchFileAccess.mockResolvedValue(VIEW);
+    api.grantAccess.mockResolvedValue(VIEW);
+    api.suggestPrincipals.mockResolvedValue({
+      plugins: [],
+      groups: ['GTM Team'],
+      people: [],
+      peopleWithheld: false,
+    });
+  });
+
+  it('suggests active groups, chips one, and grants it with the group kind', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    await user.type(
+      await screen.findByPlaceholderText(/add people, groups, or roles/i),
+      'gtm',
+    );
+    // The suggestion row carries the "group" tag and chips on click.
+    await user.click(await screen.findByRole('button', { name: /GTM Team/ }));
+    expect(screen.getByText('GTM Team')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /^Share$/ }));
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalled());
+    expect(api.grantAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ principal: { kind: 'group', group: 'GTM Team' } }),
+    );
+  });
+});

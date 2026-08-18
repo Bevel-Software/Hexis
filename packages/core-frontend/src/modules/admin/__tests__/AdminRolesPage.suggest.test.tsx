@@ -58,6 +58,7 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({
       plugins: [],
+      groups: [],
       people: [{ name: 'Alice', email: 'alice@example.com' }],
       peopleWithheld: false,
     });

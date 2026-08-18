@@ -22,6 +22,7 @@ import {
 import { canonicalRoleName, EVERYONE_CANONICAL, type Verb } from './access-control.service.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
 import { RolesAdminService, RolesAdminError } from './roles-admin.service.js';
+import { GroupsAdminService } from './groups-admin.service.js';
 import type { Principal } from './access-splice.js';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
@@ -83,6 +84,31 @@ export function createAccessRoutes(
     const { plugins } = await accessControl.kbPrincipals(workspaceIdForBranch(DEFAULT_BRANCH));
     return plugins;
   };
+
+  // Groups (the "who you are" people-sets) are likewise authoritative on the
+  // DEFAULT branch — the ACTIVE source (IdP-synced or manual) lives there.
+  const groupsAdmin = new GroupsAdminService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    kbDirName,
+    () => DEFAULT_BRANCH,
+    eventBus,
+  );
+  const defaultBranchGroups = async (): Promise<string[]> => groupsAdmin.listActiveGroupNames();
+
+  /**
+   * What the mutation routes accept as a principal. `group` exists only at
+   * this boundary: in the access.md entry grammar a group grant is the same
+   * bare-name token as a plugin grant (the resolver disambiguates by name,
+   * plugin first), so it is spliced as a role-shaped principal — the separate
+   * kind buys validation against the right namespace and honest 404s.
+   */
+  type RoutePrincipal = Principal | { kind: 'group'; group: string };
+
+  /** The role-shaped principal the splice layer actually writes/matches. */
+  const asSplicePrincipal = (p: RoutePrincipal): Principal =>
+    p.kind === 'group' ? { kind: 'role', role: p.group } : p;
 
   // Authentication gate only. Per PLAN §3 the workspace `:id` is a branch
   // identifier — any authenticated user can read its access tree.
@@ -283,10 +309,20 @@ export function createAccessRoutes(
     const q = (typeof req.query.q === 'string' ? req.query.q : '').trim().toLowerCase();
     const CAP = 15;
     try {
-      const plugins = await defaultBranchPlugins();
+      const [plugins, groups] = await Promise.all([defaultBranchPlugins(), defaultBranchGroups()]);
       const { people: kbPeople } = await accessControl.kbPrincipals(req.params.id);
 
       const matchedPlugins = plugins
+        .filter((g) => !q || g.toLowerCase().includes(q))
+        .slice(0, CAP);
+
+      // Groups from the ACTIVE source. A group whose canonical name collides
+      // with a plugin is withheld — plugin names win in grant resolution, so
+      // offering it as a group would grant something else (the grant route
+      // refuses the same case).
+      const pluginCanonicals = new Set(plugins.map((g) => canonicalRoleName(g)));
+      const matchedGroups = groups
+        .filter((g) => !pluginCanonicals.has(canonicalRoleName(g)))
         .filter((g) => !q || g.toLowerCase().includes(q))
         .slice(0, CAP);
 
@@ -311,7 +347,7 @@ export function createAccessRoutes(
           .slice(0, CAP);
       }
 
-      res.json({ plugins: matchedPlugins, people, peopleWithheld: q.length < 2 });
+      res.json({ plugins: matchedPlugins, groups: matchedGroups, people, peopleWithheld: q.length < 2 });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -325,7 +361,7 @@ export function createAccessRoutes(
   function parseMutationBody(body: unknown): {
     repoRelTarget: string;
     kind: TargetKind;
-    principal: Principal;
+    principal: RoutePrincipal;
   } {
     const b = (body ?? {}) as Record<string, unknown>;
     const rawPath = b.path;
@@ -340,7 +376,7 @@ export function createAccessRoutes(
     if (!principalRaw || typeof principalRaw !== 'object') {
       throw new AccessMutationError('principal is required');
     }
-    let principal: Principal;
+    let principal: RoutePrincipal;
     if (principalRaw.kind === 'user') {
       if (typeof principalRaw.email !== 'string' || typeof principalRaw.displayName !== 'string') {
         throw new AccessMutationError('user principal needs email + displayName');
@@ -355,8 +391,13 @@ export function createAccessRoutes(
         throw new AccessMutationError('role principal needs a role name');
       }
       principal = { kind: 'role', role: principalRaw.role };
+    } else if (principalRaw.kind === 'group') {
+      if (typeof principalRaw.group !== 'string') {
+        throw new AccessMutationError('group principal needs a group name');
+      }
+      principal = { kind: 'group', group: principalRaw.group };
     } else {
-      throw new AccessMutationError("principal.kind must be 'user' or 'role'");
+      throw new AccessMutationError("principal.kind must be 'user', 'group', or 'role'");
     }
     const targetKind = kind as TargetKind;
     const repoRelTarget = toRepoRelative(rawPath);
@@ -566,7 +607,30 @@ export function createAccessRoutes(
             '"Everyone" can only be granted read access (public). Grant other access levels to specific people or plugins.',
           );
         }
+      } else if (principal.kind === 'group') {
+        // A group grant must name a group in the ACTIVE source (IdP-synced or
+        // manual) on the default branch — same authority the suggest list uses.
+        const [groups, plugins] = await Promise.all([defaultBranchGroups(), defaultBranchPlugins()]);
+        const canonical = canonicalRoleName(principal.group);
+        // Plugin-first is the resolver's precedence: a token that names both a
+        // plugin and a group IS the plugin, so granting it "as a group" would
+        // grant something other than what the caller believes. Refuse loudly.
+        if (plugins.some((g) => canonicalRoleName(g) === canonical)) {
+          throw new AccessMutationError(
+            `"${principal.group}" is a plugin, and plugin names win over group names in grants. Grant it as a plugin.`,
+          );
+        }
+        if (!groups.some((g) => canonicalRoleName(g) === canonical)) {
+          throw new AccessMutationError(
+            `No group named "${principal.group}". Pick an existing group.`,
+            404,
+            { kind: 'unknown-group', group: principal.group },
+          );
+        }
       }
+      // In the entry grammar a group grant is the same bare-name token as a
+      // plugin grant — splice it role-shaped (see RoutePrincipal).
+      const splicePrincipal = asSplicePrincipal(principal);
 
       const { gatePath } = gateAndEditPaths(kind, repoRelTarget);
       // Ensure the branch workspace exists before locking.
@@ -576,7 +640,7 @@ export function createAccessRoutes(
 
       const editPath = gatePath; // grant edits the same path it gates on
       await withEditLock(workspaceId, branch, editPath, user, async () => {
-        await mutation.grant(workspaceId, kind, repoRelTarget, verb as Verb, principal);
+        await mutation.grant(workspaceId, kind, repoRelTarget, verb as Verb, splicePrincipal);
       });
 
       // The write landed on disk under the lock; drop the cache so the
@@ -632,7 +696,11 @@ export function createAccessRoutes(
     const branch = branchForWorkspaceId(workspaceId);
     try {
       const mode = (req.body as { mode?: unknown }).mode;
-      const { repoRelTarget, kind, principal } = parseMutationBody(req.body);
+      const { repoRelTarget, kind, principal: routePrincipal } = parseMutationBody(req.body);
+      // Revoke matching is name-based, so a group principal converts straight
+      // to the role-shaped token — no existence check (revoking a grant whose
+      // group has since vanished must keep working).
+      const principal = asSplicePrincipal(routePrincipal);
       // Optional `verb` scopes ALL three paths to a single verb: a default revoke
       // strips just that verb; remove-from-parent removes just that verb on the
       // ancestor; deny-here denies just that verb at the target. Absent ⇒ the

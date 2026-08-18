@@ -150,6 +150,23 @@ export class GroupsAdminService {
     };
   }
 
+  /**
+   * Display names from the ACTIVE group source (synced in IdP mode, manual
+   * otherwise) — what the share dialog suggests and the grant route accepts.
+   * Malformed files degrade to an empty list, matching the resolver's
+   * fail-closed read.
+   */
+  async listActiveGroupNames(): Promise<string[]> {
+    const workspaceId = await this.ensureWorkspace();
+    const syncedText = await this.readKbFile(workspaceId, SYNCED_GROUPS_YAML);
+    if (syncedText !== null) {
+      const parsed = parseGroupsFile(syncedText, SYNCED_GROUPS_YAML);
+      return parsed.ok ? [...parsed.groups.values()].map((g) => g.displayName) : [];
+    }
+    const text = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
+    return parseGroupsModel(text).map((g) => g.displayName);
+  }
+
   /** Manual group display names — what the connect-time warning dialog lists. */
   async listManualGroupNames(): Promise<string[]> {
     const workspaceId = await this.ensureWorkspace();
