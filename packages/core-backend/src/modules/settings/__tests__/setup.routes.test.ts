@@ -18,7 +18,7 @@ let server: HttpServer | null = null;
  * that runs later in the same worker would otherwise see a different
  * environment than the one it was written against.
  */
-const KB_ENV = ['KB_REPO_URL', 'GIT_TOKEN', 'GIT_USERNAME', 'KB_DIR_NAME'] as const;
+const KB_ENV = ['KB_REPO_URL', 'GIT_TOKEN', 'GIT_USERNAME', 'KB_DIR_NAME', 'GITHUB_TOKEN'] as const;
 let savedEnv: Partial<Record<(typeof KB_ENV)[number], string | undefined>> = {};
 
 beforeEach(() => {
@@ -40,7 +40,7 @@ afterEach(() => {
 });
 
 /** Mount the setup router on a throwaway port and hand back its base URL. */
-function listen(isAdmin = true) {
+function listen(isAdmin = true, runAll: () => Promise<void> = async () => {}) {
   const db = {
     select: () => ({ from: () => Promise.resolve([]) }),
     insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
@@ -54,7 +54,16 @@ function listen(isAdmin = true) {
     req.userId = 'user-1';
     next();
   });
-  app.use('/api', createSetupRoutes(settings, { isAdmin: async () => isAdmin } as IAdminAccessService));
+  app.use(
+    '/api',
+    createSetupRoutes(
+      settings,
+      { isAdmin: async () => isAdmin } as IAdminAccessService,
+      // Default no-op: most suites never complete setup, so the runner is
+      // never reached. The completion-transition suite passes its own spy.
+      { runAll },
+    ),
+  );
   server = app.listen(0);
   const { port } = server.address() as AddressInfo;
   return { base: `http://127.0.0.1:${port}`, settings };
@@ -179,6 +188,112 @@ describe('POST /setup/test-connection — the command git is given', () => {
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.error).not.toMatch(/unknown option|usage: git/i);
+  });
+});
+
+/**
+ * The KB startup phase's SECOND quiet moment: the save that completes setup.
+ * Completion is a false→true TRANSITION (whichever field arrives last, on
+ * whichever save), and a failed setup-time run keeps the deployment gated —
+ * settings saved, KB uninitialized — until a retry succeeds.
+ *
+ * The branch model rides in from the environment the vitest config pins
+ * (DEFAULT_BRANCH / PROTECTED_BRANCHES) and is configured by test-setup, so
+ * completing setup here means storing the repository URL and token — exactly
+ * the "branch model configured on an earlier save" gap.
+ */
+describe('POST /setup/settings — the completion transition and the KB startup phase', () => {
+  const completing = { kbRepoUrl: 'https://example.com/acme/kb.git', gitToken: 'ghp_x' };
+
+  it('runs the phase exactly once: on the save that completes setup, not before, not after', async () => {
+    let runs = 0;
+    const { base } = listen(true, async () => {
+      runs++;
+    });
+    // First save: an incomplete configuration — no phase.
+    let res = await post(base, '/api/setup/settings', { settings: { gitUsername: 'x-access-token' } });
+    expect(res.status).toBe(200);
+    expect(runs).toBe(0);
+    // Second save completes setup — the transition runs the phase.
+    res = await post(base, '/api/setup/settings', { settings: completing });
+    expect(res.status).toBe(200);
+    expect((await res.json()).complete).toBe(true);
+    expect(runs).toBe(1);
+    // A re-save of a complete, healthy setup is NOT a quiet moment.
+    res = await post(base, '/api/setup/settings', { settings: { gitUsername: 'x-access-token' } });
+    expect(res.status).toBe(200);
+    expect(runs).toBe(1);
+  });
+
+  it('keeps setup gated after a failed run; a re-save retries, and success clears the gate', async () => {
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      let attempts = 0;
+      let fail = true;
+      const { base } = listen(true, async () => {
+        attempts++;
+        if (fail) throw new Error('remote said no');
+      });
+      const res = await post(base, '/api/setup/settings', { settings: completing });
+      expect(res.status).toBe(500);
+      expect((await res.json()).error).toMatch(/could not be initialized/i);
+      expect(attempts).toBe(1);
+      // The gate stays shut: status reports incomplete, with the admin's hint.
+      let status = await (await fetch(`${base}/api/setup/status`)).json();
+      expect(status.complete).toBe(false);
+      expect(status.kbInitError).toMatch(/remote said no/);
+      // Any save while the failure stands retries the phase.
+      fail = false;
+      const retry = await post(base, '/api/setup/settings', {
+        settings: { gitUsername: 'x-access-token' },
+      });
+      expect(retry.status).toBe(200);
+      expect(attempts).toBe(2);
+      expect((await retry.json()).complete).toBe(true);
+      status = await (await fetch(`${base}/api/setup/status`)).json();
+      expect(status.complete).toBe(true);
+      expect(status.kbInitError).toBeUndefined();
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('keeps the gate shut while the phase runs, and a save landing mid-run waits the phase out', async () => {
+    let runs = 0;
+    let release!: () => void;
+    const running = new Promise<void>((r) => (release = r));
+    const { base } = listen(true, async () => {
+      runs++;
+      await running;
+    });
+    // The completing save blocks inside the phase...
+    const first = post(base, '/api/setup/settings', { settings: completing });
+    await new Promise((r) => setTimeout(r, 50));
+    // ...during which the settings read complete but the GATE must not open —
+    // the phase is still mutating branch trees.
+    const status = await (await fetch(`${base}/api/setup/status`)).json();
+    expect(status.complete).toBe(false);
+    // A save landing mid-run is HELD until the phase settles: the runner
+    // reads its configuration through live getters, and a save applied under
+    // it would split the run across two configurations. It must neither
+    // resolve early nor start a second run over the same trees.
+    let secondSettled = false;
+    const second = post(base, '/api/setup/settings', {
+      settings: { gitUsername: 'x-access-token' },
+    }).then((r) => {
+      secondSettled = true;
+      return r;
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(secondSettled).toBe(false);
+    expect(runs).toBe(1);
+    release();
+    const [res1, res2] = await Promise.all([first, second]);
+    expect(res1.status).toBe(200);
+    expect(res2.status).toBe(200);
+    expect(runs).toBe(1);
+    expect((await (await fetch(`${base}/api/setup/status`)).json()).complete).toBe(true);
   });
 });
 

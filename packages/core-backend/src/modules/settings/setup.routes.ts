@@ -30,8 +30,37 @@ const execFileAsync = promisify(execFile);
 export function createSetupRoutes(
   settings: DeploymentSettingsService,
   adminAccess: IAdminAccessService,
+  /**
+   * The KB startup phase, invoked at its SECOND quiet moment: the save that
+   * completes first-time setup. The app is gated shut until exactly then
+   * (`isComplete`), so no session can be holding a working clone the phase
+   * would race.
+   */
+  kbStartupRunner: { runAll(): Promise<void> },
 ): express.Router {
   const router = express.Router();
+
+  /**
+   * Whether the last setup-time run of the KB startup phase FAILED. While
+   * true the deployment stays GATED: the settings are saved but the KB was
+   * never initialized, and reporting setup complete would open the app over
+   * an unmaintained (possibly unseeded) knowledge base. Saving the setup
+   * form again retries the phase; a server restart retries it at boot; a
+   * success clears the flag. Per-process state, like the gate itself.
+   */
+  let kbInitFailed = false;
+  /** The failure's message, surfaced to the ADMIN on the status endpoint. */
+  let kbInitError: string | null = null;
+  /**
+   * The setup-time run currently executing, if any. Doing double duty: the
+   * status endpoint keeps the gate SHUT while it is set (the settings read
+   * complete the moment they save, but the phase is still mutating branch
+   * trees — no workspace request may start yet), and a concurrent completing
+   * save awaits THIS promise instead of starting a second, racing run.
+   */
+  let kbInitInFlight: Promise<void> | null = null;
+  /** The app-gate answer: settings complete AND the KB phase settled clean. */
+  const kbReady = () => isComplete(settings) && !kbInitFailed && kbInitInFlight === null;
 
   const requireAdmin: express.RequestHandler = async (req, res, next) => {
     if (!(await adminAccess.isAdmin(req.userEmail))) {
@@ -51,7 +80,11 @@ export function createSetupRoutes(
    * secret's value.
    */
   router.get('/setup/status', async (req, res) => {
-    const complete = isComplete(settings);
+    // A failed OR still-running setup-time KB initialization keeps setup
+    // INCOMPLETE: the frontend gates the app on this answer, and opening it
+    // over an uninitialized (or mid-mutation) KB would be worse than keeping
+    // the setup screen up.
+    const complete = kbReady();
     if (!(await adminAccess.isAdmin(req.userEmail))) {
       res.json({ complete, isAdmin: false });
       return;
@@ -61,8 +94,20 @@ export function createSetupRoutes(
       awaitingRestart: awaitingRestart(settings),
       isAdmin: true,
       settings: settings.describe(),
+      ...(kbInitFailed ? { kbInitError } : {}),
     });
   });
+
+  /**
+   * Setup saves run strictly ONE AT A TIME, phase included: `settings.save`
+   * updates the live cache write by write, and the completing save runs the
+   * KB startup phase, which reads its configuration through live getters —
+   * a save interleaving with either would hand half-updated state to the
+   * other. A plain promise chain is enough: saves are a setup-screen rarity,
+   * not a hot path, and a save arriving mid-run simply waits the previous
+   * save (and its phase) out before proceeding.
+   */
+  let saveTurn: Promise<unknown> = Promise.resolve();
 
   /**
    * Save settings. Validated and written as ONE batch — a repository URL
@@ -70,6 +115,12 @@ export function createSetupRoutes(
    * first clone, so a partial write is never better than none.
    */
   router.post('/setup/settings', requireAdmin, async (req, res) => {
+    const turn = saveTurn.then(() => handleSave(req, res));
+    saveTurn = turn.catch(() => {});
+    await turn;
+  });
+
+  async function handleSave(req: express.Request, res: express.Response): Promise<void> {
     const body = (req.body ?? {}) as { settings?: Record<string, unknown> };
     const entries: Record<string, string> = {};
     for (const [key, value] of Object.entries(body.settings ?? {})) {
@@ -80,6 +131,11 @@ export function createSetupRoutes(
       entries[key] = value;
     }
     try {
+      // Completion is a TRANSITION, so it is measured BEFORE the save: the
+      // save that flips it false→true — whichever field arrives last — is the
+      // one that must run the KB startup phase, regardless of which save
+      // configured the branch model.
+      const wasComplete = isComplete(settings);
       const { restartRequired } = await settings.save(entries, req.userId ?? null);
       /**
        * Apply the branch model to THIS process, so pressing Save finishes
@@ -102,10 +158,51 @@ export function createSetupRoutes(
         };
         if (!validateBranchModel(model)) configureBranchModel(model);
       }
+      /**
+       * The save that COMPLETES setup is the KB startup phase's SECOND quiet
+       * moment (the other is boot): the app was gated shut until this very
+       * response, so the trees are provably quiet. Run the phase now —
+       * seeding the remote, scaffolding and migrating every branch — so the
+       * first workspace request that follows finds a maintained KB.
+       *
+       * Runs on the false→true completion transition — including when the
+       * branch model was configured by an EARLIER save and the repository
+       * URL arrives on a later one — and again on any save while a previous
+       * setup-time run stands failed (`kbInitFailed`), so saving the form is
+       * the retry. Never on a re-save of a complete, healthy setup: with the
+       * gate open, sessions may be live and that is no longer a quiet moment.
+       */
+      if ((!wasComplete || kbInitFailed) && isComplete(settings)) {
+        try {
+          // One run at a time. The save chain already serializes handlers
+          // whole, so no second run can start while one executes; the `??=`
+          // is defense in depth should another invoker ever appear.
+          kbInitInFlight ??= kbStartupRunner.runAll();
+          await kbInitInFlight;
+          kbInitFailed = false;
+          kbInitError = null;
+        } catch (initErr) {
+          // The settings ARE saved — only the KB initialization failed. The
+          // deployment stays gated (see the status endpoint) until a retry
+          // succeeds. Logged in full, returned actionable.
+          const msg = initErr instanceof Error ? initErr.message : String(initErr);
+          console.error('[setup] KB initialization failed after setup completed:', msg);
+          kbInitFailed = true;
+          kbInitError = msg;
+          res.status(500).json({
+            error:
+              'Settings saved, but the knowledge base could not be initialized. ' +
+              'Saving the setup form again retries; restarting the server retries too.',
+          });
+          return;
+        } finally {
+          kbInitInFlight = null;
+        }
+      }
       res.json({
         ok: true,
         restartRequired,
-        complete: isComplete(settings),
+        complete: kbReady(),
         awaitingRestart: awaitingRestart(settings),
         settings: settings.describe(),
       });
@@ -119,7 +216,7 @@ export function createSetupRoutes(
       console.error('[setup] save failed:', err instanceof Error ? err.message : String(err));
       res.status(500).json({ error: 'Could not save these settings.' });
     }
-  });
+  }
 
   /**
    * Try the credentials against the real remote, BEFORE anything is saved.
