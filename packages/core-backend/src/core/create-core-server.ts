@@ -389,6 +389,7 @@ export async function createCoreServer(
     core.eventBus,
     core.db,
     core.kbDirName,
+    [core.config.adminEmail],
   ));
   app.use(
     '/api',

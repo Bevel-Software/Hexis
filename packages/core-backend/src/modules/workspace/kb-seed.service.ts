@@ -37,6 +37,16 @@ const BOT_EMAIL = 'bevel-workflow@bevel.software';
 const REQUIRED_FILES: readonly string[] = ['access.md', 'AGENTS.md', '.bevelignore', '.gitignore'];
 
 /**
+ * Destination name → the packable spelling the template may carry instead.
+ * npm strips every file named `.gitignore` from a published tarball, so the
+ * packaged template cannot ship one under its real name (see
+ * {@link KbSeedService.templateSource}).
+ */
+const TEMPLATE_SOURCE_FALLBACKS: Readonly<Record<string, string>> = {
+  '.gitignore': 'gitignore.template',
+};
+
+/**
  * The two roots CORE gives a knowledge base: the ontologies, and the plugins
  * that hold skills and tools.
  *
@@ -410,6 +420,9 @@ export class KbSeedService implements IKbSeedService {
 
   /** Copy the entire template tree into `dest` (roles.yaml isn't in it — it's generated). */
   private async copyTemplateTree(dest: string): Promise<void> {
+    const packableToReal = new Map(
+      Object.entries(TEMPLATE_SOURCE_FALLBACKS).map(([real, packable]) => [packable, real]),
+    );
     const walk = async (relDir: string): Promise<void> => {
       const abs = path.join(this.kbTemplateDir, relDir);
       const entries = await fs.readdir(abs, { withFileTypes: true });
@@ -417,9 +430,20 @@ export class KbSeedService implements IKbSeedService {
         const rel = relDir ? path.join(relDir, entry.name) : entry.name;
         if (entry.isDirectory()) {
           await walk(rel);
-        } else {
-          await this.copyTemplateFile(rel, dest);
+          continue;
         }
+        // A packable spelling at the template root seeds under its REAL name
+        // — unless the template also carries the literal file (a
+        // distribution's own template), which wins and is copied by its own
+        // walk entry; copying the packable twin too would clobber it.
+        const realName = relDir === '' ? packableToReal.get(entry.name) : undefined;
+        if (realName !== undefined) {
+          if (!(await this.exists(path.join(this.kbTemplateDir, realName)))) {
+            await this.copyTemplateFile(realName, dest);
+          }
+          continue;
+        }
+        await this.copyTemplateFile(rel, dest);
       }
     };
     await walk('');
@@ -435,16 +459,36 @@ export class KbSeedService implements IKbSeedService {
     const norm = (text: string) => text.replace(/\r\n?/g, '\n');
     const [current, template] = await Promise.all([
       fs.readFile(path.join(repoDir, relPath), 'utf8'),
-      fs.readFile(path.join(this.kbTemplateDir, relPath), 'utf8'),
+      this.templateSource(relPath).then((from) => fs.readFile(from, 'utf8')),
     ]);
     return norm(current) !== norm(template);
   }
 
   private async copyTemplateFile(relPath: string, dest: string): Promise<void> {
-    const from = path.join(this.kbTemplateDir, relPath);
+    const from = await this.templateSource(relPath);
     const to = path.join(dest, relPath);
     await fs.mkdir(path.dirname(to), { recursive: true });
     await fs.copyFile(from, to);
+  }
+
+  /**
+   * Where `relPath`'s template content actually lives. npm refuses to pack
+   * files named `.gitignore` — every such file is silently stripped from the
+   * published tarball — so the packaged template ships the KB's gitignore
+   * under a packable name and the seeder writes it to its real one. A
+   * template carrying the literal file (a distribution's own
+   * KB_TEMPLATE_DIR, or this repo's tree in a Docker build) wins outright:
+   * the mapping is a fallback, never a rename.
+   */
+  private async templateSource(relPath: string): Promise<string> {
+    const direct = path.join(this.kbTemplateDir, relPath);
+    if (await this.exists(direct)) return direct;
+    const packable = TEMPLATE_SOURCE_FALLBACKS[relPath];
+    if (packable !== undefined) {
+      const fallback = path.join(this.kbTemplateDir, packable);
+      if (await this.exists(fallback)) return fallback;
+    }
+    return direct; // let the ENOENT surface under the name the caller asked for
   }
 
   /**

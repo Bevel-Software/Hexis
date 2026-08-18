@@ -116,7 +116,11 @@ describe('KbSeedService', () => {
         expect(await exists(path.join(dir, 'access.md'))).toBe(true);
         expect(await exists(path.join(dir, 'AGENTS.md'))).toBe(true);
         expect(await exists(path.join(dir, '.bevelignore'))).toBe(true);
+        // The template ships this one under the packable spelling
+        // `gitignore.template` (npm strips literal `.gitignore` files from
+        // tarballs); the seed must land it under the REAL name only.
         expect(await exists(path.join(dir, '.gitignore'))).toBe(true);
+        expect(await exists(path.join(dir, 'gitignore.template'))).toBe(false);
         // Core's two roots are seeded (kept present via their .gitkeep).
         expect(await exists(path.join(dir, 'KnowledgeBase/.gitkeep'))).toBe(true);
         expect(await exists(path.join(dir, 'Plugins/.gitkeep'))).toBe(true);
@@ -132,6 +136,24 @@ describe('KbSeedService', () => {
         // The template's illustrative placeholder must NOT leak into the seed.
         expect(roles).not.toContain('admin@example.com');
       }
+    });
+
+    it('a literal .gitignore in a custom template beats the packable spelling', async () => {
+      // A distribution's own KB_TEMPLATE_DIR (or this repo's tree in a
+      // Docker build) may carry the real file; the fallback must never
+      // shadow or clobber it.
+      const custom = path.join(root, 'custom-template');
+      await fs.cp(TEMPLATE_DIR, custom, { recursive: true });
+      await fs.writeFile(path.join(custom, '.gitignore'), 'literal-wins\n', 'utf8');
+      const upstream = await emptyUpstream();
+      await new KbSeedService(
+        upstream, custom, PROTECTED, DEFAULT_BRANCH, ADMINS, 'x-access-token', [],
+      ).ensureRemoteSeeded();
+      const dir = await checkout(root, upstream, DEFAULT_BRANCH);
+      // Normalized: the verifying checkout may apply autocrlf.
+      const gitignore = await fs.readFile(path.join(dir, '.gitignore'), 'utf8');
+      expect(gitignore.replace(/\r\n/g, '\n')).toBe('literal-wins\n');
+      expect(await exists(path.join(dir, 'gitignore.template'))).toBe(false);
     });
 
     // Unreachable through the app — `ADMIN_EMAIL` is required at boot, so the

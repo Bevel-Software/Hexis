@@ -14,9 +14,10 @@ export interface IKbSeedService {
    * Idempotent and single-flight — safe to await before every clone; the real
    * work runs at most once per process.
    *
-   * - **Empty remote** → full seed: all template files (incl. the sample
-   *   ontology) committed to every protected branch. Uses `ADMIN_EMAIL`
-   *   (a repo with no Admin is unusable), otherwise throws.
+   * - **Empty remote** → full seed: all template files (incl. the starter
+   *   content, seeded once and never restored) committed to every protected
+   *   branch. Uses `ADMIN_EMAIL` (a repo with no Admin is unusable),
+   *   otherwise throws.
    * - **Existing remote** → create only the protected branches that don't exist
    *   yet, off an existing one. No file changes here — per-branch base files are
    *   filled in by {@link topUpWorkspace} when a branch is loaded.
@@ -25,8 +26,9 @@ export interface IKbSeedService {
 
   /**
    * Fill in any missing base scaffolding on the freshly-cloned workspace of the
-   * branch a user just loaded, then commit + push it to that branch. Add-only —
-   * never overwrites existing files, and never restores the sample ontology.
+   * branch a user just loaded, then commit + push it to that branch. Add-only
+   * for every file except `AGENTS.md`, which is MANAGED — replaced whenever it
+   * differs from the packaged template. Starter content is never restored.
    * Best-effort: never throws, so a top-up hiccup can't block loading the branch.
    *
    * @param repoDir Absolute path to the checked-out KB clone for `branch`.
