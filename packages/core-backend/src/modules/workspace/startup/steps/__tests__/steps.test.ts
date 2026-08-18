@@ -211,6 +211,14 @@ describe('renderRolesYaml', () => {
       expect(() => renderRolesYaml([bad]), JSON.stringify(bad)).toThrow(/admin email/i);
     }
   });
+
+  it('throws on anything the real access parser would reject, via parse-back', () => {
+    // Passes the character-level checks above but fails the parser's email
+    // grammar — e.g. an address-book "Name <email>" shape or a non-email.
+    for (const bad of ['<admin@example.com>', 'not-an-email']) {
+      expect(() => renderRolesYaml([bad]), JSON.stringify(bad)).toThrow(/would not parse/i);
+    }
+  });
 });
 
 describe('buildSeedTree', () => {

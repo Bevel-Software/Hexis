@@ -51,6 +51,16 @@ export function createSetupRoutes(
   let kbInitFailed = false;
   /** The failure's message, surfaced to the ADMIN on the status endpoint. */
   let kbInitError: string | null = null;
+  /**
+   * The setup-time run currently executing, if any. Doing double duty: the
+   * status endpoint keeps the gate SHUT while it is set (the settings read
+   * complete the moment they save, but the phase is still mutating branch
+   * trees — no workspace request may start yet), and a concurrent completing
+   * save awaits THIS promise instead of starting a second, racing run.
+   */
+  let kbInitInFlight: Promise<void> | null = null;
+  /** The app-gate answer: settings complete AND the KB phase settled clean. */
+  const kbReady = () => isComplete(settings) && !kbInitFailed && kbInitInFlight === null;
 
   const requireAdmin: express.RequestHandler = async (req, res, next) => {
     if (!(await adminAccess.isAdmin(req.userEmail))) {
@@ -70,10 +80,11 @@ export function createSetupRoutes(
    * secret's value.
    */
   router.get('/setup/status', async (req, res) => {
-    // A failed setup-time KB initialization keeps setup INCOMPLETE: the
-    // frontend gates the app on this answer, and opening it over an
-    // uninitialized KB would be worse than keeping the setup screen up.
-    const complete = isComplete(settings) && !kbInitFailed;
+    // A failed OR still-running setup-time KB initialization keeps setup
+    // INCOMPLETE: the frontend gates the app on this answer, and opening it
+    // over an uninitialized (or mid-mutation) KB would be worse than keeping
+    // the setup screen up.
+    const complete = kbReady();
     if (!(await adminAccess.isAdmin(req.userEmail))) {
       res.json({ complete, isAdmin: false });
       return;
@@ -146,7 +157,10 @@ export function createSetupRoutes(
        */
       if ((!wasComplete || kbInitFailed) && isComplete(settings)) {
         try {
-          await kbStartupRunner.runAll();
+          // One run at a time: a save arriving while a run is in flight joins
+          // it rather than starting a second phase over the same trees.
+          kbInitInFlight ??= kbStartupRunner.runAll();
+          await kbInitInFlight;
           kbInitFailed = false;
           kbInitError = null;
         } catch (initErr) {
@@ -163,12 +177,14 @@ export function createSetupRoutes(
               'Saving the setup form again retries; restarting the server retries too.',
           });
           return;
+        } finally {
+          kbInitInFlight = null;
         }
       }
       res.json({
         ok: true,
         restartRequired,
-        complete: isComplete(settings) && !kbInitFailed,
+        complete: kbReady(),
         awaitingRestart: awaitingRestart(settings),
         settings: settings.describe(),
       });

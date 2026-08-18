@@ -96,7 +96,11 @@ export class KbStartupRunner {
           throw new Error(redactSecret(`KB startup step "${step.name}" failed: ${msg}`));
         });
         if (result.outcome === 'stopBoot') {
-          throw new Error(`KB startup step "${step.name}" stopped the boot: ${result.message}`);
+          // Redacted like every other exit: the message travels beyond logs
+          // (the setup status endpoint surfaces it to admins).
+          throw new Error(
+            redactSecret(`KB startup step "${step.name}" stopped the boot: ${result.message}`),
+          );
         }
         if (result.outcome === 'skipped') {
           console.warn(`[kb-startup] ${step.name}: skipped — ${result.reason}`);
@@ -118,10 +122,11 @@ export class KbStartupRunner {
         '[kb-startup] SAFE BOOT: abandoning the phase after a failure — the KB is UNMAINTAINED this run.',
         redactSecret(err instanceof Error ? err.message : String(err)),
       );
-      // Reset every handle that materialized a clone, not only the ones marked
-      // dirty: a mid-apply failure leaves partial writes on a handle that never
-      // reached its dirty mark. Reset-hard + clean on an untouched tree is a
-      // no-op, so sweeping every clone is strictly safer.
+      // Reset only DIRTY handles — ones an apply at least began on (the mark
+      // is set before the first op, so a mid-apply failure is covered). A
+      // clone a step merely read must NOT be swept: `clean -fd` would delete
+      // pre-existing untracked files in a surviving working clone that no op
+      // ever touched.
       for (const h of handles.values()) await h.resetUncommitted().catch(() => {});
       return;
     }
@@ -309,11 +314,7 @@ class BranchHandle implements KbBranch {
     readonly isProtected: boolean,
     cloneOnce: () => Promise<string>,
   ) {
-    this.clone = lazyOnce(async () => {
-      const dir = await cloneOnce();
-      this.cloned = true;
-      return dir;
-    });
+    this.clone = lazyOnce(cloneOnce);
   }
 
   private readonly clone: () => Promise<string>;
@@ -322,10 +323,12 @@ class BranchHandle implements KbBranch {
   private noteBuffer: string[] = [];
   /** Notes of applied steps, in order — the commit message's material. */
   private notes: string[] = [];
-  /** Repo-relative paths applied ops produced (writes + move destinations). */
+  /**
+   * Repo-relative target paths of ops an apply ATTEMPTED (writes + move
+   * destinations), recorded before each op executes so even the op that
+   * failed mid-apply leaves its path here for the rollback to clean.
+   */
   private readonly applied = new Set<string>();
-  /** Whether a clone actually materialized — what the abandon path resets on. */
-  private cloned = false;
   dirty = false;
 
   repoDir(): Promise<string> {
@@ -360,20 +363,23 @@ class BranchHandle implements KbBranch {
     }
     if (this.buffer.length === 0) return;
     const repoDir = await this.repoDir();
+    // Dirty from the FIRST op, not the last: a mid-apply failure must leave
+    // the handle marked so the safe-boot rollback sweeps its partial writes.
+    this.dirty = true;
     const ops = this.buffer;
     this.buffer = [];
     for (const op of ops) {
       if (op.kind === 'write') {
+        this.applied.add(op.path);
         const abs = await containedPath(repoDir, op.path);
         await fs.mkdir(path.dirname(abs), { recursive: true });
         await fs.writeFile(abs, op.content);
-        this.applied.add(op.path);
       } else if (op.kind === 'move') {
+        this.applied.add(op.to);
         const from = await containedPath(repoDir, op.from);
         const to = await containedPath(repoDir, op.to);
         await fs.mkdir(path.dirname(to), { recursive: true });
         await fs.rename(from, to);
-        this.applied.add(op.to);
       } else {
         const abs = await containedPath(repoDir, op.path);
         await fs.rm(abs, { force: true });
@@ -389,15 +395,20 @@ class BranchHandle implements KbBranch {
 
   /**
    * Discard everything uncommitted (safe boot's abandonment). Keyed on
-   * `cloned`, not `dirty`: a mid-apply failure leaves partial writes on a
-   * handle that never reached its dirty mark, and those must not survive
-   * either. A clone nothing touched resets as a no-op.
+   * `dirty`, which is set BEFORE the first op applies, so a mid-apply failure
+   * is covered — while a clone a step only read is never swept (`clean -fd`
+   * on it would delete pre-existing untracked files no op ever touched). The
+   * extra `clean -fdx -- <op targets>` catches a partial write whose path a
+   * branch `.gitignore` happens to match, which plain `-fd` preserves.
    */
   async resetUncommitted(): Promise<void> {
-    if (!this.cloned) return;
+    if (!this.dirty) return;
     const repoDir = await this.repoDir();
     await git(repoDir, 'x-access-token', ['reset', '--hard', 'HEAD']).catch(() => {});
     await git(repoDir, 'x-access-token', ['clean', '-fd']).catch(() => {});
+    if (this.applied.size > 0) {
+      await git(repoDir, 'x-access-token', ['clean', '-fdx', '--', ...this.applied]).catch(() => {});
+    }
   }
 
   commitSubject(): string {

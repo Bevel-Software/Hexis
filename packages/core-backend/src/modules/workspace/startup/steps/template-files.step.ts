@@ -205,7 +205,10 @@ export class TemplateFilesStep implements OnServerStart {
     // conventions doc shows up in the file tree and the agent view.
     // Idempotent: an ignore file already carrying the rule — or absent, in
     // which case the template's copy declared above arrives with the rule in
-    // it — changes nothing and produces no note.
+    // it — changes nothing and produces no note. Deliberately checked by
+    // LINE PRESENCE, not effective outcome: a later `!AGENTS.md` negation is
+    // the operator explicitly choosing to SHOW the file, and hiding it is a
+    // default this step provides, not a mandate it re-imposes every boot.
     added.push(...(await mergeIgnorePattern(repoDir, branch, 'AGENTS.md')));
 
     // AGENTS.md is MANAGED, not merely seeded: the platform owns its content,

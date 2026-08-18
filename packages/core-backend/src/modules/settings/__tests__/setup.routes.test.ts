@@ -258,6 +258,33 @@ describe('POST /setup/settings — the completion transition and the KB startup 
       console.error = consoleError;
     }
   });
+
+  it('keeps the gate shut while the phase runs, and a concurrent save joins the run instead of starting a second', async () => {
+    let runs = 0;
+    let release!: () => void;
+    const running = new Promise<void>((r) => (release = r));
+    const { base } = listen(true, async () => {
+      runs++;
+      await running;
+    });
+    // The completing save blocks inside the phase...
+    const first = post(base, '/api/setup/settings', { settings: completing });
+    await new Promise((r) => setTimeout(r, 50));
+    // ...during which the settings read complete but the GATE must not open —
+    // the phase is still mutating branch trees.
+    const status = await (await fetch(`${base}/api/setup/status`)).json();
+    expect(status.complete).toBe(false);
+    // A save landing mid-run must not start a second phase over the same trees.
+    const second = post(base, '/api/setup/settings', { settings: { gitUsername: 'x-access-token' } });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(runs).toBe(1);
+    release();
+    const [res1, res2] = await Promise.all([first, second]);
+    expect(res1.status).toBe(200);
+    expect(res2.status).toBe(200);
+    expect(runs).toBe(1);
+    expect((await (await fetch(`${base}/api/setup/status`)).json()).complete).toBe(true);
+  });
 });
 
 describe('GET /setup/status', () => {
