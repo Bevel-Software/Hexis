@@ -1,5 +1,5 @@
 import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Check, XCircle, Lock, AlertTriangle, ArrowLeft } from 'lucide-react';
+import { Check, XCircle, Lock, AlertTriangle, ArrowLeft, FileText } from 'lucide-react';
 import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { EditorTabs } from './EditorTabs';
@@ -9,7 +9,8 @@ import { Banner, Button, Surface } from '../../../shared/components';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
-import { useCanonicalFileUrl } from '../routing/kb-routes';
+import { useParams } from 'react-router-dom';
+import { useCanonicalFileUrl, useFileNav } from '../routing/kb-routes';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
 import { useFileAccess } from '../../access/hooks/useFileAccess';
 import { FileHistoryPanel } from '../../git/components/FileHistoryPanel';
@@ -18,10 +19,7 @@ import {
   OPEN_COMPARISON_EVENT,
   type OpenComparisonDetail,
 } from '../../../core/events';
-import {
-  useAppRegistry,
-  useSuggestedPromptSeed,
-} from '../../../core/registry';
+import { useAppRegistry } from '../../../core/registry';
 import { useFileLock } from '../../workflow/hooks/useFileLock';
 import { LockApiError } from '../../workflow/services/lock.api';
 import { useAuth } from '../../auth/state/auth.context';
@@ -37,21 +35,34 @@ import { FileChangeBoxes } from '../../change-requests/components/FileChangeBoxe
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
+import { suggestedPages } from '../utils/fileTree';
 import { getFileRenderer, getRendererLayout } from './renderers';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
 
-const SUGGESTED_PROMPTS = [
-  'Give me an overview of the process landscape.',
-  'What are the main process modules?',
-  'Show me the Registration & Onboarding processes.',
-];
+/**
+ * How many pages the empty viewer offers. Enough to look like a starting
+ * point, few enough to read at a glance — a longer list is the file tree,
+ * which is already on screen and better at being one.
+ */
+const SUGGESTION_LIMIT = 4;
+
+/** What a page is called, without the extension the reader did not choose. */
+function pageTitle(fileName: string): string {
+  return fileName.replace(/\.(md|markdown)$/i, '');
+}
+
+/** The folder a page sits in, or '' for one that sits at a root. */
+function parentFolder(relativePath: string): string {
+  return relativePath.split('/').slice(-2, -1)[0] ?? '';
+}
 
 export function FileViewer() {
   const {
     workspaceId,
     kbDirName,
+    fileTree,
     openFilePath,
     openFileContent,
     openFileSavedContent,
@@ -65,9 +76,6 @@ export function FileViewer() {
     addTab,
     reloadTabFromDisk,
   } = useWorkspace();
-  // Chat decoupling: the suggested-prompt seed is an optional registry port
-  // (null when no chat surface is registered → the prompt buttons hide).
-  const seedSuggestedPrompt = useSuggestedPromptSeed();
   const { fileViewerPanels, renderers } = useAppRegistry();
   const git = useGit();
   // Hiding the tree buys margin, not line length (proto:709), and the pane
@@ -788,6 +796,33 @@ export function FileViewer() {
     });
   }, [openFilePath]);
 
+  // Where to start, for a viewer with nothing open. Computed here rather than
+  // in the empty branch below because that branch is a `return` and this is a
+  // hook — and it costs nothing while a file IS open, which is the common case.
+  const suggestions = useMemo(
+    () => suggestedPages(fileTree, SUGGESTION_LIMIT),
+    [fileTree],
+  );
+  // Opening a suggestion is NAVIGATION, the same as clicking the file in the
+  // explorer or a tab: the URL is the canonical record of what is open, and a
+  // refresh, share or back-press must land on the page — not on the empty
+  // state this button was clicked from. `openWorkspacePath`, not `openFile`:
+  // these are real tree paths, and a `#` in a filename is a character, not an
+  // anchor. Navigation needs the branch, so the buttons wait for it rather
+  // than rendering a click that silently does nothing while git status loads.
+  const { openWorkspacePath } = useFileNav();
+  // "Ready" is the same predicate `FileRoute` uses to decide the workspace is
+  // actually backing this route: the branch is known AND it is the branch the
+  // URL names. Mid-switch the status still reports the branch being left, and
+  // navigating on that would send the reader back to the branch they just
+  // left — a worse outcome than a button that waits a moment.
+  // The param arrives ALREADY decoded — the router percent-decodes path params
+  // — so it is compared as-is. Decoding again would turn a branch named
+  // `my%20branch` into `my branch`, which matches nothing and would leave the
+  // offers disabled for good on that deployment.
+  const routeBranch = useParams<{ branch: string }>().branch;
+  const navReady = !!git.status?.branch && (!routeBranch || git.status.branch === routeBranch);
+
   // ALL open requests, not just the ones scoped to you — a colleague's request
   // on a file you can read but not write still belongs on this page.
   const openChangeRequests = useOpenChangeRequests();
@@ -802,32 +837,54 @@ export function FileViewer() {
         <PullNeededBanner />
         <EditorTabs />
         <div className="flex-1 flex items-center justify-center px-6">
-          <div className="max-w-md text-center">
-            <h2 className="mb-2 text-head text-ink">
-              Open a file, or ask the process assistant a question.
-            </h2>
+          <div className="w-full max-w-md text-center">
+            <h2 className="mb-2 text-head text-ink">Open a page to start reading.</h2>
             <p className="mb-6 text-ui text-ink-muted">
-              Pick anything from the file tree, or start with a suggestion.
+              {suggestions.length > 0
+                ? 'Pick anything from the file tree, or start with one of these.'
+                : 'Pick anything from the file tree.'}
             </p>
-            {/* Suggested prompts seed the chat composer — only rendered when a
-                chat surface registered the seed port. */}
-            {seedSuggestedPrompt && (
-              <div className="flex flex-col gap-2">
-                {SUGGESTED_PROMPTS.map((prompt) => (
-                  <Surface
-                    key={prompt}
-                    as="button"
-                    tone="sunken"
-                    radius="lg"
-                    elevation="none"
-                    interactive
-                    type="button"
-                    onClick={() => seedSuggestedPrompt(prompt)}
-                    className="px-3 py-2 text-left text-ui text-ink"
-                  >
-                    {prompt}
-                  </Surface>
-                ))}
+            {/* Real pages, not prompts. Whoever lands here has a file tree and
+                a blank pane, and "browse until something looks right" is the
+                one instruction the tree already gives — so the suggestions are
+                documents that open, drawn from the top of the knowledge the
+                deployment actually holds. */}
+            {suggestions.length > 0 && (
+              <div className="flex flex-col gap-2 text-left">
+                {suggestions.map((page) => {
+                  const folder = parentFolder(page.relativePath);
+                  return (
+                    <Surface
+                      key={page.relativePath}
+                      as="button"
+                      tone="sunken"
+                      radius="lg"
+                      elevation="none"
+                      interactive
+                      type="button"
+                      onClick={() => openWorkspacePath(page.relativePath)}
+                      disabled={!navReady}
+                      className="flex items-center gap-2.5 px-3 py-2"
+                    >
+                      <FileText size={15} className="shrink-0 text-ink-faint" aria-hidden />
+                      <span className="min-w-0 flex-1 truncate text-ui text-ink">
+                        {pageTitle(page.name)}
+                      </span>
+                      {/* The folder it sits in — two pages can share a name,
+                          and the one thing that tells them apart is where they
+                          live. */}
+                      {/* Capped so a long folder name truncates instead of
+                          squeezing out the page title it is there to
+                          disambiguate — same contract as the comparison
+                          panel's path label. */}
+                      {folder && (
+                        <span className="max-w-[40%] shrink-0 truncate text-meta text-ink-faint">
+                          {folder}
+                        </span>
+                      )}
+                    </Surface>
+                  );
+                })}
               </div>
             )}
           </div>

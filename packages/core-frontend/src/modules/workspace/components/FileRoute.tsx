@@ -24,7 +24,14 @@ export function FileRoute() {
   const params = useParams<{ branch: string; '*': string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  const branchFromUrl = params.branch ? decodeURIComponent(params.branch) : '';
+  // NOT decoded again: the router percent-decodes path params before handing
+  // them over. A second pass turns a branch legitimately named `my%20branch`
+  // into `my branch`, which bootstraps the workspace under a branch that does
+  // not exist and never matches `currentBranch` — and a name ending in a bare
+  // `%` throws a URIError out of render. (`BranchSwitcher` slices the same
+  // branch out of `location.pathname` by hand, which IS still encoded, so its
+  // decode is correct and stays.)
+  const branchFromUrl = params.branch ?? '';
   // The trailing URL segment is either a node id (`/workspace/<branch>/<id>` —
   // the canonical node URL) or a file path (`/workspace/<branch>/<path>`). The id
   // grammar (lowercase, no slash/dot) is disjoint from a real workspace path, so

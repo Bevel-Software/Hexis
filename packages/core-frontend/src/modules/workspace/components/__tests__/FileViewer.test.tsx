@@ -1,9 +1,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { useEffect, useState } from 'react';
-import type { BranchInfo, WorkingTreeStatus } from '@bevel-software/platform-shared';
+import type {
+  BranchInfo,
+  FileTreeEntry,
+  WorkingTreeStatus,
+} from '@bevel-software/platform-shared';
 
 // Mock the access API before importing the component tree — useFileAccess
 // fires a fetch in an effect on mount, and we don't want real network in tests.
@@ -148,7 +152,7 @@ const fetchFileHistoryMock = vi.fn(async () => [
   },
 ]);
 
-function makeGit(status: WorkingTreeStatus): GitContextValue {
+function makeGit(status: WorkingTreeStatus | null): GitContextValue {
   const branches: BranchInfo[] = [];
   return {
     status,
@@ -168,12 +172,24 @@ function makeGit(status: WorkingTreeStatus): GitContextValue {
   };
 }
 
+/**
+ * Where the router currently stands. Opening a page from the empty state is
+ * navigation — the URL is the observable contract, and this makes it
+ * assertable without a route tree.
+ */
+function LocationEcho() {
+  const location = useLocation();
+  return <div data-testid="location">{location.pathname}</div>;
+}
+
 function ViewerHarness({
   initialContent = 'Base content',
   pendingValue = 'Agent version',
   branch = 'alice/draft',
+  routeBranch,
   filePath = 'knowledge-base/Knowledge/Foo.md',
   kbDirName = 'knowledge-base',
+  fileTree = null,
   addTab,
   changeRequests = [],
   authUser = null,
@@ -181,9 +197,18 @@ function ViewerHarness({
 }: {
   initialContent?: string;
   pendingValue?: string;
-  branch?: string;
-  filePath?: string;
+  /** `null` = git status has not loaded (or failed) — there is no branch yet. */
+  branch?: string | null;
+  /**
+   * The branch the URL names, when it differs from the one git status reports
+   * — i.e. mid-switch, before the workspace has caught up.
+   */
+  routeBranch?: string;
+  /** `null` means nothing is open — the viewer's empty state. */
+  filePath?: string | null;
   kbDirName?: string | null;
+  /** What the explorer holds; the empty state draws its suggestions from it. */
+  fileTree?: FileTreeEntry | null;
   addTab?: WorkspaceContextValue['addTab'];
   /** Open change requests touching `filePath`. */
   changeRequests?: { number: number; title: string; who: string }[];
@@ -210,18 +235,20 @@ function ViewerHarness({
   }, [pendingValue]);
 
   const effectiveSaved = captureTyped ? savedContent : openFileContent;
-  const tab = {
-    path: filePath,
-    content: openFileContent,
-    savedContent: effectiveSaved,
-    isDirty: false,
-    pendingFileContent,
-  };
+  const tab = filePath
+    ? {
+        path: filePath,
+        content: openFileContent,
+        savedContent: effectiveSaved,
+        isDirty: false,
+        pendingFileContent,
+      }
+    : null;
   const workspace: WorkspaceContextValue = {
     workspaceId: 'ws-1',
     kbDirName,
-    fileTree: null,
-    openTabs: [tab],
+    fileTree,
+    openTabs: tab ? [tab] : [],
     activeTab: tab,
     dirtyTabFilenames: [],
     openFilePath: filePath,
@@ -292,15 +319,18 @@ function ViewerHarness({
     login: async () => {},
     logout: () => {},
   };
-  return (
-    <MemoryRouter>
+  // Rendered UNDER the real route shape, so `:branch` resolves the way it does
+  // in the app — the empty state's suggestions compare it against git status
+  // before offering to navigate.
+  const urlBranch = routeBranch ?? branch ?? 'alice/draft';
+  const tree = (
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
-          <GitContext.Provider value={makeGit(makeStatus(branch))}>
+          <GitContext.Provider value={makeGit(branch ? makeStatus(branch) : null)}>
             <ReviewContext.Provider value={review}>
                 <OpenChangeRequestsContext.Provider
                   value={{
-                    paths: new Set(changeRequests.length ? [filePath] : []),
+                    paths: new Set(changeRequests.length && filePath ? [filePath] : []),
                     minePaths: new Map(),
                     mineNumbers: new Set<number>(),
                     forPath: (p) =>
@@ -321,11 +351,18 @@ function ViewerHarness({
                     Inject pending
                   </button>
                   <FileViewer />
+                  <LocationEcho />
                 </OpenChangeRequestsContext.Provider>
             </ReviewContext.Provider>
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
+  );
+  return (
+    <MemoryRouter initialEntries={[`/workspace/${encodeURIComponent(urlBranch)}`]}>
+      <Routes>
+        <Route path="/workspace/:branch/*" element={tree} />
+      </Routes>
     </MemoryRouter>
   );
 }
@@ -906,5 +943,177 @@ describe('FileViewer: proposing a change without write access', () => {
     // permission stripe with it (removed for readers everywhere).
     expect(await screen.findByRole('button', { name: 'Propose changes' })).toBeInTheDocument();
     expect(screen.queryByText(/You don't have permission to edit/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * NOTHING OPEN. The first thing most people see in Knowledge, and for a long
+ * time it told them to go and ask an assistant a question — three canned ones
+ * about a "process landscape" that only rendered at all on a deployment with a
+ * chat surface registered, and that sent someone looking at a knowledge base
+ * away from the pages it holds. It offers those pages now.
+ */
+describe('FileViewer: nothing open', () => {
+  const TREE: FileTreeEntry = {
+    name: 'knowledge-base',
+    relativePath: 'knowledge-base',
+    type: 'directory',
+    children: [
+      {
+        name: 'KnowledgeBase',
+        relativePath: 'knowledge-base/KnowledgeBase',
+        type: 'directory',
+        children: [
+          {
+            name: 'Onboarding',
+            relativePath: 'knowledge-base/KnowledgeBase/Onboarding',
+            type: 'directory',
+            children: [
+              {
+                name: 'Day one.md',
+                relativePath: 'knowledge-base/KnowledgeBase/Onboarding/Day one.md',
+                type: 'file',
+              },
+            ],
+          },
+          {
+            name: 'Handbook.md',
+            relativePath: 'knowledge-base/KnowledgeBase/Handbook.md',
+            type: 'file',
+          },
+          {
+            name: 'logo.png',
+            relativePath: 'knowledge-base/KnowledgeBase/logo.png',
+            type: 'file',
+          },
+        ],
+      },
+      {
+        name: 'Plugins',
+        relativePath: 'knowledge-base/Plugins',
+        type: 'directory',
+        children: [
+          {
+            name: 'SKILL.md',
+            relativePath: 'knowledge-base/Plugins/team-a/SKILL.md',
+            type: 'file',
+          },
+        ],
+      },
+      { name: 'access.md', relativePath: 'knowledge-base/access.md', type: 'file' },
+    ],
+  };
+
+  it('does not send the reader off to an assistant', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} />);
+    await screen.findByRole('heading', { name: /Open a page/ });
+    expect(document.body.textContent).not.toMatch(/assistant/i);
+  });
+
+  it('offers the pages nearest the top of the knowledge tree', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} />);
+    // Shallowest first, and the extension is not part of the name.
+    const shallow = await screen.findByRole('button', { name: /Handbook/ });
+    // One level down, labelled with the folder that tells two like-named
+    // pages apart.
+    const deeper = screen.getByRole('button', { name: /Day one/ });
+    expect(deeper).toHaveTextContent('Onboarding');
+    // "Nearest the top" is an ORDER, not just a membership: the top-level page
+    // renders before the one a folder down, and a regression to depth-first
+    // would flip exactly this.
+    expect(
+      shallow.compareDocumentPosition(deeper) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('offers nothing that is not a document', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} />);
+    await screen.findByRole('button', { name: /Handbook/ });
+    // An image is not a page; `Plugins/` belongs to Skills & Tools and is not a
+    // browsing destination here; the loose root files configure the
+    // deployment rather than saying anything.
+    expect(screen.queryByRole('button', { name: /logo/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /SKILL/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /access/ })).toBeNull();
+  });
+
+  /**
+   * NAVIGATES, the same as clicking the file in the explorer — the URL is the
+   * canonical record of what is open, so refresh/share/back land on the page
+   * rather than on the empty state, and a failed load surfaces where every
+   * other open's does.
+   */
+  it('navigates to the page it suggested', async () => {
+    const addTab = vi.fn(async () => true);
+    render(<ViewerHarness filePath={null} fileTree={TREE} addTab={addTab} />);
+    await userEvent.click(await screen.findByRole('button', { name: /Handbook/ }));
+    expect(screen.getByTestId('location')).toHaveTextContent(
+      /\/workspace\/.*\/knowledge-base\/KnowledgeBase\/Handbook\.md$/,
+    );
+    // Through the route, not around it.
+    expect(addTab).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Navigation needs a branch, and git status arrives asynchronously. Until it
+   * does, a suggestion click would silently do nothing — so the buttons wait,
+   * visibly, instead of pretending to work.
+   */
+  it('waits for the branch before offering to open anything', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} branch={null} />);
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeDisabled();
+  });
+
+  /**
+   * Mid-switch, git status still reports the branch being LEFT while the URL
+   * already names the new one. Navigating on the stale value would send the
+   * reader back to the branch they just left, so the offer waits — the same
+   * "branch matches the route" test `FileRoute` makes before acting.
+   */
+  it('does not offer to open on the branch it is switching away from', async () => {
+    render(
+      <ViewerHarness filePath={null} fileTree={TREE} branch="alice/draft" routeBranch="main" />,
+    );
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeDisabled();
+  });
+
+  /**
+   * A branch name may legitimately contain a percent sign. The router hands
+   * path params over already decoded, so decoding again would read this branch
+   * as `my branch`, match nothing, and disable the offers permanently for a
+   * deployment on it.
+   */
+  it('offers pages on a branch whose name contains a percent sign', async () => {
+    render(<ViewerHarness filePath={null} fileTree={TREE} branch="my%20branch" />);
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeEnabled();
+  });
+
+  /** A knowledge base with nothing in it has nothing to suggest, and says so. */
+  it('promises nothing when there is nothing to open', async () => {
+    render(<ViewerHarness filePath={null} fileTree={null} />);
+    await screen.findByRole('heading', { name: /Open a page/ });
+    expect(screen.getByText('Pick anything from the file tree.')).toBeInTheDocument();
+  });
+
+  /**
+   * A clone that predates the `KnowledgeBase/` split has no named roots to
+   * scope to — the whole tree is the knowledge, and reading none of it because
+   * a folder is missing would be the wrong answer.
+   */
+  it('reads the whole tree when there are no named roots', async () => {
+    render(
+      <ViewerHarness
+        filePath={null}
+        fileTree={{
+          name: 'knowledge-base',
+          relativePath: 'knowledge-base',
+          type: 'directory',
+          children: [
+            { name: 'Charter.md', relativePath: 'knowledge-base/Charter.md', type: 'file' },
+          ],
+        }}
+      />,
+    );
+    expect(await screen.findByRole('button', { name: /Charter/ })).toBeInTheDocument();
   });
 });

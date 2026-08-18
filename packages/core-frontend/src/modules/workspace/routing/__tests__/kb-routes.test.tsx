@@ -86,6 +86,31 @@ describe('useFileNav.openFile', () => {
     );
   });
 
+  it('treats # in a filename as part of the path when told it IS a path', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    // `openFile` parses link-shaped input, so `#` means "anchor" there.
+    // `openWorkspacePath` is for real tree paths, where `#` is a character in
+    // a filename and must be encoded, not split off.
+    result.current.openWorkspacePath('knowledge-base/Knowledge/Q#A.md');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Q%23A.md',
+    );
+  });
+
+  it('opens a tree path verbatim even when a folder inside it is named like the kbDirName', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    // A tree whose root is not the KB dir, holding a folder that happens to be
+    // named like it. The junk-segment repair drops everything before that
+    // segment, rewriting this to `knowledge-base/notes.md` — a different file.
+    // A path that came from the tree is already correct and needs no repair.
+    result.current.openWorkspacePath('Knowledge/knowledge-base/notes.md');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/Knowledge/knowledge-base/notes.md',
+    );
+  });
+
   it('leaves a well-formed path untouched and ignores a kbDirName substring match', () => {
     navigateMock.mockClear();
     const { result } = renderNav('alice/draft');
