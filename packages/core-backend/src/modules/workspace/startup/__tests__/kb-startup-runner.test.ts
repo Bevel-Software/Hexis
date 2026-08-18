@@ -119,10 +119,14 @@ describe('KbStartupRunner', () => {
   it('KB_SAFE_BOOT boots over a persisted credentials-bearing URL — the rescue never invokes git', async () => {
     process.env.KB_SAFE_BOOT = '1';
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    await makeRunner(
-      [step('never', async () => ({ outcome: 'ok' }))],
-      { kbRepoUrl: () => 'https://alice:hunter2@example.com/kb.git' },
-    ).runAll(); // resolves — the server boots unmaintained
+    try {
+      await makeRunner(
+        [step('never', async () => ({ outcome: 'ok' }))],
+        { kbRepoUrl: () => 'https://alice:hunter2@example.com/kb.git' },
+      ).runAll(); // resolves — the server boots unmaintained
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it('accepts a concurrent replica\'s seed when the empty-remote seed push loses the race', async () => {
