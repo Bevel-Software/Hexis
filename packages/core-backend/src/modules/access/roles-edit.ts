@@ -262,6 +262,30 @@ export function addRoleGroupRef(text: string, canonical: string, groupName: stri
   return reemit(text, model);
 }
 
+/**
+ * Rewrite every role's `group:<oldCanonical>` assignment to name
+ * `group:<newCanonical>` — the roles.yaml half of a group rename. Refs are
+ * STORED canonical, so a canonical-changing group rename would otherwise
+ * strand them: `mergeGroupsIntoRoles` ignores an unknown ref with a warning,
+ * silently shrinking the role's membership. Already-present target refs
+ * dedupe rather than duplicate. No-op when nothing references the old name.
+ */
+export function renameGroupRefs(text: string, oldCanonical: string, newCanonical: string): EditResult {
+  const oldRef = `${GROUP_REF_PREFIX}${oldCanonical}`;
+  const newRef = `${GROUP_REF_PREFIX}${newCanonical}`;
+  const model = parseRolesModel(text);
+  let changed = false;
+  for (const role of model) {
+    const idx = role.members.indexOf(oldRef);
+    if (idx < 0) continue;
+    if (role.members.includes(newRef)) role.members.splice(idx, 1);
+    else role.members[idx] = newRef;
+    changed = true;
+  }
+  if (!changed) return { text: emitRolesModel(model), changed: false };
+  return reemit(text, model);
+}
+
 /** Remove a role's group assignment. 404 unknown role; no-op if not assigned. */
 export function removeRoleGroupRef(text: string, canonical: string, groupName: string): EditResult {
   const ref = groupRefFor(groupName);

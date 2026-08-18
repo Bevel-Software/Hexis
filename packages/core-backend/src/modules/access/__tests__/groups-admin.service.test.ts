@@ -198,6 +198,23 @@ describe('GroupsAdminService', () => {
     expect(rewritten).toContain('- Admin');
   });
 
+  it('rename rewrites role→group assignments (group:<ref> in roles.yaml) in the SAME commit', async () => {
+    await write(
+      repo,
+      'roles.yaml',
+      'roles:\n  Admin:\n    - admin@x.io\n  Reviewer:\n    - rev@x.io\n    - group:gtm team\n',
+    );
+    await service.renameGroup(ADMIN, 'gtm team', 'Go To Market');
+
+    const roles = await fs.readFile(path.join(repo, 'roles.yaml'), 'utf-8');
+    // The stored ref is canonical — it must follow the rename, or the role
+    // silently stops expanding to the group's members.
+    expect(roles).toContain('group:go to market');
+    expect(roles).not.toContain('group:gtm team');
+    // Atomic: groups.yaml + roles.yaml land as ONE commit.
+    expect(commits).toHaveLength(1);
+  });
+
   it('retireManualGroups deletes the file once; git history is the recovery', async () => {
     expect(await service.retireManualGroups(ADMIN)).toBe(true);
     await expect(groupsYaml()).rejects.toMatchObject({ code: 'ENOENT' });

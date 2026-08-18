@@ -7,6 +7,7 @@ import {
   deleteRole,
   addMember,
   removeMember,
+  renameGroupRefs,
   renameRoleDisplay,
   assertSafeRoleDisplayName,
   RolesEditError,
@@ -122,6 +123,36 @@ describe('roles-edit: mutations', () => {
 
   it('renameRoleDisplay: rejects collision with another existing role', () => {
     expect(() => renameRoleDisplay(BASE, 'product team', 'Admin')).toThrow(/already exists/);
+  });
+
+  it('renameGroupRefs: rewrites group:<ref> members across roles, deduping an existing target', () => {
+    const text = [
+      'roles:',
+      '  Admin:',
+      '    - razvan@bevel.software',
+      '  Product Team:',
+      '    - felix@example.com',
+      '    - group:gtm team',
+      '  Ops:',
+      '    - group:gtm team',
+      '    - group:go to market', // target already present → dedupe, not duplicate
+      '',
+    ].join('\n');
+    const r = renameGroupRefs(text, 'gtm team', 'go to market');
+    expect(r.changed).toBe(true);
+    expect(r.text).not.toContain('group:gtm team');
+    const model = parseRolesModel(r.text);
+    expect(model.find((x) => x.displayName === 'Product Team')?.members).toContain('group:go to market');
+    expect(
+      model.find((x) => x.displayName === 'Ops')?.members.filter((m) => m === 'group:go to market'),
+    ).toHaveLength(1);
+    // Untouched role stays untouched.
+    expect(model.find((x) => x.displayName === 'Admin')?.members).toEqual(['razvan@bevel.software']);
+  });
+
+  it('renameGroupRefs: no-op when nothing references the old name', () => {
+    const r = renameGroupRefs(BASE, 'gtm team', 'go to market');
+    expect(r.changed).toBe(false);
   });
 
   it('only the changed role moves in the diff (other roles untouched)', () => {

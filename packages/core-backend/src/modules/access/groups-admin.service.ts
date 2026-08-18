@@ -31,7 +31,8 @@ import type { IAccessControl } from './access-control.interface.js';
 import { canonicalRoleName, isAccessMdPath } from './access-control.service.js';
 import { GROUPS_YAML, SYNCED_GROUPS_YAML, parseGroupsFile, validateGroupsFile } from './group-files.js';
 import { findRoleRefsInText, rewriteRoleTokensInText } from './roles-admin.service.js';
-import { parseRolesModel } from './roles-edit.js';
+import { parseRolesModel, renameGroupRefs } from './roles-edit.js';
+import { makeRolesYamlWriteValidator } from './roles-yaml-guard.js';
 import {
   GroupsEditError,
   parseGroupsModel,
@@ -42,6 +43,9 @@ import {
   renameGroupDisplay as editRenameDisplay,
   type GroupsEditResult,
 } from './groups-edit.js';
+
+/** Where role→group assignments live (`group:<canonical>` member entries). */
+const ROLES_YAML = 'roles.yaml';
 
 /** A group mutation that cannot proceed. `payload.kind` distinguishes the
  *  mode refusal (`'idp-mode'`) for the UI. */
@@ -217,6 +221,25 @@ export class GroupsAdminService {
     }
     if (newCanonical !== canonical) {
       writes.push(...(await this.rewriteReferences(workspaceId, canonical, newDisplayName.trim())));
+      // Role→group assignments live in roles.yaml as `group:<canonical>` —
+      // stored canonical, so they go stale on a canonical-changing rename and
+      // the role would silently stop expanding to the group's members. Rewrite
+      // them in the SAME atomic commit. Fail closed on a malformed roles.yaml:
+      // committing the rename without it would strand any refs it holds.
+      const rolesText = await this.readKbFile(workspaceId, ROLES_YAML);
+      if (rolesText !== null) {
+        let rolesEdit: { text: string; changed: boolean };
+        try {
+          rolesEdit = renameGroupRefs(rolesText, canonical, newCanonical);
+        } catch (err) {
+          throw new GroupsAdminError(
+            `Cannot rewrite role assignments in ${ROLES_YAML}; rename aborted with no changes`,
+            422,
+            { cause: (err as Error)?.message },
+          );
+        }
+        if (rolesEdit.changed) writes.push({ repoRelativePath: ROLES_YAML, content: rolesEdit.text });
+      }
     }
     if (writes.length === 0) return this.getRoster();
 
@@ -320,7 +343,15 @@ export class GroupsAdminService {
     const basePath = await this.workspaceService.getWorkspacePath(workspaceId);
     return new LockingFilesystem(
       { basePath, contained: true },
-      { workflow: this.workflowService, workspaceId, branch: this.defaultBranch, user: actor },
+      {
+        workflow: this.workflowService,
+        workspaceId,
+        branch: this.defaultBranch,
+        user: actor,
+        // The rename batch may rewrite roles.yaml (group:<ref> members) —
+        // same pre-disk no-lockout gate the roles admin attaches.
+        validateWrite: makeRolesYamlWriteValidator(this.kbDirName),
+      },
     );
   }
 
