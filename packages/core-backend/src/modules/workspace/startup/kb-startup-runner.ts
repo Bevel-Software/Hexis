@@ -324,9 +324,10 @@ class BranchHandle implements KbBranch {
   /** Notes of applied steps, in order — the commit message's material. */
   private notes: string[] = [];
   /**
-   * Repo-relative target paths of ops an apply ATTEMPTED (writes + move
-   * destinations), recorded before each op executes so even the op that
-   * failed mid-apply leaves its path here for the rollback to clean.
+   * Repo-relative target paths the ops touched: writes recorded BEFORE
+   * executing (a failed write can leave a partial file the rollback must
+   * clean), move destinations AFTER (a failed rename leaves its target
+   * untouched — see the note at the rename).
    */
   private readonly applied = new Set<string>();
   dirty = false;
@@ -375,11 +376,15 @@ class BranchHandle implements KbBranch {
         await fs.mkdir(path.dirname(abs), { recursive: true });
         await fs.writeFile(abs, op.content);
       } else if (op.kind === 'move') {
-        this.applied.add(op.to);
         const from = await containedPath(repoDir, op.from);
         const to = await containedPath(repoDir, op.to);
         await fs.mkdir(path.dirname(to), { recursive: true });
         await fs.rename(from, to);
+        // Recorded AFTER the rename, unlike a write's pre-record: rename
+        // cannot leave a partial destination (it either happened or errored
+        // with the target untouched), and pre-recording would let the
+        // rollback delete a pre-existing ignored file at an untouched target.
+        this.applied.add(op.to);
       } else {
         const abs = await containedPath(repoDir, op.path);
         await fs.rm(abs, { force: true });
@@ -407,7 +412,15 @@ class BranchHandle implements KbBranch {
     await git(repoDir, 'x-access-token', ['reset', '--hard', 'HEAD']).catch(() => {});
     await git(repoDir, 'x-access-token', ['clean', '-fd']).catch(() => {});
     if (this.applied.size > 0) {
-      await git(repoDir, 'x-access-token', ['clean', '-fdx', '--', ...this.applied]).catch(() => {});
+      // `:(literal)` — these are file paths, not pathspecs: a name that
+      // happens to contain glob or magic characters must match itself only,
+      // never broaden the cleanup.
+      await git(repoDir, 'x-access-token', [
+        'clean',
+        '-fdx',
+        '--',
+        ...[...this.applied].map((rel) => `:(literal)${rel}`),
+      ]).catch(() => {});
     }
   }
 

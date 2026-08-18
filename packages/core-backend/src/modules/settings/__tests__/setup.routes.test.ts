@@ -259,7 +259,7 @@ describe('POST /setup/settings — the completion transition and the KB startup 
     }
   });
 
-  it('keeps the gate shut while the phase runs, and a concurrent save joins the run instead of starting a second', async () => {
+  it('keeps the gate shut while the phase runs, and a save landing mid-run waits the phase out', async () => {
     let runs = 0;
     let release!: () => void;
     const running = new Promise<void>((r) => (release = r));
@@ -274,9 +274,19 @@ describe('POST /setup/settings — the completion transition and the KB startup 
     // the phase is still mutating branch trees.
     const status = await (await fetch(`${base}/api/setup/status`)).json();
     expect(status.complete).toBe(false);
-    // A save landing mid-run must not start a second phase over the same trees.
-    const second = post(base, '/api/setup/settings', { settings: { gitUsername: 'x-access-token' } });
-    await new Promise((r) => setTimeout(r, 50));
+    // A save landing mid-run is HELD until the phase settles: the runner
+    // reads its configuration through live getters, and a save applied under
+    // it would split the run across two configurations. It must neither
+    // resolve early nor start a second run over the same trees.
+    let secondSettled = false;
+    const second = post(base, '/api/setup/settings', {
+      settings: { gitUsername: 'x-access-token' },
+    }).then((r) => {
+      secondSettled = true;
+      return r;
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(secondSettled).toBe(false);
     expect(runs).toBe(1);
     release();
     const [res1, res2] = await Promise.all([first, second]);

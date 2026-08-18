@@ -114,6 +114,12 @@ export function createSetupRoutes(
       entries[key] = value;
     }
     try {
+      // NO save may land while the phase is mid-run: the runner reads its
+      // configuration through live getters, so settings changed under it
+      // would split one run across two configurations. A save arriving
+      // mid-run waits the phase out and then proceeds — its outcome (and the
+      // failure flags) are the run-starting handler's to report.
+      if (kbInitInFlight) await kbInitInFlight.catch(() => {});
       // Completion is a TRANSITION, so it is measured BEFORE the save: the
       // save that flips it false→true — whichever field arrives last — is the
       // one that must run the KB startup phase, regardless of which save
@@ -157,8 +163,11 @@ export function createSetupRoutes(
        */
       if ((!wasComplete || kbInitFailed) && isComplete(settings)) {
         try {
-          // One run at a time: a save arriving while a run is in flight joins
-          // it rather than starting a second phase over the same trees.
+          // One run at a time. The settle-wait above keeps saves out while a
+          // run executes; the `??=` closes the remaining interleaving, where
+          // two completing saves both pass that wait (neither run started
+          // yet) — the second then joins the first's run instead of starting
+          // a second phase over the same trees.
           kbInitInFlight ??= kbStartupRunner.runAll();
           await kbInitInFlight;
           kbInitFailed = false;
