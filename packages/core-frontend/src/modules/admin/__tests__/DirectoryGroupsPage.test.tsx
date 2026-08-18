@@ -187,6 +187,24 @@ describe('DirectoryGroupsPage', () => {
     ).toBeInTheDocument();
   });
 
+  it('connected-but-not-materialized: the panel signal suppresses manual CRUD', async () => {
+    renderPage({
+      directoryPanel: ({ onConnectedChange }) => (
+        <button onClick={() => onConnectedChange(true)}>simulate-connect</button>
+      ),
+    });
+    // Manual CRUD is up while disconnected.
+    expect(await screen.findByRole('textbox', { name: 'New group name' })).toBeInTheDocument();
+    // The panel reports a live connection (e.g. a token was just minted).
+    await userEvent.click(screen.getByRole('button', { name: 'simulate-connect' }));
+    // No create form, no member editing — the IdP owns groups now.
+    expect(screen.queryByRole('textbox', { name: 'New group name' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: /Add member/ })).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(/Groups appear here after its first provisioning push/),
+    ).toBeInTheDocument();
+  });
+
   it('no registry panel means the page never mentions a directory connection', async () => {
     renderPage();
     expect(await screen.findByText('Product')).toBeInTheDocument();

@@ -258,6 +258,14 @@ export interface GroupsDirectoryPanelProps {
   mode: 'manual' | 'idp';
   /** Re-fetch the roster — call after any action that may flip the mode. */
   onDirectoryChanged: () => void;
+  /**
+   * Report whether a directory connection EXISTS — which the roster alone
+   * cannot see: between connecting and the first provisioning push the mode
+   * still reads 'manual' (the synced file hasn't landed), yet the IdP already
+   * owns groups and manual edits would go dormant on the first push. The page
+   * suppresses manual CRUD while this is true.
+   */
+  onConnectedChange: (connected: boolean) => void;
 }
 
 export interface AppRegistry {

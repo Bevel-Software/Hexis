@@ -42,6 +42,10 @@ export function DirectoryGroupsPage() {
   const [working, setWorking] = useState(false);
   // Group pending delete confirmation (manual mode).
   const [deleteTarget, setDeleteTarget] = useState<GroupRosterEntry | null>(null);
+  // The overlay panel's "a directory connection exists" signal — true between
+  // connecting and the first push, when the roster still reads 'manual' but
+  // manual edits would go dormant. See GroupsDirectoryPanelProps.
+  const [directoryConnected, setDirectoryConnected] = useState(false);
 
   const refresh = useCallback(() => {
     getGroupsRoster()
@@ -108,6 +112,14 @@ export function DirectoryGroupsPage() {
             error ? null : <div className="text-xs text-ink-muted">Loading…</div>
           ) : idpMode ? (
             <IdpModeView roster={roster} />
+          ) : directoryConnected ? (
+            // Connected, but the first provisioning push hasn't landed: the
+            // IdP already owns groups, so no manual CRUD — creating one now
+            // would go dormant the moment the first push materializes.
+            <p className="text-xs text-ink-muted leading-snug">
+              An identity provider is connected. Groups appear here after its
+              first provisioning push — membership is managed there from now on.
+            </p>
           ) : (
             <ManualModeView
               roster={roster}
@@ -117,7 +129,11 @@ export function DirectoryGroupsPage() {
           )}
 
           {roster !== null && DirectoryPanel && (
-            <DirectoryPanel mode={roster.mode} onDirectoryChanged={refresh} />
+            <DirectoryPanel
+              mode={roster.mode}
+              onDirectoryChanged={refresh}
+              onConnectedChange={setDirectoryConnected}
+            />
           )}
         </div>
       </PageShell>
