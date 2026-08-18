@@ -110,8 +110,13 @@ export function LibraryCard({
       // Dashed, because the card is an outline of a skill rather than one: the
       // border says "not here yet" before any text is read, and it survives the
       // badge being missed at a glance.
+      // `min-w-0`: the card sits in a grid (or the remove-overlay's wrapper),
+      // and a grid item's automatic minimum is its content's min-content width
+      // — a long tool name plus its badges would make the card WIDER than its
+      // track and paint under the neighbouring card. Allowing the card to
+      // shrink is what lets the name's `truncate` actually engage.
       className={cn(
-        'flex min-h-28 flex-col gap-1.5 text-left',
+        'flex min-h-28 min-w-0 flex-col gap-1.5 text-left',
         pending && 'border-dashed',
       )}
       onClick={onOpen}
