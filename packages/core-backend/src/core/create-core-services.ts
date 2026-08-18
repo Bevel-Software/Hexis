@@ -13,7 +13,11 @@ import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
-import { KbSeedService } from '../modules/workspace/kb-seed.service.js';
+import { KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
+import { GroupsToPluginsStep } from '../modules/workspace/startup/steps/groups-to-plugins.step.js';
+import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
+import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
+import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
 import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
 
 /** `a.com, b.com` → `['a.com','b.com']`, tolerating a leading `@` or `.`. */
@@ -94,7 +98,12 @@ export interface CoreServices {
   config: CoreConfig;
   db: Database;
   workspaceService: WorkspaceService;
-  kbSeedService: KbSeedService;
+  /**
+   * The KB startup phase (see `startup/on-server-start.ts`): run at the
+   * deployment's two quiet moments — boot, before routes mount, and
+   * first-time setup completion — and never again while the process serves.
+   */
+  kbStartupRunner: KbStartupRunner;
   spillStore: SpillStore;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
@@ -213,27 +222,39 @@ export async function createCoreServices(
     kbDirName,
     () => settings.resolve('gitUsername') || 'x-access-token',
   );
-  // Seed (or top-up) the KB remote before the first clone so the rest of the app
-  // can keep assuming the remote already carries the protected branches + base
-  // scaffolding — a fresh or partially-populated remote no longer needs to have
-  // been forked from the standalone template.
-  const kbSeedService = new KbSeedService(
-    () => settings.resolve('kbRepoUrl'),
-    config.kbTemplateDir,
-    // Getters, not values: the branch model can arrive from the setup screen
-    // after this object exists, and seeding is the first thing that needs it.
-    () => [...PROTECTED_BRANCHES],
-    () => DEFAULT_BRANCH,
+  // The KB startup phase: every seeding, scaffolding and migration concern,
+  // run through one runner at the deployment's quiet moments (boot + setup
+  // completion) instead of lazily on branch loads. Root folders this
+  // distribution reserves on top of core's two are a plain value, not a
+  // getter: they are named in the composition root rather than collected on
+  // the setup screen, so there is nothing to re-read.
+  const extraDirs = ports.kbExtraRootDirs ?? [];
+  // Core's steps first, in dependency order — the Groups→Plugins migration
+  // reshapes trees the template top-up would otherwise re-scaffold — then
+  // whatever the distribution appends.
+  const kbStartupSteps = [
+    new GroupsToPluginsStep(),
+    new TemplateFilesStep(extraDirs),
+    new RolesYamlStep([config.adminEmail]),
+    ...(ports.kbStartupSteps ?? []),
+  ];
+  const kbStartupRunner = new KbStartupRunner({
+    // Getters, not values: the remote and the branch model can arrive from the
+    // setup screen after this object exists, and the setup-completion run is
+    // the first thing that needs them.
+    kbRepoUrl: () => settings.resolve('kbRepoUrl'),
+    gitUsername: () => settings.resolve('gitUsername') || 'x-access-token',
+    workspacesRoot: config.workspacesRoot,
+    kbDirName,
+    templateDir: config.kbTemplateDir,
+    defaultBranch: () => DEFAULT_BRANCH,
+    protectedBranches: () => [...PROTECTED_BRANCHES],
     // The deployment owner is the initial Admin of a freshly seeded KB — the
     // same answer `SEED_ADMIN_EMAILS` used to ask for a second time.
-    [config.adminEmail],
-    () => settings.resolve('gitUsername') || 'x-access-token',
-    // Root folders this distribution reserves on top of core's two. A plain
-    // value, not a getter: these are named in the composition root rather than
-    // collected on the setup screen, so there is nothing to re-read.
-    ports.kbExtraRootDirs ?? [],
-  );
-  workspaceService.setSeedService(kbSeedService);
+    seedAdminEmails: [config.adminEmail],
+    steps: kbStartupSteps,
+    buildSeedTree: buildSeedTree(config.kbTemplateDir, extraDirs, [config.adminEmail]),
+  });
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
   const spillStore = new SpillStore(config.spillRoot);
@@ -696,7 +717,7 @@ export async function createCoreServices(
     db,
     mcpServerEditService,
     workspaceService,
-    kbSeedService,
+    kbStartupRunner,
     settings,
     kbDirName,
     spillStore,

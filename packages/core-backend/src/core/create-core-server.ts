@@ -230,6 +230,13 @@ export async function createCoreServer(
   // Overlay boot-time side effects (startup reconciles, periodic sweeps).
   await ext.onBoot?.(core);
 
+  // The KB startup phase — AFTER the distribution's onBoot, because a FATAL
+  // template finding raised there must stop the boot before anything seeds
+  // from that template; the runner then brings every branch up to this build
+  // before any route can serve KB content. Throws to stop the boot (the
+  // container's restart policy is the retry) — see kb-startup-runner.ts.
+  await core.kbStartupRunner.runAll();
+
   // Auth routes (unprotected — login endpoint must be accessible)
   app.use(
     '/api',
@@ -422,8 +429,13 @@ export async function createCoreServer(
   ));
   // First-run setup. Mounted with the other authed routes but touching NO
   // workspace — it has to work on a deployment that has no knowledge base yet,
-  // which is the whole reason it exists.
-  app.use('/api', core.authMiddleware, createSetupRoutes(core.settings, core.adminAccess));
+  // which is the whole reason it exists. The startup runner rides along for
+  // the phase's SECOND quiet moment: the save that completes setup.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createSetupRoutes(core.settings, core.adminAccess, core.kbStartupRunner),
+  );
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
     service: core.mcpServerEditService,
     getUser: async (userId) => {

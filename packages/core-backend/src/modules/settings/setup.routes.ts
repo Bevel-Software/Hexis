@@ -30,6 +30,13 @@ const execFileAsync = promisify(execFile);
 export function createSetupRoutes(
   settings: DeploymentSettingsService,
   adminAccess: IAdminAccessService,
+  /**
+   * The KB startup phase, invoked at its SECOND quiet moment: the save that
+   * completes first-time setup. The app is gated shut until exactly then
+   * (`isComplete`), so no session can be holding a working clone the phase
+   * would race.
+   */
+  kbStartupRunner: { runAll(): Promise<void> },
 ): express.Router {
   const router = express.Router();
 
@@ -101,6 +108,32 @@ export function createSetupRoutes(
           protectedBranches: settings.resolve('protectedBranches'),
         };
         if (!validateBranchModel(model)) configureBranchModel(model);
+        // The save that completes setup is the KB startup phase's SECOND quiet
+        // moment (the other is boot): the app was gated shut until this very
+        // response, so the trees are provably quiet. Run the phase now —
+        // seeding the remote, scaffolding and migrating every branch — so the
+        // first workspace request that follows finds a maintained KB. Only
+        // when setup actually completed: a partial save (branch model without
+        // the repository, say) has nothing the runner could reach yet.
+        if (isComplete(settings)) {
+          try {
+            await kbStartupRunner.runAll();
+          } catch (initErr) {
+            // The settings ARE saved — only the KB initialization failed.
+            // Logged in full, returned actionable: the phase re-runs at boot,
+            // so a restart is the retry.
+            console.error(
+              '[setup] KB initialization failed after setup completed:',
+              initErr instanceof Error ? initErr.message : String(initErr),
+            );
+            res.status(500).json({
+              error:
+                'Settings saved, but the knowledge base could not be initialized. ' +
+                'It will be retried at the next start of the server.',
+            });
+            return;
+          }
+        }
       }
       res.json({
         ok: true,

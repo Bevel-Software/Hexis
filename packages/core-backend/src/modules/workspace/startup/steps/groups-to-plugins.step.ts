@@ -20,13 +20,12 @@ import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '..
 
 /**
  * One-way migration of a knowledge base from `Groups/` to the Agent Plugins
- * layout under `Plugins/` (https://agent-plugins.org, v1.0.0) — the
- * {@link OnServerStart} form of `../../plugins-migration.ts`, which stays
- * wired into the lazy top-up until that path is deleted. The LOGIC is the
- * same, deliberately duplicated; only the write mechanism differs: every
- * change is DECLARED on the branch handle (`move`/`write`/`remove`) and the
- * runner applies it, while every read still goes against the real, pre-step
- * tree via `repoDir()`.
+ * layout under `Plugins/` (https://agent-plugins.org, v1.0.0), as an
+ * {@link OnServerStart} step. (It began life as an in-place module run from
+ * the lazy top-up; that path is gone, and this is the only form.) Steps
+ * never write: every change is DECLARED on the branch handle
+ * (`move`/`write`/`remove`) and the runner applies it, while every read goes
+ * against the real, pre-step tree via `repoDir()`.
  *
  * Idempotent: a KB already on the new layout is untouched, and a half-finished
  * run is completed by the next one.
@@ -191,7 +190,8 @@ interface ConvertedManual {
 /**
  * Migrate one branch. Declares ops only; a branch whose migration declares
  * nothing stays clean, so a notes-only pass (advisory refusals) commits
- * nothing — the same contract `PluginsMigrationResult.migrated` carried.
+ * nothing — the same contract the in-place migration's `migrated` flag
+ * carried.
  */
 async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void> {
   const repoDir = await branch.repoDir();

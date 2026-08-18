@@ -16,8 +16,8 @@ const execFileAsync = promisify(execFile);
 /**
  * Integration tests for the three core steps THROUGH the real runner — the
  * ops they declare only matter as the tree the runner commits and pushes.
- * The deep migration edge cases stay covered by plugins-migration.test.ts
- * against the in-place module; these cover the buffered step's behavior.
+ * The deep migration edge cases (ported from the deleted in-place module's
+ * suite) live in the "migration edge cases" describe below.
  */
 
 /** The real seed template shipped inside this package (see assets.ts). */
@@ -273,5 +273,238 @@ describe('GroupsToPluginsStep', () => {
     expect(await exists(dir, 'Plugins/B/plugin.json')).toBe(false);
     const log = await git(dir, ['log', '--format=%s%n%b', '-1']);
     expect(log).toContain('Groups/ and Plugins/ both exist — merge by hand');
+  });
+});
+
+/**
+ * Migration edge cases ported from the deleted in-place module's suite
+ * (plugins-migration.test.ts) — same assertions, new trigger: the step runs
+ * through the real runner and the tree under test is a fresh checkout of what
+ * it committed. Refusals now surface through the step's `partial` outcome,
+ * which the runner logs via console.warn.
+ */
+describe('GroupsToPluginsStep — migration edge cases', () => {
+  async function migrate(): Promise<void> {
+    await makeRunner([new GroupsToPluginsStep()]).runAll();
+  }
+
+  async function readJson(dir: string, rel: string): Promise<Record<string, any>> {
+    return JSON.parse(await fs.readFile(path.join(dir, rel), 'utf8'));
+  }
+
+  /** What the runner's `partial` warning carried — the named refusals. */
+  function partialReason(warn: { mock: { calls: unknown[][] } }): string {
+    return warn.mock.calls
+      .flat()
+      .map(String)
+      .filter((line) => line.includes('groups-to-plugins: partial'))
+      .join(' ');
+  }
+
+  it('merges into an existing mcp.json without clobbering what is already there', async () => {
+    await seedUpstream({
+      'Groups/GTM/access.md': 'write:\n  - Admin\n',
+      'Groups/GTM/notion.tool': JSON.stringify(
+        { name: 'notion', type: 'mcp', url: 'https://mcp.notion.com/mcp' },
+        null,
+        2,
+      ),
+      'Groups/GTM/mcp.json': JSON.stringify({
+        mcpServers: { notion: { type: 'streamable-http', url: 'https://hand.example/mcp' } },
+      }),
+    });
+    await migrate();
+    const dir = await checkout(DEFAULT_BRANCH);
+    const mcp = await readJson(dir, 'Plugins/GTM/mcp.json');
+    // The hand-written notion entry WINS; the converted .tool is gone either way.
+    expect(mcp.mcpServers.notion.url).toBe('https://hand.example/mcp');
+    expect(await exists(dir, 'Plugins/GTM/notion.tool')).toBe(false);
+  });
+
+  it('refuses to convert an mcp .tool whose url is not directly parseable http(s)', async () => {
+    // A templated url (`${VENDOR_BASE}/mcp`) is legal in a `.tool`, where the
+    // substitutor expands it — but the mcp.json loader validates `new URL`
+    // and skips the entry, so converting would delete the source and write a
+    // dead entry: the integration would simply vanish.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await seedUpstream({
+      'Groups/GTM/access.md': 'write:\n  - Admin\n',
+      'Groups/GTM/vendor.tool': JSON.stringify({ name: 'vendor', type: 'mcp', url: '${VENDOR_BASE}/mcp' }),
+      'Groups/GTM/socket.tool': JSON.stringify({ name: 'socket', type: 'mcp', url: 'wss://mcp.vendor.example/mcp' }),
+    });
+    await migrate();
+    const dir = await checkout(DEFAULT_BRANCH);
+    // Both stay `.tool` files (moved with the other unconvertibles), and no
+    // mcp.json is invented for them.
+    expect(await exists(dir, 'Plugins/GTM/software.bevel.hexis/tools/vendor.tool')).toBe(true);
+    expect(await exists(dir, 'Plugins/GTM/software.bevel.hexis/tools/socket.tool')).toBe(true);
+    expect(await exists(dir, 'Plugins/GTM/mcp.json')).toBe(false);
+    // The refusal is NAMED in the partial reason — an operator must be able to
+    // tell a deliberately-retained integration from one that silently failed.
+    // (socket.tool never reaches the named refusals: its wss url fails
+    // `.tool` normalization itself, the not-a-candidate path.)
+    expect(partialReason(warn)).toMatch(/vendor\.tool NOT converted — its url is not directly parseable/);
+  });
+
+  it('refuses to convert an mcp .tool whose url carries userinfo', async () => {
+    // `https://user:pass@…` copied into mcp.json would put a credential in
+    // the PORTABLE file — the exact thing the header split exists to prevent
+    // — and stripping it would break the server. The manual keeps its
+    // `.tool` form, where the credential stays platform-internal.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await seedUpstream({
+      'Groups/GTM/access.md': 'write:\n  - Admin\n',
+      'Groups/GTM/vendor.tool': JSON.stringify(
+        { name: 'vendor', type: 'mcp', url: 'https://user:pass@mcp.vendor.example/mcp' },
+      ),
+    });
+    await migrate();
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await exists(dir, 'Plugins/GTM/software.bevel.hexis/tools/vendor.tool')).toBe(true);
+    expect(await exists(dir, 'Plugins/GTM/mcp.json')).toBe(false);
+    expect(partialReason(warn)).toMatch(/vendor\.tool NOT converted — its url embeds credentials/);
+  });
+
+  it('refuses to convert an mcp .tool that gates itself with frontmatter access verbs', async () => {
+    // The access resolver reads a `.tool`'s own verbs from the file itself;
+    // an mcp.json entry has no per-server home for them, so converting would
+    // silently widen who may configure and run the server.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await seedUpstream({
+      'Groups/GTM/access.md': 'write:\n  - Admin\n',
+      'Groups/GTM/gated.tool':
+        '---\nname: gated\ntype: mcp\nurl: https://mcp.vendor.example/mcp\nwrite:\n  - Product Team\n---\n',
+    });
+    await migrate();
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await exists(dir, 'Plugins/GTM/software.bevel.hexis/tools/gated.tool')).toBe(true);
+    expect(await exists(dir, 'Plugins/GTM/mcp.json')).toBe(false);
+    // The verbs travel with the file — the moved copy still declares them.
+    expect(
+      await fs.readFile(path.join(dir, 'Plugins/GTM/software.bevel.hexis/tools/gated.tool'), 'utf8'),
+    ).toContain('Product Team');
+    expect(partialReason(warn)).toMatch(/gated\.tool NOT converted — it gates itself with frontmatter access verbs/);
+  });
+
+  it('refuses to convert an mcp .tool whose id is not a valid mcp.json server name', async () => {
+    // The mcp.json loader accepts only names it can serve as a namespace and
+    // route slug — converting would DELETE a working integration and write an
+    // entry discovery then skips.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await seedUpstream({
+      'Groups/GTM/access.md': 'write:\n  - Admin\n',
+      'Groups/GTM/vendor.tool': JSON.stringify(
+        { name: 'MyVendor', type: 'mcp', url: 'https://mcp.vendor.example/mcp' },
+      ),
+    });
+    await migrate();
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await exists(dir, 'Plugins/GTM/software.bevel.hexis/tools/vendor.tool')).toBe(true);
+    expect(await exists(dir, 'Plugins/GTM/mcp.json')).toBe(false);
+    expect(partialReason(warn)).toMatch(/vendor\.tool NOT converted — its id "MyVendor" is not a valid mcp\.json server name/);
+  });
+
+  it('splits headers: literals into mcp.json, credential references into plugin.json extensions', async () => {
+    await seedUpstream({
+      'Groups/GTM/access.md': 'write:\n  - Admin\n',
+      'Groups/GTM/vendor.tool': JSON.stringify({
+        name: 'vendor',
+        type: 'mcp',
+        url: 'https://mcp.vendor.example/mcp',
+        headers: { Authorization: 'Bearer ${VENDOR_KEY}', 'X-Api-Version': '2' },
+      }),
+    });
+    await migrate();
+    const dir = await checkout(DEFAULT_BRANCH);
+    const mcp = await readJson(dir, 'Plugins/GTM/mcp.json');
+    // The spec forbids credentials in `headers` and forbids expanding anything
+    // but ${PLUGIN_ROOT}/${PLUGIN_DATA} — a copied ${VENDOR_KEY} would be sent
+    // literally by a conformant client.
+    expect(mcp.mcpServers.vendor.headers).toEqual({ 'X-Api-Version': '2' });
+    // The reference lives on in the extensions block, which is ours to interpret.
+    const manifest = await readJson(dir, 'Plugins/GTM/plugin.json');
+    expect(manifest.extensions['software.bevel.hexis'].mcpServers.vendor.headers).toEqual({
+      Authorization: 'Bearer ${VENDOR_KEY}',
+    });
+    expect(await exists(dir, 'Plugins/GTM/software.bevel.hexis/tools/vendor.tool')).toBe(false);
+  });
+
+  it('routes anything the substitutor would expand to the extensions block — non-name ${…} stays literal', async () => {
+    await seedUpstream({
+      'Groups/GTM/access.md': 'write:\n  - Admin\n',
+      'Groups/GTM/vendor.tool': JSON.stringify({
+        name: 'vendor',
+        type: 'mcp',
+        url: 'https://mcp.vendor.example/mcp',
+        // The substitutor's grammar decides: bare `$VENDOR_KEY` and the
+        // digit-leading `$5` in the price BOTH expand, so both route to the
+        // non-portable half; `${not-a-name}` is not expandable and stays.
+        headers: {
+          Authorization: 'Bearer $VENDOR_KEY',
+          'X-Price': '$5 per call',
+          'X-Tag': 'v ${not-a-name}',
+        },
+      }),
+    });
+    await migrate();
+    const dir = await checkout(DEFAULT_BRANCH);
+    const mcp = await readJson(dir, 'Plugins/GTM/mcp.json');
+    expect(mcp.mcpServers.vendor.headers).toEqual({ 'X-Tag': 'v ${not-a-name}' });
+    const manifest = await readJson(dir, 'Plugins/GTM/plugin.json');
+    expect(manifest.extensions['software.bevel.hexis'].mcpServers.vendor.headers).toEqual({
+      Authorization: 'Bearer $VENDOR_KEY',
+      'X-Price': '$5 per call',
+    });
+  });
+
+  it('leaves a personal folder a valid plugin', async () => {
+    await seedUpstream({
+      'Groups/personal-u-123/access.md': 'write:\n  - Ali <ali@x.com>\n',
+    });
+    await migrate();
+    const dir = await checkout(DEFAULT_BRANCH);
+    const manifest = await readJson(dir, 'Plugins/personal-u-123/plugin.json');
+    expect(manifest.name).toMatch(/^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/);
+  });
+
+  describe('the .bevelignore root rule', () => {
+    it('follows the rename, preserving every other line', async () => {
+      await seedUpstream({
+        'Groups/GTM/access.md': 'write:\n  - Admin\n',
+        '.bevelignore': '# mine\nGroups/\nMy-Own-Rule/\n',
+      });
+      await migrate();
+      const dir = await checkout(DEFAULT_BRANCH);
+      const ignore = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
+      expect(ignore.split('\n')).toContain('Plugins/');
+      expect(ignore).not.toContain('Groups/');
+      expect(ignore).toContain('# mine');
+      expect(ignore).toContain('My-Own-Rule/');
+    });
+
+    it('is left alone when Plugins/ is already listed', async () => {
+      await seedUpstream({
+        'Groups/GTM/access.md': 'write:\n  - Admin\n',
+        '.bevelignore': 'Groups/\nPlugins/\n',
+      });
+      await migrate();
+      const dir = await checkout(DEFAULT_BRANCH);
+      // The stale line is harmlessly dead; deleting it would be editing the
+      // operator's file beyond what the rename made stale.
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('Groups/\nPlugins/\n');
+    });
+
+    it('is not touched by a run that does not rename', async () => {
+      await seedUpstream({
+        'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+        'Plugins/GTM/outreach/SKILL.md': '# Outreach\n',
+        '.bevelignore': 'Groups/\n',
+      });
+      await migrate();
+      const dir = await checkout(DEFAULT_BRANCH);
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('Groups/\n');
+      // The run still reorganised the folder — the rule alone was off-limits.
+      expect(await exists(dir, 'Plugins/GTM/skills/outreach/SKILL.md')).toBe(true);
+    });
   });
 });

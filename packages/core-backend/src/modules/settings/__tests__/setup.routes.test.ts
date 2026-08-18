@@ -54,7 +54,16 @@ function listen(isAdmin = true) {
     req.userId = 'user-1';
     next();
   });
-  app.use('/api', createSetupRoutes(settings, { isAdmin: async () => isAdmin } as IAdminAccessService));
+  app.use(
+    '/api',
+    createSetupRoutes(
+      settings,
+      { isAdmin: async () => isAdmin } as IAdminAccessService,
+      // The startup phase is not under test here — these suites never
+      // complete setup, so the runner is never reached.
+      { runAll: async () => {} },
+    ),
+  );
   server = app.listen(0);
   const { port } = server.address() as AddressInfo;
   return { base: `http://127.0.0.1:${port}`, settings };
