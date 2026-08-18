@@ -54,26 +54,35 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
     getOrCreateForBranch: async () => ({}) as unknown,
     listFiles: async () => buildTree(workspaceDir),
     readFile: async (_id: string, wsRel: string) => fs.readFile(resolve(wsRel), 'utf-8'),
+    writeFile: async (_id: string, wsRel: string, content: string) => {
+      await fs.mkdir(path.dirname(resolve(wsRel)), { recursive: true });
+      await fs.writeFile(resolve(wsRel), content);
+    },
   } as unknown as WorkspaceService;
 }
 
 function stubWorkflow() {
   const commits: { summary: string }[] = [];
-  let holder: AuthUser | null = null;
+  // Strict per-path locks — a live row is contended even for the same user,
+  // exactly like FileLockService (nesting bugs must fail here too).
+  const locks = new Map<string, AuthUser>();
   const lockRow = (h: AuthUser) => ({ holderUserId: h.id, holderName: h.name });
   const svc = {
-    getLock: async () => (holder ? lockRow(holder) : null),
-    acquireLock: async (...a: unknown[]) => {
-      const user = a[3] as AuthUser;
-      return holder && holder.id !== user.id
-        ? { acquired: false, lock: lockRow(holder) }
-        : ((holder = user), { acquired: true, lock: lockRow(user) });
+    getLock: async (_w: string, _b: string, p: string) => {
+      const h = locks.get(p);
+      return h ? lockRow(h) : null;
     },
-    releaseLock: async () => {
-      holder = null;
+    acquireLock: async (_w: string, _b: string, p: string, user: AuthUser) => {
+      const h = locks.get(p);
+      if (h) return { acquired: false, lock: lockRow(h) };
+      locks.set(p, user);
+      return { acquired: true, lock: lockRow(user) };
     },
-    releaseLockNoCommit: async () => {
-      holder = null;
+    releaseLock: async (_w: string, _b: string, p: string) => {
+      locks.delete(p);
+    },
+    releaseLockNoCommit: async (_w: string, _b: string, p: string) => {
+      locks.delete(p);
     },
     commitChanges: async (_ws: string, _user: AuthUser, summary: string) => {
       commits.push({ summary });

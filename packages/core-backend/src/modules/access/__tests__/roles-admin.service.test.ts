@@ -89,24 +89,30 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
 function stubWorkflow() {
   const commits: { summary: string }[] = [];
   const resets: string[] = [];
-  /** Current holder of the roles.yaml lock, or null. */
-  let holder: AuthUser | null = null;
+  /** Per-path lock rows with STRICT acquire — mirrors FileLockService: a
+   *  live lock is contended EVEN FOR THE SAME USER (only expired rows are
+   *  reclaimed), so a service nesting a second acquire under its own hold
+   *  fails here exactly like production. */
+  const locks = new Map<string, AuthUser>();
   const lockRow = (h: AuthUser) => ({ holderUserId: h.id, holderName: h.name });
   const svc = {
-    getLock: async () => (holder ? lockRow(holder) : null),
-    acquireLock: async (...a: unknown[]) => {
-      const user = a[3] as AuthUser;
-      return holder && holder.id !== user.id
-        ? { acquired: false, lock: lockRow(holder) }
-        : ((holder = user), { acquired: true, lock: lockRow(user) });
+    getLock: async (_w: string, _b: string, p: string) => {
+      const h = locks.get(p);
+      return h ? lockRow(h) : null;
+    },
+    acquireLock: async (_w: string, _b: string, p: string, user: AuthUser) => {
+      const h = locks.get(p);
+      if (h) return { acquired: false, lock: lockRow(h) };
+      locks.set(p, user);
+      return { acquired: true, lock: lockRow(user) };
     },
     // LockingFilesystem's success path: the LocalFilesystem write already hit
     // disk, so releasing just drops the lock (the "commit" is a no-op in-memory).
-    releaseLock: async () => {
-      holder = null;
+    releaseLock: async (_w: string, _b: string, p: string) => {
+      locks.delete(p);
     },
-    releaseLockNoCommit: async () => {
-      holder = null;
+    releaseLockNoCommit: async (_w: string, _b: string, p: string) => {
+      locks.delete(p);
     },
     // The rename's atomic batch flows through LockingFilesystem.writeFiles, which
     // writes every file to disk (real LocalFilesystem) then calls commitChanges

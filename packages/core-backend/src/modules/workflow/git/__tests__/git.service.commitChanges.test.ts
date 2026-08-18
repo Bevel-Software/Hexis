@@ -125,6 +125,27 @@ describe('GitService.commitChanges', () => {
     expect(status).toContain('Old.md');
   });
 
+  it('onlyPaths keeps a staged RENAME whole — old path deletion rides the scoped commit', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+
+    // A staged rename shows as one `R` porcelain record (new-path + old-path).
+    // The scope names only the NEW path; the old path must ride along or the
+    // rename decays into an add that leaves Old.md alive in HEAD.
+    await runGit(repo, ['mv', 'Old.md', 'New.md']);
+    const change = await svc.commitChanges(workspaceId, USER, 'Rename via batch', [
+      `${PROCESS_MAP_DIR}/New.md`,
+    ]);
+
+    expect(change?.sha).toBeTruthy();
+    const { stdout: nameStatus } = await execFileAsync('git', ['-C', repo, 'show', '--name-status', '-M', '--pretty=format:', 'HEAD']);
+    expect(nameStatus).toMatch(/R\d*\s+Old\.md\s+New\.md/);
+    // Old.md is gone from HEAD — not left behind as a live file.
+    const { stdout: lsTree } = await execFileAsync('git', ['-C', repo, 'ls-tree', '-r', '--name-only', 'HEAD']);
+    expect(lsTree).not.toContain('Old.md');
+    expect(lsTree).toContain('New.md');
+  });
+
   it('onlyPaths with nothing of its own dirty is a no-op even when other files are dirty', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
     const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);

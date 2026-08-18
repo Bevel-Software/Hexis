@@ -103,8 +103,14 @@ describe('group files as access principals', () => {
 
   it('validateGroupsFile (the WRITE gate) still refuses blank keys the reader forgives', async () => {
     const { validateGroupsFile } = await import('../group-files.js');
-    const res = validateGroupsFile('groups:\n  :\n    - a@x.io\n', 'groups.yaml');
-    expect(res.ok).toBe(false);
+    // Inside `groups:` — refused via the entry warning (strict gate).
+    expect(validateGroupsFile('groups:\n  :\n    - a@x.io\n', 'groups.yaml').ok).toBe(false);
+    // At the ROOT — the tolerant reader silently drops this without any
+    // warning, so only the strict pre-parse refuses it. This is the case the
+    // strict parse exists for.
+    expect(
+      validateGroupsFile(':\n  - stray@x.io\ngroups:\n  Engineering:\n    - ada@x.io\n', 'groups.yaml').ok,
+    ).toBe(false);
   });
 
   it('a group reference with no group file behind it grants nothing', async () => {

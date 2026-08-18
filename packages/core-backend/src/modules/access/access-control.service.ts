@@ -1828,7 +1828,10 @@ export class AccessControlService implements IAccessControl {
         });
       }
     }
-    if (result.size === relativePaths.length) return result;
+    // Only short-circuit when there IS a machine-owned path covering the
+    // whole request: an EMPTY request must still answer null for an
+    // unresolvable ref, as documented.
+    if (relativePaths.length > 0 && result.size === relativePaths.length) return result;
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);

@@ -262,12 +262,22 @@ export class GroupsAdminService {
     }
     if (writes.length === 0) return this.getRoster();
 
-    const fsys = await this.lockingFsForActor(workspaceId, actor);
-    await this.mapLockContention(() =>
-      fsys.writeFiles(
-        writes.map((w) => ({ path: `${this.kbDirName}/${w.repoRelativePath}`, content: w.content })),
-        `Rename group ${canonical} → ${newDisplayName.trim()}`,
-      ),
+    // Roster locks are already ours (withFileLocks; strict same-user acquire
+    // forbids LockingFilesystem here). Grant-reference candidates are written
+    // unlocked — same exposure every reference rewrite has always had.
+    const files: { repoRel: string; content: string; original: string | null }[] = [];
+    for (const w of writes) {
+      files.push({
+        repoRel: w.repoRelativePath,
+        content: w.content,
+        original: await this.readKbFile(workspaceId, w.repoRelativePath),
+      });
+    }
+    await this.writeAndCommitLocked(
+      workspaceId,
+      actor,
+      files,
+      `Rename group ${canonical} → ${newDisplayName.trim()}`,
     );
     this.afterWrite(workspaceId, actor, writes.map((w) => w.repoRelativePath));
     return this.getRoster();
@@ -348,11 +358,14 @@ export class GroupsAdminService {
    * Run `fn` while HOLDING the named KB-file locks — read-modify-write flows
    * must keep the lock across the READ, or two concurrent edits (another tab,
    * a conversion writing groups.yaml) both snapshot the same base and the
-   * second write silently discards the first. Mirrors the roles admin's
-   * helper: failure discards (like LockingFilesystem's catch arm); a no-write
-   * success releases WITH commit (a clean tree makes that a no-op) so a
-   * still-queued earlier commit's bytes are never thrown away; a write inside
-   * `fn` has already released the rows, making both calls no-ops.
+   * second write silently discards the first. Lock acquire is STRICT even
+   * for the same user, so `fn` must write plainly + commit path-scoped (see
+   * `writeAndCommitLocked`), never through LockingFilesystem. Release is
+   * ALWAYS commit-on-release, success or failure: a discarding release could
+   * throw away a PREVIOUS holder's still-queued bytes this operation never
+   * touched, and `fn` restores its own bytes on failure — so at release time
+   * anything dirty is either clean (queued commit no-ops) or someone else's
+   * work that must be preserved.
    */
   private async withFileLocks<T>(
     workspaceId: string,
@@ -362,7 +375,6 @@ export class GroupsAdminService {
   ): Promise<T> {
     const paths = repoRelFiles.map((f) => `${this.kbDirName}/${f}`).sort();
     const held: string[] = [];
-    let failed = false;
     try {
       for (const p of paths) {
         const res = await this.workflowService.acquireLock(workspaceId, this.defaultBranch, p, actor);
@@ -375,18 +387,11 @@ export class GroupsAdminService {
         held.push(p);
       }
       return await fn();
-    } catch (err) {
-      failed = true;
-      throw err;
     } finally {
       for (const h of held) {
         try {
-          if (failed) {
-            await this.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
-          } else {
-            await this.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
-          }
-        } catch { /* already released by the write's own commit pipeline */ }
+          await this.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
+        } catch { /* best-effort release */ }
       }
     }
   }
@@ -408,11 +413,47 @@ export class GroupsAdminService {
     const result = this.guardEdit(() => pre(text));
     if (!result.changed) return;
     this.assertLoadable(result.text);
-    const fsys = await this.lockingFsForActor(workspaceId, actor);
-    await this.mapLockContention(() =>
-      fsys.writeFile(`${this.kbDirName}/${GROUPS_YAML}`, result.text),
+    // The lock is ALREADY OURS (withFileLocks) and acquire is strict even for
+    // the same user, so this write must not go through LockingFilesystem —
+    // it would contend against our own hold. Plain write + a path-scoped
+    // atomic commit instead; on a failed commit restore the bytes we changed
+    // so the release never publishes a half-done edit.
+    await this.writeAndCommitLocked(
+      workspaceId,
+      actor,
+      [{ repoRel: GROUPS_YAML, content: result.text, original: text || null }],
+      `Update ${GROUPS_YAML}`,
     );
     this.afterWrite(workspaceId, actor, [GROUPS_YAML]);
+  }
+
+  /**
+   * Plain-write `files` and commit them as ONE path-scoped change — the write
+   * half of a `withFileLocks` flow (never LockingFilesystem: same-user
+   * re-acquire is strict). On failure, best-effort restore of each file's
+   * original bytes so the lock release (commit-on-release) can't publish a
+   * partial edit; `original: null` means the file did not exist before.
+   */
+  private async writeAndCommitLocked(
+    workspaceId: string,
+    actor: AuthUser,
+    files: { repoRel: string; content: string; original: string | null }[],
+    summary: string,
+  ): Promise<void> {
+    const wsRel = (repoRel: string) => `${this.kbDirName}/${repoRel}`;
+    try {
+      for (const f of files) await this.workspaceService.writeFile(workspaceId, wsRel(f.repoRel), f.content);
+      await this.workflowService.commitChanges(workspaceId, actor, summary, files.map((f) => wsRel(f.repoRel)));
+    } catch (err) {
+      for (const f of files) {
+        try {
+          await this.workspaceService.writeFile(workspaceId, wsRel(f.repoRel), f.original ?? '');
+        } catch {
+          console.warn(`[groups-admin] could not restore ${f.repoRel} after a failed commit`);
+        }
+      }
+      throw err;
+    }
   }
 
   private async lockingFsForActor(workspaceId: string, actor: AuthUser): Promise<LockingFilesystem> {

@@ -68,8 +68,23 @@ const BOT_EMAIL = 'bevel-workflow@bevel.software';
  * we keep the new path and discard the old one.
  */
 export function parsePorcelainZ(stdout: string): string[] {
+  return parsePorcelainZDetailed(stdout).paths;
+}
+
+/**
+ * Like {@link parsePorcelainZ}, but also reports each rename/copy entry's
+ * OLD path (keyed by the new path). A pathspec-scoped commit needs the old
+ * path too: committing only the new path of a staged rename records an ADD
+ * and leaves the deletion of the old path behind — the rename becomes two
+ * files.
+ */
+export function parsePorcelainZDetailed(stdout: string): {
+  paths: string[];
+  renameOldByNew: Map<string, string>;
+} {
   const tokens = stdout.split('\0').filter((t) => t.length > 0);
   const paths = new Set<string>();
+  const renameOldByNew = new Map<string, string>();
   let i = 0;
   while (i < tokens.length) {
     const token = tokens[i];
@@ -77,12 +92,19 @@ export function parsePorcelainZ(stdout: string): string[] {
     if (token.length < 4) { i++; continue; }
     const x = token[0];
     const y = token[1];
-    paths.add(token.slice(3));
+    const newPath = token.slice(3);
+    paths.add(newPath);
     // Rename or copy in either the index or worktree position carries an
-    // extra NUL-separated old-path field we must skip.
-    i += (x === 'R' || x === 'C' || y === 'R' || y === 'C') ? 2 : 1;
+    // extra NUL-separated old-path field.
+    if (x === 'R' || x === 'C' || y === 'R' || y === 'C') {
+      const oldPath = tokens[i + 1];
+      if (oldPath) renameOldByNew.set(newPath, oldPath);
+      i += 2;
+    } else {
+      i += 1;
+    }
   }
-  return Array.from(paths);
+  return { paths: Array.from(paths), renameOldByNew };
 }
 
 /**
@@ -1002,14 +1024,21 @@ export class GitService implements IGitService {
       // Nothing dirty → no-op (idempotent). Compute touched BEFORE `git add` so
       // the protected-branch gate sees the same path set `commit()` would.
       const { stdout: porcelain } = await this.git(cwd, ['status', '--porcelain=v1', '-z']);
-      let touched = parsePorcelainZ(porcelain);
+      const detailed = parsePorcelainZDetailed(porcelain);
+      let touched = detailed.paths;
       // Scope to the caller's own paths (see the interface doc): other files
       // may be dirty from a concurrent same-branch save whose commit is still
       // queued — sweeping them in would land them under this caller's
       // author/summary, and gate the commit on paths the caller never touched.
+      // An in-scope RENAME keeps its old path too: a pathspec naming only the
+      // new path records an add and strands the deletion of the old one.
       if (onlyPaths) {
         const scope = new Set(onlyPaths.map((p) => this.stripRepoPrefix(p)));
         touched = touched.filter((p) => scope.has(p));
+        for (const p of touched.slice()) {
+          const oldPath = detailed.renameOldByNew.get(p);
+          if (oldPath && !touched.includes(oldPath)) touched.push(oldPath);
+        }
       }
       if (touched.length === 0) return null;
 
@@ -1020,12 +1049,18 @@ export class GitService implements IGitService {
         await this.assertCanWriteAtRef(workspaceId, 'HEAD', user.email, touched);
       }
 
-      // Scoped → stage exactly the touched set (`add -A -- <paths>` covers
-      // modifications and deletions alike) and commit WITH the pathspec:
-      // pathspec'd `git commit` records only those paths, so an unrelated
-      // entry someone left in the index can't ride along either.
+      // Scoped → stage per path (a brand-new file must be `add`ed before a
+      // pathspec commit will know it; a fully-staged deletion / rename-old
+      // half makes `add` fatal-with-nothing-to-match, hence per-path and
+      // tolerant), then commit WITH the pathspec: it records exactly those
+      // paths, so neither other dirty files nor an unrelated entry someone
+      // left staged can ride along.
       if (onlyPaths) {
-        await this.git(cwd, ['add', '-A', '--', ...touched]);
+        for (const p of touched) {
+          try {
+            await this.git(cwd, ['add', '-A', '--', p]);
+          } catch { /* nothing in the worktree to stage for this path */ }
+        }
         await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject, '--', ...touched]);
       } else {
         await this.git(cwd, ['add', '-A']);

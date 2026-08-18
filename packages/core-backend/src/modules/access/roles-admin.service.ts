@@ -497,33 +497,9 @@ export class RolesAdminService {
     await this.assertRolesUnlocked(workspaceId, actor);
 
     // Hold BOTH file locks across read → build → write: candidates are built
-    // from a snapshot, and between an unlocked check and the batch write's
-    // own lock acquisition another admin's edit could land and be silently
-    // overwritten. Same-user acquire is idempotent, so the batch write below
-    // re-acquiring these locks is fine; on any refusal/failure before the
-    // write commits, release without committing.
-    const lockPaths = [GROUPS_YAML, ROLES_YAML].map((f) => `${this.kbDirName}/${f}`).sort();
-    const held: string[] = [];
-    const releaseHeld = async (): Promise<void> => {
-      for (const h of held) {
-        try {
-          await this.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
-        } catch { /* best-effort unwind */ }
-      }
-    };
-    // The acquisition loop itself sits inside the unwind: a THROW from the
-    // second acquire (not just a refusal) must still release the first lock.
-    try {
-      for (const p of lockPaths) {
-        const res = await this.workflowService.acquireLock(workspaceId, this.defaultBranch, p, actor);
-        if (!res.acquired) {
-          throw new RolesAdminError(
-            `Roles are being edited by ${res.lock.holderName || 'another admin'}. Try again in a moment.`,
-            409,
-          );
-        }
-        held.push(p);
-      }
+    // from a snapshot, and without the hold another admin's edit could land
+    // in between and be silently overwritten.
+    await this.withFileLocks(workspaceId, actor, [GROUPS_YAML, ROLES_YAML], async () => {
       const rolesText = await this.readRolesYaml(workspaceId);
       const role = parseRolesModel(rolesText).find((r) => canonicalRoleName(r.displayName) === canonical);
       if (!role) throw new RolesAdminError(`role not found: ${canonical}`, 404);
@@ -538,6 +514,7 @@ export class RolesAdminService {
       // Build both candidates BEFORE any write, and validate both.
       const rolesEdit = this.guardEdit(() => editDeleteRole(rolesText, canonical));
       this.assertLoadable(rolesEdit.text);
+      makeRolesYamlWriteValidator(this.kbDirName)(`${this.kbDirName}/${ROLES_YAML}`, rolesEdit.text);
       const groupsText = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
       let groupsCandidate: string;
       try {
@@ -554,23 +531,16 @@ export class RolesAdminService {
         throw new RolesAdminError(`groups.yaml would be invalid: ${groupsValid.errors.join('; ')}`, 422);
       }
 
-      const fsys = await this.lockingFsForActor(workspaceId, actor);
-      await this.mapLockContention(() =>
-        fsys.writeFiles(
-          [
-            { path: `${this.kbDirName}/${ROLES_YAML}`, content: rolesEdit.text },
-            { path: `${this.kbDirName}/${GROUPS_YAML}`, content: groupsCandidate },
-          ],
-          `Convert role ${role.displayName} to a group`,
-        ),
+      await this.writeAndCommitLocked(
+        workspaceId,
+        actor,
+        [
+          { repoRel: ROLES_YAML, content: rolesEdit.text, original: rolesText },
+          { repoRel: GROUPS_YAML, content: groupsCandidate, original: groupsText || null },
+        ],
+        `Convert role ${role.displayName} to a group`,
       );
-    } catch (err) {
-      // The batch write releases the locks itself after a successful commit;
-      // on the failure paths above (including a failed write, which already
-      // released its own acquisitions) drop OUR holds so nothing stays locked.
-      await releaseHeld();
-      throw err;
-    }
+    });
     this.accessControl.invalidate(workspaceId);
     this.emitWrites(workspaceId, actor, [ROLES_YAML, GROUPS_YAML]);
     return this.getRoster();
@@ -687,10 +657,13 @@ export class RolesAdminService {
    * Run `fn` while HOLDING the named KB-file locks (sorted, all-or-nothing):
    * read-modify-write flows must keep the lock across the READ too, or two
    * concurrent edits (another tab, another admin, a conversion) both snapshot
-   * the same base and the second write silently discards the first. Same-user
-   * re-acquire is idempotent, so the LockingFilesystem write inside `fn` may
-   * take the locks again; the finally-release tolerates rows the inner write
-   * already released (its release IS the commit).
+   * the same base and the second write silently discards the first. Lock
+   * acquire is STRICT even for the same user, so `fn` writes plainly and
+   * commits path-scoped (`writeAndCommitLocked`), never via
+   * LockingFilesystem. Release is ALWAYS commit-on-release: a discarding
+   * release could throw away a previous holder's still-queued bytes, and
+   * `fn` restores its own bytes on failure — anything dirty at release time
+   * is either clean (queued commit no-ops) or someone else's work.
    */
   private async withFileLocks<T>(
     workspaceId: string,
@@ -700,7 +673,6 @@ export class RolesAdminService {
   ): Promise<T> {
     const paths = repoRelFiles.map((f) => `${this.kbDirName}/${f}`).sort();
     const held: string[] = [];
-    let failed = false;
     try {
       for (const p of paths) {
         const res = await this.workflowService.acquireLock(workspaceId, this.defaultBranch, p, actor);
@@ -713,24 +685,16 @@ export class RolesAdminService {
         held.push(p);
       }
       return await fn();
-    } catch (err) {
-      failed = true;
-      throw err;
     } finally {
+      // ALWAYS commit-on-release, success or failure: a discarding release
+      // could throw away a PREVIOUS holder's still-queued bytes this
+      // operation never touched, and `fn` restores its own bytes on failure
+      // (writeAndCommitLocked) — so anything dirty at release time is either
+      // clean (queued commit no-ops) or someone else's work to preserve.
       for (const h of held) {
         try {
-          // Failure → discard, exactly like LockingFilesystem's catch arm.
-          // Success with NO write (a no-op edit) must NOT discard: the lock
-          // row may still be ours while some earlier release's commit is
-          // still queued, and a discard would revert those bytes — release
-          // WITH commit instead (a clean tree makes it a no-op). A write
-          // inside `fn` already released these rows, so both calls no-op then.
-          if (failed) {
-            await this.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
-          } else {
-            await this.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
-          }
-        } catch { /* already released by the write's own commit pipeline */ }
+          await this.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
+        } catch { /* best-effort release */ }
       }
     }
   }
@@ -753,16 +717,42 @@ export class RolesAdminService {
     const result = this.guardEdit(() => pre(text));
     if (!result.changed) return;
     this.assertLoadable(result.text);
-    // LockingFilesystem paths are WORKSPACE-relative, so carry the kbDirName
-    // prefix (unlike commitChanges' bare repo-relative paths). The release
-    // pipeline writes a default per-file commit summary ("Update roles.yaml");
-    // a bespoke summary isn't threadable through this path, which is fine for a
-    // single-file roles edit. The rename keeps its descriptive summary because
-    // it commits atomically via writeFiles.
-    const fsys = await this.lockingFsForActor(workspaceId, actor);
-    await this.mapLockContention(() => fsys.writeFile(`${this.kbDirName}/${ROLES_YAML}`, result.text));
+    // The lock is ALREADY OURS (withFileLocks; strict same-user acquire), so
+    // LockingFilesystem would contend against our own hold. Apply the same
+    // pre-disk validator it would have run, then plain-write + a path-scoped
+    // atomic commit.
+    makeRolesYamlWriteValidator(this.kbDirName)(`${this.kbDirName}/${ROLES_YAML}`, result.text);
+    await this.writeAndCommitLocked(
+      workspaceId,
+      actor,
+      [{ repoRel: ROLES_YAML, content: result.text, original: text }],
+      `Update ${ROLES_YAML}`,
+    );
     this.accessControl.invalidate(workspaceId);
     this.emitWrites(workspaceId, actor, [ROLES_YAML]);
+  }
+
+  /** See groups-admin's twin: the write half of a `withFileLocks` flow. */
+  private async writeAndCommitLocked(
+    workspaceId: string,
+    actor: AuthUser,
+    files: { repoRel: string; content: string; original: string | null }[],
+    summary: string,
+  ): Promise<void> {
+    const wsRel = (repoRel: string) => `${this.kbDirName}/${repoRel}`;
+    try {
+      for (const f of files) await this.workspaceService.writeFile(workspaceId, wsRel(f.repoRel), f.content);
+      await this.workflowService.commitChanges(workspaceId, actor, summary, files.map((f) => wsRel(f.repoRel)));
+    } catch (err) {
+      for (const f of files) {
+        try {
+          await this.workspaceService.writeFile(workspaceId, wsRel(f.repoRel), f.original ?? '');
+        } catch {
+          console.warn(`[roles-admin] could not restore ${f.repoRel} after a failed commit`);
+        }
+      }
+      throw err;
+    }
   }
 
   /**

@@ -103,17 +103,23 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
 
   // Lock holder tracked so the service's getLock pre-check passes; the single-
   // file write itself lands on disk via LockingFilesystem → LocalFilesystem.
-  let holder: { id: string; name: string } | null = null;
+  // Strict per-path locks — a live row is contended even for the same user,
+  // exactly like FileLockService (nesting bugs must fail here too).
+  const locks = new Map<string, { id: string; name: string }>();
   const lockRow = (h: { id: string; name: string }) => ({ holderUserId: h.id, holderName: h.name });
   const workflowService = {
-    getLock: vi.fn(async () => (holder ? lockRow(holder) : null)),
-    acquireLock: vi.fn(async (_w: string, _b: string, _p: string, user: { id: string; name: string }) =>
-      holder && holder.id !== user.id
-        ? { acquired: false, lock: lockRow(holder) }
-        : ((holder = user), { acquired: true, lock: lockRow(user) }),
-    ),
-    releaseLock: vi.fn(async () => void (holder = null)),
-    releaseLockNoCommit: vi.fn(async () => void (holder = null)),
+    getLock: vi.fn(async (_w: string, _b: string, p: string) => {
+      const h = locks.get(p);
+      return h ? lockRow(h) : null;
+    }),
+    acquireLock: vi.fn(async (_w: string, _b: string, p: string, user: { id: string; name: string }) => {
+      const h = locks.get(p);
+      if (h) return { acquired: false, lock: lockRow(h) };
+      locks.set(p, user);
+      return { acquired: true, lock: lockRow(user) };
+    }),
+    releaseLock: vi.fn(async (_w: string, _b: string, p: string) => void locks.delete(p)),
+    releaseLockNoCommit: vi.fn(async (_w: string, _b: string, p: string) => void locks.delete(p)),
     // Write-free: the lock-aware filesystem writes to disk; this just commits the
     // dirty tree. Not exercised by these route tests (no rename), but kept honest.
     commitChanges: vi.fn(async () => ({})),
