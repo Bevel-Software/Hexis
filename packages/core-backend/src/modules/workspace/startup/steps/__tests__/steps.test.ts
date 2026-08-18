@@ -7,8 +7,9 @@ import path from 'node:path';
 import { KbStartupRunner } from '../../kb-startup-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
-import { RolesYamlStep } from '../roles-yaml.step.js';
+import { RolesYamlStep, renderRolesYaml } from '../roles-yaml.step.js';
 import { TemplateFilesStep } from '../template-files.step.js';
+import { buildSeedTree } from '../seed-tree.js';
 import { defaultKbTemplateDir } from '../../../../../assets.js';
 
 const execFileAsync = promisify(execFile);
@@ -86,6 +87,7 @@ function makeRunner(steps: OnServerStart[]) {
     steps,
     buildSeedTree: async (dir: string) => {
       await fs.writeFile(path.join(dir, 'seeded.md'), 'from template', 'utf8');
+      return [];
     },
   });
 }
@@ -193,6 +195,47 @@ describe('RolesYamlStep', () => {
     const dir = await checkout(DEFAULT_BRANCH);
     expect(await exists(dir, 'roles.yaml')).toBe(false);
     expect((await git(dir, ['rev-list', '--count', 'HEAD'])).trim()).toBe('1');
+  });
+});
+
+describe('renderRolesYaml', () => {
+  it('renders trimmed admin emails', () => {
+    const yaml = renderRolesYaml(['  admin@example.com  ']);
+    expect(yaml).toContain('  Admin:\n    - admin@example.com\n');
+  });
+
+  it('throws on an email that would corrupt roles.yaml instead of rendering an adminless file', () => {
+    // Empty after trim, a YAML comment, embedded whitespace/newline — each
+    // would render a file with no working Admin, silently.
+    for (const bad of ['', '   ', '#admin@example.com', 'admin@example.com\nextra', 'a b@example.com']) {
+      expect(() => renderRolesYaml([bad]), JSON.stringify(bad)).toThrow(/admin email/i);
+    }
+  });
+});
+
+describe('buildSeedTree', () => {
+  it('skips .git at any depth of the template walk, and names the paths it generated', async () => {
+    const templateDir = path.join(root, 'seed-template');
+    // A KB_TEMPLATE_DIR that is itself a git working tree: .git at the root
+    // and (pathologically) nested must never be seeded into the KB.
+    await fs.mkdir(path.join(templateDir, '.git'), { recursive: true });
+    await fs.writeFile(path.join(templateDir, '.git', 'config'), '[core]', 'utf8');
+    await fs.mkdir(path.join(templateDir, 'docs', '.git'), { recursive: true });
+    await fs.writeFile(path.join(templateDir, 'docs', '.git', 'HEAD'), 'ref:', 'utf8');
+    await fs.writeFile(path.join(templateDir, 'docs', 'guide.md'), 'guide', 'utf8');
+    await fs.writeFile(path.join(templateDir, 'access.md'), 'policy', 'utf8');
+
+    const dest = path.join(root, 'seed-dest');
+    await fs.mkdir(dest, { recursive: true });
+    const generated = await buildSeedTree(templateDir, [], ['admin@example.com'])(dest);
+
+    expect(await exists(dest, '.git')).toBe(false);
+    expect(await exists(dest, 'docs/.git')).toBe(false);
+    expect(await fs.readFile(path.join(dest, 'docs/guide.md'), 'utf8')).toBe('guide');
+    expect(await fs.readFile(path.join(dest, 'access.md'), 'utf8')).toBe('policy');
+    // The generated paths — what the runner force-adds past a template .gitignore.
+    expect(generated.sort()).toEqual(['KnowledgeBase/.gitkeep', 'Plugins/.gitkeep', 'roles.yaml']);
+    expect(await exists(dest, 'roles.yaml')).toBe(true);
   });
 });
 
@@ -480,6 +523,19 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
       expect(ignore).not.toContain('Groups/');
       expect(ignore).toContain('# mine');
       expect(ignore).toContain('My-Own-Rule/');
+    });
+
+    it('rewrites EVERY exact Groups/ line — the first becomes Plugins/, duplicates are dropped', async () => {
+      await seedUpstream({
+        'Groups/GTM/access.md': 'write:\n  - Admin\n',
+        '.bevelignore': 'Groups/\n# keep\nGroups/\n',
+      });
+      await migrate();
+      const dir = await checkout(DEFAULT_BRANCH);
+      const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n');
+      expect(lines.filter((l) => l.trim() === 'Plugins/')).toHaveLength(1);
+      expect(lines.filter((l) => l.trim() === 'Groups/')).toHaveLength(0);
+      expect(lines).toContain('# keep');
     });
 
     it('is left alone when Plugins/ is already listed', async () => {

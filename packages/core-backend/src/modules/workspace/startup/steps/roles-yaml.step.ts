@@ -2,9 +2,35 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
-/** Generate `roles.yaml` granting Admin to each seed email. */
+/**
+ * Generate `roles.yaml` granting Admin to each seed email.
+ *
+ * Each email is validated first, because a malformed one renders a file with
+ * no working Admin — SILENTLY: a leading `#` turns the entry into a YAML
+ * comment, an embedded newline breaks the list, an all-whitespace value
+ * renders an empty entry. A bad ADMIN_EMAIL is operator error, and under the
+ * startup phase's fail-closed contract it stops the boot with a message
+ * naming the fix instead of seeding an un-administrable knowledge base.
+ */
 export function renderRolesYaml(adminEmails: readonly string[]): string {
-  const lines = adminEmails.map((e) => `    - ${e}`).join('\n');
+  const emails = adminEmails.map((raw) => {
+    const email = raw.trim();
+    if (email === '') {
+      throw new Error('Seed admin email is empty — set ADMIN_EMAIL to a real address.');
+    }
+    if (email.startsWith('#')) {
+      throw new Error(
+        `Seed admin email ${JSON.stringify(raw)} starts with "#", which YAML reads as a comment — fix ADMIN_EMAIL.`,
+      );
+    }
+    if (/\s/.test(email)) {
+      throw new Error(
+        `Seed admin email ${JSON.stringify(raw)} contains whitespace, which would corrupt roles.yaml — fix ADMIN_EMAIL.`,
+      );
+    }
+    return email;
+  });
+  const lines = emails.map((e) => `    - ${e}`).join('\n');
   return (
     '# Identity → role mapping for access control.\n' +
     '# Role names are case- and whitespace-insensitive. The `Admin` role is special:\n' +

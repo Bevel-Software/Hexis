@@ -9,6 +9,11 @@ import { TEMPLATE_SOURCE_FALLBACKS, reservedRootDirs, templateSource } from './t
  * writes are correct here — the target is a temp directory the runner inits,
  * commits and pushes itself, not a branch handle with buffered ops.
  *
+ * Resolves to the repo-relative paths it GENERATED (roles.yaml plus each
+ * reserved root's .gitkeep): a template `.gitignore` rule could match any of
+ * them, and the runner force-adds them after `git add -A` so a required seed
+ * file can never be silently dropped from the seed commit.
+ *
  * `extraRootDirs` is validated eagerly, at composition time: a bad value
  * should fail at boot beside the rest of the wiring, not mid-seed of
  * somebody's knowledge base.
@@ -17,9 +22,10 @@ export function buildSeedTree(
   templateDir: string,
   extraRootDirs: readonly string[],
   seedAdminEmails: readonly string[],
-): (dir: string) => Promise<void> {
+): (dir: string) => Promise<string[]> {
   const requiredDirs = reservedRootDirs(extraRootDirs);
   return async (dir) => {
+    const generated: string[] = [];
     await copyTemplateTree(templateDir, dir);
     // Reserved roots the template does not carry. Without this the seed commit
     // would hold only what the template has, and a distribution's own roots
@@ -38,10 +44,13 @@ export function buildSeedTree(
       }
       await fs.mkdir(abs, { recursive: true });
       await fs.writeFile(path.join(abs, '.gitkeep'), '', 'utf8');
+      generated.push(`${rootDir}/.gitkeep`);
     }
     // Generated, never templated — see roles-yaml.step.ts. The runner refuses
     // to seed an empty remote with no admins, so the list is non-empty here.
     await fs.writeFile(path.join(dir, 'roles.yaml'), renderRolesYaml(seedAdminEmails), 'utf8');
+    generated.push('roles.yaml');
+    return generated;
   };
 }
 
@@ -54,6 +63,9 @@ async function copyTemplateTree(templateDir: string, dest: string): Promise<void
     const abs = path.join(templateDir, relDir);
     const entries = await fs.readdir(abs, { withFileTypes: true });
     for (const entry of entries) {
+      // Never copy a git dir: a KB_TEMPLATE_DIR that is itself a working tree
+      // (this repo in a Docker build) must not seed its history into the KB.
+      if (entry.name === '.git') continue;
       const rel = relDir ? path.join(relDir, entry.name) : entry.name;
       if (entry.isDirectory()) {
         await walk(rel);

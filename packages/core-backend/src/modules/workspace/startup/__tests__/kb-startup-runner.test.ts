@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { KbStartupRunner } from '../kb-startup-runner.js';
+import { redactSecret } from '../kb-git.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 const execFileAsync = promisify(execFile);
@@ -72,6 +73,7 @@ function runnerOpts(steps: OnServerStart[], overrides: Record<string, unknown> =
     steps,
     buildSeedTree: async (dir: string) => {
       await fs.writeFile(path.join(dir, 'seeded.md'), 'from template', 'utf8');
+      return [];
     },
     ...overrides,
   };
@@ -237,6 +239,87 @@ describe('KbStartupRunner', () => {
     }
   });
 
+  it('self-skips when the branch model is set but the repository URL is not', async () => {
+    let stepRan = false;
+    // A partially set-up deployment (branch model saved, repo URL not yet):
+    // running would `ls-remote ''` and fail forever, with the setup screen
+    // that could fix it unreachable behind the failed boot.
+    await makeRunner(
+      [step('never', async () => { stepRan = true; return { outcome: 'ok' }; })],
+      { kbRepoUrl: () => '' },
+    ).runAll(); // resolves — nothing to maintain yet
+    expect(stepRan).toBe(false);
+  });
+
+  it("discards a skipped step's notes with its ops — a later commit never carries them", async () => {
+    await populatedUpstream();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await makeRunner([
+        step('flaky', async (ctx) => {
+          const b = await ctx.defaultBranch();
+          b.write('never.md', 'x');
+          b.note('Never say this');
+          return { outcome: 'skipped', reason: 'precondition unmet' };
+        }),
+        step('after', async (ctx) => {
+          const b = await ctx.defaultBranch();
+          b.write('after.md', 'y');
+          b.note('Add after.md');
+          return { outcome: 'ok' };
+        }),
+      ]).runAll();
+    } finally {
+      vi.restoreAllMocks();
+    }
+    const dir = await checkout(DEFAULT_BRANCH);
+    const log = await git(dir, ['log', '--format=%s%n%b', '-1']);
+    expect(log).toContain('Add after.md');
+    expect(log).not.toContain('Never say this');
+  });
+
+  it('the push-race rollback undoes exactly the startup commit — a pre-existing AHEAD commit survives', async () => {
+    await populatedUpstream();
+    // Materialize the clone, then give it a committed-but-unpushed (AHEAD)
+    // commit — the crash-before-push state ensureClone deliberately preserves.
+    await makeRunner([
+      step('touch', async (ctx) => {
+        await (await ctx.defaultBranch()).repoDir();
+        return { outcome: 'ok' };
+      }),
+    ]).runAll();
+    const local = path.join(workspacesRoot, DEFAULT_BRANCH, 'knowledge-base');
+    await fs.writeFile(path.join(local, 'unpushed.md'), 'precious', 'utf8');
+    await git(local, ['add', '-A']);
+    await git(local, ['commit', '-m', 'committed but unpushed']);
+
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await makeRunner([
+        step('dirty-and-race', async (ctx) => {
+          const b = await ctx.defaultBranch();
+          b.write('startup.md', 'maintenance');
+          b.note('Add startup.md');
+          // A concurrent replica lands its own commit upstream AFTER this
+          // runner's fetch, so the finalize push is rejected non-fast-forward.
+          const other = await checkout(DEFAULT_BRANCH);
+          await fs.writeFile(path.join(other, 'winner.md'), 'replica won', 'utf8');
+          await git(other, ['add', '-A']);
+          await git(other, ['commit', '-m', 'replica commit']);
+          await git(other, ['push', 'origin', DEFAULT_BRANCH]);
+          return { outcome: 'ok' };
+        }),
+      ]).runAll(); // resolves — the carve-out rolls back and continues
+    } finally {
+      vi.restoreAllMocks();
+    }
+    // The rollback undid the startup commit and ONLY it: the AHEAD commit is
+    // still HEAD (a reset to origin/<branch> would have discarded it too).
+    expect(await fs.readFile(path.join(local, 'unpushed.md'), 'utf8')).toBe('precious');
+    expect((await git(local, ['log', '--format=%s', '-1'])).trim()).toBe('committed but unpushed');
+    expect(await fs.access(path.join(local, 'startup.md')).then(() => true, () => false)).toBe(false);
+  });
+
   it('a surviving clone that is AHEAD keeps its unpushed commit — not this phase\'s to discard', async () => {
     await populatedUpstream();
     // First pass touches the branch so the clone exists (handles are lazy —
@@ -255,5 +338,26 @@ describe('KbStartupRunner', () => {
 
     await makeRunner([step('noop', async () => ({ outcome: 'ok' }))]).runAll();
     expect(await fs.readFile(path.join(local, 'unpushed.md'), 'utf8')).toBe('precious');
+  });
+});
+
+describe('redactSecret', () => {
+  it('scrubs the configured token wherever it appears', () => {
+    const prev = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = 'ghp_supersecret';
+    try {
+      expect(redactSecret('fatal: ghp_supersecret was rejected')).toBe('fatal: *** was rejected');
+    } finally {
+      if (prev === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = prev;
+    }
+  });
+
+  it('scrubs URL userinfo — a user:pass@ remote must not leak the password', () => {
+    expect(redactSecret("fetch of 'https://alice:hunter2@example.com/kb.git' failed")).toBe(
+      "fetch of 'https://***@example.com/kb.git' failed",
+    );
+    // A plain URL is untouched.
+    expect(redactSecret('https://example.com/kb.git')).toBe('https://example.com/kb.git');
   });
 });

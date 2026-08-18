@@ -17,10 +17,16 @@ const execFileAsync = promisify(execFile);
 export const BOT_NAME = 'Bevel Workflow';
 export const BOT_EMAIL = 'bevel-workflow@bevel.software';
 
-/** Scrub the token from anything that reaches a log or an error message. */
+/**
+ * Scrub credentials from anything that reaches a log or an error message:
+ * the configured token wherever it appears, and URL userinfo — a remote
+ * spelled `https://user:pass@host` would otherwise leak `pass` verbatim
+ * through every git failure that quotes the URL back.
+ */
 export function redactSecret(text: string): string {
   const token = process.env.GITHUB_TOKEN;
-  return token ? text.replaceAll(token, '***') : text;
+  const scrubbed = token ? text.replaceAll(token, '***') : text;
+  return scrubbed.replace(/:\/\/[^/@\s]+@/g, '://***@');
 }
 
 /**

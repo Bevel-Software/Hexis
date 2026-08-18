@@ -73,7 +73,13 @@ export interface ServerStartContext {
 export interface KbBranch {
   readonly name: string;
   readonly isProtected: boolean;
-  /** Absolute path of the checked-out clone; clone-if-absent happens here. */
+  /**
+   * Absolute path of the checked-out clone; clone-if-absent happens here.
+   * This is the READ seam: writing through the returned path is a contract
+   * violation by the step — steps are first-party trusted code, and the
+   * buffered-ops contract is a convention the runner enforces structurally,
+   * not a sandbox it defends.
+   */
   repoDir(): Promise<string>;
   /** Declare a file's full content at a repo-relative path. */
   write(path: string, content: string | Uint8Array): void;
@@ -81,6 +87,11 @@ export interface KbBranch {
   move(from: string, to: string): void;
   /** Declare a file's removal. */
   remove(path: string): void;
-  /** One honest line per logical change — the branch's commit message is built from these. */
+  /**
+   * One honest line per logical change — the branch's commit message is built
+   * from these. Notes ride WITH the step's ops: kept when the step's outcome
+   * applies them (`ok`/`partial`), discarded together with them on `skipped` —
+   * a skipped step must not caption a commit made of other steps' changes.
+   */
   note(line: string): void;
 }

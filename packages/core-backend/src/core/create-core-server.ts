@@ -212,21 +212,6 @@ export async function createCoreServer(
     });
   });
 
-  // Close change requests whose source branch has been deleted. Not awaited:
-  // it fetches from origin, and a slow or unreachable remote must not hold up
-  // the server — nothing downstream depends on the result, and the requests it
-  // closes have been unusable since the branch went away, so landing a few
-  // seconds into uptime is soon enough. Errors are swallowed inside the sweep,
-  // which fails safe by closing nothing.
-  void core.workflowService
-    .closeChangeRequestsWithDeletedBranches()
-    .then((n) => {
-      if (n > 0) {
-        console.log(`[cr] closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
-      }
-    })
-    .catch((err) => console.warn('[cr] deleted-branch sweep failed:', err));
-
   // Overlay boot-time side effects (startup reconciles, periodic sweeps).
   await ext.onBoot?.(core);
 
@@ -236,6 +221,27 @@ export async function createCoreServer(
   // before any route can serve KB content. Throws to stop the boot (the
   // container's restart policy is the retry) — see kb-startup-runner.ts.
   await core.kbStartupRunner.runAll();
+
+  // Close change requests whose source branch has been deleted. SEQUENCED
+  // AFTER the startup phase above, for two reasons: the sweep's fresh fetch
+  // lazily bootstraps and fetches the same default-branch clone the runner
+  // maintains (kicking it off earlier races the runner's clone/fetch of that
+  // very directory), and on a brand-new deployment it would run before the
+  // empty remote is seeded, fail its clone, swallow the error, and leave
+  // deleted-branch CRs open for the whole process. Still not awaited from
+  // here on: a slow or unreachable remote must not hold up the server —
+  // nothing downstream depends on the result, and the requests it closes
+  // have been unusable since the branch went away, so landing a few seconds
+  // into uptime is soon enough. Errors are swallowed inside the sweep, which
+  // fails safe by closing nothing.
+  void core.workflowService
+    .closeChangeRequestsWithDeletedBranches()
+    .then((n) => {
+      if (n > 0) {
+        console.log(`[cr] closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
+      }
+    })
+    .catch((err) => console.warn('[cr] deleted-branch sweep failed:', err));
 
   // Auth routes (unprotected — login endpoint must be accessible)
   app.use(

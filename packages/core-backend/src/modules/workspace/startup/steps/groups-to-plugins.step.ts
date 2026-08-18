@@ -218,6 +218,19 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
   }
   if (!hasLegacy && !hasPlugins) return;
 
+  // `hasPlugins` is false for a FILE or SYMLINK squatting the `Plugins` name —
+  // and the whole-root move declared below would then die in the applier with
+  // a bare ENOTDIR. Throw the actionable version instead: under the phase's
+  // fail-closed contract this stops the boot, which a squatted reserved root
+  // deserves (same stance as template-files.step.ts's reserved-dir check).
+  if (hasLegacy && !hasPlugins && (await exists(pluginsDir))) {
+    throw new Error(
+      `Branch "${branch.name}": "${PLUGINS_DIR}" exists but is not a directory, so ` +
+        `${LEGACY_GROUPS_DIR}/ cannot be renamed to ${PLUGINS_DIR}/. ` +
+        `Remove or rename the "${PLUGINS_DIR}" entry — the platform requires this name to be a folder.`,
+    );
+  }
+
   // Every read below goes against the PRE-STEP tree: when the root rename is
   // declared this run it is NOT yet on disk, so the plugin folders are still
   // read under their legacy root while every declared op speaks post-rename
@@ -288,8 +301,13 @@ async function rewriteIgnoreRootRule(repoDir: string, branch: KbBranch, details:
   if (lines.some((l) => l.trim() === newRule)) return false;
   const idx = lines.findIndex((l) => l.trim() === legacyRule);
   if (idx === -1) return false;
+  // EVERY exact-match line follows the rename: the first becomes the new
+  // rule, any further duplicates are dropped — rewriting only the first would
+  // leave stale `Groups/` lines behind, and the already-has-Plugins guard
+  // above means a second pass would never touch them.
   lines[idx] = newRule;
-  branch.write(IGNORE_FILENAME, lines.join('\n'));
+  const rewritten = lines.filter((l, i) => i <= idx || l.trim() !== legacyRule);
+  branch.write(IGNORE_FILENAME, rewritten.join('\n'));
   details.push(`${IGNORE_FILENAME}: ${legacyRule} → ${newRule}`);
   return true;
 }

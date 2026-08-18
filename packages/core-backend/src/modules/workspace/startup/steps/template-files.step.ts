@@ -24,6 +24,15 @@ import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '..
 export const REQUIRED_FILES: readonly string[] = ['access.md', 'AGENTS.md', '.bevelignore', '.gitignore'];
 
 /**
+ * Repo-root files the startup phase GENERATES rather than copies — today just
+ * `roles.yaml`, rendered from `ADMIN_EMAIL` (see roles-yaml.step.ts and
+ * seed-tree.ts). Reserved-root validation must treat these exactly like
+ * {@link REQUIRED_FILES}: a root claiming a generated name is the same silent
+ * typo with the same silent outcome.
+ */
+export const GENERATED_FILES: readonly string[] = ['roles.yaml'];
+
+/**
  * Destination name → the packable spelling the template may carry instead.
  * npm strips every file named `.gitignore` from a published tarball, so the
  * packaged template cannot ship one under its real name (see
@@ -77,12 +86,14 @@ function assertRootSegment(dir: string): void {
 export function reservedRootDirs(extraRootDirs: readonly string[]): readonly string[] {
   for (const dir of extraRootDirs) {
     assertRootSegment(dir);
-    // A root named after a required FILE is a typo with a silent outcome:
-    // the file is laid down first, so the dir check finds the path taken and
-    // skips it, and the directory the caller asked for never appears with
-    // nothing said about why.
-    if (REQUIRED_FILES.includes(dir)) {
-      throw new Error(`Reserved KB root "${dir}" collides with a required file of the same name`);
+    // A root named after a required OR generated FILE is a typo with a silent
+    // outcome: the file is laid down first, so the dir check finds the path
+    // taken and skips it, and the directory the caller asked for never appears
+    // with nothing said about why.
+    if (REQUIRED_FILES.includes(dir) || GENERATED_FILES.includes(dir)) {
+      throw new Error(
+        `Reserved KB root "${dir}" collides with a required or generated file of the same name`,
+      );
     }
   }
   return [...CORE_REQUIRED_DIRS, ...extraRootDirs];
@@ -169,16 +180,33 @@ export class TemplateFilesStep implements OnServerStart {
     const added: string[] = [];
 
     for (const rel of REQUIRED_FILES) {
-      if (await exists(path.join(repoDir, rel))) continue;
+      // `lstat`, not `exists`: a DIRECTORY or SYMLINK squatting a required
+      // file's name would read as "present", and a skip-if-present check
+      // would then report success over a knowledge base whose root access
+      // policy (say) cannot be read. Fail-closed, same as the reserved-root
+      // squatting check below: this is a state a human must fix.
+      const found = await lstatOrNull(path.join(repoDir, rel));
+      if (found) {
+        if (found.isFile()) continue;
+        throw new Error(
+          `Required KB file "${rel}" on branch "${branch.name}" exists but is not a regular file ` +
+            `(${found.isSymbolicLink() ? 'symlink' : found.isDirectory() ? 'directory' : 'special file'}). ` +
+            'Remove or rename it — the platform requires this name to be a readable file.',
+        );
+      }
       branch.write(rel, await readTemplate(templateDir, rel));
       added.push(rel);
-      // Adding AGENTS.md to a knowledge base seeded before the rename
-      // leaves it VISIBLE: that repo's `.bevelignore` lists CLAUDE.md and
-      // knows nothing of the new name, so the conventions doc starts
-      // showing up in the file tree and the agent view. We created the
-      // mismatch by adding the file, so we close it here.
-      if (rel === 'AGENTS.md') added.push(...(await mergeIgnorePattern(repoDir, branch, rel)));
     }
+
+    // AGENTS.md left VISIBLE by a stale `.bevelignore` is closed here — and
+    // UNCONDITIONALLY, not only when the file was just added: a KB whose
+    // AGENTS.md predates the CLAUDE.md→AGENTS.md rename has an ignore file
+    // that lists the old name and knows nothing of the new one, so the
+    // conventions doc shows up in the file tree and the agent view.
+    // Idempotent: an ignore file already carrying the rule — or absent, in
+    // which case the template's copy declared above arrives with the rule in
+    // it — changes nothing and produces no note.
+    added.push(...(await mergeIgnorePattern(repoDir, branch, 'AGENTS.md')));
 
     // AGENTS.md is MANAGED, not merely seeded: the platform owns its content,
     // and a stale copy is replaced with the packaged template's every startup

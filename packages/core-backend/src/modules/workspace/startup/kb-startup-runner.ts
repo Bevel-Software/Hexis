@@ -42,8 +42,12 @@ export interface KbStartupRunnerOptions {
   steps: readonly OnServerStart[];
   /** The empty-remote seed commit builder (template tree + roles.yaml), injected
       so the runner stays free of template knowledge. Receives the temp dir to
-      fill; the runner handles init/commit/push around it. */
-  buildSeedTree: (dir: string) => Promise<void>;
+      fill; the runner handles init/commit/push around it. Resolves to the
+      repo-relative paths the builder GENERATED itself (rather than copied from
+      the template) — the runner force-adds them after `git add -A`, so a
+      template `.gitignore` rule can never silently drop a required seed file
+      from the commit. */
+  buildSeedTree: (dir: string) => Promise<string[]>;
 }
 
 export class KbStartupRunner {
@@ -58,6 +62,16 @@ export class KbStartupRunner {
       console.log('[kb-startup] branch model not configured yet — phase skipped until setup completes.');
       return;
     }
+    // A branch model without a repository URL is a PARTIALLY set-up deployment
+    // (the two can arrive on different saves, and a restart can land between
+    // them). There is nothing to maintain yet, and running anyway would
+    // `ls-remote ''` — a boot that fails forever while the setup screen it
+    // needs stays unreachable. The setup-completion invocation catches up the
+    // moment the URL exists.
+    if (this.opts.kbRepoUrl().trim() === '') {
+      console.log('[kb-startup] KB repository URL not configured yet — phase skipped until setup completes.');
+      return;
+    }
     const safeBoot = process.env.KB_SAFE_BOOT === '1';
     if (safeBoot) {
       console.warn(
@@ -67,10 +81,15 @@ export class KbStartupRunner {
     }
 
     const handles = new Map<string, BranchHandle>();
-    const heads = await this.ensureRemote();
-    const ctx = this.buildContext(heads, handles);
-
+    // ONE safe-boot boundary around the whole phase — remote preparation, the
+    // step loop, AND the finalize commits. Rescue mode must be able to reset
+    // and boot whichever of them fails; a boundary around the step loop alone
+    // would let an ensureRemote or finalize failure stop the very boot
+    // KB_SAFE_BOOT exists to allow.
     try {
+      const heads = await this.ensureRemote();
+      const ctx = this.buildContext(heads, handles);
+
       for (const step of this.opts.steps) {
         const result = await step.run(ctx).catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
@@ -89,18 +108,22 @@ export class KbStartupRunner {
         }
         for (const h of handles.values()) await h.applyBuffer();
       }
+
+      for (const h of handles.values()) {
+        await this.finalize(h);
+      }
     } catch (err) {
       if (!safeBoot) throw err;
       console.error(
         '[kb-startup] SAFE BOOT: abandoning the phase after a failure — the KB is UNMAINTAINED this run.',
         redactSecret(err instanceof Error ? err.message : String(err)),
       );
+      // Reset every handle that materialized a clone, not only the ones marked
+      // dirty: a mid-apply failure leaves partial writes on a handle that never
+      // reached its dirty mark. Reset-hard + clean on an untouched tree is a
+      // no-op, so sweeping every clone is strictly safer.
       for (const h of handles.values()) await h.resetUncommitted().catch(() => {});
       return;
-    }
-
-    for (const h of handles.values()) {
-      await this.finalize(h);
     }
     console.log('[kb-startup] phase complete.');
   }
@@ -127,8 +150,14 @@ export class KbStartupRunner {
       await withTempDir(async (dir) => {
         await git(dir, user, ['init', '-b', defaultBranch]);
         await stampIdentity(dir, user);
-        await this.opts.buildSeedTree(dir);
+        const generated = await this.opts.buildSeedTree(dir);
         await git(dir, user, ['add', '-A']);
+        // The template may ship a `.gitignore` whose rules happen to match a
+        // GENERATED seed file (roles.yaml, a reserved root's .gitkeep) —
+        // `add -A` would silently drop it from the seed commit. Force-add
+        // exactly what the builder generated; `-f` on an already-staged path
+        // is a no-op.
+        if (generated.length > 0) await git(dir, user, ['add', '-f', '--', ...generated]);
         await git(dir, user, ['commit', '-m', 'Seed knowledge base from Bevel template']);
         for (const b of protectedBranches) {
           if (b !== defaultBranch) await git(dir, user, ['branch', b]);
@@ -215,20 +244,48 @@ export class KbStartupRunner {
     const user = this.opts.gitUsername();
     await stampIdentity(repoDir, user);
     await git(repoDir, user, ['add', '-A']);
+    // A branch's own `.gitignore` can swallow a managed write: `add -A` skips
+    // ignored paths, so a declared op could land on disk and still read as
+    // "converged, nothing to commit" below. Force-add the paths the applied
+    // ops produced (writes + move destinations); paths a later op removed or
+    // relocated again are filtered out, since an unmatched pathspec is an
+    // error (their disappearance is `add -A`'s to stage).
+    const produced: string[] = [];
+    for (const rel of h.appliedPaths()) {
+      const onDisk = await fs.access(path.join(repoDir, rel)).then(() => true, () => false);
+      if (onDisk) produced.push(rel);
+    }
+    if (produced.length > 0) await git(repoDir, user, ['add', '-f', '--', ...produced]);
     const status = (await git(repoDir, user, ['status', '--porcelain'])).trim();
     if (status === '') return; // ops converged to no byte changes — nothing to commit
+    // The commit this phase is about to add, remembered so the rollback below
+    // can undo exactly it — and ONLY it. Resetting to origin/<name> instead
+    // would also nuke a pre-existing committed-but-unpushed (AHEAD) commit
+    // that ensureClone deliberately preserved.
+    const preCommit = (await git(repoDir, user, ['rev-parse', 'HEAD'])).trim();
     await git(repoDir, user, ['commit', '-m', h.commitMessage()]);
     try {
       await git(repoDir, user, ['push', 'origin', `HEAD:refs/heads/${h.name}`]);
       console.log(`[kb-startup] ${h.name}: ${h.commitSubject()}`);
     } catch (err) {
-      // The carve-out: a concurrent replica won the push race. Its pass made
-      // the same idempotent changes; roll back and let the next boot converge.
+      const msg = err instanceof Error ? err.message : String(err);
+      // The carve-out is ONLY for a push the remote refused as stale — a
+      // concurrent replica won the race, and its pass made the same idempotent
+      // changes. Git spells that refusal `! [rejected] … (non-fast-forward)`
+      // or `… (fetch first)`; the regex matches exactly those two markers.
+      // Deliberately NOT the generic `failed to push some refs` / `[rejected]`
+      // trailers: a pre-receive hook decline (branch protection on the KB
+      // repo, say) prints those too, and that is a policy refusal every boot
+      // would hit — it re-throws like auth or network failures (stopping the
+      // boot, or demoted to abandon under KB_SAFE_BOOT like every failure).
+      if (!/non-fast-forward|fetch first/i.test(msg)) {
+        throw err;
+      }
       console.warn(
         `[kb-startup] ${h.name}: push rejected (concurrent replica?) — rolling back local commit.`,
-        redactSecret(err instanceof Error ? err.message : String(err)),
+        redactSecret(msg),
       );
-      await git(repoDir, user, ['reset', '--hard', `origin/${h.name}`]).catch(() => {});
+      await git(repoDir, user, ['reset', '--hard', preCommit]).catch(() => {});
     }
   }
 }
@@ -239,10 +296,12 @@ type BufferedOp =
   | { kind: 'remove'; path: string };
 
 /**
- * The {@link KbBranch} implementation: a lazy clone plus an op buffer. Ops
- * accumulate while a step runs; the RUNNER applies them (`applyBuffer`) on
- * `ok`/`partial` and drops them (`discardBuffer`) on `skipped`. Applied ops
- * mark the handle dirty; notes accumulate across steps into one commit.
+ * The {@link KbBranch} implementation: a lazy clone plus an op buffer. Ops AND
+ * notes accumulate while a step runs; the RUNNER applies both (`applyBuffer`)
+ * on `ok`/`partial` and drops both (`discardBuffer`) on `skipped` — a skipped
+ * step's notes must never decorate a commit made of other steps' changes.
+ * Applied ops mark the handle dirty; kept notes accumulate across steps into
+ * one commit.
  */
 class BranchHandle implements KbBranch {
   constructor(
@@ -250,12 +309,23 @@ class BranchHandle implements KbBranch {
     readonly isProtected: boolean,
     cloneOnce: () => Promise<string>,
   ) {
-    this.clone = lazyOnce(cloneOnce);
+    this.clone = lazyOnce(async () => {
+      const dir = await cloneOnce();
+      this.cloned = true;
+      return dir;
+    });
   }
 
   private readonly clone: () => Promise<string>;
   private buffer: BufferedOp[] = [];
+  /** The CURRENT step's notes — kept or discarded with its ops. */
+  private noteBuffer: string[] = [];
+  /** Notes of applied steps, in order — the commit message's material. */
   private notes: string[] = [];
+  /** Repo-relative paths applied ops produced (writes + move destinations). */
+  private readonly applied = new Set<string>();
+  /** Whether a clone actually materialized — what the abandon path resets on. */
+  private cloned = false;
   dirty = false;
 
   repoDir(): Promise<string> {
@@ -271,15 +341,23 @@ class BranchHandle implements KbBranch {
     this.buffer.push({ kind: 'remove', path: p });
   }
   note(line: string): void {
-    this.notes.push(line);
+    this.noteBuffer.push(line);
   }
 
   discardBuffer(): void {
     this.buffer = [];
+    this.noteBuffer = [];
   }
 
   /** Apply buffered ops in declaration order, each path contained to the clone. */
   async applyBuffer(): Promise<void> {
+    // The step's notes are kept even when it declared no ops — an advisory
+    // note (e.g. "both roots exist, merge by hand") surfaces in a commit only
+    // if a later step dirties the branch, exactly as before.
+    if (this.noteBuffer.length > 0) {
+      this.notes.push(...this.noteBuffer);
+      this.noteBuffer = [];
+    }
     if (this.buffer.length === 0) return;
     const repoDir = await this.repoDir();
     const ops = this.buffer;
@@ -289,11 +367,13 @@ class BranchHandle implements KbBranch {
         const abs = await containedPath(repoDir, op.path);
         await fs.mkdir(path.dirname(abs), { recursive: true });
         await fs.writeFile(abs, op.content);
+        this.applied.add(op.path);
       } else if (op.kind === 'move') {
         const from = await containedPath(repoDir, op.from);
         const to = await containedPath(repoDir, op.to);
         await fs.mkdir(path.dirname(to), { recursive: true });
         await fs.rename(from, to);
+        this.applied.add(op.to);
       } else {
         const abs = await containedPath(repoDir, op.path);
         await fs.rm(abs, { force: true });
@@ -302,9 +382,19 @@ class BranchHandle implements KbBranch {
     this.dirty = true;
   }
 
-  /** Discard everything uncommitted (safe boot's abandonment). */
+  /** What the applied ops put on disk — finalize force-adds these past any branch `.gitignore`. */
+  appliedPaths(): readonly string[] {
+    return [...this.applied];
+  }
+
+  /**
+   * Discard everything uncommitted (safe boot's abandonment). Keyed on
+   * `cloned`, not `dirty`: a mid-apply failure leaves partial writes on a
+   * handle that never reached its dirty mark, and those must not survive
+   * either. A clone nothing touched resets as a no-op.
+   */
   async resetUncommitted(): Promise<void> {
-    if (!this.dirty) return;
+    if (!this.cloned) return;
     const repoDir = await this.repoDir();
     await git(repoDir, 'x-access-token', ['reset', '--hard', 'HEAD']).catch(() => {});
     await git(repoDir, 'x-access-token', ['clean', '-fd']).catch(() => {});
