@@ -143,6 +143,9 @@ describe('GroupsAdminService', () => {
     await write(repo, 'synced-groups.yaml', 'groups:\n  Engineering:\n    - ada@x.io\n');
     const roster = await service.getRoster();
     expect(roster.mode).toBe('idp');
+    // The roster IS the synced file now — not the retired manual list.
+    expect(roster.groups.map((g) => g.canonical)).toEqual(['engineering']);
+    expect(roster.groups[0].members).toEqual(['ada@x.io']);
 
     for (const call of [
       () => service.createGroup(ADMIN, 'New Team'),

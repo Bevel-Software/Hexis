@@ -29,7 +29,7 @@ import type { AuthUser, FileTreeEntry, IWorkspaceService, IWorkflowService } fro
 import { WorkflowDomainError } from '../workflow/workflow.errors.js';
 import type { IAccessControl } from './access-control.interface.js';
 import { canonicalRoleName } from './access-control.service.js';
-import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from './group-files.js';
+import { GROUPS_YAML, SYNCED_GROUPS_YAML, parseGroupsFile, validateGroupsFile } from './group-files.js';
 import { findRoleRefsInText, rewriteRoleTokensInText } from './roles-admin.service.js';
 import { parseRolesModel } from './roles-edit.js';
 import {
@@ -111,12 +111,33 @@ export class GroupsAdminService {
 
   async getRoster(): Promise<GroupsRoster> {
     const workspaceId = await this.ensureWorkspace();
-    const mode = (await this.readKbFile(workspaceId, SYNCED_GROUPS_YAML)) !== null ? 'idp' : 'manual';
+    const syncedText = await this.readKbFile(workspaceId, SYNCED_GROUPS_YAML);
+    const referencesByName = await this.scanReferences(workspaceId);
+
+    // IdP mode: the roster IS the synced file (read-only in the UI); the
+    // manual file is retired and showing it would misreport who has access.
+    // A malformed synced file degrades to an empty roster, same as the
+    // resolver's fail-closed read (mode stays 'idp' — no fallback to manual).
+    if (syncedText !== null) {
+      const parsed = parseGroupsFile(syncedText, SYNCED_GROUPS_YAML);
+      const groups: GroupsRoster['groups'] = [];
+      if (parsed.ok) {
+        for (const [canonical, def] of parsed.groups) {
+          groups.push({
+            canonical,
+            displayName: def.displayName,
+            members: [...def.emails].sort(),
+            referencedBy: referencesByName.get(canonical) ?? [],
+          });
+        }
+      }
+      return { mode: 'idp', groups };
+    }
+
     const text = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
     const model = parseGroupsModel(text);
-    const referencesByName = await this.scanReferences(workspaceId);
     return {
-      mode,
+      mode: 'manual',
       groups: model.map((group) => {
         const canonical = canonicalRoleName(group.displayName);
         return {

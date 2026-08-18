@@ -22,6 +22,10 @@ import {
   parseGroupsFile,
   type GroupsIndex,
 } from './group-files.js';
+import {
+  DIRECTORY_SYNC_BOT_EMAIL,
+  DIRECTORY_SYNC_BOT_NAME,
+} from './directory-sync-bot.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1674,12 +1678,28 @@ export class AccessControlService implements IAccessControl {
     return null;
   }
 
+  /**
+   * `synced-groups.yaml` is MACHINE-OWNED: regenerated wholesale from the
+   * directory mirror and committed by the directory-sync bot. The bot is its
+   * ONLY writer — role/grant resolution never applies to it. That cuts both
+   * ways: the bot needs no role to write it (it isn't in roles.yaml, and on a
+   * protected branch nothing else would make it eligible), and no HUMAN can
+   * hand-edit it through the app (an edit would be silently overwritten by
+   * the next provisioning push anyway).
+   */
+  private machineOwnedWriteRule(userEmail: string, relativePath: string): boolean | null {
+    if (relativePath !== SYNCED_GROUPS_YAML) return null;
+    return userEmail.trim().toLowerCase() === DIRECTORY_SYNC_BOT_EMAIL;
+  }
+
   async canWriteAtRef(
     workspaceId: string,
     ref: string,
     userEmail: string,
     relativePath: string,
   ): Promise<boolean | null> {
+    const machineOwned = this.machineOwnedWriteRule(userEmail, relativePath);
+    if (machineOwned !== null) return machineOwned;
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
@@ -1706,6 +1726,14 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePaths: string[],
   ): Promise<Map<string, boolean> | null> {
+    // Machine-owned paths resolve without the model (see machineOwnedWriteRule)
+    // — matching canWriteAtRef, including on a repo with no rules at the ref.
+    const machineAnswers = new Map<string, boolean>();
+    for (const p of relativePaths) {
+      const machineOwned = this.machineOwnedWriteRule(userEmail, p);
+      if (machineOwned !== null) machineAnswers.set(p, machineOwned);
+    }
+    if (machineAnswers.size === relativePaths.length) return machineAnswers;
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
@@ -1714,7 +1742,11 @@ export class AccessControlService implements IAccessControl {
     const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
     const result = new Map<string, boolean>();
     for (const p of relativePaths) {
-      result.set(p, hasPermissionResolved(loaded.model, 'write', userEmail, p, owns.get(p) ?? null));
+      const machineOwned = machineAnswers.get(p);
+      result.set(
+        p,
+        machineOwned ?? hasPermissionResolved(loaded.model, 'write', userEmail, p, owns.get(p) ?? null),
+      );
     }
     return result;
   }
@@ -1724,6 +1756,13 @@ export class AccessControlService implements IAccessControl {
     ref: string,
     relativePath: string,
   ): Promise<{ roles: string[]; users: { name: string; email: string }[] } | null> {
+    if (relativePath === SYNCED_GROUPS_YAML) {
+      // Machine-owned — see machineOwnedWriteRule.
+      return {
+        roles: [],
+        users: [{ name: DIRECTORY_SYNC_BOT_NAME, email: DIRECTORY_SYNC_BOT_EMAIL }],
+      };
+    }
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);

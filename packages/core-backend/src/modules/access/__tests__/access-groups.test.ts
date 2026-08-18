@@ -214,4 +214,30 @@ describe('group files as access principals', () => {
     expect(await svc.canWriteAtRef(workspaceId, 'main', 'ada@x.io', 'Knowledge/Doc.md')).toBe(true);
     expect(await svc.canWriteAtRef(workspaceId, 'main', 'zoe@x.io', 'Knowledge/Doc.md')).toBe(false);
   });
+
+  it('synced-groups.yaml is machine-owned: only the sync bot writes it, ever', async () => {
+    const { workspaceDir } = await seedWorkspace(root, workspaceId);
+    const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR);
+
+    // The bot needs no roles/grants — the rule resolves before the model
+    // loads (this workspace has no git repo at all).
+    expect(
+      await svc.canWriteAtRef(workspaceId, 'HEAD', 'directory-sync@bevel.local', 'synced-groups.yaml'),
+    ).toBe(true);
+    // No human is eligible — not even Admin. Hand-edits would be silently
+    // overwritten by the next provisioning push.
+    expect(
+      await svc.canWriteAtRef(workspaceId, 'HEAD', 'admin@x.io', 'synced-groups.yaml'),
+    ).toBe(false);
+    // Same answers through the batch gate the lock service actually uses.
+    const batch = await svc.canWriteBatchAtRef(workspaceId, 'HEAD', 'directory-sync@bevel.local', [
+      'synced-groups.yaml',
+    ]);
+    expect(batch?.get('synced-groups.yaml')).toBe(true);
+    // The eligible-writers surface names the bot, so the 403 payload and the
+    // UI say "machine-owned", not "nobody".
+    const eligible = await svc.eligibleWritersAtRef(workspaceId, 'HEAD', 'synced-groups.yaml');
+    expect(eligible?.users.map((u) => u.email)).toEqual(['directory-sync@bevel.local']);
+    expect(eligible?.roles).toEqual([]);
+  });
 });
