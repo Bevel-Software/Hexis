@@ -54,6 +54,7 @@ import {
   parseAccessEntry,
 } from './access-control.service.js';
 import { makeRolesYamlWriteValidator } from './roles-yaml-guard.js';
+import { renderRolesYaml } from './render-roles-yaml.js';
 import {
   parseRolesModel,
   createRole as editCreateRole,
@@ -97,17 +98,15 @@ const OLD_ROLES_YAML = 'old-roles.yaml';
  * (`ADMIN_EMAIL`), never a roster baked into the build: hard-coded emails
  * would land one company's admins in every customer's recovered file. It is
  * the ONLY content recovery ever writes, so it MUST parse (the post-recovery
- * resolver loads it immediately) — guaranteed by construction here.
+ * resolver loads it immediately) — guaranteed by delegating to the shared
+ * validated renderer, which parse-backs its output and throws an actionable
+ * message on a malformed ADMIN_EMAIL (instead of the write-validator
+ * rejecting the finished file deep in the write path). `null` provenance:
+ * the seed-time "generated at KB-seed time" comment would mislead on a
+ * recovery-restored file.
  */
 function renderRecoveryRolesYaml(admins: readonly string[]): string {
-  const entries = admins.map((email) => `    - ${email}`).join('\n');
-  return `# Identity → role mapping for access control.
-# Role names are case- and whitespace-insensitive. The \`Admin\` role is special:
-# only Admins may edit this file, and at least one Admin must always exist.
-roles:
-  Admin:
-${entries}
-`;
+  return renderRolesYaml(admins, null);
 }
 
 /** Health of the default-branch roles.yaml: does the resolver's parser accept it? */

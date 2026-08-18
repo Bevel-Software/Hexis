@@ -105,6 +105,58 @@ describe('KbStartupRunner', () => {
     }
   });
 
+  it('rejects a repository URL with embedded credentials — operator error, fail-closed', async () => {
+    let stepRan = false;
+    await expect(
+      makeRunner(
+        [step('never', async () => { stepRan = true; return { outcome: 'ok' }; })],
+        { kbRepoUrl: () => 'https://alice:hunter2@example.com/kb.git' },
+      ).runAll(),
+    ).rejects.toThrow(/embeds credentials.*process listings/s);
+    expect(stepRan).toBe(false);
+  });
+
+  it('accepts a concurrent replica\'s seed when the empty-remote seed push loses the race', async () => {
+    // The WINNER lands its seed between this replica's empty ls-remote and
+    // its push — buildSeedTree runs exactly in that window, which makes the
+    // race deterministic with real git.
+    const seen: string[] = [];
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await makeRunner(
+        [
+          step('probe', async (ctx) => {
+            for (const b of await ctx.protectedBranches()) seen.push(b.name);
+            return { outcome: 'ok' };
+          }),
+        ],
+        {
+          buildSeedTree: async (dir: string) => {
+            const winner = path.join(root, 'winner-seed');
+            await fs.mkdir(winner);
+            await git(winner, ['init', '-b', DEFAULT_BRANCH]);
+            await fs.writeFile(path.join(winner, 'seeded.md'), 'winner content', 'utf8');
+            await git(winner, ['add', '-A']);
+            await git(winner, ['commit', '-m', 'winner seed']);
+            await git(winner, ['branch', PROTECTED[1]!]);
+            await git(winner, ['remote', 'add', 'origin', upstream]);
+            await git(winner, ['push', 'origin', ...PROTECTED]);
+            await fs.writeFile(path.join(dir, 'seeded.md'), 'loser content', 'utf8');
+            return [];
+          },
+        },
+      ).runAll(); // resolves — the loser accepts the winner's identical work
+    } finally {
+      vi.restoreAllMocks();
+    }
+    expect(seen.sort()).toEqual([...PROTECTED].sort());
+    // The remote carries the WINNER's seed; the loser's never landed.
+    for (const b of PROTECTED) {
+      const dir = await checkout(b);
+      expect(await fs.readFile(path.join(dir, 'seeded.md'), 'utf8')).toBe('winner content');
+    }
+  });
+
   it('applies a step\'s buffered ops before the next step runs, and commits once per branch with the notes', async () => {
     await populatedUpstream();
     const secondSaw: string[] = [];
@@ -183,6 +235,7 @@ describe('KbStartupRunner', () => {
 
   it('KB_SAFE_BOOT=1 abandons the phase on failure, resets uncommitted work, and boots', async () => {
     await populatedUpstream();
+    const originSha = (await git(path.join(root, '.seed'), ['rev-parse', 'HEAD'])).trim();
     process.env.KB_SAFE_BOOT = '1';
     await makeRunner([
       step('good', async (ctx) => {
@@ -196,8 +249,71 @@ describe('KbStartupRunner', () => {
     // The applied-but-uncommitted change was reset; the remote never saw it.
     const local = path.join(workspacesRoot, DEFAULT_BRANCH, 'knowledge-base');
     await expect(fs.access(path.join(local, 'good.md'))).rejects.toThrow();
+    // The rollback lands EXACTLY on the pre-phase sha recorded at clone time.
+    expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(originSha);
     const dir = await checkout(DEFAULT_BRANCH);
     await expect(fs.access(path.join(dir, 'good.md'))).rejects.toThrow();
+  });
+
+  it('KB_SAFE_BOOT rollback undoes even a created-but-unpushed finalize commit (reset to the pre-phase sha)', async () => {
+    await populatedUpstream();
+    const originSha = (await git(path.join(root, '.seed'), ['rev-parse', 'HEAD'])).trim();
+    // A pre-receive hook that refuses every push: a POLICY refusal, not the
+    // concurrent-replica carve-out — finalize rethrows AFTER committing, and
+    // safe boot must roll that commit back or it strands locally forever.
+    const hookPath = path.join(upstream, 'hooks', 'pre-receive');
+    await fs.mkdir(path.dirname(hookPath), { recursive: true });
+    await fs.writeFile(hookPath, '#!/bin/sh\necho "policy says no" >&2\nexit 1\n', { mode: 0o755 });
+    process.env.KB_SAFE_BOOT = '1';
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await makeRunner([
+        step('write', async (ctx) => {
+          const b = await ctx.defaultBranch();
+          b.write('managed.md', 'phase');
+          b.note('Add managed.md');
+          return { outcome: 'ok' };
+        }),
+      ]).runAll(); // resolves — safe boot abandons after the push refusal
+    } finally {
+      vi.restoreAllMocks();
+    }
+    const local = path.join(workspacesRoot, DEFAULT_BRANCH, 'knowledge-base');
+    expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(originSha);
+    await expect(fs.access(path.join(local, 'managed.md'))).rejects.toThrow();
+  });
+
+  it("finalize stages only the phase's paths — pre-existing dirt in a surviving clone stays out of the commit and in the tree", async () => {
+    await populatedUpstream();
+    // Materialize the surviving clone, then drop operator dirt into it.
+    await makeRunner([
+      step('touch', async (ctx) => {
+        await (await ctx.defaultBranch()).repoDir();
+        return { outcome: 'ok' };
+      }),
+    ]).runAll();
+    const local = path.join(workspacesRoot, DEFAULT_BRANCH, 'knowledge-base');
+    await fs.writeFile(path.join(local, 'stray.md'), 'operator dirt', 'utf8');
+
+    await makeRunner([
+      step('write', async (ctx) => {
+        const b = await ctx.defaultBranch();
+        b.write('managed.md', 'phase');
+        b.note('Add managed.md');
+        return { outcome: 'ok' };
+      }),
+    ]).runAll();
+
+    // The commit carries ONLY the phase's path.
+    const committed = (await git(local, ['show', '--name-only', '--format=', 'HEAD'])).trim();
+    expect(committed.split('\n')).toEqual(['managed.md']);
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await fs.readFile(path.join(dir, 'managed.md'), 'utf8')).toBe('phase');
+    await expect(fs.access(path.join(dir, 'stray.md'))).rejects.toThrow();
+    // The dirt remains in the working tree, uncommitted — not this phase's to touch.
+    expect(await fs.readFile(path.join(local, 'stray.md'), 'utf8')).toBe('operator dirt');
+    expect((await git(local, ['status', '--porcelain', '--', 'stray.md'])).trim()).toBe('?? stray.md');
   });
 
   it('draft branches are reachable AND writable through allBranches()', async () => {

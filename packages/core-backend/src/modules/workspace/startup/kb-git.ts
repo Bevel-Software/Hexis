@@ -47,7 +47,19 @@ function credArgs(gitUsername: string): string[] {
 
 export async function git(cwd: string, gitUsername: string, args: string[]): Promise<string> {
   try {
-    const { stdout } = await execFileAsync('git', [...credArgs(gitUsername), ...args], { cwd });
+    const { stdout } = await execFileAsync('git', [...credArgs(gitUsername), ...args], {
+      cwd,
+      // A stalled remote must FAIL the phase, not hang the boot forever —
+      // fail-closed (and KB_SAFE_BOOT's demotion) can only engage on an error
+      // that actually arrives. 10 minutes is generous for the largest clone.
+      timeout: 600_000,
+      // The 1MiB default truncates `ls-remote --heads` on remotes with very
+      // many branches, which would silently drop heads from the phase's view.
+      maxBuffer: 64 * 1024 * 1024,
+      // A credential prompt must fail the phase, not hang the boot forever
+      // waiting on a terminal nobody is watching.
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
     return stdout.toString();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

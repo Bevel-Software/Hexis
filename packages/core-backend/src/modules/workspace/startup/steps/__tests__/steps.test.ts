@@ -7,7 +7,8 @@ import path from 'node:path';
 import { KbStartupRunner } from '../../kb-startup-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
-import { RolesYamlStep, renderRolesYaml } from '../roles-yaml.step.js';
+import { RolesYamlStep } from '../roles-yaml.step.js';
+import { renderRolesYaml } from '../../../../access/render-roles-yaml.js';
 import { TemplateFilesStep } from '../template-files.step.js';
 import { buildSeedTree } from '../seed-tree.js';
 import { defaultKbTemplateDir } from '../../../../../assets.js';
@@ -74,13 +75,13 @@ async function seedUpstream(files: Record<string, string>): Promise<string> {
   return seed;
 }
 
-function makeRunner(steps: OnServerStart[]) {
+function makeRunner(steps: OnServerStart[], templateDir: string = TEMPLATE_DIR) {
   return new KbStartupRunner({
     kbRepoUrl: () => upstream,
     gitUsername: () => 'x-access-token',
     workspacesRoot,
     kbDirName: 'knowledge-base',
-    templateDir: TEMPLATE_DIR,
+    templateDir,
     defaultBranch: () => DEFAULT_BRANCH,
     protectedBranches: () => PROTECTED,
     seedAdminEmails: ['admin@example.com'],
@@ -159,6 +160,32 @@ describe('TemplateFilesStep', () => {
     expect(subject).toBe('Update AGENTS.md to the current platform template');
   });
 
+  it('rejects .git — any case — as a reserved root name', async () => {
+    for (const bad of ['.git', '.GIT', '.Git']) {
+      expect(() => new TemplateFilesStep([bad]), bad).toThrow(/must not be "\.git"/);
+    }
+  });
+
+  it('appends the AGENTS.md rule to a custom template\'s .bevelignore that lacks it, at declaration time', async () => {
+    // A distribution's own template whose ignore file does not carry the rule
+    // the on-disk merge assumes: the merge only runs against an EXISTING file,
+    // so the declared content itself must arrive with the rule in it.
+    const customTemplate = path.join(root, 'custom-template');
+    await fs.mkdir(customTemplate, { recursive: true });
+    await fs.writeFile(path.join(customTemplate, 'AGENTS.md'), await template('AGENTS.md'), 'utf8');
+    await fs.writeFile(path.join(customTemplate, '.bevelignore'), '# custom\nMyStuff/\n', 'utf8');
+    const scaffold = await fullScaffold();
+    delete scaffold['.bevelignore']; // the one file the step will declare from the template
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()], customTemplate).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
+    expect(lines).toContain('MyStuff/'); // the operator's rules survive
+    expect(lines).toContain('AGENTS.md'); // the platform's rule was appended
+  });
+
   it('treats a CRLF checkout of identical AGENTS.md content as current — no churn commit', async () => {
     const scaffold = await fullScaffold();
     scaffold['AGENTS.md'] = norm(scaffold['AGENTS.md']!).replace(/\n/g, '\r\n');
@@ -184,6 +211,16 @@ describe('RolesYamlStep', () => {
       const subject = (await git(dir, ['log', '--format=%s', '-1'])).trim();
       expect(subject).toBe('Add roles.yaml granting Admin to the configured seed admins');
     }
+  });
+
+  it('throws — naming the branch and path — when a directory squats the roles.yaml name', async () => {
+    // A dir (or symlink) named roles.yaml would read as "present" to a
+    // skip-if-present check, reporting success over a KB whose access roster
+    // cannot be read. Fail closed instead.
+    await seedUpstream({ 'roles.yaml/placeholder.txt': 'squatter' });
+    await expect(makeRunner([new RolesYamlStep(['admin@example.com'])]).runAll()).rejects.toThrow(
+      /"roles\.yaml" on branch "current-company-state" exists but is not a regular file \(directory\)/,
+    );
   });
 
   it('declares a skip when the file is missing and no admins are configured', async () => {
@@ -297,6 +334,16 @@ describe('GroupsToPluginsStep', () => {
     expect(log).toContain('Groups/ → Plugins/');
     expect(log).toContain('notion.tool converted to an mcp.json entry');
     expect(log).toContain('web-search.tool → software.bevel.hexis/tools/web-search.tool');
+  });
+
+  it('throws on a file squatting the Plugins name even when no Groups/ exists', async () => {
+    // Without Groups/ the step used to early-return before the squat guard —
+    // silently skipping a branch whose reserved root cannot be a plugin tree
+    // (and on a draft nothing later would ever report it).
+    await seedUpstream({ Plugins: 'i am a file, not a folder' });
+    await expect(makeRunner([new GroupsToPluginsStep()]).runAll()).rejects.toThrow(
+      /"Plugins" exists but is not a directory/,
+    );
   });
 
   it('refuses a branch carrying BOTH roots — nothing moves, and the note names the state', async () => {

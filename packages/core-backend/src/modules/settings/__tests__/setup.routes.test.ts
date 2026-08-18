@@ -269,26 +269,32 @@ describe('POST /setup/settings — the completion transition and the KB startup 
     });
     // The completing save blocks inside the phase...
     const first = post(base, '/api/setup/settings', { settings: completing });
-    await new Promise((r) => setTimeout(r, 50));
-    // ...during which the settings read complete but the GATE must not open —
-    // the phase is still mutating branch trees.
-    const status = await (await fetch(`${base}/api/setup/status`)).json();
-    expect(status.complete).toBe(false);
-    // A save landing mid-run is HELD until the phase settles: the runner
-    // reads its configuration through live getters, and a save applied under
-    // it would split the run across two configurations. It must neither
-    // resolve early nor start a second run over the same trees.
-    let secondSettled = false;
-    const second = post(base, '/api/setup/settings', {
-      settings: { gitUsername: 'x-access-token' },
-    }).then((r) => {
-      secondSettled = true;
-      return r;
-    });
-    await new Promise((r) => setTimeout(r, 100));
-    expect(secondSettled).toBe(false);
-    expect(runs).toBe(1);
-    release();
+    // release() in a finally: a mid-test assertion failure must still unblock
+    // the phase, or `first`/`second` hang pending until the vitest timeout.
+    let second!: Promise<Response>;
+    try {
+      await new Promise((r) => setTimeout(r, 50));
+      // ...during which the settings read complete but the GATE must not open —
+      // the phase is still mutating branch trees.
+      const status = await (await fetch(`${base}/api/setup/status`)).json();
+      expect(status.complete).toBe(false);
+      // A save landing mid-run is HELD until the phase settles: the runner
+      // reads its configuration through live getters, and a save applied under
+      // it would split the run across two configurations. It must neither
+      // resolve early nor start a second run over the same trees.
+      let secondSettled = false;
+      second = post(base, '/api/setup/settings', {
+        settings: { gitUsername: 'x-access-token' },
+      }).then((r) => {
+        secondSettled = true;
+        return r;
+      });
+      await new Promise((r) => setTimeout(r, 100));
+      expect(secondSettled).toBe(false);
+      expect(runs).toBe(1);
+    } finally {
+      release();
+    }
     const [res1, res2] = await Promise.all([first, second]);
     expect(res1.status).toBe(200);
     expect(res2.status).toBe(200);

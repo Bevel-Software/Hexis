@@ -201,6 +201,22 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
   const hasLegacy = await isDir(legacyDir);
   const hasPlugins = await isDir(pluginsDir);
 
+  // `hasPlugins` is false for a FILE or SYMLINK squatting the `Plugins` name.
+  // Checked BEFORE the nothing-to-do early return below: a branch with a
+  // squatter and NO Groups/ would otherwise be silently skipped (and on a
+  // draft nothing later ever reports it), while a branch mid-migration would
+  // die in the applier with a bare ENOTDIR. Throw the actionable version
+  // either way: under the phase's fail-closed contract this stops the boot,
+  // which a squatted reserved root deserves (same stance as
+  // template-files.step.ts's reserved-dir check).
+  if (!hasPlugins && (await exists(pluginsDir))) {
+    throw new Error(
+      `Branch "${branch.name}": "${PLUGINS_DIR}" exists but is not a directory` +
+        (hasLegacy ? `, so ${LEGACY_GROUPS_DIR}/ cannot be renamed to ${PLUGINS_DIR}/` : '') +
+        `. Remove or rename the "${PLUGINS_DIR}" entry — the platform requires this name to be a folder.`,
+    );
+  }
+
   if (hasLegacy && hasPlugins) {
     // Both present: somebody is mid-migration by hand, or two branches merged
     // badly. Merging them here would guess at which copy of a same-named
@@ -217,19 +233,6 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
     return;
   }
   if (!hasLegacy && !hasPlugins) return;
-
-  // `hasPlugins` is false for a FILE or SYMLINK squatting the `Plugins` name —
-  // and the whole-root move declared below would then die in the applier with
-  // a bare ENOTDIR. Throw the actionable version instead: under the phase's
-  // fail-closed contract this stops the boot, which a squatted reserved root
-  // deserves (same stance as template-files.step.ts's reserved-dir check).
-  if (hasLegacy && !hasPlugins && (await exists(pluginsDir))) {
-    throw new Error(
-      `Branch "${branch.name}": "${PLUGINS_DIR}" exists but is not a directory, so ` +
-        `${LEGACY_GROUPS_DIR}/ cannot be renamed to ${PLUGINS_DIR}/. ` +
-        `Remove or rename the "${PLUGINS_DIR}" entry — the platform requires this name to be a folder.`,
-    );
-  }
 
   // Every read below goes against the PRE-STEP tree: when the root rename is
   // declared this run it is NOT yet on disk, so the plugin folders are still

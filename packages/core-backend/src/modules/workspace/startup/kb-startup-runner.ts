@@ -72,6 +72,17 @@ export class KbStartupRunner {
       console.log('[kb-startup] KB repository URL not configured yet — phase skipped until setup completes.');
       return;
     }
+    // A URL carrying userinfo (`https://user:token@host/…`) is operator error,
+    // and fail-closed means THROWING, not skipping: the embedded credential
+    // would ride into argv on every git invocation and be visible in process
+    // listings. (The message itself is safe — it never quotes the URL.)
+    if (/\/\/[^/]*@/.test(this.opts.kbRepoUrl())) {
+      throw new Error(
+        'The KB repository URL embeds credentials (user:token@host), which would be visible in ' +
+          'process listings. Remove them from the URL and configure the token via the setup ' +
+          'screen or GITHUB_TOKEN instead.',
+      );
+    }
     const safeBoot = process.env.KB_SAFE_BOOT === '1';
     if (safeBoot) {
       console.warn(
@@ -145,9 +156,10 @@ export class KbStartupRunner {
       );
       // Reset only DIRTY handles — ones an apply at least began on (the mark
       // is set before the first op, so a mid-apply failure is covered). A
-      // clone a step merely read must NOT be swept: `clean -fd` would delete
-      // pre-existing untracked files in a surviving working clone that no op
-      // ever touched.
+      // clone a step merely read must NOT be swept: sweeping it would disturb
+      // pre-existing state in a surviving working clone that no op ever
+      // touched. Each reset targets the handle's recorded pre-phase sha, so
+      // even a created-but-unpushed finalize commit is rolled back.
       for (const h of handles.values()) await h.resetUncommitted().catch(() => {});
       return;
     }
@@ -173,7 +185,7 @@ export class KbStartupRunner {
           'KB remote is empty and cannot be seeded: no initial Admin was supplied (ADMIN_EMAIL).',
         );
       }
-      await withTempDir(async (dir) => {
+      const seededByOther = await withTempDir(async (dir) => {
         await git(dir, user, ['init', '-b', defaultBranch]);
         await stampIdentity(dir, user);
         const generated = await this.opts.buildSeedTree(dir);
@@ -189,8 +201,26 @@ export class KbStartupRunner {
           if (b !== defaultBranch) await git(dir, user, ['branch', b]);
         }
         await git(dir, user, ['remote', 'add', 'origin', url]);
-        await git(dir, user, ['push', '-u', 'origin', ...protectedBranches]);
+        try {
+          await git(dir, user, ['push', '-u', 'origin', ...protectedBranches]);
+          return null;
+        } catch (err) {
+          // Two replicas racing to seed the same empty remote: both saw it
+          // empty, one push landed first, the loser's is rejected. ONE re-read
+          // decides — if every protected branch now exists, the winner made
+          // the identical seed and the loser accepts its work; anything less
+          // is a real push failure and rethrows.
+          const reread = await lsRemoteHeads(url, user);
+          if (protectedBranches.every((b) => reread.has(b))) return reread;
+          throw err;
+        }
       });
+      if (seededByOther) {
+        console.log(
+          '[kb-startup] seed push rejected — another replica seeded the remote first; continuing with its branches.',
+        );
+        return seededByOther;
+      }
       console.log(`[kb-startup] seeded empty KB remote with branches: ${protectedBranches.join(', ')}`);
       return new Set(protectedBranches);
     }
@@ -269,21 +299,45 @@ export class KbStartupRunner {
     const repoDir = await h.repoDir();
     const user = this.opts.gitUsername();
     await stampIdentity(repoDir, user);
-    await git(repoDir, user, ['add', '-A']);
-    // A branch's own `.gitignore` can swallow a managed write: `add -A` skips
-    // ignored paths, so a declared op could land on disk and still read as
-    // "converged, nothing to commit" below. Force-add the paths the applied
-    // ops produced (writes + move destinations); paths a later op removed or
-    // relocated again are filtered out, since an unmatched pathspec is an
-    // error (their disappearance is `add -A`'s to stage).
-    const produced: string[] = [];
+    // Stage ONLY the paths the phase's ops touched — sources and targets both
+    // (a move's `from` and a remove's path stage as deletions; `add -A -- <path>`
+    // handles a deleted path, `-f` handles one a branch `.gitignore` matches).
+    // Deliberately NOT `add -A` on the whole tree: pre-existing uncommitted
+    // dirt in a reused clone is not this phase's work — it stays out of the
+    // phase's commit and remains in the tree, untouched.
+    //
+    // A pathspec matching nothing is an error, so a path is included only when
+    // it exists on disk OR git knows it (`ls-files` non-empty — a tracked path
+    // whose deletion must be staged). A path failing both was never tracked
+    // and no longer exists: nothing to stage.
+    const touched: string[] = [];
     for (const rel of h.appliedPaths()) {
       const onDisk = await fs.access(path.join(repoDir, rel)).then(() => true, () => false);
-      if (onDisk) produced.push(rel);
+      if (!onDisk) {
+        const known = (await git(repoDir, user, ['ls-files', '--', `:(literal)${rel}`])).trim();
+        if (known === '') continue;
+      }
+      touched.push(rel);
     }
-    if (produced.length > 0) await git(repoDir, user, ['add', '-f', '--', ...produced]);
-    const status = (await git(repoDir, user, ['status', '--porcelain'])).trim();
-    if (status === '') return; // ops converged to no byte changes — nothing to commit
+    // `:(literal)` — these are file paths, not pathspecs; chunked so a large
+    // migration cannot overflow the platform's argv limit.
+    for (let i = 0; i < touched.length; i += 100) {
+      await git(repoDir, user, [
+        'add',
+        '-A',
+        '-f',
+        '--',
+        ...touched.slice(i, i + 100).map((rel) => `:(literal)${rel}`),
+      ]);
+    }
+    // Exit 0 = nothing staged: the ops converged to no byte changes. (An
+    // errored diff reads as "something staged"; a genuinely broken repo then
+    // fails loudly at commit rather than being silently skipped here.)
+    const nothingStaged = await git(repoDir, user, ['diff', '--cached', '--quiet']).then(
+      () => true,
+      () => false,
+    );
+    if (nothingStaged) return;
     // The commit this phase is about to add, remembered so the rollback below
     // can undo exactly it — and ONLY it. Resetting to origin/<name> instead
     // would also nuke a pre-existing committed-but-unpushed (AHEAD) commit
@@ -293,6 +347,11 @@ export class KbStartupRunner {
     try {
       await git(repoDir, user, ['push', 'origin', `HEAD:refs/heads/${h.name}`]);
       console.log(`[kb-startup] ${h.name}: ${h.commitSubject()}`);
+      // Committed AND pushed: nothing of the phase remains uncommitted here,
+      // so a LATER branch's failure under KB_SAFE_BOOT must not rewind this
+      // clone to its pre-phase sha — that would leave it behind what origin
+      // already holds.
+      h.dirty = false;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // The carve-out is ONLY for a push the remote refused as stale — a
@@ -335,20 +394,35 @@ class BranchHandle implements KbBranch {
     readonly isProtected: boolean,
     cloneOnce: () => Promise<string>,
   ) {
-    this.clone = lazyOnce(cloneOnce);
+    this.clone = lazyOnce(async () => {
+      const dir = await cloneOnce();
+      // The rollback anchor, recorded ONCE as the clone materializes: a fresh
+      // clone's HEAD, or a surviving clone's pre-phase state (post the
+      // fast-forward ensureClone may have applied). For the empty-remote seed
+      // the handle clones AFTER seeding, so HEAD is the seed commit — correct.
+      // resetUncommitted resets to THIS sha rather than HEAD, so a finalize
+      // commit that was created but failed to push rolls back too instead of
+      // surviving as a stranded local commit no later boot would ever push.
+      this.prePhaseSha = (await git(dir, 'x-access-token', ['rev-parse', 'HEAD'])).trim();
+      return dir;
+    });
   }
 
   private readonly clone: () => Promise<string>;
+  /** HEAD as of clone time — the safe-boot rollback's anchor (see the constructor). */
+  private prePhaseSha: string | null = null;
   private buffer: BufferedOp[] = [];
   /** The CURRENT step's notes — kept or discarded with its ops. */
   private noteBuffer: string[] = [];
   /** Notes of applied steps, in order — the commit message's material. */
   private notes: string[] = [];
   /**
-   * Repo-relative target paths the ops touched: writes recorded BEFORE
-   * executing (a failed write can leave a partial file the rollback must
-   * clean), move destinations AFTER (a failed rename leaves its target
-   * untouched — see the note at the rename).
+   * Repo-relative paths the ops touched — SOURCES and TARGETS both: writes
+   * recorded BEFORE executing (a failed write can leave a partial file the
+   * rollback must clean), move destinations AFTER (a failed rename leaves its
+   * target untouched — see the note at the rename), and a move's `from` and a
+   * remove's path unconditionally at apply time — finalize stages exactly
+   * this set, and staging a deletion is what `add -A -- <path>` does.
    */
   private readonly applied = new Set<string>();
   dirty = false;
@@ -397,6 +471,10 @@ class BranchHandle implements KbBranch {
         await fs.mkdir(path.dirname(abs), { recursive: true });
         await fs.writeFile(abs, op.content);
       } else if (op.kind === 'move') {
+        // The SOURCE is recorded unconditionally: finalize must stage its
+        // disappearance. (Harmless to the rollback — a tracked source is
+        // restored by the reset, and `clean` never touches tracked paths.)
+        this.applied.add(op.from);
         const from = await containedPath(repoDir, op.from);
         const to = await containedPath(repoDir, op.to);
         await fs.mkdir(path.dirname(to), { recursive: true });
@@ -407,6 +485,9 @@ class BranchHandle implements KbBranch {
         // rollback delete a pre-existing ignored file at an untouched target.
         this.applied.add(op.to);
       } else {
+        // Recorded unconditionally, like a move's source: finalize must stage
+        // the deletion of a removed tracked file.
+        this.applied.add(op.path);
         const abs = await containedPath(repoDir, op.path);
         await fs.rm(abs, { force: true });
       }
@@ -418,24 +499,33 @@ class BranchHandle implements KbBranch {
     return this.buffer.length;
   }
 
-  /** What the applied ops put on disk — finalize force-adds these past any branch `.gitignore`. */
+  /**
+   * Every path the applied ops touched — sources and targets. Finalize stages
+   * exactly this set (force-added past any branch `.gitignore`); the safe-boot
+   * rollback scopes its `clean` to it.
+   */
   appliedPaths(): readonly string[] {
     return [...this.applied];
   }
 
   /**
-   * Discard everything uncommitted (safe boot's abandonment). Keyed on
+   * Discard everything the phase did (safe boot's abandonment). Keyed on
    * `dirty`, which is set BEFORE the first op applies, so a mid-apply failure
-   * is covered — while a clone a step only read is never swept (`clean -fd`
-   * on it would delete pre-existing untracked files no op ever touched). The
-   * extra `clean -fdx -- <op targets>` catches a partial write whose path a
-   * branch `.gitignore` happens to match, which plain `-fd` preserves.
+   * is covered — while a clone a step only read is never swept.
+   *
+   * `reset --hard` targets the PRE-PHASE sha recorded at clone time, not
+   * HEAD: a finalize commit that was created but failed to push must roll
+   * back too, or it survives as a stranded local commit no later boot would
+   * ever push. The reset restores everything tracked; the SCOPED
+   * `clean -fdx -- <op paths>` then removes files the ops created (including
+   * a partial write whose path a branch `.gitignore` happens to match). No
+   * global `clean`: it would delete pre-existing untracked files in a
+   * surviving working clone that the phase never touched.
    */
   async resetUncommitted(): Promise<void> {
     if (!this.dirty) return;
     const repoDir = await this.repoDir();
-    await git(repoDir, 'x-access-token', ['reset', '--hard', 'HEAD']).catch(() => {});
-    await git(repoDir, 'x-access-token', ['clean', '-fd']).catch(() => {});
+    await git(repoDir, 'x-access-token', ['reset', '--hard', this.prePhaseSha ?? 'HEAD']).catch(() => {});
     if (this.applied.size > 0) {
       // `:(literal)` — these are file paths, not pathspecs: a name that
       // happens to contain glob or magic characters must match itself only,

@@ -52,11 +52,13 @@ export function createSetupRoutes(
   /** The failure's message, surfaced to the ADMIN on the status endpoint. */
   let kbInitError: string | null = null;
   /**
-   * The setup-time run currently executing, if any. Doing double duty: the
-   * status endpoint keeps the gate SHUT while it is set (the settings read
-   * complete the moment they save, but the phase is still mutating branch
-   * trees — no workspace request may start yet), and a concurrent completing
-   * save awaits THIS promise instead of starting a second, racing run.
+   * The setup-time run currently executing, if any. Its jobs: (a) keeping the
+   * status gate SHUT while a run executes (the settings read complete the
+   * moment they save, but the phase is still mutating branch trees — no
+   * workspace request may start yet), and (b) defense in depth via the `??=`
+   * at the run site, should a second invoker ever appear. It is NOT what
+   * serializes saves — the `saveTurn` chain below runs handlers strictly one
+   * at a time, phase included, so no second run can start while one executes.
    */
   let kbInitInFlight: Promise<void> | null = null;
   /** The app-gate answer: settings complete AND the KB phase settled clean. */
@@ -84,13 +86,17 @@ export function createSetupRoutes(
     // INCOMPLETE: the frontend gates the app on this answer, and opening it
     // over an uninitialized (or mid-mutation) KB would be worse than keeping
     // the setup screen up.
-    const complete = kbReady();
+    //
+    // `kbReady()` is read fresh AFTER the admin check, immediately before
+    // building each response: the check awaits, a completion save can start
+    // the phase during that await, and a snapshot taken before it would
+    // resurrect a pre-phase `true` — opening the gate mid-mutation.
     if (!(await adminAccess.isAdmin(req.userEmail))) {
-      res.json({ complete, isAdmin: false });
+      res.json({ complete: kbReady(), isAdmin: false });
       return;
     }
     res.json({
-      complete,
+      complete: kbReady(),
       awaitingRestart: awaitingRestart(settings),
       isAdmin: true,
       settings: settings.describe(),
@@ -179,6 +185,10 @@ export function createSetupRoutes(
           // is defense in depth should another invoker ever appear.
           kbInitInFlight ??= kbStartupRunner.runAll();
           await kbInitInFlight;
+          // Under KB_SAFE_BOOT a run that abandoned the phase still resolves
+          // and opens the gate DELIBERATELY — booting unmaintained so the
+          // operator can get in and fix things is exactly what the
+          // break-glass is for.
           kbInitFailed = false;
           kbInitError = null;
         } catch (initErr) {

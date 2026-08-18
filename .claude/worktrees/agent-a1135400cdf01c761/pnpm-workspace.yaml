@@ -1,0 +1,21 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+
+# Dependencies pnpm is allowed to run install/build scripts for. Without this
+# allow-list, `pnpm install --frozen-lockfile` (e.g. the Docker build) fails with
+# ERR_PNPM_IGNORED_BUILDS even though install succeeds locally. esbuild and
+# isolated-vm have native build steps and protobufjs runs a codegen step — all
+# are needed at install time.
+allowBuilds:
+  esbuild: true
+  isolated-vm: true
+  protobufjs: true
+
+# Older pnpm 10.x (< the version that introduced `allowBuilds`) reads the list
+# form instead — keep both in sync so `pnpm install` builds the native deps on
+# either. pnpm 11 drops this key; `allowBuilds` above is the forward setting.
+onlyBuiltDependencies:
+  - esbuild
+  - isolated-vm
+  - protobufjs

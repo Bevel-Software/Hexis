@@ -72,6 +72,12 @@ function assertRootSegment(dir: string): void {
   if (!dir || dir === '.' || dir === '..' || dir.includes('/') || dir.includes('\\') || path.isAbsolute(dir)) {
     throw new Error(`Reserved KB root must be a single path segment (no separators, no ".."); got "${dir}"`);
   }
+  // `.git` can never be a KB root: writing `<dir>/.gitkeep` under it would
+  // corrupt the clone's own metadata. Any case — Windows filesystems treat
+  // `.GIT` as the same directory.
+  if (dir.toLowerCase() === '.git') {
+    throw new Error(`Reserved KB root must not be ".git" (any case); got "${dir}"`);
+  }
 }
 
 /**
@@ -194,7 +200,16 @@ export class TemplateFilesStep implements OnServerStart {
             'Remove or rename it — the platform requires this name to be a readable file.',
         );
       }
-      branch.write(rel, await readTemplate(templateDir, rel));
+      let content: Uint8Array | string = await readTemplate(templateDir, rel);
+      // The on-disk merge below only runs against an EXISTING ignore file; a
+      // freshly-declared one was merely assumed to carry the AGENTS.md rule —
+      // true of the packaged template, not necessarily of a distribution's
+      // custom one. Make it true here, so the managed conventions doc is
+      // hidden from the file tree from the first boot either way.
+      if (rel === IGNORE_FILENAME) {
+        content = withIgnorePattern(new TextDecoder().decode(content), 'AGENTS.md');
+      }
+      branch.write(rel, content);
       added.push(rel);
     }
 
@@ -316,14 +331,25 @@ async function mergeIgnorePattern(repoDir: string, branch: KbBranch, pattern: st
   try {
     current = await fs.readFile(path.join(repoDir, IGNORE_FILENAME), 'utf8');
   } catch {
-    return []; // No ignore file — the template's copy arrives with the pattern in it.
+    // No ignore file — the copy declared from the template arrives with the
+    // pattern in it (guaranteed at declaration time, see the required-files
+    // loop above).
+    return [];
   }
-  const lines = current.split('\n').map((l) => l.trim());
-  if (lines.includes(pattern)) return [];
-  const separator = current.endsWith('\n') ? '' : '\n';
-  branch.write(
-    IGNORE_FILENAME,
-    `${current}${separator}\n# Added by the platform: the conventions doc is not node content.\n${pattern}\n`,
-  );
+  const merged = withIgnorePattern(current, pattern);
+  if (merged === current) return [];
+  branch.write(IGNORE_FILENAME, merged);
   return [IGNORE_FILENAME];
+}
+
+/**
+ * `text` with `pattern` guaranteed present as a LINE — appended under a
+ * comment naming its origin when absent, returned unchanged when present.
+ * Line-wise match, same rationale as {@link mergeIgnorePattern}.
+ */
+function withIgnorePattern(text: string, pattern: string): string {
+  const lines = text.split('\n').map((l) => l.trim());
+  if (lines.includes(pattern)) return text;
+  const separator = text.endsWith('\n') ? '' : '\n';
+  return `${text}${separator}\n# Added by the platform: the conventions doc is not node content.\n${pattern}\n`;
 }
