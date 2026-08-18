@@ -58,6 +58,9 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
       await fs.mkdir(path.dirname(resolve(wsRel)), { recursive: true });
       await fs.writeFile(resolve(wsRel), content);
     },
+    deleteFile: async (_id: string, wsRel: string) => {
+      await fs.rm(resolve(wsRel));
+    },
   } as unknown as WorkspaceService;
 }
 
@@ -197,6 +200,28 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
       status: 409,
       payload: { kind: 'idp-mode' },
     });
+  });
+
+  it('a failed conversion with NO pre-existing groups.yaml leaves no groups.yaml behind', async () => {
+    await fs.rm(path.join(repo, 'groups.yaml'));
+    const workspace = stubWorkspace(root);
+    const workflow = stubWorkflow();
+    (workflow.svc as unknown as { commitChanges: unknown }).commitChanges = async () => {
+      throw new Error('commit exploded');
+    };
+    const svc = new RolesAdminService(
+      workspace,
+      workflow.svc,
+      new AccessControlService(workspace as never, KB),
+      KB,
+      () => DEFAULT_BRANCH,
+    );
+    await expect(svc.convertRoleToGroup(ADMIN, 'product')).rejects.toThrow('commit exploded');
+    // groups.yaml was CREATED by this conversion → rollback deletes it
+    // instead of publishing an empty file as a brand-new artifact.
+    await expect(groupsYaml()).rejects.toMatchObject({ code: 'ENOENT' });
+    // …and roles.yaml got its original bytes back: the role survives.
+    expect(await rolesYaml()).toBe(ROLES);
   });
 
   it('conversion refuses a groups.yaml name collision', async () => {

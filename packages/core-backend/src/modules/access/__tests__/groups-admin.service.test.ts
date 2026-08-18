@@ -51,6 +51,9 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
       await fs.mkdir(path.dirname(resolve(wsRel)), { recursive: true });
       await fs.writeFile(resolve(wsRel), content);
     },
+    deleteFile: async (_id: string, wsRel: string) => {
+      await fs.rm(resolve(wsRel));
+    },
   } as unknown as WorkspaceService;
 }
 
@@ -222,6 +225,71 @@ describe('GroupsAdminService', () => {
     expect(roles).not.toContain('group:gtm team');
     // Atomic: groups.yaml + roles.yaml land as ONE commit.
     expect(commits).toHaveLength(1);
+  });
+
+  it('rollback of a failed commit DELETES a file this edit created (no empty artifact)', async () => {
+    await fs.rm(path.join(repo, 'groups.yaml'));
+    const workspace = stubWorkspace(root);
+    const workflow = stubWorkflow();
+    (workflow.svc as unknown as { commitChanges: unknown }).commitChanges = async () => {
+      throw new Error('commit exploded');
+    };
+    const svc = new GroupsAdminService(
+      workspace,
+      workflow.svc,
+      new AccessControlService(workspace as never, KB),
+      KB,
+      () => DEFAULT_BRANCH,
+    );
+    await expect(svc.createGroup(ADMIN, 'Contractors')).rejects.toThrow('commit exploded');
+    // groups.yaml did not exist before the edit → the rollback removes it
+    // instead of leaving an empty file behind as a new artifact.
+    await expect(groupsYaml()).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('a path whose restore failed is released WITHOUT commit (discard, never partial publish)', async () => {
+    const workspace = stubWorkspace(root);
+    const workflow = stubWorkflow();
+    const wf = workflow.svc as unknown as {
+      commitChanges: (...a: unknown[]) => Promise<unknown>;
+      releaseLock: (...a: unknown[]) => Promise<void>;
+      releaseLockNoCommit: (...a: unknown[]) => Promise<void>;
+    };
+    wf.commitChanges = async () => {
+      throw new Error('commit exploded');
+    };
+    const committingReleases: string[] = [];
+    const discardingReleases: string[] = [];
+    const origRelease = wf.releaseLock.bind(workflow.svc);
+    const origNoCommit = wf.releaseLockNoCommit.bind(workflow.svc);
+    wf.releaseLock = async (...a) => {
+      committingReleases.push(a[2] as string);
+      return origRelease(...a);
+    };
+    wf.releaseLockNoCommit = async (...a) => {
+      discardingReleases.push(a[2] as string);
+      return origNoCommit(...a);
+    };
+    // The edit's own write lands; the rollback write then fails — the tree
+    // holds known-partial bytes, so the release must DISCARD, not commit.
+    const ws = workspace as unknown as { writeFile: (...a: unknown[]) => Promise<void> };
+    const origWrite = ws.writeFile.bind(workspace);
+    let writes = 0;
+    ws.writeFile = async (...a) => {
+      writes += 1;
+      if (writes >= 2) throw new Error('disk full');
+      return origWrite(...a);
+    };
+    const svc = new GroupsAdminService(
+      workspace,
+      workflow.svc,
+      new AccessControlService(workspace as never, KB),
+      KB,
+      () => DEFAULT_BRANCH,
+    );
+    await expect(svc.addMember(ADMIN, 'product', 'new@x.io')).rejects.toThrow('commit exploded');
+    expect(discardingReleases).toEqual([`${KB}/groups.yaml`]);
+    expect(committingReleases).not.toContain(`${KB}/groups.yaml`);
   });
 
   it('retireManualGroups deletes the file once; git history is the recovery', async () => {

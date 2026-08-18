@@ -1059,7 +1059,15 @@ export class GitService implements IGitService {
         for (const p of touched) {
           try {
             await this.git(cwd, ['add', '-A', '--', p]);
-          } catch { /* nothing in the worktree to stage for this path */ }
+          } catch (err) {
+            // Tolerate ONLY the expected miss: a fully-staged deletion (or the
+            // old half of a rename) has nothing left in the worktree to match.
+            // Any other add failure — index.lock contention, I/O — must abort:
+            // committing without staging would record stale index content as
+            // this caller's change. (LC_ALL=C pins the message to English.)
+            const e = err as Error & { stderr?: string };
+            if (!/did not match any files/.test(`${e.stderr ?? ''}\n${e.message}`)) throw err;
+          }
         }
         await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject, '--', ...touched]);
       } else {
@@ -1067,17 +1075,29 @@ export class GitService implements IGitService {
         await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject]);
       }
 
-      const { stdout } = await this.git(cwd, [
-        'log', '-1', '--pretty=format:%H%x00%an%x00%ae%x00%s%x00%aI',
-      ]);
-      const [sha, authorName, authorEmail, subj, committedAt] = stdout.split('\x00');
+      // CONTRACT: past this point the commit EXISTS, so this method must not
+      // throw — callers (writeAndCommitLocked) treat a throw as "nothing was
+      // committed" and restore their pre-edit bytes, which here would publish
+      // a compensating revert of a commit that DID land. The attribution read
+      // is best-effort; on failure fall back to what we already know.
+      let sha = '';
+      let authorName = user.name;
+      let authorEmail = user.email;
+      let subj = subject;
+      let committedAt = '';
+      try {
+        const { stdout } = await this.git(cwd, [
+          'log', '-1', '--pretty=format:%H%x00%an%x00%ae%x00%s%x00%aI',
+        ]);
+        [sha, authorName, authorEmail, subj, committedAt] = stdout.split('\x00');
+      } catch { /* the commit landed; only its attribution read failed */ }
       this.accessControl?.invalidate(workspaceId);
       return {
         sha: sha?.trim() ?? '',
         authorName: authorName ?? '',
         authorEmail: authorEmail ?? '',
         subject: subj ?? subject,
-        committedAt: committedAt?.trim() ?? new Date().toISOString(),
+        committedAt: committedAt?.trim() || new Date().toISOString(),
       };
     });
   }

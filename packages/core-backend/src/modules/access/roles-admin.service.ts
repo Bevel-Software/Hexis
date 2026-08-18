@@ -515,10 +515,12 @@ export class RolesAdminService {
       const rolesEdit = this.guardEdit(() => editDeleteRole(rolesText, canonical));
       this.assertLoadable(rolesEdit.text);
       makeRolesYamlWriteValidator(this.kbDirName)(`${this.kbDirName}/${ROLES_YAML}`, rolesEdit.text);
-      const groupsText = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
+      // Keep absent (null) distinct from existing-but-empty ('') — rollback
+      // must DELETE a groups.yaml it created, not truncate one already there.
+      const groupsOriginal = await this.readKbFile(workspaceId, GROUPS_YAML);
       let groupsCandidate: string;
       try {
-        groupsCandidate = editCreateGroup(groupsText, role.displayName).text;
+        groupsCandidate = editCreateGroup(groupsOriginal ?? '', role.displayName).text;
         for (const email of role.members) {
           groupsCandidate = editAddGroupMember(groupsCandidate, canonical, email).text;
         }
@@ -536,7 +538,7 @@ export class RolesAdminService {
         actor,
         [
           { repoRel: ROLES_YAML, content: rolesEdit.text, original: rolesText },
-          { repoRel: GROUPS_YAML, content: groupsCandidate, original: groupsText || null },
+          { repoRel: GROUPS_YAML, content: groupsCandidate, original: groupsOriginal },
         ],
         `Convert role ${role.displayName} to a group`,
       );
@@ -660,10 +662,13 @@ export class RolesAdminService {
    * the same base and the second write silently discards the first. Lock
    * acquire is STRICT even for the same user, so `fn` writes plainly and
    * commits path-scoped (`writeAndCommitLocked`), never via
-   * LockingFilesystem. Release is ALWAYS commit-on-release: a discarding
-   * release could throw away a previous holder's still-queued bytes, and
-   * `fn` restores its own bytes on failure — anything dirty at release time
-   * is either clean (queued commit no-ops) or someone else's work.
+   * LockingFilesystem. Release is commit-on-release: a discarding release
+   * could throw away a previous holder's still-queued bytes, and `fn`
+   * restores its own bytes on failure — anything dirty at release time is
+   * either clean (queued commit no-ops) or someone else's work. The ONE
+   * exception: a path whose restore itself failed (`unrestoredPaths` on the
+   * thrown error) holds known-partial bytes, and committing those is worse
+   * than discarding to HEAD.
    */
   private async withFileLocks<T>(
     workspaceId: string,
@@ -673,6 +678,7 @@ export class RolesAdminService {
   ): Promise<T> {
     const paths = repoRelFiles.map((f) => `${this.kbDirName}/${f}`).sort();
     const held: string[] = [];
+    let unrestored: Set<string> | null = null;
     try {
       for (const p of paths) {
         const res = await this.workflowService.acquireLock(workspaceId, this.defaultBranch, p, actor);
@@ -685,15 +691,17 @@ export class RolesAdminService {
         held.push(p);
       }
       return await fn();
+    } catch (err) {
+      unrestored = (err as { unrestoredPaths?: Set<string> } | null)?.unrestoredPaths ?? null;
+      throw err;
     } finally {
-      // ALWAYS commit-on-release, success or failure: a discarding release
-      // could throw away a PREVIOUS holder's still-queued bytes this
-      // operation never touched, and `fn` restores its own bytes on failure
-      // (writeAndCommitLocked) — so anything dirty at release time is either
-      // clean (queued commit no-ops) or someone else's work to preserve.
       for (const h of held) {
         try {
-          await this.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
+          if (unrestored?.has(h)) {
+            await this.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
+          } else {
+            await this.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
+          }
         } catch { /* best-effort release */ }
       }
     }
@@ -732,7 +740,13 @@ export class RolesAdminService {
     this.emitWrites(workspaceId, actor, [ROLES_YAML]);
   }
 
-  /** See groups-admin's twin: the write half of a `withFileLocks` flow. */
+  /**
+   * See groups-admin's twin: the write half of a `withFileLocks` flow.
+   * `original: null` = the file did not exist, so restoration DELETES it;
+   * paths whose restore failed ride the thrown error as `unrestoredPaths`
+   * so `withFileLocks` discards them at release instead of committing
+   * known-partial bytes.
+   */
   private async writeAndCommitLocked(
     workspaceId: string,
     actor: AuthUser,
@@ -744,12 +758,20 @@ export class RolesAdminService {
       for (const f of files) await this.workspaceService.writeFile(workspaceId, wsRel(f.repoRel), f.content);
       await this.workflowService.commitChanges(workspaceId, actor, summary, files.map((f) => wsRel(f.repoRel)));
     } catch (err) {
+      const unrestored = new Set<string>();
       for (const f of files) {
         try {
-          await this.workspaceService.writeFile(workspaceId, wsRel(f.repoRel), f.original ?? '');
-        } catch {
+          if (f.original === null) await this.workspaceService.deleteFile(workspaceId, wsRel(f.repoRel));
+          else await this.workspaceService.writeFile(workspaceId, wsRel(f.repoRel), f.original);
+        } catch (restoreErr) {
+          // Deleting an already-absent file IS the original state.
+          if (f.original === null && (restoreErr as NodeJS.ErrnoException | null)?.code === 'ENOENT') continue;
+          unrestored.add(wsRel(f.repoRel));
           console.warn(`[roles-admin] could not restore ${f.repoRel} after a failed commit`);
         }
+      }
+      if (unrestored.size > 0 && typeof err === 'object' && err !== null) {
+        (err as { unrestoredPaths?: Set<string> }).unrestoredPaths = unrestored;
       }
       throw err;
     }

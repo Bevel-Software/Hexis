@@ -146,6 +146,27 @@ describe('GitService.commitChanges', () => {
     expect(lsTree).toContain('New.md');
   });
 
+  it('a REAL `git add` failure aborts the scoped commit — only the pathspec miss is tolerated', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+
+    await fs.writeFile(path.join(repo, 'Old.md'), 'new bytes\n');
+    // Hold git's index lock: `git add` now fails with a real error (index
+    // contention), which must PROPAGATE — swallowing it would let the commit
+    // record stale index content as this caller's change.
+    await fs.writeFile(path.join(repo, '.git', 'index.lock'), '');
+    try {
+      await expect(
+        svc.commitChanges(workspaceId, USER, 'must not land', [`${PROCESS_MAP_DIR}/Old.md`]),
+      ).rejects.toThrow(/git (add|commit) failed/);
+    } finally {
+      await fs.rm(path.join(repo, '.git', 'index.lock'), { force: true });
+    }
+    // Nothing was committed — still just the seed commit.
+    const { stdout } = await execFileAsync('git', ['-C', repo, 'log', '--oneline']);
+    expect(stdout.trim().split('\n')).toHaveLength(1);
+  });
+
   it('onlyPaths with nothing of its own dirty is a no-op even when other files are dirty', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
     const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);

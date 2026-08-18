@@ -257,7 +257,13 @@ export class GroupsAdminService {
             { cause: (err as Error)?.message },
           );
         }
-        if (rolesEdit.changed) writes.push({ repoRelativePath: ROLES_YAML, content: rolesEdit.text });
+        if (rolesEdit.changed) {
+          // Same pre-disk no-lockout gate LockingFilesystem would have run —
+          // the plain-write path must not lose it (a roles.yaml that fails
+          // the resolver's parser is an app-wide admin lockout).
+          makeRolesYamlWriteValidator(this.kbDirName)(`${this.kbDirName}/${ROLES_YAML}`, rolesEdit.text);
+          writes.push({ repoRelativePath: ROLES_YAML, content: rolesEdit.text });
+        }
       }
     }
     if (writes.length === 0) return this.getRoster();
@@ -361,11 +367,13 @@ export class GroupsAdminService {
    * second write silently discards the first. Lock acquire is STRICT even
    * for the same user, so `fn` must write plainly + commit path-scoped (see
    * `writeAndCommitLocked`), never through LockingFilesystem. Release is
-   * ALWAYS commit-on-release, success or failure: a discarding release could
-   * throw away a PREVIOUS holder's still-queued bytes this operation never
-   * touched, and `fn` restores its own bytes on failure — so at release time
-   * anything dirty is either clean (queued commit no-ops) or someone else's
-   * work that must be preserved.
+   * commit-on-release, success or failure: a discarding release could throw
+   * away a PREVIOUS holder's still-queued bytes this operation never touched,
+   * and `fn` restores its own bytes on failure — so at release time anything
+   * dirty is either clean (queued commit no-ops) or someone else's work that
+   * must be preserved. The ONE exception: a path whose restore itself failed
+   * (`unrestoredPaths` on the thrown error) holds known-partial bytes, and
+   * committing those is worse than discarding to HEAD.
    */
   private async withFileLocks<T>(
     workspaceId: string,
@@ -375,6 +383,7 @@ export class GroupsAdminService {
   ): Promise<T> {
     const paths = repoRelFiles.map((f) => `${this.kbDirName}/${f}`).sort();
     const held: string[] = [];
+    let unrestored: Set<string> | null = null;
     try {
       for (const p of paths) {
         const res = await this.workflowService.acquireLock(workspaceId, this.defaultBranch, p, actor);
@@ -387,10 +396,17 @@ export class GroupsAdminService {
         held.push(p);
       }
       return await fn();
+    } catch (err) {
+      unrestored = (err as { unrestoredPaths?: Set<string> } | null)?.unrestoredPaths ?? null;
+      throw err;
     } finally {
       for (const h of held) {
         try {
-          await this.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
+          if (unrestored?.has(h)) {
+            await this.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
+          } else {
+            await this.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
+          }
         } catch { /* best-effort release */ }
       }
     }
@@ -409,8 +425,10 @@ export class GroupsAdminService {
     actor: AuthUser,
     pre: (text: string) => GroupsEditResult,
   ): Promise<void> {
-    const text = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
-    const result = this.guardEdit(() => pre(text));
+    // Keep absent (null) distinct from existing-but-empty ('') — rollback
+    // must DELETE a file it created, not truncate one that was already there.
+    const original = await this.readKbFile(workspaceId, GROUPS_YAML);
+    const result = this.guardEdit(() => pre(original ?? ''));
     if (!result.changed) return;
     this.assertLoadable(result.text);
     // The lock is ALREADY OURS (withFileLocks) and acquire is strict even for
@@ -421,7 +439,7 @@ export class GroupsAdminService {
     await this.writeAndCommitLocked(
       workspaceId,
       actor,
-      [{ repoRel: GROUPS_YAML, content: result.text, original: text || null }],
+      [{ repoRel: GROUPS_YAML, content: result.text, original }],
       `Update ${GROUPS_YAML}`,
     );
     this.afterWrite(workspaceId, actor, [GROUPS_YAML]);
@@ -431,8 +449,12 @@ export class GroupsAdminService {
    * Plain-write `files` and commit them as ONE path-scoped change — the write
    * half of a `withFileLocks` flow (never LockingFilesystem: same-user
    * re-acquire is strict). On failure, best-effort restore of each file's
-   * original bytes so the lock release (commit-on-release) can't publish a
-   * partial edit; `original: null` means the file did not exist before.
+   * original state so the lock release (commit-on-release) can't publish a
+   * partial edit: `original: null` means the file did not exist before, so
+   * restoration DELETES it rather than leaving an empty artifact. Paths whose
+   * restore itself failed are recorded on the thrown error
+   * (`unrestoredPaths`) so `withFileLocks` can discard them at release
+   * instead of committing known-partial bytes.
    */
   private async writeAndCommitLocked(
     workspaceId: string,
@@ -445,12 +467,20 @@ export class GroupsAdminService {
       for (const f of files) await this.workspaceService.writeFile(workspaceId, wsRel(f.repoRel), f.content);
       await this.workflowService.commitChanges(workspaceId, actor, summary, files.map((f) => wsRel(f.repoRel)));
     } catch (err) {
+      const unrestored = new Set<string>();
       for (const f of files) {
         try {
-          await this.workspaceService.writeFile(workspaceId, wsRel(f.repoRel), f.original ?? '');
-        } catch {
+          if (f.original === null) await this.workspaceService.deleteFile(workspaceId, wsRel(f.repoRel));
+          else await this.workspaceService.writeFile(workspaceId, wsRel(f.repoRel), f.original);
+        } catch (restoreErr) {
+          // Deleting an already-absent file IS the original state.
+          if (f.original === null && (restoreErr as NodeJS.ErrnoException | null)?.code === 'ENOENT') continue;
+          unrestored.add(wsRel(f.repoRel));
           console.warn(`[groups-admin] could not restore ${f.repoRel} after a failed commit`);
         }
+      }
+      if (unrestored.size > 0 && typeof err === 'object' && err !== null) {
+        (err as { unrestoredPaths?: Set<string> }).unrestoredPaths = unrestored;
       }
       throw err;
     }
