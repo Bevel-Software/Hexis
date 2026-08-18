@@ -80,6 +80,7 @@ export class KbStartupRunner {
       );
     }
 
+    const phaseStart = Date.now();
     const handles = new Map<string, BranchHandle>();
     // ONE safe-boot boundary around the whole phase — remote preparation, the
     // step loop, AND the finalize commits. Rescue mode must be able to reset
@@ -91,10 +92,12 @@ export class KbStartupRunner {
       const ctx = this.buildContext(heads, handles);
 
       for (const step of this.opts.steps) {
+        const started = Date.now();
         const result = await step.run(ctx).catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
           throw new Error(redactSecret(`KB startup step "${step.name}" failed: ${msg}`));
         });
+        const took = `${((Date.now() - started) / 1000).toFixed(1)}s`;
         if (result.outcome === 'stopBoot') {
           // Redacted like every other exit: the message travels beyond logs
           // (the setup status endpoint surfaces it to admins).
@@ -103,12 +106,30 @@ export class KbStartupRunner {
           );
         }
         if (result.outcome === 'skipped') {
-          console.warn(`[kb-startup] ${step.name}: skipped — ${result.reason}`);
+          console.warn(`[kb-startup] ${step.name}: skipped — ${result.reason} (${took})`);
           for (const h of handles.values()) h.discardBuffer();
           continue;
         }
+        // Counted before applying — applyBuffer drains the buffers.
+        let changes = 0;
+        let branches = 0;
+        for (const h of handles.values()) {
+          const n = h.pendingOpCount();
+          if (n > 0) {
+            changes += n;
+            branches++;
+          }
+        }
+        const scope =
+          changes === 0
+            ? 'no changes'
+            : `${changes} change${changes === 1 ? '' : 's'} on ${branches} branch${branches === 1 ? '' : 'es'}`;
         if (result.outcome === 'partial') {
-          console.warn(`[kb-startup] ${step.name}: partial — ${result.reason}`);
+          console.warn(`[kb-startup] ${step.name}: partial — ${result.reason} (${scope}, ${took})`);
+        } else {
+          // One line per step even when nothing happened: a silent phase and a
+          // step that never ran look identical from the boot log otherwise.
+          console.log(`[kb-startup] ${step.name}: ok — ${scope} (${took})`);
         }
         for (const h of handles.values()) await h.applyBuffer();
       }
@@ -130,7 +151,7 @@ export class KbStartupRunner {
       for (const h of handles.values()) await h.resetUncommitted().catch(() => {});
       return;
     }
-    console.log('[kb-startup] phase complete.');
+    console.log(`[kb-startup] phase complete (${((Date.now() - phaseStart) / 1000).toFixed(1)}s).`);
   }
 
   /**
@@ -390,7 +411,11 @@ class BranchHandle implements KbBranch {
         await fs.rm(abs, { force: true });
       }
     }
-    this.dirty = true;
+  }
+
+  /** Ops declared by the current step and not yet applied — log material. */
+  pendingOpCount(): number {
+    return this.buffer.length;
   }
 
   /** What the applied ops put on disk — finalize force-adds these past any branch `.gitignore`. */
