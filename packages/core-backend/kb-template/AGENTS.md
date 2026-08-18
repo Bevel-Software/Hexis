@@ -110,11 +110,17 @@ Write access to any path is governed by `roles.yaml` (who has which role) and
 - **Roles** in `roles.yaml` map a role name to a list of emails. Role names are
   case- and whitespace-insensitive (`Admin` = `admin` = `ADMIN`; `Product Team`
   = `product team`). The reserved name `deny` cannot be used.
-- **Access rules** live in `access.md` files. Each declares a `write:` list
-  whose entries are either grants (bare principal — a role name or
-  `Name <email>`) or denials (the lowercase word `deny`, a space, then the
-  principal). Capitalised forms like `Deny` are *not* triggers; they are
-  treated as part of a name.
+- **Access rules** live in `access.md` files, which carry **two blocks with two
+  scopes**: the body declares the rules for the folder the file sits in, and the
+  frontmatter declares who may read and write that `access.md` itself. Each
+  block names verbs (`read`, `write`, `download`, `owner`) whose entries are
+  either grants (bare principal — a role name or `Name <email>`) or denials
+  (the lowercase word `deny`, a space, then the principal). Capitalised forms
+  like `Deny` are *not* triggers; they are treated as part of a name.
+- **Keep an `access.md` body pure YAML**, with any explanation in `#` comments.
+  A body that does not parse as YAML naming at least one verb is read in the
+  older format instead, where the FRONTMATTER carried the folder's rules — so a
+  stray line of prose silently changes which block governs the folder.
 - **Resolution** walks repo root → file directory, accumulating per-principal
   state. User-level entries trump role-level entries. A role denial removes
   only that role's contribution; it does not undo grants from other roles.
