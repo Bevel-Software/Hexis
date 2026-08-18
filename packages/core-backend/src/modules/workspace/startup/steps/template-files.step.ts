@@ -346,10 +346,15 @@ async function mergeIgnorePattern(repoDir: string, branch: KbBranch, pattern: st
  * `text` with `pattern` guaranteed present as a LINE — appended under a
  * comment naming its origin when absent, returned unchanged when present.
  * Line-wise match, same rationale as {@link mergeIgnorePattern}.
+ *
+ * An explicit `!pattern` line also returns the text unchanged: that is the
+ * operator choosing to SHOW the file, and ordered matching means a positive
+ * line appended after it would win and silently defeat the choice. Hiding
+ * the conventions doc is a default this provides, never a mandate.
  */
 function withIgnorePattern(text: string, pattern: string): string {
   const lines = text.split('\n').map((l) => l.trim());
-  if (lines.includes(pattern)) return text;
+  if (lines.includes(pattern) || lines.includes(`!${pattern}`)) return text;
   const separator = text.endsWith('\n') ? '' : '\n';
   return `${text}${separator}\n# Added by the platform: the conventions doc is not node content.\n${pattern}\n`;
 }

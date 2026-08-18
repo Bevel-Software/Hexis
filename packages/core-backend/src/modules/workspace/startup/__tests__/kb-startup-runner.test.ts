@@ -116,6 +116,15 @@ describe('KbStartupRunner', () => {
     expect(stepRan).toBe(false);
   });
 
+  it('KB_SAFE_BOOT boots over a persisted credentials-bearing URL — the rescue never invokes git', async () => {
+    process.env.KB_SAFE_BOOT = '1';
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await makeRunner(
+      [step('never', async () => ({ outcome: 'ok' }))],
+      { kbRepoUrl: () => 'https://alice:hunter2@example.com/kb.git' },
+    ).runAll(); // resolves — the server boots unmaintained
+  });
+
   it('accepts a concurrent replica\'s seed when the empty-remote seed push loses the race', async () => {
     // The WINNER lands its seed between this replica's empty ls-remote and
     // its push — buildSeedTree runs exactly in that window, which makes the
@@ -295,6 +304,9 @@ describe('KbStartupRunner', () => {
     ]).runAll();
     const local = path.join(workspacesRoot, DEFAULT_BRANCH, 'knowledge-base');
     await fs.writeFile(path.join(local, 'stray.md'), 'operator dirt', 'utf8');
+    // A crashed tool even STAGED it — the pre-existing index state must be
+    // dropped, not adopted into the phase's commit.
+    await git(local, ['add', '--', 'stray.md']);
 
     await makeRunner([
       step('write', async (ctx) => {

@@ -72,17 +72,6 @@ export class KbStartupRunner {
       console.log('[kb-startup] KB repository URL not configured yet — phase skipped until setup completes.');
       return;
     }
-    // A URL carrying userinfo (`https://user:token@host/…`) is operator error,
-    // and fail-closed means THROWING, not skipping: the embedded credential
-    // would ride into argv on every git invocation and be visible in process
-    // listings. (The message itself is safe — it never quotes the URL.)
-    if (/\/\/[^/]*@/.test(this.opts.kbRepoUrl())) {
-      throw new Error(
-        'The KB repository URL embeds credentials (user:token@host), which would be visible in ' +
-          'process listings. Remove them from the URL and configure the token via the setup ' +
-          'screen or GITHUB_TOKEN instead.',
-      );
-    }
     const safeBoot = process.env.KB_SAFE_BOOT === '1';
     if (safeBoot) {
       console.warn(
@@ -99,6 +88,19 @@ export class KbStartupRunner {
     // would let an ensureRemote or finalize failure stop the very boot
     // KB_SAFE_BOOT exists to allow.
     try {
+      // A URL carrying userinfo (`https://user:token@host/…`) is operator
+      // error, and fail-closed means THROWING, not skipping: the embedded
+      // credential would ride into argv on every git invocation and be
+      // visible in process listings. Checked INSIDE the boundary so
+      // KB_SAFE_BOOT can still bring the server up over a persisted bad URL
+      // — the rescue never invokes git. (The message never quotes the URL.)
+      if (/\/\/[^/]*@/.test(this.opts.kbRepoUrl())) {
+        throw new Error(
+          'The KB repository URL embeds credentials (user:token@host), which would be visible in ' +
+            'process listings. Remove them from the URL and configure the token via the setup ' +
+            'screen or GITHUB_TOKEN instead.',
+        );
+      }
       const heads = await this.ensureRemote();
       const ctx = this.buildContext(heads, handles);
 
@@ -207,9 +209,14 @@ export class KbStartupRunner {
         } catch (err) {
           // Two replicas racing to seed the same empty remote: both saw it
           // empty, one push landed first, the loser's is rejected. ONE re-read
-          // decides — if every protected branch now exists, the winner made
-          // the identical seed and the loser accepts its work; anything less
-          // is a real push failure and rethrows.
+          // decides — if every protected branch now exists, the loser accepts
+          // the winner's work; anything less is a real push failure and
+          // rethrows. Ref EXISTENCE is deliberately the whole test — content
+          // identity is not required, because the steps that follow enforce
+          // the required scaffolding on every protected branch regardless of
+          // who seeded. A foreign seed is just an "existing remote"
+          // discovered late, the same contract as a repo populated before
+          // boot.
           const reread = await lsRemoteHeads(url, user);
           if (protectedBranches.every((b) => reread.has(b))) return reread;
           throw err;
@@ -299,6 +306,11 @@ export class KbStartupRunner {
     const repoDir = await h.repoDir();
     const user = this.opts.gitUsername();
     await stampIdentity(repoDir, user);
+    // Drop any PRE-EXISTING index state first (a crashed tool may have left
+    // edits staged): `git commit` publishes the whole index, and the phase
+    // must commit exactly its own staged set. The edits stay in the working
+    // tree, unstaged and unpublished — preserved, not adopted.
+    await git(repoDir, user, ['reset', '-q']);
     // Stage ONLY the paths the phase's ops touched — sources and targets both
     // (a move's `from` and a remove's path stage as deletions; `add -A -- <path>`
     // handles a deleted path, `-f` handles one a branch `.gitignore` matches).

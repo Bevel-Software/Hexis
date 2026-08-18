@@ -186,6 +186,21 @@ describe('TemplateFilesStep', () => {
     expect(lines).toContain('AGENTS.md'); // the platform's rule was appended
   });
 
+  it('respects an explicit !AGENTS.md negation — hiding the doc is a default, not a mandate', async () => {
+    // Appending the positive rule after the negation would WIN under ordered
+    // matching and silently defeat the operator's stated choice to show it.
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] = '# operator wants the doc visible\n!AGENTS.md\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
+      '# operator wants the doc visible\n!AGENTS.md\n',
+    );
+  });
+
   it('treats a CRLF checkout of identical AGENTS.md content as current — no churn commit', async () => {
     const scaffold = await fullScaffold();
     scaffold['AGENTS.md'] = norm(scaffold['AGENTS.md']!).replace(/\n/g, '\r\n');
