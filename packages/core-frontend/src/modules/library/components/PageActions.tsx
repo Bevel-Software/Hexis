@@ -38,8 +38,17 @@ export interface PageActionsProps {
    * editor with nothing to edit.
    */
   onShare?: () => void;
-  /** Opens the add dialog. Never gated on role — see the note above. */
-  onAdd(): void;
+  /**
+   * Opens the add dialog. Never gated on ROLE — see the note above; that is
+   * the whole point of this component.
+   *
+   * Omitted when there is nothing to add INTO, exactly as `onShare` is: the
+   * dialog needs the group's summary and its primary folder, so without them
+   * the button could only ever be a no-op. A control that is present and does
+   * nothing teaches people that buttons lie, which is worse than a control
+   * that is not there.
+   */
+  onAdd?: () => void;
   /** Copies a link to this page. Resolves false if the clipboard refused. */
   onCopyLink(): Promise<boolean>;
   /**
@@ -78,7 +87,7 @@ export function PageActions({
   }, [close, onCopyLink]);
 
   return (
-    <div className="flex flex-none items-center gap-1.5">
+    <div className="relative flex flex-none items-center gap-1.5">
       {onShare && (
         <Button variant="outline" size="sm" onClick={onShare}>
           <Users size={13} />
@@ -86,9 +95,11 @@ export function PageActions({
         </Button>
       )}
 
-      <IconButton aria-label={addLabel} title={addLabel} onClick={onAdd}>
-        <Plus size={15} />
-      </IconButton>
+      {onAdd && (
+        <IconButton aria-label={addLabel} title={addLabel} onClick={onAdd}>
+          <Plus size={15} />
+        </IconButton>
+      )}
 
       <div className="relative">
         <IconButton
@@ -139,12 +150,24 @@ export function PageActions({
 
       {/* The copy's answer, announced once. A clipboard write can be refused
           outright on a non-secure origin, and a silent no-op is the worst
-          possible reply to "copy this". */}
+          possible reply to "copy this".
+
+          OUT of the flex flow, BELOW the row: in flow, the appearing text
+          widened the row and slid every button — including the `+` an empty
+          page's chalk arrow is aimed at — left for the 1.8s the answer shows.
+          A status is an annotation on the actions, not a fourth action, so it
+          must not move them.
+
+          Below rather than beside, because beside (`right-full`) reaches into
+          whatever shares the row — on a narrow column, or under a long group
+          name, that is the page title, and an answer that covers the heading
+          traded one layout bug for a worse one. Under the row it is clear of
+          every sibling at any width. */}
       <span
         role="status"
         aria-live="polite"
         className={cn(
-          'text-meta transition-opacity',
+          'absolute right-0 top-full mt-1 whitespace-nowrap text-meta transition-opacity',
           copied ? 'opacity-100' : 'opacity-0',
           copied === 'fail' ? 'text-danger' : 'text-ink-faint',
         )}

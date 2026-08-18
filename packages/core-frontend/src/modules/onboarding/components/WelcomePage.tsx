@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { Check, Copy, X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { Button, IconButton } from '../../../shared/components';
@@ -13,6 +13,7 @@ import { setSidebarCollapsed } from '../../layout/state/sidebar';
 import { ClaudeInstallLink, mcpEndpointUrl } from '../../../shared/mcp';
 import { AGENT_CLIENTS, type AgentClient } from '../agent-clients';
 import { useOnboarding } from '../state/onboarding';
+import { useWelcomeRouteState } from '../welcome-state';
 
 /**
  * The welcome page — the first thing a new account sees, once.
@@ -48,20 +49,16 @@ export function WelcomePage() {
   }, []);
 
   /**
-   * How you got here. The automatic redirect at first sign-in is the ONE
-   * navigation that sets it (see `RootLanding`); the sidebar pill and a typed
-   * URL do not. Everything ceremonial on this page hangs off this flag.
+   * How you got here, and where you were going — read through the shared
+   * parser, so this page and `WelcomeRoute` cannot drift apart about what an
+   * arrival carries (see `welcome-state`).
+   *
+   * `greeting` is what everything ceremonial on this page hangs off.
+   * `returnTo` is the deep link that survived the SSO round-trip, and it
+   * retargets both exits: a welcome that concluded by discarding the page
+   * someone was sent is a greeting that cost them the reason they came.
    */
-  const routeState = useLocation().state as { greeting?: boolean; returnTo?: string | null } | null;
-  const greeting = routeState?.greeting === true;
-  /**
-   * Where the person was actually GOING when the sign-in interrupted them — a
-   * deep link that survived the SSO round-trip (see `RootLanding`). Present
-   * only on the greeting arrival, and it retargets both exits: a welcome that
-   * concluded by discarding the page someone was sent is a greeting that cost
-   * them the reason they came.
-   */
-  const returnTo = greeting ? (routeState?.returnTo ?? null) : null;
+  const { greeting, returnTo } = useWelcomeRouteState();
 
   /**
    * The entrance — and it belongs to the greeting alone.

@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useLayoutEffect } from 'react';
 import { useJoinRequests } from '../hooks/useJoinRequests';
 import { AccessRequestsBanner } from './AccessRequestsBanner';
 
@@ -25,6 +25,13 @@ export interface PluginJoinRequestsProps {
    * next natural fetch.
    */
   reloadSignal?: number;
+  /**
+   * Told whether the banner is actually on screen (it renders nothing while
+   * no requests pend). The group page listens so the empty band's chalk
+   * arrow can stand down when this banner sits in its line of fire — the
+   * arrow's aim assumes nothing between the band and the title row.
+   */
+  onVisible?(visible: boolean): void;
   className?: string;
 }
 
@@ -33,6 +40,7 @@ export function PluginJoinRequests({
   folders,
   onManage,
   reloadSignal = 0,
+  onVisible,
   className,
 }: PluginJoinRequestsProps) {
   const requests = useJoinRequests(plugin, folders[0] ?? null);
@@ -41,6 +49,19 @@ export function PluginJoinRequests({
   useEffect(() => {
     if (reloadSignal > 0) reload();
   }, [reloadSignal, reload]);
+
+  const visible = requests.requests.length > 0;
+  // A LAYOUT effect, because the listener uses this to decide what to draw in
+  // the same frame. Requests arrive asynchronously; reported after paint, the
+  // banner and the empty band's arrow — which are meant to be mutually
+  // exclusive — would both be on screen for one frame. Before paint, the
+  // listener's re-render lands in the only frame that is ever drawn.
+  useLayoutEffect(() => {
+    onVisible?.(visible);
+    // Unmounting is the banner leaving the page — say so, or a listener keeps
+    // holding a "visible" that nothing on screen backs up.
+    return () => onVisible?.(false);
+  }, [visible, onVisible]);
 
   return (
     <AccessRequestsBanner

@@ -28,6 +28,7 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
     attentionCount: 2,
     onFinishSetup,
     onCreatePlugin: vi.fn(),
+    canCreatePlugin: true,
     pluginsIndexActive: false,
     onOpenPluginsIndex: vi.fn(),
 
@@ -81,6 +82,34 @@ describe('PluginsSidebar', () => {
     const { onCreatePlugin } = renderSidebar();
     fireEvent.click(screen.getByRole('button', { name: 'New plugin' }));
     expect(onCreatePlugin).toHaveBeenCalledTimes(1);
+  });
+
+  it('spells out Create a plugin while the MCP list is empty — the `+` alone is hover-hidden', () => {
+    const { onCreatePlugin } = renderSidebar({ plugins: [] });
+    fireEvent.click(screen.getByRole('button', { name: 'Create a plugin' }));
+    expect(onCreatePlugin).toHaveBeenCalledTimes(1);
+  });
+
+  it('stands the create CTA down once a real plugin exists', () => {
+    renderSidebar(); // default fixture has three plugins
+    expect(screen.queryByRole('button', { name: 'Create a plugin' })).not.toBeInTheDocument();
+  });
+
+  it('stands the create CTA down when only locked plugins exist — someone already created them', () => {
+    renderSidebar({ plugins: [], lockedPlugins: ['Ops'] });
+    expect(screen.queryByRole('button', { name: 'Create a plugin' })).not.toBeInTheDocument();
+  });
+
+  it('stands the create CTA down for a non-admin, empty workspace or not', () => {
+    renderSidebar({ plugins: [], lockedPlugins: [], canCreatePlugin: false });
+    expect(screen.queryByRole('button', { name: 'Create a plugin' })).not.toBeInTheDocument();
+  });
+
+  it('says nothing about creating when the prop is omitted — the nav a host app already had', () => {
+    // `canCreatePlugin` is optional so this public props type survives the
+    // upgrade. Omitted must mean OFF, which is the nav exactly as it shipped.
+    renderSidebar({ plugins: [], lockedPlugins: [], canCreatePlugin: undefined });
+    expect(screen.queryByRole('button', { name: 'Create a plugin' })).not.toBeInTheDocument();
   });
 
   it('marks the selected plugin current and leaves the others alone', () => {

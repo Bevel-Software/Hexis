@@ -207,6 +207,27 @@ export function useLibrary(): LibraryContextValue {
 }
 
 /**
+ * "This workspace holds no plugins at all" — settled, and from both witnesses.
+ *
+ * One predicate for every surface that offers to create the FIRST plugin (the
+ * nav's spelled-out row, the index's CTA), so the two cannot drift into
+ * disagreeing about whether a workspace is untouched. Deliberately false while
+ * either source is still loading or has failed: an unanswered question is not
+ * "no plugins", and a first-plugin doorway shown on a guess points somebody at
+ * a decision that may already be taken.
+ */
+export function workspaceHasNoPlugins(lib: LibraryContextValue): boolean {
+  return (
+    !lib.loading &&
+    !lib.pluginsLoading &&
+    !lib.error &&
+    !lib.pluginsError &&
+    lib.pluginSummaries.length === 0 &&
+    lib.items.every((item) => item.plugin === null)
+  );
+}
+
+/**
  * How many of a plugin's integrations need setup — the amber count on the
  * sidebar row and the plugin page's banner, computed from one place so the two
  * can never disagree.

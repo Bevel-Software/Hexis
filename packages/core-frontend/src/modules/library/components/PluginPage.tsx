@@ -14,7 +14,8 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManifestButton, ClientExtensionsSection } from './PluginExtras';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { AddToPluginDialog } from './AddToPluginDialog';
-import { BandControls, PluginBreadcrumb, PluginItemSections, PageNote, RemoveLibraryItemDialog,
+import { BandControls, EmptySkillsNudge, PluginBreadcrumb, PluginItemSections, PageNote,
+  RemoveLibraryItemDialog,
 } from './plugin-page-parts';
 import { DeletePluginDialog } from './DeletePluginDialog';
 import { PageActions } from './PageActions';
@@ -60,6 +61,13 @@ export function PluginPage() {
   const [accessRevision, setAccessRevision] = useState(0);
   /** The proposed skill being reviewed, if the reader opened one. */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
+  /**
+   * Whether the join-requests banner is actually on screen. The empty band's
+   * chalk arrow points a fixed distance up at the title row's `+`, so any
+   * banner between them turns the arrow into a lie — this is how the page
+   * knows to stand the arrow down (the sentence and its action stay).
+   */
+  const [joinRequestsShown, setJoinRequestsShown] = useState(false);
 
   /**
    * "Last updated just now" has to be TRUE.
@@ -235,7 +243,13 @@ export function PluginPage() {
           <ManifestButton kbDirName={kbDirName} folder={plugin} canWrite={summary?.canWrite === true} />
           <PageActions
             onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
-            onAdd={() => setAddOpen(true)}
+            // The dialog needs both to mount (`addOpen && summary &&
+            // primaryFolder`), so without them `+` could only ever be a
+            // no-op — it is omitted instead, the same way `Share` is when
+            // there is no folder to manage. The empty band's doorway checks
+            // the identical prerequisite, so the two ways to add always agree
+            // about whether adding is possible at all.
+            onAdd={summary && primaryFolder ? () => setAddOpen(true) : undefined}
             onCopyLink={() => copyToClipboard(window.location.href)}
             // The OWNER's verb — `isOwner` is the same verdict the DELETE
             // route enforces, so the item appears for exactly the people the
@@ -255,6 +269,7 @@ export function PluginPage() {
           folders={summary.folders}
           onManage={setManageFolder}
           reloadSignal={accessRevision}
+          onVisible={setJoinRequestsShown}
           className="mt-4"
         />
       )}
@@ -283,9 +298,31 @@ export function PluginPage() {
         // for real; this only decides who sees the affordance.
         onRemove={summary?.canWrite ? setRemoving : undefined}
         emptySkills={
-          filterOn
-            ? 'Nothing in this band needs you right now.'
-            : `No skills yet. Add one, or ask your agent to write one for ${plugin}.`
+          filterOn ? (
+            'Nothing in this band needs you right now.'
+          ) : summary && primaryFolder ? (
+            // A truly empty plugin is the one moment the page has to teach
+            // where "add" lives — the button opens the same dialog the title
+            // row's `+` does, and the nudge's arrow points at that `+`. The
+            // arrow stands down when a banner sits between the band and the
+            // title row (join requests, integration attention): its aim is a
+            // fixed offset, and pointing into a banner teaches the wrong spot.
+            <EmptySkillsNudge
+              lead="No skills yet."
+              actionLabel="Add the first skill"
+              tail={`, or ask your agent to write one for ${plugin}.`}
+              agentOnly={`No skills yet. Ask your agent to write one for ${plugin}.`}
+              arrow={attention === 0 && !joinRequestsShown}
+              onAction={() => setAddOpen(true)}
+            />
+          ) : (
+            // Degraded: the plugins endpoint failed, so the summary — and with
+            // it the folder the add dialog writes into — is missing. The
+            // dialog gated on both (`addOpen && summary && primaryFolder`)
+            // could not mount, so a doorway here would be a button that does
+            // nothing. State the fact and the one door that still works.
+            `No skills yet. Ask your agent to write one for ${plugin}.`
+          )
         }
         // The band fades its controls until you hover it, and `opacity`
         // composites — so "the filter stays lit when it is on" has to be said

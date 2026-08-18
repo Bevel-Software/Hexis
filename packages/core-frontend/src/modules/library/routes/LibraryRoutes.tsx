@@ -7,7 +7,7 @@ import { LibraryPage } from '../components/LibraryPage';
 import { PluginPage } from '../components/PluginPage';
 import { PluginsIndexPage } from '../components/PluginsIndexPage';
 import { PersonalPluginPage } from '../components/PersonalPluginPage';
-import { WelcomePage } from '../../onboarding/components/WelcomePage';
+import { WelcomeRoute } from '../../onboarding/components/WelcomeRoute';
 import { WorkspaceItemRoute } from './WorkspaceItemRoute';
 import { decodePluginSegment, LIBRARY_ROOT, pathForPlugin, urlForItemFile, urlForSkillFile } from './library-paths';
 
@@ -45,7 +45,7 @@ export function LibraryRoutes() {
                 sidebar (and the pill's selected state) is on screen with it.
                 Auto-reached once, on first sign-in (see `RootLanding`);
                 reachable forever through the pill and by URL. */}
-            <Route path="welcome" element={<WelcomePage />} />
+            <Route path="welcome" element={<WelcomeRoute />} />
 
             <Route path="owned" element={<LibraryPage filter={{ kind: 'owned' }} />} />
 

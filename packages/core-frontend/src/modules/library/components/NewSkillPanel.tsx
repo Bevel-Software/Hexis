@@ -29,6 +29,15 @@ export interface NewSkillPanelProps {
   existingSkills: string[];
   /** Fired once the file exists; the host dialog closes on it. */
   onCreated(): void;
+  /**
+   * Follows the panel's in-flight state, for a host that can dismiss it. A
+   * create that is already running does not stop when this panel unmounts —
+   * it finishes, and (direct case) NAVIGATES. A host dialog that stayed
+   * closable while that was pending let someone dismiss "New skill" and be
+   * carried off the page seconds later; with this it holds its close doors
+   * shut (`Dialog.busy`) until the request settles.
+   */
+  onBusyChange?(busy: boolean): void;
 }
 
 /**
@@ -49,6 +58,7 @@ export function NewSkillPanel({
   destination,
   existingSkills,
   onCreated,
+  onBusyChange,
 }: NewSkillPanelProps) {
   const { user } = useAuth();
   const reloadLibrary = useLibraryReload();
@@ -81,6 +91,7 @@ export function NewSkillPanel({
   async function create() {
     if (!canCreate || !user) return;
     setBusy(true);
+    onBusyChange?.(true);
     try {
       const created = await createEmptySkill({
         ...('personal' in destination
@@ -93,6 +104,12 @@ export function NewSkillPanel({
       // The library is where the result lives, whichever way it went — nobody
       // is bounced to the Knowledge app to meet the thing they just made.
       reloadLibrary();
+      // Settled, and said so BEFORE handing back: the panel owns the whole
+      // lifecycle it advertises. Leaving the success case to the host works
+      // only while every host remembers to clear the flag in `onCreated` — a
+      // host that merely closes its dialog there (as `PersonalAddDialog` does
+      // with `onCreated={onClose}`) would stay busy forever.
+      onBusyChange?.(false);
       onCreated();
       if (created.direct) {
         // Straight into the new skill's page, editor open: an empty SKILL.md
@@ -112,6 +129,7 @@ export function NewSkillPanel({
       const msg = err instanceof Error ? err.message : String(err);
       toast(`Couldn't create that skill: ${msg}`, 'danger');
       setBusy(false);
+      onBusyChange?.(false);
     }
   }
 

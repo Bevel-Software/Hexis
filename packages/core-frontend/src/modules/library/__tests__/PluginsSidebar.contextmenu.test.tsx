@@ -32,6 +32,7 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
     attentionCount: 2,
     onFinishSetup: vi.fn(),
     onCreatePlugin: vi.fn(),
+    canCreatePlugin: true,
     pluginsIndexActive: false,
     onOpenPluginsIndex: vi.fn(),
     onContextMenu,
