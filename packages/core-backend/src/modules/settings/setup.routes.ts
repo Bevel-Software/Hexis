@@ -99,11 +99,28 @@ export function createSetupRoutes(
   });
 
   /**
+   * Setup saves run strictly ONE AT A TIME, phase included: `settings.save`
+   * updates the live cache write by write, and the completing save runs the
+   * KB startup phase, which reads its configuration through live getters —
+   * a save interleaving with either would hand half-updated state to the
+   * other. A plain promise chain is enough: saves are a setup-screen rarity,
+   * not a hot path, and a save arriving mid-run simply waits the previous
+   * save (and its phase) out before proceeding.
+   */
+  let saveTurn: Promise<unknown> = Promise.resolve();
+
+  /**
    * Save settings. Validated and written as ONE batch — a repository URL
    * stored without the token that reads it is a deployment that fails at its
    * first clone, so a partial write is never better than none.
    */
   router.post('/setup/settings', requireAdmin, async (req, res) => {
+    const turn = saveTurn.then(() => handleSave(req, res));
+    saveTurn = turn.catch(() => {});
+    await turn;
+  });
+
+  async function handleSave(req: express.Request, res: express.Response): Promise<void> {
     const body = (req.body ?? {}) as { settings?: Record<string, unknown> };
     const entries: Record<string, string> = {};
     for (const [key, value] of Object.entries(body.settings ?? {})) {
@@ -114,12 +131,6 @@ export function createSetupRoutes(
       entries[key] = value;
     }
     try {
-      // NO save may land while the phase is mid-run: the runner reads its
-      // configuration through live getters, so settings changed under it
-      // would split one run across two configurations. A save arriving
-      // mid-run waits the phase out and then proceeds — its outcome (and the
-      // failure flags) are the run-starting handler's to report.
-      if (kbInitInFlight) await kbInitInFlight.catch(() => {});
       // Completion is a TRANSITION, so it is measured BEFORE the save: the
       // save that flips it false→true — whichever field arrives last — is the
       // one that must run the KB startup phase, regardless of which save
@@ -163,11 +174,9 @@ export function createSetupRoutes(
        */
       if ((!wasComplete || kbInitFailed) && isComplete(settings)) {
         try {
-          // One run at a time. The settle-wait above keeps saves out while a
-          // run executes; the `??=` closes the remaining interleaving, where
-          // two completing saves both pass that wait (neither run started
-          // yet) — the second then joins the first's run instead of starting
-          // a second phase over the same trees.
+          // One run at a time. The save chain already serializes handlers
+          // whole, so no second run can start while one executes; the `??=`
+          // is defense in depth should another invoker ever appear.
           kbInitInFlight ??= kbStartupRunner.runAll();
           await kbInitInFlight;
           kbInitFailed = false;
@@ -207,7 +216,7 @@ export function createSetupRoutes(
       console.error('[setup] save failed:', err instanceof Error ? err.message : String(err));
       res.status(500).json({ error: 'Could not save these settings.' });
     }
-  });
+  }
 
   /**
    * Try the credentials against the real remote, BEFORE anything is saved.
