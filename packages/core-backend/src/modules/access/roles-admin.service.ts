@@ -49,8 +49,10 @@ import { WorkflowDomainError } from '../workflow/workflow.errors.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
   ADMIN_CANONICAL,
+  accessMdDeclaresBodyRules,
   canonicalRoleName,
   canonicalEmail,
+  isAccessMdPath,
   parseAccessEntry,
 } from './access-control.service.js';
 import { makeRolesYamlWriteValidator } from './roles-yaml-guard.js';
@@ -675,7 +677,7 @@ export class RolesAdminService {
           { cause: (err as Error)?.message },
         );
       }
-      const rewritten = rewriteRoleTokensInText(text, oldCanonical, newDisplayName);
+      const rewritten = rewriteRoleTokensInText(text, oldCanonical, newDisplayName, true, isAccessMdPath(repoRel));
       if (rewritten !== text) {
         // REPO-relative (bare repoRel) for commitChanges — repoDir already points
         // at <workspaceDir>/<kbDirName>.
@@ -734,7 +736,7 @@ export class RolesAdminService {
       } catch {
         continue;
       }
-      for (const ref of findRoleRefsInText(text)) {
+      for (const ref of findRoleRefsInText(text, true, isAccessMdPath(repoRel))) {
         const list = byRole.get(ref.role);
         if (list) list.push({ path: repoRel, verb: ref.verb });
         else byRole.set(ref.role, [{ path: repoRel, verb: ref.verb }]);
@@ -767,6 +769,43 @@ function configLineRange(lines: string[], isMarkdown: boolean): { start: number;
   // No fence: a markdown file has no config region; a non-markdown access file
   // (no body) is entirely config.
   return isMarkdown ? { start: 0, end: 0 } : { start: 0, end: lines.length };
+}
+
+/** The line range AFTER the closing frontmatter fence — empty when there is
+ *  no fence or it never closes, mirroring `bodyAfterFrontmatter` (a
+ *  fence-less access.md is a hard parse error to the resolver, so it is not
+ *  a rule source and must not be rewritten). */
+function bodyLineRange(lines: string[]): { start: number; end: number } {
+  if (lines.length > 0 && lines[0].trim() === '---') {
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i].trim() === '---') return { start: i + 1, end: lines.length };
+    }
+  }
+  return { start: 0, end: 0 };
+}
+
+/**
+ * The line ranges that are RULE SOURCES for this file — the ranges the
+ * resolver actually parses rules from, so the scan/rewrite can never miss a
+ * rule the resolver enforces:
+ *
+ *   - A body-governed `access.md` (see {@link accessMdDeclaresBodyRules}):
+ *     the BODY carries the folder's rules and the frontmatter carries the
+ *     file's own rules — both are rule sources.
+ *   - Everything else: the config region as before (frontmatter for markdown,
+ *     the whole file for a fence-less config file). A legacy `access.md`'s
+ *     body and a node file's body are prose and stay untouchable.
+ */
+function ruleLineRanges(
+  text: string,
+  lines: string[],
+  isMarkdown: boolean,
+  isAccessMd: boolean,
+): { start: number; end: number }[] {
+  if (isAccessMd && accessMdDeclaresBodyRules(text)) {
+    return [configLineRange(lines, true), bodyLineRange(lines)];
+  }
+  return [configLineRange(lines, isMarkdown)];
 }
 
 /** A known access verb key: heads a block list or holds a scalar role value. */
@@ -828,24 +867,35 @@ function walkRoleRefs(
   }
 }
 
-/** Every genuine role reference in `text`'s config region, as {role, verb}. */
-export function findRoleRefsInText(text: string, isMarkdown = true): { role: string; verb: string }[] {
+/**
+ * Every genuine role reference in `text`'s rule regions, as {role, verb}.
+ * `isAccessMd` marks an `access.md` file, whose BODY is a rule source in the
+ * body-governed format — see {@link ruleLineRanges}.
+ */
+export function findRoleRefsInText(
+  text: string,
+  isMarkdown = true,
+  isAccessMd = false,
+): { role: string; verb: string }[] {
   const lines = text.split('\n');
-  const { start, end } = configLineRange(lines, isMarkdown);
   const out: { role: string; verb: string }[] = [];
-  if (start >= end) return out;
-  walkRoleRefs(lines, start, end, ({ verb, entry }) => out.push({ role: entry.role, verb }));
+  for (const { start, end } of ruleLineRanges(text, lines, isMarkdown, isAccessMd)) {
+    if (start >= end) continue;
+    walkRoleRefs(lines, start, end, ({ verb, entry }) => out.push({ role: entry.role, verb }));
+  }
   return out;
 }
 
 /**
- * Rewrite every CONFIG-REGION line that PARSES as a role reference whose
+ * Rewrite every RULE-REGION line that PARSES as a role reference whose
  * canonical name == `oldCanonical`, replacing the role token with
- * `newDisplayName` (preserving any leading `deny ` and indentation). Only the
- * frontmatter block of a markdown file is touched — the body is left
- * byte-for-byte intact, so a prose line like `- Sales` is never corrupted.
- * Lines that don't parse as a matching role entry (user entries, other keys,
- * substrings) are also untouched. Exported for test.
+ * `newDisplayName` (preserving any leading `deny ` and indentation). A prose
+ * body is never touched — a line like `- Sales` in a node file or a legacy
+ * `access.md` stays byte-for-byte intact; the body is eligible ONLY when the
+ * file is a body-governed `access.md` (`isAccessMd` + the body parses as
+ * rules), where the body IS what the resolver enforces — see
+ * {@link ruleLineRanges}. Lines that don't parse as a matching role entry
+ * (user entries, other keys, substrings) are also untouched. Exported for test.
  *
  * `isMarkdown` (default true) marks files that carry a markdown body below the
  * frontmatter; pass false only for a pure-config file with no body.
@@ -855,15 +905,17 @@ export function rewriteRoleTokensInText(
   oldCanonical: string,
   newDisplayName: string,
   isMarkdown = true,
+  isAccessMd = false,
 ): string {
   const lines = text.split('\n');
-  const { start, end } = configLineRange(lines, isMarkdown);
-  if (start >= end) return text;
   let changed = false;
-  walkRoleRefs(lines, start, end, ({ i, entry, indent, prefix }) => {
-    if (entry.role !== oldCanonical) return;
-    lines[i] = `${indent}${prefix}${entry.deny ? 'deny ' : ''}${newDisplayName}`;
-    changed = true;
-  });
+  for (const { start, end } of ruleLineRanges(text, lines, isMarkdown, isAccessMd)) {
+    if (start >= end) continue;
+    walkRoleRefs(lines, start, end, ({ i, entry, indent, prefix }) => {
+      if (entry.role !== oldCanonical) return;
+      lines[i] = `${indent}${prefix}${entry.deny ? 'deny ' : ''}${newDisplayName}`;
+      changed = true;
+    });
+  }
   return changed ? lines.join('\n') : text;
 }

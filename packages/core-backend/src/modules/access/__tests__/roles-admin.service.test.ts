@@ -454,6 +454,57 @@ describe('rewriteRoleTokensInText (reference-aware, frontmatter-only)', () => {
   });
 });
 
+describe('rewriteRoleTokensInText — body-governed access.md (isAccessMd)', () => {
+  it('rewrites BODY rules and frontmatter self-rules of a body-governed access.md', () => {
+    const text = [
+      '---',
+      'write:',
+      '  - Sales', // self-rule: who may edit access.md itself
+      '---',
+      'read:',
+      '  - Sales', // the FOLDER rule the resolver enforces
+      '  - deny Sales',
+      'write:',
+      '  - Admin',
+    ].join('\n');
+    const out = rewriteRoleTokensInText(text, 'sales', 'Sales Team', true, true);
+    const lines = out.split('\n');
+    expect(lines[2]).toBe('  - Sales Team'); // frontmatter self-rule
+    expect(lines[5]).toBe('  - Sales Team'); // body rule
+    expect(lines[6]).toBe('  - deny Sales Team'); // deny preserved in body
+    expect(out).toContain('  - Admin'); // other roles untouched
+  });
+
+  it('a LEGACY access.md (prose body) keeps its body untouched even with isAccessMd', () => {
+    const text = [
+      '---',
+      'read:',
+      '  - Sales',
+      '---',
+      '# About this folder',
+      '- Sales', // prose bullet, not a rule — the body does not parse as rules
+    ].join('\n');
+    const out = rewriteRoleTokensInText(text, 'sales', 'Sales Team', true, true);
+    const lines = out.split('\n');
+    expect(lines[2]).toBe('  - Sales Team'); // legacy frontmatter rules rewritten
+    expect(lines[5]).toBe('- Sales'); // prose untouched
+  });
+
+  it('a fence-less access.md is untouched — the resolver hard-errors it, so it is no rule source', () => {
+    const text = 'read:\n  - Sales\n';
+    expect(rewriteRoleTokensInText(text, 'sales', 'Sales Team', true, true)).toBe(text);
+  });
+
+  it('findRoleRefsInText sees body rules of a body-governed access.md', () => {
+    const text = ['---', 'write:', '  - Admin', '---', 'read:', '  - Sales'].join('\n');
+    const refs = findRoleRefsInText(text, true, true);
+    expect(refs).toContainEqual({ role: 'sales', verb: 'read' });
+    expect(refs).toContainEqual({ role: 'admin', verb: 'write' });
+    // Without the access.md flag the body stays invisible (node files, prose).
+    expect(findRoleRefsInText(text, true, false)).not.toContainEqual({ role: 'sales', verb: 'read' });
+  });
+});
+
 describe('findRoleRefsInText (sound reference scan — shared with the rewrite)', () => {
   it('reports every genuine role ref with its enclosing verb, ignoring users/prose', () => {
     const text = [

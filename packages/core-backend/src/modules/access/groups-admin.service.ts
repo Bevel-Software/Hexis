@@ -28,7 +28,7 @@ import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthUser, FileTreeEntry, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../workflow/workflow.errors.js';
 import type { IAccessControl } from './access-control.interface.js';
-import { canonicalRoleName } from './access-control.service.js';
+import { canonicalRoleName, isAccessMdPath } from './access-control.service.js';
 import { GROUPS_YAML, SYNCED_GROUPS_YAML, parseGroupsFile, validateGroupsFile } from './group-files.js';
 import { findRoleRefsInText, rewriteRoleTokensInText } from './roles-admin.service.js';
 import { parseRolesModel } from './roles-edit.js';
@@ -365,7 +365,7 @@ export class GroupsAdminService {
       } catch {
         continue;
       }
-      for (const ref of findRoleRefsInText(text)) {
+      for (const ref of findRoleRefsInText(text, true, isAccessMdPath(repoRel))) {
         const list = byName.get(ref.role);
         if (list) list.push({ path: repoRel, verb: ref.verb });
         else byName.set(ref.role, [{ path: repoRel, verb: ref.verb }]);
@@ -394,7 +394,7 @@ export class GroupsAdminService {
           { cause: (err as Error)?.message },
         );
       }
-      const rewritten = rewriteRoleTokensInText(text, oldCanonical, newDisplayName);
+      const rewritten = rewriteRoleTokensInText(text, oldCanonical, newDisplayName, true, isAccessMdPath(repoRel));
       if (rewritten !== text) writes.push({ repoRelativePath: repoRel, content: rewritten });
     }
     return writes;

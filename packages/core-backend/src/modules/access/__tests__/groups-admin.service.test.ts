@@ -176,6 +176,28 @@ describe('GroupsAdminService', () => {
     expect(commits[0].summary).toContain('gtm team → Go To Market');
   });
 
+  it('rename rewrites a BODY-GOVERNED access.md (rules live below the frontmatter)', async () => {
+    // New-format file: frontmatter governs access.md itself, the body is the
+    // folder's rules — exactly what the resolver enforces.
+    await write(
+      repo,
+      'Knowledge/Sales/access.md',
+      '---\nwrite:\n  - Admin\n---\nread:\n  - GTM Team\nwrite:\n  - deny GTM Team\n',
+    );
+    // The scan must see the body rule too (delete warnings / referencedBy).
+    const roster = await service.getRoster();
+    const gtm = roster.groups.find((g) => g.canonical === 'gtm team');
+    expect(gtm?.referencedBy).toContainEqual({ path: 'Knowledge/Sales/access.md', verb: 'read' });
+
+    await service.renameGroup(ADMIN, 'gtm team', 'Go To Market');
+    const rewritten = await fs.readFile(path.join(repo, 'Knowledge/Sales/access.md'), 'utf-8');
+    expect(rewritten).toContain('- Go To Market');
+    expect(rewritten).toContain('- deny Go To Market');
+    expect(rewritten).not.toContain('GTM Team');
+    // The frontmatter self-rule is a rule source too, and Admin is untouched.
+    expect(rewritten).toContain('- Admin');
+  });
+
   it('retireManualGroups deletes the file once; git history is the recovery', async () => {
     expect(await service.retireManualGroups(ADMIN)).toBe(true);
     await expect(groupsYaml()).rejects.toMatchObject({ code: 'ENOENT' });
