@@ -17,6 +17,9 @@ import { parseOwnAccessEntries } from '../access/access-control.service.js';
 import { containsVariableReference } from '../../shared/variable-refs.js';
 import { IGNORE_FILENAME } from './bevel-ignore.js';
 
+// SUPERSEDED by startup/steps/groups-to-plugins.step.ts (the buffered OnServerStart
+// form); this in-place module stays only while kb-seed's lazy path lives, and is
+// removed with it.
 /**
  * One-way migration of a knowledge base from `Groups/` to the Agent Plugins
  * layout under `Plugins/` (https://agent-plugins.org, v1.0.0).
