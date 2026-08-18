@@ -69,7 +69,10 @@ export function parseGroupsFile(
   text: string,
   filename: string,
 ): ParsedGroupsFile | GroupsFileError {
-  const parsed = parseYamlSubset(text);
+  // Tolerate empty keys at parse: this file's contract is ENTRY-level
+  // forgiveness (a blank group name is skipped with a warning below), and a
+  // hard tokenizer error here would retire every OTHER group fail-closed.
+  const parsed = parseYamlSubset(text, { tolerateEmptyKeys: true });
   if (!parsed.ok) return { ok: false, errors: [`${filename}: ${parsed.error}`] };
 
   const root = parsed.value;

@@ -1,4 +1,14 @@
-import { canonicalRoleName, RESERVED_ROLE_NAMES } from './access-control.service.js';
+import { EMAIL_REGEX, canonicalEmail, canonicalRoleName, RESERVED_ROLE_NAMES } from './access-control.service.js';
+
+/**
+ * Locale-independent code-unit comparator. `localeCompare` would make the
+ * "deterministic render" depend on the process's ambient locale/ICU build —
+ * two deployments could then disagree on byte order and ping-pong no-op
+ * detection.
+ */
+function codeUnitCompare(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 
 /**
  * Materializes an external directory's groups into `synced-groups.yaml` — the
@@ -90,9 +100,16 @@ export function renderSyncedGroupsYaml(groups: SyncedGroupRecord[]): RenderedSyn
   const byCanonical = new Map<string, SyncedGroupRecord>();
 
   const sorted = [...groups].sort((a, b) => {
-    const byName = canonicalRoleName(a.displayName).localeCompare(canonicalRoleName(b.displayName));
+    const byName = codeUnitCompare(canonicalRoleName(a.displayName), canonicalRoleName(b.displayName));
     if (byName !== 0) return byName;
-    return (a.externalId ?? '').localeCompare(b.externalId ?? '');
+    const byExternalId = codeUnitCompare(a.externalId ?? '', b.externalId ?? '');
+    if (byExternalId !== 0) return byExternalId;
+    // Full-key duplicates: break the tie on membership so which record wins
+    // the first-wins dedup below never depends on source array order.
+    return codeUnitCompare(
+      a.members.map((m) => `${m.email ?? ''}:${m.active}`).sort(codeUnitCompare).join(','),
+      b.members.map((m) => `${m.email ?? ''}:${m.active}`).sort(codeUnitCompare).join(','),
+    );
   });
 
   for (const group of sorted) {
@@ -122,16 +139,30 @@ export function renderSyncedGroupsYaml(groups: SyncedGroupRecord[]): RenderedSyn
   for (const [, group] of byCanonical) {
     const emails = new Set<string>();
     let skippedMembers = 0;
+    let malformedMembers = 0;
     for (const member of group.members) {
       if (!member.active || !member.email) {
         skippedMembers++;
         continue;
       }
-      emails.add(member.email);
+      // The directory is UNTRUSTED input: a "email" carrying a newline or
+      // entry-grammar characters would corrupt the emitted YAML or inject
+      // memberships. Canonicalize and validate before it may become a line.
+      const email = canonicalEmail(member.email);
+      if (!EMAIL_REGEX.test(email)) {
+        malformedMembers++;
+        continue;
+      }
+      emails.add(email);
     }
     if (skippedMembers > 0) {
       warnings.push(
         `group '${group.displayName}': ${skippedMembers} member${skippedMembers === 1 ? '' : 's'} not materialized (inactive or no email)`,
+      );
+    }
+    if (malformedMembers > 0) {
+      warnings.push(
+        `group '${group.displayName}': ${malformedMembers} member${malformedMembers === 1 ? '' : 's'} not materialized (malformed email)`,
       );
     }
     const name = group.displayName.trim();
@@ -139,7 +170,7 @@ export function renderSyncedGroupsYaml(groups: SyncedGroupRecord[]): RenderedSyn
       lines.push(`  ${name}: []`);
     } else {
       lines.push(`  ${name}:`);
-      for (const email of [...emails].sort()) lines.push(`    - ${email}`);
+      for (const email of [...emails].sort(codeUnitCompare)) lines.push(`    - ${email}`);
     }
   }
 

@@ -53,6 +53,7 @@ import {
   canonicalRoleName,
   canonicalEmail,
   isAccessMdPath,
+  loadActiveGroups,
   parseAccessEntry,
 } from './access-control.service.js';
 import { makeRolesYamlWriteValidator } from './roles-yaml-guard.js';
@@ -71,7 +72,7 @@ import {
 } from './roles-edit.js';
 import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from './group-files.js';
 import { createGroup as editCreateGroup, addGroupMember as editAddGroupMember, GroupsEditError } from './groups-edit.js';
-import { capabilityRoleFor } from './capability-registry.js';
+import { capabilityRoleFor, isLegacyPeopleSetRole } from './capability-registry.js';
 import { GROUP_REF_PREFIX } from './access-control.service.js';
 
 /** A mutation that cannot proceed (invariant violation, contention, not found). */
@@ -434,8 +435,27 @@ export class RolesAdminService {
     return this.getRoster();
   }
 
-  /** Assign a role to a group (Admin refused by the editor — see roles-edit). */
+  /** Assign a role to a group (Admin refused — the editor guards this too). */
   async assignGroup(actor: AuthUser, canonical: string, groupName: string): Promise<RoleRosterEntry[]> {
+    // Admin carve-out OUTRANKS every other answer — it is absolute, so it
+    // must not vary with which groups happen to exist.
+    if (canonical === ADMIN_CANONICAL) {
+      throw new RolesAdminError(
+        'the Admin role cannot be assigned to a group — add individual members instead',
+        422,
+      );
+    }
+    // The ref must name a group the ACTIVE source knows: mergeGroupsIntoRoles
+    // ignores an unknown ref with only a log warning, so a typo here would be
+    // accepted and then silently grant the role to nobody. Fail loudly instead.
+    const workspaceId = await this.ensureWorkspace();
+    const { groups } = await loadActiveGroups((f) => this.readKbFile(workspaceId, f));
+    if (!groups.has(canonicalRoleName(groupName))) {
+      throw new RolesAdminError(`No group named "${groupName.trim()}". Pick an existing group.`, 404, {
+        kind: 'unknown-group',
+        group: groupName.trim(),
+      });
+    }
     await this.runEdit(actor, (text) => editAddGroupRef(text, canonical, groupName));
     return this.getRoster();
   }
@@ -460,7 +480,7 @@ export class RolesAdminService {
    */
   async convertRoleToGroup(actor: AuthUser, canonical: string): Promise<RoleRosterEntry[]> {
     const workspaceId = await this.ensureWorkspace();
-    if (capabilityRoleFor(canonical)) {
+    if (!isLegacyPeopleSetRole(canonical)) {
       throw new RolesAdminError(`'${canonical}' is a capability role — it cannot become a group`, 422);
     }
     if ((await this.readKbFile(workspaceId, SYNCED_GROUPS_YAML)) !== null) {
@@ -472,46 +492,82 @@ export class RolesAdminService {
     }
     await this.assertRolesUnlocked(workspaceId, actor);
 
-    const rolesText = await this.readRolesYaml(workspaceId);
-    const role = parseRolesModel(rolesText).find((r) => canonicalRoleName(r.displayName) === canonical);
-    if (!role) throw new RolesAdminError(`role not found: ${canonical}`, 404);
-    const groupRefs = role.members.filter(isGroupRefMember);
-    if (groupRefs.length > 0) {
-      throw new RolesAdminError(
-        'This role is assigned to groups — remove those assignments before converting it.',
-        422,
-      );
+    // Hold BOTH file locks across read → build → write: candidates are built
+    // from a snapshot, and between an unlocked check and the batch write's
+    // own lock acquisition another admin's edit could land and be silently
+    // overwritten. Same-user acquire is idempotent, so the batch write below
+    // re-acquiring these locks is fine; on any refusal/failure before the
+    // write commits, release without committing.
+    const lockPaths = [GROUPS_YAML, ROLES_YAML].map((f) => `${this.kbDirName}/${f}`).sort();
+    const held: string[] = [];
+    for (const p of lockPaths) {
+      const res = await this.workflowService.acquireLock(workspaceId, this.defaultBranch, p, actor);
+      if (!res.acquired) {
+        for (const h of held) {
+          try {
+            await this.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
+          } catch { /* best-effort unwind */ }
+        }
+        throw new RolesAdminError(
+          `Roles are being edited by ${res.lock.holderName || 'another admin'}. Try again in a moment.`,
+          409,
+        );
+      }
+      held.push(p);
     }
 
-    // Build both candidates BEFORE any write, and validate both.
-    const rolesEdit = this.guardEdit(() => editDeleteRole(rolesText, canonical));
-    this.assertLoadable(rolesEdit.text);
-    const groupsText = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
-    let groupsCandidate: string;
     try {
-      groupsCandidate = editCreateGroup(groupsText, role.displayName).text;
-      for (const email of role.members) {
-        groupsCandidate = editAddGroupMember(groupsCandidate, canonical, email).text;
+      const rolesText = await this.readRolesYaml(workspaceId);
+      const role = parseRolesModel(rolesText).find((r) => canonicalRoleName(r.displayName) === canonical);
+      if (!role) throw new RolesAdminError(`role not found: ${canonical}`, 404);
+      const groupRefs = role.members.filter(isGroupRefMember);
+      if (groupRefs.length > 0) {
+        throw new RolesAdminError(
+          'This role is assigned to groups — remove those assignments before converting it.',
+          422,
+        );
       }
+
+      // Build both candidates BEFORE any write, and validate both.
+      const rolesEdit = this.guardEdit(() => editDeleteRole(rolesText, canonical));
+      this.assertLoadable(rolesEdit.text);
+      const groupsText = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
+      let groupsCandidate: string;
+      try {
+        groupsCandidate = editCreateGroup(groupsText, role.displayName).text;
+        for (const email of role.members) {
+          groupsCandidate = editAddGroupMember(groupsCandidate, canonical, email).text;
+        }
+      } catch (err) {
+        if (err instanceof GroupsEditError) throw new RolesAdminError(err.message, err.status);
+        throw err;
+      }
+      const groupsValid = validateGroupsFile(groupsCandidate, GROUPS_YAML);
+      if (!groupsValid.ok) {
+        throw new RolesAdminError(`groups.yaml would be invalid: ${groupsValid.errors.join('; ')}`, 422);
+      }
+
+      const fsys = await this.lockingFsForActor(workspaceId, actor);
+      await this.mapLockContention(() =>
+        fsys.writeFiles(
+          [
+            { path: `${this.kbDirName}/${ROLES_YAML}`, content: rolesEdit.text },
+            { path: `${this.kbDirName}/${GROUPS_YAML}`, content: groupsCandidate },
+          ],
+          `Convert role ${role.displayName} to a group`,
+        ),
+      );
     } catch (err) {
-      if (err instanceof GroupsEditError) throw new RolesAdminError(err.message, err.status);
+      // The batch write releases the locks itself after a successful commit;
+      // on the failure paths above (including a failed write, which already
+      // released its own acquisitions) drop OUR holds so nothing stays locked.
+      for (const h of held) {
+        try {
+          await this.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
+        } catch { /* already released */ }
+      }
       throw err;
     }
-    const groupsValid = validateGroupsFile(groupsCandidate, GROUPS_YAML);
-    if (!groupsValid.ok) {
-      throw new RolesAdminError(`groups.yaml would be invalid: ${groupsValid.errors.join('; ')}`, 422);
-    }
-
-    const fsys = await this.lockingFsForActor(workspaceId, actor);
-    await this.mapLockContention(() =>
-      fsys.writeFiles(
-        [
-          { path: `${this.kbDirName}/${ROLES_YAML}`, content: rolesEdit.text },
-          { path: `${this.kbDirName}/${GROUPS_YAML}`, content: groupsCandidate },
-        ],
-        `Convert role ${role.displayName} to a group`,
-      ),
-    );
     this.accessControl.invalidate(workspaceId);
     this.emitWrites(workspaceId, actor, [ROLES_YAML, GROUPS_YAML]);
     return this.getRoster();

@@ -102,4 +102,37 @@ describe('GitService.commitChanges', () => {
     const change = await svc.commitChanges(workspaceId, USER, 'no-op');
     expect(change).toBeNull();
   });
+
+  it('onlyPaths scopes the commit — an unrelated dirty file is NOT swept in', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+
+    // The batch's own file, plus a CONCURRENT save's bytes whose commit is
+    // still queued — the shared per-branch workspace makes this ordinary.
+    await fs.writeFile(path.join(repo, 'synced-groups.yaml'), 'groups: {}\n');
+    await fs.writeFile(path.join(repo, 'Old.md'), 'someone else mid-save\n');
+
+    const change = await svc.commitChanges(workspaceId, USER, 'Sync directory groups', [
+      `${PROCESS_MAP_DIR}/synced-groups.yaml`,
+    ]);
+
+    expect(change?.sha).toBeTruthy();
+    const { stdout: nameStatus } = await execFileAsync('git', ['-C', repo, 'show', '--name-status', '--pretty=format:', 'HEAD']);
+    expect(nameStatus).toMatch(/A\s+synced-groups\.yaml/);
+    expect(nameStatus).not.toMatch(/Old\.md/);
+    // The unrelated file stays dirty for its OWN queued commit.
+    const { stdout: status } = await execFileAsync('git', ['-C', repo, 'status', '--porcelain']);
+    expect(status).toContain('Old.md');
+  });
+
+  it('onlyPaths with nothing of its own dirty is a no-op even when other files are dirty', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+
+    await fs.writeFile(path.join(repo, 'Old.md'), 'someone else mid-save\n');
+    const change = await svc.commitChanges(workspaceId, USER, 'Sync directory groups', [
+      `${PROCESS_MAP_DIR}/synced-groups.yaml`,
+    ]);
+    expect(change).toBeNull();
+  });
 });

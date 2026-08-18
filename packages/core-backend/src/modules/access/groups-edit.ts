@@ -64,11 +64,19 @@ export function assertSafeGroupDisplayName(displayName: string): void {
   }
 }
 
-/** Parse groups.yaml into the ordered model; `[]` for an empty/missing file. */
+/**
+ * Parse groups.yaml into the ordered model; `[]` for an empty/missing file.
+ *
+ * Applies the RESOLVER's entry-skip rules (empty/reserved/duplicate names,
+ * malformed member emails — see `parseGroupsFile`): the admin roster and the
+ * edit surface must never show an entry the resolver ignores, or an admin
+ * "manages" a group that grants nothing. Consequence, deliberate: the next
+ * edit's re-emit garbage-collects those dead entries from the file.
+ */
 export function parseGroupsModel(text: string): GroupsModel {
   const trimmed = text.trim();
   if (!trimmed) return [];
-  const parsed = parseYamlSubset(text);
+  const parsed = parseYamlSubset(text, { tolerateEmptyKeys: true });
   if (!parsed.ok) throw new GroupsEditError(`groups.yaml: ${parsed.error}`);
   const root = parsed.value;
   if (root == null || typeof root !== 'object' || Array.isArray(root)) {
@@ -80,10 +88,16 @@ export function parseGroupsModel(text: string): GroupsModel {
     throw new GroupsEditError("groups.yaml: 'groups' must be a mapping");
   }
   const model: GroupsModel = [];
+  const seenCanonicals = new Set<string>();
   for (const [displayName, value] of Object.entries(groupsNode as Record<string, unknown>)) {
+    const canonical = canonicalRoleName(displayName);
+    if (!canonical || RESERVED_ROLE_NAMES.has(canonical) || seenCanonicals.has(canonical)) {
+      continue; // resolver-skipped entry — invisible to the editor too
+    }
     if (value !== null && !Array.isArray(value)) {
       throw new GroupsEditError(`groups.yaml: group '${displayName.trim()}' must be a list of emails`);
     }
+    seenCanonicals.add(canonical);
     const members: string[] = [];
     if (Array.isArray(value)) {
       const seen = new Set<string>();
@@ -92,7 +106,7 @@ export function parseGroupsModel(text: string): GroupsModel {
           throw new GroupsEditError(`groups.yaml: group '${displayName.trim()}' has a non-string member`);
         }
         const email = canonicalEmail(raw);
-        if (!email || seen.has(email)) continue;
+        if (!email || !EMAIL_REGEX.test(email) || seen.has(email)) continue;
         seen.add(email);
         members.push(email);
       }

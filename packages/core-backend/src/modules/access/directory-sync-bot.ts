@@ -11,8 +11,11 @@ import { users } from '../database/core-schema.js';
  * recovery bot.
  */
 
+// Trimmed BEFORE the empty-fallback so a whitespace-only override falls back,
+// and so the constant always compares equal to a trimmed caller email (the
+// machine-owned write rule trims the caller's side).
 export const DIRECTORY_SYNC_BOT_EMAIL = (
-  process.env.DIRECTORY_SYNC_BOT_EMAIL ?? 'directory-sync@bevel.local'
+  process.env.DIRECTORY_SYNC_BOT_EMAIL?.trim() || 'directory-sync@bevel.local'
 ).toLowerCase();
 
 export const DIRECTORY_SYNC_BOT_NAME = 'Directory Sync Bot';

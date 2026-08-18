@@ -155,6 +155,20 @@ describe('roles-edit: mutations', () => {
     expect(r.changed).toBe(false);
   });
 
+  it('group-ref matching is canonical: an un-normalized hand-written ref still matches', () => {
+    // The resolver canonicalizes the ref's suffix (collapsing runs of
+    // spaces), so a hand-written `group:gtm  team` grants — the editors must
+    // find it too, or unassign/rename no-op while the roster still shows the
+    // group. (Parse lowercases members but keeps the double space.)
+    const text = 'roles:\n  Ops:\n    - group:GTM  Team\n';
+    const removed = removeMember(text, 'ops', 'nobody@x.io'); // sanity: parse keeps the un-collapsed ref
+    expect(removed.text).toContain('group:gtm  team');
+    const renamed = renameGroupRefs(text, 'gtm team', 'go to market');
+    expect(renamed.changed).toBe(true);
+    expect(renamed.text).toContain('group:go to market');
+    expect(renamed.text).not.toContain('gtm  team');
+  });
+
   it('only the changed role moves in the diff (other roles untouched)', () => {
     const before = emitRolesModel(parseRolesModel(BASE));
     const after = addMember(before, 'product team', 'z@example.com').text;

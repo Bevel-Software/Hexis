@@ -24,7 +24,6 @@ vi.mock('../services/groups.api', async (importOriginal) => {
     getGroupsRoster: vi.fn(),
     createGroup: vi.fn(),
     deleteGroup: vi.fn(),
-    renameGroup: vi.fn(),
     addGroupMember: vi.fn(),
     removeGroupMember: vi.fn(),
   };
@@ -140,6 +139,39 @@ describe('DirectoryGroupsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Remove pat@example.com' }));
     await waitFor(() =>
       expect(removeGroupMember).toHaveBeenCalledWith('product', 'pat@example.com'),
+    );
+  });
+
+  it('manual mode: overlapping mutations are serialized — the second request waits for the first', async () => {
+    // Mutations are snapshot-based server-side, so the page must never have
+    // two in flight at once. Hold the first response open and check the second
+    // click doesn't issue its request until the first resolves.
+    const resolvers: ((r: GroupsRoster) => void)[] = [];
+    vi.mocked(addGroupMember).mockImplementation(
+      () => new Promise<GroupsRoster>((resolve) => resolvers.push(resolve)),
+    );
+    renderPage();
+
+    const productInput = await screen.findByRole('textbox', { name: 'Add member to Product' });
+    await userEvent.type(productInput, 'a@example.com');
+    await userEvent.click(within(productInput.closest('div')!).getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(addGroupMember).toHaveBeenCalledTimes(1));
+
+    // Second card: its own busy flag is free, so the click goes through — but
+    // the request must queue behind the unresolved first one.
+    const designInput = screen.getByRole('textbox', { name: 'Add member to Design' });
+    await userEvent.type(designInput, 'b@example.com');
+    await userEvent.click(within(designInput.closest('div')!).getByRole('button', { name: 'Add' }));
+    expect(addGroupMember).toHaveBeenCalledTimes(1);
+
+    resolvers[0](MANUAL_ROSTER);
+    await waitFor(() => expect(addGroupMember).toHaveBeenCalledTimes(2));
+    expect(addGroupMember).toHaveBeenNthCalledWith(2, 'design', 'b@example.com');
+
+    resolvers[1](MANUAL_ROSTER);
+    // Both cards settle back to idle.
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Add member to Design' })).not.toBeDisabled(),
     );
   });
 

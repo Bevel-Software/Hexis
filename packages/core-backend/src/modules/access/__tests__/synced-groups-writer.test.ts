@@ -73,6 +73,37 @@ describe('renderSyncedGroupsYaml', () => {
     expect(rendered.warnings.join(' ')).toContain('2 members not materialized');
   });
 
+  it('refuses malformed emails from the directory (YAML corruption / injection)', () => {
+    const rendered = renderSyncedGroupsYaml([
+      group('Engineering', [
+        member(),
+        // A newline-bearing "email" would smuggle extra member lines into the file.
+        member({ email: 'evil@x.io\n    - attacker@evil.io' }),
+        member({ email: 'not an email' }),
+        member({ email: '  ADA@X.IO  ' }), // canonicalized, deduped with ada@x.io
+      ]),
+    ]);
+    expect(rendered.text).toContain('ada@x.io');
+    expect(rendered.text).not.toContain('attacker@evil.io');
+    expect(rendered.text).not.toContain('not an email');
+    expect(rendered.text.match(/ada@x\.io/g)).toHaveLength(1);
+    expect(rendered.warnings.join(' ')).toContain('malformed email');
+  });
+
+  it('sorts by code units, not locale (byte-stable across deployments)', () => {
+    // localeCompare in most locales collates 'é' before 'z'; code units put
+    // 'z' (0x7a) before 'é' (0xe9). Pin the code-unit order so the rendered
+    // bytes never depend on the process's ambient locale/ICU build.
+    const rendered = renderSyncedGroupsYaml([
+      group('équipe', [member()]),
+      group('z team', [member()]),
+    ]);
+    const z = rendered.text.indexOf('z team:');
+    const e = rendered.text.indexOf('équipe:');
+    expect(z).toBeGreaterThan(-1);
+    expect(z).toBeLessThan(e);
+  });
+
   it('skips YAML-unsafe, reserved, and name-colliding groups (fail-closed)', () => {
     const rendered = renderSyncedGroupsYaml([
       group('Ops: West', [member()]),

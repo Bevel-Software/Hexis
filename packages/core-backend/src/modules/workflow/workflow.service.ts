@@ -463,8 +463,9 @@ export class WorkflowService implements IWorkflowService {
     workspaceId: string,
     user: AuthUser,
     summary: string,
+    onlyPaths?: string[],
   ): Promise<Change | null> {
-    const change = await this.git.commitChanges(workspaceId, user, summary);
+    const change = await this.git.commitChanges(workspaceId, user, summary, onlyPaths);
     // Same recovery as the per-file queue: a bare push here could strand the
     // just-made local commit (committed but never shared — breaking save=share)
     // on any non-fast-forward race. Pull-rebase + retry recovers the common

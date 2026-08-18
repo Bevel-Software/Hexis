@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, Plus, Trash2, X } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Dialog } from '../../../shared/components/Dialog';
 import { useAdmin } from '../state/admin.context';
 import { useAppRegistry } from '../../../core/registry';
+import { useExclusiveRunner, type ExclusiveRunner } from '../hooks/useExclusiveRunner';
 import {
   addGroupMember,
   createGroup,
@@ -46,14 +47,23 @@ export function DirectoryGroupsPage() {
   // connecting and the first push, when the roster still reads 'manual' but
   // manual edits would go dormant. See GroupsDirectoryPanelProps.
   const [directoryConnected, setDirectoryConnected] = useState(false);
+  // All roster mutations queue through here — see useExclusiveRunner.
+  const runExclusive = useExclusiveRunner();
+
+  // Bump on every load so a stale in-flight response never overwrites the
+  // current roster.
+  const requestId = useRef(0);
 
   const refresh = useCallback(() => {
+    const myReq = ++requestId.current;
     getGroupsRoster()
       .then((r) => {
+        if (myReq !== requestId.current) return;
         setRoster(r);
         setError(null);
       })
       .catch((err) => {
+        if (myReq !== requestId.current) return;
         setError(errMessage(err, "Couldn't load groups."));
         // Keep whatever was already on screen — a failed reload is a banner,
         // not an empty page.
@@ -67,7 +77,13 @@ export function DirectoryGroupsPage() {
   // Any mutation on the groups roster returns the authoritative roster — set
   // it directly rather than refetching.
   const applyRoster = useCallback((r: GroupsRoster) => {
+    // Bump so an in-flight refresh() result is dropped in favour of this
+    // fresher mutation response.
+    requestId.current++;
     setRoster(r);
+    // A stale banner from an earlier failed reload no longer describes what's
+    // on screen.
+    setError(null);
   }, []);
 
   async function handleDeleteGroup() {
@@ -75,7 +91,8 @@ export function DirectoryGroupsPage() {
     setWorking(true);
     setError(null);
     try {
-      applyRoster(await deleteGroup(deleteTarget.canonical));
+      const target = deleteTarget;
+      applyRoster(await runExclusive(() => deleteGroup(target.canonical)));
       setDeleteTarget(null);
     } catch (err) {
       setDeleteTarget(null);
@@ -125,6 +142,7 @@ export function DirectoryGroupsPage() {
               roster={roster}
               onApply={applyRoster}
               onDeleteRequest={setDeleteTarget}
+              runExclusive={runExclusive}
             />
           )}
 
@@ -195,10 +213,12 @@ function ManualModeView({
   roster,
   onApply,
   onDeleteRequest,
+  runExclusive,
 }: {
   roster: GroupsRoster;
   onApply: (roster: GroupsRoster) => void;
   onDeleteRequest: (group: GroupRosterEntry) => void;
+  runExclusive: ExclusiveRunner;
 }) {
   return (
     <>
@@ -206,7 +226,7 @@ function ManualModeView({
         Groups are sets of people you can share with and assign roles to.
       </p>
 
-      <CreateGroupForm onApply={onApply} />
+      <CreateGroupForm onApply={onApply} runExclusive={runExclusive} />
 
       {roster.groups.length === 0 ? (
         <div className="text-xs text-ink-muted">No groups yet.</div>
@@ -218,6 +238,7 @@ function ManualModeView({
               group={group}
               onApply={onApply}
               onDeleteRequest={onDeleteRequest}
+              runExclusive={runExclusive}
             />
           ))}
         </div>
@@ -226,7 +247,13 @@ function ManualModeView({
   );
 }
 
-function CreateGroupForm({ onApply }: { onApply: (roster: GroupsRoster) => void }) {
+function CreateGroupForm({
+  onApply,
+  runExclusive,
+}: {
+  onApply: (roster: GroupsRoster) => void;
+  runExclusive: ExclusiveRunner;
+}) {
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -240,7 +267,7 @@ function CreateGroupForm({ onApply }: { onApply: (roster: GroupsRoster) => void 
     setBusy(true);
     setError(null);
     try {
-      onApply(await createGroup(trimmed));
+      onApply(await runExclusive(() => createGroup(trimmed)));
       setName('');
     } catch (err) {
       setError(errMessage(err, 'Failed to create group'));
@@ -286,10 +313,12 @@ function ManualGroupCard({
   group,
   onApply,
   onDeleteRequest,
+  runExclusive,
 }: {
   group: GroupRosterEntry;
   onApply: (roster: GroupsRoster) => void;
   onDeleteRequest: (group: GroupRosterEntry) => void;
+  runExclusive: ExclusiveRunner;
 }) {
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
@@ -304,7 +333,7 @@ function ManualGroupCard({
     setBusy(true);
     setError(null);
     try {
-      onApply(await addGroupMember(group.canonical, trimmed));
+      onApply(await runExclusive(() => addGroupMember(group.canonical, trimmed)));
       setEmail('');
     } catch (err) {
       setError(errMessage(err, 'Failed to add member'));
@@ -317,7 +346,7 @@ function ManualGroupCard({
     setBusy(true);
     setError(null);
     try {
-      onApply(await removeGroupMember(group.canonical, member));
+      onApply(await runExclusive(() => removeGroupMember(group.canonical, member)));
     } catch (err) {
       setError(errMessage(err, 'Failed to remove member'));
     } finally {

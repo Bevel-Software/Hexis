@@ -292,7 +292,11 @@ export class LockingFilesystem extends LocalFilesystem {
           );
         }
       }
-      change = await workflow.commitChanges(workspaceId, user, summary);
+      // Scope the commit to this batch's own paths (caller paths + landed
+      // seeds): on the shared per-branch workspace another save's bytes may be
+      // dirty with their commit still queued, and an unscoped commit would
+      // sweep them in under this batch's author/summary.
+      change = await workflow.commitChanges(workspaceId, user, summary, acquired);
       if (seeds.size > 0) this.lockContext.creatorAccess?.noteAccessFileWritten(workspaceId);
     } catch (err) {
       // A write or the commit threw — nothing should land. releaseLockNoCommit

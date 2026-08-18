@@ -286,7 +286,10 @@ interface Token {
   value: string;
 }
 
-function tokenise(text: string): YamlErr | { ok: true; tokens: Token[] } {
+function tokenise(
+  text: string,
+  opts?: { tolerateEmptyKeys?: boolean },
+): YamlErr | { ok: true; tokens: Token[] } {
   const lines = text.split(/\r?\n/);
   const tokens: Token[] = [];
   for (let i = 0; i < lines.length; i++) {
@@ -308,14 +311,23 @@ function tokenise(text: string): YamlErr | { ok: true; tokens: Token[] } {
     }
     const key = content.slice(0, colonIdx).trim();
     const valuePart = content.slice(colonIdx + 1).trim();
-    if (!key) return { ok: false, error: `line ${lineNum}: empty mapping key` };
+    // An empty key is normally a hard error (roles.yaml/access.md want loud
+    // failures), but a parser with ENTRY-level forgiveness (the group files:
+    // one bad entry must not retire every other group) keeps it as an ''
+    // key for its own skip-with-warning handling.
+    if (!key && !opts?.tolerateEmptyKeys) {
+      return { ok: false, error: `line ${lineNum}: empty mapping key` };
+    }
     tokens.push({ lineNum, indent, kind: 'kv', key, value: valuePart });
   }
   return { ok: true, tokens };
 }
 
-export function parseYamlSubset(text: string): YamlOk | YamlErr {
-  const tok = tokenise(text);
+export function parseYamlSubset(
+  text: string,
+  opts?: { tolerateEmptyKeys?: boolean },
+): YamlOk | YamlErr {
+  const tok = tokenise(text, opts);
   if (!tok.ok) return tok;
   if (tok.tokens.length === 0) return { ok: true, value: {} };
 
@@ -1431,6 +1443,8 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePath: string,
   ): Promise<boolean> {
+    const machineOwned = this.machineOwnedWriteRule(userEmail, relativePath);
+    if (machineOwned !== null) return machineOwned;
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return hasPermissionResolved(model, 'write', userEmail, relativePath, own);
@@ -1475,7 +1489,8 @@ export class AccessControlService implements IAccessControl {
     const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
-      result.set(p, hasPermissionResolved(model, 'write', userEmail, p, owns[i]));
+      const machineOwned = this.machineOwnedWriteRule(userEmail, p);
+      result.set(p, machineOwned ?? hasPermissionResolved(model, 'write', userEmail, p, owns[i]));
     });
     return result;
   }
@@ -1798,6 +1813,16 @@ export class AccessControlService implements IAccessControl {
     // One `git cat-file --batch` for the whole path set — see canWriteBatchAtRef.
     const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
     for (const p of relativePaths) {
+      if (p === SYNCED_GROUPS_YAML) {
+        // Machine-owned — same answer eligibleWritersAtRef gives, so batched
+        // consumers (CR owner-routing, approval state) agree with it.
+        result.set(p, {
+          roles: [],
+          users: [{ name: DIRECTORY_SYNC_BOT_NAME, email: DIRECTORY_SYNC_BOT_EMAIL }],
+          emails: new Set([DIRECTORY_SYNC_BOT_EMAIL]),
+        });
+        continue;
+      }
       const own = owns.get(p) ?? null;
       const display = eligibleHoldersResolved(loaded.model, 'write', p, own);
       const emails = new Set(eligibleHolderEmailsResolved(loaded.model, 'write', p, own).keys());

@@ -245,6 +245,19 @@ function groupRefFor(groupName: string): string {
 }
 
 /**
+ * The canonical group name a member entry references, or null for non-refs.
+ * Matching MUST go through this rather than string equality on the ref: a
+ * hand-edited file may carry an un-normalized ref (`group:GTM  Team`) that
+ * the RESOLVER honors (it canonicalizes the suffix) — an equality match would
+ * then no-op the unassign/rename while the roster still shows the group.
+ */
+function groupRefCanonical(member: string): string | null {
+  return isGroupRefMember(member)
+    ? canonicalRoleName(member.slice(GROUP_REF_PREFIX.length))
+    : null;
+}
+
+/**
  * Assign a role to a group. Refused for Admin — same carve-out the resolver's
  * parser enforces (see GROUP_REF_PREFIX): a group must never decide who is
  * admin. Idempotent; 404 unknown role.
@@ -254,10 +267,13 @@ export function addRoleGroupRef(text: string, canonical: string, groupName: stri
     throw new RolesEditError('the Admin role cannot be assigned to a group — add individual members instead');
   }
   const ref = groupRefFor(groupName);
+  const refCanonical = canonicalRoleName(groupName);
   const model = parseRolesModel(text);
   const role = findRole(model, canonical);
   if (!role) throw new RolesEditError(`role not found: ${canonical}`, 404);
-  if (role.members.includes(ref)) return { text: emitRolesModel(model), changed: false };
+  if (role.members.some((m) => groupRefCanonical(m) === refCanonical)) {
+    return { text: emitRolesModel(model), changed: false };
+  }
   role.members.push(ref);
   return reemit(text, model);
 }
@@ -271,14 +287,13 @@ export function addRoleGroupRef(text: string, canonical: string, groupName: stri
  * dedupe rather than duplicate. No-op when nothing references the old name.
  */
 export function renameGroupRefs(text: string, oldCanonical: string, newCanonical: string): EditResult {
-  const oldRef = `${GROUP_REF_PREFIX}${oldCanonical}`;
   const newRef = `${GROUP_REF_PREFIX}${newCanonical}`;
   const model = parseRolesModel(text);
   let changed = false;
   for (const role of model) {
-    const idx = role.members.indexOf(oldRef);
+    const idx = role.members.findIndex((m) => groupRefCanonical(m) === oldCanonical);
     if (idx < 0) continue;
-    if (role.members.includes(newRef)) role.members.splice(idx, 1);
+    if (role.members.some((m) => groupRefCanonical(m) === newCanonical)) role.members.splice(idx, 1);
     else role.members[idx] = newRef;
     changed = true;
   }
@@ -288,11 +303,11 @@ export function renameGroupRefs(text: string, oldCanonical: string, newCanonical
 
 /** Remove a role's group assignment. 404 unknown role; no-op if not assigned. */
 export function removeRoleGroupRef(text: string, canonical: string, groupName: string): EditResult {
-  const ref = groupRefFor(groupName);
+  const refCanonical = canonicalRoleName(groupName);
   const model = parseRolesModel(text);
   const role = findRole(model, canonical);
   if (!role) throw new RolesEditError(`role not found: ${canonical}`, 404);
-  const idx = role.members.indexOf(ref);
+  const idx = role.members.findIndex((m) => groupRefCanonical(m) === refCanonical);
   if (idx < 0) return { text: emitRolesModel(model), changed: false };
   role.members.splice(idx, 1);
   return reemit(text, model);

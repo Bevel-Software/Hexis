@@ -86,6 +86,18 @@ describe('group files as access principals', () => {
     expect(await svc.canWrite(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(false);
   });
 
+  it('a blank group key is skipped — every OTHER group keeps resolving', async () => {
+    const svc = await makeService({
+      'roles.yaml': ROLES_YAML,
+      // The blank key (and its members) is an entry-level problem; a hard
+      // parse failure here would retire Engineering too, fail-closed.
+      'groups.yaml': 'groups:\n  :\n    - stray@x.io\n  Engineering:\n    - ada@x.io\n',
+      'access.md': '---\nread:\n  - Engineering\n---\n',
+    });
+    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(true);
+    expect(await svc.canRead(workspaceId, 'stray@x.io', 'Knowledge/Doc.md')).toBe(false);
+  });
+
   it('a group reference with no group file behind it grants nothing', async () => {
     const svc = await makeService({
       'roles.yaml': ROLES_YAML,

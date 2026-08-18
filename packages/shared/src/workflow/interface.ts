@@ -143,11 +143,18 @@ export interface IWorkflowService {
    * content: the caller writes the files first (e.g. via the lock-aware
    * filesystem) and is responsible for any validation. Returns null on a no-op
    * (clean tree).
+   *
+   * `onlyPaths` (workspace-relative) scopes the commit to the caller's own
+   * files: on a shared per-branch workspace other paths may be dirty from a
+   * concurrent save whose commit is still queued, and an unscoped commit
+   * would sweep them in under this caller's author/summary. Omitted → the
+   * whole dirty set (legacy behavior for flows that own the workspace).
    */
   commitChanges(
     workspaceId: string,
     user: AuthUser,
     summary: string,
+    onlyPaths?: string[],
   ): Promise<Change | null>;
   /** Per-file history. Newest first; clamps to ≤ 100 entries. */
   listChangesForFile(workspaceId: string, path: string, limit?: number): Promise<Change[]>;

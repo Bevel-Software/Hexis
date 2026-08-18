@@ -128,6 +128,16 @@ describe('AdminRolesPage: capabilities, groups, and legacy conversion', () => {
     await waitFor(() => expect(unassignGroup).toHaveBeenCalledWith('editor', 'engineering'));
   });
 
+  it('legacy roles get Convert instead of group assignment — never both', async () => {
+    renderPage();
+    const legacyCard = within(await findCard('Product'));
+    expect(legacyCard.getByRole('button', { name: 'Convert to group' })).toBeInTheDocument();
+    // A group-assigned role can't be converted, so offering assignment here
+    // would dead-end the Convert path.
+    expect(legacyCard.queryByText('Assigned groups')).not.toBeInTheDocument();
+    expect(legacyCard.queryByRole('textbox', { name: 'Assign group' })).not.toBeInTheDocument();
+  });
+
   it('legacy role converts only after an explicit confirm, refreshing from the response', async () => {
     renderPage();
     const legacyCard = within(await findCard('Product'));

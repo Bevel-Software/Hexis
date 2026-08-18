@@ -17,6 +17,7 @@ import {
   type RoleRosterEntry,
 } from '../services/roles.api';
 import { suggestPrincipals } from '../../access/api';
+import { useExclusiveRunner, type ExclusiveRunner } from '../hooks/useExclusiveRunner';
 
 /** The default-branch workspace id — roles are managed there (admin status derives from it). */
 // A function, not a constant: the branch model arrives from `/api/config`
@@ -98,6 +99,10 @@ export function AdminRolesPage() {
   // current roster.
   const requestId = useRef(0);
 
+  // All roster mutations queue through here — see useExclusiveRunner. The
+  // per-card busy/optimistic UX is untouched; only the requests serialize.
+  const runExclusive = useExclusiveRunner();
+
   // Load the roster on mount (and again if admin status resolves later —
   // AdminProvider fetches admin status asynchronously, so `isAdmin` can flip
   // to true after the first render). All setState happens in the async
@@ -176,7 +181,7 @@ export function AdminRolesPage() {
       };
       setPendingCreates((prev) => [...prev, placeholder]);
       try {
-        const rows = await createRole(displayName.trim());
+        const rows = await runExclusive(() => createRole(displayName.trim()));
         applyRoster(rows);
         return null;
       } catch (err) {
@@ -184,7 +189,7 @@ export function AdminRolesPage() {
         return errMessage(err, 'Failed to create role');
       }
     },
-    [applyRoster],
+    [applyRoster, runExclusive],
   );
 
   // Optimistic delete: hide the card immediately, fire the commit, reconcile
@@ -200,7 +205,7 @@ export function AdminRolesPage() {
         return rest;
       });
       try {
-        const rows = await deleteRole(canonical);
+        const rows = await runExclusive(() => deleteRole(canonical));
         applyRoster(rows);
       } catch (err) {
         // Roll back the optimistic hide and record the error against the
@@ -213,7 +218,7 @@ export function AdminRolesPage() {
         setDeleteErrors((prev) => ({ ...prev, [canonical]: errMessage(err, 'Failed to delete role') }));
       }
     },
-    [applyRoster],
+    [applyRoster, runExclusive],
   );
 
   // The list the user sees = authoritative roster minus optimistically-deleted,
@@ -259,6 +264,7 @@ export function AdminRolesPage() {
               onApply={applyRoster}
               onDelete={deleteOptimistic}
               deleteError={deleteErrors[role.canonical] ?? null}
+              runExclusive={runExclusive}
             />
           ))}
         </div>
@@ -358,6 +364,7 @@ function RoleCard({
   onApply,
   onDelete,
   deleteError,
+  runExclusive,
 }: {
   role: RoleRosterEntry;
   onApply: (rows: RoleRosterEntry[]) => void;
@@ -365,6 +372,8 @@ function RoleCard({
   // Delete error for this role, owned by the parent so it survives the
   // optimistic hide→restore cycle (the card may remount in between).
   deleteError: string | null;
+  // Page-level mutation queue — every card's mutations share it.
+  runExclusive: ExclusiveRunner;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -476,7 +485,7 @@ function RoleCard({
       setBusy(true);
       setError(null);
       try {
-        const rows = await fn();
+        const rows = await runExclusive(fn);
         onApply(rows);
         return true;
       } catch (err) {
@@ -486,7 +495,7 @@ function RoleCard({
         setBusy(false);
       }
     },
-    [onApply],
+    [onApply, runExclusive],
   );
 
   const submitRename = async () => {
@@ -503,7 +512,7 @@ function RoleCard({
     setRenaming(false);
     setRenamePending(true);
     try {
-      const rows = await renameRole(role.canonical, next);
+      const rows = await runExclusive(() => renameRole(role.canonical, next));
       onApply(rows);
     } catch (err) {
       setOptimisticName(null); // roll back the optimistic label
@@ -543,7 +552,7 @@ function RoleCard({
     setShowSuggest(false);
     setSuggestions([]);
     try {
-      const rows = await addMember(role.canonical, email);
+      const rows = await runExclusive(() => addMember(role.canonical, email));
       onApply(rows);
     } catch (err) {
       // Roll back the optimistic chip so it disappears.
@@ -571,7 +580,7 @@ function RoleCard({
     // chip just disappears, which is the whole point of optimism.
     setPendingRemovals((s) => new Set(s).add(email.toLowerCase()));
     try {
-      const rows = await removeMember(role.canonical, email);
+      const rows = await runExclusive(() => removeMember(role.canonical, email));
       onApply(rows); // authoritative roster replaces local members
     } catch (err) {
       // Roll back the optimistic hide so the chip returns.
@@ -837,8 +846,10 @@ function RoleCard({
 
       {/* Group assignments — everyone in an assigned group holds the role.
           Hidden for Admin (individuals only: its blast radius must not follow
-          IdP-managed membership) and for capabilities that opt out. */}
-      {!role.isAdmin && role.capability?.groupAssignable !== false && (
+          IdP-managed membership), for capabilities that opt out, and for
+          legacy people-set roles — those get "Convert to group" instead, and a
+          group-assigned role can no longer be converted. */}
+      {!role.isAdmin && role.capability !== null && role.capability.groupAssignable !== false && (
         <div className="mt-3 pt-3 border-t border-line">
           <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1.5">
             Assigned groups

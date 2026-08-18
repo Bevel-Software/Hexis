@@ -181,6 +181,10 @@ export class GroupsAdminService {
   // ---- Mutations ----------------------------------------------------------
 
   async createGroup(actor: AuthUser, displayName: string): Promise<GroupsRoster> {
+    // Mode gate FIRST: in IdP mode every mutation must answer the typed 409
+    // (the UI's cue to point at the identity provider) — a name-collision 422
+    // for a name like "Admin" would mislead about what is actually refused.
+    await this.assertManualMode(await this.ensureWorkspace());
     await this.assertRoleNameFree(displayName);
     await this.runEdit(actor, (text) => editCreateGroup(text, displayName));
     return this.getRoster();

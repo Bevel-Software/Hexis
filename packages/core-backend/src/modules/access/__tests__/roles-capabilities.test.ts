@@ -93,6 +93,9 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-roles-cap-'));
     repo = path.join(root, KB);
     await write(repo, 'roles.yaml', ROLES);
+    // Assignable groups must exist in the ACTIVE source — assignGroup
+    // validates against it (a ref to a missing group is a dead grant).
+    await write(repo, 'groups.yaml', 'groups:\n  GTM Team:\n    - sara@x.io\n');
     await write(repo, 'access.md', '---\nwrite:\n  - Admin\nread:\n  - Product\n---\n');
     const workspace = stubWorkspace(root);
     const workflow = stubWorkflow();
@@ -138,12 +141,23 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     expect(roster.find((r) => r.canonical === 'product')?.groups).toEqual([]);
   });
 
+  it('refuses to assign a group the active source does not know (dead grant)', async () => {
+    const before = await rolesYaml();
+    await expect(service.assignGroup(ADMIN, 'product', 'Ghost Team')).rejects.toMatchObject({
+      status: 404,
+      payload: { kind: 'unknown-group', group: 'Ghost Team' },
+    });
+    expect(await rolesYaml()).toBe(before);
+  });
+
   it('refuses to assign Admin to a group', async () => {
+    const before = await rolesYaml();
     await expect(service.assignGroup(ADMIN, 'admin', 'Engineering')).rejects.toMatchObject({
       status: 422,
       message: expect.stringContaining('cannot be assigned to a group'),
     });
-    expect(await rolesYaml()).not.toContain('group:engineering\n    - admin');
+    // The refusal wrote NOTHING — the file is byte-identical.
+    expect(await rolesYaml()).toBe(before);
   });
 
   it('converts a legacy role to a group atomically; grants keep the name', async () => {

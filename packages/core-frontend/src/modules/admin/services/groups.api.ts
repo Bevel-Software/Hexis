@@ -79,18 +79,6 @@ export async function deleteGroup(canonical: string): Promise<GroupsRoster> {
   return parseRoster(res);
 }
 
-export async function renameGroup(
-  canonical: string,
-  newDisplayName: string,
-): Promise<GroupsRoster> {
-  const res = await authFetch(`/api/admin/groups/${encodeURIComponent(canonical)}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ newDisplayName }),
-  });
-  return parseRoster(res);
-}
-
 export async function addGroupMember(
   canonical: string,
   email: string,

@@ -987,6 +987,7 @@ export class GitService implements IGitService {
     workspaceId: string,
     user: AuthUser,
     summary: string,
+    onlyPaths?: string[],
   ): Promise<CommitAttribution | null> {
     assertValidAuthor(user);
     const subject = summary?.trim();
@@ -1001,7 +1002,15 @@ export class GitService implements IGitService {
       // Nothing dirty → no-op (idempotent). Compute touched BEFORE `git add` so
       // the protected-branch gate sees the same path set `commit()` would.
       const { stdout: porcelain } = await this.git(cwd, ['status', '--porcelain=v1', '-z']);
-      const touched = parsePorcelainZ(porcelain);
+      let touched = parsePorcelainZ(porcelain);
+      // Scope to the caller's own paths (see the interface doc): other files
+      // may be dirty from a concurrent same-branch save whose commit is still
+      // queued — sweeping them in would land them under this caller's
+      // author/summary, and gate the commit on paths the caller never touched.
+      if (onlyPaths) {
+        const scope = new Set(onlyPaths.map((p) => this.stripRepoPrefix(p)));
+        touched = touched.filter((p) => scope.has(p));
+      }
       if (touched.length === 0) return null;
 
       // Protected-branch access gate (defence in depth — callers already gate at
@@ -1011,7 +1020,11 @@ export class GitService implements IGitService {
         await this.assertCanWriteAtRef(workspaceId, 'HEAD', user.email, touched);
       }
 
-      await this.git(cwd, ['add', '-A']);
+      // Scoped → stage exactly the touched set (`add -A -- <paths>` covers
+      // modifications and deletions alike); `git commit` then takes the index,
+      // leaving the other dirty paths for their own queued commits.
+      if (onlyPaths) await this.git(cwd, ['add', '-A', '--', ...touched]);
+      else await this.git(cwd, ['add', '-A']);
       await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject]);
 
       const { stdout } = await this.git(cwd, [
