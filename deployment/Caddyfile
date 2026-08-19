@@ -1,0 +1,7 @@
+# Served by the caddy service in deployment/docker-compose.https.yml.
+# {$DOMAIN} is that service's environment variable; `app` is the app service's
+# name on the compose network. HTTPS, certificates and the HTTP→HTTPS redirect
+# all come from this one site block — that is Caddy's whole appeal here.
+{$DOMAIN} {
+	reverse_proxy app:3001
+}

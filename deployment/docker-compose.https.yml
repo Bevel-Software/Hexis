@@ -1,0 +1,67 @@
+# Public HTTPS in one step, for a server with NO reverse proxy of its own —
+# a bare EC2 instance, a plain VPS. Adds Caddy in front of the app; Caddy
+# obtains and renews Let's Encrypt certificates for ${DOMAIN} automatically.
+#
+# Usage, from the repository root (DOMAIN can also live in .env):
+#
+#   DOMAIN=bevel.your-domain.com \
+#     docker compose -f docker-compose.yml -f deployment/docker-compose.https.yml up -d
+#
+# Requirements: a DNS A (or AAAA) record for ${DOMAIN} pointing at this
+# server, and ports 80 + 443 reachable from the internet (on EC2: both open
+# in the security group — 80 is not optional, the certificate challenge and
+# the HTTP→HTTPS redirect both use it).
+#
+# Deployments that already sit behind a proxy (Coolify, Traefik, nginx) do
+# NOT want this file — two things terminating TLS for one app is one too
+# many. See deployment/README.md.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      # HTTP/3. Caddy offers it by default; without the UDP mapping the offer
+      # dangles and browsers fall back after a timeout instead of instantly.
+      - "443:443/udp"
+    environment:
+      # `:?` and not `:-`: a certificate has to be FOR a name, so there is no
+      # default worth inventing — better to refuse to start with this message
+      # than to come up serving a certificate error.
+      - DOMAIN=${DOMAIN:?set DOMAIN to the public host name this deployment should serve, e.g. bevel.your-domain.com}
+    volumes:
+      # Relative to the project directory (the repo root when invoked as
+      # documented above), not to this file.
+      - ./deployment/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates + ACME account. Named volumes so a redeploy does not
+      # re-issue certificates — Let's Encrypt rate-limits issuance per name,
+      # and a deploy loop that discards certs can lock the domain out for a
+      # week.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+    # Same retention cap the base file applies to every service. YAML anchors
+    # do not cross files, so the options are spelled out again here.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  app:
+    environment:
+      # One proxy hop — Caddy — unless the operator says otherwise (a CDN in
+      # front of Caddy makes it 2).
+      - TRUST_PROXY=${TRUST_PROXY:-1}
+      # The public origin IS the domain Caddy serves; setting these here is
+      # what lets the README's "origin values" step be skipped entirely when
+      # this overlay is in play.
+      - PUBLIC_BACKEND_URL=https://${DOMAIN:?set DOMAIN to the public host name this deployment should serve}
+      - PUBLIC_FRONTEND_URL=https://${DOMAIN}
+
+volumes:
+  caddy_data:
+  caddy_config:

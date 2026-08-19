@@ -167,6 +167,17 @@ network. This is deliberate: a fixed published port makes every redeploy fail
 with `port is already allocated`, because the replacement container starts
 while the outgoing one still holds it.
 
+**No reverse proxy yet?** (a bare EC2 instance, a plain VPS): the bundled
+Caddy overlay gets you public HTTPS with automatic Let's Encrypt certificates
+in one command — it also sets `TRUST_PROXY` and both origin values from
+`DOMAIN`, so the two steps above fall away. DNS record and open ports 80+443
+first; details in [deployment/](deployment/README.md).
+
+```sh
+DOMAIN=bevel.your-domain.com \
+  docker compose -f docker-compose.yml -f deployment/docker-compose.https.yml up -d
+```
+
 **Directly exposed** (no proxy): plain `docker compose up -d` publishes
 `:3001`; use `APP_PORT=8080 docker compose up -d` for a different host port.
 Leave `TRUST_PROXY` unset here. With no proxy in front, trusting forwarded
