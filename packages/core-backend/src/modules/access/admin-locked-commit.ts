@@ -9,12 +9,28 @@
  *
  *   withFileLocks(paths, fn)          — acquire every path's lock (sorted,
  *     all-or-nothing; strict even for the same user), run `fn`, release.
- *     Release is commit-on-release: `fn` restores its own bytes on failure,
- *     so anything dirty at release time is either clean (queued commit
- *     no-ops) or someone else's still-queued work that must be preserved.
- *     The ONE exception: a path whose restore itself failed
- *     (`unrestoredPaths` on the thrown error) holds known-partial bytes, and
- *     committing those is worse than discarding to HEAD.
+ *     HOW each lock is released depends on the outcome (see the finally
+ *     block for the full reasoning):
+ *       - `fn` succeeded → releaseLockNoCommit for every path the batch
+ *         commit LANDED on (tracked by writeAndCommitLocked): the commit
+ *         landed AND pushed, so the tree there is clean (the discard
+ *         no-ops); releaseLock would instead ENQUEUE a commit before
+ *         dropping the row, and an enqueue failure then strands the lock
+ *         until TTL. A held path the batch never committed keeps
+ *         commit-on-release — it may carry a PRIOR holder's still-queued
+ *         work, which a discard would destroy.
+ *       - `fn` threw PushNeedsAgentResolutionError → releaseLock. The commit
+ *         landed but the push didn't; the enqueued release commit IS the
+ *         retry (the worker sees the clean tree, notices unpushed commits,
+ *         and re-runs the cooperative push ladder).
+ *       - `fn` threw anything else → releaseLock (commit-on-release): `fn`
+ *         restored its own bytes, so anything dirty at release time is
+ *         either clean (queued commit no-ops) or someone else's still-queued
+ *         work that must be preserved. The ONE exception: a path whose
+ *         restore itself failed (`unrestoredPaths` on the thrown error)
+ *         holds known-partial bytes → releaseLockNoCommit discards to HEAD.
+ *     Every release is per-path best-effort: one failed release logs and
+ *     moves on so it can never strand the REST of the held locks.
  *
  *   writeAndCommitLocked(files)       — the write half of a withFileLocks
  *     flow: plain-write each file (the lock is already ours — strict
@@ -60,7 +76,21 @@ export interface LockedWrite {
 }
 
 export class AdminLockedCommits {
+  /**
+   * Workspace-scoped ws-relative paths whose bytes a `writeAndCommitLocked`
+   * batch has committed (and pushed) while their locks are held — i.e. paths
+   * whose working tree is KNOWN clean. `withFileLocks` releases exactly these
+   * with `releaseLockNoCommit` on success (see the module doc) and clears
+   * each entry as it releases. Keyed `<workspaceId>\0<wsRelPath>` so two
+   * workspaces can't cross-talk.
+   */
+  private readonly committedCleanPaths = new Set<string>();
+
   constructor(private readonly deps: LockedCommitDeps) {}
+
+  private cleanKey(workspaceId: string, wsRelPath: string): string {
+    return `${workspaceId}\0${wsRelPath}`;
+  }
 
   private get defaultBranch(): string {
     return this.deps.defaultBranchOf();
@@ -145,6 +175,7 @@ export class AdminLockedCommits {
   ): Promise<T> {
     const paths = repoRelFiles.map((f) => this.wsRel(f)).sort();
     const held: string[] = [];
+    let failure: unknown | null = null;
     let unrestored: Set<string> | null = null;
     try {
       for (const p of paths) {
@@ -159,17 +190,49 @@ export class AdminLockedCommits {
       }
       return await fn();
     } catch (err) {
+      failure = err;
       unrestored = (err as { unrestoredPaths?: Set<string> } | null)?.unrestoredPaths ?? null;
       throw err;
     } finally {
+      // Outcome-dependent release — see the module doc. The key hazard this
+      // guards: `releaseLock` ENQUEUES the release commit BEFORE dropping the
+      // lock row (deliberately, so a crash can't orphan bytes), which means an
+      // enqueue failure leaves the row held until TTL. After a SUCCESSFUL
+      // batch commit there is nothing left to commit — writeAndCommitLocked
+      // committed and pushed these exact paths, and we hold their locks, so
+      // the tree there is clean — so releaseLockNoCommit (whose discard
+      // no-ops on a clean path) releases without ever touching the queue.
+      //
+      // EXCEPT on the push-retry path: PushNeedsAgentResolutionError means
+      // the commit landed but the push didn't, and the enqueued release
+      // commit is what retries the push (runPendingCommit: clean tree +
+      // unpushed commits → pushWithRecovery). That path MUST releaseLock.
+      // Failures there log + continue so one bad enqueue strands at most its
+      // own lock (TTL backstop), never the rest.
+      const pushRetry = failure instanceof PushNeedsAgentResolutionError;
       for (const h of held) {
+        const committedClean =
+          this.committedCleanPaths.delete(this.cleanKey(workspaceId, h)) && !pushRetry;
         try {
-          if (unrestored?.has(h)) {
+          if ((failure === null && committedClean) || unrestored?.has(h)) {
+            // Batch-committed path on success (clean tree — discard no-ops),
+            // or known-partial bytes (restore failed — discarding to HEAD
+            // beats committing them).
             await this.deps.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
           } else {
+            // Push-retry (the enqueued commit retries the share), the
+            // restored-failure path, and any held path the batch never
+            // committed (commit-on-release: a prior holder's still-queued
+            // work must be preserved, never discarded).
             await this.deps.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
           }
-        } catch { /* best-effort release */ }
+        } catch (releaseErr) {
+          console.warn(
+            `[${this.deps.logTag}] could not release lock on ${h}${pushRetry ? ' (push-retry release)' : ''}; ` +
+              'it frees on TTL — continuing with the remaining locks:',
+            releaseErr instanceof Error ? releaseErr.message : releaseErr,
+          );
+        }
       }
     }
   }
@@ -189,6 +252,11 @@ export class AdminLockedCommits {
     try {
       for (const f of files) await workspaceService.writeFile(workspaceId, this.wsRel(f.repoRel), f.content);
       await workflowService.commitChanges(workspaceId, actor, summary, files.map((f) => this.wsRel(f.repoRel)));
+      // Commit landed AND pushed — the tree at these paths is clean. Mark
+      // them so withFileLocks releases them WITHOUT enqueueing a release
+      // commit (see the module doc — an enqueue failure would strand the
+      // lock until TTL for a commit there is nothing left to make).
+      for (const f of files) this.committedCleanPaths.add(this.cleanKey(workspaceId, this.wsRel(f.repoRel)));
     } catch (err) {
       // POST-commit failure: the commit landed and only the PUSH needs help
       // (thrown "with the commit intact"). The bytes on disk match the landed
