@@ -11,8 +11,22 @@ import type {
   GrantPrincipal,
   GrantSource,
   GrantSources,
+  ResolvedPrincipal,
 } from './access-control.interface.js';
 import { AccessConfigError } from './access-errors.js';
+// NOTE: deliberate module cycle — group-files.ts imports this module's parsing
+// primitives. Benign: both sides only dereference the other's exports inside
+// function bodies, never at module-evaluation time.
+import {
+  GROUPS_YAML,
+  SYNCED_GROUPS_YAML,
+  parseGroupsFile,
+  type GroupsIndex,
+} from './group-files.js';
+import {
+  DIRECTORY_SYNC_BOT_EMAIL,
+  DIRECTORY_SYNC_BOT_NAME,
+} from './directory-sync-bot.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -133,6 +147,24 @@ export function sourceVerbsFor(verb: Verb): Verb[] {
 }
 export const RESERVED_ROLE_NAMES = new Set(['deny', EVERYONE_CANONICAL]);
 export const DENY_PREFIX = 'deny ';
+/**
+ * Member-entry prefix in roles.yaml that references a GROUP instead of an
+ * email: `- group:Engineering`. Explicit on purpose — membership kind is
+ * never guessed from string shape. Valid on EVERY role including Admin, with
+ * one kept invariant (see `parseRolesYaml`): Admin must always retain at
+ * least one direct email member, so a misconfigured or unreachable directory
+ * can never leave the deployment without a rescuable admin.
+ */
+export const GROUP_REF_PREFIX = 'group:';
+/**
+ * Explicit ROLE token prefix in access.md entries: `role/<Name>` resolves to
+ * the roles.yaml role only, never a group. A BARE name resolves GROUP-FIRST
+ * and falls back to the role — so `role/` is the escape hatch when a group
+ * shares the role's name. The prefix is reserved in the group name-safety
+ * rules (a group may never be named `role/...`), and every role is also
+ * registered in the principal index under its `role/<canonical>` alias.
+ */
+export const ROLE_TOKEN_PREFIX = 'role/';
 
 export const USER_REF_REGEX = /^(.+?)\s+<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$/;
 export const EMAIL_REGEX = /^[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+$/;
@@ -180,14 +212,50 @@ export function isAccessMdPath(p: string): boolean {
   return p === 'access.md' || p.endsWith('/access.md');
 }
 
+/**
+ * Extensions of node files whose OWN `---` frontmatter can carry access verbs
+ * the resolver enforces (`readOwnEntries` → `parseOwnAccessEntries`). The
+ * SINGLE source of truth for every surface that enumerates candidate files —
+ * the access-declarations scan and the shared `KbReferenceScanner` (which
+ * must scan/rewrite the same set, or a rename strands a live `.tool`
+ * frontmatter grant). `access.md` is covered by `.md`.
+ */
+export const ACCESS_FRONTMATTER_EXTENSIONS = ['.md', '.tool'] as const;
+
+/** True when `p` is a file the resolver reads access frontmatter from. */
+export function hasAccessFrontmatterExtension(p: string): boolean {
+  return ACCESS_FRONTMATTER_EXTENSIONS.some((ext) => p.endsWith(ext));
+}
+
+/**
+ * The PRINCIPAL index — canonical name → member emails. Despite the name it
+ * holds both kinds of named principal after `mergeGroupsIntoRoles` runs:
+ * roles.yaml roles (`kind: 'role'`, the default) and the active group file's
+ * groups (`kind: 'group'`). Grant resolution treats them identically — a
+ * grant names a principal, the principal has member emails — which is what
+ * lets the whole closeness-first resolver work on groups without changes.
+ *
+ * `groupRefs` carries a role's `group:<Name>` member entries between parse
+ * and merge; the merge expands them into `emails`/`byEmail`.
+ */
 interface RolesIndex {
-  byCanonical: Map<string, { displayName: string; emails: Set<string> }>;
+  byCanonical: Map<
+    string,
+    { displayName: string; emails: Set<string>; groupRefs?: Set<string>; kind?: 'role' | 'group' }
+  >;
   byEmail: Map<string, Set<string>>;
 }
 
 interface AccessModel {
   roles: RolesIndex;
   accessFilesByDir: Map<string, AccessFile>;
+  /**
+   * Whether the active groups source loaded cleanly — see {@link GroupsHealth}.
+   * A broken source degrades (groups contribute nothing) but is recorded here
+   * so admin surfaces can banner it instead of silently resolving without
+   * groups.
+   */
+  groupsHealth: GroupsHealth;
   /**
    * Canonical emails that count as Admin whatever `roles.yaml` says — the
    * deployment owner (`ADMIN_EMAIL`). Empty when none is configured.
@@ -230,7 +298,14 @@ interface YamlErr {
   error: string;
 }
 
-function stripComment(line: string): string {
+/**
+ * Strip a trailing `# comment` the way the YAML-subset tokeniser reads a
+ * line: a `#` at the start (after only whitespace) or preceded by whitespace
+ * begins a comment. Exported so the reference scanner matches tokens against
+ * the SAME comment rule the resolver parses with (a `- GTM Team  # sales`
+ * entry is the token `GTM Team`, never `GTM Team # sales`).
+ */
+export function stripComment(line: string): string {
   let inWs = true;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
@@ -250,9 +325,17 @@ interface Token {
   value: string;
 }
 
-function tokenise(text: string): YamlErr | { ok: true; tokens: Token[] } {
+function tokenise(
+  text: string,
+  opts?: { tolerateEmptyKeys?: boolean },
+): YamlErr | { ok: true; tokens: Token[] } {
   const lines = text.split(/\r?\n/);
   const tokens: Token[] = [];
+  // Tolerated blank keys are uniquified as runs of spaces so a SECOND blank
+  // key doesn't trip the duplicate-key check (which would retire every valid
+  // group after it). All-whitespace keys still canonicalize to '' downstream,
+  // so the entry-level "empty group name — skipped" handling sees them all.
+  let blankKeySeq = 0;
   for (let i = 0; i < lines.length; i++) {
     const stripped = stripComment(lines[i]).replace(/\s+$/, '');
     if (!stripped.trim()) continue;
@@ -270,16 +353,28 @@ function tokenise(text: string): YamlErr | { ok: true; tokens: Token[] } {
     if (colonIdx < 0) {
       return { ok: false, error: `line ${lineNum}: expected 'key:' or '- value' but got '${content}'` };
     }
-    const key = content.slice(0, colonIdx).trim();
+    let key = content.slice(0, colonIdx).trim();
     const valuePart = content.slice(colonIdx + 1).trim();
-    if (!key) return { ok: false, error: `line ${lineNum}: empty mapping key` };
+    // An empty key is normally a hard error (roles.yaml/access.md want loud
+    // failures), but a parser with ENTRY-level forgiveness (the group files:
+    // one bad entry must not retire every other group) keeps it as a
+    // whitespace key for its own skip-with-warning handling.
+    if (!key) {
+      if (!opts?.tolerateEmptyKeys) {
+        return { ok: false, error: `line ${lineNum}: empty mapping key` };
+      }
+      key = ' '.repeat(++blankKeySeq);
+    }
     tokens.push({ lineNum, indent, kind: 'kv', key, value: valuePart });
   }
   return { ok: true, tokens };
 }
 
-export function parseYamlSubset(text: string): YamlOk | YamlErr {
-  const tok = tokenise(text);
+export function parseYamlSubset(
+  text: string,
+  opts?: { tolerateEmptyKeys?: boolean },
+): YamlOk | YamlErr {
+  const tok = tokenise(text, opts);
   if (!tok.ok) return tok;
   if (tok.tokens.length === 0) return { ok: true, value: {} };
 
@@ -426,8 +521,16 @@ export function parseAccessEntry(
     };
   }
 
-  const role = canonicalRoleName(body);
+  let role = canonicalRoleName(body);
   if (!role) return { ok: false, error: `empty role name in entry '${raw}'` };
+  // Explicit role token: normalize `role/ <Name>` spacing so the canonical
+  // form is always `role/<canonicalName>` — the exact alias key the principal
+  // index registers for every role.
+  if (role.startsWith(ROLE_TOKEN_PREFIX)) {
+    const suffix = canonicalRoleName(role.slice(ROLE_TOKEN_PREFIX.length));
+    if (!suffix) return { ok: false, error: `entry '${body}' names no role after '${ROLE_TOKEN_PREFIX}'` };
+    role = `${ROLE_TOKEN_PREFIX}${suffix}`;
+  }
   return { ok: true, entry: { kind: 'role', role, displayRole: body, deny } };
 }
 
@@ -469,6 +572,12 @@ export function parseRolesYaml(
       );
       continue;
     }
+    if (canonical.startsWith(ROLE_TOKEN_PREFIX)) {
+      errors.push(
+        `roles.yaml: role '${displayName}' starts with the reserved '${ROLE_TOKEN_PREFIX}' prefix — that spelling is the explicit role token in access entries`,
+      );
+      continue;
+    }
     if (index.byCanonical.has(canonical)) {
       const prev = index.byCanonical.get(canonical)!.displayName;
       errors.push(
@@ -481,9 +590,24 @@ export function parseRolesYaml(
       continue;
     }
     const emails = new Set<string>();
+    const groupRefs = new Set<string>();
     for (const rawEmail of value) {
       if (typeof rawEmail !== 'string') {
         errors.push(`roles.yaml: role '${displayName}' has a non-string entry`);
+        continue;
+      }
+      // `- group:<Name>` assigns the role to a whole group (expanded against
+      // the active group source by `mergeGroupsIntoRoles`). Allowed on every
+      // role, Admin included — the Admin invariant below only demands at
+      // least one DIRECT email member so a broken directory can never leave
+      // the deployment adminless.
+      if (rawEmail.trim().toLowerCase().startsWith(GROUP_REF_PREFIX)) {
+        const refName = canonicalRoleName(rawEmail.trim().slice(GROUP_REF_PREFIX.length));
+        if (!refName) {
+          errors.push(`roles.yaml: role '${displayName}' has an empty group reference '${rawEmail}'`);
+          continue;
+        }
+        groupRefs.add(refName);
         continue;
       }
       const email = canonicalEmail(rawEmail);
@@ -499,17 +623,180 @@ export function parseRolesYaml(
       }
       set.add(canonical);
     }
-    index.byCanonical.set(canonical, { displayName: displayName.trim(), emails });
+    index.byCanonical.set(canonical, { displayName: displayName.trim(), emails, groupRefs });
   }
 
   if (!index.byCanonical.has(ADMIN_CANONICAL)) {
     errors.push(`roles.yaml: must declare at least one 'Admin' role`);
   } else if (index.byCanonical.get(ADMIN_CANONICAL)!.emails.size === 0) {
-    errors.push(`roles.yaml: 'Admin' role has no emails`);
+    // The kept invariant: Admin may reference groups, but must ALWAYS retain
+    // at least one direct email member — the rescue story requires an admin
+    // whose membership does not depend on a reachable, well-configured
+    // directory. A group-only Admin is as hard an error as an adminless one.
+    errors.push(
+      `roles.yaml: 'Admin' role has no direct email members — Admin must keep at least one individual email (group references alone are not enough)`,
+    );
   }
 
   if (errors.length) return { ok: false, errors };
   return { ok: true, index };
+}
+
+/**
+ * Merge the active group source into the principal index and expand role →
+ * group assignments. Mutates `index` in place; returns human-readable
+ * warnings (callers log them — nothing here ever throws, because group
+ * problems must degrade, not brick access resolution).
+ *
+ * Rules (the grant-grammar precedence):
+ *   - Every role is ALSO registered under its explicit `role/<canonical>`
+ *     alias — the token that always resolves to the role.
+ *   - A BARE name resolves GROUP-FIRST: when a group's canonical name
+ *     collides with a role's, the bare key resolves to the GROUP (warned);
+ *     the role stays reachable via `role/<canonical>`.
+ *   - Role `group:<Name>` refs — Admin's included — expand against the
+ *     merged groups; an unknown ref contributes nothing (warned).
+ *   - `byEmail` is rebuilt so each member holds exactly the tokens that
+ *     resolve to a principal they belong to (bare + `role/` alias for roles,
+ *     bare for groups).
+ */
+export function mergeGroupsIntoRoles(
+  index: RolesIndex,
+  groups: GroupsIndex,
+  sourceFile: string,
+): string[] {
+  const warnings: string[] = [];
+  // Snapshot before any group lands: at this point the index holds roles only.
+  const roleRecords = new Map(index.byCanonical);
+
+  // 1. Expand role → group assignments (Admin included — its safety net is
+  //    the parse-time "at least one direct email" invariant, not a merge skip).
+  for (const [, principal] of roleRecords) {
+    if (!principal.groupRefs?.size) continue;
+    for (const ref of principal.groupRefs) {
+      const group = groups.get(ref);
+      if (!group) {
+        warnings.push(
+          `roles.yaml: role '${principal.displayName}' references unknown group '${ref}' — reference ignored`,
+        );
+        continue;
+      }
+      for (const email of group.emails) principal.emails.add(email);
+    }
+  }
+
+  // 2. Bare-name precedence: groups win the bare token; the role keeps its
+  //    `role/<canonical>` alias registered below.
+  for (const [canonical, def] of groups) {
+    if (roleRecords.has(canonical)) {
+      warnings.push(
+        `${sourceFile}: group '${def.displayName}' shares its name with a role — the bare name now resolves to the GROUP; use '${ROLE_TOKEN_PREFIX}${canonical}' to reference the role`,
+      );
+    }
+    index.byCanonical.set(canonical, {
+      displayName: def.displayName,
+      emails: new Set(def.emails),
+      kind: 'group',
+    });
+  }
+
+  // 3. Explicit `role/<canonical>` alias for every role (same record — the
+  //    alias and the bare key, when the role still owns it, stay in lockstep).
+  for (const [canonical, principal] of roleRecords) {
+    principal.kind = 'role';
+    index.byCanonical.set(`${ROLE_TOKEN_PREFIX}${canonical}`, principal);
+  }
+
+  // 4. Rebuild the email → tokens map from the final index so membership
+  //    reflects the post-precedence keys (a collided role's members no longer
+  //    hold the bare token unless the group also contains them).
+  index.byEmail.clear();
+  for (const [key, principal] of index.byCanonical) {
+    for (const email of principal.emails) {
+      let set = index.byEmail.get(email);
+      if (!set) {
+        set = new Set();
+        index.byEmail.set(email, set);
+      }
+      set.add(key);
+    }
+  }
+
+  return warnings;
+}
+
+/**
+ * Health of the ACTIVE groups source as of the last load. `ok: false` means
+ * the source EXISTS but could not be read or parsed — groups contribute
+ * nothing, bare grant tokens fall through to roles, and group-backed denies
+ * drop (the owner's explicit degrade-loudly decision, NOT fail-closed). The
+ * marker is carried on the loaded model and surfaced by the groups admin
+ * endpoints so the Groups page can banner it.
+ */
+export type GroupsHealth = { ok: true } | { ok: false; file: string; reason: string };
+
+/** True for the errno codes that mean "the file genuinely is not there". */
+function isAbsenceError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+/**
+ * Load the ACTIVE group source through `read` (working tree or at-ref — the
+ * caller supplies the reader, so both model loaders share one mode rule):
+ * `synced-groups.yaml` existing → IdP mode (groups.yaml ignored entirely,
+ * even when the synced file is empty or malformed — falling back would
+ * resurrect retired manual groups); otherwise `groups.yaml` → manual mode.
+ *
+ * `read` returns null for a genuinely-absent file and may THROW for any other
+ * failure. Only ENOENT/ENOTDIR count as absent (the caller may also whitelist
+ * them into null); every other read error — notably a non-absence error on
+ * `synced-groups.yaml` — is treated as a BROKEN source: no groups, no
+ * fallback to the manual file (falling back would resurrect retired groups),
+ * and an `ok: false` health marker. Structural parse failures degrade the
+ * same way; this function never throws.
+ */
+export async function loadActiveGroups(
+  read: (filename: string) => Promise<string | null>,
+): Promise<{ groups: GroupsIndex; sourceFile: string; warnings: string[]; health: GroupsHealth }> {
+  const broken = (file: string, reason: string) => ({
+    groups: new Map() as GroupsIndex,
+    sourceFile: file,
+    warnings: [],
+    health: { ok: false as const, file, reason },
+  });
+
+  let syncedText: string | null;
+  try {
+    syncedText = await read(SYNCED_GROUPS_YAML);
+  } catch (err) {
+    if (isAbsenceError(err)) {
+      syncedText = null;
+    } else {
+      // A non-absence read error on the SYNCED source must NOT fall back to
+      // groups.yaml — the synced file may exist and its manual predecessor is
+      // retired. Broken-groups instead.
+      return broken(SYNCED_GROUPS_YAML, err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  const sourceFile = syncedText !== null ? SYNCED_GROUPS_YAML : GROUPS_YAML;
+  let text: string | null;
+  if (syncedText !== null) {
+    text = syncedText;
+  } else {
+    try {
+      text = await read(GROUPS_YAML);
+    } catch (err) {
+      if (isAbsenceError(err)) text = null;
+      else return broken(GROUPS_YAML, err instanceof Error ? err.message : String(err));
+    }
+  }
+  if (text === null) return { groups: new Map(), sourceFile, warnings: [], health: { ok: true } };
+
+  const parsed = parseGroupsFile(text, sourceFile);
+  if (!parsed.ok) return broken(sourceFile, parsed.errors.join('; '));
+  return { groups: parsed.groups, sourceFile, warnings: parsed.warnings, health: { ok: true } };
 }
 
 /**
@@ -807,7 +1094,10 @@ function resolveAtPath(
 function isAdminEmail(model: AccessModel, email: string): boolean {
   if (model.deploymentOwners.has(email)) return true;
   const roles = model.roles.byEmail.get(email);
-  return !!roles && roles.has(ADMIN_CANONICAL);
+  // Check the explicit `role/admin` alias, NOT the bare token: bare-name
+  // precedence is group-first, so a group that happens to be named "Admin"
+  // owns the bare key — and its members must never inherit the capability.
+  return !!roles && roles.has(`${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`);
 }
 
 /**
@@ -925,7 +1215,7 @@ function scopeToGrantSource(
  * returning the WHOLE list of removable entries rather than just the winner.
  *
  * Only the principal's OWN named entry yields a source — a `user` by their email,
- * a `role` by its role token. A grant that reaches the user via a plugin they
+ * a `role` by its role token. A grant that reaches the user via a group/role they
  * belong to, the built-in `everyone`, or admin-rescue is NOT their entry, so it
  * never adds a source (the group/role shows as its own row instead). The list is:
  *   - `[]` (verb omitted by the caller) when the principal effectively holds no
@@ -941,7 +1231,7 @@ function scopeToGrantSource(
  * under closest-wins), and the revoke flow needs the inherited remainder that
  * survives removing the direct entry. A group/everyone grant at some scope does
  * not add a source AND does not hide a farther own-entry the principal is named
- * in (removing it is still meaningful if the plugin grant is later removed).
+ * in (removing it is still meaningful if the group/role grant is later removed).
  */
 function resolveGrantSourcesForVerb(
   model: AccessModel,
@@ -955,11 +1245,34 @@ function resolveGrantSourcesForVerb(
   const out: GrantSource[] = [];
 
   if (principal.kind === 'role') {
-    const role = canonicalRoleName(principal.role);
+    // A named principal can be spelled two ways in a file: the bare token and
+    // the explicit `role/<name>` token. WHICH spellings are THIS principal's
+    // entries depends on who owns the bare key in the merged index:
+    //
+    //   - UNSHADOWED (no group named `<bare>`): both spellings resolve to the
+    //     role, so both count — a grant under either adds a source; a deny
+    //     under either cuts off farther grants. (The revoke splice strips both
+    //     spellings in this case too, so classification and removal agree.)
+    //   - SHADOWED (a group owns the bare key): the spellings are DIFFERENT
+    //     principals. A bare-token principal is the GROUP — only bare entries
+    //     are its own; a `role/`-token principal is the ROLE — only `role/`
+    //     entries are its own. Counting the other spelling would attribute a
+    //     shadowed bare token to the role (hiding a real `role/<name>`
+    //     ancestor grant and making its revoke a false no-op), or vice versa.
+    const canonical = canonicalRoleName(principal.role);
+    const explicit = canonical.startsWith(ROLE_TOKEN_PREFIX);
+    const bare = explicit ? canonical.slice(ROLE_TOKEN_PREFIX.length) : canonical;
+    const shadowed = model.roles.byCanonical.get(bare)?.kind === 'group';
+    const tokens = shadowed
+      ? [explicit ? `${ROLE_TOKEN_PREFIX}${bare}` : bare]
+      : [bare, `${ROLE_TOKEN_PREFIX}${bare}`];
     for (const scope of scopes) {
-      const s = scope.byRole.get(role);
-      if (s === 'denied') break; // a closer deny of this role cuts off farther grants
-      if (s === 'grant') out.push(scopeToGrantSource(scope, kind, relativePath));
+      const states = tokens.map((t) => scope.byRole.get(t));
+      if (states.includes('grant')) {
+        out.push(scopeToGrantSource(scope, kind, relativePath));
+        continue;
+      }
+      if (states.includes('denied')) break; // a closer deny cuts off farther grants
     }
     return out;
   }
@@ -1058,14 +1371,27 @@ function eligibleHoldersResolved(
   verb: Verb,
   relativePath: string,
   fileOwn?: OwnEntries | null,
-): { roles: string[]; users: { name: string; email: string }[] } {
+): { principals: ResolvedPrincipal[]; roles: string[]; users: { name: string; email: string }[] } {
   const { byRole, byEmail } = resolveAtPath(model, verb, relativePath, fileOwn);
 
-  const roleSet = new Set<string>();
+  // Display name → kind. The `byRole` keys are the merged index's canonical
+  // tokens exactly as granted (bare, or the `role/<canonical>` alias); the
+  // `byCanonical` record a key hits carries its kind — a `role/` alias always
+  // hits the role record, a bare key hits whichever principal owns it under
+  // group-first precedence. A token with no record (the built-in `everyone`,
+  // or a grant naming a since-vanished principal) degrades to 'role', the
+  // pre-groups display. In the rare case one display name is granted as BOTH
+  // (a role via its alias plus a same-named group via the bare token) the
+  // single deduped entry reads 'group' — mirroring bare-token precedence and
+  // the dialog's shared per-name row.
+  const kindByName = new Map<string, 'role' | 'group'>();
+  const addPrincipal = (name: string, kind: 'role' | 'group') => {
+    if (kindByName.get(name) !== 'group') kindByName.set(name, kind);
+  };
   for (const [canonical, state] of byRole) {
     if (state !== 'grant') continue;
-    const role = model.roles.byCanonical.get(canonical);
-    roleSet.add(role ? role.displayName : canonical);
+    const record = model.roles.byCanonical.get(canonical);
+    addPrincipal(record ? record.displayName : canonical, record?.kind ?? 'role');
   }
 
   // Mirror the admin overrides applied in `hasPermissionResolved`: write on
@@ -1077,11 +1403,19 @@ function eligibleHoldersResolved(
     verb === 'write' &&
     (relativePath === 'roles.yaml' || isAccessMdPath(relativePath))
   ) {
-    const adminRole = model.roles.byCanonical.get(ADMIN_CANONICAL);
-    roleSet.add(adminRole ? adminRole.displayName : ADMIN_CANONICAL);
+    // Look the Admin ROLE up via its explicit alias — the bare key may be
+    // owned by a same-named group under group-first precedence. The override
+    // is the ROLE's capability, so the row's kind is 'role' regardless.
+    const adminRole = model.roles.byCanonical.get(`${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`);
+    addPrincipal(adminRole ? adminRole.displayName : ADMIN_CANONICAL, 'role');
   }
 
-  const roles = [...roleSet].sort();
+  const principals: ResolvedPrincipal[] = [...kindByName]
+    .map(([name, kind]) => ({ name, kind }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  // Legacy name-only list, kind erased — kept for the many consumers that
+  // only ever render names (banners, contact lines, PR-routing messages).
+  const roles = principals.map((p) => p.name);
 
   const users: { name: string; email: string }[] = [];
   for (const [email, state] of byEmail) {
@@ -1090,7 +1424,7 @@ function eligibleHoldersResolved(
   }
   users.sort((a, b) => a.email.localeCompare(b.email));
 
-  return { roles, users };
+  return { principals, roles, users };
 }
 
 /**
@@ -1254,35 +1588,13 @@ export class AccessControlService implements IAccessControl {
     return parsed.ok ? { ok: true } : { ok: false, errors: parsed.errors };
   }
 
-  /**
-   * Advisory scan of folder `access.md` files for references to a role (by
-   * canonical name). See `IAccessControl.referencesToRole` — undercounts node
-   * frontmatter by design; powers the delete warning only, never the rename
-   * gate.
-   */
-  async referencesToRole(
-    workspaceId: string,
-    canonicalRole: string,
-  ): Promise<{ path: string; verb: string }[]> {
-    const model = await this.loadModel(workspaceId);
-    const out: { path: string; verb: string }[] = [];
-    for (const file of model.accessFilesByDir.values()) {
-      for (const verb of KNOWN_VERBS) {
-        for (const entry of file.entries[verb]) {
-          if (entry.kind === 'role' && entry.role === canonicalRole) {
-            out.push({ path: file.path, verb });
-          }
-        }
-      }
-    }
-    return out;
-  }
-
   async canWrite(
     workspaceId: string,
     userEmail: string,
     relativePath: string,
   ): Promise<boolean> {
+    const machineOwned = this.machineOwnedWriteRule(userEmail, relativePath);
+    if (machineOwned !== null) return machineOwned;
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return hasPermissionResolved(model, 'write', userEmail, relativePath, own);
@@ -1327,7 +1639,8 @@ export class AccessControlService implements IAccessControl {
     const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
-      result.set(p, hasPermissionResolved(model, 'write', userEmail, p, owns[i]));
+      const machineOwned = this.machineOwnedWriteRule(userEmail, p);
+      result.set(p, machineOwned ?? hasPermissionResolved(model, 'write', userEmail, p, owns[i]));
     });
     return result;
   }
@@ -1371,7 +1684,11 @@ export class AccessControlService implements IAccessControl {
   async eligibleOwners(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }> {
+  ): Promise<{
+    principals: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return eligibleHoldersResolved(model, 'owner', relativePath, own);
@@ -1380,7 +1697,11 @@ export class AccessControlService implements IAccessControl {
   async eligibleWriters(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }> {
+  ): Promise<{
+    principals: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return eligibleHoldersResolved(model, 'write', relativePath, own);
@@ -1389,23 +1710,32 @@ export class AccessControlService implements IAccessControl {
   async eligibleReaders(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ restricted: boolean; roles: string[]; users: { name: string; email: string }[] }> {
+  ): Promise<{
+    restricted: boolean;
+    principals: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     // When `read: everyone` applies cleanly, the node is readable by all users
     // and the role/user lists are meaningless. Otherwise return the explicit
     // reader set; it may be empty for a default-denied path with no grants.
     if (canEveryoneReadResolved(model, relativePath, own)) {
-      return { restricted: false, roles: [], users: [] };
+      return { restricted: false, principals: [], roles: [], users: [] };
     }
-    const { roles, users } = eligibleHoldersResolved(model, 'read', relativePath, own);
-    return { restricted: true, roles, users };
+    const { principals, roles, users } = eligibleHoldersResolved(model, 'read', relativePath, own);
+    return { restricted: true, principals, roles, users };
   }
 
   async eligibleDownloaders(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }> {
+  ): Promise<{
+    principals: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return eligibleHoldersResolved(model, 'download', relativePath, own);
@@ -1453,21 +1783,27 @@ export class AccessControlService implements IAccessControl {
 
   async kbPrincipals(
     workspaceId: string,
-  ): Promise<{ plugins: string[]; people: { name: string; email: string }[] }> {
+  ): Promise<{ roles: string[]; groups: string[]; people: { name: string; email: string }[] }> {
     let model: AccessModel;
     try {
       model = await this.loadModel(workspaceId);
     } catch {
-      return { plugins: [], people: [] };
+      return { roles: [], groups: [], people: [] };
     }
-    // Plugins = the built-in `everyone` role plus every declared role's display
-    // name. `everyone` is surfaced so the share UI can grant public read; the
-    // grant route gates it to the `read` verb only (write/owner/download
-    // everyone stay a direct-access.md edit).
-    const plugins = [
-      EVERYONE_DISPLAY,
-      ...[...model.roles.byCanonical.values()].map((r) => r.displayName),
-    ];
+    // Roles = the built-in `everyone` role plus every declared role's display
+    // name — ROLE principals only, never groups. Each role is enumerated via
+    // its `role/<canonical>` alias key, which exists exactly once per role
+    // (the bare key may be owned by a same-named group under group-first
+    // precedence, and merged group entries must not appear here). `everyone`
+    // is surfaced so the share UI can grant public read; the grant route
+    // gates it to the `read` verb only (write/owner/download everyone stay a
+    // direct-access.md edit).
+    const roles = [EVERYONE_DISPLAY];
+    const groups: string[] = [];
+    for (const [key, principal] of model.roles.byCanonical) {
+      if (key.startsWith(ROLE_TOKEN_PREFIX)) roles.push(principal.displayName);
+      else if (principal.kind === 'group') groups.push(principal.displayName);
+    }
     // People = roles.yaml member emails (name-less) ∪ access.md `Name <email>`
     // grants (named). The login-only users table is unioned in by the caller.
     const byEmail = new Map<string, string>(); // email -> display name ('' if unknown)
@@ -1487,7 +1823,7 @@ export class AccessControlService implements IAccessControl {
       name: name || email.split('@')[0],
       email,
     }));
-    return { plugins, people };
+    return { roles, groups, people };
   }
 
   async findEmailByHash(
@@ -1530,12 +1866,28 @@ export class AccessControlService implements IAccessControl {
     return null;
   }
 
+  /**
+   * `synced-groups.yaml` is MACHINE-OWNED: regenerated wholesale from the
+   * directory mirror and committed by the directory-sync bot. The bot is its
+   * ONLY writer — role/grant resolution never applies to it. That cuts both
+   * ways: the bot needs no role to write it (it isn't in roles.yaml, and on a
+   * protected branch nothing else would make it eligible), and no HUMAN can
+   * hand-edit it through the app (an edit would be silently overwritten by
+   * the next provisioning push anyway).
+   */
+  private machineOwnedWriteRule(userEmail: string, relativePath: string): boolean | null {
+    if (relativePath !== SYNCED_GROUPS_YAML) return null;
+    return userEmail.trim().toLowerCase() === DIRECTORY_SYNC_BOT_EMAIL;
+  }
+
   async canWriteAtRef(
     workspaceId: string,
     ref: string,
     userEmail: string,
     relativePath: string,
   ): Promise<boolean | null> {
+    const machineOwned = this.machineOwnedWriteRule(userEmail, relativePath);
+    if (machineOwned !== null) return machineOwned;
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
@@ -1562,6 +1914,14 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePaths: string[],
   ): Promise<Map<string, boolean> | null> {
+    // Machine-owned paths resolve without the model (see machineOwnedWriteRule)
+    // — matching canWriteAtRef, including on a repo with no rules at the ref.
+    const machineAnswers = new Map<string, boolean>();
+    for (const p of relativePaths) {
+      const machineOwned = this.machineOwnedWriteRule(userEmail, p);
+      if (machineOwned !== null) machineAnswers.set(p, machineOwned);
+    }
+    if (machineAnswers.size === relativePaths.length) return machineAnswers;
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
@@ -1570,7 +1930,11 @@ export class AccessControlService implements IAccessControl {
     const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
     const result = new Map<string, boolean>();
     for (const p of relativePaths) {
-      result.set(p, hasPermissionResolved(loaded.model, 'write', userEmail, p, owns.get(p) ?? null));
+      const machineOwned = machineAnswers.get(p);
+      result.set(
+        p,
+        machineOwned ?? hasPermissionResolved(loaded.model, 'write', userEmail, p, owns.get(p) ?? null),
+      );
     }
     return result;
   }
@@ -1580,6 +1944,13 @@ export class AccessControlService implements IAccessControl {
     ref: string,
     relativePath: string,
   ): Promise<{ roles: string[]; users: { name: string; email: string }[] } | null> {
+    if (relativePath === SYNCED_GROUPS_YAML) {
+      // Machine-owned — see machineOwnedWriteRule.
+      return {
+        roles: [],
+        users: [{ name: DIRECTORY_SYNC_BOT_NAME, email: DIRECTORY_SYNC_BOT_EMAIL }],
+      };
+    }
     const loaded = await this.loadModelAtRef(workspaceId, ref);
     if (!loaded) return null;
     const repoDir = await this.repoDir(workspaceId);
@@ -1600,9 +1971,6 @@ export class AccessControlService implements IAccessControl {
       excludedEmails?: Set<string>;
     }
   > | null> {
-    const loaded = await this.loadModelAtRef(workspaceId, ref);
-    if (!loaded) return null;
-    const repoDir = await this.repoDir(workspaceId);
     const result = new Map<
       string,
       {
@@ -1612,9 +1980,30 @@ export class AccessControlService implements IAccessControl {
         excludedEmails?: Set<string>;
       }
     >();
+    // Machine-owned paths resolve without the model — same answer
+    // eligibleWritersAtRef gives (including at a ref with no usable
+    // roles.yaml), so batched consumers (CR owner-routing, approval state)
+    // agree with the single-path surface.
+    for (const p of relativePaths) {
+      if (p === SYNCED_GROUPS_YAML) {
+        result.set(p, {
+          roles: [],
+          users: [{ name: DIRECTORY_SYNC_BOT_NAME, email: DIRECTORY_SYNC_BOT_EMAIL }],
+          emails: new Set([DIRECTORY_SYNC_BOT_EMAIL]),
+        });
+      }
+    }
+    // Only short-circuit when there IS a machine-owned path covering the
+    // whole request: an EMPTY request must still answer null for an
+    // unresolvable ref, as documented.
+    if (relativePaths.length > 0 && result.size === relativePaths.length) return result;
+    const loaded = await this.loadModelAtRef(workspaceId, ref);
+    if (!loaded) return null;
+    const repoDir = await this.repoDir(workspaceId);
     // One `git cat-file --batch` for the whole path set — see canWriteBatchAtRef.
     const owns = await this.readOwnEntriesAtRefBatch(repoDir, loaded.resolvedRef, relativePaths);
     for (const p of relativePaths) {
+      if (result.has(p)) continue;
       const own = owns.get(p) ?? null;
       const display = eligibleHoldersResolved(loaded.model, 'write', p, own);
       const emails = new Set(eligibleHolderEmailsResolved(loaded.model, 'write', p, own).keys());
@@ -1645,6 +2034,35 @@ export class AccessControlService implements IAccessControl {
 
     const rolesParsed = parseRolesYaml(rolesYaml);
     if (!rolesParsed.ok) throw new AccessConfigError(rolesParsed.errors);
+
+    // Groups — the other named-principal source. Loaded forgivingly (a broken
+    // group file degrades to "contributes nothing"; only roles.yaml problems
+    // may throw) and merged into the principal index, after which the resolver
+    // below needs no group awareness at all. The reader whitelists ONLY
+    // genuine absence (ENOENT/ENOTDIR → null, like synced-groups-committer);
+    // any other read error propagates so loadActiveGroups records a
+    // broken-groups marker instead of silently treating the file as missing.
+    const activeGroups = await loadActiveGroups(async (filename) => {
+      try {
+        return await fs.readFile(path.join(repoDir, filename), 'utf-8');
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException | null)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        throw err;
+      }
+    });
+    if (!activeGroups.health.ok) {
+      console.error(
+        `[access] groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
+      );
+    }
+    for (const w of activeGroups.warnings) console.warn(`[access] ${w}`);
+    const mergeWarnings = mergeGroupsIntoRoles(
+      rolesParsed.index,
+      activeGroups.groups,
+      activeGroups.sourceFile,
+    );
+    for (const w of mergeWarnings) console.warn(`[access] ${w}`);
 
     const accessFiles = new Map<string, AccessFile>();
 
@@ -1684,6 +2102,7 @@ export class AccessControlService implements IAccessControl {
     const model: AccessModel = {
       roles: rolesParsed.index,
       accessFilesByDir: accessFiles,
+      groupsHealth: activeGroups.health,
       deploymentOwners: this.deploymentOwners,
     };
     this.cache.set(workspaceId, { model, loadedAt: Date.now() });
@@ -1901,6 +2320,28 @@ export class AccessControlService implements IAccessControl {
     const rolesParsed = parseRolesYaml(rolesYaml);
     if (!rolesParsed.ok) return null;
 
+    // Same group loading as the working-tree model, read AT THE REF — the
+    // whole point of file-materialized groups is that the merge/push gates
+    // can evaluate them at the commit they gate. (`showAtRef` folds every git
+    // failure into null/absent — at-ref reads cannot distinguish a missing
+    // path from a repo error, so the broken-groups marker here fires only on
+    // parse failures.)
+    const activeGroups = await loadActiveGroups((filename) =>
+      this.showAtRef(repoDir, resolvedRef, filename),
+    );
+    if (!activeGroups.health.ok) {
+      console.error(
+        `[access@${resolvedRef}] groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
+      );
+    }
+    for (const w of activeGroups.warnings) console.warn(`[access@${resolvedRef}] ${w}`);
+    const mergeWarnings = mergeGroupsIntoRoles(
+      rolesParsed.index,
+      activeGroups.groups,
+      activeGroups.sourceFile,
+    );
+    for (const w of mergeWarnings) console.warn(`[access@${resolvedRef}] ${w}`);
+
     const accessFiles = new Map<string, AccessFile>();
     const accessPaths = await this.listAccessFilesAtRef(repoDir, resolvedRef);
     for (const p of accessPaths) {
@@ -1928,6 +2369,7 @@ export class AccessControlService implements IAccessControl {
       model: {
         roles: rolesParsed.index,
         accessFilesByDir: accessFiles,
+        groupsHealth: activeGroups.health,
         // Same owners as the working-tree model. The at-ref model backs the
         // PUSH gate, so omitting them here would let the deployment owner save
         // a roles.yaml repair locally and then be refused when it tries to

@@ -17,10 +17,11 @@ import { createAccessRoutes } from '../access.routes.js';
 
 /**
  * HTTP-level contract tests for the /api/access/roles routes: the admin gate
- * (non-admin → 403), the GET roster shape, and that service-layer invariant
- * errors (reserved name → 422, self-admin-removal → 409 { kind }) surface with
- * the right status. The CRUD logic itself is covered by roles-admin.service.test;
- * here we pin the route wiring + error mapping.
+ * (non-admin → 403), the GET roster shape, the REMOVED role-CRUD endpoints
+ * (404 — roles are app-defined capabilities), and that service-layer
+ * invariant errors (self-admin-removal → 409 { kind }) surface with the
+ * right status. The membership logic itself is covered by
+ * roles-admin.service.test; here we pin the route wiring + error mapping.
  */
 
 const KB = 'knowledge-base';
@@ -64,7 +65,6 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
     eligibleWriters: vi.fn(async () => ({ roles: ['Admin'], users: [] })),
     invalidate: vi.fn(),
     validateRolesYaml: (t: string) => realAccess.validateRolesYaml(t),
-    referencesToRole: vi.fn(async () => []),
   } as unknown as IAccessControl;
 
   const resolve = (wsRel: string) => path.join(workspaceDir, wsRel);
@@ -103,17 +103,23 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
 
   // Lock holder tracked so the service's getLock pre-check passes; the single-
   // file write itself lands on disk via LockingFilesystem → LocalFilesystem.
-  let holder: { id: string; name: string } | null = null;
+  // Strict per-path locks — a live row is contended even for the same user,
+  // exactly like FileLockService (nesting bugs must fail here too).
+  const locks = new Map<string, { id: string; name: string }>();
   const lockRow = (h: { id: string; name: string }) => ({ holderUserId: h.id, holderName: h.name });
   const workflowService = {
-    getLock: vi.fn(async () => (holder ? lockRow(holder) : null)),
-    acquireLock: vi.fn(async (_w: string, _b: string, _p: string, user: { id: string; name: string }) =>
-      holder && holder.id !== user.id
-        ? { acquired: false, lock: lockRow(holder) }
-        : ((holder = user), { acquired: true, lock: lockRow(user) }),
-    ),
-    releaseLock: vi.fn(async () => void (holder = null)),
-    releaseLockNoCommit: vi.fn(async () => void (holder = null)),
+    getLock: vi.fn(async (_w: string, _b: string, p: string) => {
+      const h = locks.get(p);
+      return h ? lockRow(h) : null;
+    }),
+    acquireLock: vi.fn(async (_w: string, _b: string, p: string, user: { id: string; name: string }) => {
+      const h = locks.get(p);
+      if (h) return { acquired: false, lock: lockRow(h) };
+      locks.set(p, user);
+      return { acquired: true, lock: lockRow(user) };
+    }),
+    releaseLock: vi.fn(async (_w: string, _b: string, p: string) => void locks.delete(p)),
+    releaseLockNoCommit: vi.fn(async (_w: string, _b: string, p: string) => void locks.delete(p)),
     // Write-free: the lock-aware filesystem writes to disk; this just commits the
     // dirty tree. Not exercised by these route tests (no rename), but kept honest.
     commitChanges: vi.fn(async () => ({})),
@@ -166,35 +172,58 @@ describe('/api/access/roles routes', () => {
     expect(res.status).toBe(403);
   });
 
-  it('a non-admin is refused on every mutating route (403)', async () => {
+  it('a non-admin is refused on the surviving mutating routes (403)', async () => {
     const h = await makeHarness({ isAdmin: false });
     server = h.server;
-    const post = await fetch(`${h.baseUrl}/api/access/roles`, {
+    const addMember = await fetch(`${h.baseUrl}/api/access/roles/sales/members`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'x@example.com' }),
+    });
+    expect(addMember.status).toBe(403);
+    const assignGroup = await fetch(`${h.baseUrl}/api/access/roles/sales/groups`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group: 'GTM Team' }),
+    });
+    expect(assignGroup.status).toBe(403);
+    const removeMember = await fetch(
+      `${h.baseUrl}/api/access/roles/sales/members/${encodeURIComponent('felix@example.com')}`,
+      { method: 'DELETE' },
+    );
+    expect(removeMember.status).toBe(403);
+    const unassignGroup = await fetch(
+      `${h.baseUrl}/api/access/roles/sales/groups/${encodeURIComponent('GTM Team')}`,
+      { method: 'DELETE' },
+    );
+    expect(unassignGroup.status).toBe(403);
+    const convert = await fetch(`${h.baseUrl}/api/access/roles/sales/convert-to-group`, {
+      method: 'POST',
+    });
+    expect(convert.status).toBe(403);
+  });
+
+  it('role CRUD endpoints are GONE: create/rename/delete answer 404 even for admins', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const created = await fetch(`${h.baseUrl}/api/access/roles`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ displayName: 'Marketing' }),
     });
-    expect(post.status).toBe(403);
-    const del = await fetch(`${h.baseUrl}/api/access/roles/sales`, { method: 'DELETE' });
-    expect(del.status).toBe(403);
-  });
-
-  it('create with a reserved name → 422', async () => {
-    const h = await makeHarness();
-    server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/access/roles`, {
-      method: 'POST',
+    expect(created.status).toBe(404);
+    const renamed = await fetch(`${h.baseUrl}/api/access/roles/sales`, {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ displayName: 'everyone' }),
+      body: JSON.stringify({ newDisplayName: 'Sales Team' }),
     });
-    expect(res.status).toBe(422);
-  });
-
-  it('delete Admin → 422', async () => {
-    const h = await makeHarness();
-    server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/access/roles/admin`, { method: 'DELETE' });
-    expect(res.status).toBe(422);
+    expect(renamed.status).toBe(404);
+    const deleted = await fetch(`${h.baseUrl}/api/access/roles/sales`, { method: 'DELETE' });
+    expect(deleted.status).toBe(404);
+    // The roster is untouched by the dead endpoints.
+    const roster = await fetch(`${h.baseUrl}/api/access/roles`);
+    const body = (await roster.json()) as { roles: { canonical: string }[] };
+    expect(body.roles.map((r) => r.canonical)).toEqual(['admin', 'sales']);
   });
 
   it('removing own last Admin membership → 409 { kind: self-admin-removal }', async () => {
@@ -213,22 +242,16 @@ describe('/api/access/roles routes', () => {
     expect(body.kind).toBe('self-admin-removal');
   });
 
-  it('create a role then add a member → 200 fresh roster', async () => {
+  it('add a member to an existing (legacy) role → 200 fresh roster', async () => {
     const h = await makeHarness();
     server = h.server;
-    const created = await fetch(`${h.baseUrl}/api/access/roles`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ displayName: 'Marketing' }),
-    });
-    expect(created.status).toBe(200);
-    const add = await fetch(`${h.baseUrl}/api/access/roles/marketing/members`, {
+    const add = await fetch(`${h.baseUrl}/api/access/roles/sales/members`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: 'mkt@example.com' }),
     });
     expect(add.status).toBe(200);
     const body = (await add.json()) as { roles: { canonical: string; members: string[] }[] };
-    expect(body.roles.find((r) => r.canonical === 'marketing')!.members).toContain('mkt@example.com');
+    expect(body.roles.find((r) => r.canonical === 'sales')!.members).toContain('mkt@example.com');
   });
 });

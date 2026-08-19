@@ -37,7 +37,7 @@ function noopAccessControl(): IAccessControl {
     canDownload: vi.fn(), canOwner: vi.fn(), eligibleOwners: vi.fn(), eligibleDownloaders: vi.fn(),
     eligibleWriters: vi.fn(), eligibleWriterEmails: vi.fn(), eligibleOwnerEmails: vi.fn(),
     grantSources: vi.fn(), invalidate: vi.fn(), findEmailByHash: vi.fn(), kbPrincipals: vi.fn(),
-    validateRolesYaml: vi.fn(), referencesToRole: vi.fn(), canWriteAtRef: vi.fn(),
+    validateRolesYaml: vi.fn(), canWriteAtRef: vi.fn(),
     canWriteBatchAtRef: vi.fn(), eligibleWritersAtRef: vi.fn(), eligibleWritersForPathsAtRef: vi.fn(),
   } as unknown as IAccessControl;
 }

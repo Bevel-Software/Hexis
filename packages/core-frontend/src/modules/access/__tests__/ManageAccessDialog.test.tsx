@@ -46,7 +46,7 @@ async function openAndUncheckEdit(user: ReturnType<typeof userEvent.setup>) {
 describe('ManageAccessDialog: unchecking an inherited verb on a mixed row', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    api.suggestPrincipals.mockResolvedValue({ plugins: [], people: [], peopleWithheld: false });
+    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
   });
 
   it('write PURELY inherited (download direct): uncheck "Can edit" → 409 → opens prompt on FIRST click, revokes only write', async () => {
@@ -166,7 +166,7 @@ describe('ManageAccessDialog: which workspace the edit targets', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    api.suggestPrincipals.mockResolvedValue({ plugins: [], people: [], peopleWithheld: false });
+    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
     api.fetchFileAccess.mockResolvedValue(VIEW);
     api.grantAccess.mockResolvedValue(VIEW);
   });
@@ -215,7 +215,7 @@ describe('ManageAccessDialog: which workspace the edit targets', () => {
 describe('ManageAccessDialog: naming the rules', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    api.suggestPrincipals.mockResolvedValue({ users: [], plugins: [], peopleWithheld: false });
+    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
   });
 
   /** The real AccessResponse shape — see the passing fixture above. */
@@ -240,7 +240,7 @@ describe('ManageAccessDialog: naming the rules', () => {
     expect(screen.queryByRole('heading', { name: /People with access/i })).not.toBeInTheDocument();
   });
 
-  it('gives each granting folder its own plugin, named after the folder', async () => {
+  it('gives each granting folder its own section, named after the folder', async () => {
     api.fetchFileAccess.mockResolvedValue(
       view({
         readers: { restricted: true, roles: [], users: [A, { name: 'Bo', email: 'bo@x.com' }] },
@@ -291,5 +291,195 @@ describe('ManageAccessDialog: naming the rules', () => {
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
     await user.click(await screen.findByRole('button', { name: /People invited to Sales/ }));
     expect(screen.queryByRole('button', { name: /Manage Sales →/ })).not.toBeInTheDocument();
+  });
+});
+
+// ── group principals in the picker ──
+describe('ManageAccessDialog: group principals', () => {
+  const VIEW = {
+    canRead: true,
+    canWrite: true,
+    canDownload: false,
+    canOwner: false,
+    eligible: { roles: [], users: [A] },
+    readers: { restricted: true, roles: [], users: [A] },
+    owners: { roles: [], users: [] },
+    downloaders: { roles: [], users: [] },
+    sources: { 'u:alice@x.com': { read: [{ kind: 'direct' }], write: [{ kind: 'direct' }] } },
+  } as AccessResponse;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.fetchFileAccess.mockResolvedValue(VIEW);
+    api.grantAccess.mockResolvedValue(VIEW);
+    api.suggestPrincipals.mockResolvedValue({
+      roles: [],
+      groups: ['GTM Team'],
+      people: [],
+      peopleWithheld: false,
+    });
+  });
+
+  it('suggests active groups, chips one, and grants it with the group kind', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    await user.type(
+      await screen.findByPlaceholderText(/add people, groups, or roles/i),
+      'gtm',
+    );
+    // The suggestion row carries the "group" tag and chips on click.
+    await user.click(await screen.findByRole('button', { name: /GTM Team/ }));
+    expect(screen.getByText('GTM Team')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /^Share$/ }));
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalled());
+    expect(api.grantAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ principal: { kind: 'group', group: 'GTM Team' } }),
+    );
+  });
+
+  it('suggests roles from the `roles` field (never the retired `plugins` alias) and grants the role kind', async () => {
+    const user = userEvent.setup();
+    // A server still emitting the deprecated alias: the dialog must read
+    // `roles` and IGNORE `plugins` — the alias is not in the type, and the
+    // suggestion list must come from the new field alone.
+    api.suggestPrincipals.mockResolvedValue({
+      roles: ['Admin'],
+      groups: [],
+      people: [],
+      peopleWithheld: false,
+      plugins: ['Stale Alias Role'],
+    } as never);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    await user.type(
+      await screen.findByPlaceholderText(/add people, groups, or roles/i),
+      'adm',
+    );
+    expect(await screen.findByRole('button', { name: /Admin/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Stale Alias Role/ })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Admin/ }));
+    await user.click(screen.getByRole('button', { name: /^Share$/ }));
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalled());
+    expect(api.grantAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ principal: { kind: 'role', role: 'Admin' } }),
+    );
+  });
+
+  it('a suggest response missing `roles` and `groups` renders people and never throws', async () => {
+    const user = userEvent.setup();
+    // Version skew: an older/newer server may omit either field entirely. The
+    // dialog reads every field defensively — this used to crash.
+    api.suggestPrincipals.mockResolvedValue({
+      people: [{ name: 'Bo', email: 'bo@x.com' }],
+      peopleWithheld: false,
+    } as never);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    await user.type(
+      await screen.findByPlaceholderText(/add people, groups, or roles/i),
+      'bo',
+    );
+    expect(await screen.findByRole('button', { name: /Bo/ })).toBeInTheDocument();
+  });
+
+  it('a suggest response with ONLY roles/groups (people absent) still lists them', async () => {
+    const user = userEvent.setup();
+    api.suggestPrincipals.mockResolvedValue({
+      roles: ['Admin'],
+      groups: ['GTM Team'],
+    } as never);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    await user.type(
+      await screen.findByPlaceholderText(/add people, groups, or roles/i),
+      'a',
+    );
+    expect(await screen.findByRole('button', { name: /GTM Team/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Admin/ })).toBeInTheDocument();
+  });
+});
+
+// ── grantee rows: a group is badged "Group", a role "Role" ──
+//
+// The eligible lists' `principals` carry each collective's kind; the old
+// name-only `roles` list forced every collective row into a "Role" badge —
+// a group grantee rendered as a role, and its mutations round-tripped with
+// the wrong principal kind (a grant on the row would 404 as an unknown role).
+describe('ManageAccessDialog: grantee rows badge roles vs groups', () => {
+  /** GTM Team (a GROUP) holds write directly; Engineering (a ROLE) holds read. */
+  const VIEW = {
+    canRead: true,
+    canWrite: true,
+    canDownload: false,
+    canOwner: false,
+    eligible: {
+      principals: [{ name: 'GTM Team', kind: 'group' }],
+      roles: ['GTM Team'],
+      users: [],
+    },
+    readers: {
+      restricted: true,
+      principals: [{ name: 'Engineering', kind: 'role' }],
+      roles: ['Engineering'],
+      users: [],
+    },
+    owners: { principals: [], roles: [], users: [] },
+    downloaders: { principals: [], roles: [], users: [] },
+    sources: {
+      'r:gtm team': { write: [{ kind: 'direct' }] },
+      'r:engineering': { read: [{ kind: 'direct' }] },
+    },
+  } as AccessResponse;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
+    api.fetchFileAccess.mockResolvedValue(VIEW);
+    api.grantAccess.mockResolvedValue(VIEW);
+  });
+
+  it('badges each collective row with its kind', async () => {
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    expect(await screen.findByText('GTM Team')).toBeInTheDocument();
+    // One badge each, with the right words — a group must NOT read "Role".
+    expect(screen.getByText('Group')).toBeInTheDocument();
+    expect(screen.getByText('Role')).toBeInTheDocument();
+  });
+
+  it('round-trips a group row mutation with the group principal kind', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    // The GTM row's trigger reads "Can edit" (the add-row selector does too —
+    // the row's is the later one in the DOM). Check "Can download" on it.
+    const triggers = await screen.findAllByRole('button', { name: /^can edit$/i });
+    await user.click(triggers[triggers.length - 1]);
+    await user.click(await screen.findByRole('button', { name: /^can download$/i }));
+
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalledTimes(1));
+    expect(api.grantAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({
+        verb: 'download',
+        principal: { kind: 'group', group: 'GTM Team' },
+      }),
+    );
+  });
+
+  it('falls back to name-only `roles` (badged "Role") when `principals` is absent — version skew', async () => {
+    api.fetchFileAccess.mockResolvedValue({
+      ...VIEW,
+      eligible: { roles: ['GTM Team'], users: [] },
+      readers: { restricted: true, roles: [], users: [] },
+    } as AccessResponse);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    expect(await screen.findByText('GTM Team')).toBeInTheDocument();
+    expect(screen.getByText('Role')).toBeInTheDocument();
+    expect(screen.queryByText('Group')).not.toBeInTheDocument();
   });
 });

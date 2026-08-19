@@ -25,6 +25,7 @@ import {
   revokeAccess,
   suggestPrincipals,
   asInheritedError,
+  type AccessEligible,
   type AccessResponse,
   type GrantVerb,
   type GrantSource,
@@ -32,6 +33,7 @@ import {
   type Principal,
   type SuggestResponse,
 } from '../api';
+import { EMAIL_RE } from '../../../lib/email';
 
 interface Props {
   entry: FileTreeEntry;
@@ -42,8 +44,8 @@ interface Props {
    * it edits the branch the user is looking at.
    *
    * The Library is the other case: its surfaces describe the DEFAULT branch
-   * regardless of which branch happens to be open, so a plugin's access edit
-   * has to be pinned to it. Without this the same click would splice
+   * regardless of which branch happens to be open, so a Library item's access
+   * edit has to be pinned to it. Without this the same click would splice
    * `access.md` on whatever branch the context last had open — a rule written
    * into a draft nobody merges, silently doing nothing.
    */
@@ -76,7 +78,12 @@ interface PrincipalRow {
   label: string;
   sub?: string;
   verbs: VerbSet;
-  isRole: boolean;
+  /**
+   * What the row is: a person, a ROLE (app-defined capability), or a GROUP
+   * (grant audience). Decides the badge ("Role" vs "Group") and which
+   * principal kind mutations round-trip with.
+   */
+  kind: 'user' | 'role' | 'group';
   isYou: boolean;
   /** The principal to send on grant / revoke. */
   principal: Principal;
@@ -188,8 +195,6 @@ function avatarTone(seed: string): { bg: string; fg: string } {
   return AVATAR_TONES[Math.abs(h) % AVATAR_TONES.length];
 }
 
-const EMAIL_RE = /^[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+$/;
-
 /** Human noun for a verb, used in the verb-scoped confirmation copy. */
 const VERB_NOUN: Record<GrantVerb, string> = {
   owner: 'owner',
@@ -214,7 +219,7 @@ const ROLE_TO_KEY: Record<Role, keyof VerbSet> = {
   'Can download': 'download',
 };
 
-/** The built-in `everyone` plugin — grantable as public READ only (see backend). */
+/** The built-in `everyone` role — grantable as public READ only (see backend). */
 function isEveryoneRole(p: Principal): boolean {
   return p.kind === 'role' && p.role.trim().toLowerCase() === 'everyone';
 }
@@ -362,7 +367,7 @@ function AnchoredMenu({
 /**
  * Google-Drive-style "Manage access" sheet. Reads the resolved access for a KB
  * path and lets anyone who can write the path's access config share it: add one
- * or more people/plugins as chips and grant them a shared verb (Owner / Can edit /
+ * or more people/groups/roles as chips and grant them a shared verb (Owner / Can edit /
  * Can read / Can download). Each existing grantee's verbs are editable inline via
  * a multi-select checklist (independent verbs); toggling a box grants or revokes
  * that single verb. Grants/revokes write the folder's `access.md` (folder target)
@@ -492,21 +497,34 @@ export function ManageAccessDialog({
     // so an owner legitimately shows owner+write+read checked; download is its own
     // axis (owner folds in, write does not), sourced from `downloaders`.
     const rows = new Map<string, PrincipalRow>();
-    const touchRole = (role: string): PrincipalRow => {
-      const key = `r:${role.toLowerCase()}`;
+    // Kinded collective list for one eligible set. Older servers omit
+    // `principals` (version skew) — fall back to the name-only `roles`,
+    // treating everything as a role (the pre-groups display).
+    const collectivesOf = (list: AccessEligible): { name: string; kind: 'role' | 'group' }[] =>
+      list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
+    const touchCollective = (c: { name: string; kind: 'role' | 'group' }): PrincipalRow => {
+      // Groups share the `r:` row namespace with roles — the resolver keys its
+      // `sources` map that way, and one name is one row regardless of kind.
+      const key = `r:${c.name.toLowerCase()}`;
       let row = rows.get(key);
       if (!row) {
         row = {
           key,
-          label: role,
-          isRole: true,
+          label: c.name,
+          kind: c.kind,
           isYou: false,
-          principal: { kind: 'role', role },
+          principal:
+            c.kind === 'group' ? { kind: 'group', group: c.name } : { kind: 'role', role: c.name },
           verbs: { owner: false, write: false, read: false, download: false },
           manage: 'direct',
           ancestors: [],
         };
         rows.set(key, row);
+      } else if (c.kind === 'group' && row.kind === 'role') {
+        // Group-sticky, mirroring bare-token precedence: should the per-verb
+        // lists ever disagree on a shared name, the merged row is the group.
+        row.kind = 'group';
+        row.principal = { kind: 'group', group: c.name };
       }
       return row;
     };
@@ -522,7 +540,7 @@ export function ManageAccessDialog({
           // would otherwise render the same email twice, burning a row of the
           // scarce width on a duplicate.
           sub: label.toLowerCase() === u.email.toLowerCase() ? undefined : u.email,
-          isRole: false,
+          kind: 'user',
           isYou: u.email.toLowerCase() === myEmail,
           principal: { kind: 'user', email: u.email, displayName: u.name || u.email },
           verbs: { owner: false, write: false, read: false, download: false },
@@ -534,17 +552,17 @@ export function ManageAccessDialog({
       return row;
     };
 
-    for (const r of data.owners.roles) touchRole(r).verbs.owner = true;
+    for (const c of collectivesOf(data.owners)) touchCollective(c).verbs.owner = true;
     for (const u of data.owners.users) touchUser(u).verbs.owner = true;
-    for (const r of data.eligible.roles) touchRole(r).verbs.write = true;
+    for (const c of collectivesOf(data.eligible)) touchCollective(c).verbs.write = true;
     for (const u of data.eligible.users) touchUser(u).verbs.write = true;
     // Read membership is per-principal only for a restricted node. When
     // `restricted` is false, read is `everyone` and the reader lists are empty.
     if (data.readers.restricted) {
-      for (const r of data.readers.roles) touchRole(r).verbs.read = true;
+      for (const c of collectivesOf(data.readers)) touchCollective(c).verbs.read = true;
       for (const u of data.readers.users) touchUser(u).verbs.read = true;
     }
-    for (const r of data.downloaders.roles) touchRole(r).verbs.download = true;
+    for (const c of collectivesOf(data.downloaders)) touchCollective(c).verbs.download = true;
     for (const u of data.downloaders.users) touchUser(u).verbs.download = true;
 
     // Attach each row's per-verb source + manageability (direct / inherited /
@@ -569,7 +587,7 @@ export function ManageAccessDialog({
   );
 
   /**
-   * The inherited rows, ONE PLUGIN PER GRANTING FOLDER — the prototype's shape
+   * The inherited rows, ONE SECTION PER GRANTING FOLDER — the prototype's shape
    * (proto:3637-3649) and, more to the point, its reasoning:
    *
    *   "Inheritance, said as a sentence instead of labelled as a concept.
@@ -626,18 +644,33 @@ export function ManageAccessDialog({
   const canManage = !!data?.canWrite;
 
   // Resolve the CURRENT typed query into a principal to append as a chip: an
-  // exact plugin match or a free-typed email. (Suggestion clicks append directly.)
+  // exact group/role match or a free-typed email. (Suggestion clicks append
+  // directly.) Group first — bare grant tokens resolve group-first, so a name
+  // shared by both defaults to the audience concept; the role stays reachable
+  // via its own suggestion row.
   const addPending: Principal | null = useMemo(() => {
     const q = query.trim();
     if (!q) return null;
-    const pluginHit = suggest?.plugins.find((g) => g.toLowerCase() === q.toLowerCase());
-    if (pluginHit) return { kind: 'role', role: pluginHit };
+    const groupHit = suggest?.groups?.find((g) => g.toLowerCase() === q.toLowerCase());
+    if (groupHit) return { kind: 'group', group: groupHit };
+    const roleHit = suggest?.roles?.find((g) => g.toLowerCase() === q.toLowerCase());
+    if (roleHit) return { kind: 'role', role: roleHit };
     if (EMAIL_RE.test(q)) return { kind: 'user', email: q, displayName: q.split('@')[0] };
     return null;
   }, [query, suggest]);
 
+  // Groups and roles share the `r:` row namespace (the resolver keys both as
+  // `r:<name>`), so a group chip and a role chip with one name dedupe to one
+  // principal in the picker.
   const principalKey = (p: Principal): string =>
-    p.kind === 'role' ? `r:${p.role.toLowerCase()}` : `u:${p.email.toLowerCase()}`;
+    p.kind === 'role'
+      ? `r:${p.role.toLowerCase()}`
+      : p.kind === 'group'
+        ? `r:${p.group.toLowerCase()}`
+        : `u:${p.email.toLowerCase()}`;
+
+  const principalLabel = (p: Principal): string =>
+    p.kind === 'role' ? p.role : p.kind === 'group' ? p.group : p.displayName || p.email;
 
   const addChip = useCallback((p: Principal) => {
     setPickedChips((chips) =>
@@ -687,7 +720,7 @@ export function ManageAccessDialog({
     const failures: string[] = [];
     try {
       for (const principal of pickedChips) {
-        const label = principal.kind === 'role' ? principal.role : principal.email;
+        const label = principalLabel(principal);
         // `everyone` is public-read only — the backend rejects any other verb for
         // it, so clamp here to avoid a guaranteed failure when a higher verb is
         // also selected for the other chips.
@@ -767,8 +800,8 @@ export function ManageAccessDialog({
 
   // Toggle a single verb on an existing grantee: check → grant that verb, uncheck
   // → revoke just that verb. The server's fresh view is authoritative (we never
-  // flip optimistically); a refused revoke (e.g. last-owner) surfaces its message
-  // and we re-sync.
+  // flip optimistically); a refused revoke (e.g. lock contention) surfaces its
+  // message and we re-sync.
   const doToggleVerb = useCallback(
     async (principal: Principal, role: Role, currentlyOn: boolean) => {
       if (!workspaceId || repoRelative === null) return;
@@ -797,15 +830,16 @@ export function ManageAccessDialog({
         // so one uncheck finishes the job instead of a half-removal (the direct
         // bit gone, the inherited bit silently remaining and the box re-checking).
         if (currentlyOn) {
-          const key = principal.kind === 'role'
-            ? `r:${principal.role.toLowerCase()}`
-            : `u:${principal.email.toLowerCase()}`;
+          const key = principalKey(principal);
           const stillForVerb = res.sources?.[key]?.[grantVerb] ?? [];
           const ancestors = ancestorsFromSources({ [grantVerb]: stillForVerb });
           if (ancestors.length > 0) {
-            const label =
-              principal.kind === 'role' ? principal.role : principal.displayName || principal.email;
-            setConfirmRemove({ principal, label, ancestors, verb: grantVerb });
+            setConfirmRemove({
+              principal,
+              label: principalLabel(principal),
+              ancestors,
+              verb: grantVerb,
+            });
           }
         }
       } catch (err) {
@@ -815,8 +849,7 @@ export function ManageAccessDialog({
         // "Remove from parent?" flow a Remove uses, instead of a raw error toast.
         const inherited = asInheritedError(err);
         if (inherited) {
-          const label =
-            principal.kind === 'role' ? principal.role : principal.displayName || principal.email;
+          const label = principalLabel(principal);
           // Scope the confirmation to the single verb the user unchecked, so
           // "Restrict just this file" / "Remove from parent" act on THAT verb
           // only and leave the principal's other (e.g. direct download) verbs.
@@ -966,7 +999,7 @@ export function ManageAccessDialog({
       // squeezing the name to zero width — which left the `Role` badge sitting
       // on top of the "via …" label and pushed Remove off the panel's edge.
       <div key={p.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
-        {p.isRole ? (
+        {p.kind !== 'user' ? (
           <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-sunken text-detail font-bold text-ink-muted">
             {initials(p.label)}
           </span>
@@ -982,9 +1015,11 @@ export function ManageAccessDialog({
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="truncate text-ui font-medium text-ink">{p.label}</span>
             {p.isYou && <span className="shrink-0 text-ui text-ink-faint">(you)</span>}
-            {p.isRole && (
+            {p.kind !== 'user' && (
+              // The same chip vocabulary as the suggest menu's trailing tags:
+              // a role is a capability, a group is an audience — badge which.
               <Badge tone="outline" size="xs" className="shrink-0 uppercase">
-                Role
+                {p.kind === 'group' ? 'Group' : 'Role'}
               </Badge>
             )}
           </div>
@@ -1008,8 +1043,8 @@ export function ManageAccessDialog({
             </Button>
           </div>
         ) : canManage && p.manage === 'external' ? (
-          // No file-backed grant to remove here — managed elsewhere (a plugin's
-          // membership, the everyone policy, or admin rescue).
+          // No file-backed grant to remove here — managed elsewhere (a role or
+          // group's membership, the everyone policy, or admin rescue).
           <span
             className="ml-auto shrink-0 text-detail text-ink-faint"
             title="Granted via a role or policy. Manage it there"
@@ -1115,7 +1150,7 @@ export function ManageAccessDialog({
                     treatment as the primitive, wrapped so the chips can wrap. */}
                 <div className="flex w-full flex-wrap items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2 py-1 focus-within:border-transparent focus-within:outline-2 focus-within:-outline-offset-1 focus-within:outline-accent">
                   {pickedChips.map((c) => {
-                    const label = c.kind === 'role' ? c.role : c.displayName || c.email;
+                    const label = principalLabel(c);
                     return (
                       <span
                         key={principalKey(c)}
@@ -1142,13 +1177,31 @@ export function ManageAccessDialog({
                         addChip(addPending);
                       }
                     }}
-                    placeholder={pickedChips.length ? '' : 'Add people or roles…'}
+                    placeholder={pickedChips.length ? '' : 'Add people, groups, or roles…'}
                     className="min-w-32 flex-1 bg-transparent px-1 py-1 text-ui text-ink placeholder:text-ink-faint focus:outline-none"
                   />
                 </div>
-                {query.trim() && suggest && (suggest.plugins.length > 0 || suggest.people.length > 0) && (
+                {/* Defensive `?? []` on every field: a suggest response missing
+                    `roles` or `groups` (version skew) must degrade to an empty
+                    section, never a crash. Groups lead — they are the audience
+                    concept grants are meant for; roles remain grantable below. */}
+                {query.trim() && suggest && ((suggest.groups?.length ?? 0) > 0 || (suggest.roles?.length ?? 0) > 0 || (suggest.people?.length ?? 0) > 0) && (
                   <AnchoredMenu width="anchor" align="left" className="max-h-56 overflow-auto">
-                    {suggest.plugins.map((g) => (
+                    {(suggest.groups ?? []).map((g) => (
+                      <MenuItem
+                        key={`grp:${g}`}
+                        onClick={() => addChip({ kind: 'group', group: g })}
+                        trailing={
+                          <span className="text-label uppercase text-ink-faint">group</span>
+                        }
+                      >
+                        <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
+                          {initials(g)}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate">{g}</span>
+                      </MenuItem>
+                    ))}
+                    {(suggest.roles ?? []).map((g) => (
                       <MenuItem
                         key={`g:${g}`}
                         onClick={() => addChip({ kind: 'role', role: g })}
@@ -1162,7 +1215,7 @@ export function ManageAccessDialog({
                         <span className="min-w-0 flex-1 truncate">{g}</span>
                       </MenuItem>
                     ))}
-                    {suggest.people.map((p) => {
+                    {(suggest.people ?? []).map((p) => {
                       const tone = avatarTone(p.name || p.email);
                       return (
                         <MenuItem
@@ -1250,7 +1303,7 @@ export function ManageAccessDialog({
             </div>
             {query.trim() && !addPending && !suggest?.peopleWithheld && (
               <p className="mt-1.5 text-detail text-ink-muted">
-                Type a full email to add someone, or pick a role from the list.
+                Type a full email to add someone, or pick a group or role from the list.
               </p>
             )}
             {pickedChips.some(isEveryoneRole) && (

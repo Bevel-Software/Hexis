@@ -143,11 +143,18 @@ export interface IWorkflowService {
    * content: the caller writes the files first (e.g. via the lock-aware
    * filesystem) and is responsible for any validation. Returns null on a no-op
    * (clean tree).
+   *
+   * `onlyPaths` (workspace-relative) scopes the commit to the caller's own
+   * files: on a shared per-branch workspace other paths may be dirty from a
+   * concurrent save whose commit is still queued, and an unscoped commit
+   * would sweep them in under this caller's author/summary. Omitted → the
+   * whole dirty set (legacy behavior for flows that own the workspace).
    */
   commitChanges(
     workspaceId: string,
     user: AuthUser,
     summary: string,
+    onlyPaths?: string[],
   ): Promise<Change | null>;
   /** Per-file history. Newest first; clamps to ≤ 100 entries. */
   listChangesForFile(workspaceId: string, path: string, limit?: number): Promise<Change[]>;
@@ -245,8 +252,10 @@ export interface IWorkflowService {
    * lock-aware write — when the underlying op threw, we don't want the
    * normal `releaseLock` to commit + push whatever partial state happens
    * to be on disk. The lock row goes away (so the next caller can edit
-   * the file); the working tree is left as-is. Idempotent like
-   * `releaseLock`: a no-op when the caller doesn't hold the lock.
+   * the file) and the path's working-tree changes are DISCARDED back to
+   * HEAD — every release leaves the tree clean; bytes not committed are
+   * thrown away. Idempotent like `releaseLock`: a no-op when the caller
+   * doesn't hold the lock.
    */
   releaseLockNoCommit(
     workspaceId: string,

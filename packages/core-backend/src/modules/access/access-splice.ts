@@ -122,7 +122,7 @@ export function validatePrincipal(p: Principal): Principal {
   }
   const role = p.role.trim();
   const canonical = canonicalRoleName(role);
-  if (!canonical) throw new AccessSpliceError('plugin grant needs a name');
+  if (!canonical) throw new AccessSpliceError('role grant needs a name');
   if (
     CONTROL_CHARS.test(role) ||
     role.includes('<') ||
@@ -130,24 +130,48 @@ export function validatePrincipal(p: Principal): Principal {
     role.includes(':') ||
     role.includes('#')
   ) {
-    throw new AccessSpliceError(`invalid plugin name: ${JSON.stringify(p.role)}`);
+    throw new AccessSpliceError(`invalid role name: ${JSON.stringify(p.role)}`);
   }
   // `deny` is never a grantee — it's the denial prefix. `everyone` IS grantable
   // (the built-in public role); the access route restricts it to the read verb.
   if (canonical === 'deny') {
-    throw new AccessSpliceError(`'${role}' is a reserved name and cannot be granted as a plugin`);
+    throw new AccessSpliceError(`'${role}' is a reserved name and cannot be granted as a role`);
   }
   const round = parseAccessEntry(role);
   if (!round.ok || round.entry.kind !== 'role' || round.entry.deny) {
-    throw new AccessSpliceError(`plugin grant does not round-trip: ${JSON.stringify(p)}`);
+    throw new AccessSpliceError(`role grant does not round-trip: ${JSON.stringify(p)}`);
   }
   return { kind: 'role', role };
 }
 
-/** True when a parsed entry names the given principal (ignoring deny prefix). */
-function entryMatches(entry: ParsedEntry, p: Principal): boolean {
+/**
+ * How a role-shaped principal's TOKEN is compared against a file entry:
+ *
+ *  - `'exact'`: the entry must carry the SAME spelling — a bare token and a
+ *    `role/<name>` token are DIFFERENT principals (bare = whoever owns the
+ *    bare key under group-first precedence, `role/` = the role). Grants
+ *    always use this: granting the group `X` while `role/X` is present (or
+ *    vice versa) must NOT be treated as already-granted, or the other
+ *    principal silently never receives the grant.
+ *  - `'name'`: both spellings of the name match. Revokes use this ONLY when
+ *    no group shadows the bare name — then both spellings resolve to the
+ *    role, and revoking the role must also remove legacy bare spellings.
+ */
+export type TokenMatch = 'exact' | 'name';
+
+/**
+ * True when a parsed entry names the given principal (ignoring deny prefix).
+ * `tokenMatch` (role-shaped principals only) selects exact-spelling vs
+ * name-level matching — see {@link TokenMatch}.
+ */
+function entryMatches(entry: ParsedEntry, p: Principal, tokenMatch: TokenMatch): boolean {
   if (p.kind === 'user') return entry.kind === 'user' && entry.email === canonicalEmail(p.email);
-  return entry.kind === 'role' && entry.role === canonicalRoleName(p.role);
+  if (entry.kind !== 'role') return false;
+  const canonicalPrincipal = canonicalRoleName(p.role);
+  if (tokenMatch === 'exact') return entry.role === canonicalPrincipal;
+  const strip = (token: string): string =>
+    token.startsWith('role/') ? canonicalRoleName(token.slice('role/'.length)) : token;
+  return strip(entry.role) === strip(canonicalPrincipal);
 }
 
 // ---------------------------------------------------------------------------
@@ -325,10 +349,15 @@ function blockEntries(fm: string[], block: VerbBlock): { entry: ParsedEntry; lin
 // ---------------------------------------------------------------------------
 
 /**
- * Add `principal` under `verb`. Idempotent: if an equivalent entry already
- * exists with the SAME deny-ness (a grant when granting, a deny when denying),
- * returns `changed: false`. Creates the verb key (and the frontmatter fence,
- * for a fresh file) as needed. Preserves everything else byte-for-byte.
+ * Add `principal` under `verb`. Idempotent: if an entry with the EXACT same
+ * token spelling already exists with the SAME deny-ness (a grant when
+ * granting, a deny when denying), returns `changed: false`. Idempotency is
+ * deliberately exact-token, never name-level: a bare token and a `role/`
+ * token are different principals (group-first precedence gives the bare key
+ * to a same-named group), so a bare-`X` GROUP grant must go through even when
+ * `role/X` is present, and vice versa. Creates the verb key (and the
+ * frontmatter fence, for a fresh file) as needed. Preserves everything else
+ * byte-for-byte.
  *
  * `allowScalar` controls whether a fresh single-entry verb may be written in
  * the node-frontmatter scalar form (`owner: Name <email>`). access.md always
@@ -369,9 +398,10 @@ export function spliceGrant(
   const block = findVerbBlock(region.lines, verb);
   const existing = blockEntries(region.lines, block);
 
-  // Idempotency: an entry for this principal with the same deny-ness is already
-  // present (a grant when granting, a deny when denying).
-  if (existing.some((e) => entryMatches(e.entry, principal) && e.entry.deny === deny)) {
+  // Idempotency: an entry for this EXACT token with the same deny-ness is
+  // already present (a grant when granting, a deny when denying). Exact-token
+  // on purpose — see the doc above.
+  if (existing.some((e) => entryMatches(e.entry, principal, 'exact') && e.entry.deny === deny)) {
     return { text, changed: false };
   }
 
@@ -413,14 +443,22 @@ export function spliceGrant(
  * last item empties the verb, the `verb:` key is collapsed to `verb: []` so the
  * file still parses cleanly (the resolver reads `[]` as an empty list).
  * Preserves everything else.
+ *
+ * Token matching for role-shaped principals is `tokenMatch` (default `'name'`:
+ * BOTH spellings — revoking the role removes legacy bare spellings too).
+ * Callers pass `'exact'` when a GROUP shadows the principal's bare name: the
+ * bare token then belongs to the group and the `role/` token to the role, so a
+ * revoke of one must never strip the other (see AccessMutationService, which
+ * derives the flag from the merged principal index).
  */
 export function spliceRevoke(
   text: string,
   verb: Verb,
   rawPrincipal: Principal,
-  opts: { target?: SpliceTarget } = {},
+  opts: { target?: SpliceTarget; tokenMatch?: TokenMatch } = {},
 ): SpliceResult {
   const principal = validatePrincipal(rawPrincipal);
+  const tokenMatch = opts.tokenMatch ?? 'name';
   const f = splitFrontmatter(text);
   if (!f.hasFrontmatter) return { text, changed: false };
 
@@ -430,7 +468,7 @@ export function spliceRevoke(
 
   if (block.inlineScalarValue !== null) {
     const r = parseAccessEntry(block.inlineScalarValue);
-    if (r.ok && entryMatches(r.entry, principal)) {
+    if (r.ok && entryMatches(r.entry, principal, tokenMatch)) {
       // Lone scalar entry removed -> collapse to empty list.
       region.lines[block.keyLine] = `${' '.repeat(block.keyIndent)}${verb}: []`;
       return { text: region.join(), changed: true };
@@ -439,7 +477,7 @@ export function spliceRevoke(
   }
 
   const entries = blockEntries(region.lines, block);
-  const victims = entries.filter((e) => entryMatches(e.entry, principal)).map((e) => e.line);
+  const victims = entries.filter((e) => entryMatches(e.entry, principal, tokenMatch)).map((e) => e.line);
   if (victims.length === 0) return { text, changed: false };
 
   // Delete from the bottom up so earlier indices stay valid.

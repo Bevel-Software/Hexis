@@ -463,8 +463,9 @@ export class WorkflowService implements IWorkflowService {
     workspaceId: string,
     user: AuthUser,
     summary: string,
+    onlyPaths?: string[],
   ): Promise<Change | null> {
-    const change = await this.git.commitChanges(workspaceId, user, summary);
+    const change = await this.git.commitChanges(workspaceId, user, summary, onlyPaths);
     // Same recovery as the per-file queue: a bare push here could strand the
     // just-made local commit (committed but never shared — breaking save=share)
     // on any non-fast-forward race. Pull-rebase + retry recovers the common
@@ -1958,7 +1959,7 @@ export class WorkflowService implements IWorkflowService {
         }
 
         // Commit ONLY roles.yaml via commitFile (`git add -- roles.yaml`), never
-        // `commitChanges` (`git add -A`): on this shared per-branch workspace other
+        // an unscoped `commitChanges` (`git add -A`): on this shared per-branch workspace other
         // files may be dirty from a concurrent same-branch save, and `add -A` would
         // sweep those unrelated edits into our "preserve roles.yaml" commit under the
         // wrong author/message. Feature branch → the protected-branch gate doesn't

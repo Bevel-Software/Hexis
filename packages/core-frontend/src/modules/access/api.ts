@@ -1,7 +1,20 @@
 import { authFetch } from '../../lib/api';
 import { GitApiError, handleApiResponse } from '../git/services/git.api';
 
+/** A collective grantee with WHAT it is — role (capability) or group (audience). */
+export interface ResolvedPrincipal {
+  name: string;
+  kind: 'role' | 'group';
+}
+
 export interface AccessEligible {
+  /**
+   * Kinded twin of `roles` — the same names, each saying whether it is a ROLE
+   * or a GROUP, so grantee rows can badge honestly and round-trip mutations
+   * with the right principal kind. Optional for version skew: an older server
+   * omits it, and readers fall back to `roles` (all treated as roles).
+   */
+  principals?: ResolvedPrincipal[];
   roles: string[];
   users: { name: string; email: string }[];
 }
@@ -15,7 +28,7 @@ export interface AccessReaders extends AccessEligible {
  * ONE place a principal is named for a verb (mirrors the backend `GrantSource`).
  * Both kinds are file-backed and removable from the dialog: `direct` → remove
  * here; `ancestor` → remove-from-parent or deny-here. A principal who only
- * resolves via a plugin / `everyone` / admin-rescue produces no source.
+ * resolves via a role / group / `everyone` / admin-rescue produces no source.
  */
 export type GrantSource =
   | { kind: 'direct' }
@@ -85,23 +98,41 @@ export function asInheritedError(err: unknown): InheritedRevokeError | null {
   return null;
 }
 
-/** A grantable principal — a person (by email) or a plugin (a roles.yaml role). */
+/**
+ * A grantable principal — a person (by email), a role (an app-defined
+ * capability from the registry, or a legacy roles.yaml role), or a group (a
+ * people-set from the active group source — IdP-synced or manual). Groups are
+ * written as bare-name tokens (bare names resolve group-first); the backend
+ * writes role grants as explicit `role/<Name>` tokens itself — the dialog
+ * just sends `kind: 'role'`. The separate kinds exist so the backend
+ * validates each against the right namespace.
+ */
 export type Principal =
   | { kind: 'user'; email: string; displayName: string }
-  | { kind: 'role'; role: string };
+  | { kind: 'role'; role: string }
+  | { kind: 'group'; group: string };
 
 /** Verbs the share dialog can grant. */
 export type GrantVerb = 'read' | 'write' | 'owner' | 'download';
 
+/**
+ * The suggest payload. Every field is read DEFENSIVELY (`?.` / `?? []`) in
+ * the dialog: under version skew a server may omit one, and a missing field
+ * must degrade to an empty section, never a crash. (The retired `plugins`
+ * alias of `roles` is deliberately NOT in this type — nothing may read it.)
+ */
 export interface SuggestResponse {
-  plugins: string[];
-  people: { name: string; email: string }[];
-  /** True when the query was too short to return people (plugins still shown). */
-  peopleWithheld: boolean;
+  /** Role principals (registry roles + legacy roles.yaml roles + `Everyone`). */
+  roles?: string[];
+  /** Active-source groups. A name shared with a role is offered as BOTH. */
+  groups?: string[];
+  people?: { name: string; email: string }[];
+  /** True when the query was too short to return people (roles/groups still shown). */
+  peopleWithheld?: boolean;
 }
 
 /**
- * Autocomplete the share dialog: matching plugins (roles) + people. People are
+ * Autocomplete the share dialog: matching roles + groups + people. People are
  * withheld until the query is ≥ 2 chars (server-side harvesting guard).
  */
 export async function suggestPrincipals(

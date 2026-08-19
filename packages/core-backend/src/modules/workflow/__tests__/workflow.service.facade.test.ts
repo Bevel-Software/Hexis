@@ -95,7 +95,6 @@ function makeAccessControl(): IAccessControl {
     findEmailByHash: vi.fn().mockResolvedValue(null),
     kbPrincipals: vi.fn().mockResolvedValue({ plugins: [], people: [] }),
     validateRolesYaml: vi.fn().mockReturnValue({ ok: true }),
-    referencesToRole: vi.fn().mockResolvedValue([]),
     canWriteAtRef: vi.fn().mockResolvedValue(null),
     canWriteBatchAtRef: vi.fn().mockResolvedValue(null),
     eligibleWritersAtRef: vi.fn().mockResolvedValue(null),

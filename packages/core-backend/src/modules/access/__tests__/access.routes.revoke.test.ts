@@ -76,6 +76,10 @@ async function makeHarness(opts: {
     canWrite,
     grantSources,
     invalidate: vi.fn(),
+    // The mutation service consults the merged principal index to decide
+    // exact-vs-name token matching on revoke (group shadowing). No groups in
+    // these fixtures → unshadowed (name-level) matching, the legacy behavior.
+    kbPrincipals: vi.fn(async () => ({ roles: [], groups: [], people: [] })),
     // resolvedView() fans out to these after a successful mutation; harmless stubs.
     // canRead/canDownload/canOwner are ALSO consumed by denyHere's assert.
     canRead: vi.fn(async (_w: string, email: string) => effEmail(email, true)),

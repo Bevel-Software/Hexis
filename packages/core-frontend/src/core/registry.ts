@@ -252,6 +252,22 @@ export interface ToolbarItemDef {
   order?: number;
 }
 
+/** Props for the overlay-provided panel on the Groups settings page. */
+export interface GroupsDirectoryPanelProps {
+  /** The active group source, as the roster reports it. */
+  mode: 'manual' | 'idp';
+  /** Re-fetch the roster — call after any action that may flip the mode. */
+  onDirectoryChanged: () => void;
+  /**
+   * Report whether a directory connection EXISTS — which the roster alone
+   * cannot see: between connecting and the first provisioning push the mode
+   * still reads 'manual' (the synced file hasn't landed), yet the IdP already
+   * owns groups and manual edits would go dormant on the first push. The page
+   * suppresses manual CRUD while this is true.
+   */
+  onConnectedChange: (connected: boolean) => void;
+}
+
 export interface AppRegistry {
   /** Apps appended to the toolbar's app switcher (see {@link AppDef}). */
   apps: AppDef[];
@@ -285,6 +301,15 @@ export interface AppRegistry {
   renderers: FileRendererDef[];
   /** Extra rows in the explorer's Pinned section (see {@link ExplorerItemDef}). */
   explorerItems: ExplorerItemDef[];
+  /**
+   * The Groups settings page's directory-connection panel. Core's Groups
+   * page manages MANUAL groups and renders the IdP-synced roster read-only;
+   * HOW a deployment connects an identity provider (e.g. SCIM provisioning)
+   * is an enterprise concern, so the page reserves this slot for an overlay
+   * panel. Rendered below the groups list in both modes; absent means the
+   * page simply never mentions a directory connection.
+   */
+  groupsDirectoryPanel?: ComponentType<GroupsDirectoryPanelProps>;
   /**
    * How many unread items the gear menu's badge should show, if anything is
    * counting. CORE COUNTS NOTHING: the feedback inbox behind that badge is an
