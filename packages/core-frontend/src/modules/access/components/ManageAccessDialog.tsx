@@ -32,6 +32,7 @@ import {
   type Principal,
   type SuggestResponse,
 } from '../api';
+import { EMAIL_RE } from '../../../lib/email';
 
 interface Props {
   entry: FileTreeEntry;
@@ -42,8 +43,8 @@ interface Props {
    * it edits the branch the user is looking at.
    *
    * The Library is the other case: its surfaces describe the DEFAULT branch
-   * regardless of which branch happens to be open, so a plugin's access edit
-   * has to be pinned to it. Without this the same click would splice
+   * regardless of which branch happens to be open, so a Library item's access
+   * edit has to be pinned to it. Without this the same click would splice
    * `access.md` on whatever branch the context last had open — a rule written
    * into a draft nobody merges, silently doing nothing.
    */
@@ -188,8 +189,6 @@ function avatarTone(seed: string): { bg: string; fg: string } {
   return AVATAR_TONES[Math.abs(h) % AVATAR_TONES.length];
 }
 
-const EMAIL_RE = /^[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+$/;
-
 /** Human noun for a verb, used in the verb-scoped confirmation copy. */
 const VERB_NOUN: Record<GrantVerb, string> = {
   owner: 'owner',
@@ -214,7 +213,7 @@ const ROLE_TO_KEY: Record<Role, keyof VerbSet> = {
   'Can download': 'download',
 };
 
-/** The built-in `everyone` plugin — grantable as public READ only (see backend). */
+/** The built-in `everyone` role — grantable as public READ only (see backend). */
 function isEveryoneRole(p: Principal): boolean {
   return p.kind === 'role' && p.role.trim().toLowerCase() === 'everyone';
 }
@@ -362,7 +361,7 @@ function AnchoredMenu({
 /**
  * Google-Drive-style "Manage access" sheet. Reads the resolved access for a KB
  * path and lets anyone who can write the path's access config share it: add one
- * or more people/plugins as chips and grant them a shared verb (Owner / Can edit /
+ * or more people/groups/roles as chips and grant them a shared verb (Owner / Can edit /
  * Can read / Can download). Each existing grantee's verbs are editable inline via
  * a multi-select checklist (independent verbs); toggling a box grants or revokes
  * that single verb. Grants/revokes write the folder's `access.md` (folder target)
@@ -569,7 +568,7 @@ export function ManageAccessDialog({
   );
 
   /**
-   * The inherited rows, ONE PLUGIN PER GRANTING FOLDER — the prototype's shape
+   * The inherited rows, ONE SECTION PER GRANTING FOLDER — the prototype's shape
    * (proto:3637-3649) and, more to the point, its reasoning:
    *
    *   "Inheritance, said as a sentence instead of labelled as a concept.
@@ -626,21 +625,24 @@ export function ManageAccessDialog({
   const canManage = !!data?.canWrite;
 
   // Resolve the CURRENT typed query into a principal to append as a chip: an
-  // exact plugin match or a free-typed email. (Suggestion clicks append directly.)
+  // exact group/role match or a free-typed email. (Suggestion clicks append
+  // directly.) Group first — bare grant tokens resolve group-first, so a name
+  // shared by both defaults to the audience concept; the role stays reachable
+  // via its own suggestion row.
   const addPending: Principal | null = useMemo(() => {
     const q = query.trim();
     if (!q) return null;
-    const pluginHit = suggest?.plugins.find((g) => g.toLowerCase() === q.toLowerCase());
-    if (pluginHit) return { kind: 'role', role: pluginHit };
-    const groupHit = suggest?.groups.find((g) => g.toLowerCase() === q.toLowerCase());
+    const groupHit = suggest?.groups?.find((g) => g.toLowerCase() === q.toLowerCase());
     if (groupHit) return { kind: 'group', group: groupHit };
+    const roleHit = suggest?.roles?.find((g) => g.toLowerCase() === q.toLowerCase());
+    if (roleHit) return { kind: 'role', role: roleHit };
     if (EMAIL_RE.test(q)) return { kind: 'user', email: q, displayName: q.split('@')[0] };
     return null;
   }, [query, suggest]);
 
-  // Groups share the `r:` namespace with plugins: in the written grant they
-  // are the same bare-name token, so a group chip and a plugin chip with one
-  // name ARE one principal and must dedupe.
+  // Groups and roles share the `r:` row namespace (the resolver keys both as
+  // `r:<name>`), so a group chip and a role chip with one name dedupe to one
+  // principal in the picker.
   const principalKey = (p: Principal): string =>
     p.kind === 'role'
       ? `r:${p.role.toLowerCase()}`
@@ -1020,8 +1022,8 @@ export function ManageAccessDialog({
             </Button>
           </div>
         ) : canManage && p.manage === 'external' ? (
-          // No file-backed grant to remove here — managed elsewhere (a plugin's
-          // membership, the everyone policy, or admin rescue).
+          // No file-backed grant to remove here — managed elsewhere (a role or
+          // group's membership, the everyone policy, or admin rescue).
           <span
             className="ml-auto shrink-0 text-detail text-ink-faint"
             title="Granted via a role or policy. Manage it there"
@@ -1158,23 +1160,13 @@ export function ManageAccessDialog({
                     className="min-w-32 flex-1 bg-transparent px-1 py-1 text-ui text-ink placeholder:text-ink-faint focus:outline-none"
                   />
                 </div>
-                {query.trim() && suggest && (suggest.plugins.length > 0 || suggest.groups.length > 0 || suggest.people.length > 0) && (
+                {/* Defensive `?? []` on every field: a suggest response missing
+                    `roles` or `groups` (version skew) must degrade to an empty
+                    section, never a crash. Groups lead — they are the audience
+                    concept grants are meant for; roles remain grantable below. */}
+                {query.trim() && suggest && ((suggest.groups?.length ?? 0) > 0 || (suggest.roles?.length ?? 0) > 0 || (suggest.people?.length ?? 0) > 0) && (
                   <AnchoredMenu width="anchor" align="left" className="max-h-56 overflow-auto">
-                    {suggest.plugins.map((g) => (
-                      <MenuItem
-                        key={`g:${g}`}
-                        onClick={() => addChip({ kind: 'role', role: g })}
-                        trailing={
-                          <span className="text-label uppercase text-ink-faint">role</span>
-                        }
-                      >
-                        <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
-                          {initials(g)}
-                        </span>
-                        <span className="min-w-0 flex-1 truncate">{g}</span>
-                      </MenuItem>
-                    ))}
-                    {suggest.groups.map((g) => (
+                    {(suggest.groups ?? []).map((g) => (
                       <MenuItem
                         key={`grp:${g}`}
                         onClick={() => addChip({ kind: 'group', group: g })}
@@ -1188,7 +1180,21 @@ export function ManageAccessDialog({
                         <span className="min-w-0 flex-1 truncate">{g}</span>
                       </MenuItem>
                     ))}
-                    {suggest.people.map((p) => {
+                    {(suggest.roles ?? []).map((g) => (
+                      <MenuItem
+                        key={`g:${g}`}
+                        onClick={() => addChip({ kind: 'role', role: g })}
+                        trailing={
+                          <span className="text-label uppercase text-ink-faint">role</span>
+                        }
+                      >
+                        <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
+                          {initials(g)}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate">{g}</span>
+                      </MenuItem>
+                    ))}
+                    {(suggest.people ?? []).map((p) => {
                       const tone = avatarTone(p.name || p.email);
                       return (
                         <MenuItem
@@ -1276,7 +1282,7 @@ export function ManageAccessDialog({
             </div>
             {query.trim() && !addPending && !suggest?.peopleWithheld && (
               <p className="mt-1.5 text-detail text-ink-muted">
-                Type a full email to add someone, or pick a role from the list.
+                Type a full email to add someone, or pick a group or role from the list.
               </p>
             )}
             {pickedChips.some(isEveryoneRole) && (

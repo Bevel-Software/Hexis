@@ -46,7 +46,7 @@ async function openAndUncheckEdit(user: ReturnType<typeof userEvent.setup>) {
 describe('ManageAccessDialog: unchecking an inherited verb on a mixed row', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    api.suggestPrincipals.mockResolvedValue({ plugins: [], people: [], peopleWithheld: false });
+    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
   });
 
   it('write PURELY inherited (download direct): uncheck "Can edit" → 409 → opens prompt on FIRST click, revokes only write', async () => {
@@ -166,7 +166,7 @@ describe('ManageAccessDialog: which workspace the edit targets', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    api.suggestPrincipals.mockResolvedValue({ plugins: [], people: [], peopleWithheld: false });
+    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
     api.fetchFileAccess.mockResolvedValue(VIEW);
     api.grantAccess.mockResolvedValue(VIEW);
   });
@@ -215,7 +215,7 @@ describe('ManageAccessDialog: which workspace the edit targets', () => {
 describe('ManageAccessDialog: naming the rules', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    api.suggestPrincipals.mockResolvedValue({ users: [], plugins: [], peopleWithheld: false });
+    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
   });
 
   /** The real AccessResponse shape — see the passing fixture above. */
@@ -240,7 +240,7 @@ describe('ManageAccessDialog: naming the rules', () => {
     expect(screen.queryByRole('heading', { name: /People with access/i })).not.toBeInTheDocument();
   });
 
-  it('gives each granting folder its own plugin, named after the folder', async () => {
+  it('gives each granting folder its own section, named after the folder', async () => {
     api.fetchFileAccess.mockResolvedValue(
       view({
         readers: { restricted: true, roles: [], users: [A, { name: 'Bo', email: 'bo@x.com' }] },
@@ -313,7 +313,7 @@ describe('ManageAccessDialog: group principals', () => {
     api.fetchFileAccess.mockResolvedValue(VIEW);
     api.grantAccess.mockResolvedValue(VIEW);
     api.suggestPrincipals.mockResolvedValue({
-      plugins: [],
+      roles: [],
       groups: ['GTM Team'],
       people: [],
       peopleWithheld: false,
@@ -338,5 +338,68 @@ describe('ManageAccessDialog: group principals', () => {
       'ws-1',
       expect.objectContaining({ principal: { kind: 'group', group: 'GTM Team' } }),
     );
+  });
+
+  it('suggests roles from the `roles` field (never the retired `plugins` alias) and grants the role kind', async () => {
+    const user = userEvent.setup();
+    // A server still emitting the deprecated alias: the dialog must read
+    // `roles` and IGNORE `plugins` — the alias is not in the type, and the
+    // suggestion list must come from the new field alone.
+    api.suggestPrincipals.mockResolvedValue({
+      roles: ['Admin'],
+      groups: [],
+      people: [],
+      peopleWithheld: false,
+      plugins: ['Stale Alias Role'],
+    } as never);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    await user.type(
+      await screen.findByPlaceholderText(/add people, groups, or roles/i),
+      'adm',
+    );
+    expect(await screen.findByRole('button', { name: /Admin/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Stale Alias Role/ })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Admin/ }));
+    await user.click(screen.getByRole('button', { name: /^Share$/ }));
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalled());
+    expect(api.grantAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ principal: { kind: 'role', role: 'Admin' } }),
+    );
+  });
+
+  it('a suggest response missing `roles` and `groups` renders people and never throws', async () => {
+    const user = userEvent.setup();
+    // Version skew: an older/newer server may omit either field entirely. The
+    // dialog reads every field defensively — this used to crash.
+    api.suggestPrincipals.mockResolvedValue({
+      people: [{ name: 'Bo', email: 'bo@x.com' }],
+      peopleWithheld: false,
+    } as never);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    await user.type(
+      await screen.findByPlaceholderText(/add people, groups, or roles/i),
+      'bo',
+    );
+    expect(await screen.findByRole('button', { name: /Bo/ })).toBeInTheDocument();
+  });
+
+  it('a suggest response with ONLY roles/groups (people absent) still lists them', async () => {
+    const user = userEvent.setup();
+    api.suggestPrincipals.mockResolvedValue({
+      roles: ['Admin'],
+      groups: ['GTM Team'],
+    } as never);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    await user.type(
+      await screen.findByPlaceholderText(/add people, groups, or roles/i),
+      'a',
+    );
+    expect(await screen.findByRole('button', { name: /GTM Team/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Admin/ })).toBeInTheDocument();
   });
 });
