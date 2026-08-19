@@ -96,14 +96,13 @@ describe('the interactive tab: local first, hosted second, each with its own add
   });
 
   /**
-   * The RECOMMENDED path leads: the local-server section renders above the
-   * hosted one, and its two snippets carry the key placeholder — no key
-   * exists on this tab, and an empty env value would fail at connect time
-   * with nothing to say what was missing. Both quote the workspace ORIGIN,
-   * because hexis-mcp resolves the endpoint from `GET <base>/api/config`
-   * itself.
+   * The RECOMMENDED path leads: the local-server drawer renders above the
+   * hosted one, and its two snippets are KEYLESS — interactive mode signs in
+   * through the browser on first run, so no key belongs in the config. Both
+   * quote the workspace ORIGIN, because hexis-mcp resolves the endpoint from
+   * `GET <base>/api/config` itself.
    */
-  it('leads with the local server: placeholder-bearing snippets built from the origin', () => {
+  it('leads with the local server: keyless snippets built from the origin', () => {
     mount(PUBLIC_URL);
     // Two CLOSED drawers, desktop first. The summaries are the whole pitch;
     // the configs sit inside and neither drawer arrives open.
@@ -119,13 +118,14 @@ describe('the interactive tab: local first, hosted second, each with its own add
 
     const values = snippets();
     expect(values).toContain(
-      `claude mcp add hexis-local --env HEXIS_URL="${window.location.origin}" --env HEXIS_CONNECTION_KEY="PASTE_YOUR_EXTERNAL_API_KEY" -- npx -y @bevel-software/hexis-mcp`,
+      `claude mcp add hexis-local --env HEXIS_URL="${window.location.origin}" -- npx -y @bevel-software/hexis-mcp`,
     );
     const json = values.find((v) => v.includes('mcpServers') && v.includes('hexis-local'));
     const parsed = JSON.parse(json!).mcpServers['hexis-local'];
     expect(parsed.args).toEqual(['-y', '@bevel-software/hexis-mcp']);
     expect(parsed.env.HEXIS_URL).toBe(window.location.origin);
-    expect(parsed.env.HEXIS_CONNECTION_KEY).toBe('PASTE_YOUR_EXTERNAL_API_KEY');
+    // Keyless = interactive: the browser-sign-in mode carries no key env.
+    expect(parsed.env.HEXIS_CONNECTION_KEY).toBeUndefined();
   });
 
   /**

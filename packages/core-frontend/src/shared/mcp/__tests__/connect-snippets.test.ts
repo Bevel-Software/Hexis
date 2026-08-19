@@ -449,7 +449,6 @@ describe('snippets: one builder per client, keyed or not', () => {
       const parsed = JSON.parse(hexisMcpJsonSnippet(BASE));
       expect(parsed.mcpServers['hexis-local'].env).toEqual({
         HEXIS_URL: BASE,
-        HEXIS_CONNECTION_KEY: 'PASTE_YOUR_EXTERNAL_API_KEY',
       });
       expect(hexisMcpJsonSnippet(BASE)).not.toContain(KEY);
     });

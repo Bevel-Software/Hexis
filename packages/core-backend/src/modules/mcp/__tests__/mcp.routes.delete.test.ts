@@ -41,7 +41,12 @@ async function mountWithRemove(
 
   const app = express();
   app.use(express.json());
-  app.use('/api', createMcpRoutes(mcpService, externalApiKeyService, fakeAuth, fakeAuth, stub));
+  // local-token deps (internal tokens / OAuth provider / metadata URL) are only
+  // dereferenced by that route's handler — stubs suffice here.
+  app.use(
+    '/api',
+    createMcpRoutes(mcpService, externalApiKeyService, fakeAuth, fakeAuth, stub, stub, stub, ''),
+  );
 
   httpServer = await new Promise<HttpServer>((resolve) => {
     const s = app.listen(0, () => resolve(s));

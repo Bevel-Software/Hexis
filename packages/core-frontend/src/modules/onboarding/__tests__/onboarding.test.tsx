@@ -351,10 +351,10 @@ describe('WelcomePage', () => {
    * endpoint does plus the plugins' local-only tools, so the picker leads
    * with it and the page opens on it. No key exists at onboarding time, so
    * the snippet must carry the placeholder that tells someone what to paste
-   * — a snippet with an empty key would fail at connect time with nothing
-   * to say why.
+   * — keyless is the interactive mode: the local server opens the browser
+   * to sign in on first run, so the config carries no key at all.
    */
-  it('defaults to Desktop agents: the hexis-mcp config with the key placeholder', () => {
+  it('defaults to Desktop agents: the keyless hexis-mcp config', () => {
     mountPage();
     expect(screen.getByRole('radio', { name: 'Desktop agents' })).toHaveAttribute(
       'aria-checked',
@@ -362,9 +362,11 @@ describe('WelcomePage', () => {
     );
     const snippet = screen.getByText(/mcpServers/).textContent!;
     expect(snippet).toContain('@bevel-software/hexis-mcp');
-    expect(snippet).toContain('PASTE_YOUR_EXTERNAL_API_KEY');
-    // The hint says what the placeholder is and where the real key is minted.
-    expect(screen.getByText(/External agent access/)).toBeInTheDocument();
+    // Keyless = interactive sign-in: no key env at all, not a placeholder —
+    // the server opens the browser on first run.
+    expect(snippet).not.toContain('HEXIS_CONNECTION_KEY');
+    // The hint says how identity arrives instead: browser sign-in on first run.
+    expect(screen.getByText(/your browser opens so you can sign in/)).toBeInTheDocument();
   });
 
   /**

@@ -3,8 +3,9 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { ConfigError, USAGE, resolveConfig } from './config.js';
-import { DeploymentError } from './deployment.js';
+import { ConfigError, USAGE, resolveConfig, type HexisMcpConfig } from './config.js';
+import { DeploymentError, resolveMcpUrl } from './deployment.js';
+import { OAuthError, establishOAuthConfig } from './oauth.js';
 import { createHexisMcpServer } from './server.js';
 
 /**
@@ -33,7 +34,18 @@ async function main(): Promise<void> {
     return;
   }
 
-  const config = resolveConfig(argv, process.env);
+  const resolved = resolveConfig(argv, process.env);
+  let config: HexisMcpConfig;
+  if (resolved.connectionKey !== undefined) {
+    // Key mode: autonomous, exactly the pre-OAuth behavior.
+    config = { baseUrl: resolved.baseUrl, connectionKey: resolved.connectionKey };
+  } else {
+    // No key = browser sign-in. Discovery starts from the deployment's OWN
+    // MCP endpoint; `/api/config` is unauthenticated, so resolving it needs
+    // no credential — which is the point: none exists yet.
+    const mcpUrl = await resolveMcpUrl({ baseUrl: resolved.baseUrl, connectionKey: '' });
+    config = await establishOAuthConfig(resolved.baseUrl, mcpUrl, { noOpen: resolved.noOpen });
+  }
   const server = await createHexisMcpServer(config, packageVersion());
   await server.connect(new StdioServerTransport());
 }
@@ -42,7 +54,7 @@ main().catch((err: unknown) => {
   // A startup failure the person can act on (bad URL, dead key, unreachable
   // deployment) prints its own message and nothing else; an unexpected one
   // keeps its stack, because that is a bug report.
-  if (err instanceof ConfigError || err instanceof DeploymentError) {
+  if (err instanceof ConfigError || err instanceof DeploymentError || err instanceof OAuthError) {
     process.stderr.write(`${err.message}\n`);
   } else {
     console.error(err);

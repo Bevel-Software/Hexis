@@ -382,16 +382,18 @@ export function workspaceBaseUrl(): string {
  * whole and an empty env value fails at connect time with nothing to say
  * what was missing.
  */
-export const CONNECTION_KEY_PLACEHOLDER = 'PASTE_YOUR_EXTERNAL_API_KEY';
-
 /**
  * The JSON block that runs the workspace as a LOCAL MCP server. Read by the
  * same clients as `jsonConfigSnippet` — Claude Desktop, Cursor, Windsurf,
  * Cline, anything that loads servers from a JSON config — but the entry
  * spawns `npx @bevel-software/hexis-mcp` instead of pointing at the hosted
- * endpoint, so the command needs Node on the machine. Without a bearer the
- * key field carries `PASTE_YOUR_EXTERNAL_API_KEY`, which is what the person
- * must do before the config works.
+ * endpoint, so the command needs Node on the machine.
+ *
+ * Without a bearer there is NO key field at all: keyless is the interactive
+ * mode, where the server opens the person's browser to sign in on first run
+ * (the same OAuth flow the hosted endpoint puts web agents through). The
+ * bearer variant exists for the key-reveal modal, whose reader is setting up
+ * an autonomous pipeline that cannot open a browser.
  */
 export function hexisMcpJsonSnippet(baseUrl: string, bearer?: string): string {
   return JSON.stringify(
@@ -402,7 +404,7 @@ export function hexisMcpJsonSnippet(baseUrl: string, bearer?: string): string {
           args: ['-y', '@bevel-software/hexis-mcp'],
           env: {
             HEXIS_URL: baseUrl,
-            HEXIS_CONNECTION_KEY: bearer ?? CONNECTION_KEY_PLACEHOLDER,
+            ...(bearer ? { HEXIS_CONNECTION_KEY: bearer } : {}),
           },
         },
       },
@@ -414,17 +416,19 @@ export function hexisMcpJsonSnippet(baseUrl: string, bearer?: string): string {
 
 /**
  * The `claude mcp add` one-liner for the local server. A stdio command, not
- * a URL, so the address and key travel as `--env` values — and both are
- * interpolated inside double quotes and escaped, exactly as the header is in
- * `claudeCodeCommand`. Today's values are tame (a `bevel_…` key, an https
- * URL), but a URL can legally carry `$` or backtick, and quoting only the
- * value that looks dangerous is how the other one bites later.
+ * a URL, so the address (and the key, when the autonomous variant carries
+ * one) travel as `--env` values — interpolated inside double quotes and
+ * escaped, exactly as the header is in `claudeCodeCommand`. Today's values
+ * are tame (a tenant-prefixed key, an https URL), but a URL can legally
+ * carry `$` or backtick, and quoting only the value that looks dangerous is
+ * how the other one bites later. Keyless = interactive sign-in, same as
+ * {@link hexisMcpJsonSnippet}.
  */
-export function hexisMcpClaudeCommand(baseUrl: string, bearer: string): string {
+export function hexisMcpClaudeCommand(baseUrl: string, bearer?: string): string {
   return (
     `claude mcp add hexis-local` +
     ` --env HEXIS_URL="${escapeForDoubleQuotes(baseUrl)}"` +
-    ` --env HEXIS_CONNECTION_KEY="${escapeForDoubleQuotes(bearer)}"` +
+    (bearer ? ` --env HEXIS_CONNECTION_KEY="${escapeForDoubleQuotes(bearer)}"` : '') +
     ` -- npx -y @bevel-software/hexis-mcp`
   );
 }

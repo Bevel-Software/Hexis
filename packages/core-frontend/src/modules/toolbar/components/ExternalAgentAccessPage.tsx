@@ -5,7 +5,6 @@ import { Dialog } from '../../../shared/components/Dialog';
 import { PageShell } from '../../../shared/components/PageShell';
 import { buttonClasses } from '../../../shared/components';
 import {
-  CONNECTION_KEY_PLACEHOLDER,
   ConnectionInstructions,
   CopyBlock,
   claudeCodeCommand,
@@ -220,8 +219,9 @@ export function ExternalAgentAccessPage() {
                   Recommended: runs this workspace as a local MCP server (needs Node), so the
                   agent gets everything the hosted endpoint serves, plus your plugins'
                   local-only tools — the ones{' '}
-                  <span className="font-mono">list_local_tools</span> names. It authenticates
-                  with an external API key: create one on the{' '}
+                  <span className="font-mono">list_local_tools</span> names. No key needed: the
+                  first time it starts, your browser opens so you can sign in. (A pipeline that
+                  can't open a browser passes an external API key instead — the{' '}
                   <button
                     type="button"
                     onClick={() => setTab('autonomous')}
@@ -229,11 +229,11 @@ export function ExternalAgentAccessPage() {
                   >
                     Autonomous agents
                   </button>{' '}
-                  tab and paste it over the placeholder.
+                  tab shows that setup.)
                 </p>
                 <CopyBlock
                   label="Connect Claude Code"
-                  value={hexisMcpClaudeCommand(workspaceUrl, CONNECTION_KEY_PLACEHOLDER)}
+                  value={hexisMcpClaudeCommand(workspaceUrl)}
                   rows={3}
                 />
                 <div>

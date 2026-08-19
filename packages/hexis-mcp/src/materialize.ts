@@ -29,7 +29,12 @@ export function hexisHome(): string {
   return process.env.HEXIS_HOME || path.join(os.homedir(), '.hexis');
 }
 
-function hostKey(baseUrl: string): string {
+/**
+ * One deployment's on-disk identity. Shared with the OAuth credential store
+ * (`oauth.ts`) so a plugin tree and a sign-in for the same deployment key the
+ * same way — and two deployments never collide in either.
+ */
+export function hostKey(baseUrl: string): string {
   const host = new URL(baseUrl).host.replace(/[^a-zA-Z0-9.-]+/g, '_');
   // The hash keeps two base urls on one host (different ports/paths) apart.
   return `${host}-${createHash('sha256').update(baseUrl).digest('hex').slice(0, 8)}`;
