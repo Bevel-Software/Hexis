@@ -93,9 +93,12 @@ export interface RoleRosterEntry {
    */
   capability: { description: string; groupAssignable: boolean } | null;
   /**
-   * Every access rule referencing this role — folder `access.md` AND node
-   * frontmatter, under EITHER spelling (the bare token or `role/<name>`).
-   * Sound: this is the SAME scan the group rename/delete rewrites use.
+   * Every access rule referencing this ROLE — folder `access.md` AND node
+   * frontmatter. `role/<name>` hits always count; a BARE-token hit counts
+   * only when no group shadows the name (bare tokens resolve group-first, so
+   * a shadowed bare grant is the GROUP's reference, listed on the groups
+   * roster instead). Sound: this is the SAME scan the group rename/delete
+   * rewrites use.
    */
   referencedBy: { path: string; verb: string }[];
 }
@@ -175,7 +178,10 @@ export class RolesAdminService {
       // malformed roles.yaml can never land through here either.
       validateWrite: makeRolesYamlWriteValidator(kbDirName),
     });
-    this.references = new KbReferenceScanner(workspaceService, kbDirName);
+    // The event bus keeps the roster's `referencedBy` fresh: a share-dialog
+    // grant/revoke on any access.md happens outside this service, and the
+    // scanner invalidates its cache on those writes' events (TTL as backstop).
+    this.references = new KbReferenceScanner(workspaceService, kbDirName, eventBus);
   }
 
   /** Resolved per call — see the constructor note on `defaultBranchOf`. */
@@ -247,11 +253,18 @@ export class RolesAdminService {
     const workspaceId = await this.ensureWorkspace();
     const text = await this.readRolesYaml(workspaceId);
     const model = parseRolesModel(text);
-    // ONE sound scan of every `.md` (folder access.md + node frontmatter) —
-    // cached in the shared scanner, so mutations returning the fresh roster
-    // don't rerun the full-KB sweep — indexed by canonical entry token. A
-    // role is referenced under either spelling: bare name or `role/<name>`.
-    const referencesByToken = await this.references.scan(workspaceId);
+    // ONE sound scan of every candidate file (folder access.md + node
+    // frontmatter) — cached in the shared scanner, so mutations returning the
+    // fresh roster don't rerun the full-KB sweep — indexed by canonical entry
+    // token. Attribution per spelling: a `role/<name>` hit is ALWAYS the
+    // role's; a BARE hit is the role's only when no group shadows the name —
+    // bare tokens resolve group-first, so a shadowed bare grant belongs to the
+    // GROUP (and the groups roster attributes it there — the mirror image).
+    const [referencesByToken, activeGroups] = await Promise.all([
+      this.references.scan(workspaceId),
+      loadActiveGroups((f) => this.locked.readKbFile(workspaceId, f)),
+    ]);
+    const groupOwnedBareNames = new Set(activeGroups.groups.keys());
     const out: RoleRosterEntry[] = [];
     for (const role of model) {
       const canonical = canonicalRoleName(role.displayName);
@@ -268,7 +281,7 @@ export class RolesAdminService {
           ? { description: registryEntry.description, groupAssignable: registryEntry.groupAssignable }
           : null,
         referencedBy: [
-          ...(referencesByToken.get(canonical) ?? []),
+          ...(groupOwnedBareNames.has(canonical) ? [] : referencesByToken.get(canonical) ?? []),
           ...(referencesByToken.get(`${ROLE_TOKEN_PREFIX}${canonical}`) ?? []),
         ],
       });

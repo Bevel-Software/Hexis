@@ -106,7 +106,24 @@ export function createAccessRoutes(
     if (p.kind === 'group') return { kind: 'role', role: p.group };
     if (p.kind === 'role') {
       const canonical = canonicalRoleName(p.role);
-      if (canonical === EVERYONE_CANONICAL || canonical.startsWith(ROLE_TOKEN_PREFIX)) return p;
+      const bare = canonical.startsWith(ROLE_TOKEN_PREFIX)
+        ? canonical.slice(ROLE_TOKEN_PREFIX.length)
+        : canonical;
+      // The built-in `everyone` has NO `role/` alias in the principal index
+      // (it is not a roles.yaml role), so `role/everyone` would be a DEAD
+      // token — granted but resolving to nothing. Normalize either spelling
+      // to the bare built-in (keeping the caller's casing, e.g. `Everyone`),
+      // on grant and revoke symmetrically.
+      if (bare === EVERYONE_CANONICAL) {
+        const raw = p.role.trim();
+        return {
+          kind: 'role',
+          role: canonical.startsWith(ROLE_TOKEN_PREFIX)
+            ? raw.slice(ROLE_TOKEN_PREFIX.length).trim()
+            : raw,
+        };
+      }
+      if (canonical.startsWith(ROLE_TOKEN_PREFIX)) return p;
       return { kind: 'role', role: `${ROLE_TOKEN_PREFIX}${p.role.trim()}` };
     }
     return p;

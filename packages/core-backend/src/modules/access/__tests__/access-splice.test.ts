@@ -266,3 +266,68 @@ describe('round-trip — every granted entry parses back', () => {
     );
   });
 });
+
+describe('token-kind family — exact-token grants, shadow-aware revokes', () => {
+  // One name, two spellings, two possible principals: the bare token is the
+  // GROUP's whenever a group shadows the name (group-first precedence), the
+  // `role/` token is always the ROLE's. Grants must be exact-token idempotent;
+  // revokes are alias-tolerant ONLY when unshadowed (the caller passes
+  // tokenMatch: 'exact' when a group owns the bare name).
+  const SHARED = `---
+write:
+  - role/Sales
+  - Sales
+  - Admin
+---
+`;
+
+  it("GRANT is exact-token: a bare GROUP grant goes through even when role/<Name> is present", () => {
+    const md = '---\nwrite:\n  - role/Sales\n---\n';
+    const r = spliceGrant(md, 'write', { kind: 'role', role: 'Sales' });
+    expect(r.changed).toBe(true); // NOT swallowed as already-granted
+    expect(r.text).toContain('  - role/Sales');
+    expect(r.text).toContain('  - Sales');
+  });
+
+  it('GRANT is exact-token: a role/<Name> grant goes through even when the bare token is present', () => {
+    const md = '---\nwrite:\n  - Sales\n---\n';
+    const r = spliceGrant(md, 'write', { kind: 'role', role: 'role/Sales' });
+    expect(r.changed).toBe(true);
+    expect(r.text).toContain('  - Sales');
+    expect(r.text).toContain('  - role/Sales');
+  });
+
+  it('GRANT stays idempotent for the SAME spelling (both spellings)', () => {
+    expect(spliceGrant(SHARED, 'write', { kind: 'role', role: 'Sales' }).changed).toBe(false);
+    expect(spliceGrant(SHARED, 'write', { kind: 'role', role: 'role/Sales' }).changed).toBe(false);
+  });
+
+  it("REVOKE unshadowed (default 'name'): revoking the role strips BOTH spellings (legacy cleanup)", () => {
+    const r = spliceRevoke(SHARED, 'write', { kind: 'role', role: 'role/Sales' });
+    expect(r.changed).toBe(true);
+    expect(r.text).not.toContain('Sales');
+    expect(r.text).toContain('  - Admin');
+  });
+
+  it("REVOKE shadowed ('exact'): revoking the ROLE leaves the group's bare token", () => {
+    const r = spliceRevoke(SHARED, 'write', { kind: 'role', role: 'role/Sales' }, { tokenMatch: 'exact' });
+    expect(r.changed).toBe(true);
+    expect(r.text).not.toContain('role/Sales');
+    expect(r.text).toContain('  - Sales'); // the GROUP's grant survives
+    expect(r.text).toContain('  - Admin');
+  });
+
+  it("REVOKE shadowed ('exact'): revoking the GROUP (bare) leaves the role's explicit token", () => {
+    const r = spliceRevoke(SHARED, 'write', { kind: 'role', role: 'Sales' }, { tokenMatch: 'exact' });
+    expect(r.changed).toBe(true);
+    expect(r.text).toContain('  - role/Sales'); // the ROLE's grant survives
+    const lines = r.text.split('\n');
+    expect(lines).not.toContain('  - Sales');
+  });
+
+  it("REVOKE unshadowed bare principal (group since vanished): 'name' matching strips both spellings", () => {
+    const r = spliceRevoke(SHARED, 'write', { kind: 'role', role: 'Sales' });
+    expect(r.changed).toBe(true);
+    expect(r.text).not.toContain('Sales'); // bare token falls back to the role — same principal
+  });
+});

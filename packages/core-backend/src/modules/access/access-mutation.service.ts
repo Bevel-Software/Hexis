@@ -36,13 +36,19 @@ import path from 'node:path';
 
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from './access-control.interface.js';
-import { type Verb, KNOWN_VERBS } from './access-control.service.js';
+import {
+  type Verb,
+  KNOWN_VERBS,
+  ROLE_TOKEN_PREFIX,
+  canonicalRoleName,
+} from './access-control.service.js';
 import {
   spliceRevoke,
   spliceGrant,
   validatePrincipal,
   AccessSpliceError,
   type Principal,
+  type TokenMatch,
 } from './access-splice.js';
 import { WorkflowDomainError } from '../workflow/workflow.errors.js';
 
@@ -122,6 +128,34 @@ export class AccessMutationService {
   }
 
   /**
+   * How a REVOKE of `principal` matches file tokens — the shadowing rule:
+   *
+   *   - When a GROUP owns the principal's bare name (group-first precedence),
+   *     the two spellings are DIFFERENT principals: the bare token is the
+   *     group's, `role/<name>` is the role's. Matching is `'exact'` so
+   *     revoking the role never strips the group's bare grant (and revoking
+   *     the group never strips the role's explicit grant).
+   *   - Unshadowed, both spellings resolve to the ROLE (bare falls back to
+   *     it), so matching is `'name'`: revoking the role also removes legacy
+   *     bare spellings — the historical cleanup behavior.
+   *
+   * Judged against THIS workspace's merged principal index (`kbPrincipals` —
+   * the same model the resolver reads), so revoke agrees with resolution on
+   * who owns the bare key. A model that fails to load yields no groups, i.e.
+   * unshadowed — matching degrades to the pre-groups name-level behavior.
+   */
+  private async revokeTokenMatch(workspaceId: string, principal: Principal): Promise<TokenMatch> {
+    if (principal.kind !== 'role') return 'exact'; // user matching ignores the mode
+    const canonical = canonicalRoleName(principal.role);
+    const bare = canonical.startsWith(ROLE_TOKEN_PREFIX)
+      ? canonical.slice(ROLE_TOKEN_PREFIX.length)
+      : canonical;
+    const { groups } = await this.accessControl.kbPrincipals(workspaceId);
+    const shadowed = groups.some((g) => canonicalRoleName(g) === bare);
+    return shadowed ? 'exact' : 'name';
+  }
+
+  /**
    * Grant `principal` `verb` on `target`. Adds the principal under exactly this
    * verb and touches no other verb — verbs are independent, so a principal may
    * hold several at once (e.g. `read` + `download`). Idempotent: a no-op when the
@@ -191,12 +225,18 @@ export class AccessMutationService {
     // missing FILE node is a bad target and should surface, not silently no-op
     // — same rule grant() uses.
     const original = await this.readOrEmpty(workspaceId, editPath, kind === 'folder');
+    // Alias-tolerant vs exact-token matching, decided by group shadowing —
+    // see revokeTokenMatch.
+    const tokenMatch = await this.revokeTokenMatch(workspaceId, principal);
     let next = original;
     let changed = false;
     try {
       const verbsToRevoke = verb ? [verb] : KNOWN_VERBS;
       for (const v of verbsToRevoke) {
-        const r = spliceRevoke(next, v, principal, { target: kind === 'folder' ? 'folder' : 'node' });
+        const r = spliceRevoke(next, v, principal, {
+          target: kind === 'folder' ? 'folder' : 'node',
+          tokenMatch,
+        });
         next = r.text;
         changed = changed || r.changed;
       }
@@ -254,12 +294,18 @@ export class AccessMutationService {
     const original = await this.readOrEmpty(workspaceId, editPath, kind === 'folder');
 
     const verbsToDeny = verb ? [verb] : KNOWN_VERBS;
+    // Same shadowing-aware matching as revoke(): the strip must not swallow a
+    // same-named OTHER principal's grant (bare = group vs role/<name> = role).
+    const tokenMatch = await this.revokeTokenMatch(workspaceId, principal);
     let next = original;
     try {
       for (const v of verbsToDeny) {
         // (1) Strip any same-scope GRANT for this principal so grant-beats-deny
         // can't silently swallow the deny we're about to add.
-        next = spliceRevoke(next, v, principal, { target: kind === 'folder' ? 'folder' : 'node' }).text;
+        next = spliceRevoke(next, v, principal, {
+          target: kind === 'folder' ? 'folder' : 'node',
+          tokenMatch,
+        }).text;
         // (2) Add the deny under the same verb.
         next = spliceGrant(next, v, principal, { allowScalar, deny: true, target: kind === 'folder' ? 'folder' : 'node' }).text;
       }

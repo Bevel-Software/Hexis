@@ -379,3 +379,31 @@ describe('groups-edit guardrails', () => {
     expect(() => addGroupMember(base, 'team', 'group:GTM Team')).toThrow(GroupsEditError);
   });
 });
+
+describe('groups roster referencedBy — the mirror of the roles roster attribution', () => {
+  it('a group shadowed BY a role name still owns its bare-token hits; role/<name> hits are never the group’s', async () => {
+    const root2 = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-groups-shadow-'));
+    try {
+      const repo2 = path.join(root2, KB);
+      // A group named Reviewer shares the Reviewer role's name. Group-first
+      // precedence gives the GROUP the bare key, so the bare hit is its
+      // reference; the explicit role/ hit belongs to the ROLE roster only.
+      await write(repo2, 'roles.yaml', ROLES); // declares role Reviewer
+      await write(repo2, 'groups.yaml', 'groups:\n  Reviewer:\n    - pat@x.io\n');
+      await write(repo2, 'team/access.md', '---\nread:\n  - Reviewer\nwrite:\n  - role/Reviewer\n---\n');
+      const workspace = stubWorkspace(root2);
+      const svc = new GroupsAdminService(
+        workspace,
+        stubWorkflow().svc,
+        new AccessControlService(workspace as never, KB),
+        KB,
+        () => DEFAULT_BRANCH,
+      );
+      const roster = await svc.getRoster();
+      const reviewer = roster.groups.find((g) => g.canonical === 'reviewer')!;
+      expect(reviewer.referencedBy).toEqual([{ path: 'team/access.md', verb: 'read' }]);
+    } finally {
+      await fs.rm(root2, { recursive: true, force: true });
+    }
+  });
+});

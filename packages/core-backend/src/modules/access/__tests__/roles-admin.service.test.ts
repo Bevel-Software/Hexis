@@ -531,3 +531,49 @@ describe('findRoleRefsInText (sound reference scan — shared with the rewrite)'
     expect(findRoleRefsInText('# Doc\nread:\n  - Sales\n')).toEqual([]);
   });
 });
+
+describe('roster referencedBy under group shadowing', () => {
+  let root: string;
+  let repo: string;
+  let svc: RolesAdminService;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const workspaceDir = path.join(root, WS);
+    repo = path.join(workspaceDir, KB);
+    await write(repo, 'roles.yaml', ROLES);
+    const ws = stubWorkspace(workspaceDir);
+    svc = new RolesAdminService(
+      ws,
+      stubWorkflow().svc,
+      new AccessControlService(ws, KB),
+      KB,
+      () => DEFAULT_BRANCH,
+      stubEventBus().bus,
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('a bare-token hit is the GROUP’s when a group shadows the role name; role/<name> hits stay the role’s', async () => {
+    // A group named Sales shadows the Sales role: bare tokens resolve to the
+    // GROUP, so the roles roster must not claim them as role references.
+    await write(repo, 'groups.yaml', 'groups:\n  Sales:\n    - pat@x.io\n');
+    await write(repo, 'team/access.md', '---\nread:\n  - Sales\nwrite:\n  - role/Sales\n---\n');
+
+    const sales = (await svc.getRoster()).find((r) => r.canonical === 'sales')!;
+    // Only the explicit spelling counts for the ROLE.
+    expect(sales.referencedBy).toEqual([{ path: 'team/access.md', verb: 'write' }]);
+  });
+
+  it('unshadowed: bare hits still count for the role (both spellings)', async () => {
+    await write(repo, 'team/access.md', '---\nread:\n  - Sales\nwrite:\n  - role/Sales\n---\n');
+    const sales = (await svc.getRoster()).find((r) => r.canonical === 'sales')!;
+    expect(sales.referencedBy).toEqual([
+      { path: 'team/access.md', verb: 'read' },
+      { path: 'team/access.md', verb: 'write' },
+    ]);
+  });
+});

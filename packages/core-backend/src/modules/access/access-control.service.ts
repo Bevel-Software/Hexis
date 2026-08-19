@@ -1246,16 +1246,26 @@ function resolveGrantSourcesForVerb(
 
   if (principal.kind === 'role') {
     // A named principal can be spelled two ways in a file: the bare token and
-    // the explicit `role/<name>` token. The dialog's row represents the NAME
-    // (whichever spelling the caller passed), so both spellings count as its
-    // entries: a grant under either adds a source; a deny under either cuts
-    // off farther grants. (The revoke splice strips both spellings too, so
-    // classification and removal stay in agreement.)
+    // the explicit `role/<name>` token. WHICH spellings are THIS principal's
+    // entries depends on who owns the bare key in the merged index:
+    //
+    //   - UNSHADOWED (no group named `<bare>`): both spellings resolve to the
+    //     role, so both count — a grant under either adds a source; a deny
+    //     under either cuts off farther grants. (The revoke splice strips both
+    //     spellings in this case too, so classification and removal agree.)
+    //   - SHADOWED (a group owns the bare key): the spellings are DIFFERENT
+    //     principals. A bare-token principal is the GROUP — only bare entries
+    //     are its own; a `role/`-token principal is the ROLE — only `role/`
+    //     entries are its own. Counting the other spelling would attribute a
+    //     shadowed bare token to the role (hiding a real `role/<name>`
+    //     ancestor grant and making its revoke a false no-op), or vice versa.
     const canonical = canonicalRoleName(principal.role);
-    const bare = canonical.startsWith(ROLE_TOKEN_PREFIX)
-      ? canonical.slice(ROLE_TOKEN_PREFIX.length)
-      : canonical;
-    const tokens = [bare, `${ROLE_TOKEN_PREFIX}${bare}`];
+    const explicit = canonical.startsWith(ROLE_TOKEN_PREFIX);
+    const bare = explicit ? canonical.slice(ROLE_TOKEN_PREFIX.length) : canonical;
+    const shadowed = model.roles.byCanonical.get(bare)?.kind === 'group';
+    const tokens = shadowed
+      ? [explicit ? `${ROLE_TOKEN_PREFIX}${bare}` : bare]
+      : [bare, `${ROLE_TOKEN_PREFIX}${bare}`];
     for (const scope of scopes) {
       const states = tokens.map((t) => scope.byRole.get(t));
       if (states.includes('grant')) {

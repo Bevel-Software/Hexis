@@ -242,3 +242,96 @@ describe('group principals on the share surface', () => {
     expect(md).toContain('- Admin'); // untouched
   });
 });
+
+describe('token-kind family at the route boundary', () => {
+  let h: Awaited<ReturnType<typeof makeHarness>> | null = null;
+  afterEach(async () => {
+    if (h) await close(h.server);
+    h = null;
+  });
+
+  const post = (route: string, body: unknown) =>
+    fetch(`${h!.baseUrl}/api/workspace/${encodeURIComponent(WS)}/access/${route}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  it("granting 'role/Everyone' normalizes to the bare built-in — never the dead role/everyone token", async () => {
+    h = await makeHarness({ roles: ['Everyone'] });
+    const res = await post('grant', {
+      path: `${KB}/Open`,
+      kind: 'folder',
+      verb: 'read',
+      principal: { kind: 'role', role: 'role/Everyone' },
+    });
+    expect(res.status).toBe(200);
+    const md = h.files.get(`${KB}/Open/access.md`)!;
+    expect(md).toContain('- Everyone');
+    expect(md).not.toContain('role/');
+  });
+
+  it("granting 'role/Everyone' a non-read verb is refused like the bare spelling", async () => {
+    h = await makeHarness({ roles: ['Everyone'] });
+    const res = await post('grant', {
+      path: `${KB}/Open`,
+      kind: 'folder',
+      verb: 'write',
+      principal: { kind: 'role', role: 'role/Everyone' },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("revoking 'role/Everyone' strips a bare everyone grant (symmetric normalization)", async () => {
+    h = await makeHarness({
+      roles: ['Everyone'],
+      files: { [`${KB}/Open/access.md`]: '---\nread:\n  - everyone\n  - Admin\n---\n' },
+    });
+    const res = await post('revoke', {
+      path: `${KB}/Open`,
+      kind: 'folder',
+      principal: { kind: 'role', role: 'role/Everyone' },
+    });
+    expect(res.status).toBe(200);
+    const md = h.files.get(`${KB}/Open/access.md`)!;
+    expect(md).not.toContain('everyone');
+    expect(md).toContain('- Admin');
+  });
+
+  it('granting a GROUP that shadows an already-granted role/<Name> is NOT swallowed as idempotent', async () => {
+    h = await makeHarness({
+      roles: ['Everyone', 'Product'],
+      groups: ['Product'],
+      files: { [`${KB}/Sales/access.md`]: '---\nread:\n  - role/Product\n---\n' },
+    });
+    const res = await post('grant', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      verb: 'read',
+      principal: { kind: 'group', group: 'Product' },
+    });
+    expect(res.status).toBe(200);
+    const md = h.files.get(`${KB}/Sales/access.md`)!;
+    expect(md).toContain('- role/Product');
+    expect(md.split('\n')).toContain('  - Product'); // the group's bare token landed
+  });
+
+  it('revoking the ROLE while a same-named GROUP is granted leaves the bare token (kbPrincipals-driven shadowing)', async () => {
+    h = await makeHarness({
+      roles: ['Everyone', 'Product'],
+      groups: ['Product'],
+      files: {
+        [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n---\n',
+      },
+    });
+    const res = await post('revoke', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      principal: { kind: 'role', role: 'Product' },
+    });
+    expect(res.status).toBe(200);
+    const md = h.files.get(`${KB}/Sales/access.md`)!;
+    expect(md).not.toContain('role/Product');
+    expect(md.split('\n')).toContain('  - Product'); // the GROUP's grant survives
+  });
+});

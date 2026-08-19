@@ -33,6 +33,7 @@ import type { IAccessControl } from './access-control.interface.js';
 import {
   GROUP_REF_PREFIX,
   canonicalRoleName,
+  hasAccessFrontmatterExtension,
   loadActiveGroups,
   type GroupsHealth,
 } from './access-control.service.js';
@@ -119,7 +120,10 @@ export class GroupsAdminService {
       // — same pre-disk no-lockout gate the roles admin attaches.
       validateWrite: makeRolesYamlWriteValidator(kbDirName),
     });
-    this.references = new KbReferenceScanner(workspaceService, kbDirName);
+    // The event bus keeps the roster's `referencedBy` fresh: a share-dialog
+    // grant/revoke on any access.md happens outside this service, and the
+    // scanner invalidates its cache on those writes' events (TTL as backstop).
+    this.references = new KbReferenceScanner(workspaceService, kbDirName, eventBus);
   }
 
   private get defaultBranch(): string {
@@ -188,6 +192,12 @@ export class GroupsAdminService {
         // IdP members render sorted (machine-generated file, no author order
         // to honour); manual members keep file order (the editor's view).
         members: mode === 'idp' ? [...def.emails].sort() : [...def.emails],
+        // A group's references are its BARE-token hits, unconditionally: this
+        // group exists in the active source, so under group-first precedence
+        // it owns the bare key — even when a role shares the name (the roles
+        // roster is the mirror image: it then skips the bare hits and counts
+        // only `role/<name>`). Explicit `role/<name>` hits are never a group
+        // reference.
         referencedBy: referencesByToken.get(canonical) ?? [],
         assignedToRoles: assignedByGroup.get(canonical) ?? [],
       });
@@ -512,9 +522,10 @@ export class GroupsAdminService {
 
   private afterWrite(workspaceId: string, actor: AuthUser, repoRelPaths: string[]): void {
     this.accessControl.invalidate(workspaceId);
-    // Any write in this batch may have moved grant references (`.md`
-    // rewrites on rename); drop the cached scan so the next roster is fresh.
-    if (repoRelPaths.some((p) => p.endsWith('.md'))) this.references.invalidate(workspaceId);
+    // Any write in this batch may have moved grant references (scanned-file
+    // rewrites on rename — `.md` AND `.tool`); drop the cached scan so the
+    // next roster is fresh.
+    if (repoRelPaths.some(hasAccessFrontmatterExtension)) this.references.invalidate(workspaceId);
     if (!this.eventBus) return;
     for (const repoRel of repoRelPaths) {
       this.eventBus.emit({
