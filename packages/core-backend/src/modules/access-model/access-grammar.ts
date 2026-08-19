@@ -296,10 +296,14 @@ export function parseYamlSubset(
 
     if (cur.value !== '') {
       // Inline empty collections are the only flow-style YAML we accept, so
-      // `owner: []` / `download: []` read as an empty list rather than the
-      // scalar string "[]".
+      // `owner: []` reads as an empty list and `groups: {}` as an empty
+      // mapping rather than the scalar strings "[]" / "{}".
       if (cur.value === '[]') {
         map[key] = [];
+        continue;
+      }
+      if (cur.value === '{}') {
+        map[key] = {};
         continue;
       }
       map[key] = cur.value;
