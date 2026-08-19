@@ -27,13 +27,17 @@ services:
     logging: *bounded-logging
 
   app:
-    build:
-      context: .
-      # No `args:` block. The image still accepts a GIT_SHA build arg — the
-      # Dockerfile declares it, and `GET /api/health` reports whatever it was
-      # given (`unknown` otherwise) — but naming it here made every deployment
-      # UI that reads this file ask for a value nobody sets by hand. CI passes
-      # it directly: `--build-arg GIT_SHA=$(git rev-parse HEAD)`.
+    # The image CI publishes on every release — deploying does not compile
+    # anything. Pin the version in `.env` (`HEXIS_VERSION=0.9.1`) so an
+    # upgrade is a deliberate act: bump the value, `docker compose pull app`,
+    # `up -d`. Left unset it tracks `latest` (the newest release) — right for
+    # a first install, a footgun after: an unplanned `pull` becomes an
+    # unplanned upgrade.
+    #
+    # Building from SOURCE (a staging server tracking dev, a fork) is what
+    # `deployment/docker-compose.build.yml` is for — a standalone file an
+    # orchestrator can be pointed at directly.
+    image: ghcr.io/bevel-software/hexis:${HEXIS_VERSION:-latest}
     # NO host port is published here, deliberately. A reverse proxy (Coolify,
     # Traefik, nginx) reaches the container on this port over the compose
     # network, and publishing a FIXED host port alongside that breaks every
@@ -67,6 +71,9 @@ services:
     #
     # Variables that are genuinely REQUIRED keep an interpolated reference, so
     # the operator is still prompted for them.
+    #
+    # deployment/docker-compose.build.yml mirrors this list (it must stand
+    # alone for orchestrators) — a variable added here is added there too.
     environment:
       - NODE_ENV=production
       - PORT=3001

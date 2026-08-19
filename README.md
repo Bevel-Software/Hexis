@@ -151,10 +151,12 @@ PUBLIC_BACKEND_URL=https://bevel.your-domain.com   # public origin; OAuth redire
 PUBLIC_FRONTEND_URL=https://bevel.your-domain.com  # same origin: the backend serves the SPA
 ```
 
-Then start everything (Postgres + the app). Add
-`-f deployment/docker-compose.image.yml` to any variant below to pull the
-[prebuilt image](deployment/README.md) instead of compiling the monorepo on
-your server — faster, and a small instance suffices.
+Then start everything (Postgres + the app). Deploying **pulls the image CI
+publishes on every release** — nothing compiles on your server, so a small
+instance suffices. Pin the version in `.env` (`HEXIS_VERSION=0.9.1`) so a
+later `pull` can't become an unplanned upgrade; building from source instead
+(a staging server tracking a branch, a fork) is
+[deployment/docker-compose.build.yml](deployment/README.md).
 
 **Behind a reverse proxy** (Coolify, Traefik, nginx; recommended):
 

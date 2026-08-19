@@ -1,38 +1,31 @@
-# Deployment overlays
+# Deployment variants
 
-Compose files for specific deployment shapes. Each is an **overlay**: it is
-passed alongside the base file, never instead of it —
-
-```sh
-docker compose -f docker-compose.yml -f deployment/<overlay>.yml up -d
-```
+Compose files for specific deployment shapes — overlays passed alongside the
+root file (`docker compose -f docker-compose.yml -f deployment/<overlay>.yml`)
+and standalone variants an orchestrator is pointed at directly; each section
+below says which its file is.
 
 Two compose files deliberately stay at the repository root and out of this
-folder: `docker-compose.yml` (the base every deployment uses) and
-`docker-compose.override.yml` (the local-quickstart port publish — Compose
-only auto-merges it under exactly that name in the project root).
+folder: `docker-compose.yml` (the default every release deployment uses —
+it pulls the published image) and `docker-compose.override.yml` (the
+local-quickstart port publish — Compose only auto-merges it under exactly
+that name in the project root).
 
-## docker-compose.image.yml — run the published image, skip the build
+## docker-compose.build.yml — build from source (standalone)
 
-Uses `ghcr.io/bevel-software/hexis` (published by CI on every release)
-instead of compiling the monorepo on your server. No Node toolchain, no
-multi-minute build, and a small instance suffices — the source build is
-exactly what needed the memory.
-
-```sh
-docker compose -f docker-compose.yml -f deployment/docker-compose.image.yml up -d
-```
-
-Pin the version in `.env` so upgrades are deliberate:
+The root `docker-compose.yml` pulls the release image from GHCR — deploying
+never compiles anything. This file is for deployments that track a BRANCH
+instead of a release: a staging server building `dev`, a fork building its
+own changes. It is a **standalone** compose file, not an overlay, precisely
+so an orchestrator can be pointed at it directly — in Coolify, set the
+resource's *Docker Compose Location* to `/deployment/docker-compose.build.yml`.
 
 ```sh
-HEXIS_VERSION=0.9.1
+docker compose -f deployment/docker-compose.build.yml up -d
 ```
 
-Upgrade = bump the value, then
-`docker compose -f docker-compose.yml -f deployment/docker-compose.image.yml pull app && docker compose -f docker-compose.yml -f deployment/docker-compose.image.yml up -d`.
-Unset, the tag is `latest` (the newest release) — fine for a first install, a
-footgun after: an unplanned `pull` becomes an unplanned upgrade.
+It mirrors the root file's services and env list; the root file's comments
+are the reference for what each knob means.
 
 ## docker-compose.https.yml — public HTTPS without a reverse proxy
 
@@ -69,18 +62,7 @@ Worth knowing:
   terminates TLS, and the base file alone is the right shape (see the main
   README's reverse-proxy section).
 
-## Combining overlays
-
-Overlays stack — pass every one that applies. The typical bare-EC2 install
-wants both:
-
-```sh
-DOMAIN=bevel.your-domain.com docker compose \
-  -f docker-compose.yml \
-  -f deployment/docker-compose.image.yml \
-  -f deployment/docker-compose.https.yml up -d
-```
-
 TLS never lives in the app image: the published image is the app alone, and
-Caddy runs beside it from the stock `caddy:2-alpine` image — which is what
-lets each overlay make sense without the other.
+Caddy runs beside it from the stock `caddy:2-alpine` image. The typical
+bare-EC2 install is therefore just the root file plus this overlay — the
+command in the main README's deploy section.
