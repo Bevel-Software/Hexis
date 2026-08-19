@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../auth/state/auth.context';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 import { useLibraryToast } from '../state/toast.context';
-import { urlForItemFile } from '../routes/library-paths';
+import { urlForLibraryItem } from '../routes/library-paths';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { personalPluginName } from '../utils/personal-plugin';
 import { EmptySkillsNudge, PluginBreadcrumb, PluginItemSections, PageNote,
@@ -61,7 +61,7 @@ export function PersonalPluginPage() {
 
   /** Identical to the gallery's and the plugin page's — one behaviour per card. */
   function openItem(item: LibraryItem) {
-    if (kbDirName) navigate(urlForItemFile(kbDirName, item.path));
+    if (kbDirName) navigate(urlForLibraryItem(kbDirName, item));
   }
 
   if (items.length === 0 && data.loading) {

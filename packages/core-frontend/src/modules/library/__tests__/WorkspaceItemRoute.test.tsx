@@ -340,6 +340,74 @@ describe('WorkspaceItemRoute', () => {
   });
 
   /**
+   * MCP servers declared in a plugin's `mcp.json` — one FILE, several tools, so
+   * the file URL alone cannot name a page: `?server=<slug>` disambiguates (a
+   * query param, never the hash — the `#…` fragment is the OAuth callback's
+   * outcome channel). Before the branch existed, `mcp.json` fell through to the
+   * direct-file rule and every mcp-declared tool card bounced to its plugin.
+   */
+  describe('a server declared in a plugin mcp.json', () => {
+    const mcpTool = (slug: string, path: string) => ({
+      slug,
+      name: slug,
+      path,
+      type: 'mcp' as const,
+      setup: null,
+      canWrite: false,
+      variables: [],
+    });
+    const MCP: LibraryData = {
+      ...CATALOG,
+      tools: [
+        // Two servers sharing one declaring file — the ambiguous case.
+        mcpTool('granola', 'Plugins/Everyone/mcp.json'),
+        mcpTool('linear', 'Plugins/Everyone/mcp.json'),
+        // A file declaring exactly one server — resolvable without the param.
+        mcpTool('local_toolbox', 'Plugins/LocalLab/mcp.json'),
+      ],
+    };
+
+    beforeEach(() => {
+      dataMock.useLibraryData.mockReturnValue(MCP);
+    });
+
+    it('renders the tool page the `?server=` param names', async () => {
+      renderAt(`${itemUrl('Plugins/Everyone/mcp.json')}?server=granola`);
+      expect(await screen.findByLabelText('tool-page')).toHaveTextContent('granola');
+    });
+
+    it('renders the named tool page before the catalog has loaded — the param needs no catalog', async () => {
+      dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
+      renderAt(`${itemUrl('Plugins/Everyone/mcp.json')}?server=granola`);
+      expect(await screen.findByLabelText('tool-page')).toHaveTextContent('granola');
+    });
+
+    it('resolves a bare mcp.json URL when the catalog knows exactly one server for it', async () => {
+      renderAt(itemUrl('Plugins/LocalLab/mcp.json'));
+      expect(await screen.findByLabelText('tool-page')).toHaveTextContent('local_toolbox');
+    });
+
+    it('sends a bare mcp.json URL with SEVERAL servers to the plugin page — ambiguous, no page', async () => {
+      renderAt(itemUrl('Plugins/Everyone/mcp.json'));
+      await waitFor(() =>
+        expect(screen.getByLabelText('pathname')).toHaveTextContent(
+          '/skills-and-tools/plugins/Everyone',
+        ),
+      );
+      expect(screen.queryByLabelText('tool-page')).toBeNull();
+    });
+
+    it('waits for the catalog on a bare mcp.json URL rather than guessing', async () => {
+      dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
+      renderAt(itemUrl('Plugins/LocalLab/mcp.json'));
+      expect(await screen.findByRole('button', { name: /^All plugins/ })).toBeInTheDocument();
+      expect(screen.queryByLabelText('tool-page')).toBeNull();
+      // …and it has not been bounced away either: the URL is still the file's.
+      expect(screen.getByLabelText('pathname')).toHaveTextContent('/Plugins/LocalLab/mcp.json');
+    });
+  });
+
+  /**
    * A skill's id is its frontmatter `id`/`name`, and only FALLS BACK to the
    * folder name — so the URL cannot be trusted to spell it. The catalog can.
    */

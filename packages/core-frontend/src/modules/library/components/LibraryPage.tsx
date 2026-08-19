@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import '../library.css';
 import { useLibrary, type LibraryItem } from '../state/library-data';
-import { urlForItemFile } from '../routes/library-paths';
+import { urlForLibraryItem } from '../routes/library-paths';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { Banner, TextField } from '../../../shared/components';
@@ -67,7 +67,7 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
       setReviewing(item);
       return;
     }
-    if (kbDirName) navigate(urlForItemFile(kbDirName, item.path));
+    if (kbDirName) navigate(urlForLibraryItem(kbDirName, item));
   }
 
   return (
