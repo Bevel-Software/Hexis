@@ -1588,30 +1588,6 @@ export class AccessControlService implements IAccessControl {
     return parsed.ok ? { ok: true } : { ok: false, errors: parsed.errors };
   }
 
-  /**
-   * Advisory scan of folder `access.md` files for references to a role (by
-   * canonical name). See `IAccessControl.referencesToRole` — undercounts node
-   * frontmatter by design; the admin surfaces use the sound shared
-   * `KbReferenceScanner` instead.
-   */
-  async referencesToRole(
-    workspaceId: string,
-    canonicalRole: string,
-  ): Promise<{ path: string; verb: string }[]> {
-    const model = await this.loadModel(workspaceId);
-    const out: { path: string; verb: string }[] = [];
-    for (const file of model.accessFilesByDir.values()) {
-      for (const verb of KNOWN_VERBS) {
-        for (const entry of file.entries[verb]) {
-          if (entry.kind === 'role' && entry.role === canonicalRole) {
-            out.push({ path: file.path, verb });
-          }
-        }
-      }
-    }
-    return out;
-  }
-
   async canWrite(
     workspaceId: string,
     userEmail: string,

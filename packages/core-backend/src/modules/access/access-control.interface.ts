@@ -301,21 +301,6 @@ export interface IAccessControl {
   validateRolesYaml(text: string): { ok: true } | { ok: false; errors: string[] };
 
   /**
-   * Find every folder-`access.md` reference to a role, by canonical name, in the
-   * cached model. ADVISORY ONLY — and it may UNDERCOUNT: `collectAccessFiles`
-   * only walks files literally named `access.md`, so a role granted in a node's
-   * OWN frontmatter is a real grant this scan misses. The admin surfaces
-   * (roster `referencedBy`, the group rename/delete rewrites) therefore use the
-   * sound shared `KbReferenceScanner` (`reference-scan.ts`), which also covers
-   * node frontmatter, instead of this method — an undercount there would
-   * silently orphan access.
-   */
-  referencesToRole(
-    workspaceId: string,
-    canonicalRole: string,
-  ): Promise<{ path: string; verb: string }[]>;
-
-  /**
    * Enumerate the grantable principals known to the KB, for the share-dialog
    * autocomplete. `roles` are the built-in `everyone` role plus the declared
    * `roles.yaml` role display names — ROLE principals only, never groups
