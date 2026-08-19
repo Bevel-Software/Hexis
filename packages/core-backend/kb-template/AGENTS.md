@@ -68,7 +68,10 @@ ignore by design. A `type: "stdio"` entry (a command run on the user's own
 machine) is always local: the hosted endpoint never spawns it; the local
 `hexis-mcp` server fetches the plugin's files to a local directory and runs it
 per the Agent Plugins runtime contract (`PLUGIN_ROOT`/`PLUGIN_DATA`, `./`
-commands contained to the plugin).
+commands contained to the plugin). A stdio server SHOULD exit when its stdin
+reaches EOF — the client also terminates it on shutdown, but a server that
+ignores EOF outlives crashes as an orphan whose working directory blocks the
+plugin folder from ever refreshing.
 
 **Secrets are never written into a plugin's portable files.** The specification
 defines no portable credential mechanism on purpose: authorization and

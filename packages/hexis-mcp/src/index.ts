@@ -39,4 +39,4 @@ export {
   type OAuthModeOptions,
 } from './oauth.js';
 export { REMOTE_MANUAL_NAME, remoteManualTemplate, localManualTemplates } from './manuals.js';
-export { createHexisMcpServer, listedTools } from './server.js';
+export { createHexisMcpServer, listedTools, type HexisMcpHandle } from './server.js';

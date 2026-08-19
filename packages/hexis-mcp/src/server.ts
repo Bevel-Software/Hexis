@@ -212,17 +212,36 @@ async function prepareLocalManuals(
   return out;
 }
 
+/** The live server plus its teardown — see `createHexisMcpServer`. */
+export interface HexisMcpHandle {
+  server: Server;
+  /**
+   * Close the UTCP client — and with it every communication protocol it
+   * holds, including @utcp/mcp's stdio transports, whose close() is what
+   * actually terminates the spawned local server processes. Idempotent and
+   * never throws: teardown runs on the way out, where nothing can act on an
+   * error anyway.
+   */
+  shutdown: () => Promise<void>;
+}
+
 /**
  * Stand up the local MCP server: connect it to a transport and it is live.
  *
  * Discovery happens here, before the server is returned, so `tools/list` is
  * ready the moment a client asks — and so a bad URL or a dead key fails at
  * startup with a readable message instead of an empty toolset.
+ *
+ * Returned WITH its `shutdown`, because the spawned stdio servers are held by
+ * the UTCP client, not the SDK `Server` — a caller that lets this process
+ * exit without closing the client is relying on the stdin-EOF cascade to end
+ * its grandchildren, and that cascade observably leaks (an orphaned server
+ * then holds its plugin root hostage for every later instance).
  */
 export async function createHexisMcpServer(
   config: HexisMcpConfig,
   version: string,
-): Promise<Server> {
+): Promise<HexisMcpHandle> {
   const mcpUrl = await resolveMcpUrl(config);
   const [allManuals, localOnly] = await Promise.all([
     fetchAllManuals(config),
@@ -285,7 +304,16 @@ export async function createHexisMcpServer(
     getSkillPrompt(config, request.params.name),
   );
 
-  return server;
+  let closed = false;
+  const shutdown = async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    // `UtcpClient.close()` releases every registered communication protocol;
+    // @utcp/mcp's close tears down its sessions AND the stdio transports,
+    // which is the only thing that reliably ends the spawned children.
+    await client.close().catch(() => {});
+  };
+  return { server, shutdown };
 }
 
 /**

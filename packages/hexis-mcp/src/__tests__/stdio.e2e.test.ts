@@ -3,6 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import AdmZip from 'adm-zip';
 import '@utcp/mcp'; // side effect: registers the 'mcp' call-template protocol
 import { CallTemplateSerializer, UtcpClientConfigSerializer } from '@utcp/sdk';
@@ -267,4 +268,68 @@ describe('stdio end-to-end', () => {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
+
+  it(
+    'tolerates a HELD canonical root — sibling fallback on Windows — and sweeps stale fallbacks',
+    { timeout: 60_000 },
+    async () => {
+      const first = await materializePlugin(config, 'GTM');
+      const keyDir = path.dirname(first.pluginRoot);
+
+      // Stale + fresh fallback roots, as a hard-killed prior run leaves them.
+      // Contents FIRST, utimes after — adding an entry would bump the dir's
+      // mtime back inside the age gate.
+      const stale = path.join(keyDir, 'GTM.aaaaaaaaaaaa');
+      const fresh = path.join(keyDir, 'GTM.bbbbbbbbbbbb');
+      await fs.mkdir(stale, { recursive: true });
+      await fs.writeFile(path.join(stale, 'junk.txt'), 'junk');
+      const past = new Date(Date.now() - 11 * 60 * 1000);
+      await fs.utimes(stale, past, past);
+      await fs.mkdir(fresh, { recursive: true });
+
+      // A REAL holder: a live process whose cwd sits inside the canonical
+      // root — exactly what an orphaned stdio server from a previous instance
+      // does. On Windows that makes the refresh rm fail EBUSY (the observed
+      // bug); POSIX unlinks a held directory without complaint, so the
+      // fallback assertions are win32-only while the sweep ones hold anywhere.
+      const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+        cwd: first.pluginRoot,
+        stdio: 'ignore',
+      });
+      await new Promise<void>((resolve, reject) => {
+        holder.once('spawn', resolve);
+        holder.once('error', reject);
+      });
+      try {
+        const second = await materializePlugin(config, 'GTM');
+        // PLUGIN_DATA stays canonical either way — state is shared by design.
+        expect(second.pluginData).toBe(first.pluginData);
+        // The fresh bytes landed wherever the root ended up.
+        expect(await fs.readFile(path.join(second.pluginRoot, 'bin', 'server.cjs'), 'utf8')).toBe(
+          FIXTURE_SERVER,
+        );
+        if (process.platform === 'win32') {
+          // The fix: a sibling root instead of `skipping local server (EBUSY)`.
+          expect(second.pluginRoot).not.toBe(first.pluginRoot);
+          expect(path.dirname(second.pluginRoot)).toBe(keyDir);
+          expect(path.basename(second.pluginRoot)).toMatch(/^GTM\.[0-9a-f]{12}$/);
+        } else {
+          // The fast path stays byte-identical when the rm succeeds.
+          expect(second.pluginRoot).toBe(first.pluginRoot);
+        }
+        // The sweep beside it: the stale fallback is reclaimed, the fresh one
+        // (a possibly-live concurrent instance) and this run's own root are not.
+        const entries = await fs.readdir(keyDir);
+        expect(entries).not.toContain('GTM.aaaaaaaaaaaa');
+        expect(entries).toContain('GTM.bbbbbbbbbbbb');
+        expect(entries).toContain(path.basename(second.pluginRoot));
+      } finally {
+        holder.kill();
+        // The holder must be GONE before afterAll's rm of the whole home —
+        // Windows would EBUSY against its cwd otherwise.
+        await new Promise<void>((resolve) => holder.once('exit', () => resolve()));
+        await fs.rm(fresh, { recursive: true, force: true });
+      }
+    },
+  );
 });

@@ -19,7 +19,9 @@ import type { HexisMcpConfig } from './config.js';
  *
  * Layout: `~/.hexis/plugins/<host>/<plugin>` as PLUGIN_ROOT, refreshed on
  * every server start (a stale copy is the cost of a running session, not of a
- * lifetime); `~/.hexis/plugin-data/<host>/<plugin>` as PLUGIN_DATA, created
+ * lifetime) — or, when that root is held by a process a previous instance
+ * leaked, a `<plugin>.<12-hex>` SIBLING (see `materializePlugin`);
+ * `~/.hexis/plugin-data/<host>/<plugin>` as PLUGIN_DATA, created
  * once and NEVER cleared — it is the server's persistent state, and the spec
  * says the client manages its lifetime, not its contents.
  */
@@ -107,7 +109,8 @@ export async function materializePlugin(
   assertSegment(folder);
   const home = hexisHome();
   const key = hostKey(config.baseUrl);
-  const pluginRoot = path.join(home, 'plugins', key, folder);
+  const keyDir = path.join(home, 'plugins', key);
+  const canonicalRoot = path.join(keyDir, folder);
   const pluginData = path.join(home, 'plugin-data', key, folder);
   // Owner-only: both trees hold what the caller's key could read — plugin
   // files and whatever state a server accumulates — none of which belongs to
@@ -123,7 +126,28 @@ export async function materializePlugin(
   // Refresh from scratch each start: correctness over cleverness. Staleness
   // becomes bounded by process lifetime, and there is no cache-invalidation
   // protocol to get wrong. The tree is small (a plugin, not a repo).
-  await fs.rm(pluginRoot, { recursive: true, force: true });
+  //
+  // A HELD canonical root must not cost the server the whole local manual: a
+  // stdio server spawned by a previous instance can outlive it (killing a
+  // process does not kill its grandchildren on Windows), and its cwd sits
+  // inside the root — which makes this rm fail EBUSY/EPERM/ENOTEMPTY there.
+  // The fallback is a fresh SIBLING root, so this instance still comes up on
+  // current bytes; PLUGIN_DATA stays the canonical shared dir, because state
+  // is shared by design. The held root becomes sweepable (below) the moment
+  // its holder dies. When the rm succeeds, the canonical path is returned
+  // unchanged — the fallback is strictly the busy-case escape hatch.
+  let pluginRoot = canonicalRoot;
+  try {
+    await fs.rm(pluginRoot, { recursive: true, force: true });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== 'EBUSY' && code !== 'EPERM' && code !== 'ENOTEMPTY') throw err;
+    pluginRoot = path.join(keyDir, `${folder}.${randomBytes(6).toString('hex')}`);
+    console.error(
+      `[hexis-mcp] the plugin root for "${folder}" is held by a live process (${code}) — ` +
+        `likely a stdio server from a previous run; materializing into ${pluginRoot} instead.`,
+    );
+  }
   await fs.mkdir(pluginRoot, { recursive: true, mode: 0o700 });
 
   // One request, byte-for-byte: the deployment's plugin-archive endpoint zips
@@ -163,10 +187,28 @@ export async function materializePlugin(
   const partialPrefix = `.${folder}.zip.`;
   const PARTIAL_SHAPE = /^[0-9a-f]{12}\.partial$/;
   const SWEEP_AGE_MS = 10 * 60 * 1000;
-  const keyDir = path.join(home, 'plugins', key);
+  // Fallback ROOTS (see the busy-rm escape above) get the same sweep as the
+  // partials, for the same reason: a hard-killed or orphan-holding previous
+  // instance cannot clean up after itself, so the NEXT materialization of the
+  // same folder does. Folder-EXACT: the remainder after `<folder>.` must be
+  // exactly the 12-hex shape written above (the folder is regex-escaped, and
+  // `GTM.zip`'s fallbacks must never fall to `GTM`'s sweep). AGE-GATED with
+  // the same window: any startup finishes well inside it, so a concurrent
+  // instance's freshly-made fallback is never reclaimed — and fallbacks are
+  // born on Windows, where one still hosting a live server makes the rm fail,
+  // which is silently tolerated: it becomes sweepable the moment its holder
+  // dies.
+  const escapedFolder = folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const FALLBACK_SHAPE = new RegExp(`^${escapedFolder}\\.[0-9a-f]{12}$`);
   for (const entry of await fs.readdir(keyDir).catch(() => [] as string[])) {
-    if (!entry.startsWith(partialPrefix) || !PARTIAL_SHAPE.test(entry.slice(partialPrefix.length))) continue;
     const abs = path.join(keyDir, entry);
+    if (FALLBACK_SHAPE.test(entry) && abs !== pluginRoot) {
+      const st = await fs.stat(abs).catch(() => null);
+      if (st === null || Date.now() - st.mtimeMs < SWEEP_AGE_MS) continue;
+      await fs.rm(abs, { recursive: true, force: true }).catch(() => {});
+      continue;
+    }
+    if (!entry.startsWith(partialPrefix) || !PARTIAL_SHAPE.test(entry.slice(partialPrefix.length))) continue;
     const st = await fs.stat(abs).catch(() => null);
     if (st === null || Date.now() - st.mtimeMs < SWEEP_AGE_MS) continue;
     await fs.rm(abs, { force: true }).catch(() => {});

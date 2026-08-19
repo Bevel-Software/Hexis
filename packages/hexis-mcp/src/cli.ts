@@ -46,8 +46,26 @@ async function main(): Promise<void> {
     const mcpUrl = await resolveMcpUrl({ baseUrl: resolved.baseUrl, connectionKey: '' });
     config = await establishOAuthConfig(resolved.baseUrl, mcpUrl, { noOpen: resolved.noOpen });
   }
-  const server = await createHexisMcpServer(config, packageVersion());
+  const { server, shutdown } = await createHexisMcpServer(config, packageVersion());
   await server.connect(new StdioServerTransport());
+
+  // Deterministic teardown, on every way an MCP client lets go of us: stdin
+  // EOF/close (the client hung up), SIGINT, SIGTERM. Killing this process
+  // does NOT kill its grandchildren on Windows — only the transports' close()
+  // inside `shutdown()` does — and an orphaned stdio server keeps its cwd
+  // inside the materialized plugin root, holding it hostage (EBUSY) for every
+  // later instance. So the spawned servers must die WITH this process, not be
+  // left to a stdin-pipe EOF cascade that observably leaks.
+  let exiting = false;
+  const exitAfterShutdown = (): void => {
+    if (exiting) return; // 'end' then 'close' both fire; signals can repeat
+    exiting = true;
+    void shutdown().finally(() => process.exit(0));
+  };
+  process.stdin.on('end', exitAfterShutdown);
+  process.stdin.on('close', exitAfterShutdown);
+  process.on('SIGINT', exitAfterShutdown);
+  process.on('SIGTERM', exitAfterShutdown);
 }
 
 main().catch((err: unknown) => {
