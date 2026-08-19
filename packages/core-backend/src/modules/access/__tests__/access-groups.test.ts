@@ -205,9 +205,11 @@ describe('group files as access principals', () => {
     // longer resolves through the bare token (use role/Engineering for that).
     expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(true);
     expect(await svc.canRead(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(false);
-    // The display surface resolves the bare token to the group too.
+    // The display surface resolves the bare token to the group too — and says
+    // WHAT it is, so the dialog badges the row "Group", not "Role".
     const readers = await svc.eligibleReaders(workspaceId, 'Knowledge/Doc.md');
     expect(readers.roles).toContain('Engineering');
+    expect(readers.principals).toContainEqual({ name: 'Engineering', kind: 'group' });
   });
 
   it('a bare-name DENY resolves to the group; role/<Name> reaches the role (writers included)', async () => {
@@ -223,9 +225,12 @@ describe('group files as access principals', () => {
     // The explicit token grants the ROLE write.
     expect(await svc.canWrite(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(true);
     expect(await svc.canWrite(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(false);
-    // eligibleWriters resolves the explicit token to the role's display name.
+    // eligibleWriters resolves the explicit token to the role's display name —
+    // and carries kind 'role': the `role/` alias always means the role, even
+    // with a same-named group in play.
     const writers = await svc.eligibleWriters(workspaceId, 'Knowledge/Doc.md');
     expect(writers.roles).toContain('Engineering');
+    expect(writers.principals).toContainEqual({ name: 'Engineering', kind: 'role' });
   });
 
   it('role/Admin resolves to the ROLE even when a synced group is named Admin', async () => {

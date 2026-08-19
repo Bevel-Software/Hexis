@@ -51,6 +51,24 @@ export type GrantPrincipal =
   | { kind: 'role'; role: string };
 
 /**
+ * One collective principal in a resolved eligible list, with WHAT it is: a
+ * ROLE (an app-defined capability) or a GROUP (a grant audience from the
+ * active group source). The resolver knows the kind from the merged principal
+ * index — a `role/<canonical>` alias hit is always the role; a bare token is
+ * whatever owns it under group-first precedence — and the share dialog needs
+ * it to badge each grantee row honestly ("Role" vs "Group") and to round-trip
+ * the row's principal with the right kind.
+ *
+ * Additive: `principals` rides NEXT TO the legacy `roles: string[]` (the same
+ * names, kind erased), which many name-only consumers (banners, owner
+ * contact lines, PR-routing messages) still read. It is optional in the
+ * interface so existing test doubles stay valid; the real service always
+ * returns it, and payload consumers fall back to `roles` (all treated as
+ * roles) when absent.
+ */
+export type ResolvedPrincipal = { name: string; kind: 'role' | 'group' };
+
+/**
  * Per-verb sources of a principal's access on a target. Only verbs the principal
  * actually holds (via a named file entry) appear; each maps to the closest-first
  * list of scopes that grant it (see `VerbSources`). A principal with no named
@@ -155,7 +173,11 @@ export interface IAccessControl {
   eligibleOwners(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }>;
+  ): Promise<{
+    principals?: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }>;
 
   /**
    * The set of principals (roles + direct users) with `write` on this path.
@@ -167,7 +189,11 @@ export interface IAccessControl {
   eligibleWriters(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }>;
+  ): Promise<{
+    principals?: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }>;
 
   /**
    * Answers the file viewer's "who can see this?" affordance. `restricted` is
@@ -181,7 +207,12 @@ export interface IAccessControl {
   eligibleReaders(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ restricted: boolean; roles: string[]; users: { name: string; email: string }[] }>;
+  ): Promise<{
+    restricted: boolean;
+    principals?: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }>;
 
   /**
    * The set of principals (roles + direct users) with `download` on this path.
@@ -194,7 +225,11 @@ export interface IAccessControl {
   eligibleDownloaders(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }>;
+  ): Promise<{
+    principals?: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }>;
 
   /**
    * Finite expanded email set for configured users who could approve this path

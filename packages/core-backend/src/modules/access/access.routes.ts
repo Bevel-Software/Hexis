@@ -486,9 +486,15 @@ export function createAccessRoutes(
       ]);
 
     // Per-principal, per-verb origin (direct / ancestor — MECE over editable
-    // files). Keyed `u:<email>` / `r:<role>` to match the dialog's row keys, so
+    // files). Keyed `u:<email>` / `r:<name>` to match the dialog's row keys, so
     // each row can show where its access comes from and which verbs are
-    // removable here. A row whose verbs resolve only via a group/everyone/rescue
+    // removable here. GROUPS deliberately share the `r:` namespace with roles
+    // (the dialog keys both collective kinds to one row per name, and the
+    // eligible lists' `principals[].kind` — not this key — is what says which
+    // is which): the keys are only ever matched back against the same map and
+    // echoed on revoke, where the resolver/splice match BOTH spellings (bare
+    // and `role/<name>`) of a name, so classification and removal work for
+    // either kind. A row whose verbs resolve only via a group/everyone/rescue
     // has no source (the verb is absent) and renders non-actionable. Built over
     // the union of every principal in the four eligible lists.
     const roleSet = new Set<string>([
@@ -929,8 +935,12 @@ export function createAccessRoutes(
     }
   });
 
-  // Assign / unassign a GROUP to a role (capability-follows-membership; the
-  // editor refuses Admin — individuals only for the blast-radius role).
+  // Assign / unassign a GROUP to a role (capability-follows-membership). Any
+  // roster role accepts group references, Admin included — Admin's safety net
+  // is the parse-time invariant that it always keeps at least one DIRECT
+  // email member (a group-only Admin is rejected as hard as an adminless
+  // roles.yaml), so a broken or hostile directory can never leave the
+  // deployment adminless.
   router.post('/access/roles/:canonical/groups', async (req, res) => {
     const user = await requireUser(req, res);
     if (!user) return;

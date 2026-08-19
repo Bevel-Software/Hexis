@@ -25,6 +25,7 @@ import {
   revokeAccess,
   suggestPrincipals,
   asInheritedError,
+  type AccessEligible,
   type AccessResponse,
   type GrantVerb,
   type GrantSource,
@@ -77,7 +78,12 @@ interface PrincipalRow {
   label: string;
   sub?: string;
   verbs: VerbSet;
-  isRole: boolean;
+  /**
+   * What the row is: a person, a ROLE (app-defined capability), or a GROUP
+   * (grant audience). Decides the badge ("Role" vs "Group") and which
+   * principal kind mutations round-trip with.
+   */
+  kind: 'user' | 'role' | 'group';
   isYou: boolean;
   /** The principal to send on grant / revoke. */
   principal: Principal;
@@ -491,21 +497,34 @@ export function ManageAccessDialog({
     // so an owner legitimately shows owner+write+read checked; download is its own
     // axis (owner folds in, write does not), sourced from `downloaders`.
     const rows = new Map<string, PrincipalRow>();
-    const touchRole = (role: string): PrincipalRow => {
-      const key = `r:${role.toLowerCase()}`;
+    // Kinded collective list for one eligible set. Older servers omit
+    // `principals` (version skew) — fall back to the name-only `roles`,
+    // treating everything as a role (the pre-groups display).
+    const collectivesOf = (list: AccessEligible): { name: string; kind: 'role' | 'group' }[] =>
+      list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
+    const touchCollective = (c: { name: string; kind: 'role' | 'group' }): PrincipalRow => {
+      // Groups share the `r:` row namespace with roles — the resolver keys its
+      // `sources` map that way, and one name is one row regardless of kind.
+      const key = `r:${c.name.toLowerCase()}`;
       let row = rows.get(key);
       if (!row) {
         row = {
           key,
-          label: role,
-          isRole: true,
+          label: c.name,
+          kind: c.kind,
           isYou: false,
-          principal: { kind: 'role', role },
+          principal:
+            c.kind === 'group' ? { kind: 'group', group: c.name } : { kind: 'role', role: c.name },
           verbs: { owner: false, write: false, read: false, download: false },
           manage: 'direct',
           ancestors: [],
         };
         rows.set(key, row);
+      } else if (c.kind === 'group' && row.kind === 'role') {
+        // Group-sticky, mirroring bare-token precedence: should the per-verb
+        // lists ever disagree on a shared name, the merged row is the group.
+        row.kind = 'group';
+        row.principal = { kind: 'group', group: c.name };
       }
       return row;
     };
@@ -521,7 +540,7 @@ export function ManageAccessDialog({
           // would otherwise render the same email twice, burning a row of the
           // scarce width on a duplicate.
           sub: label.toLowerCase() === u.email.toLowerCase() ? undefined : u.email,
-          isRole: false,
+          kind: 'user',
           isYou: u.email.toLowerCase() === myEmail,
           principal: { kind: 'user', email: u.email, displayName: u.name || u.email },
           verbs: { owner: false, write: false, read: false, download: false },
@@ -533,17 +552,17 @@ export function ManageAccessDialog({
       return row;
     };
 
-    for (const r of data.owners.roles) touchRole(r).verbs.owner = true;
+    for (const c of collectivesOf(data.owners)) touchCollective(c).verbs.owner = true;
     for (const u of data.owners.users) touchUser(u).verbs.owner = true;
-    for (const r of data.eligible.roles) touchRole(r).verbs.write = true;
+    for (const c of collectivesOf(data.eligible)) touchCollective(c).verbs.write = true;
     for (const u of data.eligible.users) touchUser(u).verbs.write = true;
     // Read membership is per-principal only for a restricted node. When
     // `restricted` is false, read is `everyone` and the reader lists are empty.
     if (data.readers.restricted) {
-      for (const r of data.readers.roles) touchRole(r).verbs.read = true;
+      for (const c of collectivesOf(data.readers)) touchCollective(c).verbs.read = true;
       for (const u of data.readers.users) touchUser(u).verbs.read = true;
     }
-    for (const r of data.downloaders.roles) touchRole(r).verbs.download = true;
+    for (const c of collectivesOf(data.downloaders)) touchCollective(c).verbs.download = true;
     for (const u of data.downloaders.users) touchUser(u).verbs.download = true;
 
     // Attach each row's per-verb source + manageability (direct / inherited /
@@ -980,7 +999,7 @@ export function ManageAccessDialog({
       // squeezing the name to zero width — which left the `Role` badge sitting
       // on top of the "via …" label and pushed Remove off the panel's edge.
       <div key={p.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
-        {p.isRole ? (
+        {p.kind !== 'user' ? (
           <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-sunken text-detail font-bold text-ink-muted">
             {initials(p.label)}
           </span>
@@ -996,9 +1015,11 @@ export function ManageAccessDialog({
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="truncate text-ui font-medium text-ink">{p.label}</span>
             {p.isYou && <span className="shrink-0 text-ui text-ink-faint">(you)</span>}
-            {p.isRole && (
+            {p.kind !== 'user' && (
+              // The same chip vocabulary as the suggest menu's trailing tags:
+              // a role is a capability, a group is an audience — badge which.
               <Badge tone="outline" size="xs" className="shrink-0 uppercase">
-                Role
+                {p.kind === 'group' ? 'Group' : 'Role'}
               </Badge>
             )}
           </div>

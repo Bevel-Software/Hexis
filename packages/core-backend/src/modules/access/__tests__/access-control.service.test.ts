@@ -283,6 +283,12 @@ describe('AccessControlService', () => {
     const e = await svc.eligibleWriters(workspaceId, 'Knowledge/Foo.md');
     expect(e.roles).toEqual(['Admin']);
     expect(e.users.map((u) => u.email)).toEqual(['felix@example.com']);
+    // The kinded twin of `roles`: a roles.yaml principal reads kind 'role'.
+    expect(e.principals).toEqual([{ name: 'Admin', kind: 'role' }]);
+    // The Admin-override insertion (write on an access.md is admin-rescued)
+    // also carries kind 'role' — it is the role's capability, never a group's.
+    const onAccessMd = await svc.eligibleWriters(workspaceId, 'access.md');
+    expect(onAccessMd.principals).toContainEqual({ name: 'Admin', kind: 'role' });
   });
 
   it('throws AccessConfigError when roles.yaml is missing', async () => {
@@ -947,7 +953,7 @@ describe('AccessControlService', () => {
 
         const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Foo.md');
-        expect(e).toEqual({ restricted: true, roles: [], users: [] });
+        expect(e).toEqual({ restricted: true, principals: [], roles: [], users: [] });
       });
 
       it('reports restricted=false when read: everyone applies', async () => {
@@ -957,7 +963,7 @@ describe('AccessControlService', () => {
 
         const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Foo.md');
-        expect(e).toEqual({ restricted: false, roles: [], users: [] });
+        expect(e).toEqual({ restricted: false, principals: [], roles: [], users: [] });
       });
 
       it('restricted=false when a closer everyone grant shadows a farther by-name deny', async () => {
@@ -972,7 +978,7 @@ describe('AccessControlService', () => {
         // node really is readable by everyone — not restricted.
         expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Open/Foo.md')).toBe(true);
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Open/Foo.md');
-        expect(e).toEqual({ restricted: false, roles: [], users: [] });
+        expect(e).toEqual({ restricted: false, principals: [], roles: [], users: [] });
       });
 
       it('restricted=true when a same-scope by-name deny carves someone out of read: everyone', async () => {

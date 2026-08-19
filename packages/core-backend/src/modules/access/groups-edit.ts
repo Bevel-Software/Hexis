@@ -18,6 +18,7 @@ import {
   canonicalRoleName,
   canonicalEmail,
   EMAIL_REGEX,
+  GROUP_REF_PREFIX,
   RESERVED_ROLE_NAMES,
 } from './access-control.service.js';
 import { GROUPS_YAML, parseGroupsFile, unsafeNameReason } from './group-files.js';
@@ -131,6 +132,16 @@ export function deleteGroup(text: string, canonical: string): GroupsEditResult {
 
 export function addGroupMember(text: string, canonical: string, rawEmail: string): GroupsEditResult {
   const email = canonicalEmail(rawEmail);
+  // A `group:`-prefixed value is roles.yaml grammar (a role assigned to a
+  // group) — and `group:lee@x.io` would pass the email regex, landing a dead
+  // entry the resolver reads as a plain (never-matching) address. Mirrors
+  // `roles-edit.ts` addMember; groups do not nest, so there is no "right
+  // editor" to route to — a group member is always an email.
+  if (email.startsWith(GROUP_REF_PREFIX)) {
+    throw new GroupsEditError(
+      `member ${JSON.stringify(rawEmail)} starts with '${GROUP_REF_PREFIX}' — a group member is always a person's email (groups cannot contain other groups). Drop the '${GROUP_REF_PREFIX}' prefix and add the email itself`,
+    );
+  }
   if (!EMAIL_REGEX.test(email)) {
     throw new GroupsEditError(`malformed email: ${JSON.stringify(rawEmail)}`);
   }

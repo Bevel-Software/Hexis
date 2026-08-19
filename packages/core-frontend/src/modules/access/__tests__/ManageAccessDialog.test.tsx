@@ -403,3 +403,83 @@ describe('ManageAccessDialog: group principals', () => {
     expect(screen.getByRole('button', { name: /Admin/ })).toBeInTheDocument();
   });
 });
+
+// ── grantee rows: a group is badged "Group", a role "Role" ──
+//
+// The eligible lists' `principals` carry each collective's kind; the old
+// name-only `roles` list forced every collective row into a "Role" badge —
+// a group grantee rendered as a role, and its mutations round-tripped with
+// the wrong principal kind (a grant on the row would 404 as an unknown role).
+describe('ManageAccessDialog: grantee rows badge roles vs groups', () => {
+  /** GTM Team (a GROUP) holds write directly; Engineering (a ROLE) holds read. */
+  const VIEW = {
+    canRead: true,
+    canWrite: true,
+    canDownload: false,
+    canOwner: false,
+    eligible: {
+      principals: [{ name: 'GTM Team', kind: 'group' }],
+      roles: ['GTM Team'],
+      users: [],
+    },
+    readers: {
+      restricted: true,
+      principals: [{ name: 'Engineering', kind: 'role' }],
+      roles: ['Engineering'],
+      users: [],
+    },
+    owners: { principals: [], roles: [], users: [] },
+    downloaders: { principals: [], roles: [], users: [] },
+    sources: {
+      'r:gtm team': { write: [{ kind: 'direct' }] },
+      'r:engineering': { read: [{ kind: 'direct' }] },
+    },
+  } as AccessResponse;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
+    api.fetchFileAccess.mockResolvedValue(VIEW);
+    api.grantAccess.mockResolvedValue(VIEW);
+  });
+
+  it('badges each collective row with its kind', async () => {
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    expect(await screen.findByText('GTM Team')).toBeInTheDocument();
+    // One badge each, with the right words — a group must NOT read "Role".
+    expect(screen.getByText('Group')).toBeInTheDocument();
+    expect(screen.getByText('Role')).toBeInTheDocument();
+  });
+
+  it('round-trips a group row mutation with the group principal kind', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    // The GTM row's trigger reads "Can edit" (the add-row selector does too —
+    // the row's is the later one in the DOM). Check "Can download" on it.
+    const triggers = await screen.findAllByRole('button', { name: /^can edit$/i });
+    await user.click(triggers[triggers.length - 1]);
+    await user.click(await screen.findByRole('button', { name: /^can download$/i }));
+
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalledTimes(1));
+    expect(api.grantAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({
+        verb: 'download',
+        principal: { kind: 'group', group: 'GTM Team' },
+      }),
+    );
+  });
+
+  it('falls back to name-only `roles` (badged "Role") when `principals` is absent — version skew', async () => {
+    api.fetchFileAccess.mockResolvedValue({
+      ...VIEW,
+      eligible: { roles: ['GTM Team'], users: [] },
+      readers: { restricted: true, roles: [], users: [] },
+    } as AccessResponse);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    expect(await screen.findByText('GTM Team')).toBeInTheDocument();
+    expect(screen.getByText('Role')).toBeInTheDocument();
+    expect(screen.queryByText('Group')).not.toBeInTheDocument();
+  });
+});

@@ -368,4 +368,14 @@ describe('groups-edit guardrails', () => {
     const base = createGroup('', 'Team').text;
     expect(() => addGroupMember(base, 'team', 'not-an-email')).toThrow(GroupsEditError);
   });
+
+  it('refuses a group:-prefixed member (groups do not nest; a member is always an email)', () => {
+    const base = createGroup('', 'Team').text;
+    // `group:lee@x.io` passes the email regex, so without the explicit refusal
+    // this would land a dead never-matching entry instead of an actionable 422.
+    expect(() => addGroupMember(base, 'team', 'group:lee@x.io')).toThrow(
+      /a group member is always a person's email/,
+    );
+    expect(() => addGroupMember(base, 'team', 'group:GTM Team')).toThrow(GroupsEditError);
+  });
 });

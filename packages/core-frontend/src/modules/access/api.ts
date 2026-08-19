@@ -1,7 +1,20 @@
 import { authFetch } from '../../lib/api';
 import { GitApiError, handleApiResponse } from '../git/services/git.api';
 
+/** A collective grantee with WHAT it is — role (capability) or group (audience). */
+export interface ResolvedPrincipal {
+  name: string;
+  kind: 'role' | 'group';
+}
+
 export interface AccessEligible {
+  /**
+   * Kinded twin of `roles` — the same names, each saying whether it is a ROLE
+   * or a GROUP, so grantee rows can badge honestly and round-trip mutations
+   * with the right principal kind. Optional for version skew: an older server
+   * omits it, and readers fall back to `roles` (all treated as roles).
+   */
+  principals?: ResolvedPrincipal[];
   roles: string[];
   users: { name: string; email: string }[];
 }

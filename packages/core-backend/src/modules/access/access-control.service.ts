@@ -11,6 +11,7 @@ import type {
   GrantPrincipal,
   GrantSource,
   GrantSources,
+  ResolvedPrincipal,
 } from './access-control.interface.js';
 import { AccessConfigError } from './access-errors.js';
 // NOTE: deliberate module cycle — group-files.ts imports this module's parsing
@@ -1338,14 +1339,27 @@ function eligibleHoldersResolved(
   verb: Verb,
   relativePath: string,
   fileOwn?: OwnEntries | null,
-): { roles: string[]; users: { name: string; email: string }[] } {
+): { principals: ResolvedPrincipal[]; roles: string[]; users: { name: string; email: string }[] } {
   const { byRole, byEmail } = resolveAtPath(model, verb, relativePath, fileOwn);
 
-  const roleSet = new Set<string>();
+  // Display name → kind. The `byRole` keys are the merged index's canonical
+  // tokens exactly as granted (bare, or the `role/<canonical>` alias); the
+  // `byCanonical` record a key hits carries its kind — a `role/` alias always
+  // hits the role record, a bare key hits whichever principal owns it under
+  // group-first precedence. A token with no record (the built-in `everyone`,
+  // or a grant naming a since-vanished principal) degrades to 'role', the
+  // pre-groups display. In the rare case one display name is granted as BOTH
+  // (a role via its alias plus a same-named group via the bare token) the
+  // single deduped entry reads 'group' — mirroring bare-token precedence and
+  // the dialog's shared per-name row.
+  const kindByName = new Map<string, 'role' | 'group'>();
+  const addPrincipal = (name: string, kind: 'role' | 'group') => {
+    if (kindByName.get(name) !== 'group') kindByName.set(name, kind);
+  };
   for (const [canonical, state] of byRole) {
     if (state !== 'grant') continue;
-    const role = model.roles.byCanonical.get(canonical);
-    roleSet.add(role ? role.displayName : canonical);
+    const record = model.roles.byCanonical.get(canonical);
+    addPrincipal(record ? record.displayName : canonical, record?.kind ?? 'role');
   }
 
   // Mirror the admin overrides applied in `hasPermissionResolved`: write on
@@ -1358,12 +1372,18 @@ function eligibleHoldersResolved(
     (relativePath === 'roles.yaml' || isAccessMdPath(relativePath))
   ) {
     // Look the Admin ROLE up via its explicit alias — the bare key may be
-    // owned by a same-named group under group-first precedence.
+    // owned by a same-named group under group-first precedence. The override
+    // is the ROLE's capability, so the row's kind is 'role' regardless.
     const adminRole = model.roles.byCanonical.get(`${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`);
-    roleSet.add(adminRole ? adminRole.displayName : ADMIN_CANONICAL);
+    addPrincipal(adminRole ? adminRole.displayName : ADMIN_CANONICAL, 'role');
   }
 
-  const roles = [...roleSet].sort();
+  const principals: ResolvedPrincipal[] = [...kindByName]
+    .map(([name, kind]) => ({ name, kind }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  // Legacy name-only list, kind erased — kept for the many consumers that
+  // only ever render names (banners, contact lines, PR-routing messages).
+  const roles = principals.map((p) => p.name);
 
   const users: { name: string; email: string }[] = [];
   for (const [email, state] of byEmail) {
@@ -1372,7 +1392,7 @@ function eligibleHoldersResolved(
   }
   users.sort((a, b) => a.email.localeCompare(b.email));
 
-  return { roles, users };
+  return { principals, roles, users };
 }
 
 /**
@@ -1656,7 +1676,11 @@ export class AccessControlService implements IAccessControl {
   async eligibleOwners(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }> {
+  ): Promise<{
+    principals: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return eligibleHoldersResolved(model, 'owner', relativePath, own);
@@ -1665,7 +1689,11 @@ export class AccessControlService implements IAccessControl {
   async eligibleWriters(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }> {
+  ): Promise<{
+    principals: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return eligibleHoldersResolved(model, 'write', relativePath, own);
@@ -1674,23 +1702,32 @@ export class AccessControlService implements IAccessControl {
   async eligibleReaders(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ restricted: boolean; roles: string[]; users: { name: string; email: string }[] }> {
+  ): Promise<{
+    restricted: boolean;
+    principals: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     // When `read: everyone` applies cleanly, the node is readable by all users
     // and the role/user lists are meaningless. Otherwise return the explicit
     // reader set; it may be empty for a default-denied path with no grants.
     if (canEveryoneReadResolved(model, relativePath, own)) {
-      return { restricted: false, roles: [], users: [] };
+      return { restricted: false, principals: [], roles: [], users: [] };
     }
-    const { roles, users } = eligibleHoldersResolved(model, 'read', relativePath, own);
-    return { restricted: true, roles, users };
+    const { principals, roles, users } = eligibleHoldersResolved(model, 'read', relativePath, own);
+    return { restricted: true, principals, roles, users };
   }
 
   async eligibleDownloaders(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }> {
+  ): Promise<{
+    principals: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return eligibleHoldersResolved(model, 'download', relativePath, own);
