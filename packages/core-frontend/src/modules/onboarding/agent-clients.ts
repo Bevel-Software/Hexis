@@ -56,7 +56,7 @@ export const AGENT_CLIENTS: AgentClient[] = [
   {
     id: 'local',
     label: 'Local tools',
-    hint: 'Runs on your machine, so plugins’ local-only tools work. Needs Node. Replace the key placeholder with an external API key from the profile menu → External agent access.',
+    hint: 'For desktop agents only — Claude Code, Claude Desktop, Cursor and similar — and only when your plugins have local-only tools; every other agent uses the URL the other options give. Runs on your machine (needs Node). Replace the key placeholder with an external API key from the profile menu → External agent access.',
     // The passed endpoint is deliberately unused: the local server takes the
     // WORKSPACE address and asks it for the MCP endpoint itself
     // (`GET /api/config`), so the URL every other client pastes is the wrong

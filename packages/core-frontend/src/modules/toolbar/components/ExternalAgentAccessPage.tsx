@@ -219,10 +219,13 @@ export function ExternalAgentAccessPage() {
             </Link>
             <ConnectionInstructions mcpUrl={mcpUrl} />
             <p className="text-[11px] text-ink-muted leading-snug">
-              Plugins with local-only tools — the ones{' '}
+              The URL above is the right connection for every agent — with one exception. Plugins
+              with local-only tools — the ones{' '}
               <span className="font-mono">list_local_tools</span> names — need the local server
-              (hexis-mcp) instead, which authenticates with an external API key. Create one on
-              the{' '}
+              (hexis-mcp), and only a desktop agent that can run a process on your machine can use
+              it: Claude Code, Claude Desktop, Cursor and similar. Web agents like claude.ai and
+              ChatGPT always use the URL above. The local server authenticates with an external
+              API key — create one on the{' '}
               <button
                 type="button"
                 onClick={() => setTab('autonomous')}
@@ -484,8 +487,11 @@ export function ExternalAgentAccessPage() {
                 </div>
                 <p className="text-[11px] text-ink-muted mb-1 leading-snug">
                   Runs this workspace as a local MCP server, so plugins' local-only tools (stdio
-                  servers, localhost services) work too. Needs Node. The agent gets everything
-                  the hosted endpoint serves, plus those local-only tools. In Claude Code:
+                  servers, localhost services) work too. The agent gets everything the hosted
+                  endpoint serves, plus those local-only tools. For desktop agents that can run
+                  a process on your machine — Claude Code, Claude Desktop, Cursor and similar —
+                  and only worth it when your plugins have local-only tools; web agents and
+                  pipelines keep the hosted URL above. Needs Node. In Claude Code:
                 </p>
                 <textarea
                   readOnly
