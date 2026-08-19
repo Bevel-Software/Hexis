@@ -1,15 +1,20 @@
 # Deployment variants
 
-Compose files for specific deployment shapes — overlays passed alongside the
-root file (`docker compose -f docker-compose.yml -f deployment/<overlay>.yml`)
-and standalone variants an orchestrator is pointed at directly; each section
-below says which its file is.
+Extra deployment material beyond the root `docker-compose.yml`: a standalone
+build-from-source compose file, and distribution templates for third-party
+platforms.
 
 Two compose files deliberately stay at the repository root and out of this
 folder: `docker-compose.yml` (the default every release deployment uses —
 it pulls the published image) and `docker-compose.override.yml` (the
 local-quickstart port publish — Compose only auto-merges it under exactly
 that name in the project root).
+
+Public HTTPS without a reverse proxy of your own is no longer a file here
+either: it is the `https` **profile** of the root compose file
+(`docker compose --profile https up -d` with `DOMAIN` set in `.env` — Caddy
+in front of the app, automatic Let's Encrypt certificates). See the
+[main README](../README.md#deploy-it-in-5-minutes-docker)'s deploy section.
 
 ## docker-compose.build.yml — build from source (standalone)
 
@@ -32,42 +37,20 @@ the manual command to the same behavior.
 It mirrors the root file's services and env list; the root file's comments
 are the reference for what each knob means.
 
-## docker-compose.https.yml — public HTTPS without a reverse proxy
+## portainer-template.json — Portainer app template
 
-For a server that has no proxy of its own: a bare EC2 instance, a plain VPS.
-Puts [Caddy](https://caddyserver.com/) in front of the app, which obtains and
-renews Let's Encrypt certificates automatically and redirects HTTP to HTTPS.
+A [Portainer](https://www.portainer.io/) v3 app-template list with one entry:
+the root `docker-compose.yml` as a stack, prompting for the four required
+values plus the version pin. To use it, add this file's raw GitHub URL as a
+**custom template list** in Portainer (*Settings → App Templates → URL*), then
+deploy Hexis from the Templates view.
 
-```sh
-DOMAIN=bevel.your-domain.com \
-  docker compose -f docker-compose.yml -f deployment/docker-compose.https.yml up -d
-```
+## coolify-template.yml — Coolify service-template candidate
 
-`DOMAIN` can also go in `.env` next to the other values. The overlay sets
-`TRUST_PROXY=1` and both public-origin URLs from `DOMAIN` for you, so the
-only `.env` entries you need are the four required values from the
-[main README](../README.md#deploy-it-in-5-minutes-docker).
-
-Before first start:
-
-- **DNS**: an A (or AAAA) record for the domain pointing at the server. On
-  EC2, use an Elastic IP so the record survives instance stop/start.
-- **Ports 80 and 443 open** to the internet — on EC2 that is two inbound
-  rules in the security group. Port 80 is not optional: the certificate
-  challenge and the HTTP→HTTPS redirect both use it. Port 3001 stays closed;
-  only Caddy talks to the app, over the compose network.
-
-Worth knowing:
-
-- Certificates live in the `caddy_data` volume and survive redeploys. Do not
-  clear it casually — Let's Encrypt rate-limits issuance per domain.
-- A CDN or load balancer *in front of* Caddy adds a proxy hop: set
-  `TRUST_PROXY=2` in `.env` so rate limits still see real client addresses.
-- Already behind Coolify, Traefik or nginx? Skip this overlay — that proxy
-  terminates TLS, and the base file alone is the right shape (see the main
-  README's reverse-proxy section).
-
-TLS never lives in the app image: the published image is the app alone, and
-Caddy runs beside it from the stock `caddy:2-alpine` image. The typical
-bare-EC2 install is therefore just the root file plus this overlay — the
-command in the main README's deploy section.
+A service-template candidate in the format of
+[Coolify's template repo](https://github.com/coollabsio/coolify/tree/main/templates/compose)
+(`# documentation:`/`# slogan:` headers, `SERVICE_*` magic variables that
+make Coolify generate secrets and the public URL). It exists as the basis for
+a future PR to that repo — **not** something to point a deployment at
+directly. Deploying on Coolify today works with the root compose file as a
+Docker Compose resource, per the main README's reverse-proxy section.

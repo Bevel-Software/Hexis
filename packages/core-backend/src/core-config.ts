@@ -203,14 +203,22 @@ export class CoreConfig {
    * but behind a proxy it makes every client share the proxy's IP (so the
    * per-IP login rate limit would pool all users). Set it to the actual hop
    * count — never a blanket trust — so clients can't spoof X-Forwarded-For.
+   * With `DOMAIN` set (the bundled Caddy fronts the deployment) it defaults
+   * to `1` instead — see the derivation in the constructor.
    */
   readonly trustProxy: string;
   /**
    * Public base URL of THIS backend, used to build OAuth redirect URIs.
    * Must match a redirect URI registered with the OAuth provider(s).
+   * Defaults to `https://<DOMAIN>` when `DOMAIN` is set.
    */
   readonly publicBackendUrl: string;
-  /** Public base URL of the frontend, where callbacks redirect post-login. */
+  /**
+   * Public base URL of the frontend, where callbacks redirect post-login.
+   * Defaults to `https://<DOMAIN>` when `DOMAIN` is set, else to the backend
+   * origin in production (the backend serves the SPA) and Vite's `:5173` in
+   * development.
+   */
   readonly publicFrontendUrl: string;
 
   constructor() {
@@ -322,11 +330,35 @@ export class CoreConfig {
       );
     }
     this.internalTokenSecret = (process.env.INTERNAL_TOKEN_SECRET || '').trim();
-    this.trustProxy = (process.env.TRUST_PROXY || '').trim();
-    this.publicBackendUrl = (process.env.PUBLIC_BACKEND_URL || `http://localhost:${this.port}`)
+    // Setting DOMAIN declares "the bundled Caddy `https` profile fronts this
+    // deployment" — one proxy hop, and the public origin IS that domain. The
+    // three values below therefore default from it, so `DOMAIN=x.example.com`
+    // in `.env` is the whole configuration for that shape: TRUST_PROXY falls
+    // to 1 (Caddy is the hop) and both public URLs to `https://<DOMAIN>` (the
+    // backend serves the SPA, so they share an origin). Explicit
+    // PUBLIC_BACKEND_URL / PUBLIC_FRONTEND_URL / TRUST_PROXY always win — a
+    // CDN in front of Caddy (TRUST_PROXY=2) or a frontend served elsewhere
+    // stays expressible.
+    const domain = (process.env.DOMAIN || '').trim();
+    this.trustProxy = (process.env.TRUST_PROXY || (domain ? '1' : '')).trim();
+    this.publicBackendUrl = (
+      process.env.PUBLIC_BACKEND_URL ||
+      (domain ? `https://${domain}` : `http://localhost:${this.port}`)
+    )
       .trim()
       .replace(/\/+$/, '');
-    this.publicFrontendUrl = (process.env.PUBLIC_FRONTEND_URL || 'http://localhost:5173')
+    // Unset, the frontend origin is the backend's own in production (the
+    // backend serves the built SPA — under docker compose this is what makes
+    // a bare `up -d` bounce logins back to the right place), and Vite's dev
+    // server in development.
+    this.publicFrontendUrl = (
+      process.env.PUBLIC_FRONTEND_URL ||
+      (domain
+        ? `https://${domain}`
+        : this.nodeEnv === 'production'
+          ? this.publicBackendUrl
+          : 'http://localhost:5173')
+    )
       .trim()
       .replace(/\/+$/, '');
     // Parse-validate so a malformed URL fails at boot rather than producing a
