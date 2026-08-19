@@ -4,7 +4,7 @@ import {
   assertValidRelativePath,
   isProtectedBranch,
 } from '../branch-name.js';
-import { BranchNameError, WorkflowValidationError } from '../../workflow.errors.js';
+import { BranchNameError, WorkflowValidationError } from '../../../../shared/domain-errors.js';
 
 describe('assertValidBranchName', () => {
   it.each([

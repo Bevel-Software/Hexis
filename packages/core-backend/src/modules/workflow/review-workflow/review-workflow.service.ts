@@ -19,7 +19,7 @@ import {
   ChangeRequestConflictsError,
   WorkflowDomainError,
   WorkflowValidationError,
-} from '../workflow.errors.js';
+} from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { hashEmail } from '../../../shared/hash-email.js';
 import type {

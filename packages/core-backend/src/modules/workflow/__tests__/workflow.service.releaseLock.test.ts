@@ -14,7 +14,7 @@ import {
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
   WorkflowValidationError,
-} from '../workflow.errors.js';
+} from '../../../shared/domain-errors.js';
 
 /**
  * Two surfaces under test:

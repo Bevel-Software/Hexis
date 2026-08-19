@@ -7,7 +7,7 @@ import os from 'node:os';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
 import { GitService } from '../git.service.js';
-import { WorkflowValidationError } from '../../workflow.errors.js';
+import { WorkflowValidationError } from '../../../../shared/domain-errors.js';
 
 const execFileAsync = promisify(execFile);
 const PROCESS_MAP_DIR = 'knowledge-base';

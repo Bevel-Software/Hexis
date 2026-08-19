@@ -48,7 +48,7 @@
 import path from 'node:path';
 
 import { LockingFilesystem } from '../workflow/locking-filesystem.js';
-import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../workflow/workflow.errors.js';
+import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import type { FileContent } from '@mastra/core/workspace';
 

@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { GitService } from '../git.service.js';
-import { PullRebaseConflictError } from '../../workflow.errors.js';
+import { PullRebaseConflictError } from '../../../../shared/domain-errors.js';
 import { runGit, gitOut, stubWorkflowHooks, stubWorkspaceService } from './git-test-helpers.js';
 
 /** See git.service.createBranch.test.ts — same prod-mirroring layout. */

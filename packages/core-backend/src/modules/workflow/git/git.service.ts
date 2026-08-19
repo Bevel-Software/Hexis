@@ -31,7 +31,7 @@ import {
   WorkflowValidationError,
   ProtectedBranchError,
   PullRebaseConflictError,
-} from '../workflow.errors.js';
+} from '../../../shared/domain-errors.js';
 
 const execFileAsync = promisify(execFile);
 

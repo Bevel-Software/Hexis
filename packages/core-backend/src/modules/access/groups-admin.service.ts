@@ -28,7 +28,7 @@
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
-import { WorkflowDomainError } from '../workflow/workflow.errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
   GROUP_REF_PREFIX,

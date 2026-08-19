@@ -50,7 +50,7 @@ import {
   type Principal,
   type TokenMatch,
 } from './access-splice.js';
-import { WorkflowDomainError } from '../workflow/workflow.errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 
 /** Whether the dialog target is a folder (edit folder access.md) or a file (edit node frontmatter). */
 export type TargetKind = 'folder' | 'file';

@@ -66,7 +66,7 @@ import {
   PushNeedsAgentResolutionError,
   WorkflowDomainError,
   WorkflowValidationError,
-} from './workflow.errors.js';
+} from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
 import { AccessDeniedError } from '../access/access-errors.js';
 

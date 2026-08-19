@@ -1,5 +1,5 @@
 import type { FileTreeEntry, IWorkspaceService } from '@bevel-software/platform-shared';
-import { WorkflowDomainError } from '../workflow/workflow.errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { accessMdPathForFolder } from './access-mutation.service.js';
 import {
   EVERYONE_CANONICAL,

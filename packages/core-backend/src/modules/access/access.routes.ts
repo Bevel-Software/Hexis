@@ -11,7 +11,7 @@ import { branchForWorkspaceId, workspaceIdForBranch } from '../../shared/workspa
 import type { AuthService } from '../auth/auth.service.js';
 import type { WorkflowService } from '../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import { WorkflowDomainError } from '../workflow/workflow.errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { AccessDeniedError } from './access-errors.js';
 import {
   AccessMutationService,

@@ -12,7 +12,7 @@ import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowService } from '../workflow.service.js';
 import type { Database } from '../../database/connection.js';
-import { RolesYamlPreservationError } from '../workflow.errors.js';
+import { RolesYamlPreservationError } from '../../../shared/domain-errors.js';
 
 /**
  * Focused tests for the roles.yaml-preservation guard inside

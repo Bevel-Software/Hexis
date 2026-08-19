@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import { toHttpError, requireNonEmptyString } from '../admin-route-helpers.js';
-import { WorkflowDomainError } from '../../workflow/workflow.errors.js';
+import { WorkflowDomainError } from '../../../shared/domain-errors.js';
 import { AccessMutationError } from '../access-mutation.service.js';
 
 describe('toHttpError — the shared access-family error shape', () => {

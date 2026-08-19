@@ -6,7 +6,7 @@ import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { GitService } from '../../git/git.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
 import { hashEmail } from '../../../../shared/hash-email.js';
-import { WorkflowValidationError } from '../../workflow.errors.js';
+import { WorkflowValidationError } from '../../../../shared/domain-errors.js';
 
 // Cancel is now a DB state flip (no `gh`): `update(change_requests) … WHERE
 // number = ? AND state = 'open'`. This spy stands in for the update's

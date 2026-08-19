@@ -9,7 +9,7 @@ import {
 } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { spliceGrant } from '../access/access-splice.js';
-import { WorkflowDomainError } from '../workflow/workflow.errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { pluginsWorkspaceId } from './plugins.service.js';
 import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
