@@ -49,7 +49,7 @@ import type { GitService } from './git/git.service.js';
 import type { PullRequestService } from './git/pull-request.service.js';
 import type { IReviewWorkflowService } from './review-workflow/review-workflow.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { FileLockService } from './file-lock.service.js';
 import { PendingCommitsService } from './pending-commits.service.js';

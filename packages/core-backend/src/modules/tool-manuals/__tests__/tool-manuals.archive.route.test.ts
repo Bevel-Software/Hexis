@@ -6,7 +6,7 @@ import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { createToolManualsAgentRoutes } from '../tool-manuals.routes.js';
-import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { IToolManualService } from '../tool-manuals.contract.js';

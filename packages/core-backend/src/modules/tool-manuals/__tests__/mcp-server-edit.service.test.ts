@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_BRANCH, type AuthUser } from '@bevel-software/platform-shared';
-import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { IToolManualService, ToolManualSummary } from '../tool-manuals.contract.js';

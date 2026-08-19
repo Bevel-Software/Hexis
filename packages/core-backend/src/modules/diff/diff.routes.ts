@@ -6,7 +6,7 @@ import type { IAccessControl } from '../access/access-control.interface.js';
 import { toKbRelative, resolveReadableMap } from '../access/kb-read-filter.js';
 import { WorkflowDomainError, WorkflowValidationError } from '../workflow/workflow.errors.js';
 import { LockingFilesystem } from '../workflow/locking-filesystem.js';
-import { branchForWorkspaceId } from '../workspace/workspace.service.js';
+import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import '../auth/auth.middleware.js';
 
 function toHttpError(

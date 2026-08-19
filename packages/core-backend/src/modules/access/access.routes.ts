@@ -7,7 +7,7 @@ import type {
   GrantSources,
 } from './access-control.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { branchForWorkspaceId, workspaceIdForBranch } from '../workspace/workspace.service.js';
+import { branchForWorkspaceId, workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { WorkflowService } from '../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';

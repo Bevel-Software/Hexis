@@ -13,7 +13,8 @@ import {
   PIPELINES_DIR,
   PLUGINS_DIR,
 } from '@bevel-software/platform-shared';
-import { branchForWorkspaceId, FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
+import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
+import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkspaceService } from './workspace.service.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';

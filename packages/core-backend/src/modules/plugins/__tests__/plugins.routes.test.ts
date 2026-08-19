@@ -8,7 +8,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
 import type { ChangeRequest, IWorkflowService } from '@bevel-software/platform-shared';
-import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ISkillService, SkillSummary } from '../../skills/skills.contract.js';

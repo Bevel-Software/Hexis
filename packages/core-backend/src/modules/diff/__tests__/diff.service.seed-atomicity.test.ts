@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { WorkspaceService, workspaceIdForBranch } from '../../workspace/workspace.service.js';
+import { WorkspaceService } from '../../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { WorkspaceMutex } from '../../workflow/git/mutex.js';
 import { DiffService } from '../diff.service.js';
 

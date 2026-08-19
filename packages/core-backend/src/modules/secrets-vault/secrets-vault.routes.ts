@@ -12,7 +12,7 @@ import {
 import type { IToolManualService, ToolManualSummary, ToolVariable } from '../tool-manuals/tool-manuals.contract.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { workspaceIdForBranch } from '../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
 
 export interface SecretsVaultRoutesDeps {

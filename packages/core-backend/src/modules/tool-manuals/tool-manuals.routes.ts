@@ -3,7 +3,8 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import AdmZip from 'adm-zip';
 import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
-import { workspaceIdForBranch, type WorkspaceService } from '../workspace/workspace.service.js';
+import { type WorkspaceService } from '../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';

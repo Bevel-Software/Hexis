@@ -17,7 +17,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { RESERVED_VARIABLE_NAMES, findReservedVariableRef } from '../../shared/variable-refs.js';

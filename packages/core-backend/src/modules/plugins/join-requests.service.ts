@@ -5,7 +5,8 @@ import {
   type ChangeRequest,
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
-import { workspaceIdForBranch, type WorkspaceService } from '../workspace/workspace.service.js';
+import { type WorkspaceService } from '../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { pendingProposals, type JoinProposal } from './join-proposals.js';
 
 /** One open join change request, with what it still proposes. */

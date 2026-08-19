@@ -32,7 +32,7 @@
  * sweep the GET pays for).
  */
 
-import { workspaceIdForBranch } from '../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../workflow/workflow.errors.js';

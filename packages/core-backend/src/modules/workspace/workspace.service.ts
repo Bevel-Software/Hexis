@@ -6,6 +6,7 @@ import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
 import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { BevelIgnoreStack } from './bevel-ignore.js';
+import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import { assertValidBranchName } from '../workflow/git/branch-name.js';
 import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../workflow/git/clone-config.js';
 import type { IDiffService } from '../diff/diff.interface.js';
@@ -84,19 +85,6 @@ function redactError(err: unknown): string {
 }
 
 const FETCH_CACHE_TTL_MS = 30_000;
-
-/**
- * Map a branch name to the directory that contains its workspace clone.
- * `encodeURIComponent` handles `/` in branch names (e.g. `alice/foo`) by
- * encoding it to `%2F` — single-segment-safe on every supported filesystem.
- */
-export function workspaceIdForBranch(branch: string): string {
-  return encodeURIComponent(branch);
-}
-
-export function branchForWorkspaceId(workspaceId: string): string {
-  return decodeURIComponent(workspaceId);
-}
 
 /**
  * Per-directory read filter for the file tree. Given a batch of
