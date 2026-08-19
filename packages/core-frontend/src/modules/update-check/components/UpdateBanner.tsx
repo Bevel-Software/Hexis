@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Sparkles, X } from 'lucide-react';
 import { useAdmin } from '../../admin/state/admin.context';
+import { useAuth } from '../../auth/state/auth.context';
 import { fetchUpdateCheck, type UpdateCheckResult } from '../services/update-check.api';
 
 /**
@@ -10,17 +11,26 @@ import { fetchUpdateCheck, type UpdateCheckResult } from '../services/update-che
  *
  * Checked ONCE per app load (no polling — the server caches the answer for
  * hours anyway). Dismissing remembers the dismissed VERSION, so 0.10.0 stays
- * dismissed until 0.10.1 appears.
+ * dismissed until 0.10.1 appears — PER ACCOUNT, like the rest of the
+ * persisted admin state: on a shared machine one admin's dismissal must not
+ * hide the line from the next admin who signs in.
  */
 
-const DISMISSED_KEY = 'bevel.updateBanner.dismissedVersion';
+function dismissedKey(email: string | null): string {
+  return `bevel.updateBanner.dismissedVersion.${(email ?? 'anonymous').toLowerCase()}`;
+}
 
 export function UpdateBanner() {
   const { isAdmin, isAdminLoading } = useAdmin();
+  const { user } = useAuth();
+  const storageKey = dismissedKey(user?.email ?? null);
   const [info, setInfo] = useState<UpdateCheckResult | null>(null);
-  const [dismissedVersion, setDismissedVersion] = useState<string | null>(() =>
-    localStorage.getItem(DISMISSED_KEY),
-  );
+  // Read at RENDER time, not captured in state: the signed-in email (and with
+  // it the storage key) can resolve after the first render, and a captured
+  // initial read would keep consulting the anonymous key. A state tick just
+  // forces the re-render after a dismissal writes.
+  const [, setDismissTick] = useState(0);
+  const dismissedVersion = localStorage.getItem(storageKey);
 
   // Fires once, when the admin verdict settles positive. Non-admins never
   // reach the fetch — the endpoint would 403 them anyway, and a guaranteed
@@ -41,8 +51,8 @@ export function UpdateBanner() {
   if (dismissedVersion === latest) return null;
 
   const dismiss = () => {
-    localStorage.setItem(DISMISSED_KEY, latest);
-    setDismissedVersion(latest);
+    localStorage.setItem(storageKey, latest);
+    setDismissTick((t) => t + 1);
   };
 
   // A calm neutral, deliberately quieter than the demo/danger banners: an

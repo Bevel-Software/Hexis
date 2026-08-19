@@ -46,6 +46,21 @@ The volumes, and what each holds:
 - **backups** — the change-review backup ledger.
 - **spills** — oversized tool results parked for re-reading; ephemeral.
 
+The database dump is the backup that matters — it is the only thing a
+restore below puts back. The other volumes are deliberately not part of it:
+workspace copies re-clone, spills expire, and the change-review ledger is a
+belt-and-braces safety copy whose history you lose on a fresh server without
+losing any reviewed content (it all lives in git). If you want the volumes
+anyway, archive them while the app is stopped:
+
+```sh
+docker compose down
+docker run --rm -v hexis_backups:/v -v "$PWD":/out alpine tar czf /out/backups-volume.tgz -C /v .
+```
+
+(`hexis_backups` = `<project>_backups`; `docker volume ls` shows the exact
+names. The same line works for any of the volumes.)
+
 (The `https` profile adds **caddy_data** / **caddy_config** — TLS
 certificates. Keep them too: Let's Encrypt rate-limits re-issuance.)
 

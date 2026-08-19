@@ -12,7 +12,7 @@ that name in the project root).
 
 Public HTTPS without a reverse proxy of your own is no longer a file here
 either: it is the `https` **profile** of the root compose file
-(`docker compose --profile https up -d` with `DOMAIN` set in `.env` — Caddy
+(`docker compose -f docker-compose.yml --profile https up -d` with `DOMAIN` set in `.env` — Caddy
 in front of the app, automatic Let's Encrypt certificates). See the
 [main README](../README.md#deploy-it-in-5-minutes-docker)'s deploy section.
 
@@ -39,11 +39,14 @@ are the reference for what each knob means.
 
 ## portainer-template.json — Portainer app template
 
-A [Portainer](https://www.portainer.io/) v3 app-template list with one entry:
-the root `docker-compose.yml` as a stack, prompting for the four required
-values plus the version pin. To use it, add this file's raw GitHub URL as a
-**custom template list** in Portainer (*Settings → App Templates → URL*), then
-deploy Hexis from the Templates view.
+A [Portainer](https://www.portainer.io/) v3 app-template list with one entry,
+prompting for the four required values plus the version pin. Its stackfile is
+`docker-compose.portainer.yml` — the root file with the app port published on
+the host (`APP_PORT`, default 3001): Portainer activates no compose profiles
+and brings no reverse proxy, so an unpublished port would deploy an
+unreachable stack. TLS is the deployer's proxy's job. To use it, add this
+file's raw GitHub URL as a **custom template list** in Portainer
+(*Settings → App Templates → URL*), then deploy Hexis from the Templates view.
 
 ## coolify-template.yml — Coolify service-template candidate
 

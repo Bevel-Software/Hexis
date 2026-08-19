@@ -96,6 +96,14 @@ describe('UpdateCheckService.check', () => {
     expect(result.latest).toBeUndefined();
   });
 
+  it('refuses a double-prefixed tag — vv99.0.0 must not shed one v and pass', async () => {
+    // The RAW tag is what gets validated: stripping first would leave v99.0.0,
+    // which the parser's lenient `v?` accepts.
+    const result = await service({ fetchFn: githubFetch('vv99.0.0') }).check();
+    expect(result.updateAvailable).toBe(false);
+    expect(result.latest).toBeUndefined();
+  });
+
   it('disabled: answers immediately and never touches the network', async () => {
     const fetchFn = githubFetch('v99.0.0');
     const result = await service({ enabled: false, fetchFn }).check();

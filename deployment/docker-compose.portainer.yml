@@ -1,19 +1,13 @@
-# Build-from-source variant of the root docker-compose.yml, STANDALONE —
-# usable as the one file an orchestrator is pointed at (Coolify: set the
-# resource's Docker Compose Location to /deployment/docker-compose.build.yml).
-# This is the file for deployments that track a BRANCH rather than a release:
-# a staging server building dev, a fork building its own changes. Everyone
-# else wants the root file, which pulls the image CI publishes per release.
+# The Portainer app-template's stackfile (see portainer-template.json) — the
+# root docker-compose.yml with exactly one difference: the app publishes
+# ${APP_PORT:-3001} on the host. Portainer stacks activate no compose
+# profiles and bring no reverse proxy of their own, so without a published
+# port the deployed stack is simply unreachable; the deployer puts their own
+# proxy (or firewall rules) in front, per the template's note.
 #
-# Deliberately a copy of the root file's db + app services rather than an
-# overlay — and ONLY those: the root file's `https` (Caddy) profile is left
-# out on purpose, because a deployment tracking a branch sits behind its
-# orchestrator's own proxy. Not an overlay because:
-# an orchestrator takes exactly one compose file, so this one cannot depend on
-# being merged with another. The cost is a mirrored app `environment` list —
-# WHEN A VARIABLE IS ADDED TO THE ROOT FILE, ADD IT HERE TOO. Every knob's
-# rationale lives as a comment on the root file's copy; this file stays terse
-# on purpose so the two drift as little as possible.
+# STANDALONE, like docker-compose.build.yml, and mirrored the same way: A
+# VARIABLE ADDED TO THE ROOT FILE'S app ENVIRONMENT IS ADDED HERE TOO. The
+# root file's comments are the reference for every knob.
 
 x-logging: &bounded-logging
   driver: json-file
@@ -36,19 +30,9 @@ services:
     logging: *bounded-logging
 
   app:
-    build:
-      # Relative to the PROJECT DIRECTORY, not to this file: orchestrators
-      # (Coolify) run compose with --project-directory set to the checkout
-      # root, and the documented manual command pins it the same way — which
-      # is also what makes the root .env the one compose reads. So `.` IS the
-      # repository root here, subfolder or not.
-      context: .
-      # No `args:` block, same reasoning as the root file once carried: the
-      # Dockerfile accepts GIT_SHA (reported by `GET /api/health`), but naming
-      # it here makes deployment UIs prompt for a value nobody sets by hand.
-      # CI passes it directly: `--build-arg GIT_SHA=$(git rev-parse HEAD)`.
-    expose:
-      - "3001"
+    image: ghcr.io/bevel-software/hexis:${HEXIS_VERSION:-latest}
+    ports:
+      - "${APP_PORT:-3001}:3001"
     environment:
       - NODE_ENV=production
       - PORT=3001

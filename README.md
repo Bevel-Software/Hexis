@@ -163,7 +163,8 @@ Pin the version in `.env` (`HEXIS_VERSION=0.10.0`) so a later `pull` can't
 become an unplanned upgrade — [UPGRADING.md](UPGRADING.md) covers upgrades
 and backups. Building from source instead (a staging server tracking a
 branch, a fork) is
-[deployment/docker-compose.build.yml](deployment/README.md).
+[deployment/docker-compose.build.yml](deployment/docker-compose.build.yml)
+(explained in [deployment/](deployment/README.md)).
 
 **Public HTTPS, no proxy of your own** (a bare EC2 instance, a plain VPS):
 the `https` profile starts Caddy in front of the app, with automatic Let's
@@ -173,7 +174,7 @@ open to the internet (port 80 is not optional — the certificate challenge and
 the redirect both use it).
 
 ```sh
-docker compose --profile https up -d
+docker compose -f docker-compose.yml --profile https up -d
 ```
 
 **Behind your own reverse proxy** (Coolify, Traefik, nginx): skip the profile

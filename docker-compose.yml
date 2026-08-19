@@ -72,8 +72,9 @@ services:
     # Variables that are genuinely REQUIRED keep an interpolated reference, so
     # the operator is still prompted for them.
     #
-    # deployment/docker-compose.build.yml mirrors this list (it must stand
-    # alone for orchestrators) — a variable added here is added there too.
+    # deployment/docker-compose.build.yml and docker-compose.portainer.yml
+    # mirror this list (each must stand alone for its orchestrator) — a
+    # variable added here is added to both.
     environment:
       - NODE_ENV=production
       - PORT=3001
@@ -119,7 +120,7 @@ services:
       # when DOMAIN below is set — that declares the bundled Caddy in front.)
       - TRUST_PROXY
       # The public host name, for deployments fronted by the bundled `caddy`
-      # service below (`docker compose --profile https up -d`). Setting it
+      # service below (`docker compose -f docker-compose.yml --profile https up -d`). Setting it
       # declares "the bundled Caddy fronts this deployment", and the app
       # derives the rest: PUBLIC_BACKEND_URL / PUBLIC_FRONTEND_URL default to
       # https://<DOMAIN> and TRUST_PROXY to 1 (one hop — Caddy). Explicit
@@ -146,6 +147,10 @@ services:
       # 32-byte key (base64 or hex) encrypting secrets-vault values + MCP
       # OAuth client secrets/tokens.
       - SECRETS_ENC_KEY=${SECRETS_ENC_KEY}
+      # Update check (admins see a banner when a release is newer). Pass-through
+      # so UPDATE_CHECK=false actually reaches the app — air-gapped and
+      # opt-out deployments disable the one outbound request with it.
+      - UPDATE_CHECK
       # Public URLs for OAuth redirects + post-login bounces. Pass-throughs,
       # like everything optional: the defaults live in the app (same move as
       # DATABASE_URL below), which in production falls back to https://<DOMAIN>
@@ -209,7 +214,13 @@ services:
   # Public HTTPS in one step, for a server with NO reverse proxy of its own —
   # a bare EC2 instance, a plain VPS. Opt in with:
   #
-  #   docker compose --profile https up -d
+  #   docker compose -f docker-compose.yml --profile https up -d
+  #
+  # The explicit `-f` matters from a CLONE: without it Compose also merges
+  # docker-compose.override.yml, which publishes app port 3001 on the host —
+  # beside Caddy, and reachable by clients that can then spoof forwarded
+  # headers against the one-hop TRUST_PROXY this profile implies. (wget
+  # deployments have no override file; the flag is harmless there.)
   #
   # Caddy obtains and renews Let's Encrypt certificates for $DOMAIN and
   # redirects HTTP→HTTPS; set DOMAIN in `.env`, and the app derives the public

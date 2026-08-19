@@ -103,7 +103,10 @@ export class UpdateCheckService {
       if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
       const body = (await res.json()) as { tag_name?: unknown; html_url?: unknown };
       const tag = typeof body.tag_name === 'string' ? body.tag_name.trim() : '';
-      const latest = tag.replace(/^v/, '');
+      // Validate the RAW tag before normalizing: a malformed `vv1.2.3` would
+      // otherwise shed one prefix and land on `v1.2.3`, which the parser's
+      // lenient `v?` then accepts — announcing a tag we should distrust.
+      const latest = parseReleaseVersion(tag) ? tag.replace(/^v/, '') : '';
       const notesUrl = typeof body.html_url === 'string' ? body.html_url : undefined;
       const result: UpdateCheckResult = isNewerVersion(latest, current)
         ? { updateAvailable: true, current, latest, notesUrl }

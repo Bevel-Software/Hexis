@@ -6,13 +6,13 @@
       "title": "Hexis",
       "name": "hexis",
       "description": "Self-hosted knowledge base for AI agents and people: skills, tools and processes in a git-backed workspace, served to any agent over MCP, with change requests gating every edit.",
-      "note": "Fill in the four required values below, then deploy. Sign in with the admin email and password; the setup screen collects the knowledge-base repository on first sign-in. Generate the two secrets with: <code>node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\"</code>. Details: https://github.com/Bevel-Software/Hexis",
+      "note": "Fill in the four required values below, then deploy. The app is served on host port 3001 (change with APP_PORT) — put your own reverse proxy in front for TLS. Sign in with the admin email and password; the setup screen collects the knowledge-base repository on first sign-in. Generate the two secrets with: <code>node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\"</code>. Details: https://github.com/Bevel-Software/Hexis",
       "categories": ["knowledge-base", "AI", "tools"],
       "platform": "linux",
       "logo": "https://raw.githubusercontent.com/Bevel-Software/Hexis/main/docs/hexis-logo-400.png",
       "repository": {
         "url": "https://github.com/Bevel-Software/Hexis",
-        "stackfile": "docker-compose.yml"
+        "stackfile": "deployment/docker-compose.portainer.yml"
       },
       "env": [
         {

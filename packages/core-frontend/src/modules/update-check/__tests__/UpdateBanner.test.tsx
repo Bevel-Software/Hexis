@@ -9,7 +9,14 @@ vi.mock('../services/update-check.api', () => ({
   fetchUpdateCheck: vi.fn(),
 }));
 
+// The banner keys its dismissal per signed-in account; the tests sign in a
+// fixed admin (mixed-case, to pin the lowercased storage key).
+vi.mock('../../auth/state/auth.context', () => ({
+  useAuth: () => ({ user: { email: 'Admin@Example.com' } }),
+}));
+
 const fetchUpdateCheckMock = vi.mocked(fetchUpdateCheck);
+const DISMISSED_KEY = 'bevel.updateBanner.dismissedVersion.admin@example.com';
 
 function adminContext(overrides: Partial<AdminContextValue> = {}): AdminContextValue {
   return {
@@ -71,6 +78,9 @@ describe('UpdateBanner', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    // Persisted under the ACCOUNT's key (lowercased): on a shared machine one
+    // admin's dismissal must not hide the line from the next admin.
+    expect(localStorage.getItem(DISMISSED_KEY)).toBe('0.10.0');
 
     // A fresh mount (a reload) with the SAME version stays dismissed…
     unmount();
@@ -100,7 +110,9 @@ describe('UpdateBanner', () => {
   });
 
   it('waits out the admin verdict rather than fetching for everyone', async () => {
-    renderBanner(adminContext({ isAdmin: false, isAdminLoading: true }));
+    // isAdmin TRUE while still loading: only the loading guard can stop this
+    // fetch, so the test fails if that guard is ever removed.
+    renderBanner(adminContext({ isAdmin: true, isAdminLoading: true }));
     await Promise.resolve();
     expect(fetchUpdateCheckMock).not.toHaveBeenCalled();
   });
