@@ -34,8 +34,12 @@ services:
 
   app:
     build:
-      # Relative to THIS file — the repository root.
-      context: ..
+      # Relative to the PROJECT DIRECTORY, not to this file: orchestrators
+      # (Coolify) run compose with --project-directory set to the checkout
+      # root, and the documented manual command pins it the same way — which
+      # is also what makes the root .env the one compose reads. So `.` IS the
+      # repository root here, subfolder or not.
+      context: .
       # No `args:` block, same reasoning as the root file once carried: the
       # Dockerfile accepts GIT_SHA (reported by `GET /api/health`), but naming
       # it here makes deployment UIs prompt for a value nobody sets by hand.

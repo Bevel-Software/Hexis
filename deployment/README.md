@@ -21,8 +21,13 @@ so an orchestrator can be pointed at it directly — in Coolify, set the
 resource's *Docker Compose Location* to `/deployment/docker-compose.build.yml`.
 
 ```sh
-docker compose -f deployment/docker-compose.build.yml up -d
+docker compose --project-directory . -f deployment/docker-compose.build.yml up -d
 ```
+
+`--project-directory .` (run from the repo root) is load-bearing, not
+ceremony: compose resolves the build context and the `.env` file against the
+PROJECT directory, which orchestrators set to the checkout root — this pins
+the manual command to the same behavior.
 
 It mirrors the root file's services and env list; the root file's comments
 are the reference for what each knob means.
