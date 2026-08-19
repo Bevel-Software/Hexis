@@ -304,6 +304,47 @@ describe('DirectoryGroupsPage', () => {
     expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
   });
 
+  it('a refresh-discovered broken-groups 422 clears the stale roster rows and any pending delete confirm', async () => {
+    // First load is healthy; a later refresh (directory panel callback) finds
+    // the manual groups.yaml broken. The stale rows must not keep offering
+    // CRUD against a file that can't be parsed, and a delete confirm opened
+    // against the stale roster must not survive; the banner takes over.
+    vi.mocked(getGroupsRoster)
+      .mockReset()
+      .mockResolvedValueOnce(MANUAL_ROSTER)
+      .mockRejectedValueOnce(
+        new GroupsApiError('groups.yaml cannot be read: bad indent', 422, 'broken-groups', {
+          file: 'groups.yaml',
+          reason: 'bad indent',
+        }),
+      );
+    renderPage({
+      directoryPanel: ({ onDirectoryChanged }) => (
+        <button onClick={onDirectoryChanged}>refresh-panel</button>
+      ),
+    });
+
+    // Healthy roster rendered; open the delete confirm against it.
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete Product' }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+    // The refresh discovers the broken file.
+    await userEvent.click(screen.getByRole('button', { name: 'refresh-panel' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('groups.yaml');
+    expect(alert).toHaveTextContent(/groups are\s+not being applied/i);
+    // Stale rows + CRUD controls are gone.
+    await waitFor(() => expect(screen.queryByText('Product')).not.toBeInTheDocument());
+    expect(screen.queryByRole('textbox', { name: 'New group name' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: /Add member/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Delete / })).not.toBeInTheDocument();
+    // The pending delete confirm was dismissed — no dialog left to act on the
+    // unparseable file.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(deleteGroup).not.toHaveBeenCalled();
+  });
+
   it('the delete confirm names the roles the group is assigned to', async () => {
     vi.mocked(getGroupsRoster).mockResolvedValue({
       mode: 'manual',

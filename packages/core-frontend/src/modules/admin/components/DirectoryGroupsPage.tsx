@@ -75,6 +75,12 @@ export function DirectoryGroupsPage() {
           // the parse message. Not a generic error — groups are not applying.
           setBrokenGroups({ file: err.file, reason: err.reason ?? err.message });
           setError(null);
+          // A roster rendered from an EARLIER healthy load no longer describes
+          // the file: clear the stale rows (and any pending delete confirm) so
+          // no CRUD control can operate on a file that can't be parsed. The
+          // banner above is the whole page until the file is repaired.
+          setRoster(null);
+          setDeleteTarget(null);
           return;
         }
         setError(errMessage(err, "Couldn't load groups."));
