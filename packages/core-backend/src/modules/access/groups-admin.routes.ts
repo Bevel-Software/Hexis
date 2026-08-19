@@ -1,8 +1,8 @@
 import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
-import { WorkflowDomainError } from '../workflow/workflow.errors.js';
 import { canonicalRoleName } from './access-control.service.js';
+import { sendError as sharedSendError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import type { GroupsAdminService } from './groups-admin.service.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
@@ -38,23 +38,18 @@ export function createGroupsAdminRoutes(deps: {
     return { id: req.userId ?? 'unknown', email: req.userEmail ?? 'unknown', name: req.userEmail ?? 'unknown' };
   };
 
-  const sendError = (res: express.Response, err: unknown): void => {
-    if (err instanceof WorkflowDomainError) {
-      res.status(err.status).json({ error: err.message, ...(err.payload ?? {}) });
-      return;
-    }
-    console.error('[groups] admin route failure:', err instanceof Error ? err.message : err);
-    res.status(500).json({ error: 'Group operation failed.' });
-  };
+  // Shared access-family error shape + input coercion (admin-route-helpers):
+  // typed domain errors (incl. the roster's broken-groups 422) render
+  // themselves; anything else logs server-side and answers generically.
+  const sendError = (res: express.Response, err: unknown): void => sharedSendError(res, err, 'groups');
 
-  const requireNonEmptyString = (value: unknown, field: string): string => {
-    if (typeof value !== 'string' || !value.trim()) {
-      throw new WorkflowDomainError(`${field} is required`, 400);
-    }
-    return value.trim();
-  };
+  const requireNonEmptyString = (value: unknown, field: string): string =>
+    sharedRequireNonEmptyString(value, field, { trim: true });
 
-  // GET /api/admin/groups — mode + roster (manual groups with references).
+  // GET /api/admin/groups — mode + roster (groups with grant references and
+  // role assignments) + `groupsHealth` (the broken-source banner marker; a
+  // broken MANUAL groups.yaml instead answers 422 with the parse message so
+  // the operator sees what to fix).
   router.get('/admin/groups', requireAdmin, async (_req, res) => {
     try {
       res.json(await groupsAdmin.getRoster());

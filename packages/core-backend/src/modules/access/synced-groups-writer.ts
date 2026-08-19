@@ -1,4 +1,5 @@
 import { EMAIL_REGEX, canonicalEmail, canonicalRoleName, RESERVED_ROLE_NAMES } from './access-control.service.js';
+import { unsafeNameReason } from './group-files.js';
 
 /**
  * Locale-independent code-unit comparator. `localeCompare` would make the
@@ -62,22 +63,11 @@ export interface SyncedGroupsSource {
   listGroups(): Promise<SyncedGroupRecord[]>;
 }
 
-/**
- * Group names whose characters would corrupt the emitted YAML or collide with
- * entry grammar — same character set `assertSafeRoleDisplayName` refuses for
- * roles, but here the name arrives from the IdP so the group is SKIPPED with
- * a warning instead of erroring (fail-closed: an unrepresentable group grants
- * nothing).
- */
-function unsafeNameReason(displayName: string): string | null {
-  const trimmed = displayName.trim();
-  if (!trimmed) return 'empty name';
-  if (/[:#<>]/.test(trimmed)) return "contains ':', '#', '<', or '>'";
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(trimmed)) return 'contains control characters';
-  if (trimmed.startsWith('-')) return "starts with '-'";
-  return null;
-}
+// Name safety is the SHARED predicate in `group-files.ts` (`unsafeNameReason`)
+// — the same rules the manual group editor asserts, including the reserved
+// `role/` prefix. Here the name arrives from the IdP, so an unsafe group is
+// SKIPPED with a warning instead of erroring (fail-closed: an unrepresentable
+// group grants nothing).
 
 export interface RenderedSyncedGroups {
   text: string;

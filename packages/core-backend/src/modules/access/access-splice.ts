@@ -122,7 +122,7 @@ export function validatePrincipal(p: Principal): Principal {
   }
   const role = p.role.trim();
   const canonical = canonicalRoleName(role);
-  if (!canonical) throw new AccessSpliceError('plugin grant needs a name');
+  if (!canonical) throw new AccessSpliceError('role grant needs a name');
   if (
     CONTROL_CHARS.test(role) ||
     role.includes('<') ||
@@ -130,24 +130,38 @@ export function validatePrincipal(p: Principal): Principal {
     role.includes(':') ||
     role.includes('#')
   ) {
-    throw new AccessSpliceError(`invalid plugin name: ${JSON.stringify(p.role)}`);
+    throw new AccessSpliceError(`invalid role name: ${JSON.stringify(p.role)}`);
   }
   // `deny` is never a grantee — it's the denial prefix. `everyone` IS grantable
   // (the built-in public role); the access route restricts it to the read verb.
   if (canonical === 'deny') {
-    throw new AccessSpliceError(`'${role}' is a reserved name and cannot be granted as a plugin`);
+    throw new AccessSpliceError(`'${role}' is a reserved name and cannot be granted as a role`);
   }
   const round = parseAccessEntry(role);
   if (!round.ok || round.entry.kind !== 'role' || round.entry.deny) {
-    throw new AccessSpliceError(`plugin grant does not round-trip: ${JSON.stringify(p)}`);
+    throw new AccessSpliceError(`role grant does not round-trip: ${JSON.stringify(p)}`);
   }
   return { kind: 'role', role };
 }
 
-/** True when a parsed entry names the given principal (ignoring deny prefix). */
+/**
+ * True when a parsed entry names the given principal (ignoring deny prefix).
+ *
+ * Role-shaped principals match BOTH spellings of the name — the bare token
+ * and the explicit `role/<name>` token: a revoke means "remove this NAME
+ * here" (legacy bare role grants must go when the role is revoked; a
+ * grant-route group revoke is name-based too), and grant idempotency treats a
+ * legacy bare entry as already-granting the same name. The collision
+ * edge — a group and a role sharing one name where only ONE spelling should
+ * match — is accepted: precedence resolves reads, and a Remove of the name
+ * removing both spellings is the dialog's advertised meaning.
+ */
 function entryMatches(entry: ParsedEntry, p: Principal): boolean {
   if (p.kind === 'user') return entry.kind === 'user' && entry.email === canonicalEmail(p.email);
-  return entry.kind === 'role' && entry.role === canonicalRoleName(p.role);
+  if (entry.kind !== 'role') return false;
+  const strip = (token: string): string =>
+    token.startsWith('role/') ? canonicalRoleName(token.slice('role/'.length)) : token;
+  return strip(entry.role) === strip(canonicalRoleName(p.role));
 }
 
 // ---------------------------------------------------------------------------

@@ -36,10 +36,8 @@ import {
   parseYamlSubset,
   canonicalRoleName,
   canonicalEmail,
-  ADMIN_CANONICAL,
   EMAIL_REGEX,
   GROUP_REF_PREFIX,
-  RESERVED_ROLE_NAMES,
 } from './access-control.service.js';
 
 /** Bad-input failure when editing roles.yaml (invalid name/email, unknown role). */
@@ -64,34 +62,6 @@ export type RolesModel = RoleModel[];
 export interface EditResult {
   text: string;
   changed: boolean;
-}
-
-/**
- * Reject role display names whose characters would corrupt the emitted YAML.
- * `canonicalRoleName` only trims/lowercases/collapses spaces — it does NOT
- * reject structural characters, so a name like `Sales: West` or `#temp` would
- * round-trip into a broken file. This guard is the structural complement to the
- * reserved/duplicate checks the service layer applies.
- *
- *   `:`        mis-tokenises as a nested mapping key
- *   `#`        truncated as a comment by the subset parser's stripComment
- *   `<` / `>`  collide with the `Name <email>` user-reference shape
- *   leading -  tokenises as a list item
- *   \x00-\x1f  control chars / newlines break line structure outright
- */
-export function assertSafeRoleDisplayName(displayName: string): void {
-  const trimmed = displayName.trim();
-  if (!trimmed) throw new RolesEditError('role name must not be empty');
-  if (/[:#<>]/.test(trimmed)) {
-    throw new RolesEditError(`role name must not contain ':', '#', '<', or '>': ${JSON.stringify(displayName)}`);
-  }
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(trimmed)) {
-    throw new RolesEditError(`role name must not contain control characters: ${JSON.stringify(displayName)}`);
-  }
-  if (trimmed.startsWith('-')) {
-    throw new RolesEditError(`role name must not start with '-': ${JSON.stringify(displayName)}`);
-  }
 }
 
 /**
@@ -180,22 +150,13 @@ function reemit(original: string, model: RolesModel): EditResult {
   return { text, changed: text !== originalCanonical };
 }
 
-/** Create a new empty role. 422 on reserved/duplicate/structurally-unsafe name. */
-export function createRole(text: string, displayName: string): EditResult {
-  assertSafeRoleDisplayName(displayName);
-  const canonical = canonicalRoleName(displayName);
-  if (RESERVED_ROLE_NAMES.has(canonical)) {
-    throw new RolesEditError(`'${displayName.trim()}' is a reserved name and cannot be a role`);
-  }
-  const model = parseRolesModel(text);
-  if (findRole(model, canonical)) {
-    throw new RolesEditError(`a role named '${displayName.trim()}' already exists`);
-  }
-  model.push({ displayName: displayName.trim(), members: [] });
-  return reemit(text, model);
-}
-
-/** Delete a role by canonical name. 404 if absent. */
+/**
+ * Delete a role by canonical name. 404 if absent.
+ *
+ * NOTE: roles are app-defined capabilities now — there is no create/rename
+ * editor anymore. This deletion survives ONLY as the roles.yaml half of
+ * `convertRoleToGroup` (a LEGACY people-set role migrating to a group).
+ */
 export function deleteRole(text: string, canonical: string): EditResult {
   const model = parseRolesModel(text);
   const idx = model.findIndex((r) => canonicalRoleName(r.displayName) === canonical);
@@ -207,6 +168,14 @@ export function deleteRole(text: string, canonical: string): EditResult {
 /** Add a member email to a role. Idempotent. 422 bad email; 404 unknown role. */
 export function addMember(text: string, canonical: string, rawEmail: string): EditResult {
   const email = canonicalEmail(rawEmail);
+  // A `group:`-prefixed value is a GROUP REFERENCE, not an email — and
+  // `group:lee@x.io` would pass the email regex, landing a dead ref the
+  // resolver reads as an unknown group. Route the caller to the right editor.
+  if (email.startsWith(GROUP_REF_PREFIX)) {
+    throw new RolesEditError(
+      `member ${JSON.stringify(rawEmail)} starts with '${GROUP_REF_PREFIX}' — to assign this role to a group, use the group assignment (addRoleGroupRef / the role's Groups control), not a member email`,
+    );
+  }
   if (!EMAIL_REGEX.test(email)) throw new RolesEditError(`malformed email: ${JSON.stringify(rawEmail)}`);
   const model = parseRolesModel(text);
   const role = findRole(model, canonical);
@@ -258,14 +227,13 @@ function groupRefCanonical(member: string): string | null {
 }
 
 /**
- * Assign a role to a group. Refused for Admin — same carve-out the resolver's
- * parser enforces (see GROUP_REF_PREFIX): a group must never decide who is
- * admin. Idempotent; 404 unknown role.
+ * Assign a role to a group. Allowed on every role, Admin included — the
+ * resolver's parse-time invariant (Admin keeps at least one DIRECT email
+ * member) is what protects the rescue story, and the service validates every
+ * candidate through that parser before a byte lands. Idempotent; 404 unknown
+ * role.
  */
 export function addRoleGroupRef(text: string, canonical: string, groupName: string): EditResult {
-  if (canonical === ADMIN_CANONICAL) {
-    throw new RolesEditError('the Admin role cannot be assigned to a group — add individual members instead');
-  }
   const ref = groupRefFor(groupName);
   const refCanonical = canonicalRoleName(groupName);
   const model = parseRolesModel(text);
@@ -310,6 +278,28 @@ export function renameGroupRefs(text: string, oldCanonical: string, newCanonical
   return reemit(text, model);
 }
 
+/**
+ * Remove every role's `group:<canonical>` assignment — the roles.yaml half of
+ * a group DELETION (mirror of {@link renameGroupRefs}): a deleted group's
+ * refs would otherwise dangle, silently shrinking each assigned role's
+ * membership with only a resolver log warning. Canonical-suffix matching, so
+ * un-normalized hand-edited refs are removed too. No-op when nothing
+ * references the group.
+ */
+export function removeGroupRefsEverywhere(text: string, canonical: string): EditResult {
+  const model = parseRolesModel(text);
+  let changed = false;
+  for (const role of model) {
+    for (let i = role.members.length - 1; i >= 0; i--) {
+      if (groupRefCanonical(role.members[i]) !== canonical) continue;
+      role.members.splice(i, 1);
+      changed = true;
+    }
+  }
+  if (!changed) return { text: emitRolesModel(model), changed: false };
+  return reemit(text, model);
+}
+
 /** Remove a role's group assignment. 404 unknown role; no-op if not assigned. */
 export function removeRoleGroupRef(text: string, canonical: string, groupName: string): EditResult {
   const refCanonical = canonicalRoleName(groupName);
@@ -320,26 +310,5 @@ export function removeRoleGroupRef(text: string, canonical: string, groupName: s
   const idx = role.members.findIndex((m) => groupRefCanonical(m) === refCanonical);
   if (idx < 0) return { text: emitRolesModel(model), changed: false };
   role.members.splice(idx, 1);
-  return reemit(text, model);
-}
-
-/**
- * Rename a role's display name. The canonical name MAY change (the service
- * layer is responsible for the reference rewrite + Admin guard when it does).
- * 404 unknown source; 422 reserved/duplicate/unsafe target.
- */
-export function renameRoleDisplay(text: string, canonical: string, newDisplayName: string): EditResult {
-  assertSafeRoleDisplayName(newDisplayName);
-  const newCanonical = canonicalRoleName(newDisplayName);
-  if (RESERVED_ROLE_NAMES.has(newCanonical)) {
-    throw new RolesEditError(`'${newDisplayName.trim()}' is a reserved name and cannot be a role`);
-  }
-  const model = parseRolesModel(text);
-  const role = findRole(model, canonical);
-  if (!role) throw new RolesEditError(`role not found: ${canonical}`, 404);
-  if (newCanonical !== canonical && findRole(model, newCanonical)) {
-    throw new RolesEditError(`a role named '${newDisplayName.trim()}' already exists`);
-  }
-  role.displayName = newDisplayName.trim();
   return reemit(text, model);
 }

@@ -34,10 +34,11 @@ export interface CapabilityRole {
   description: string;
   capabilities: readonly Capability[];
   /**
-   * Whether the role may be assigned to groups. False ONLY for Admin: letting
-   * an IdP-synced group decide who is admin turns a misconfigured
-   * provisioning connection into an admin-takeover/lockout vector, so Admin
-   * stays individuals-only (also enforced at parse — see GROUP_REF_PREFIX).
+   * Whether the role may be assigned to groups. True for every role, Admin
+   * included — with the parse-time invariant that Admin ALWAYS keeps at least
+   * one direct email member (see `parseRolesYaml`), so a misconfigured or
+   * unreachable directory can never leave the deployment without a
+   * directory-independent admin.
    */
   groupAssignable: boolean;
 }
@@ -55,7 +56,7 @@ export const CAPABILITY_ROLES: readonly CapabilityRole[] = [
       'manage-groups',
       'manage-directory',
     ],
-    groupAssignable: false,
+    groupAssignable: true,
   },
   // Planned next (lands with its feature gates, not before):
   // { canonical: 'plugin creator', displayName: 'Plugin Creator', … }

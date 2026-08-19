@@ -15,12 +15,12 @@
  */
 
 import {
-  parseYamlSubset,
   canonicalRoleName,
   canonicalEmail,
   EMAIL_REGEX,
   RESERVED_ROLE_NAMES,
 } from './access-control.service.js';
+import { GROUPS_YAML, parseGroupsFile, unsafeNameReason } from './group-files.js';
 
 /** Bad-input failure when editing groups.yaml. */
 export class GroupsEditError extends Error {
@@ -45,76 +45,37 @@ export interface GroupsEditResult {
   changed: boolean;
 }
 
-/** Same structural-character rules as role names — one shared namespace,
- *  one set of YAML-safety constraints. */
+/** Thin assert wrapper over the SHARED name-safety predicate (`group-files.ts`
+ *  `unsafeNameReason`) — one namespace, one set of rules, including the
+ *  reserved `role/` prefix. */
 export function assertSafeGroupDisplayName(displayName: string): void {
-  const trimmed = displayName.trim();
-  if (!trimmed) throw new GroupsEditError('group name must not be empty');
-  if (/[:#<>]/.test(trimmed)) {
-    throw new GroupsEditError(
-      `group name must not contain ':', '#', '<', or '>': ${JSON.stringify(displayName)}`,
-    );
-  }
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(trimmed)) {
-    throw new GroupsEditError(`group name must not contain control characters: ${JSON.stringify(displayName)}`);
-  }
-  if (trimmed.startsWith('-')) {
-    throw new GroupsEditError(`group name must not start with '-': ${JSON.stringify(displayName)}`);
+  const reason = unsafeNameReason(displayName);
+  if (reason) {
+    throw new GroupsEditError(`group name ${reason}: ${JSON.stringify(displayName)}`);
   }
 }
 
 /**
  * Parse groups.yaml into the ordered model; `[]` for an empty/missing file.
  *
- * Applies the RESOLVER's entry-skip rules (empty/reserved/duplicate names,
- * malformed member emails — see `parseGroupsFile`): the admin roster and the
- * edit surface must never show an entry the resolver ignores, or an admin
- * "manages" a group that grants nothing. Consequence, deliberate: the next
- * edit's re-emit garbage-collects those dead entries from the file.
+ * DERIVED from the resolver's own `parseGroupsFile` — one parser for the
+ * grammar, so the editor's skip rules (empty/reserved/duplicate names,
+ * malformed member emails) can never drift from the resolver's: the admin
+ * roster and the edit surface must never show an entry the resolver ignores,
+ * or an admin "manages" a group that grants nothing. Consequence, deliberate:
+ * the next edit's re-emit garbage-collects those dead entries from the file.
+ * Structural failures throw GroupsEditError (422) — the caller reads under
+ * the lock, so a broken on-disk file is an operator problem surfaced loudly,
+ * not a silent reset.
  */
 export function parseGroupsModel(text: string): GroupsModel {
-  const trimmed = text.trim();
-  if (!trimmed) return [];
-  const parsed = parseYamlSubset(text, { tolerateEmptyKeys: true });
-  if (!parsed.ok) throw new GroupsEditError(`groups.yaml: ${parsed.error}`);
-  const root = parsed.value;
-  if (root == null || typeof root !== 'object' || Array.isArray(root)) {
-    throw new GroupsEditError('groups.yaml: must be a top-level mapping');
-  }
-  const groupsNode = (root as Record<string, unknown>).groups;
-  if (groupsNode == null) return [];
-  if (typeof groupsNode !== 'object' || Array.isArray(groupsNode)) {
-    throw new GroupsEditError("groups.yaml: 'groups' must be a mapping");
-  }
-  const model: GroupsModel = [];
-  const seenCanonicals = new Set<string>();
-  for (const [displayName, value] of Object.entries(groupsNode as Record<string, unknown>)) {
-    const canonical = canonicalRoleName(displayName);
-    if (
-      !canonical ||
-      RESERVED_ROLE_NAMES.has(canonical) ||
-      seenCanonicals.has(canonical) ||
-      (value !== null && !Array.isArray(value)) // scalar value — resolver skips it
-    ) {
-      continue; // resolver-skipped entry — invisible to the editor too
-    }
-    seenCanonicals.add(canonical);
-    const members: string[] = [];
-    if (Array.isArray(value)) {
-      const seen = new Set<string>();
-      for (const raw of value) {
-        // Non-string / malformed members are resolver-skipped — same here.
-        if (typeof raw !== 'string') continue;
-        const email = canonicalEmail(raw);
-        if (!email || !EMAIL_REGEX.test(email) || seen.has(email)) continue;
-        seen.add(email);
-        members.push(email);
-      }
-    }
-    model.push({ displayName: displayName.trim(), members });
-  }
-  return model;
+  if (!text.trim()) return [];
+  const parsed = parseGroupsFile(text, GROUPS_YAML);
+  if (!parsed.ok) throw new GroupsEditError(parsed.errors.join('; '));
+  return [...parsed.groups.values()].map((def) => ({
+    displayName: def.displayName,
+    members: [...def.emails],
+  }));
 }
 
 /** Deterministic canonical emit; empty groups as `Name: []`. */

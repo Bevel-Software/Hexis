@@ -2,36 +2,42 @@
  * Admin Groups service — CRUD on the default-branch `groups.yaml` (manual
  * mode), the mode probe, and the connect-time retirement of manual groups.
  *
- * Mirrors `RolesAdminService`'s write pipeline (lock-aware filesystem →
- * commit+push attributed to the actor, friendly 409 on contention) with the
- * policy differences the roles/groups split defines:
+ * Shares `RolesAdminService`'s write pipeline via the SHARED
+ * `AdminLockedCommits` helper (one lock/commit implementation — the twin
+ * copies diverged once into a real bug) with the policy differences the
+ * roles/groups split defines:
  *
  *   - MODE GATE: every mutation refuses in IdP mode (`synced-groups.yaml`
  *     exists on the default branch). Groups are managed in the identity
  *     provider then; a second write surface would fragment org management —
  *     which is the thing the mode model exists to prevent.
  *   - COLLISION GATE: create/rename refuse a name whose canonical form is a
- *     roles.yaml role. One namespace, roles win — a group may never shadow a
- *     role.
- *   - NO lockout machinery: a broken groups.yaml degrades to "contributes
- *     nothing" in the resolver, so there is no recovery path to carry. The
- *     validate gate here exists to keep the file HEALTHY, not to prevent a
- *     catastrophe.
+ *     roles.yaml role. Bare-name precedence would let the group win, but a
+ *     deliberately-created shadow of a capability role is far more likely a
+ *     mistake than an intent — the IdP can still produce collisions, which
+ *     precedence then resolves (group first, `role/<name>` for the role).
+ *   - DEGRADE LOUDLY: a broken groups source never fails access resolution
+ *     closed — groups contribute nothing and the model carries a
+ *     `groupsHealth` marker, which the roster exposes so the Groups page can
+ *     banner it. A broken MANUAL groups.yaml additionally makes the roster
+ *     answer 422 with the parse message (the operator must see what to fix —
+ *     never a dead Groups page, never a silent empty roster they might
+ *     "repair" by re-creating groups over live bytes).
  */
 
-import path from 'node:path';
-import { promises as fs } from 'node:fs';
-
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
-import { LockingFilesystem } from '../workflow/locking-filesystem.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import type { AuthUser, FileTreeEntry, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../workflow/workflow.errors.js';
 import type { IAccessControl } from './access-control.interface.js';
-import { canonicalRoleName, isAccessMdPath } from './access-control.service.js';
-import { GROUPS_YAML, SYNCED_GROUPS_YAML, parseGroupsFile, validateGroupsFile } from './group-files.js';
-import { findRoleRefsInText, rewriteRoleTokensInText } from './roles-admin.service.js';
-import { parseRolesModel, renameGroupRefs } from './roles-edit.js';
+import {
+  GROUP_REF_PREFIX,
+  canonicalRoleName,
+  loadActiveGroups,
+  type GroupsHealth,
+} from './access-control.service.js';
+import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from './group-files.js';
+import { parseRolesModel, removeGroupRefsEverywhere, renameGroupRefs, isGroupRefMember } from './roles-edit.js';
 import { makeRolesYamlWriteValidator } from './roles-yaml-guard.js';
 import {
   GroupsEditError,
@@ -43,6 +49,8 @@ import {
   renameGroupDisplay as editRenameDisplay,
   type GroupsEditResult,
 } from './groups-edit.js';
+import { AdminLockedCommits, type LockedWrite } from './admin-locked-commit.js';
+import { KbReferenceScanner } from './reference-scan.js';
 
 /** Where role→group assignments live (`group:<canonical>` member entries). */
 const ROLES_YAML = 'roles.yaml';
@@ -64,14 +72,32 @@ export interface GroupRosterEntry {
   members: string[];
   /** Every access rule referencing this group — same scan the rename uses. */
   referencedBy: { path: string; verb: string }[];
+  /**
+   * Canonical names of roles carrying a `group:<canonical>` assignment to
+   * this group — so the delete confirm can warn that those roles will lose
+   * the members they inherit through it (deleteGroup unassigns them
+   * atomically).
+   */
+  assignedToRoles: string[];
 }
 
 export interface GroupsRoster {
   mode: GroupsMode;
   groups: GroupRosterEntry[];
+  /**
+   * Health of the active groups source — `ok: false` when the source exists
+   * but is unreadable/unparseable (resolution degrades: groups contribute
+   * nothing). Shipped for the Groups page banner (frontend increment).
+   */
+  groupsHealth: GroupsHealth;
 }
 
 export class GroupsAdminService {
+  /** Shared lock/commit plumbing — see module doc. */
+  private readonly locked: AdminLockedCommits;
+  /** Shared cached reference scanner. */
+  private readonly references: KbReferenceScanner;
+
   constructor(
     private readonly workspaceService: IWorkspaceService,
     private readonly workflowService: IWorkflowService,
@@ -80,7 +106,21 @@ export class GroupsAdminService {
     /** Live-binding thunk — see RolesAdminService's identical note. */
     private readonly defaultBranchOf: () => string,
     private readonly eventBus?: WorkflowEventBus,
-  ) {}
+  ) {
+    this.locked = new AdminLockedCommits({
+      workspaceService,
+      workflowService,
+      kbDirName,
+      defaultBranchOf,
+      makeError: (message, status, payload) => new GroupsAdminError(message, status, payload),
+      logTag: 'groups-admin',
+      contendedSubject: 'Groups',
+      // The rename/delete batch may rewrite roles.yaml (group:<ref> members)
+      // — same pre-disk no-lockout gate the roles admin attaches.
+      validateWrite: makeRolesYamlWriteValidator(kbDirName),
+    });
+    this.references = new KbReferenceScanner(workspaceService, kbDirName);
+  }
 
   private get defaultBranch(): string {
     return this.defaultBranchOf();
@@ -95,86 +135,81 @@ export class GroupsAdminService {
     return this.workspaceId;
   }
 
-  private async readKbFile(workspaceId: string, repoRel: string): Promise<string | null> {
-    try {
-      return await this.workspaceService.readFile(workspaceId, path.posix.join(this.kbDirName, repoRel));
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException | null)?.code;
-      if (code === 'ENOENT' || code === 'ENOTDIR') return null;
-      throw err;
-    }
-  }
-
-  /** IdP mode iff `synced-groups.yaml` exists — same rule the resolver applies. */
+  /**
+   * IdP mode iff `synced-groups.yaml` exists — same rule the resolver applies.
+   *
+   * KNOWN GAP, deliberate: this cannot see the connect WINDOW — a directory
+   * connection that is configured but whose first provisioning push has not
+   * landed the synced file yet. Core's `SyncedGroupsSource` seam exposes only
+   * `listGroups()` (the overlay owns the connection), so "connected but not
+   * yet materialized" is not cheaply knowable server-side; the UI keeps its
+   * own suppression for that window.
+   */
   async getMode(): Promise<GroupsMode> {
     const workspaceId = await this.ensureWorkspace();
-    return (await this.readKbFile(workspaceId, SYNCED_GROUPS_YAML)) !== null ? 'idp' : 'manual';
+    return (await this.locked.readKbFile(workspaceId, SYNCED_GROUPS_YAML)) !== null ? 'idp' : 'manual';
   }
 
   // ---- Read ---------------------------------------------------------------
 
+  /**
+   * Mode + roster + source health. Reads the ACTIVE source through the same
+   * `loadActiveGroups` rule the resolver applies, so mode, health, and the
+   * group set can never disagree with resolution:
+   *
+   *   - IdP mode (synced file present, even broken): the roster IS the synced
+   *     file — read-only in the UI; the manual file is retired and showing it
+   *     would misreport who has access. A broken synced file yields an EMPTY
+   *     roster with the `groupsHealth` marker (mode stays 'idp' — no
+   *     fallback to manual, which would resurrect retired groups).
+   *   - Manual mode, broken groups.yaml: 422 with the parse message — the
+   *     repair path must show the operator what to fix, never a dead page.
+   */
   async getRoster(): Promise<GroupsRoster> {
     const workspaceId = await this.ensureWorkspace();
-    const syncedText = await this.readKbFile(workspaceId, SYNCED_GROUPS_YAML);
-    const referencesByName = await this.scanReferences(workspaceId);
-
-    // IdP mode: the roster IS the synced file (read-only in the UI); the
-    // manual file is retired and showing it would misreport who has access.
-    // A malformed synced file degrades to an empty roster, same as the
-    // resolver's fail-closed read (mode stays 'idp' — no fallback to manual).
-    if (syncedText !== null) {
-      const parsed = parseGroupsFile(syncedText, SYNCED_GROUPS_YAML);
-      const groups: GroupsRoster['groups'] = [];
-      if (parsed.ok) {
-        for (const [canonical, def] of parsed.groups) {
-          groups.push({
-            canonical,
-            displayName: def.displayName,
-            members: [...def.emails].sort(),
-            referencedBy: referencesByName.get(canonical) ?? [],
-          });
-        }
-      }
-      return { mode: 'idp', groups };
+    const active = await loadActiveGroups((f) => this.locked.readKbFile(workspaceId, f));
+    if (active.sourceFile === GROUPS_YAML && !active.health.ok) {
+      throw new GroupsAdminError(`groups.yaml cannot be read: ${active.health.reason}`, 422, {
+        kind: 'broken-groups',
+        file: active.health.file,
+        reason: active.health.reason,
+      });
     }
-
-    const text = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
-    const model = parseGroupsModel(text);
-    return {
-      mode: 'manual',
-      groups: model.map((group) => {
-        const canonical = canonicalRoleName(group.displayName);
-        return {
-          canonical,
-          displayName: group.displayName,
-          members: group.members,
-          referencedBy: referencesByName.get(canonical) ?? [],
-        };
-      }),
-    };
+    const [referencesByToken, assignedByGroup] = await Promise.all([
+      this.references.scan(workspaceId),
+      this.rolesReferencingGroups(workspaceId),
+    ]);
+    const mode: GroupsMode = active.sourceFile === SYNCED_GROUPS_YAML ? 'idp' : 'manual';
+    const groups: GroupRosterEntry[] = [];
+    for (const [canonical, def] of active.groups) {
+      groups.push({
+        canonical,
+        displayName: def.displayName,
+        // IdP members render sorted (machine-generated file, no author order
+        // to honour); manual members keep file order (the editor's view).
+        members: mode === 'idp' ? [...def.emails].sort() : [...def.emails],
+        referencedBy: referencesByToken.get(canonical) ?? [],
+        assignedToRoles: assignedByGroup.get(canonical) ?? [],
+      });
+    }
+    return { mode, groups, groupsHealth: active.health };
   }
 
   /**
    * Display names from the ACTIVE group source (synced in IdP mode, manual
-   * otherwise) — what the share dialog suggests and the grant route accepts.
-   * Malformed files degrade to an empty list, matching the resolver's
-   * fail-closed read.
+   * otherwise). Malformed files degrade to an empty list, matching the
+   * resolver's degrade rule.
    */
   async listActiveGroupNames(): Promise<string[]> {
     const workspaceId = await this.ensureWorkspace();
-    const syncedText = await this.readKbFile(workspaceId, SYNCED_GROUPS_YAML);
-    if (syncedText !== null) {
-      const parsed = parseGroupsFile(syncedText, SYNCED_GROUPS_YAML);
-      return parsed.ok ? [...parsed.groups.values()].map((g) => g.displayName) : [];
-    }
-    const text = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
-    return parseGroupsModel(text).map((g) => g.displayName);
+    const active = await loadActiveGroups((f) => this.locked.readKbFile(workspaceId, f));
+    return [...active.groups.values()].map((g) => g.displayName);
   }
 
   /** Manual group display names — what the connect-time warning dialog lists. */
   async listManualGroupNames(): Promise<string[]> {
     const workspaceId = await this.ensureWorkspace();
-    const text = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
+    const text = (await this.locked.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
     return parseGroupsModel(text).map((g) => g.displayName);
   }
 
@@ -190,8 +225,53 @@ export class GroupsAdminService {
     return this.getRoster();
   }
 
+  /**
+   * Delete a group AND unassign it from every role — the `group:<canonical>`
+   * members in roles.yaml — in the SAME atomic locked commit (mirror of the
+   * rename's ref rewrite): a delete that left the refs would silently shrink
+   * each assigned role's membership behind a mere log warning. Grant
+   * references in access.md are NOT touched — a dangling grant resolves to
+   * nothing by design (and the roster's `referencedBy` fed the confirm
+   * dialog's warning).
+   */
   async deleteGroup(actor: AuthUser, canonical: string): Promise<GroupsRoster> {
-    await this.runEdit(actor, (text) => editDeleteGroup(text, canonical));
+    const workspaceId = await this.ensureWorkspace();
+    await this.assertManualMode(workspaceId);
+    await this.locked.withFileLocks(workspaceId, actor, [GROUPS_YAML, ROLES_YAML], async () => {
+      const groupsOriginal = await this.locked.readKbFile(workspaceId, GROUPS_YAML);
+      const groupsEdit = this.guardEdit(() => editDeleteGroup(groupsOriginal ?? '', canonical));
+      this.assertLoadable(groupsEdit.text);
+      const files: LockedWrite[] = [
+        { repoRel: GROUPS_YAML, content: groupsEdit.text, original: groupsOriginal },
+      ];
+      const rolesText = await this.locked.readKbFile(workspaceId, ROLES_YAML);
+      if (rolesText !== null) {
+        let rolesEdit: { text: string; changed: boolean };
+        try {
+          rolesEdit = removeGroupRefsEverywhere(rolesText, canonical);
+        } catch (err) {
+          // Fail closed on a malformed roles.yaml: deleting the group without
+          // unassigning it would strand dangling refs the delete exists to clean.
+          throw new GroupsAdminError(
+            `Cannot rewrite role assignments in ${ROLES_YAML}; delete aborted with no changes`,
+            422,
+            { cause: (err as Error)?.message },
+          );
+        }
+        if (rolesEdit.changed) {
+          // Same pre-disk no-lockout gate LockingFilesystem would have run.
+          makeRolesYamlWriteValidator(this.kbDirName)(`${this.kbDirName}/${ROLES_YAML}`, rolesEdit.text);
+          files.push({ repoRel: ROLES_YAML, content: rolesEdit.text, original: rolesText });
+        }
+      }
+      await this.locked.writeAndCommitLocked(
+        workspaceId,
+        actor,
+        files,
+        `Delete group ${canonical}`,
+      );
+      this.afterWrite(workspaceId, actor, files.map((f) => f.repoRel));
+    });
     return this.getRoster();
   }
 
@@ -207,8 +287,8 @@ export class GroupsAdminService {
 
   /**
    * Rename — canonical-changing renames rewrite every grant reference in ONE
-   * atomic commit (same machinery, same reasoning as the role rename: a
-   * partial rewrite is a silent access drop).
+   * atomic commit (same machinery, same reasoning as ref unassignment on
+   * delete: a partial rewrite is a silent access drop).
    */
   async renameGroup(actor: AuthUser, canonical: string, newDisplayName: string): Promise<GroupsRoster> {
     const workspaceId = await this.ensureWorkspace();
@@ -219,9 +299,10 @@ export class GroupsAdminService {
     // Both roster files are read AND rewritten from snapshots — hold their
     // locks across the whole build so a concurrent roster edit can't land in
     // between and be overwritten by the batch.
-    return this.withFileLocks(workspaceId, actor, [GROUPS_YAML, ROLES_YAML], () =>
+    await this.locked.withFileLocks(workspaceId, actor, [GROUPS_YAML, ROLES_YAML], () =>
       this.renameGroupLocked(workspaceId, actor, canonical, newCanonical, newDisplayName),
     );
+    return this.getRoster();
   }
 
   private async renameGroupLocked(
@@ -230,22 +311,35 @@ export class GroupsAdminService {
     canonical: string,
     newCanonical: string,
     newDisplayName: string,
-  ): Promise<GroupsRoster> {
-    const text = (await this.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
+  ): Promise<void> {
+    const text = (await this.locked.readKbFile(workspaceId, GROUPS_YAML)) ?? '';
     const groupsEdit = this.guardEdit(() => editRenameDisplay(text, canonical, newDisplayName));
-    const writes: { repoRelativePath: string; content: string }[] = [];
+    const files: LockedWrite[] = [];
     if (groupsEdit.changed) {
       this.assertLoadable(groupsEdit.text);
-      writes.push({ repoRelativePath: GROUPS_YAML, content: groupsEdit.text });
+      files.push({ repoRel: GROUPS_YAML, content: groupsEdit.text, original: text });
     }
     if (newCanonical !== canonical) {
-      writes.push(...(await this.rewriteReferences(workspaceId, canonical, newDisplayName.trim())));
+      // Grant references (bare tokens in access.md + node frontmatter). The
+      // rewrite returns each file's ORIGINAL text alongside the new content,
+      // so the rollback snapshots reuse the read it already did — no second
+      // full-KB pass. Explicit `role/<name>` tokens are untouched by design:
+      // they reference the ROLE, not this group.
+      const refWrites = await this.references.rewriteReferences(
+        workspaceId,
+        canonical,
+        newDisplayName.trim(),
+        (message, cause) => new GroupsAdminError(message, 422, { cause }),
+      );
+      for (const w of refWrites) {
+        files.push({ repoRel: w.repoRelativePath, content: w.content, original: w.original });
+      }
       // Role→group assignments live in roles.yaml as `group:<canonical>` —
       // stored canonical, so they go stale on a canonical-changing rename and
       // the role would silently stop expanding to the group's members. Rewrite
       // them in the SAME atomic commit. Fail closed on a malformed roles.yaml:
       // committing the rename without it would strand any refs it holds.
-      const rolesText = await this.readKbFile(workspaceId, ROLES_YAML);
+      const rolesText = await this.locked.readKbFile(workspaceId, ROLES_YAML);
       if (rolesText !== null) {
         let rolesEdit: { text: string; changed: boolean };
         try {
@@ -262,31 +356,22 @@ export class GroupsAdminService {
           // the plain-write path must not lose it (a roles.yaml that fails
           // the resolver's parser is an app-wide admin lockout).
           makeRolesYamlWriteValidator(this.kbDirName)(`${this.kbDirName}/${ROLES_YAML}`, rolesEdit.text);
-          writes.push({ repoRelativePath: ROLES_YAML, content: rolesEdit.text });
+          files.push({ repoRel: ROLES_YAML, content: rolesEdit.text, original: rolesText });
         }
       }
     }
-    if (writes.length === 0) return this.getRoster();
+    if (files.length === 0) return;
 
     // Roster locks are already ours (withFileLocks; strict same-user acquire
     // forbids LockingFilesystem here). Grant-reference candidates are written
     // unlocked — same exposure every reference rewrite has always had.
-    const files: { repoRel: string; content: string; original: string | null }[] = [];
-    for (const w of writes) {
-      files.push({
-        repoRel: w.repoRelativePath,
-        content: w.content,
-        original: await this.readKbFile(workspaceId, w.repoRelativePath),
-      });
-    }
-    await this.writeAndCommitLocked(
+    await this.locked.writeAndCommitLocked(
       workspaceId,
       actor,
       files,
       `Rename group ${canonical} → ${newDisplayName.trim()}`,
     );
-    this.afterWrite(workspaceId, actor, writes.map((w) => w.repoRelativePath));
-    return this.getRoster();
+    this.afterWrite(workspaceId, actor, files.map((f) => f.repoRel));
   }
 
   /**
@@ -298,9 +383,9 @@ export class GroupsAdminService {
    */
   async retireManualGroups(actor: AuthUser): Promise<boolean> {
     const workspaceId = await this.ensureWorkspace();
-    if ((await this.readKbFile(workspaceId, GROUPS_YAML)) === null) return false;
-    const fsys = await this.lockingFsForActor(workspaceId, actor);
-    await this.mapLockContention(() =>
+    if ((await this.locked.readKbFile(workspaceId, GROUPS_YAML)) === null) return false;
+    const fsys = await this.locked.lockingFsForActor(workspaceId, actor);
+    await this.locked.mapLockContention(() =>
       fsys.writeFiles(
         [],
         'Retire manual groups — directory sync connected',
@@ -330,7 +415,7 @@ export class GroupsAdminService {
   }
 
   private async assertManualMode(workspaceId: string): Promise<void> {
-    if ((await this.readKbFile(workspaceId, SYNCED_GROUPS_YAML)) !== null) {
+    if ((await this.locked.readKbFile(workspaceId, SYNCED_GROUPS_YAML)) !== null) {
       throw new GroupsAdminError(
         'Groups are synced from your identity provider — manage membership there.',
         409,
@@ -339,11 +424,18 @@ export class GroupsAdminService {
     }
   }
 
-  /** One namespace, roles win: refuse a group name that IS a role. */
+  /**
+   * Refuse a group name that IS a role. Bare-name precedence (group-first)
+   * would make the group win resolution, so this is deliberate FRICTION, not
+   * a correctness need: an admin naming a group after a capability role is
+   * far more likely shadowing by accident than by intent. IdP-sourced
+   * collisions still happen (the sync writer doesn't consult roles.yaml) and
+   * precedence resolves them.
+   */
   private async assertRoleNameFree(displayName: string): Promise<void> {
     const workspaceId = await this.ensureWorkspace();
     const canonical = canonicalRoleName(displayName);
-    const rolesText = (await this.readKbFile(workspaceId, 'roles.yaml')) ?? '';
+    const rolesText = (await this.locked.readKbFile(workspaceId, 'roles.yaml')) ?? '';
     let roles;
     try {
       roles = parseRolesModel(rolesText);
@@ -354,68 +446,46 @@ export class GroupsAdminService {
     }
     if (roles.some((r) => canonicalRoleName(r.displayName) === canonical)) {
       throw new GroupsAdminError(
-        `'${displayName.trim()}' is a role name — a group cannot shadow a role.`,
+        `'${displayName.trim()}' is a role name — name the group something else (a role can be referenced explicitly as 'role/${canonical}').`,
         422,
       );
     }
   }
 
   /**
-   * Run `fn` while HOLDING the named KB-file locks — read-modify-write flows
-   * must keep the lock across the READ, or two concurrent edits (another tab,
-   * a conversion writing groups.yaml) both snapshot the same base and the
-   * second write silently discards the first. Lock acquire is STRICT even
-   * for the same user, so `fn` must write plainly + commit path-scoped (see
-   * `writeAndCommitLocked`), never through LockingFilesystem. Release is
-   * commit-on-release, success or failure: a discarding release could throw
-   * away a PREVIOUS holder's still-queued bytes this operation never touched,
-   * and `fn` restores its own bytes on failure — so at release time anything
-   * dirty is either clean (queued commit no-ops) or someone else's work that
-   * must be preserved. The ONE exception: a path whose restore itself failed
-   * (`unrestoredPaths` on the thrown error) holds known-partial bytes, and
-   * committing those is worse than discarding to HEAD.
+   * Which roles carry a `group:<canonical>` assignment, per group canonical.
+   * Advisory (feeds the roster's `assignedToRoles` warning field): a broken
+   * roles.yaml yields an empty map rather than failing the roster.
    */
-  private async withFileLocks<T>(
-    workspaceId: string,
-    actor: AuthUser,
-    repoRelFiles: string[],
-    fn: () => Promise<T>,
-  ): Promise<T> {
-    const paths = repoRelFiles.map((f) => `${this.kbDirName}/${f}`).sort();
-    const held: string[] = [];
-    let unrestored: Set<string> | null = null;
+  private async rolesReferencingGroups(workspaceId: string): Promise<Map<string, string[]>> {
+    const rolesText = (await this.locked.readKbFile(workspaceId, ROLES_YAML)) ?? '';
+    const byGroup = new Map<string, string[]>();
+    let roles;
     try {
-      for (const p of paths) {
-        const res = await this.workflowService.acquireLock(workspaceId, this.defaultBranch, p, actor);
-        if (!res.acquired) {
-          throw new GroupsAdminError(
-            `Groups are being edited by ${res.lock.holderName || 'another admin'}. Try again in a moment.`,
-            409,
-          );
+      roles = parseRolesModel(rolesText);
+    } catch {
+      return byGroup;
+    }
+    for (const role of roles) {
+      const roleCanonical = canonicalRoleName(role.displayName);
+      for (const member of role.members) {
+        if (!isGroupRefMember(member)) continue;
+        const groupCanonical = canonicalRoleName(member.slice(GROUP_REF_PREFIX.length));
+        const list = byGroup.get(groupCanonical);
+        if (list) {
+          if (!list.includes(roleCanonical)) list.push(roleCanonical);
+        } else {
+          byGroup.set(groupCanonical, [roleCanonical]);
         }
-        held.push(p);
-      }
-      return await fn();
-    } catch (err) {
-      unrestored = (err as { unrestoredPaths?: Set<string> } | null)?.unrestoredPaths ?? null;
-      throw err;
-    } finally {
-      for (const h of held) {
-        try {
-          if (unrestored?.has(h)) {
-            await this.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
-          } else {
-            await this.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
-          }
-        } catch { /* best-effort release */ }
       }
     }
+    return byGroup;
   }
 
   private async runEdit(actor: AuthUser, pre: (text: string) => GroupsEditResult): Promise<void> {
     const workspaceId = await this.ensureWorkspace();
     await this.assertManualMode(workspaceId);
-    return this.withFileLocks(workspaceId, actor, [GROUPS_YAML], () =>
+    return this.locked.withFileLocks(workspaceId, actor, [GROUPS_YAML], () =>
       this.runEditLocked(workspaceId, actor, pre),
     );
   }
@@ -427,16 +497,11 @@ export class GroupsAdminService {
   ): Promise<void> {
     // Keep absent (null) distinct from existing-but-empty ('') — rollback
     // must DELETE a file it created, not truncate one that was already there.
-    const original = await this.readKbFile(workspaceId, GROUPS_YAML);
+    const original = await this.locked.readKbFile(workspaceId, GROUPS_YAML);
     const result = this.guardEdit(() => pre(original ?? ''));
     if (!result.changed) return;
     this.assertLoadable(result.text);
-    // The lock is ALREADY OURS (withFileLocks) and acquire is strict even for
-    // the same user, so this write must not go through LockingFilesystem —
-    // it would contend against our own hold. Plain write + a path-scoped
-    // atomic commit instead; on a failed commit restore the bytes we changed
-    // so the release never publishes a half-done edit.
-    await this.writeAndCommitLocked(
+    await this.locked.writeAndCommitLocked(
       workspaceId,
       actor,
       [{ repoRel: GROUPS_YAML, content: result.text, original }],
@@ -445,76 +510,11 @@ export class GroupsAdminService {
     this.afterWrite(workspaceId, actor, [GROUPS_YAML]);
   }
 
-  /**
-   * Plain-write `files` and commit them as ONE path-scoped change — the write
-   * half of a `withFileLocks` flow (never LockingFilesystem: same-user
-   * re-acquire is strict). On failure, best-effort restore of each file's
-   * original state so the lock release (commit-on-release) can't publish a
-   * partial edit: `original: null` means the file did not exist before, so
-   * restoration DELETES it rather than leaving an empty artifact. Paths whose
-   * restore itself failed are recorded on the thrown error
-   * (`unrestoredPaths`) so `withFileLocks` can discard them at release
-   * instead of committing known-partial bytes.
-   */
-  private async writeAndCommitLocked(
-    workspaceId: string,
-    actor: AuthUser,
-    files: { repoRel: string; content: string; original: string | null }[],
-    summary: string,
-  ): Promise<void> {
-    const wsRel = (repoRel: string) => `${this.kbDirName}/${repoRel}`;
-    try {
-      for (const f of files) await this.workspaceService.writeFile(workspaceId, wsRel(f.repoRel), f.content);
-      await this.workflowService.commitChanges(workspaceId, actor, summary, files.map((f) => wsRel(f.repoRel)));
-    } catch (err) {
-      const unrestored = new Set<string>();
-      for (const f of files) {
-        try {
-          if (f.original === null) await this.workspaceService.deleteFile(workspaceId, wsRel(f.repoRel));
-          else await this.workspaceService.writeFile(workspaceId, wsRel(f.repoRel), f.original);
-        } catch (restoreErr) {
-          // Deleting an already-absent file IS the original state.
-          if (f.original === null && (restoreErr as NodeJS.ErrnoException | null)?.code === 'ENOENT') continue;
-          unrestored.add(wsRel(f.repoRel));
-          console.warn(`[groups-admin] could not restore ${f.repoRel} after a failed commit`);
-        }
-      }
-      if (unrestored.size > 0 && typeof err === 'object' && err !== null) {
-        (err as { unrestoredPaths?: Set<string> }).unrestoredPaths = unrestored;
-      }
-      throw err;
-    }
-  }
-
-  private async lockingFsForActor(workspaceId: string, actor: AuthUser): Promise<LockingFilesystem> {
-    const basePath = await this.workspaceService.getWorkspacePath(workspaceId);
-    return new LockingFilesystem(
-      { basePath, contained: true },
-      {
-        workflow: this.workflowService,
-        workspaceId,
-        branch: this.defaultBranch,
-        user: actor,
-        // The rename batch may rewrite roles.yaml (group:<ref> members) —
-        // same pre-disk no-lockout gate the roles admin attaches.
-        validateWrite: makeRolesYamlWriteValidator(this.kbDirName),
-      },
-    );
-  }
-
-  private async mapLockContention<T>(write: () => Promise<T>): Promise<T> {
-    try {
-      return await write();
-    } catch (err) {
-      if (err instanceof Error && /locked by /.test(err.message)) {
-        throw new GroupsAdminError('Groups are being edited by another admin. Try again in a moment.', 409);
-      }
-      throw err;
-    }
-  }
-
   private afterWrite(workspaceId: string, actor: AuthUser, repoRelPaths: string[]): void {
     this.accessControl.invalidate(workspaceId);
+    // Any write in this batch may have moved grant references (`.md`
+    // rewrites on rename); drop the cached scan so the next roster is fresh.
+    if (repoRelPaths.some((p) => p.endsWith('.md'))) this.references.invalidate(workspaceId);
     if (!this.eventBus) return;
     for (const repoRel of repoRelPaths) {
       this.eventBus.emit({
@@ -528,75 +528,5 @@ export class GroupsAdminService {
       });
     }
     this.eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch: this.defaultBranch });
-  }
-
-  /** Grant references by canonical name — same scan + parse the rename uses. */
-  private async scanReferences(
-    workspaceId: string,
-  ): Promise<Map<string, { path: string; verb: string }[]>> {
-    const repoDir = await this.repoDir(workspaceId);
-    const byName = new Map<string, { path: string; verb: string }[]>();
-    for (const repoRel of await this.collectCandidateFiles(workspaceId)) {
-      let text: string;
-      try {
-        text = await fs.readFile(path.join(repoDir, repoRel), 'utf-8');
-      } catch {
-        continue;
-      }
-      for (const ref of findRoleRefsInText(text, true, isAccessMdPath(repoRel))) {
-        const list = byName.get(ref.role);
-        if (list) list.push({ path: repoRel, verb: ref.verb });
-        else byName.set(ref.role, [{ path: repoRel, verb: ref.verb }]);
-      }
-    }
-    return byName;
-  }
-
-  private async rewriteReferences(
-    workspaceId: string,
-    oldCanonical: string,
-    newDisplayName: string,
-  ): Promise<{ repoRelativePath: string; content: string }[]> {
-    const repoDir = await this.repoDir(workspaceId);
-    const writes: { repoRelativePath: string; content: string }[] = [];
-    for (const repoRel of await this.collectCandidateFiles(workspaceId)) {
-      let text: string;
-      try {
-        text = await fs.readFile(path.join(repoDir, repoRel), 'utf-8');
-      } catch (err) {
-        // Fail closed, like the role rename: an unreadable candidate might
-        // reference the old name; a partial rewrite silently drops access.
-        throw new GroupsAdminError(
-          `Cannot read ${repoRel} while rewriting group references; rename aborted with no changes`,
-          422,
-          { cause: (err as Error)?.message },
-        );
-      }
-      const rewritten = rewriteRoleTokensInText(text, oldCanonical, newDisplayName, true, isAccessMdPath(repoRel));
-      if (rewritten !== text) writes.push({ repoRelativePath: repoRel, content: rewritten });
-    }
-    return writes;
-  }
-
-  private async collectCandidateFiles(workspaceId: string): Promise<string[]> {
-    const tree = await this.workspaceService.listFiles(workspaceId);
-    const prefix = `${this.kbDirName}/`;
-    const out: string[] = [];
-    const visit = (node: FileTreeEntry): void => {
-      if (node.type === 'file') {
-        if (node.relativePath.startsWith(prefix) && node.relativePath.endsWith('.md')) {
-          out.push(node.relativePath.slice(prefix.length));
-        }
-        return;
-      }
-      for (const child of node.children ?? []) visit(child);
-    };
-    visit(tree);
-    return out;
-  }
-
-  private async repoDir(workspaceId: string): Promise<string> {
-    const wsDir = await this.workspaceService.getWorkspacePath(workspaceId);
-    return path.join(wsDir, this.kbDirName);
   }
 }

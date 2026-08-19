@@ -1,6 +1,7 @@
 import {
   EMAIL_REGEX,
   RESERVED_ROLE_NAMES,
+  ROLE_TOKEN_PREFIX,
   canonicalEmail,
   canonicalRoleName,
   parseYamlSubset,
@@ -39,6 +40,35 @@ import {
 
 export const GROUPS_YAML = 'groups.yaml';
 export const SYNCED_GROUPS_YAML = 'synced-groups.yaml';
+
+/**
+ * THE name-safety predicate for principal display names — the single source
+ * of truth every surface derives from (group creation/rename, IdP sync
+ * materialization; thin assert wrappers sit on top). Returns a human-readable
+ * reason the name is unsafe, or null when it is fine.
+ *
+ * The character rules keep the emitted YAML parseable and the entry grammar
+ * unambiguous:
+ *   `:`        mis-tokenises as a nested mapping key
+ *   `#`        truncated as a comment by the subset parser's stripComment
+ *   `<` / `>`  collide with the `Name <email>` user-reference shape
+ *   leading -  tokenises as a list item
+ *   \x00-\x1f  control chars / newlines break line structure outright
+ *   `role/…`   reserved: that spelling is the EXPLICIT role token in access
+ *              entries — a group carrying it could never be referenced.
+ */
+export function unsafeNameReason(displayName: string): string | null {
+  const trimmed = displayName.trim();
+  if (!trimmed) return 'empty name';
+  if (/[:#<>]/.test(trimmed)) return "contains ':', '#', '<', or '>'";
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f]/.test(trimmed)) return 'contains control characters';
+  if (trimmed.startsWith('-')) return "starts with '-'";
+  if (canonicalRoleName(trimmed).startsWith(ROLE_TOKEN_PREFIX)) {
+    return `starts with the reserved '${ROLE_TOKEN_PREFIX}' prefix (the explicit role token in access entries)`;
+  }
+  return null;
+}
 
 /** One parsed group: display name + canonicalised member emails. */
 export interface GroupDefinition {
@@ -100,6 +130,15 @@ export function parseGroupsFile(
     if (RESERVED_ROLE_NAMES.has(canonical)) {
       warnings.push(
         `${filename}: group '${displayName}' uses reserved name '${canonical}' — skipped`,
+      );
+      continue;
+    }
+    if (canonical.startsWith(ROLE_TOKEN_PREFIX)) {
+      // Reserved spelling: `role/<Name>` is the explicit role token in access
+      // entries, so a group named that way could never be referenced — and
+      // letting it into the index would shadow a role's alias key.
+      warnings.push(
+        `${filename}: group '${displayName}' uses the reserved '${ROLE_TOKEN_PREFIX}' prefix — skipped`,
       );
       continue;
     }

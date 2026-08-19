@@ -20,8 +20,8 @@
  *
  * Only a principal NAMED in a file (a direct user grant `Name <email>`, or a
  * group/role token) produces sources. A USER who merely RESOLVES to access via a
- * plugin they belong to, the built-in `everyone`, or admin-rescue is NOT a
- * per-target file entry and produces NO source (the plugin itself shows as its own
+ * group or role they belong to, the built-in `everyone`, or admin-rescue is NOT a
+ * per-target file entry and produces NO source (the group/role itself shows as its own
  * row instead).
  */
 export type GrantSource =
@@ -281,17 +281,20 @@ export interface IAccessControl {
 
   /**
    * Enumerate the grantable principals known to the KB, for the share-dialog
-   * autocomplete. `plugins` are the built-in `everyone` role plus the declared
-   * `roles.yaml` role display names (`everyone` is surfaced so the UI can
-   * grant public read; the grant route gates it to the `read` verb only).
-   * `people` are every email named in `roles.yaml` (name defaults to the local
-   * part) unioned with every `Name <email>` grant in any `access.md` (named).
-   * The login-only `users` table is unioned in by the caller — this method
-   * covers the KB-canonical people the users table misses.
+   * autocomplete. `roles` are the built-in `everyone` role plus the declared
+   * `roles.yaml` role display names — ROLE principals only, never groups
+   * (`everyone` is surfaced so the UI can grant public read; the grant route
+   * gates it to the `read` verb only). `groups` are the ACTIVE group source's
+   * display names as merged into the resolver's cached model — served from
+   * that cache precisely so suggest/grant don't re-read the files per call.
+   * `people` are every email named in `roles.yaml` (name defaults to the
+   * local part) unioned with every `Name <email>` grant in any `access.md`
+   * (named). The login-only `users` table is unioned in by the caller — this
+   * method covers the KB-canonical people the users table misses.
    */
   kbPrincipals(
     workspaceId: string,
-  ): Promise<{ plugins: string[]; people: { name: string; email: string }[] }>;
+  ): Promise<{ roles: string[]; groups: string[]; people: { name: string; email: string }[] }>;
 
   /**
    * Reverse-lookup an email by its SHA-256 hash (per `hashEmail` semantics)
