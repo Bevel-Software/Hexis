@@ -1090,7 +1090,15 @@ export class GitService implements IGitService {
           'log', '-1', '--pretty=format:%H%x00%an%x00%ae%x00%s%x00%aI',
         ]);
         [sha, authorName, authorEmail, subj, committedAt] = stdout.split('\x00');
-      } catch { /* the commit landed; only its attribution read failed */ }
+      } catch {
+        // The commit landed; only its attribution read failed. Give the sha
+        // one simpler second chance — callers use it as the commit id, and an
+        // empty sha would make a landed change unidentifiable downstream.
+        try {
+          const { stdout } = await this.git(cwd, ['rev-parse', 'HEAD']);
+          sha = stdout;
+        } catch { /* keep the fallback attribution */ }
+      }
       this.accessControl?.invalidate(workspaceId);
       return {
         sha: sha?.trim() ?? '',
