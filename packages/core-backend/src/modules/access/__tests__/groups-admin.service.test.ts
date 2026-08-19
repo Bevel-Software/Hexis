@@ -197,7 +197,7 @@ describe('GroupsAdminService', () => {
     expect(await groupsYaml()).not.toContain('Contractors');
   });
 
-  it('refuses a group that would shadow a role (one namespace, roles win)', async () => {
+  it('refuses a group name that shadows a role (deliberate friction — IdP collisions resolve by precedence instead)', async () => {
     await expect(service.createGroup(ADMIN, 'Reviewer')).rejects.toMatchObject({
       status: 422,
       message: expect.stringContaining('role name'),

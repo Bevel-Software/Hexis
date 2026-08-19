@@ -177,14 +177,14 @@ export class AccessMutationService {
     kind: TargetKind,
     repoRelTarget: string,
     principal: Principal,
-    // Kept on the signature: the route supplies it and the upcoming
-    // revoke-vs-deny slice needs the acting user. Not consumed yet.
+    // Kept on the signature: the route supplies it, for attribution / future
+    // per-principal checks. Not consumed yet.
     _actingUserEmail: string,
     // When present, strip ONLY this verb (a per-checkbox toggle in the share UI);
     // absent strips the principal from every verb (the whole-principal Remove).
     verb?: Verb,
   ): Promise<{ changed: boolean; editPath: string }> {
-    void _actingUserEmail; // referenced to satisfy no-unused-vars until Slice 2 consumes it
+    void _actingUserEmail; // referenced to satisfy no-unused-vars until something consumes it
     this.assertPrincipalSafe(principal); // same injection/shape guard grant runs
     const { editPath } = this.fileToEdit(kind, repoRelTarget);
     // Allow a missing target only for a folder (no access.md yet is normal); a

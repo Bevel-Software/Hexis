@@ -35,7 +35,7 @@ import {
  * contributes nothing" rather than throwing: unlike roles.yaml there is no
  * admin-lockout risk here, so groups must never be able to brick access
  * resolution. Strict acceptance for WRITES is the job of the write-side
- * validator (Phase 3), which treats warnings as refusals.
+ * validator (`validateGroupsFile` below), which treats warnings as refusals.
  */
 
 export const GROUPS_YAML = 'groups.yaml';

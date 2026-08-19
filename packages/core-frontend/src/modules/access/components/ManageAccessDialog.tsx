@@ -800,8 +800,8 @@ export function ManageAccessDialog({
 
   // Toggle a single verb on an existing grantee: check → grant that verb, uncheck
   // → revoke just that verb. The server's fresh view is authoritative (we never
-  // flip optimistically); a refused revoke (e.g. last-owner) surfaces its message
-  // and we re-sync.
+  // flip optimistically); a refused revoke (e.g. lock contention) surfaces its
+  // message and we re-sync.
   const doToggleVerb = useCallback(
     async (principal: Principal, role: Role, currentlyOn: boolean) => {
       if (!workspaceId || repoRelative === null) return;

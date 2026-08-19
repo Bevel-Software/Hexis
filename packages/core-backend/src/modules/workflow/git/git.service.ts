@@ -992,18 +992,24 @@ export class GitService implements IGitService {
   }
 
   /**
-   * Atomic multi-file commit — commits whatever is currently dirty in the
-   * working tree as ONE commit attributed to `user`, then returns its
-   * attribution (or null when the tree is clean — idempotent re-apply). The
-   * multi-file sibling of `commit()`: same `git add -A` + commit, but WITHOUT
-   * the one-file-per-change guard — the caller has assembled + written + validated
-   * a batch (bulk node upload; the role-rename rewrite via `LockingFilesystem`).
+   * Atomic multi-file commit — commits the caller's batch as ONE commit
+   * attributed to `user`, then returns its attribution (or null when nothing
+   * in scope is dirty — idempotent re-apply). The multi-file sibling of
+   * `commit()`, WITHOUT the one-file-per-change guard — the caller has
+   * assembled + written + validated a batch (bulk node upload; the lock-aware
+   * saves and admin roster writes via `LockingFilesystem` /
+   * `AdminLockedCommits`).
+   *
+   * `onlyPaths` (workspace-relative) scopes staging + commit to the caller's
+   * own files via git pathspecs: on the shared per-branch workspace other
+   * paths may be dirty from a concurrent save whose commit is still queued,
+   * and sweeping them in would land them under this caller's author/summary.
+   * Omitted → the whole dirty set (`git add -A`), for flows that own the
+   * workspace.
    *
    * Deliberately does NOT write file content itself — disk writes are the
-   * caller's job. This is the git layer: it only stages + commits what is already
-   * on disk (the working tree is expected otherwise-clean under save=share, so
-   * `git add -A` stages exactly the caller's batch). Caller pushes separately
-   * (mirrors `commitFile` + `push`).
+   * caller's job. This is the git layer: it only stages + commits what is
+   * already on disk. Caller pushes separately (mirrors `commitFile` + `push`).
    */
   async commitChanges(
     workspaceId: string,

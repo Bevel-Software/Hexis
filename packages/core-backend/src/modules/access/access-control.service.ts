@@ -1559,8 +1559,8 @@ export class AccessControlService implements IAccessControl {
   /**
    * Advisory scan of folder `access.md` files for references to a role (by
    * canonical name). See `IAccessControl.referencesToRole` — undercounts node
-   * frontmatter by design; powers the delete warning only, never the rename
-   * gate.
+   * frontmatter by design; the admin surfaces use the sound shared
+   * `KbReferenceScanner` instead.
    */
   async referencesToRole(
     workspaceId: string,

@@ -585,7 +585,7 @@ export function createAccessRoutes(
 
   /**
    * POST /api/workspace/:id/access/grant
-   * Body: `{ path, kind: 'folder'|'file', verb: 'write'|'owner', principal }`.
+   * Body: `{ path, kind: 'folder'|'file', verb: 'read'|'write'|'download'|'owner', principal }`.
    * Grants the principal the verb on the target (folder → its access.md, file →
    * its own frontmatter). Gated on write to the access config (fail-closed on
    * protected branches). Returns the fresh resolved access for the target.

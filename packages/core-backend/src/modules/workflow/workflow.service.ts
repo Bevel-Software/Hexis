@@ -1959,7 +1959,7 @@ export class WorkflowService implements IWorkflowService {
         }
 
         // Commit ONLY roles.yaml via commitFile (`git add -- roles.yaml`), never
-        // `commitChanges` (`git add -A`): on this shared per-branch workspace other
+        // an unscoped `commitChanges` (`git add -A`): on this shared per-branch workspace other
         // files may be dirty from a concurrent same-branch save, and `add -A` would
         // sweep those unrelated edits into our "preserve roles.yaml" commit under the
         // wrong author/message. Feature branch → the protected-branch gate doesn't

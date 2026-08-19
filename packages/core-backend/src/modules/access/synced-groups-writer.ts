@@ -223,7 +223,9 @@ export class SyncedGroupsWriter {
     this.timer.unref?.();
   }
 
-  /** Render + commit immediately (used by the admin "Write now" action too). */
+  /** Render + commit immediately, skipping the debounce. Today only the
+      debounce timer calls this; it is public so a future manual "sync now"
+      surface can reuse it without changing the writer. */
   async writeNow(): Promise<SyncedGroupsWriteResult> {
     if (this.inflight) {
       // A write is running against a snapshot that may predate this call —

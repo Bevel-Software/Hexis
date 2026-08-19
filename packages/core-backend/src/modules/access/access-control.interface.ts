@@ -1,7 +1,8 @@
 /**
- * Access-control service interface. The implementation reads `roles.yaml`
- * and the `access.md` tree from the per-user `knowledge-base` clone and
- * resolves write permissions against them.
+ * Access-control service interface. The implementation reads `roles.yaml`,
+ * the active group file (`synced-groups.yaml` / `groups.yaml`), and the
+ * `access.md` tree from the workspace's `knowledge-base` clone and resolves
+ * the access verbs (read / write / download / owner) against them.
  *
  * All `relativePath` arguments are repo-relative POSIX paths inside the KB
  * repo (e.g. `Knowledge/Sales/Foo.md`, `roles.yaml`) — NOT workspace-relative
@@ -301,13 +302,13 @@ export interface IAccessControl {
 
   /**
    * Find every folder-`access.md` reference to a role, by canonical name, in the
-   * cached model. ADVISORY ONLY — it powers the delete-confirmation "N rules
-   * will be ignored" warning, and it may UNDERCOUNT: `collectAccessFiles` only
-   * walks files literally named `access.md`, so a role granted in a node's OWN
-   * frontmatter is a real grant this scan misses. That is acceptable for a
-   * non-fatal warning. It must NOT be used to gate the rename rewrite — that
-   * needs the sound git-grep scan in `roles-admin.service.ts`, which also covers
-   * node frontmatter. An undercount there would silently orphan access.
+   * cached model. ADVISORY ONLY — and it may UNDERCOUNT: `collectAccessFiles`
+   * only walks files literally named `access.md`, so a role granted in a node's
+   * OWN frontmatter is a real grant this scan misses. The admin surfaces
+   * (roster `referencedBy`, the group rename/delete rewrites) therefore use the
+   * sound shared `KbReferenceScanner` (`reference-scan.ts`), which also covers
+   * node frontmatter, instead of this method — an undercount there would
+   * silently orphan access.
    */
   referencesToRole(
     workspaceId: string,

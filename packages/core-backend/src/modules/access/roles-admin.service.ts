@@ -10,8 +10,10 @@
  * people-set roles alike (pre-split roles keep resolving and stay editable;
  * `convertRoleToGroup` is their migration path).
  *
- * It is the ONLY writer of `roles.yaml` outside a hand-edit, and it is built
- * around one non-negotiable safety property:
+ * It is the primary in-app writer of `roles.yaml` (the groups admin also
+ * rewrites its `group:` refs on group rename/delete, through the same shared
+ * validated pipeline), and it is built around one non-negotiable safety
+ * property:
  *
  *   roles.yaml has NO admin-rescue (canWrite('roles.yaml') is a pure isAdmin
  *   check) and loadModel HARD-THROWS on a parse failure (which isAdmin swallows

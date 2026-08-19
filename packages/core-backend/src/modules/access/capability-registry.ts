@@ -3,9 +3,10 @@
  * roles/groups split.
  *
  * Roles are CODE-DEFINED capability bundles: the product decides which roles
- * exist and what each unlocks; admins assign them (to individuals, and — for
- * non-Admin roles — to groups via `group:` members in roles.yaml). Something
- * like "Developer" is not a role; that's a group.
+ * exist and what each unlocks; admins assign them (to individuals, and to
+ * groups via `group:` members in roles.yaml — every role, Admin included,
+ * kept safe by the parse-time at-least-one-direct-email invariant on Admin).
+ * Something like "Developer" is not a role; that's a group.
  *
  * Adding a future role (the planned Plugin Creator) is a registry entry plus
  * capability gates at its feature surfaces — never a parser change: the

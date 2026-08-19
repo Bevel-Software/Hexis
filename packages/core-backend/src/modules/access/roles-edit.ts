@@ -6,7 +6,8 @@
  * markdown BODY below the frontmatter (the repo-root one is a whole README)
  * that a parse→emit round-trip would silently delete. `roles.yaml` has no body
  * and no frontmatter fence — it is a plain `roles:` mapping of display-name →
- * email list — and no real `roles.yaml` in the repo carries comments. So we
+ * member list (emails and `group:<name>` refs) — and no real `roles.yaml` in
+ * the repo carries comments. So we
  * parse the file into a model, apply the edit, and re-emit a canonical,
  * deterministic file. Re-emit is idempotent (re-emitting an unchanged model
  * yields byte-identical text), so a single edit moves only the lines it
@@ -23,8 +24,8 @@
  *
  * Every mutation returns `{ text, changed }`; `changed: false` means the edit
  * was a no-op (e.g. adding a member who already exists) and the caller should
- * skip the commit. Role ORDER is preserved as parsed; a newly created role is
- * appended last. Member emails within a role are canonicalised + de-duplicated.
+ * skip the commit. Role ORDER is preserved as parsed. Member entries within a
+ * role are canonicalised + de-duplicated.
  *
  * This module does NOT enforce the Admin-must-exist / no-self-lockout
  * invariants — those are policy and live in `roles-admin.service.ts`. It only
@@ -50,7 +51,8 @@ export class RolesEditError extends Error {
   }
 }
 
-/** One role in parse order: display name + its de-duplicated member emails. */
+/** One role in parse order: display name + its de-duplicated member entries
+ *  (emails and `group:<canonical>` refs). */
 export interface RoleModel {
   displayName: string;
   /** canonicalised, de-duplicated, in first-seen order */
