@@ -6,10 +6,12 @@
  *   - `findRoleRefsInText` / `rewriteRoleTokensInText`: the config-region
  *     parse that decides what IS a principal reference. One source of truth,
  *     so the delete/rename warning and the rename rewrite can never disagree.
- *   - `KbReferenceScanner`: candidate collection (every KB `.md`), the
- *     advisory reference scan (cached — roster mutations must not rerun a
- *     full-KB read sweep), and the fail-closed reference rewrite (returns
- *     each file's ORIGINAL text too, so rollback snapshots reuse the read the
+ *   - `KbReferenceScanner`: candidate collection (every KB file with an
+ *     access-frontmatter extension — `.md` and `.tool`, the resolver's own
+ *     set), the advisory reference scan (cached — roster mutations must not
+ *     rerun a full-KB read sweep, invalidated by file-changed events and a
+ *     TTL backstop), and the fail-closed reference rewrite (returns each
+ *     file's ORIGINAL text too, so rollback snapshots reuse the read the
  *     rewrite already did instead of a second full-KB pass).
  *
  * Tokens here are the ENTRY-GRAMMAR canonical tokens: a bare name (group
@@ -22,7 +24,13 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 
 import type { FileTreeEntry, IWorkspaceService } from '@bevel-software/platform-shared';
-import { accessMdDeclaresBodyRules, isAccessMdPath, parseAccessEntry } from './access-control.service.js';
+import {
+  accessMdDeclaresBodyRules,
+  hasAccessFrontmatterExtension,
+  isAccessMdPath,
+  parseAccessEntry,
+  stripComment,
+} from './access-control.service.js';
 
 /**
  * Resolve the [start, end) line range that role rewrites may touch — the YAML
@@ -86,48 +94,77 @@ function ruleLineRanges(
   return [configLineRange(lines, isMarkdown)];
 }
 
-/** A known access verb key: heads a block list or holds a scalar role value. */
-const VERB_KEY_RE = /^(\s*)(read|write|download|owner)(:\s*)(.*)$/;
+/** A known access verb key AT THE RULE MAPPING'S ROOT (indent 0 — the only
+ *  level the resolver parses verbs from; see `parseAccessFile` /
+ *  `parseOwnAccessEntries`, which read `Object.entries(root)`, and the splice
+ *  writer's `findVerbBlock`, which requires `indent === 0` for the key). An
+ *  INDENTED `read:` inside some nested config mapping is NOT an access rule
+ *  and must never be scanned or rewritten. */
+const VERB_KEY_RE = /^(read|write|download|owner)(:\s*)(.*)$/;
 /** A block-list item: `  - <token>` (token may carry a leading `deny `). */
 const LIST_ITEM_RE = /^(\s*-\s+)(.*)$/;
 
 /**
  * Walk the CONFIG-REGION lines of `text`, invoking `onRoleRef` for every line
  * that PARSES as a genuine role entry — both the block-list form (`- <token>`
- * under a `read:`/`write:`/… key) and the inline scalar form (`owner: <token>`).
- * `verb` is the access verb the reference sits under; for a block list it is the
- * nearest enclosing verb key (lines before any verb key, or under an unknown
- * key, are skipped). This is the SINGLE source of truth for "what is a role
- * reference" — both the delete-warning scan and the rename rewrite drive off it,
- * so they cannot disagree. The callback may mutate `lines[i]` (the rewrite does;
- * the scan does not). User entries, other keys, comments and substrings never
- * fire it.
+ * under a root-level `read:`/`write:`/… key) and the inline scalar form
+ * (`owner: <token>`). `verb` is the access verb the reference sits under; for
+ * a block list it is the nearest enclosing verb key (lines before any verb
+ * key, or under an unknown key, are skipped). This is the SINGLE source of
+ * truth for "what is a role reference" — both the delete-warning scan and the
+ * rename rewrite drive off it, so they cannot disagree. The callback may
+ * mutate `lines[i]` (the rewrite does; the scan does not). User entries,
+ * other keys, nested mappings' verb-looking keys, comments and substrings
+ * never fire it.
+ *
+ * Comments follow the resolver's tokeniser rule (`stripComment`): they are
+ * invisible to MATCHING — a trailing `# note` never becomes part of the
+ * token, and a full-line comment neither ends a block nor is an entry — but
+ * the rewrite preserves them: `suffix` carries the stripped tail (trailing
+ * whitespace + comment) verbatim for re-append.
  */
 function walkRoleRefs(
   lines: string[],
   start: number,
   end: number,
-  onRoleRef: (ctx: { i: number; verb: string; entry: { role: string; deny: boolean }; indent: string; prefix: string }) => void,
+  onRoleRef: (ctx: {
+    i: number;
+    verb: string;
+    entry: { role: string; deny: boolean };
+    indent: string;
+    prefix: string;
+    /** Trailing whitespace + `# comment` of the original line, preserved on rewrite. */
+    suffix: string;
+  }) => void,
 ): void {
   let currentVerb: string | null = null;
   /** A role-entry value → its parsed role entry, else null (user/empty/other). */
   const roleEntry = (rawValue: string): { role: string; deny: boolean } | null => {
-    const parsed = parseAccessEntry(rawValue.replace(/\s+$/, ''));
+    const parsed = parseAccessEntry(rawValue);
     return parsed.ok && parsed.entry.kind === 'role'
       ? { role: parsed.entry.role, deny: parsed.entry.deny }
       : null;
   };
   for (let i = start; i < end; i++) {
-    const line = lines[i];
-    // A verb key resets the block context. Its inline value (scalar form,
-    // `owner: Sales`) is itself a candidate reference under that same verb.
+    const raw = lines[i];
+    // Match against the COMMENT-STRIPPED line — the resolver's tokeniser view.
+    // `suffix` is everything stripping removed (trailing whitespace + comment),
+    // kept so a rewrite can re-append it byte-for-byte.
+    const line = stripComment(raw).replace(/\s+$/, '');
+    const suffix = raw.slice(line.length);
+    // A full-line comment (or blank line) is invisible: not an entry, and it
+    // does NOT end the current block — the tokeniser skips it entirely.
+    if (!line.trim()) continue;
+    // A verb key at the rule mapping's root resets the block context. Its
+    // inline value (scalar form, `owner: Sales`) is itself a candidate
+    // reference under that same verb.
     const kvM = line.match(VERB_KEY_RE);
     if (kvM) {
-      currentVerb = kvM[2];
-      const inlineValue = kvM[4];
+      currentVerb = kvM[1];
+      const inlineValue = kvM[3];
       if (inlineValue.trim() !== '') {
         const entry = roleEntry(inlineValue);
-        if (entry) onRoleRef({ i, verb: currentVerb, entry, indent: `${kvM[1]}${kvM[2]}${kvM[3]}`, prefix: '' });
+        if (entry) onRoleRef({ i, verb: currentVerb, entry, indent: `${kvM[1]}${kvM[2]}`, prefix: '', suffix });
       }
       continue;
     }
@@ -136,12 +173,13 @@ function walkRoleRefs(
     const listM = line.match(LIST_ITEM_RE);
     if (listM && currentVerb !== null) {
       const entry = roleEntry(listM[2]);
-      if (entry) onRoleRef({ i, verb: currentVerb, entry, indent: '', prefix: listM[1] });
+      if (entry) onRoleRef({ i, verb: currentVerb, entry, indent: '', prefix: listM[1], suffix });
       continue;
     }
-    // A non-empty, non-list, non-kv line ends the current block (e.g. a new
-    // top-level key whose value isn't a verb, or stray prose in config).
-    if (line.trim() !== '' && !listM) currentVerb = null;
+    // Any other non-empty line ends the current block: a non-verb key, an
+    // INDENTED verb-looking key (a nested mapping's — not a rule the resolver
+    // parses), or stray prose in config.
+    if (!listM) currentVerb = null;
   }
 }
 
@@ -190,9 +228,11 @@ export function rewriteRoleTokensInText(
   let changed = false;
   for (const { start, end } of ruleLineRanges(text, lines, isMarkdown, isAccessMd)) {
     if (start >= end) continue;
-    walkRoleRefs(lines, start, end, ({ i, entry, indent, prefix }) => {
+    walkRoleRefs(lines, start, end, ({ i, entry, indent, prefix, suffix }) => {
       if (entry.role !== oldToken) return;
-      lines[i] = `${indent}${prefix}${entry.deny ? 'deny ' : ''}${newDisplayName}`;
+      // `suffix` re-appends the trailing whitespace + `# comment` the match
+      // ignored — a rename must not eat an entry's comment.
+      lines[i] = `${indent}${prefix}${entry.deny ? 'deny ' : ''}${newDisplayName}${suffix}`;
       changed = true;
     });
   }
@@ -213,8 +253,19 @@ export interface ReferenceRewrite {
 }
 
 /** How long a cached reference scan may serve after its load. Backstop only —
- *  reference-changing writes call `invalidate` explicitly. */
+ *  reference-changing writes invalidate explicitly (the admin services after
+ *  their own rewrites, and the event-bus tap below for everyone else's). */
 const SCAN_TTL_MS = 30_000;
+
+/**
+ * The slice of the workflow event bus the scanner taps for cache
+ * invalidation. Structural (not the concrete class) so test doubles and the
+ * services' optional bus stay compatible.
+ */
+export interface ReferenceScanInvalidationBus {
+  /** Optional so record-only test doubles (emit-only stubs) stay valid. */
+  onEmit?(listener: (event: { kind: string; workspaceId?: string; path?: string }) => void): () => void;
+}
 
 /**
  * Candidate collection + cached scan + fail-closed rewrite over one KB.
@@ -222,6 +273,16 @@ const SCAN_TTL_MS = 30_000;
  * the full-KB reference sweep (only the roster GET pays it, at most once per
  * TTL), and `invalidate` drops it whenever a write could have moved
  * references (rename/delete rewrites, or any external change signal).
+ *
+ * FRESHNESS: an `access.md` grant/revoke (or any other write to a scanned
+ * file) lands OUTSIDE the admin services, so their explicit invalidations
+ * can't see it — the roster's `referencedBy` would serve up to `SCAN_TTL_MS`
+ * of staleness. When an `eventBus` is provided, the scanner taps its emits
+ * and drops the workspace's cache on every path-carrying event
+ * (`file-changed` from the commit pipeline, and `lock-released` — which the
+ * share routes emit synchronously at write time, before the async commit's
+ * `file-changed` lands) whose path has a scanned extension. The TTL stays as
+ * the backstop for deployments/tests without a bus.
  */
 export class KbReferenceScanner {
   private readonly cache = new Map<
@@ -232,7 +293,17 @@ export class KbReferenceScanner {
   constructor(
     private readonly workspaceService: IWorkspaceService,
     private readonly kbDirName: string,
-  ) {}
+    eventBus?: ReferenceScanInvalidationBus,
+  ) {
+    eventBus?.onEmit?.((event) => {
+      if (event.kind !== 'file-changed' && event.kind !== 'lock-released') return;
+      if (!event.workspaceId || !event.path) return;
+      // Paths on the bus are workspace-relative (`<kbDir>/...`); only writes
+      // to files the scan reads can move references.
+      if (!hasAccessFrontmatterExtension(event.path)) return;
+      this.invalidate(event.workspaceId);
+    });
+  }
 
   invalidate(workspaceId: string): void {
     this.cache.delete(workspaceId);
@@ -240,12 +311,16 @@ export class KbReferenceScanner {
 
   /**
    * Repo-relative paths of every file that could carry a principal reference:
-   * all `access.md` files plus every `.md` node (its own frontmatter). Sourced
+   * all `access.md` files plus every node file whose own frontmatter the
+   * resolver reads access verbs from — the shared
+   * `ACCESS_FRONTMATTER_EXTENSIONS` set (`.md` AND `.tool`; a rename that
+   * skipped `.tool` would strand a live frontmatter grant there). Sourced
    * from the workspace file tree (which already skips `.git` and honours
-   * `.bevelignore`), filtered to `.md` under the KB dir and returned bare
-   * repo-relative. (`roles.yaml` isn't `.md`, so it's excluded; callers commit
-   * it separately.) Under save=share the working tree matches the committed
-   * set, so this is the same candidate list git-tracking would give.
+   * `.bevelignore`), filtered under the KB dir and returned bare
+   * repo-relative. (`roles.yaml` matches no scanned extension, so it's
+   * excluded; callers commit it separately.) Under save=share the working
+   * tree matches the committed set, so this is the same candidate list
+   * git-tracking would give.
    */
   async collectCandidateFiles(workspaceId: string): Promise<string[]> {
     const tree = await this.workspaceService.listFiles(workspaceId);
@@ -253,7 +328,7 @@ export class KbReferenceScanner {
     const out: string[] = [];
     const visit = (node: FileTreeEntry): void => {
       if (node.type === 'file') {
-        if (node.relativePath.startsWith(prefix) && node.relativePath.endsWith('.md')) {
+        if (node.relativePath.startsWith(prefix) && hasAccessFrontmatterExtension(node.relativePath)) {
           out.push(node.relativePath.slice(prefix.length));
         }
         return;
@@ -265,8 +340,9 @@ export class KbReferenceScanner {
   }
 
   /**
-   * Sound scan of EVERY `.md` (folder `access.md` + node frontmatter) for
-   * genuine principal references, indexed by canonical entry TOKEN. Shares the
+   * Sound scan of EVERY candidate file (folder `access.md` + `.md`/`.tool`
+   * node frontmatter) for genuine principal references, indexed by canonical
+   * entry TOKEN. Shares the
    * candidate set and the config-region parse with the rename rewrite, so the
    * delete warning and the rewrite see the SAME references. A file we cannot
    * read is skipped (this is an advisory read, not the atomic write path).

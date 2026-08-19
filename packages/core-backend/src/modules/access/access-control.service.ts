@@ -213,6 +213,21 @@ export function isAccessMdPath(p: string): boolean {
 }
 
 /**
+ * Extensions of node files whose OWN `---` frontmatter can carry access verbs
+ * the resolver enforces (`readOwnEntries` → `parseOwnAccessEntries`). The
+ * SINGLE source of truth for every surface that enumerates candidate files —
+ * the access-declarations scan and the shared `KbReferenceScanner` (which
+ * must scan/rewrite the same set, or a rename strands a live `.tool`
+ * frontmatter grant). `access.md` is covered by `.md`.
+ */
+export const ACCESS_FRONTMATTER_EXTENSIONS = ['.md', '.tool'] as const;
+
+/** True when `p` is a file the resolver reads access frontmatter from. */
+export function hasAccessFrontmatterExtension(p: string): boolean {
+  return ACCESS_FRONTMATTER_EXTENSIONS.some((ext) => p.endsWith(ext));
+}
+
+/**
  * The PRINCIPAL index — canonical name → member emails. Despite the name it
  * holds both kinds of named principal after `mergeGroupsIntoRoles` runs:
  * roles.yaml roles (`kind: 'role'`, the default) and the active group file's
@@ -283,7 +298,14 @@ interface YamlErr {
   error: string;
 }
 
-function stripComment(line: string): string {
+/**
+ * Strip a trailing `# comment` the way the YAML-subset tokeniser reads a
+ * line: a `#` at the start (after only whitespace) or preceded by whitespace
+ * begins a comment. Exported so the reference scanner matches tokens against
+ * the SAME comment rule the resolver parses with (a `- GTM Team  # sales`
+ * entry is the token `GTM Team`, never `GTM Team # sales`).
+ */
+export function stripComment(line: string): string {
   let inWs = true;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
