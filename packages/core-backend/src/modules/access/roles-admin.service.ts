@@ -353,10 +353,13 @@ export class RolesAdminService {
     }
 
     if (this.recoveryAdmins.length === 0) {
+      // 409, not 500: this is a CONFIGURATION refusal in a break-glass flow —
+      // the operator needs the actionable message, and the route helper hides
+      // every >=500 body behind a generic "Internal error." on purpose.
       throw new RolesAdminError(
         'Recovery needs a configured admin (ADMIN_EMAIL) to restore — a roles.yaml ' +
           'with no Admin is exactly the unusable state recovery exists to escape.',
-        500,
+        409,
         { kind: 'no-recovery-admins' },
       );
     }

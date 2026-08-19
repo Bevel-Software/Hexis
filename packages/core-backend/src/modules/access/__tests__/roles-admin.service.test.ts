@@ -245,8 +245,10 @@ describe('RolesAdminService', () => {
     await write(repo, 'roles.yaml', corrupt);
     access.invalidate(WS);
     const adminless = new RolesAdminService(ws, workflow.svc, access, KB, () => DEFAULT_BRANCH, bus.bus);
+    // 409, not 500: the route helper hides >=500 bodies behind a generic
+    // message, and this break-glass refusal must reach the operator verbatim.
     await expect(adminless.recover(ADMIN)).rejects.toMatchObject({
-      status: 500,
+      status: 409,
       payload: { kind: 'no-recovery-admins' },
     });
     // Nothing parked, nothing overwritten.
