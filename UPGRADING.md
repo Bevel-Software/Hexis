@@ -5,6 +5,10 @@
 Pin the version you run in `.env` (`HEXIS_VERSION=0.9.1`) — left unset it
 tracks `latest`, and an unplanned `pull` becomes an unplanned upgrade.
 
+The app tells you when it's time: admins see an in-app banner when a newer
+release is published, linking to its release notes (set `UPDATE_CHECK=false`
+to disable the check — e.g. on air-gapped deployments).
+
 To upgrade, read the
 [release notes](https://github.com/Bevel-Software/Hexis/releases) for the
 target version first, then:

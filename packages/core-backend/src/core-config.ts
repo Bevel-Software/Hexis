@@ -145,6 +145,16 @@ export class CoreConfig {
    */
   readonly ontologySessionBlock: boolean;
   /**
+   * In-app update check. When true (default), `GET /api/update-check` lazily
+   * asks api.github.com for the newest Hexis release — only when an admin's
+   * browser asks, cached for hours, never on a timer — so admins see a quiet
+   * banner when this deployment is behind. The request carries nothing but
+   * the request itself: no token, no identifier, no telemetry. Set
+   * `UPDATE_CHECK=false` for air-gapped deployments or anyone who objects to
+   * the phone-home; disabled, the server never makes the call.
+   */
+  readonly updateCheckEnabled: boolean;
+  /**
    * Password-login toggle for the login screen. Default enabled; set
    * `LOGIN_PASSWORD=false` to hide the method AND reject `/auth/login`
    * server-side. SSO methods are separate `AuthProviderPlugin`s wired by the
@@ -312,6 +322,8 @@ export class CoreConfig {
     this.kbTemplateDir = process.env.KB_TEMPLATE_DIR || defaultKbTemplateDir();
     this.ontologySessionBlock =
       (process.env.ONTOLOGY_SESSION_BLOCK ?? 'true').trim().toLowerCase() !== 'false';
+    this.updateCheckEnabled =
+      (process.env.UPDATE_CHECK ?? 'true').trim().toLowerCase() !== 'false';
     this.allowedEmailDomains = (process.env.ALLOWED_EMAIL_DOMAINS || '')
       .split(/[\s,]+/)
       .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
