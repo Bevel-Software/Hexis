@@ -1,0 +1,88 @@
+# The Portainer app-template's stackfile (see portainer-template.json) — the
+# root docker-compose.yml with exactly one difference: the app publishes
+# ${APP_PORT:-3001} on the host. Portainer stacks activate no compose
+# profiles and bring no reverse proxy of their own, so without a published
+# port the deployed stack is simply unreachable; the deployer puts their own
+# proxy (or firewall rules) in front, per the template's note.
+#
+# STANDALONE, like docker-compose.build.yml, and mirrored the same way: A
+# VARIABLE ADDED TO THE ROOT FILE'S app ENVIRONMENT IS ADDED HERE TOO. The
+# root file's comments are the reference for every knob.
+
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bevel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bevel}
+      POSTGRES_DB: ${POSTGRES_DB:-bevel}
+    expose:
+      - "5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    logging: *bounded-logging
+
+  app:
+    image: ghcr.io/bevel-software/hexis:${HEXIS_VERSION:-latest}
+    ports:
+      - "${APP_PORT:-3001}:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - SOURCE_COMMIT
+      - GIT_TOKEN
+      - GIT_USERNAME
+      - JWT_SECRET=${JWT_SECRET}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - OIDC_ISSUER_URL
+      - OIDC_CLIENT_ID
+      - OIDC_CLIENT_SECRET
+      - OIDC_SCOPES
+      - OIDC_PROVIDER_LABEL
+      - TRUST_PROXY
+      - DOMAIN
+      - TENANT_ID=${TENANT_ID:-bevel}
+      - LOGIN_PASSWORD=${LOGIN_PASSWORD:-true}
+      - ALLOWED_EMAIL_DOMAINS
+      - KB_REPO_URL
+      - KB_DIR_NAME
+      - DEFAULT_BRANCH
+      - PROTECTED_BRANCHES
+      - SECRETS_ENC_KEY=${SECRETS_ENC_KEY}
+      - UPDATE_CHECK
+      - PUBLIC_BACKEND_URL
+      - PUBLIC_FRONTEND_URL
+      - DATABASE_URL
+      - POSTGRES_HOST=db
+      - POSTGRES_USER=${POSTGRES_USER:-bevel}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-bevel}
+      - POSTGRES_DB=${POSTGRES_DB:-bevel}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 90s
+    depends_on:
+      db:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - workspaces:/app/apps/server/workspaces
+      - backups:/app/apps/server/backups
+      - spills:/app/apps/server/tool-chain-spills
+    logging: *bounded-logging
+
+volumes:
+  pgdata:
+  workspaces:
+  backups:
+  spills:

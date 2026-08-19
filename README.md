@@ -117,16 +117,22 @@ in. Write to **[ali.raza@bevel.software](mailto:ali.raza@bevel.software)**.
 ## Deploy it in 5 minutes (Docker)
 
 You need: [Docker](https://docs.docker.com/get-docker/) with Compose on a
-server (or your laptop; one line below differs), and an
+server (or your laptop; one extra line below), and an
 **empty git repository** on any host (GitHub, GitLab, Bitbucket, Azure DevOps,
 self-hosted) to hold your knowledge base. The app seeds it with a starter
 template on first run.
 
+Grab the two deployment files — no clone needed:
+
 ```sh
-git clone https://github.com/Bevel-Software/Hexis.git
-cd Hexis
-cp .env.example .env
+mkdir hexis && cd hexis
+# v0.10.0 below = the release this page was written against; replace with the latest release tag
+wget https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.10.0/docker-compose.yml
+wget -O .env https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.10.0/.env.example
 ```
+
+(Working from a git clone works identically — both files sit at the repo root;
+`cp .env.example .env`.)
 
 Open `.env` and fill in the **four required values** (everything else can wait):
 
@@ -144,53 +150,71 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 # no Node installed? docker run --rm node:22-slim node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
-For a public deployment, also set the origin values:
+For a public deployment served over HTTPS by the bundled proxy, also set the
+domain — it derives everything else public (origins, proxy hop):
+
+```sh
+DOMAIN=bevel.your-domain.com
+```
+
+Then start everything. Deploying **pulls the image CI publishes on every
+release** — nothing compiles on your server, so a small instance suffices.
+Pin the version in `.env` (`HEXIS_VERSION=0.10.0`) so a later `pull` can't
+become an unplanned upgrade — [UPGRADING.md](UPGRADING.md) covers upgrades
+and backups. Building from source instead (a staging server tracking a
+branch, a fork) is
+[deployment/docker-compose.build.yml](deployment/docker-compose.build.yml)
+(explained in [deployment/](deployment/README.md)).
+
+**Public HTTPS, no proxy of your own** (a bare EC2 instance, a plain VPS):
+the `https` profile starts Caddy in front of the app, with automatic Let's
+Encrypt certificates for `DOMAIN` and the HTTP→HTTPS redirect. First: a DNS
+A (or AAAA) record for the domain pointing at the server, and ports 80 + 443
+open to the internet (port 80 is not optional — the certificate challenge and
+the redirect both use it).
+
+```sh
+docker compose -f docker-compose.yml --profile https up -d
+```
+
+**Behind your own reverse proxy** (Coolify, Traefik, nginx): skip the profile
+— two things terminating TLS for one app is one too many. Instead of `DOMAIN`,
+set the origin values and the proxy hop count in `.env`, so OAuth redirects
+are built right and rate limits see real client IPs instead of the proxy's:
 
 ```sh
 PUBLIC_BACKEND_URL=https://bevel.your-domain.com   # public origin; OAuth redirects are built from it
 PUBLIC_FRONTEND_URL=https://bevel.your-domain.com  # same origin: the backend serves the SPA
+TRUST_PROXY=1                                      # your proxy hop count
 ```
-
-Then start everything (Postgres + the app). Add
-`-f deployment/docker-compose.image.yml` to any variant below to pull the
-[prebuilt image](deployment/README.md) instead of compiling the monorepo on
-your server — faster, and a small instance suffices.
-
-**Behind a reverse proxy** (Coolify, Traefik, nginx; recommended):
 
 ```sh
 docker compose -f docker-compose.yml up -d
 ```
 
-Also set `TRUST_PROXY` to your proxy hop count (`1` for a single proxy), so
-rate limits see real client IPs instead of the proxy's.
-
-The explicit `-f` skips `docker-compose.override.yml`, so the app publishes
-**no host port**: your proxy reaches it on port `3001` over the compose
-network. This is deliberate: a fixed published port makes every redeploy fail
-with `port is already allocated`, because the replacement container starts
-while the outgoing one still holds it.
-
-**No reverse proxy yet?** (a bare EC2 instance, a plain VPS): the bundled
-Caddy overlay gets you public HTTPS with automatic Let's Encrypt certificates
-in one command — it also sets `TRUST_PROXY` and both origin values from
-`DOMAIN`, so the two steps above fall away. DNS record and open ports 80+443
-first; details in [deployment/](deployment/README.md).
-
-```sh
-DOMAIN=bevel.your-domain.com \
-  docker compose -f docker-compose.yml -f deployment/docker-compose.https.yml up -d
-```
-
-**Directly exposed** (no proxy): plain `docker compose up -d` publishes
-`:3001`; use `APP_PORT=8080 docker compose up -d` for a different host port.
-Leave `TRUST_PROXY` unset here. With no proxy in front, trusting forwarded
-headers would let clients spoof their own address.
+The explicit `-f` matters in a clone: it skips `docker-compose.override.yml`,
+so the app publishes **no host port** — your proxy reaches it on port `3001`
+over the compose network. This is deliberate: a fixed published port makes
+every redeploy fail with `port is already allocated`, because the replacement
+container starts while the outgoing one still holds it.
 
 Open your domain and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 
-**Just trying it on your laptop?** Same steps, minus the origin values: plain
-`docker compose up -d`, then open **http://localhost:3001**.
+**Just trying it on your laptop?** Same steps, minus `DOMAIN` and the origin
+values — plus one extra file: `docker-compose.yml` alone publishes no host
+port (see above), and `docker-compose.override.yml` is the piece that puts
+the app on localhost. A clone already has it; next to the wget'd files, fetch
+it too:
+
+```sh
+wget https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.10.0/docker-compose.override.yml
+docker compose up -d
+```
+
+Then open **http://localhost:3001** (a different port:
+`APP_PORT=8080 docker compose up -d`). Leave `TRUST_PROXY` unset here — with
+no proxy in front, trusting forwarded headers would let clients spoof their
+own address.
 
 ### First sign-in: the setup screen
 

@@ -89,6 +89,8 @@ import { ToolRegistry } from '../modules/tool-registry/tool-registry.js';
 import { createToolContextResolver } from '../modules/tool-helpers/tool-context.js';
 import { createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
 import { TokenCrypto } from '../shared/token-crypto.js';
+import { UpdateCheckService } from '../modules/update-check/update-check.service.js';
+import { resolveAppVersion } from '../version.js';
 import { noopRecoveryAgent, type CorePorts } from './core-ports.js';
 
 /**
@@ -152,6 +154,8 @@ export interface CoreServices {
     source: SyncedGroupsSource,
     opts?: { debounceMs?: number; log?: (message: string) => void },
   ) => Promise<SyncedGroupsWriter>;
+  /** Newest-release lookup behind `GET /api/update-check` (admin-only). */
+  updateCheckService: UpdateCheckService;
   /** Deployment settings, env-first — the KB remote resolves through these. */
   settings: DeploymentSettingsService;
   /**
@@ -520,6 +524,15 @@ export async function createCoreServices(
     [config.adminEmail],
   );
 
+  // In-app update check: lazily compares the running release version against
+  // the newest published GitHub release, only when an admin's browser asks —
+  // no timers, so a deployment nobody looks at makes zero calls. The flag
+  // removes even that (air-gapped deployments; see CoreConfig).
+  const updateCheckService = new UpdateCheckService({
+    enabled: config.updateCheckEnabled,
+    currentVersion: resolveAppVersion(),
+  });
+
   // Secrets Vault: the per-user store of credentials (static API keys + OAuth
   // tokens) that back UTCP tool variables (`${FOO_API_KEY}`). Encrypted at rest
   // with the connector-config key; read only by the `bevel-secrets` variable
@@ -806,6 +819,7 @@ export async function createCoreServices(
     adminAccess,
     groupsAdminService,
     createSyncedGroupsMaterializer,
+    updateCheckService,
     secretsVaultService,
     externalApiKeyService,
     internalTokenService,

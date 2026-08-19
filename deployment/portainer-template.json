@@ -1,0 +1,47 @@
+{
+  "version": "3",
+  "templates": [
+    {
+      "type": 3,
+      "title": "Hexis",
+      "name": "hexis",
+      "description": "Self-hosted knowledge base for AI agents and people: skills, tools and processes in a git-backed workspace, served to any agent over MCP, with change requests gating every edit.",
+      "note": "Fill in the four required values below, then deploy. The app is served on host port 3001 (change with APP_PORT) — put your own reverse proxy in front for TLS. Sign in with the admin email and password; the setup screen collects the knowledge-base repository on first sign-in. Generate the two secrets with: <code>node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\"</code>. Details: https://github.com/Bevel-Software/Hexis",
+      "categories": ["knowledge-base", "AI", "tools"],
+      "platform": "linux",
+      "logo": "https://raw.githubusercontent.com/Bevel-Software/Hexis/main/docs/hexis-logo-400.png",
+      "repository": {
+        "url": "https://github.com/Bevel-Software/Hexis",
+        "stackfile": "deployment/docker-compose.portainer.yml"
+      },
+      "env": [
+        {
+          "name": "ADMIN_EMAIL",
+          "label": "Admin email",
+          "description": "The deployment owner — always an admin, whatever the sign-in method."
+        },
+        {
+          "name": "ADMIN_PASSWORD",
+          "label": "Admin password",
+          "description": "Bootstrap sign-in password for the admin email."
+        },
+        {
+          "name": "JWT_SECRET",
+          "label": "JWT secret",
+          "description": "Signs login sessions. Any long random string."
+        },
+        {
+          "name": "SECRETS_ENC_KEY",
+          "label": "Secrets encryption key",
+          "description": "32-byte key (base64 or hex) encrypting stored secrets and tokens."
+        },
+        {
+          "name": "HEXIS_VERSION",
+          "label": "Version",
+          "default": "0.10.0",
+          "description": "Release to run (the published image tag). Pin it; bump deliberately to upgrade."
+        }
+      ]
+    }
+  ]
+}
