@@ -12,6 +12,7 @@
  * Tests import it straight from `./connect-snippets`, as `test-setup.ts` does.
  */
 export {
+  CONNECTION_KEY_PLACEHOLDER,
   canDeepLink,
   claudeCodeCommand,
   claudeInstallUrl,

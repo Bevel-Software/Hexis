@@ -337,23 +337,29 @@ describe('WelcomePage', () => {
 
   it('shows one snippet at a time, following the picker', async () => {
     mountPage();
-    // Claude default: the bare URL.
+    // Desktop agents default: the local hexis-mcp config, not the bare URL.
+    expect(screen.getByText(/@bevel-software\/hexis-mcp/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
     expect(screen.getByText(/\/api\/mcp$/)).toBeInTheDocument();
     expect(screen.queryByText(/mcpServers/)).toBeNull();
-    await userEvent.click(screen.getByRole('radio', { name: 'Cursor & Others' }));
-    expect(screen.getByText(/mcpServers/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('radio', { name: 'Other' }));
+    expect(screen.getByText(/knowledge-base/)).toBeInTheDocument();
   });
 
   /**
-   * The fourth option runs the workspace as a LOCAL server: a config that
-   * spawns `npx @bevel-software/hexis-mcp` rather than pointing at the
-   * hosted endpoint. No key exists at onboarding time, so the snippet must
-   * carry the placeholder that tells someone what to paste — a snippet with
-   * an empty key would fail at connect time with nothing to say why.
+   * The RECOMMENDED default: the local server serves everything the hosted
+   * endpoint does plus the plugins' local-only tools, so the picker leads
+   * with it and the page opens on it. No key exists at onboarding time, so
+   * the snippet must carry the placeholder that tells someone what to paste
+   * — a snippet with an empty key would fail at connect time with nothing
+   * to say why.
    */
-  it('offers Local tools, whose snippet spawns hexis-mcp with the key placeholder', async () => {
+  it('defaults to Desktop agents: the hexis-mcp config with the key placeholder', () => {
     mountPage();
-    await userEvent.click(screen.getByRole('radio', { name: 'Local tools' }));
+    expect(screen.getByRole('radio', { name: 'Desktop agents' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
     const snippet = screen.getByText(/mcpServers/).textContent!;
     expect(snippet).toContain('@bevel-software/hexis-mcp');
     expect(snippet).toContain('PASTE_YOUR_EXTERNAL_API_KEY');
@@ -366,11 +372,16 @@ describe('WelcomePage', () => {
    * only client with a documented install link, and it appears only when
    * Anthropic could actually reach this deployment — see `canDeepLink`. The
    * copy block stays either way; it is the route that always works.
+   *
+   * Every case selects the Claude option first: the picker now defaults to
+   * Desktop agents (the local server), and the install link belongs to the
+   * hosted claude.ai path alone.
    */
   describe('the Add to Claude link', () => {
-    it('offers one-click connect on a reachable deployment', () => {
+    it('offers one-click connect on a reachable deployment', async () => {
       configureMcpUrl('https://kb.acme.com/api/mcp');
       mountPage();
+      await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
       const link = screen.getByRole('link', { name: 'Add to Claude' });
       const href = new URL(link.getAttribute('href')!);
       expect(href.origin + href.pathname).toBe('https://claude.ai/customize/connectors');
@@ -383,9 +394,10 @@ describe('WelcomePage', () => {
      * claude.ai cannot reach. A dead button on the first screen a self-hoster
      * sees reads as a broken product.
      */
-    it('offers nothing to click on a localhost deployment', () => {
+    it('offers nothing to click on a localhost deployment', async () => {
       configureMcpUrl('http://localhost:3001/api/mcp');
       mountPage();
+      await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
       expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
       // …and the route that always works is still there.
       expect(screen.getByText('http://localhost:3001/api/mcp')).toBeInTheDocument();
@@ -396,26 +408,31 @@ describe('WelcomePage', () => {
      * employee who cannot change deployment config; naming an env var at them
      * is noise. The settings page, whose reader plausibly can, says it there.
      */
-    it('does not lecture a new employee about deployment config', () => {
+    it('does not lecture a new employee about deployment config', async () => {
       configureMcpUrl('http://localhost:3001/api/mcp');
       mountPage();
+      await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
       expect(screen.queryByText(/PUBLIC_BACKEND_URL/)).toBeNull();
     });
 
     it('belongs to Claude alone', async () => {
       configureMcpUrl('https://kb.acme.com/api/mcp');
       mountPage();
+      // The default — Desktop agents — earns no install link either.
+      expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
+      await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
       expect(screen.getByRole('link', { name: 'Add to Claude' })).toBeInTheDocument();
       await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
       expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
-      await userEvent.click(screen.getByRole('radio', { name: 'Cursor & Others' }));
+      await userEvent.click(screen.getByRole('radio', { name: 'Other' }));
       expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
     });
 
     // Opening claude.ai must not hand it a handle on this window.
-    it('opens in a new tab safely', () => {
+    it('opens in a new tab safely', async () => {
       configureMcpUrl('https://kb.acme.com/api/mcp');
       mountPage();
+      await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
       const link = screen.getByRole('link', { name: 'Add to Claude' });
       expect(link).toHaveAttribute('target', '_blank');
       expect(link).toHaveAttribute('rel', 'noopener noreferrer');
@@ -426,9 +443,10 @@ describe('WelcomePage', () => {
      * what the copy block shows a human must be the same string, or one of
      * them is lying.
      */
-    it('hands Claude exactly the URL the copy block shows', () => {
+    it('hands Claude exactly the URL the copy block shows', async () => {
       configureMcpUrl('https://kb.acme.com/api/mcp');
       mountPage();
+      await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
       const href = new URL(
         screen.getByRole('link', { name: 'Add to Claude' }).getAttribute('href')!,
       );
@@ -442,7 +460,8 @@ describe('WelcomePage', () => {
     const writeText = stubClipboard();
     mountPage();
     await userEvent.click(screen.getByRole('button', { name: 'Copy' }));
-    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('/api/mcp'));
+    // The default snippet is the local server's config, not the hosted URL.
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('@bevel-software/hexis-mcp'));
     // Copying is not Done: no server write, no navigation.
     expect(authFetchMock).not.toHaveBeenCalled();
     expect(screen.getByTestId('pathname')).toHaveTextContent(WELCOME_PATH);
@@ -481,6 +500,7 @@ describe('WelcomePage', () => {
     const group = screen.getByRole('radiogroup', { name: 'Your agent' });
     const options = screen.getAllByRole('radio');
     expect(group).toContainElement(options[0]!);
+    // Desktop agents — the local server — leads, and is the default.
     expect(options.map((o) => o.getAttribute('aria-checked'))).toEqual([
       'true',
       'false',
@@ -490,8 +510,8 @@ describe('WelcomePage', () => {
     await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
     expect(screen.getAllByRole('radio').map((o) => o.getAttribute('aria-checked'))).toEqual([
       'false',
-      'true',
       'false',
+      'true',
       'false',
     ]);
   });
@@ -506,18 +526,18 @@ describe('WelcomePage', () => {
     const checked = () =>
       screen.getAllByRole('radio').find((o) => o.getAttribute('aria-checked') === 'true');
 
-    screen.getByRole('radio', { name: 'Claude' }).focus();
+    screen.getByRole('radio', { name: 'Desktop agents' }).focus();
     await userEvent.keyboard('{ArrowRight}');
-    expect(checked()).toHaveAccessibleName('ChatGPT');
+    expect(checked()).toHaveAccessibleName('Claude');
     expect(checked()).toHaveFocus();
 
     // Off the end and round to the first.
     await userEvent.keyboard('{ArrowRight}{ArrowRight}{ArrowRight}');
-    expect(checked()).toHaveAccessibleName('Claude');
+    expect(checked()).toHaveAccessibleName('Desktop agents');
 
     // And backwards past the start, to the last.
     await userEvent.keyboard('{ArrowLeft}');
-    expect(checked()).toHaveAccessibleName('Local tools');
+    expect(checked()).toHaveAccessibleName('Other');
   });
 
   // Roving tabindex: the picker is ONE tab stop, not one per client.

@@ -5,7 +5,9 @@ import { Dialog } from '../../../shared/components/Dialog';
 import { PageShell } from '../../../shared/components/PageShell';
 import { buttonClasses } from '../../../shared/components';
 import {
+  CONNECTION_KEY_PLACEHOLDER,
   ConnectionInstructions,
+  CopyBlock,
   claudeCodeCommand,
   hexisMcpClaudeCommand,
   hexisMcpJsonSnippet,
@@ -198,43 +200,74 @@ export function ExternalAgentAccessPage() {
 
         {tab === 'agent' && (
           <div className="px-4 py-3 space-y-4">
-            <p className="text-xs text-ink-muted leading-snug">
-              Connect your own agent: Claude Code, Claude Desktop, Cursor and similar. No key
-              needed: the first time the agent connects, your browser opens so you can sign in and
-              choose which tools to share with it. Everything it saves appears under your name.
-            </p>
-            {/* `buttonClasses`, not a hand-rolled class string — the one
-                button primitive exists because 171 sites once shared 153
-                variants between them, and its docstring prescribes exactly
-                this shape for links. */}
-            <Link
-              to="/connect"
-              target="_blank"
-              rel="noopener noreferrer"
-              className={buttonClasses({ variant: 'outline', size: 'sm', className: 'w-full' })}
-            >
-              <Wrench size={12} />
-              Configure your tools
-              <ExternalLink size={11} className="opacity-60" aria-hidden="true" />
-            </Link>
-            <ConnectionInstructions mcpUrl={mcpUrl} />
-            <p className="text-[11px] text-ink-muted leading-snug">
-              The URL above is the right connection for every agent — with one exception. Plugins
-              with local-only tools — the ones{' '}
-              <span className="font-mono">list_local_tools</span> names — need the local server
-              (hexis-mcp), and only a desktop agent that can run a process on your machine can use
-              it: Claude Code, Claude Desktop, Cursor and similar. Web agents like claude.ai and
-              ChatGPT always use the URL above. The local server authenticates with an external
-              API key — create one on the{' '}
-              <button
-                type="button"
-                onClick={() => setTab('autonomous')}
-                className="underline text-ink-muted hover:text-ink"
+            {/* LOCAL FIRST. The local server is the recommended connection for
+                every agent that can run it — it serves everything the hosted
+                endpoint does PLUS the plugins' local-only tools — so it leads,
+                and the hosted URL follows as the path for the agents that
+                cannot (web assistants, cloud platforms). */}
+            <div>
+              <div className="text-xs font-medium text-ink mb-1">
+                Desktop agents — the local server (recommended)
+              </div>
+              <p className="text-[11px] text-ink-muted mb-1 leading-snug">
+                For agents that run on your machine: Claude Code, Claude Desktop, Cursor,
+                Windsurf, Cline and similar. Runs this workspace as a local MCP server (needs
+                Node): the agent gets everything the hosted endpoint serves, plus your plugins'
+                local-only tools — the ones{' '}
+                <span className="font-mono">list_local_tools</span> names. It authenticates with
+                an external API key: create one on the{' '}
+                <button
+                  type="button"
+                  onClick={() => setTab('autonomous')}
+                  className="underline text-ink-muted hover:text-ink"
+                >
+                  Autonomous agents
+                </button>{' '}
+                tab and paste it over the placeholder below.
+              </p>
+              <CopyBlock
+                label="Connect Claude Code"
+                value={hexisMcpClaudeCommand(workspaceUrl, CONNECTION_KEY_PLACEHOLDER)}
+                rows={3}
+              />
+              <div className="mt-2">
+                <CopyBlock
+                  label="Claude Desktop, Cursor & others (JSON config)"
+                  value={hexisMcpJsonSnippet(workspaceUrl)}
+                  rows={12}
+                />
+              </div>
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-ink mb-1">
+                Web agents — the hosted endpoint
+              </div>
+              <p className="text-[11px] text-ink-muted mb-1 leading-snug">
+                claude.ai, ChatGPT and other agents that can't run a process on your machine
+                connect to the hosted endpoint. No key needed: the first time the agent connects,
+                your browser opens so you can sign in and choose which tools to share with it.
+                Everything it saves appears under your name.
+              </p>
+              {/* `buttonClasses`, not a hand-rolled class string — the one
+                  button primitive exists because 171 sites once shared 153
+                  variants between them, and its docstring prescribes exactly
+                  this shape for links. */}
+              <Link
+                to="/connect"
+                target="_blank"
+                rel="noopener noreferrer"
+                className={buttonClasses({ variant: 'outline', size: 'sm', className: 'w-full mb-2' })}
               >
-                Autonomous agents
-              </button>{' '}
-              tab; the key reveal shows the setup.
-            </p>
+                <Wrench size={12} />
+                Configure your tools
+                <ExternalLink size={11} className="opacity-60" aria-hidden="true" />
+              </Link>
+              <div className="space-y-4">
+                <ConnectionInstructions mcpUrl={mcpUrl} />
+              </div>
+            </div>
+
             <p className="text-[11px] text-ink-muted leading-snug">
               Running an unattended pipeline or CI agent that can't open a browser? Use the{' '}
               <button
@@ -438,8 +471,41 @@ export function ExternalAgentAccessPage() {
               </div>
               <div>
                 <div className="text-xs font-medium text-ink mb-1">
-                  Connect Claude Code
+                  Desktop agents — the local server (recommended)
                 </div>
+                <p className="text-[11px] text-ink-muted mb-1 leading-snug">
+                  For agents that run on your machine: Claude Code, Claude Desktop, Cursor,
+                  Windsurf, Cline and similar. Runs this workspace as a local MCP server (needs
+                  Node): the agent gets everything the hosted endpoint serves, plus your
+                  plugins' local-only tools. In Claude Code:
+                </p>
+                <textarea
+                  readOnly
+                  value={hexisMcpClaudeCommand(workspaceUrl, reveal.plaintext)}
+                  rows={3}
+                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+                <p className="text-[11px] text-ink-muted mt-2 mb-1 leading-snug">
+                  Or as a JSON config, for Claude Desktop, Cursor, Windsurf, Cline and
+                  similar:
+                </p>
+                <textarea
+                  readOnly
+                  value={hexisMcpJsonSnippet(workspaceUrl, reveal.plaintext)}
+                  rows={13}
+                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+              </div>
+              <div>
+                <div className="text-xs font-medium text-ink mb-1">
+                  Web agents and pipelines — the hosted endpoint
+                </div>
+                <p className="text-[11px] text-ink-muted mb-1 leading-snug">
+                  For agents that can't run a process on your machine, and for CI where
+                  installing Node is unwanted. Claude Code, via the hosted endpoint:
+                </p>
                 <textarea
                   readOnly
                   value={claudeCodeCommand(mcpUrl, reveal.plaintext)}
@@ -471,42 +537,13 @@ export function ExternalAgentAccessPage() {
                   Other agents (JSON config)
                 </div>
                 <p className="text-[11px] text-ink-muted mb-1 leading-snug">
-                  Works with Claude Desktop, Cursor, Windsurf, Cline, and most clients that load servers from a JSON config.
+                  The hosted endpoint for most clients that load servers from a JSON config —
+                  when the local server above isn't wanted.
                 </p>
                 <textarea
                   readOnly
                   value={jsonConfigSnippet(mcpUrl, reveal.plaintext)}
                   rows={11}
-                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-              </div>
-              <div>
-                <div className="text-xs font-medium text-ink mb-1">
-                  Local tools on this machine (hexis-mcp)
-                </div>
-                <p className="text-[11px] text-ink-muted mb-1 leading-snug">
-                  Runs this workspace as a local MCP server, so plugins' local-only tools (stdio
-                  servers, localhost services) work too. The agent gets everything the hosted
-                  endpoint serves, plus those local-only tools. For desktop agents that can run
-                  a process on your machine — Claude Code, Claude Desktop, Cursor and similar —
-                  and only worth it when your plugins have local-only tools; web agents and
-                  pipelines keep the hosted URL above. Needs Node. In Claude Code:
-                </p>
-                <textarea
-                  readOnly
-                  value={hexisMcpClaudeCommand(workspaceUrl, reveal.plaintext)}
-                  rows={3}
-                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-                <p className="text-[11px] text-ink-muted mt-2 mb-1 leading-snug">
-                  Or as a JSON config, for the same clients as above:
-                </p>
-                <textarea
-                  readOnly
-                  value={hexisMcpJsonSnippet(workspaceUrl, reveal.plaintext)}
-                  rows={13}
                   className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
                 />

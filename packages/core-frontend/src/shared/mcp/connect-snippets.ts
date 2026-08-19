@@ -382,7 +382,7 @@ export function workspaceBaseUrl(): string {
  * whole and an empty env value fails at connect time with nothing to say
  * what was missing.
  */
-const CONNECTION_KEY_PLACEHOLDER = 'PASTE_YOUR_EXTERNAL_API_KEY';
+export const CONNECTION_KEY_PLACEHOLDER = 'PASTE_YOUR_EXTERNAL_API_KEY';
 
 /**
  * The JSON block that runs the workspace as a LOCAL MCP server. Read by the

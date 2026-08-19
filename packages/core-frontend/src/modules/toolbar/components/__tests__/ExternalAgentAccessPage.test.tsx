@@ -7,9 +7,14 @@ import { configureMcpUrl } from '../../../../shared/mcp';
 
 /**
  * The Connect page's contract, and the reason this file exists at all: every
- * address it hands out is the DEPLOYMENT's, never the browser's.
+ * HOSTED snippet quotes the DEPLOYMENT's address, never the browser's — and
+ * every LOCAL-server (hexis-mcp) snippet quotes the browser's origin, never
+ * the deployment's MCP endpoint. Two families, two addresses, on purpose:
+ * hexis-mcp takes the workspace base and resolves the endpoint from
+ * `GET /api/config` itself, and the one base the browser has proven serves
+ * the whole app is its own origin.
  *
- * Six sites on this page used to rebuild the endpoint from
+ * Six hosted sites on this page used to rebuild the endpoint from
  * `window.location.origin` — three keyless, three carrying a freshly minted
  * external API key. They agreed with the server's own idea of its address
  * only by luck, and a proxy or a second domain was enough to break it. The
@@ -73,8 +78,8 @@ async function revealAKey(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByRole('heading', { name: /Save this external API key now/ });
 }
 
-describe('the interactive tab quotes the deployment, not the browser', () => {
-  it('builds all three keyless snippets from the configured URL', () => {
+describe('the interactive tab: local first, hosted second, each with its own address', () => {
+  it('builds all three hosted keyless snippets from the configured URL', () => {
     mount(PUBLIC_URL);
     const values = snippets();
 
@@ -84,19 +89,53 @@ describe('the interactive tab quotes the deployment, not the browser', () => {
     );
     // 2. the bare URL for claude.ai / Claude Desktop
     expect(values).toContain(PUBLIC_URL);
-    // 3. the JSON config for everything else
-    const json = values.find((v) => v.includes('mcpServers'));
+    // 3. the JSON config for everything else — the LOCAL section renders a
+    // `mcpServers` block too, so pick the hosted one by its server name.
+    const json = values.find((v) => v.includes('knowledge-base') && v.includes('mcpServers'));
     expect(JSON.parse(json!).mcpServers['knowledge-base'].url).toBe(PUBLIC_URL);
   });
 
   /**
-   * The regression stated as a negative: the page's own origin must appear
-   * nowhere, or one of the six sites quietly went back to deriving it.
+   * The RECOMMENDED path leads: the local-server section renders above the
+   * hosted one, and its two snippets carry the key placeholder — no key
+   * exists on this tab, and an empty env value would fail at connect time
+   * with nothing to say what was missing. Both quote the workspace ORIGIN,
+   * because hexis-mcp resolves the endpoint from `GET <base>/api/config`
+   * itself.
    */
-  it('never falls back to the page origin', () => {
+  it('leads with the local server: placeholder-bearing snippets built from the origin', () => {
+    mount(PUBLIC_URL);
+    const local = screen.getByText('Desktop agents — the local server (recommended)');
+    const hosted = screen.getByText('Web agents — the hosted endpoint');
+    // DOCUMENT_POSITION_FOLLOWING: the hosted heading comes after the local one.
+    expect(local.compareDocumentPosition(hosted) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const values = snippets();
+    expect(values).toContain(
+      `claude mcp add hexis-local --env HEXIS_URL="${window.location.origin}" --env HEXIS_CONNECTION_KEY="PASTE_YOUR_EXTERNAL_API_KEY" -- npx -y @bevel-software/hexis-mcp`,
+    );
+    const json = values.find((v) => v.includes('mcpServers') && v.includes('hexis-local'));
+    const parsed = JSON.parse(json!).mcpServers['hexis-local'];
+    expect(parsed.args).toEqual(['-y', '@bevel-software/hexis-mcp']);
+    expect(parsed.env.HEXIS_URL).toBe(window.location.origin);
+    expect(parsed.env.HEXIS_CONNECTION_KEY).toBe('PASTE_YOUR_EXTERNAL_API_KEY');
+  });
+
+  /**
+   * The regression stated as a negative, per family: a hosted snippet
+   * quoting the origin means one of the six sites quietly went back to
+   * deriving it, and a local snippet quoting the configured endpoint would
+   * hand hexis-mcp a base that may serve only the MCP path.
+   */
+  it('keeps each family on its own address', () => {
     mount(PUBLIC_URL);
     for (const value of snippets()) {
-      expect(value).not.toContain(window.location.origin);
+      if (value.includes('hexis')) {
+        expect(value).toContain(window.location.origin);
+        expect(value).not.toContain(PUBLIC_URL);
+      } else {
+        expect(value).not.toContain(window.location.origin);
+      }
     }
   });
 
@@ -143,17 +182,22 @@ describe('the key-bearing snippets quote the deployment too', () => {
   });
 
   /**
-   * The local-tools block is the ONE place the page's own origin is right:
+   * The modal leads with the local server too — the recommended block comes
+   * first, with the REAL key in both snippets (unlike the interactive tab's
+   * placeholder). And it is the one place the page's own origin is right:
    * hexis-mcp takes the workspace's address — the one the browser provably
    * loaded this app from — and resolves the MCP endpoint from it itself,
    * so the configured `mcpUrl` (possibly a proxy serving only the MCP path)
    * must appear in neither snippet.
    */
-  it('hands the local server the workspace origin, with the minted key in both snippets', async () => {
+  it('leads with the local server, handing it the origin and the minted key', async () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await revealAKey(user);
-    expect(screen.getByText('Local tools on this machine (hexis-mcp)')).toBeInTheDocument();
+    const local = screen.getByText('Desktop agents — the local server (recommended)');
+    const hosted = screen.getByText('Web agents and pipelines — the hosted endpoint');
+    // DOCUMENT_POSITION_FOLLOWING: the hosted block comes after the local one.
+    expect(local.compareDocumentPosition(hosted) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const values = snippets();
 
     // 7. the Claude Code stdio one-liner
@@ -246,18 +290,18 @@ describe('tabs', () => {
   });
 
   /**
-   * The interactive tab's configs all point at the HOSTED endpoint, which
-   * skips local-only tools by construction. The footnote is what tells
-   * someone why a tool `list_local_tools` names is not in their agent — and
-   * its inline button walks them to the tab where the key (and with it the
-   * hexis-mcp setup) is minted.
+   * The local server authenticates by key alone, and the key is minted on
+   * the other tab — so the recommended section names why a tool
+   * `list_local_tools` lists is worth the trip, and its inline button walks
+   * someone straight there.
    */
-  it('points local-tools users at the autonomous tab, and the button goes there', async () => {
+  it('points local-server users at the autonomous tab, and the button goes there', async () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     expect(screen.getByText(/local-only tools/)).toBeInTheDocument();
     expect(screen.getByText('list_local_tools')).toBeInTheDocument();
-    // Two footnotes point at the same tab; the local-tools one comes first.
+    // The local section's button and the CI footnote's point at the same
+    // tab; the local section comes first.
     await user.click(screen.getAllByRole('button', { name: 'Autonomous agents' })[0]!);
     expect(screen.getByRole('tab', { name: 'Autonomous agents' })).toHaveAttribute(
       'aria-selected',
