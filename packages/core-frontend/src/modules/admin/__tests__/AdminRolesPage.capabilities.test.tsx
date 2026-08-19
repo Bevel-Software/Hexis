@@ -4,9 +4,12 @@ import userEvent from '@testing-library/user-event';
 import { AdminRolesPage } from '../components/AdminRolesPage';
 import { AdminContext } from '../state/admin.context';
 import {
+  addMember,
   assignGroup,
   convertRoleToGroup,
   fetchRoles,
+  removeMember,
+  RolesApiError,
   unassignGroup,
   type RoleRosterEntry,
 } from '../services/roles.api';
@@ -18,9 +21,6 @@ vi.mock('../services/roles.api', async (importOriginal) => {
     fetchRoles: vi.fn(),
     addMember: vi.fn(),
     removeMember: vi.fn(),
-    createRole: vi.fn(),
-    deleteRole: vi.fn(),
-    renameRole: vi.fn(),
     assignGroup: vi.fn(),
     unassignGroup: vi.fn(),
     convertRoleToGroup: vi.fn(),
@@ -30,14 +30,29 @@ vi.mock('../../access/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../access/api')>();
   return { ...actual, suggestPrincipals: vi.fn() };
 });
+import { suggestPrincipals } from '../../access/api';
 
+// Matches the real registry: Admin IS group-assignable — the backend's
+// parse-time invariant (≥1 direct email member) is what keeps a directory
+// outage from ever locking the deployment out, not a UI refusal.
 const ADMIN: RoleRosterEntry = {
   canonical: 'admin',
   displayName: 'Admin',
   members: ['root@example.com'],
   groups: [],
-  capability: { description: 'Full administrative access.', groupAssignable: false },
+  capability: { description: 'Full administrative access.', groupAssignable: true },
   isAdmin: true,
+  referencedBy: [],
+};
+
+// A capability role whose registry entry opts out of group assignment.
+const OPTED_OUT: RoleRosterEntry = {
+  canonical: 'auditor',
+  displayName: 'Auditor',
+  members: [],
+  groups: [],
+  capability: { description: 'Read-only audit access.', groupAssignable: false },
+  isAdmin: false,
   referencedBy: [],
 };
 
@@ -87,11 +102,18 @@ async function findCard(name: string): Promise<HTMLElement> {
   return heading.closest('div.rounded-lg') as HTMLElement;
 }
 
+const ALL = [ADMIN, OPTED_OUT, EDITOR, LEGACY];
+
 beforeEach(() => {
-  vi.mocked(fetchRoles).mockReset().mockResolvedValue([ADMIN, EDITOR, LEGACY]);
-  vi.mocked(assignGroup).mockReset().mockResolvedValue([ADMIN, EDITOR, LEGACY]);
-  vi.mocked(unassignGroup).mockReset().mockResolvedValue([ADMIN, EDITOR, LEGACY]);
-  vi.mocked(convertRoleToGroup).mockReset().mockResolvedValue([ADMIN, EDITOR]);
+  vi.mocked(suggestPrincipals)
+    .mockReset()
+    .mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
+  vi.mocked(fetchRoles).mockReset().mockResolvedValue(ALL);
+  vi.mocked(addMember).mockReset().mockResolvedValue(ALL);
+  vi.mocked(removeMember).mockReset().mockResolvedValue(ALL);
+  vi.mocked(assignGroup).mockReset().mockResolvedValue(ALL);
+  vi.mocked(unassignGroup).mockReset().mockResolvedValue(ALL);
+  vi.mocked(convertRoleToGroup).mockReset().mockResolvedValue([ADMIN, OPTED_OUT, EDITOR]);
 });
 
 describe('AdminRolesPage: capabilities, groups, and legacy conversion', () => {
@@ -101,13 +123,22 @@ describe('AdminRolesPage: capabilities, groups, and legacy conversion', () => {
     expect(screen.getByText('Can edit everything.')).toBeInTheDocument();
   });
 
-  it('Admin has no group-assignment UI and no Convert action', async () => {
+  it('group assignment follows the roster payload: Admin (assignable) gets the control, an opted-out role does not', async () => {
     renderPage();
+    // Admin: the registry says groupAssignable — the UI offers assignment
+    // (the ≥1-direct-email invariant is the backend's guard, not a UI ban)
+    // but NEVER a Convert action (it is a capability role).
     const adminCard = within(await findCard('Admin'));
-    expect(adminCard.queryByRole('textbox', { name: 'Assign group' })).not.toBeInTheDocument();
-    expect(adminCard.queryByText('Assigned groups')).not.toBeInTheDocument();
+    expect(adminCard.getByRole('textbox', { name: 'Assign group' })).toBeInTheDocument();
     expect(
       adminCard.queryByRole('button', { name: 'Convert to group' }),
+    ).not.toBeInTheDocument();
+    // Opted out in the registry: no assignment UI, no Convert either.
+    const optedOutCard = within(await findCard('Auditor'));
+    expect(optedOutCard.queryByRole('textbox', { name: 'Assign group' })).not.toBeInTheDocument();
+    expect(optedOutCard.queryByText('Assigned groups')).not.toBeInTheDocument();
+    expect(
+      optedOutCard.queryByRole('button', { name: 'Convert to group' }),
     ).not.toBeInTheDocument();
   });
 
@@ -194,5 +225,57 @@ describe('AdminRolesPage: capabilities, groups, and legacy conversion', () => {
     expect(
       editorCard.queryByRole('button', { name: 'Convert to group' }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe('AdminRolesPage: membership-only surface', () => {
+  it('offers NO create / rename / delete affordances — roles are app-defined', async () => {
+    renderPage();
+    await screen.findByRole('heading', { name: 'Admin' });
+    // Roles cannot be minted, rebranded, or retired from the UI (the backend
+    // routes are gone too): no New-role control, no rename pencil, no trash.
+    expect(screen.queryByRole('button', { name: /new role/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: /new role name/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /rename role/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /delete role/i })).not.toBeInTheDocument();
+    // What remains is membership: member emails and (where assignable) groups.
+    const adminCard = within(await findCard('Admin'));
+    expect(adminCard.getByRole('textbox', { name: 'Member email' })).toBeInTheDocument();
+  });
+
+  it('the Admin ≥1-direct-email 422 renders the backend message inline on the card', async () => {
+    // Two direct members, so the client-side last-member disable does not
+    // trip — the backend is the authority (e.g. a concurrent edit already
+    // removed the other member) and answers 422 with the invariant message.
+    const adminTwo: RoleRosterEntry = {
+      ...ADMIN,
+      members: ['root@example.com', 'second@example.com'],
+    };
+    vi.mocked(fetchRoles).mockResolvedValue([adminTwo, EDITOR]);
+    const invariant =
+      'The Admin role must keep at least one direct email member — group references alone are not enough.';
+    vi.mocked(removeMember).mockRejectedValue(new RolesApiError(invariant, 422));
+
+    renderPage();
+    const adminCard = within(await findCard('Admin'));
+    await userEvent.click(adminCard.getByRole('button', { name: 'Remove second@example.com' }));
+    // The exact backend message, inline on the card — not a generic failure.
+    expect(await adminCard.findByText(invariant)).toBeInTheDocument();
+    // The optimistic hide rolled back: the member chip is visible again.
+    expect(adminCard.getByText('second@example.com')).toBeInTheDocument();
+  });
+
+  it("a 'group:'-prefixed member value gets the inline hint and no request", async () => {
+    renderPage();
+    const editorCard = within(await findCard('Editor'));
+    await userEvent.type(
+      editorCard.getByRole('textbox', { name: 'Member email' }),
+      'group:engineering',
+    );
+    await userEvent.click(editorCard.getByRole('button', { name: 'Add' }));
+    expect(
+      await editorCard.findByText(/Members are emails — to give this role to a group/),
+    ).toBeInTheDocument();
+    expect(addMember).not.toHaveBeenCalled();
   });
 });
