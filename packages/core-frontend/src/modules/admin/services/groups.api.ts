@@ -20,11 +20,27 @@ export interface GroupRosterEntry {
   members: string[];
   /** Every access rule referencing this group — drives the delete warning. */
   referencedBy: { path: string; verb: string }[];
+  /**
+   * Canonical names of roles carrying an assignment to this group — deleting
+   * the group also unassigns it from these roles (they lose the members they
+   * inherit through it), which the delete confirm must say. Optional
+   * defensively: a skewed server may omit it, and rendering must not throw.
+   */
+  assignedToRoles?: string[];
 }
+
+/**
+ * Health of the ACTIVE groups source. `ok: false` means the source file
+ * exists but cannot be read/parsed — groups then contribute NOTHING to
+ * access resolution until repaired, which the page banners loudly.
+ */
+export type GroupsHealth = { ok: true } | { ok: false; file: string; reason: string };
 
 export interface GroupsRoster {
   mode: GroupsMode;
   groups: GroupRosterEntry[];
+  /** See {@link GroupsHealth}. Defaulted to ok when a skewed server omits it. */
+  groupsHealth: GroupsHealth;
 }
 
 /**
@@ -35,11 +51,17 @@ export interface GroupsRoster {
 export class GroupsApiError extends Error {
   status: number;
   kind?: string;
-  constructor(message: string, status: number, kind?: string) {
+  /** The broken source file (422 `broken-groups` payloads carry it). */
+  file?: string;
+  /** The parse/read failure message (422 `broken-groups` payloads carry it). */
+  reason?: string;
+  constructor(message: string, status: number, kind?: string, extra?: { file?: string; reason?: string }) {
     super(message);
     this.name = 'GroupsApiError';
     this.status = status;
     this.kind = kind;
+    this.file = extra?.file;
+    this.reason = extra?.reason;
   }
 }
 
@@ -47,15 +69,22 @@ async function parseRoster(res: Response): Promise<GroupsRoster> {
   const body = (await res.json().catch(() => ({}))) as Partial<GroupsRoster> & {
     error?: string;
     kind?: string;
+    file?: string;
+    reason?: string;
   };
   if (!res.ok) {
     throw new GroupsApiError(
       body.error || `Request failed (${res.status})`,
       res.status,
       body.kind,
+      { file: body.file, reason: body.reason },
     );
   }
-  return { mode: body.mode ?? 'manual', groups: body.groups ?? [] };
+  return {
+    mode: body.mode ?? 'manual',
+    groups: body.groups ?? [],
+    groupsHealth: body.groupsHealth ?? { ok: true },
+  };
 }
 
 export async function getGroupsRoster(): Promise<GroupsRoster> {

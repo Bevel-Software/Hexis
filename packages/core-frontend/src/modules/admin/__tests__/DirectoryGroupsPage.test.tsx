@@ -13,6 +13,7 @@ import {
   createGroup,
   deleteGroup,
   getGroupsRoster,
+  GroupsApiError,
   removeGroupMember,
   type GroupsRoster,
 } from '../services/groups.api';
@@ -37,14 +38,17 @@ const MANUAL_ROSTER: GroupsRoster = {
       displayName: 'Product',
       members: ['pat@example.com'],
       referencedBy: [{ path: 'docs/roadmap.md', verb: 'read' }],
+      assignedToRoles: [],
     },
     {
       canonical: 'design',
       displayName: 'Design',
       members: [],
       referencedBy: [],
+      assignedToRoles: [],
     },
   ],
+  groupsHealth: { ok: true },
 };
 
 const IDP_ROSTER: GroupsRoster = {
@@ -55,9 +59,11 @@ const IDP_ROSTER: GroupsRoster = {
       displayName: 'Engineering',
       members: ['ada@example.com', 'bo@example.com', 'cy@example.com'],
       referencedBy: [],
+      assignedToRoles: [],
     },
-    { canonical: 'sales', displayName: 'Sales', members: [], referencedBy: [] },
+    { canonical: 'sales', displayName: 'Sales', members: [], referencedBy: [], assignedToRoles: [] },
   ],
+  groupsHealth: { ok: true },
 };
 
 function renderPage(opts: {
@@ -116,8 +122,15 @@ describe('DirectoryGroupsPage', () => {
       mode: 'manual',
       groups: [
         ...MANUAL_ROSTER.groups,
-        { canonical: 'support', displayName: 'Support', members: [], referencedBy: [] },
+        {
+          canonical: 'support',
+          displayName: 'Support',
+          members: [],
+          referencedBy: [],
+          assignedToRoles: [],
+        },
       ],
+      groupsHealth: { ok: true },
     });
     renderPage();
     await userEvent.type(await screen.findByRole('textbox', { name: 'New group name' }), 'Support');
@@ -250,5 +263,79 @@ describe('DirectoryGroupsPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Backend unreachable');
     expect(screen.queryByRole('textbox', { name: 'New group name' })).not.toBeInTheDocument();
     expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+  });
+
+  it('a roster whose groupsHealth is broken banners loudly: file, reason, "not being applied"', async () => {
+    // Broken IdP-synced file: the roster still answers 200 (mode stays idp,
+    // groups empty) but carries the health marker — resolution is degraded
+    // and the page must say so, not render a quietly empty list.
+    vi.mocked(getGroupsRoster).mockResolvedValue({
+      mode: 'idp',
+      groups: [],
+      groupsHealth: { ok: false, file: 'synced-groups.yaml', reason: 'bad indentation on line 3' },
+    });
+    renderPage();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('synced-groups.yaml');
+    expect(alert).toHaveTextContent(/groups are\s+not being applied/i);
+    expect(alert).toHaveTextContent('bad indentation on line 3');
+    // The rest of the page stays alive (the idp view still renders).
+    expect(screen.getByText(/synced from your identity provider/i)).toBeInTheDocument();
+  });
+
+  it("the roster 422 (kind 'broken-groups') gets the same banner with the parse message", async () => {
+    // Broken MANUAL groups.yaml: the roster endpoint answers 422 with the
+    // parse message — the operator must see what to fix, never a dead page.
+    vi.mocked(getGroupsRoster)
+      .mockReset()
+      .mockRejectedValue(
+        new GroupsApiError('groups.yaml cannot be read: mapping values are not allowed', 422, 'broken-groups', {
+          file: 'groups.yaml',
+          reason: 'mapping values are not allowed',
+        }),
+      );
+    renderPage();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('groups.yaml');
+    expect(alert).toHaveTextContent(/groups are\s+not being applied/i);
+    expect(alert).toHaveTextContent('mapping values are not allowed');
+    // Not the generic load-failure message, and not stuck on the spinner.
+    expect(screen.queryByText("Couldn't load groups.")).not.toBeInTheDocument();
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+  });
+
+  it('the delete confirm names the roles the group is assigned to', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue({
+      mode: 'manual',
+      groups: [
+        {
+          canonical: 'gtm',
+          displayName: 'GTM',
+          members: ['pat@example.com'],
+          referencedBy: [],
+          assignedToRoles: ['editor', 'reviewer'],
+        },
+      ],
+      groupsHealth: { ok: true },
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete GTM' }));
+    const dialog = within(screen.getByRole('dialog'));
+    // Deleting also unassigns — the confirm names the affected roles.
+    expect(dialog.getByText(/unassigns this group from the roles/i)).toBeInTheDocument();
+    expect(dialog.getByText('editor, reviewer')).toBeInTheDocument();
+    // The "loses nothing else" reassurance would be a lie here.
+    expect(dialog.queryByText(/lose nothing else/i)).not.toBeInTheDocument();
+  });
+
+  it("a 'group:'-prefixed member value gets the inline hint and no request", async () => {
+    renderPage();
+    const input = await screen.findByRole('textbox', { name: 'Add member to Design' });
+    await userEvent.type(input, 'group:engineering');
+    await userEvent.click(within(input.closest('div')!).getByRole('button', { name: 'Add' }));
+    expect(
+      await screen.findByText(/Group members are emails — 'group:' references aren't allowed/),
+    ).toBeInTheDocument();
+    expect(addGroupMember).not.toHaveBeenCalled();
   });
 });

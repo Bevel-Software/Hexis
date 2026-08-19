@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Loader2, Plus, Trash2, X } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Dialog } from '../../../shared/components/Dialog';
@@ -10,12 +10,12 @@ import {
   createGroup,
   deleteGroup,
   getGroupsRoster,
+  GroupsApiError,
   removeGroupMember,
   type GroupRosterEntry,
   type GroupsRoster,
 } from '../services/groups.api';
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+import { EMAIL_RE, isGroupPrefixed } from '../../../lib/email';
 
 function errMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
@@ -40,6 +40,12 @@ export function DirectoryGroupsPage() {
   const { groupsDirectoryPanel: DirectoryPanel } = useAppRegistry();
   const [roster, setRoster] = useState<GroupsRoster | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The broken-MANUAL-groups.yaml state: the roster answers 422
+  // (`kind: 'broken-groups'`) with the parse message instead of a group list.
+  // Held separately from `error` so the page can render the same loud
+  // repair banner the in-roster `groupsHealth` marker gets — a broken groups
+  // file means groups are NOT applying, which is worse than a failed fetch.
+  const [brokenGroups, setBrokenGroups] = useState<{ file?: string; reason: string } | null>(null);
   const [working, setWorking] = useState(false);
   // Group pending delete confirmation (manual mode).
   const [deleteTarget, setDeleteTarget] = useState<GroupRosterEntry | null>(null);
@@ -50,26 +56,27 @@ export function DirectoryGroupsPage() {
   // All roster mutations queue through here — see useExclusiveRunner.
   const runExclusive = useExclusiveRunner();
 
-  // Bump on every refresh so a superseded refresh response (an older refresh
-  // overlapped by a newer one) is dropped rather than applied out of order.
-  const requestId = useRef(0);
-
   // Refreshes queue through the SAME exclusive runner as the mutations, so a
-  // refresh and a mutation can never interleave: whichever queued first runs —
-  // and applies its roster — first. (Ordering refreshes against mutations by
-  // bumping requestId in applyRoster instead was backwards: a panel-triggered
-  // refresh resolving before an older slow mutation made the late mutation
-  // response "look newer" and restore a stale roster/mode.)
+  // refresh and a mutation can never interleave OR apply out of order:
+  // whichever queued first runs — and settles, and applies its roster — first.
+  // (That total order is also why there is no request-id stale-response guard
+  // here: the queue's tail only starts the next task after the previous one's
+  // handlers ran, so a superseded response can never land after a newer one.)
   const refresh = useCallback(() => {
-    const myReq = ++requestId.current;
     runExclusive(getGroupsRoster)
       .then((r) => {
-        if (myReq !== requestId.current) return;
         setRoster(r);
         setError(null);
+        setBrokenGroups(null);
       })
       .catch((err) => {
-        if (myReq !== requestId.current) return;
+        if (err instanceof GroupsApiError && err.kind === 'broken-groups') {
+          // Manual groups.yaml is unreadable: surface the repair banner with
+          // the parse message. Not a generic error — groups are not applying.
+          setBrokenGroups({ file: err.file, reason: err.reason ?? err.message });
+          setError(null);
+          return;
+        }
         setError(errMessage(err, "Couldn't load groups."));
         // Keep whatever was already on screen — a failed reload is a banner,
         // not an empty page.
@@ -89,6 +96,7 @@ export function DirectoryGroupsPage() {
     // A stale banner from an earlier failed reload no longer describes what's
     // on screen.
     setError(null);
+    setBrokenGroups(null);
   }, []);
 
   async function handleDeleteGroup() {
@@ -117,10 +125,35 @@ export function DirectoryGroupsPage() {
 
   const idpMode = roster?.mode === 'idp';
 
+  // The broken-source banner has TWO triggers describing the same fact — the
+  // groups file cannot be read, so groups are NOT being applied:
+  //   - a 200 roster whose `groupsHealth` marker is not ok (broken IdP-synced
+  //     file: mode stays 'idp', roster is empty, resolution degrades), and
+  //   - the roster 422 `broken-groups` (broken MANUAL file: no roster at all).
+  const health = roster?.groupsHealth;
+  const broken =
+    brokenGroups ?? (health && !health.ok ? { file: health.file, reason: health.reason } : null);
+
   return (
     <>
       <PageShell title="Groups">
         <div className="space-y-4">
+          {broken && (
+            <div
+              className="text-xs text-danger bg-danger-soft border border-danger/30 rounded-sm px-2 py-1.5 space-y-0.5"
+              role="alert"
+            >
+              <div className="font-semibold">
+                The groups file{broken.file ? ` (${broken.file})` : ''} is broken — groups are
+                not being applied.
+              </div>
+              <div>
+                No one gets access through groups until the file is repaired.
+                {broken.reason ? <> Reason: {broken.reason}</> : null}
+              </div>
+            </div>
+          )}
+
           {error && (
             <div
               className="text-xs text-danger bg-danger-soft border border-danger/30 rounded-sm px-2 py-1.5"
@@ -131,7 +164,7 @@ export function DirectoryGroupsPage() {
           )}
 
           {roster === null ? (
-            error ? null : <div className="text-xs text-ink-muted">Loading…</div>
+            error || broken ? null : <div className="text-xs text-ink-muted">Loading…</div>
           ) : idpMode ? (
             <IdpModeView roster={roster} />
           ) : directoryConnected ? (
@@ -187,26 +220,42 @@ export function DirectoryGroupsPage() {
           </>
         }
       >
-        {deleteTarget && deleteTarget.referencedBy.length > 0 ? (
+        {deleteTarget && (
           <div className="space-y-2">
-            <p className="text-xs text-ink leading-snug">
-              {deleteTarget.referencedBy.length} access rule
-              {deleteTarget.referencedBy.length === 1 ? '' : 's'} reference
-              {deleteTarget.referencedBy.length === 1 ? 's' : ''} this group and will stop
-              matching anyone after deletion:
-            </p>
-            <ul className="max-h-40 overflow-auto text-xs text-ink-muted space-y-0.5">
-              {deleteTarget.referencedBy.map((ref, i) => (
-                <li key={`${ref.path}:${ref.verb}:${i}`} className="truncate">
-                  {ref.verb} · {ref.path}
-                </li>
-              ))}
-            </ul>
+            {deleteTarget.referencedBy.length > 0 ? (
+              <>
+                <p className="text-xs text-ink leading-snug">
+                  {deleteTarget.referencedBy.length} access rule
+                  {deleteTarget.referencedBy.length === 1 ? '' : 's'} reference
+                  {deleteTarget.referencedBy.length === 1 ? 's' : ''} this group and will stop
+                  matching anyone after deletion:
+                </p>
+                <ul className="max-h-40 overflow-auto text-xs text-ink-muted space-y-0.5">
+                  {deleteTarget.referencedBy.map((ref, i) => (
+                    <li key={`${ref.path}:${ref.verb}:${i}`} className="truncate">
+                      {ref.verb} · {ref.path}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (deleteTarget.assignedToRoles?.length ?? 0) === 0 ? (
+              <p className="text-xs text-ink leading-snug">
+                Nothing is shared with this group. Its members lose nothing else.
+              </p>
+            ) : null}
+            {/* Role assignments are unassigned atomically with the delete —
+                each named role loses the members it inherits through this
+                group, which the admin must hear BEFORE confirming. */}
+            {(deleteTarget.assignedToRoles?.length ?? 0) > 0 && (
+              <p className="text-xs text-ink leading-snug">
+                Deleting also unassigns this group from the{' '}
+                {deleteTarget.assignedToRoles!.length === 1 ? 'role' : 'roles'}{' '}
+                <span className="font-semibold">{deleteTarget.assignedToRoles!.join(', ')}</span>
+                {' '}— this group's members no longer hold{' '}
+                {deleteTarget.assignedToRoles!.length === 1 ? 'that role' : 'those roles'} through it.
+              </p>
+            )}
           </div>
-        ) : (
-          <p className="text-xs text-ink leading-snug">
-            Nothing is shared with this group. Its members lose nothing else.
-          </p>
         )}
       </Dialog>
     </>
@@ -331,6 +380,12 @@ function ManualGroupCard({
 
   const submitAdd = async () => {
     const trimmed = email.trim();
+    // Mirror the backend's refusal of `group:`-prefixed member values with an
+    // inline hint — group members are emails; groups don't contain groups.
+    if (isGroupPrefixed(trimmed)) {
+      setError("Group members are emails — 'group:' references aren't allowed here.");
+      return;
+    }
     if (!EMAIL_RE.test(trimmed)) {
       setError('Enter a valid email address.');
       return;
