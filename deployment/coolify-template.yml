@@ -1,0 +1,72 @@
+# Coolify service-template CANDIDATE — the basis for a future PR to
+# https://github.com/coollabsio/coolify (templates/compose/), not a file to
+# point a deployment at directly. Deploying on Coolify today: use the root
+# docker-compose.yml as a Docker Compose resource (see the main README).
+#
+# Conventions follow Coolify's existing templates: the comment headers below
+# are metadata Coolify parses, and the SERVICE_* magic variables make Coolify
+# generate secrets and the public URL at deploy time (SERVICE_URL_APP = the
+# resource's https URL, SERVICE_PASSWORD_* / SERVICE_BASE64_* /
+# SERVICE_REALBASE64_* = generated credentials).
+#
+# documentation: https://github.com/Bevel-Software/Hexis
+# slogan: "Self-hosted knowledge base for AI agents and people — skills, tools and processes, served over MCP, every edit gated by change requests."
+# category: ai
+# tags: knowledge-base, ai, agents, mcp, skills, tools
+# port: 3001
+
+services:
+  app:
+    image: "ghcr.io/bevel-software/hexis:${HEXIS_VERSION:-latest}"
+    environment:
+      - SERVICE_URL_APP
+      - NODE_ENV=production
+      - PORT=3001
+      # The deployment owner — the one value only the operator can supply.
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - ADMIN_PASSWORD=${SERVICE_PASSWORD_ADMIN}
+      - JWT_SECRET=${SERVICE_BASE64_64_JWT}
+      # Must decode to exactly 32 bytes, hence REALBASE64.
+      - SECRETS_ENC_KEY=${SERVICE_REALBASE64_32_SECRETS}
+      # Coolify's proxy fronts the app: its URL is the public origin (the
+      # backend serves the SPA, so both are the same), one proxy hop.
+      - PUBLIC_BACKEND_URL=${SERVICE_URL_APP}
+      - PUBLIC_FRONTEND_URL=${SERVICE_URL_APP}
+      - TRUST_PROXY=1
+      - POSTGRES_HOST=db
+      - POSTGRES_USER=${SERVICE_USER_POSTGRES}
+      - POSTGRES_PASSWORD=${SERVICE_PASSWORD_POSTGRES}
+      - POSTGRES_DB=${POSTGRES_DB:-bevel}
+    volumes:
+      - workspaces:/app/apps/server/workspaces
+      - backups:/app/apps/server/backups
+      - spills:/app/apps/server/tool-chain-spills
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 90s
+
+  db:
+    image: "postgres:17-alpine"
+    environment:
+      - POSTGRES_USER=${SERVICE_USER_POSTGRES}
+      - POSTGRES_PASSWORD=${SERVICE_PASSWORD_POSTGRES}
+      - POSTGRES_DB=${POSTGRES_DB:-bevel}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 20s
+      retries: 10
+
+volumes:
+  pgdata:
+  workspaces:
+  backups:
+  spills:

@@ -1,6 +1,6 @@
 {
   "name": "@bevel-software/platform-core-backend",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "Open-source core backend of the Bevel platform: git-backed knowledge workspace, workflow (branches/change requests/locks/SSE), skills, tools, secrets vault, access control and the remote MCP surface.",
   "type": "module",
   "main": "./dist/index.js",
@@ -43,7 +43,7 @@
     "@utcp/code-mode": "^1.2.12",
     "@utcp/direct-call": "^1.1.1",
     "@utcp/http": "^1.1.7",
-    "@utcp/mcp": "^1.1.3",
+    "@utcp/mcp": "^1.1.4",
     "@utcp/sdk": "^1.1.1",
     "adm-zip": "^0.6.0",
     "cors": "^2.8.5",

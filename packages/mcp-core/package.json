@@ -1,6 +1,6 @@
 {
   "name": "@bevel-software/platform-mcp-core",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "The transport-agnostic half of Bevel's MCP surface: UTCP manual registration, tool discovery, MCP listing/dispatch and the code-mode meta-tools. Shared by the hosted proxy and the local stdio server.",
   "type": "module",
   "main": "./dist/index.js",
@@ -31,7 +31,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@utcp/code-mode": "^1.2.12",
     "@utcp/http": "^1.1.11",
-    "@utcp/mcp": "^1.1.3",
+    "@utcp/mcp": "^1.1.4",
     "@utcp/sdk": "^1.1.1"
   },
   "devDependencies": {

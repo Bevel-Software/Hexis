@@ -27,13 +27,17 @@ services:
     logging: *bounded-logging
 
   app:
-    build:
-      context: .
-      # No `args:` block. The image still accepts a GIT_SHA build arg — the
-      # Dockerfile declares it, and `GET /api/health` reports whatever it was
-      # given (`unknown` otherwise) — but naming it here made every deployment
-      # UI that reads this file ask for a value nobody sets by hand. CI passes
-      # it directly: `--build-arg GIT_SHA=$(git rev-parse HEAD)`.
+    # The image CI publishes on every release — deploying does not compile
+    # anything. Pin the version in `.env` (`HEXIS_VERSION=0.10.0`) so an
+    # upgrade is a deliberate act: bump the value, `docker compose pull app`,
+    # `up -d`. Left unset it tracks `latest` (the newest release) — right for
+    # a first install, a footgun after: an unplanned `pull` becomes an
+    # unplanned upgrade.
+    #
+    # Building from SOURCE (a staging server tracking dev, a fork) is what
+    # `deployment/docker-compose.build.yml` is for — a standalone file an
+    # orchestrator can be pointed at directly.
+    image: ghcr.io/bevel-software/hexis:${HEXIS_VERSION:-latest}
     # NO host port is published here, deliberately. A reverse proxy (Coolify,
     # Traefik, nginx) reaches the container on this port over the compose
     # network, and publishing a FIXED host port alongside that breaks every
@@ -67,6 +71,10 @@ services:
     #
     # Variables that are genuinely REQUIRED keep an interpolated reference, so
     # the operator is still prompted for them.
+    #
+    # deployment/docker-compose.build.yml and docker-compose.portainer.yml
+    # mirror this list (each must stand alone for its orchestrator) — a
+    # variable added here is added to both.
     environment:
       - NODE_ENV=production
       - PORT=3001
@@ -108,8 +116,16 @@ services:
       - OIDC_PROVIDER_LABEL
       # Reverse-proxy hop count. Required behind a proxy (Coolify, Traefik,
       # nginx) or every request looks like it came from the proxy — which
-      # collapses the per-IP login rate limit onto one bucket.
+      # collapses the per-IP login rate limit onto one bucket. (Defaults to 1
+      # when DOMAIN below is set — that declares the bundled Caddy in front.)
       - TRUST_PROXY
+      # The public host name, for deployments fronted by the bundled `caddy`
+      # service below (`docker compose -f docker-compose.yml --profile https up -d`). Setting it
+      # declares "the bundled Caddy fronts this deployment", and the app
+      # derives the rest: PUBLIC_BACKEND_URL / PUBLIC_FRONTEND_URL default to
+      # https://<DOMAIN> and TRUST_PROXY to 1 (one hop — Caddy). Explicit
+      # values for any of those always win.
+      - DOMAIN
       # Tenant slug branded into every credential prefix. Default `bevel`
       # keeps pre-existing keys/tokens valid — change it only for a fresh deploy.
       - TENANT_ID=${TENANT_ID:-bevel}
@@ -131,10 +147,18 @@ services:
       # 32-byte key (base64 or hex) encrypting secrets-vault values + MCP
       # OAuth client secrets/tokens.
       - SECRETS_ENC_KEY=${SECRETS_ENC_KEY}
-      # Public URLs for OAuth redirects + post-login bounces. The backend
-      # serves the SPA itself, so both default to this container's origin.
-      - PUBLIC_BACKEND_URL=${PUBLIC_BACKEND_URL:-http://localhost:3001}
-      - PUBLIC_FRONTEND_URL=${PUBLIC_FRONTEND_URL:-http://localhost:3001}
+      # Update check (admins see a banner when a release is newer). Pass-through
+      # so UPDATE_CHECK=false actually reaches the app — air-gapped and
+      # opt-out deployments disable the one outbound request with it.
+      - UPDATE_CHECK
+      # Public URLs for OAuth redirects + post-login bounces. Pass-throughs,
+      # like everything optional: the defaults live in the app (same move as
+      # DATABASE_URL below), which in production falls back to https://<DOMAIN>
+      # when DOMAIN is set and to this container's own origin otherwise — the
+      # backend serves the SPA itself. Writing a default HERE would defeat the
+      # DOMAIN derivation: the container would always see a value.
+      - PUBLIC_BACKEND_URL
+      - PUBLIC_FRONTEND_URL
       # The database. Set DATABASE_URL to point at a Postgres you already have;
       # left unset, the app builds one from the POSTGRES_* values below, which
       # are the same ones the bundled `db` service is created with.
@@ -187,8 +211,75 @@ services:
       - spills:/app/apps/server/tool-chain-spills
     logging: *bounded-logging
 
+  # Public HTTPS in one step, for a server with NO reverse proxy of its own —
+  # a bare EC2 instance, a plain VPS. Opt in with:
+  #
+  #   docker compose -f docker-compose.yml --profile https up -d
+  #
+  # The explicit `-f` matters from a CLONE: without it Compose also merges
+  # docker-compose.override.yml, which publishes app port 3001 on the host —
+  # beside Caddy, and reachable by clients that can then spoof forwarded
+  # headers against the one-hop TRUST_PROXY this profile implies. (wget
+  # deployments have no override file; the flag is harmless there.)
+  #
+  # Caddy obtains and renews Let's Encrypt certificates for $DOMAIN and
+  # redirects HTTP→HTTPS; set DOMAIN in `.env`, and the app derives the public
+  # origins and proxy hop from it (see the app's DOMAIN comment above).
+  # Requirements: a DNS A (or AAAA) record for the domain pointing at this
+  # server, and ports 80 + 443 reachable from the internet — 80 is not
+  # optional, the certificate challenge and the HTTP→HTTPS redirect both use
+  # it. Port 3001 stays closed; only Caddy talks to the app, over the compose
+  # network. Deployments that already sit behind a proxy (Coolify, Traefik,
+  # nginx) do NOT want this profile — two things terminating TLS for one app
+  # is one too many.
+  caddy:
+    profiles: ["https"]
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      # HTTP/3. Caddy offers it by default; without the UDP mapping the offer
+      # dangles and browsers fall back after a timeout instead of instantly.
+      - "443:443/udp"
+    environment:
+      # A soft `:-` default, NOT `:?`, even though DOMAIN is genuinely
+      # required here: compose interpolates the WHOLE file even for services
+      # whose profile is inactive, so a hard `:?` would break plain
+      # `docker compose up` for everyone. The command below refuses to start
+      # without it instead — same outcome, only when the profile is in play.
+      - DOMAIN=${DOMAIN:-}
+    # No Caddyfile: `caddy reverse-proxy` is Caddy's production-ready quick
+    # subcommand — given a bare hostname in --from it serves that host over
+    # HTTPS with automatic ACME certificates AND the port-80 HTTP→HTTPS
+    # redirect, no config file needed. `$$DOMAIN` (doubled $) keeps compose
+    # from interpolating at config time; the shell inside the container reads
+    # the runtime value, which is what lets the empty check run at start
+    # rather than at parse.
+    command:
+      - sh
+      - -c
+      - |
+        if [ -z "$$DOMAIN" ]; then
+          echo "The https profile needs DOMAIN: set it (in .env, next to the other values) to the public host name this deployment should serve, e.g. DOMAIN=bevel.your-domain.com" >&2
+          exit 1
+        fi
+        exec caddy reverse-proxy --from "$$DOMAIN" --to http://app:3001
+    volumes:
+      # Certificates + ACME account state. Named volumes so they survive
+      # redeploys — Let's Encrypt rate-limits issuance per domain, and a
+      # deploy loop that discards certs can lock the domain out for a week.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+    logging: *bounded-logging
+
 volumes:
   pgdata:
   workspaces:
   backups:
   spills:
+  # Only used by the `https` profile (the caddy service above).
+  caddy_data:
+  caddy_config:

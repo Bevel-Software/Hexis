@@ -1,0 +1,104 @@
+# Build-from-source variant of the root docker-compose.yml, STANDALONE —
+# usable as the one file an orchestrator is pointed at (Coolify: set the
+# resource's Docker Compose Location to /deployment/docker-compose.build.yml).
+# This is the file for deployments that track a BRANCH rather than a release:
+# a staging server building dev, a fork building its own changes. Everyone
+# else wants the root file, which pulls the image CI publishes per release.
+#
+# Deliberately a copy of the root file's db + app services rather than an
+# overlay — and ONLY those: the root file's `https` (Caddy) profile is left
+# out on purpose, because a deployment tracking a branch sits behind its
+# orchestrator's own proxy. Not an overlay because:
+# an orchestrator takes exactly one compose file, so this one cannot depend on
+# being merged with another. The cost is a mirrored app `environment` list —
+# WHEN A VARIABLE IS ADDED TO THE ROOT FILE, ADD IT HERE TOO. Every knob's
+# rationale lives as a comment on the root file's copy; this file stays terse
+# on purpose so the two drift as little as possible.
+
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bevel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bevel}
+      POSTGRES_DB: ${POSTGRES_DB:-bevel}
+    expose:
+      - "5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    logging: *bounded-logging
+
+  app:
+    build:
+      # Relative to the PROJECT DIRECTORY, not to this file: orchestrators
+      # (Coolify) run compose with --project-directory set to the checkout
+      # root, and the documented manual command pins it the same way — which
+      # is also what makes the root .env the one compose reads. So `.` IS the
+      # repository root here, subfolder or not.
+      context: .
+      # No `args:` block, same reasoning as the root file once carried: the
+      # Dockerfile accepts GIT_SHA (reported by `GET /api/health`), but naming
+      # it here makes deployment UIs prompt for a value nobody sets by hand.
+      # CI passes it directly: `--build-arg GIT_SHA=$(git rev-parse HEAD)`.
+    expose:
+      - "3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - SOURCE_COMMIT
+      - GIT_TOKEN
+      - GIT_USERNAME
+      - JWT_SECRET=${JWT_SECRET}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - OIDC_ISSUER_URL
+      - OIDC_CLIENT_ID
+      - OIDC_CLIENT_SECRET
+      - OIDC_SCOPES
+      - OIDC_PROVIDER_LABEL
+      - TRUST_PROXY
+      - DOMAIN
+      - TENANT_ID=${TENANT_ID:-bevel}
+      - LOGIN_PASSWORD=${LOGIN_PASSWORD:-true}
+      - ALLOWED_EMAIL_DOMAINS
+      - KB_REPO_URL
+      - KB_DIR_NAME
+      - DEFAULT_BRANCH
+      - PROTECTED_BRANCHES
+      - SECRETS_ENC_KEY=${SECRETS_ENC_KEY}
+      - UPDATE_CHECK
+      - PUBLIC_BACKEND_URL
+      - PUBLIC_FRONTEND_URL
+      - DATABASE_URL
+      - POSTGRES_HOST=db
+      - POSTGRES_USER=${POSTGRES_USER:-bevel}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-bevel}
+      - POSTGRES_DB=${POSTGRES_DB:-bevel}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 90s
+    depends_on:
+      db:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - workspaces:/app/apps/server/workspaces
+      - backups:/app/apps/server/backups
+      - spills:/app/apps/server/tool-chain-spills
+    logging: *bounded-logging
+
+volumes:
+  pgdata:
+  workspaces:
+  backups:
+  spills:
