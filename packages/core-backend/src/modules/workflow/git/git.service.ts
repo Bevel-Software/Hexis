@@ -1023,7 +1023,11 @@ export class GitService implements IGitService {
 
       // Nothing dirty → no-op (idempotent). Compute touched BEFORE `git add` so
       // the protected-branch gate sees the same path set `commit()` would.
-      const { stdout: porcelain } = await this.git(cwd, ['status', '--porcelain=v1', '-z']);
+      // `--untracked-files=all` lists every untracked FILE individually —
+      // without it a brand-new directory shows as one `?? dir/` entry, so a
+      // scoped batch creating files under a new folder would match nothing
+      // against `onlyPaths` and silently no-op.
+      const { stdout: porcelain } = await this.git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
       const detailed = parsePorcelainZDetailed(porcelain);
       let touched = detailed.paths;
       // Scope to the caller's own paths (see the interface doc): other files
@@ -1049,27 +1053,47 @@ export class GitService implements IGitService {
         await this.assertCanWriteAtRef(workspaceId, 'HEAD', user.email, touched);
       }
 
-      // Scoped → stage per path (a brand-new file must be `add`ed before a
-      // pathspec commit will know it; a fully-staged deletion / rename-old
-      // half makes `add` fatal-with-nothing-to-match, hence per-path and
-      // tolerant), then commit WITH the pathspec: it records exactly those
-      // paths, so neither other dirty files nor an unrelated entry someone
-      // left staged can ride along.
+      // Scoped → stage the batch (a brand-new file must be `add`ed before a
+      // pathspec commit will know it), then commit WITH the pathspec: it
+      // records exactly those paths, so neither other dirty files nor an
+      // unrelated entry someone left staged can ride along.
+      //
+      // Both stages feed the pathspecs over STDIN (`--pathspec-from-file=-`,
+      // NUL-separated) instead of argv: a several-hundred-file batch of long
+      // KB paths would otherwise blow Windows' ~32K command-line limit. The
+      // add is ONE spawn for the whole batch; only when git reports the ONE
+      // expected miss — a fully-staged deletion (or the old half of a rename)
+      // has nothing left in the worktree to match, which fails the entire
+      // batched add — do we fall back to per-path adds with the same
+      // tolerance, in argv-safe chunks of one path per spawn.
       if (onlyPaths) {
-        for (const p of touched) {
-          try {
-            await this.git(cwd, ['add', '-A', '--', p]);
-          } catch (err) {
-            // Tolerate ONLY the expected miss: a fully-staged deletion (or the
-            // old half of a rename) has nothing left in the worktree to match.
-            // Any other add failure — index.lock contention, I/O — must abort:
-            // committing without staging would record stale index content as
-            // this caller's change. (LC_ALL=C pins the message to English.)
-            const e = err as Error & { stderr?: string };
-            if (!/did not match any files/.test(`${e.stderr ?? ''}\n${e.message}`)) throw err;
+        const pathspecInput = touched.join('\0');
+        const pathspecArgs = ['--pathspec-from-file=-', '--pathspec-file-nul'];
+        const isExpectedMiss = (err: unknown): boolean => {
+          // (LC_ALL=C pins the message to English.)
+          const e = err as Error & { stderr?: string };
+          return /did not match any files/.test(`${e.stderr ?? ''}\n${e.message}`);
+        };
+        try {
+          await this.git(cwd, ['add', '-A', ...pathspecArgs], { input: pathspecInput });
+        } catch (err) {
+          // Any other add failure — index.lock contention, I/O — must abort:
+          // committing without staging would record stale index content as
+          // this caller's change.
+          if (!isExpectedMiss(err)) throw err;
+          for (const p of touched) {
+            try {
+              await this.git(cwd, ['add', '-A', '--', p]);
+            } catch (perPathErr) {
+              if (!isExpectedMiss(perPathErr)) throw perPathErr;
+            }
           }
         }
-        await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject, '--', ...touched]);
+        await this.git(
+          cwd,
+          ['commit', `--author=${user.name} <${user.email}>`, '-m', subject, ...pathspecArgs],
+          { input: pathspecInput },
+        );
       } else {
         await this.git(cwd, ['add', '-A']);
         await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject]);
@@ -2360,9 +2384,21 @@ export class GitService implements IGitService {
     return stdout.trim().length > 0;
   }
 
-  private async git(cwd: string, args: string[]): Promise<GitRunResult> {
+  private async git(
+    cwd: string,
+    args: string[],
+    opts?: {
+      /**
+       * Bytes to feed the subprocess on stdin — used by the
+       * `--pathspec-from-file=-` commit/add paths so a several-hundred-file
+       * batch never has to ride the argv (Windows caps a command line at
+       * ~32K chars).
+       */
+      input?: string;
+    },
+  ): Promise<GitRunResult> {
     try {
-      const { stdout, stderr } = await execFileAsync('git', args, {
+      const pending = execFileAsync('git', args, {
         cwd,
         // `GIT_LITERAL_PATHSPECS=1` makes git treat every pathspec literally
         // instead of interpreting `[`, `]`, `*`, `?`, `!`, or `:(magic)` as
@@ -2383,6 +2419,14 @@ export class GitService implements IGitService {
         env: { ...process.env, GIT_LITERAL_PATHSPECS: '1', LC_ALL: 'C', LANG: 'C' },
         maxBuffer: 32 * 1024 * 1024,
       });
+      if (opts?.input !== undefined && pending.child.stdin) {
+        // A dying git can close stdin mid-write; the promise below still
+        // rejects with the exit code, which is the error we want to surface.
+        pending.child.stdin.on('error', () => undefined);
+        pending.child.stdin.write(opts.input);
+        pending.child.stdin.end();
+      }
+      const { stdout, stderr } = await pending;
       return { stdout: stdout.toString(), stderr: stderr.toString() };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

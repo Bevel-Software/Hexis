@@ -167,6 +167,63 @@ describe('GitService.commitChanges', () => {
     expect(stdout.trim().split('\n')).toHaveLength(1);
   });
 
+  it('a several-hundred-file scoped batch commits (pathspecs ride stdin, not argv)', async () => {
+    // ~300 long paths would blow Windows' ~32K argv limit if the add/commit
+    // pathspecs were passed on the command line — the scoped path feeds them
+    // via `--pathspec-from-file=-` on stdin instead.
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+
+    const dir = 'Product/Knowledge/A Rather Long Folder Name To Inflate The Pathspec Bytes';
+    await fs.mkdir(path.join(repo, dir), { recursive: true });
+    const batch: string[] = [];
+    for (let i = 0; i < 300; i++) {
+      const rel = `${dir}/A quite long knowledge node file name number ${String(i).padStart(3, '0')}.md`;
+      await fs.writeFile(path.join(repo, rel), `# node ${i}\n`);
+      batch.push(`${PROCESS_MAP_DIR}/${rel}`);
+    }
+    // An unrelated dirty file proves the scope still holds at this size.
+    await fs.writeFile(path.join(repo, 'Old.md'), 'someone else mid-save\n');
+
+    const change = await svc.commitChanges(workspaceId, USER, 'Bulk import (300 nodes)', batch);
+
+    expect(change?.sha).toBeTruthy();
+    const { stdout: names } = await execFileAsync(
+      'git',
+      ['-C', repo, 'show', '--name-only', '--pretty=format:', 'HEAD'],
+      { maxBuffer: 16 * 1024 * 1024 },
+    );
+    const committed = names.split('\n').filter(Boolean);
+    expect(committed).toHaveLength(300);
+    expect(committed).not.toContain('Old.md');
+    const { stdout: status } = await execFileAsync('git', ['-C', repo, 'status', '--porcelain']);
+    expect(status).toContain('Old.md'); // untouched, still dirty
+  });
+
+  it('a big batch containing a fully-staged deletion still commits (per-path fallback)', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
+
+    // Stage Old.md's deletion fully — the batched `git add` then has nothing
+    // in the worktree to match for it and fails with the ONE expected miss,
+    // which must fall back to tolerant per-path adds, not abort the batch.
+    await runGit(repo, ['rm', 'Old.md']);
+    await fs.writeFile(path.join(repo, 'New-A.md'), 'a\n');
+    await fs.writeFile(path.join(repo, 'New-B.md'), 'b\n');
+
+    const change = await svc.commitChanges(workspaceId, USER, 'Delete + add batch', [
+      `${PROCESS_MAP_DIR}/Old.md`,
+      `${PROCESS_MAP_DIR}/New-A.md`,
+      `${PROCESS_MAP_DIR}/New-B.md`,
+    ]);
+
+    expect(change?.sha).toBeTruthy();
+    const { stdout: nameStatus } = await execFileAsync('git', ['-C', repo, 'show', '--name-status', '--pretty=format:', 'HEAD']);
+    expect(nameStatus).toMatch(/D\s+Old\.md/);
+    expect(nameStatus).toMatch(/A\s+New-A\.md/);
+    expect(nameStatus).toMatch(/A\s+New-B\.md/);
+  });
+
   it('onlyPaths with nothing of its own dirty is a no-op even when other files are dirty', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
     const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), makeValidator(), PROCESS_MAP_DIR);
