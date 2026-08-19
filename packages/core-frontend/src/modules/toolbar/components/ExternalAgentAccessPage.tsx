@@ -7,10 +7,13 @@ import { buttonClasses } from '../../../shared/components';
 import {
   ConnectionInstructions,
   claudeCodeCommand,
+  hexisMcpClaudeCommand,
+  hexisMcpJsonSnippet,
   jsonConfigSnippet,
   langdockSnippet,
   mcpEndpointUrl,
   useCopyFeedback,
+  workspaceBaseUrl,
 } from '../../../shared/mcp';
 import {
   type ExternalApiKeySummary,
@@ -64,6 +67,14 @@ export function ExternalAgentAccessPage() {
    * `window.location.origin`.
    */
   const mcpUrl = mcpEndpointUrl();
+
+  /**
+   * The LOCAL server's address is the one exception to "everything quotes
+   * `mcpUrl`": `hexis-mcp` takes the workspace's base and resolves the MCP
+   * endpoint from it itself, so handing it the endpoint would be wrong twice
+   * over. See `workspaceBaseUrl` for why the origin is the right base.
+   */
+  const workspaceUrl = workspaceBaseUrl();
 
   const [tab, setTab] = useState<'agent' | 'autonomous'>('agent');
   const [keys, setKeys] = useState<ExternalApiKeySummary[]>([]);
@@ -207,6 +218,20 @@ export function ExternalAgentAccessPage() {
               <ExternalLink size={11} className="opacity-60" aria-hidden="true" />
             </Link>
             <ConnectionInstructions mcpUrl={mcpUrl} />
+            <p className="text-[11px] text-ink-muted leading-snug">
+              Plugins with local-only tools — the ones{' '}
+              <span className="font-mono">list_local_tools</span> names — need the local server
+              (hexis-mcp) instead, which authenticates with an external API key. Create one on
+              the{' '}
+              <button
+                type="button"
+                onClick={() => setTab('autonomous')}
+                className="underline text-ink-muted hover:text-ink"
+              >
+                Autonomous agents
+              </button>{' '}
+              tab; the key reveal shows the setup.
+            </p>
             <p className="text-[11px] text-ink-muted leading-snug">
               Running an unattended pipeline or CI agent that can't open a browser? Use the{' '}
               <button
@@ -449,6 +474,33 @@ export function ExternalAgentAccessPage() {
                   readOnly
                   value={jsonConfigSnippet(mcpUrl, reveal.plaintext)}
                   rows={11}
+                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+              </div>
+              <div>
+                <div className="text-xs font-medium text-ink mb-1">
+                  Local tools on this machine (hexis-mcp)
+                </div>
+                <p className="text-[11px] text-ink-muted mb-1 leading-snug">
+                  Runs this workspace as a local MCP server, so plugins' local-only tools (stdio
+                  servers, localhost services) work too. Needs Node. The agent gets everything
+                  the hosted endpoint serves, plus those local-only tools. In Claude Code:
+                </p>
+                <textarea
+                  readOnly
+                  value={hexisMcpClaudeCommand(workspaceUrl, reveal.plaintext)}
+                  rows={3}
+                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+                <p className="text-[11px] text-ink-muted mt-2 mb-1 leading-snug">
+                  Or as a JSON config, for the same clients as above:
+                </p>
+                <textarea
+                  readOnly
+                  value={hexisMcpJsonSnippet(workspaceUrl, reveal.plaintext)}
+                  rows={13}
                   className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
                 />

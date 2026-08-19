@@ -143,8 +143,35 @@ describe('the key-bearing snippets quote the deployment too', () => {
   });
 
   /**
-   * The consolidation's real risk: three snippets that must carry a secret
-   * and three that must not. Losing the token during the move would look
+   * The local-tools block is the ONE place the page's own origin is right:
+   * hexis-mcp takes the workspace's address — the one the browser provably
+   * loaded this app from — and resolves the MCP endpoint from it itself,
+   * so the configured `mcpUrl` (possibly a proxy serving only the MCP path)
+   * must appear in neither snippet.
+   */
+  it('hands the local server the workspace origin, with the minted key in both snippets', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await revealAKey(user);
+    expect(screen.getByText('Local tools on this machine (hexis-mcp)')).toBeInTheDocument();
+    const values = snippets();
+
+    // 7. the Claude Code stdio one-liner
+    expect(values).toContain(
+      `claude mcp add hexis-local --env HEXIS_URL="${window.location.origin}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp`,
+    );
+    // 8. the JSON config that spawns the package
+    const json = values.find((v) => v.includes('mcpServers') && v.includes('hexis-local'));
+    const parsed = JSON.parse(json!).mcpServers['hexis-local'];
+    expect(parsed.args).toEqual(['-y', '@bevel-software/hexis-mcp']);
+    expect(parsed.env.HEXIS_URL).toBe(window.location.origin);
+    expect(parsed.env.HEXIS_CONNECTION_KEY).toBe(KEY);
+    expect(json).not.toContain(PUBLIC_URL);
+  });
+
+  /**
+   * The consolidation's real risk: snippets that must carry a secret
+   * and snippets that must not. Losing the token during the move would look
    * like working code and fail at connect time.
    */
   it('keeps the key in the keyed snippets and out of the keyless ones', async () => {
@@ -153,8 +180,9 @@ describe('the key-bearing snippets quote the deployment too', () => {
     expect(snippets().some((v) => v.includes(KEY))).toBe(false);
     await revealAKey(user);
     expect(snippets().filter((v) => v.includes(KEY))).toHaveLength(
-      // the reveal textarea itself, plus the three keyed snippets
-      4,
+      // the reveal textarea itself, the three keyed hosted snippets, and the
+      // two local-server (hexis-mcp) snippets
+      6,
     );
   });
 });
@@ -215,6 +243,26 @@ describe('tabs', () => {
     expect(tabs.map((t) => t.textContent)).toEqual(['Your agent', 'Autonomous agents']);
     expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
     expect(tabs[1]).toHaveAttribute('aria-selected', 'false');
+  });
+
+  /**
+   * The interactive tab's configs all point at the HOSTED endpoint, which
+   * skips local-only tools by construction. The footnote is what tells
+   * someone why a tool `list_local_tools` names is not in their agent — and
+   * its inline button walks them to the tab where the key (and with it the
+   * hexis-mcp setup) is minted.
+   */
+  it('points local-tools users at the autonomous tab, and the button goes there', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    expect(screen.getByText(/local-only tools/)).toBeInTheDocument();
+    expect(screen.getByText('list_local_tools')).toBeInTheDocument();
+    // Two footnotes point at the same tab; the local-tools one comes first.
+    await user.click(screen.getAllByRole('button', { name: 'Autonomous agents' })[0]!);
+    expect(screen.getByRole('tab', { name: 'Autonomous agents' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
   });
 
   // The install link belongs to the interactive tab only — the autonomous

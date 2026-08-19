@@ -1,9 +1,13 @@
-import { jsonConfigSnippet } from '../../shared/mcp';
+import { hexisMcpJsonSnippet, jsonConfigSnippet, workspaceBaseUrl } from '../../shared/mcp';
 
 /**
- * The three ways an agent connects, named by PRODUCT rather than surface —
+ * The ways an agent connects, named by PRODUCT rather than surface —
  * someone knows which assistant they use before they know which build of it
- * they are in (prototype `AGENT_CLIENTS`).
+ * they are in (prototype `AGENT_CLIENTS`). The one exception is "Local
+ * tools", which is named by NEED: it is the same clients as the others, run
+ * against the local hexis-mcp server instead, and the thing someone knows
+ * when they want it is which tools stopped short — not which server binary
+ * fixes that.
  *
  * This file is now the welcome page's PICKER and nothing else: which clients
  * to offer, what to call them, and how to say where the snippet goes. The
@@ -20,7 +24,7 @@ import { jsonConfigSnippet } from '../../shared/mcp';
  */
 
 export interface AgentClient {
-  id: 'claude' | 'chatgpt' | 'other';
+  id: 'claude' | 'chatgpt' | 'other' | 'local';
   label: string;
   /** Where the snippet goes, said as the path through that client's own UI. */
   hint: string;
@@ -48,5 +52,15 @@ export const AGENT_CLIENTS: AgentClient[] = [
     label: 'Cursor & Others',
     hint: 'For clients that read their servers from a JSON config, like Cursor, Windsurf and Cline.',
     snip: (url) => jsonConfigSnippet(url),
+  },
+  {
+    id: 'local',
+    label: 'Local tools',
+    hint: 'Runs on your machine, so plugins’ local-only tools work. Needs Node. Replace the key placeholder with an external API key from the profile menu → External agent access.',
+    // The passed endpoint is deliberately unused: the local server takes the
+    // WORKSPACE address and asks it for the MCP endpoint itself
+    // (`GET /api/config`), so the URL every other client pastes is the wrong
+    // value here — see `workspaceBaseUrl`.
+    snip: () => hexisMcpJsonSnippet(workspaceBaseUrl()),
   },
 ];

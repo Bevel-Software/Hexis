@@ -345,6 +345,23 @@ describe('WelcomePage', () => {
   });
 
   /**
+   * The fourth option runs the workspace as a LOCAL server: a config that
+   * spawns `npx @bevel-software/hexis-mcp` rather than pointing at the
+   * hosted endpoint. No key exists at onboarding time, so the snippet must
+   * carry the placeholder that tells someone what to paste — a snippet with
+   * an empty key would fail at connect time with nothing to say why.
+   */
+  it('offers Local tools, whose snippet spawns hexis-mcp with the key placeholder', async () => {
+    mountPage();
+    await userEvent.click(screen.getByRole('radio', { name: 'Local tools' }));
+    const snippet = screen.getByText(/mcpServers/).textContent!;
+    expect(snippet).toContain('@bevel-software/hexis-mcp');
+    expect(snippet).toContain('PASTE_YOUR_EXTERNAL_API_KEY');
+    // The hint says what the placeholder is and where the real key is minted.
+    expect(screen.getByText(/External agent access/)).toBeInTheDocument();
+  });
+
+  /**
    * One click instead of a menu path. It is Claude-only because Claude is the
    * only client with a documented install link, and it appears only when
    * Anthropic could actually reach this deployment — see `canDeepLink`. The
@@ -464,11 +481,17 @@ describe('WelcomePage', () => {
     const group = screen.getByRole('radiogroup', { name: 'Your agent' });
     const options = screen.getAllByRole('radio');
     expect(group).toContainElement(options[0]!);
-    expect(options.map((o) => o.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
+    expect(options.map((o) => o.getAttribute('aria-checked'))).toEqual([
+      'true',
+      'false',
+      'false',
+      'false',
+    ]);
     await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
     expect(screen.getAllByRole('radio').map((o) => o.getAttribute('aria-checked'))).toEqual([
       'false',
       'true',
+      'false',
       'false',
     ]);
   });
@@ -476,7 +499,7 @@ describe('WelcomePage', () => {
   /**
    * `role="radiogroup"` is a promise about the keyboard, not just a label for
    * a screen reader: arrows select, and selection follows focus. The plugin
-   * wraps, because three options in a row have no edge worth stopping at.
+   * wraps, because four options in a row have no edge worth stopping at.
    */
   it('drives the picker with the arrow keys, wrapping at both ends', async () => {
     mountPage();
@@ -489,12 +512,12 @@ describe('WelcomePage', () => {
     expect(checked()).toHaveFocus();
 
     // Off the end and round to the first.
-    await userEvent.keyboard('{ArrowRight}{ArrowRight}');
+    await userEvent.keyboard('{ArrowRight}{ArrowRight}{ArrowRight}');
     expect(checked()).toHaveAccessibleName('Claude');
 
     // And backwards past the start, to the last.
     await userEvent.keyboard('{ArrowLeft}');
-    expect(checked()).toHaveAccessibleName('Cursor & Others');
+    expect(checked()).toHaveAccessibleName('Local tools');
   });
 
   // Roving tabindex: the picker is ONE tab stop, not one per client.
@@ -502,6 +525,7 @@ describe('WelcomePage', () => {
     mountPage();
     expect(screen.getAllByRole('radio').map((o) => o.getAttribute('tabindex'))).toEqual([
       '0',
+      '-1',
       '-1',
       '-1',
     ]);

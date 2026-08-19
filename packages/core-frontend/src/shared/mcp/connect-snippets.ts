@@ -351,3 +351,80 @@ export function jsonConfigSnippet(mcpUrl: string, bearer?: string): string {
 export function langdockSnippet(mcpUrl: string, bearer: string): string {
   return `URL: ${mcpUrl}\nHeader name: Authorization\nHeader value: Bearer ${bearer}`;
 }
+
+/* ------------------------------------------------------------------ *
+ * The LOCAL server (`npx @bevel-software/hexis-mcp`): the same workspace
+ * as a stdio server on the member's own machine, which is the only place
+ * a plugin's local-only tools — stdio servers, localhost services — can
+ * run. It serves everything the hosted endpoint serves plus those, and it
+ * authenticates by connection key alone: there is no browser on the far
+ * side of a stdio pipe to open an OAuth flow in.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The base URL to hand the local server — deliberately NOT `mcpEndpointUrl`.
+ *
+ * `hexis-mcp` takes the WORKSPACE's address, not the MCP endpoint: it asks
+ * `GET <base>/api/config` for the real endpoint itself, the same field
+ * `configureMcpUrl` records up top. So what it needs is a base the config
+ * endpoint answers on — and the one address the browser has PROVEN serves
+ * this whole app, config endpoint included, is its own origin, because it
+ * loaded this page from it. The configured `mcpUrl` proves less: it may sit
+ * on a proxy domain that forwards only the MCP path.
+ */
+export function workspaceBaseUrl(): string {
+  return window.location.origin;
+}
+
+/**
+ * Where the connection key goes when none has been minted yet. A readable
+ * instruction rather than an empty string, because the config is pasted
+ * whole and an empty env value fails at connect time with nothing to say
+ * what was missing.
+ */
+const CONNECTION_KEY_PLACEHOLDER = 'PASTE_YOUR_EXTERNAL_API_KEY';
+
+/**
+ * The JSON block that runs the workspace as a LOCAL MCP server. Read by the
+ * same clients as `jsonConfigSnippet` — Claude Desktop, Cursor, Windsurf,
+ * Cline, anything that loads servers from a JSON config — but the entry
+ * spawns `npx @bevel-software/hexis-mcp` instead of pointing at the hosted
+ * endpoint, so the command needs Node on the machine. Without a bearer the
+ * key field carries `PASTE_YOUR_EXTERNAL_API_KEY`, which is what the person
+ * must do before the config works.
+ */
+export function hexisMcpJsonSnippet(baseUrl: string, bearer?: string): string {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        'hexis-local': {
+          command: 'npx',
+          args: ['-y', '@bevel-software/hexis-mcp'],
+          env: {
+            HEXIS_URL: baseUrl,
+            HEXIS_CONNECTION_KEY: bearer ?? CONNECTION_KEY_PLACEHOLDER,
+          },
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * The `claude mcp add` one-liner for the local server. A stdio command, not
+ * a URL, so the address and key travel as `--env` values — and both are
+ * interpolated inside double quotes and escaped, exactly as the header is in
+ * `claudeCodeCommand`. Today's values are tame (a `bevel_…` key, an https
+ * URL), but a URL can legally carry `$` or backtick, and quoting only the
+ * value that looks dangerous is how the other one bites later.
+ */
+export function hexisMcpClaudeCommand(baseUrl: string, bearer: string): string {
+  return (
+    `claude mcp add hexis-local` +
+    ` --env HEXIS_URL="${escapeForDoubleQuotes(baseUrl)}"` +
+    ` --env HEXIS_CONNECTION_KEY="${escapeForDoubleQuotes(bearer)}"` +
+    ` -- npx -y @bevel-software/hexis-mcp`
+  );
+}

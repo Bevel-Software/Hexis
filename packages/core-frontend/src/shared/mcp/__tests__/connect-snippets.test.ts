@@ -5,10 +5,13 @@ import {
   claudeInstallUrl,
   configureMcpUrl,
   connectorName,
+  hexisMcpClaudeCommand,
+  hexisMcpJsonSnippet,
   jsonConfigSnippet,
   langdockSnippet,
   mcpEndpointUrl,
   resetMcpUrlForTests,
+  workspaceBaseUrl,
 } from '../connect-snippets';
 
 /**
@@ -408,6 +411,69 @@ describe('snippets: one builder per client, keyed or not', () => {
     expect(langdockSnippet(URL_UNDER_TEST, KEY)).toBe(
       `URL: ${URL_UNDER_TEST}\nHeader name: Authorization\nHeader value: Bearer ${KEY}`,
     );
+  });
+
+  /**
+   * The LOCAL server's builders. These take the WORKSPACE base, not the MCP
+   * endpoint — hexis-mcp resolves the endpoint from `GET <base>/api/config`
+   * itself — so unlike everything above they are handed `workspaceBaseUrl()`
+   * by their callers.
+   */
+  describe('the local server (hexis-mcp)', () => {
+    const BASE = 'https://kb.acme.com';
+
+    // The one address the browser has proven serves this app, config
+    // endpoint included, is the one it loaded the app from.
+    it('workspaceBaseUrl is the page origin', () => {
+      expect(workspaceBaseUrl()).toBe(window.location.origin);
+    });
+
+    it('builds a JSON config that spawns the package with the key', () => {
+      const parsed = JSON.parse(hexisMcpJsonSnippet(BASE, KEY));
+      expect(parsed.mcpServers['hexis-local']).toEqual({
+        command: 'npx',
+        args: ['-y', '@bevel-software/hexis-mcp'],
+        env: {
+          HEXIS_URL: BASE,
+          HEXIS_CONNECTION_KEY: KEY,
+        },
+      });
+    });
+
+    /**
+     * Keyless is the onboarding picker's case: no key exists yet, and an
+     * empty env value would fail at connect time with nothing to say what
+     * was missing. The placeholder IS the instruction.
+     */
+    it('carries a readable placeholder when no key was minted', () => {
+      const parsed = JSON.parse(hexisMcpJsonSnippet(BASE));
+      expect(parsed.mcpServers['hexis-local'].env).toEqual({
+        HEXIS_URL: BASE,
+        HEXIS_CONNECTION_KEY: 'PASTE_YOUR_EXTERNAL_API_KEY',
+      });
+      expect(hexisMcpJsonSnippet(BASE)).not.toContain(KEY);
+    });
+
+    it('builds the Claude Code command as a stdio add with both env values', () => {
+      expect(hexisMcpClaudeCommand(BASE, KEY)).toBe(
+        `claude mcp add hexis-local --env HEXIS_URL="${BASE}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp`,
+      );
+    });
+
+    /**
+     * The env values sit inside double quotes on a POSIX shell, where `"`,
+     * `$`, backtick and backslash are still read. A key carrying one of them
+     * must not cut the pasted command short or expand into it — same rule as
+     * the header in `claudeCodeCommand`, applied to both values.
+     */
+    it('escapes shell metacharacters in the key and the URL', () => {
+      expect(hexisMcpClaudeCommand(BASE, 'a"b$c`d\\e')).toContain(
+        '--env HEXIS_CONNECTION_KEY="a\\"b\\$c\\`d\\\\e"',
+      );
+      expect(hexisMcpClaudeCommand('https://kb.acme.com/?a=$b', KEY)).toContain(
+        '--env HEXIS_URL="https://kb.acme.com/?a=\\$b"',
+      );
+    });
   });
 
   /**
