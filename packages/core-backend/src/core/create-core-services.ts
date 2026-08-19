@@ -654,6 +654,7 @@ export async function createCoreServices(
     externalApiKeyService,
     mcpOAuthProvider,
     mcpResourceMetadataUrl,
+    internalTokenService,
   );
 
   // ── Unified tool surface ──────────────────────────────────────────────

@@ -4,6 +4,7 @@ import { createMcpAuthMiddleware } from '../mcp-auth.middleware.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
 import type { BevelOAuthProvider } from '../oauth/bevel-oauth-provider.js';
+import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
 
 const RESOURCE_METADATA_URL = 'https://bevel.example/.well-known/oauth-protected-resource/api/mcp';
 
@@ -64,6 +65,7 @@ function makeMw(
     auth?: AuthService;
     keys?: IExternalApiKeyService;
     oauth?: BevelOAuthProvider;
+    internal?: InternalTokenService;
   } = {},
 ) {
   return createMcpAuthMiddleware(
@@ -71,6 +73,7 @@ function makeMw(
     overrides.keys ?? makeExternalApiKeyService(),
     overrides.oauth ?? makeOAuthProvider(),
     RESOURCE_METADATA_URL,
+    overrides.internal ?? new InternalTokenService({ secret: 'test-secret-32-bytes-long-enough!!' }),
   );
 }
 
@@ -245,5 +248,55 @@ describe('createMcpAuthMiddleware', () => {
 
     expect(status).toHaveBeenCalledWith(401);
     expect(next).not.toHaveBeenCalled();
+  });
+
+
+  /**
+   * The internal-token branch: server-minted only (createSession's loopback
+   * bearer, the /mcp/local-token exchange). hexis-mcp's OAuth mode sends one
+   * here when it registers this endpoint as its remote manual — the exact hop
+   * that failed while this surface refused the shape.
+   */
+  describe('internal tokens', () => {
+    const internal = new InternalTokenService({ secret: 'test-secret-32-bytes-long-enough!!' });
+
+    it('accepts a live internal token and resolves the user', async () => {
+      const token = internal.mint({ userId: 'user-7', externalProxy: true }, 60_000);
+      const auth = makeAuthService();
+      (auth.getUserById as ReturnType<typeof vi.fn>) = vi.fn(async () => ({
+        id: 'user-7',
+        email: 'seven@example.com',
+      }));
+      const mw = makeMw({ internal, auth });
+      const { req, res, next } = makeReqRes(`Bearer ${token}`);
+      await mw(req, res, next);
+      expect(next).toHaveBeenCalled();
+      expect(req.userId).toBe('user-7');
+      expect(req.userEmail).toBe('seven@example.com');
+    });
+
+    it('401s an expired internal token', async () => {
+      const past = new InternalTokenService({
+        secret: 'test-secret-32-bytes-long-enough!!',
+        now: () => Date.now() - 120_000,
+      });
+      const token = past.mint({ userId: 'user-7', externalProxy: true }, 60_000);
+      const mw = makeMw({ internal });
+      const { req, res, next, status } = makeReqRes(`Bearer ${token}`);
+      await mw(req, res, next);
+      expect(next).not.toHaveBeenCalled();
+      expect(status).toHaveBeenCalledWith(401);
+    });
+
+    it('401s an internal token whose user no longer exists', async () => {
+      const token = internal.mint({ userId: 'ghost', externalProxy: true }, 60_000);
+      const auth = makeAuthService();
+      (auth.getUserById as ReturnType<typeof vi.fn>) = vi.fn(async () => null);
+      const mw = makeMw({ internal, auth });
+      const { req, res, next, status } = makeReqRes(`Bearer ${token}`);
+      await mw(req, res, next);
+      expect(next).not.toHaveBeenCalled();
+      expect(status).toHaveBeenCalledWith(401);
+    });
   });
 });
