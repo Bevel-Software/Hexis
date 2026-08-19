@@ -39,7 +39,7 @@ import {
 } from './access-control.service.js';
 import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from './group-files.js';
 import { parseRolesModel, removeGroupRefsEverywhere, renameGroupRefs, isGroupRefMember } from './roles-edit.js';
-import { makeRolesYamlWriteValidator } from './roles-yaml-guard.js';
+import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
 import {
   GroupsEditError,
   parseGroupsModel,

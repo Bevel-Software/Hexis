@@ -6,7 +6,7 @@ import os from 'node:os';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../access-control.service.js';
 import { AccessMutationService, AccessMutationError } from '../access-mutation.service.js';
-import type { Principal } from '../access-splice.js';
+import type { Principal } from '../../access-model/access-splice.js';
 
 const KB = 'knowledge-base';
 const WS = 'ws-mut-1';

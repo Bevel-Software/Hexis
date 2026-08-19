@@ -22,7 +22,7 @@
  */
 
 import type { FileContent } from '@mastra/core/workspace';
-import { parseRolesYaml } from './access-control.service.js';
+import { parseRolesYaml } from '../access/access-control.service.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 
 /** Repo-relative basename of the roles file (it lives at the KB repo root). */

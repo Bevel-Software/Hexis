@@ -37,9 +37,9 @@ import path from 'node:path';
 
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from './access-control.interface.js';
-import { spliceGrant, type Principal } from './access-splice.js';
+import { spliceGrant, type Principal } from '../access-model/access-splice.js';
 import { isAccessMdPath } from './access-control.service.js';
-import { toKbRelative } from './kb-read-filter.js';
+import { toKbRelative } from '../access-model/kb-read-filter.js';
 
 /**
  * How a pending creation gets its creator read grant.

@@ -22,7 +22,7 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import type { ISessionSink } from './session-sink.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { toKbRelative, resolveReadableMap } from '../access/kb-read-filter.js';
+import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
 
 /** A directory entry as returned by `LocalFilesystem.readdir`. */

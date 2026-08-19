@@ -13,7 +13,7 @@ import type {
   GrantSources,
   ResolvedPrincipal,
 } from './access-control.interface.js';
-import { AccessConfigError } from './access-errors.js';
+import { AccessConfigError } from '../access-model/access-errors.js';
 // NOTE: deliberate module cycle — group-files.ts imports this module's parsing
 // primitives. Benign: both sides only dereference the other's exports inside
 // function bodies, never at module-evaluation time.

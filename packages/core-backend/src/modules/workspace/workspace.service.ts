@@ -91,7 +91,7 @@ const FETCH_CACHE_TTL_MS = 30_000;
  * workspace-relative entry paths (e.g. `staging-repo/Product/Knowledge/x.md`),
  * returns a verdict map keyed by those paths (`path → readable`). Injected by
  * the route from the access service so `WorkspaceService` stays access-agnostic
- * (it gets a function, not the access module). See `modules/access/kb-read-filter.ts`.
+ * (it gets a function, not the access module). See `modules/access-model/kb-read-filter.ts`.
  */
 export type ReadTreeFilter = (wsRelPaths: string[]) => Promise<Map<string, boolean>>;
 

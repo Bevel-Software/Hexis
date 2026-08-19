@@ -10,7 +10,7 @@ import {
   accessMdSelfEntries,
   parseAccessFile,
 } from '../access-control.service.js';
-import { spliceGrant, spliceRevoke } from '../access-splice.js';
+import { spliceGrant, spliceRevoke } from '../../access-model/access-splice.js';
 
 /**
  * The two-format `access.md` story:

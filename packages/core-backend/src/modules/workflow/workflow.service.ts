@@ -68,7 +68,7 @@ import {
   WorkflowValidationError,
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError } from '../access/access-errors.js';
+import { AccessDeniedError } from '../access-model/access-errors.js';
 
 const execFileAsync = promisify(execFile);
 

@@ -44,8 +44,8 @@ import {
   canonicalEmail,
   loadActiveGroups,
 } from './access-control.service.js';
-import { makeRolesYamlWriteValidator } from './roles-yaml-guard.js';
-import { renderRolesYaml } from './render-roles-yaml.js';
+import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
+import { renderRolesYaml } from '../access-model/render-roles-yaml.js';
 import {
   parseRolesModel,
   deleteRole as editDeleteRole,

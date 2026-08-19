@@ -33,7 +33,7 @@ import {
   canonicalEmail,
   canonicalRoleName,
   accessMdDeclaresBodyRules,
-} from './access-control.service.js';
+} from '../access/access-control.service.js';
 
 /**
  * Which rule block a mutation edits.

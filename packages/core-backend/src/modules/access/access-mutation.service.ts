@@ -49,7 +49,7 @@ import {
   AccessSpliceError,
   type Principal,
   type TokenMatch,
-} from './access-splice.js';
+} from '../access-model/access-splice.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 
 /** Whether the dialog target is a folder (edit folder access.md) or a file (edit node frontmatter). */

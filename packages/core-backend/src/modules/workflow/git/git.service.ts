@@ -15,7 +15,7 @@ import type {
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import { AccessDeniedError } from '../../access/access-errors.js';
+import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
 import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../../kb-fs/clone-config.js';
 import {

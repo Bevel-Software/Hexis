@@ -18,9 +18,9 @@ import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkspaceService } from './workspace.service.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { resolveReadableMap, toKbRelative } from '../access/kb-read-filter.js';
+import { resolveReadableMap, toKbRelative } from '../access-model/kb-read-filter.js';
 import type { ICreatorAccess } from '../access/creator-access.js';
-import { isRolesYamlPath, assertRolesYamlParsable } from '../access/roles-yaml-guard.js';
+import { isRolesYamlPath, assertRolesYamlParsable } from '../access-model/roles-yaml-guard.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation

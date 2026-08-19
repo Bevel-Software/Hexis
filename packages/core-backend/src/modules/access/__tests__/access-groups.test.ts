@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService, parseRolesYaml } from '../access-control.service.js';
-import { AccessConfigError } from '../access-errors.js';
+import { AccessConfigError } from '../../access-model/access-errors.js';
 import { addMember, parseRolesModel, emitRolesModel } from '../roles-edit.js';
 
 const execFileAsync = promisify(execFile);
