@@ -16,8 +16,8 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessDeniedError } from '../../access/access-errors.js';
-import { WorkspaceMutex } from './mutex.js';
-import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from './clone-config.js';
+import { WorkspaceMutex } from '../../kb-fs/mutex.js';
+import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../../kb-fs/clone-config.js';
 import {
   assertValidBranchName,
   assertValidRelativePath,
@@ -25,7 +25,7 @@ import {
   isOwnSuggestionsBranch,
   isProtectedBranch,
   PROTECTED_BRANCHES,
-} from './branch-name.js';
+} from '../../kb-fs/branch-name.js';
 import {
   BranchAuthorshipError,
   WorkflowValidationError,

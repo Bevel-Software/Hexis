@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { WorkspaceService } from '../../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import { WorkspaceMutex } from '../../workflow/git/mutex.js';
+import { WorkspaceMutex } from '../../kb-fs/mutex.js';
 import { DiffService } from '../diff.service.js';
 
 /**

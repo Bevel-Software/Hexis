@@ -5,7 +5,7 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { AccessControlService } from './access-control.service.js';
 import { SYNCED_GROUPS_YAML } from './group-files.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import { LockingFilesystem } from '../workflow/locking-filesystem.js';
+import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import type { SyncedGroupsWriterDeps } from './synced-groups-writer.js';
 
 /**

@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { FileDiffPayload, PendingChange, ReviewSession, ChangeKind } from '@bevel-software/platform-shared';
 import type { IDiffService } from './diff.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import type { WorkspaceMutex } from '../workflow/git/mutex.js';
+import type { WorkspaceMutex } from '../kb-fs/mutex.js';
 import { BevelIgnoreStack } from '../workspace/bevel-ignore.js';
 import { isDiffable } from './diff.config.js';
 import { assertWithinDirectory } from './diff-paths.js';

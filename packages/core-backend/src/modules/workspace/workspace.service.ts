@@ -7,8 +7,8 @@ import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '
 import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { BevelIgnoreStack } from './bevel-ignore.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
-import { assertValidBranchName } from '../workflow/git/branch-name.js';
-import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../workflow/git/clone-config.js';
+import { assertValidBranchName } from '../kb-fs/branch-name.js';
+import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../kb-fs/clone-config.js';
 import type { IDiffService } from '../diff/diff.interface.js';
 
 /**
@@ -396,7 +396,7 @@ export class WorkspaceService implements IWorkspaceService {
 
   /**
    * Collapse the clone's tracking config to a single fetch refspec and a single
-   * upstream ref for `branch` (see `workflow/git/clone-config.ts`). A clone that
+   * upstream ref for `branch` (see `kb-fs/clone-config.ts`). A clone that
    * accumulated a second `remote.origin.fetch` refspec or `branch.<b>.merge`
    * value makes git refuse to refresh it — "Cannot rebase onto multiple
    * branches" — which is how a post-merge pull of the target branch fails.
@@ -712,7 +712,7 @@ export class WorkspaceService implements IWorkspaceService {
 
     // This driver runs outside the git layer's per-workspace mutex, so it may
     // only run the safe implicit-fetch shape — see `SAFE_IMPLICIT_FETCH_ARGS`
-    // in `workflow/git/clone-config.ts` for the full rationale.
+    // in `kb-fs/clone-config.ts` for the full rationale.
     const promise = execFileAsync(
       'git',
       ['-C', repoDir, ...SAFE_IMPLICIT_FETCH_ARGS],

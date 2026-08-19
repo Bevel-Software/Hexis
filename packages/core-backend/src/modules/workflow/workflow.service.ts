@@ -54,9 +54,9 @@ import type { IAccessControl } from '../access/access-control.interface.js';
 import { FileLockService } from './file-lock.service.js';
 import { PendingCommitsService } from './pending-commits.service.js';
 import type { WorkflowEventBus } from './event-bus.js';
-import type { FileChangeNotifier } from './file-change-notifier.js';
+import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
-import { WorkspaceMutex } from './git/mutex.js';
+import { WorkspaceMutex } from '../kb-fs/mutex.js';
 import { hashEmail } from '../../shared/hash-email.js';
 import {
   ChangeRequestConflictsError,

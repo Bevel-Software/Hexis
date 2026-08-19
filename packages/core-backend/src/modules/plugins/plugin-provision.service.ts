@@ -49,7 +49,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { creatorPrincipal } from '../access/creator-access.js';
 import { spliceGrant } from '../access/access-splice.js';
-import { WorkspaceMutex } from '../workflow/git/mutex.js';
+import { WorkspaceMutex } from '../kb-fs/mutex.js';
 
 /** Commit machinery the provision rides — the pending-commit pipeline, run inline. */
 export interface ProvisionCommitDriver {

@@ -47,13 +47,13 @@ import {
 } from '../modules/secrets-vault/index.js';
 import { GitService } from '../modules/workflow/git/git.service.js';
 import { PullRequestService } from '../modules/workflow/git/pull-request.service.js';
-import { WorkspaceMutex } from '../modules/workflow/git/mutex.js';
+import { WorkspaceMutex } from '../modules/kb-fs/mutex.js';
 import { assertGitVersion } from '../modules/workflow/git/git-version.js';
 import { DiffService } from '../modules/diff/diff.service.js';
 import { ReviewWorkflowService } from '../modules/workflow/review-workflow/review-workflow.service.js';
 import { FileLockService } from '../modules/workflow/file-lock.service.js';
 import { WorkflowEventBus } from '../modules/workflow/event-bus.js';
-import { FileChangeNotifier } from '../modules/workflow/file-change-notifier.js';
+import { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
 import { WorkflowService } from '../modules/workflow/workflow.service.js';
 import { WorkflowHooks } from '../modules/workflow/workflow-hooks.js';
 import { SessionOntologyService } from '../modules/workflow/session-ontology.service.js';
