@@ -105,10 +105,17 @@ describe('the interactive tab: local first, hosted second, each with its own add
    */
   it('leads with the local server: placeholder-bearing snippets built from the origin', () => {
     mount(PUBLIC_URL);
-    const local = screen.getByText('Desktop agents — the local server (recommended)');
-    const hosted = screen.getByText('Web agents — the hosted endpoint');
-    // DOCUMENT_POSITION_FOLLOWING: the hosted heading comes after the local one.
+    // Two CLOSED drawers, desktop first. The summaries are the whole pitch;
+    // the configs sit inside and neither drawer arrives open.
+    const local = screen.getByText(
+      'Desktop agents: Claude Code, Claude Desktop, Cursor, Windsurf, Cline and similar',
+    );
+    const hosted = screen.getByText('Any other agent');
+    // DOCUMENT_POSITION_FOLLOWING: the hosted drawer comes after the local one.
     expect(local.compareDocumentPosition(hosted) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    for (const drawer of [local, hosted]) {
+      expect((drawer.closest('details') as HTMLDetailsElement).open).toBe(false);
+    }
 
     const values = snippets();
     expect(values).toContain(

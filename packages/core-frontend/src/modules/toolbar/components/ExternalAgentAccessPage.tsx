@@ -200,73 +200,81 @@ export function ExternalAgentAccessPage() {
 
         {tab === 'agent' && (
           <div className="px-4 py-3 space-y-4">
+            <p className="text-xs text-ink-muted leading-snug">
+              Pick where your agent runs. Everything it saves appears under your name.
+            </p>
             {/* LOCAL FIRST. The local server is the recommended connection for
                 every agent that can run it — it serves everything the hosted
-                endpoint does PLUS the plugins' local-only tools — so it leads,
-                and the hosted URL follows as the path for the agents that
-                cannot (web assistants, cloud platforms). */}
-            <div>
-              <div className="text-xs font-medium text-ink mb-1">
-                Desktop agents — the local server (recommended)
-              </div>
-              <p className="text-[11px] text-ink-muted mb-1 leading-snug">
-                For agents that run on your machine: Claude Code, Claude Desktop, Cursor,
-                Windsurf, Cline and similar. Runs this workspace as a local MCP server (needs
-                Node): the agent gets everything the hosted endpoint serves, plus your plugins'
-                local-only tools — the ones{' '}
-                <span className="font-mono">list_local_tools</span> names. It authenticates with
-                an external API key: create one on the{' '}
-                <button
-                  type="button"
-                  onClick={() => setTab('autonomous')}
-                  className="underline text-ink-muted hover:text-ink"
-                >
-                  Autonomous agents
-                </button>{' '}
-                tab and paste it over the placeholder below.
-              </p>
-              <CopyBlock
-                label="Connect Claude Code"
-                value={hexisMcpClaudeCommand(workspaceUrl, CONNECTION_KEY_PLACEHOLDER)}
-                rows={3}
-              />
-              <div className="mt-2">
+                endpoint does PLUS the plugins' local-only tools — so its drawer
+                leads, and the hosted URL follows for the agents that cannot
+                (web assistants, cloud platforms). Two CLOSED drawers, native
+                <details> (the SecretsPage "Advanced" precedent): the choice is
+                the headline, and neither config wall is worth reading until
+                the reader has picked their side of it. */}
+            <details className="border border-line rounded">
+              <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
+                Desktop agents: Claude Code, Claude Desktop, Cursor, Windsurf, Cline and similar
+              </summary>
+              <div className="px-3 pb-3 space-y-2">
+                <p className="text-[11px] text-ink-muted leading-snug">
+                  Recommended: runs this workspace as a local MCP server (needs Node), so the
+                  agent gets everything the hosted endpoint serves, plus your plugins'
+                  local-only tools — the ones{' '}
+                  <span className="font-mono">list_local_tools</span> names. It authenticates
+                  with an external API key: create one on the{' '}
+                  <button
+                    type="button"
+                    onClick={() => setTab('autonomous')}
+                    className="underline text-ink-muted hover:text-ink"
+                  >
+                    Autonomous agents
+                  </button>{' '}
+                  tab and paste it over the placeholder.
+                </p>
                 <CopyBlock
-                  label="Claude Desktop, Cursor & others (JSON config)"
-                  value={hexisMcpJsonSnippet(workspaceUrl)}
-                  rows={12}
+                  label="Connect Claude Code"
+                  value={hexisMcpClaudeCommand(workspaceUrl, CONNECTION_KEY_PLACEHOLDER)}
+                  rows={3}
                 />
+                <div>
+                  <p className="text-[11px] text-ink-muted mb-1 leading-snug">
+                    Cursor, Windsurf and Cline take this JSON in their MCP config. Claude
+                    Desktop takes it too, in its config file: Settings → Developer → Edit
+                    Config (its Connectors UI only adds remote servers).
+                  </p>
+                  <CopyBlock label={null} value={hexisMcpJsonSnippet(workspaceUrl)} rows={12} />
+                </div>
               </div>
-            </div>
+            </details>
 
-            <div>
-              <div className="text-xs font-medium text-ink mb-1">
-                Web agents — the hosted endpoint
-              </div>
-              <p className="text-[11px] text-ink-muted mb-1 leading-snug">
-                claude.ai, ChatGPT and other agents that can't run a process on your machine
-                connect to the hosted endpoint. No key needed: the first time the agent connects,
-                your browser opens so you can sign in and choose which tools to share with it.
-                Everything it saves appears under your name.
-              </p>
-              {/* `buttonClasses`, not a hand-rolled class string — the one
-                  button primitive exists because 171 sites once shared 153
-                  variants between them, and its docstring prescribes exactly
-                  this shape for links. */}
-              <Link
-                to="/connect"
-                target="_blank"
-                rel="noopener noreferrer"
-                className={buttonClasses({ variant: 'outline', size: 'sm', className: 'w-full mb-2' })}
-              >
-                <Wrench size={12} />
-                Configure your tools
-                <ExternalLink size={11} className="opacity-60" aria-hidden="true" />
-              </Link>
-              <div className="space-y-4">
+            <details className="border border-line rounded">
+              <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
+                Any other agent
+              </summary>
+              <div className="px-3 pb-3 space-y-3">
+                <p className="text-[11px] text-ink-muted leading-snug">
+                  claude.ai, ChatGPT and other agents that can't run a process on your machine
+                  connect to the hosted endpoint. No key needed: the first time the agent
+                  connects, your browser opens so you can sign in and choose which tools to
+                  share with it.
+                </p>
+                {/* `buttonClasses`, not a hand-rolled class string — the one
+                    button primitive exists because 171 sites once shared 153
+                    variants between them, and its docstring prescribes exactly
+                    this shape for links. */}
+                <Link
+                  to="/connect"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={buttonClasses({ variant: 'outline', size: 'sm', className: 'w-full' })}
+                >
+                  <Wrench size={12} />
+                  Configure your tools
+                  <ExternalLink size={11} className="opacity-60" aria-hidden="true" />
+                </Link>
                 <ConnectionInstructions mcpUrl={mcpUrl} />
               </div>
-            </div>
+            </details>
 
             <p className="text-[11px] text-ink-muted leading-snug">
               Running an unattended pipeline or CI agent that can't open a browser? Use the{' '}
