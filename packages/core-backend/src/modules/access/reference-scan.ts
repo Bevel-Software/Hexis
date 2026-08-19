@@ -290,12 +290,15 @@ export class KbReferenceScanner {
     { loadedAt: number; byToken: Map<string, ReferenceHit[]> }
   >();
   /**
-   * Bumped by every invalidation; a scan may only CACHE its result if the
-   * generation it started under is still current — an invalidation landing
-   * mid-scan otherwise gets repopulated by the in-flight scan's pre-change
-   * snapshot and sticks for a whole TTL.
+   * Per-workspace in-flight scan state: a scan may only CACHE its result if
+   * no invalidation landed after it started — otherwise the pre-change
+   * snapshot would repopulate the cache and stick for a whole TTL. Tracked
+   * ONLY while scans run (a future scan reads post-write state by nature, so
+   * an invalidation with nothing in flight needs only the cache drop): the
+   * entry is created by the first concurrent scan and removed by the last,
+   * so the map never accumulates workspaces.
    */
-  private readonly generation = new Map<string, number>();
+  private readonly inFlight = new Map<string, { gen: number; scans: number }>();
 
   constructor(
     private readonly workspaceService: IWorkspaceService,
@@ -316,7 +319,8 @@ export class KbReferenceScanner {
 
   invalidate(workspaceId: string): void {
     this.cache.delete(workspaceId);
-    this.generation.set(workspaceId, (this.generation.get(workspaceId) ?? 0) + 1);
+    const flight = this.inFlight.get(workspaceId);
+    if (flight) flight.gen++;
   }
 
   /**
@@ -363,35 +367,46 @@ export class KbReferenceScanner {
     const hit = this.cache.get(workspaceId);
     if (hit && Date.now() - hit.loadedAt < SCAN_TTL_MS) return hit.byToken;
 
-    const startedUnder = this.generation.get(workspaceId) ?? 0;
-    const repoDir = await this.repoDir(workspaceId);
-    const candidates = await this.collectCandidateFiles(workspaceId);
-    const texts = await Promise.all(
-      candidates.map(async (repoRel) => {
-        try {
-          return await fs.readFile(path.join(repoDir, repoRel), 'utf-8');
-        } catch {
-          return null;
-        }
-      }),
-    );
-    const byToken = new Map<string, ReferenceHit[]>();
-    candidates.forEach((repoRel, i) => {
-      const text = texts[i];
-      if (text === null) return;
-      for (const ref of findRoleRefsInText(text, true, isAccessMdPath(repoRel))) {
-        const list = byToken.get(ref.role);
-        if (list) list.push({ path: repoRel, verb: ref.verb });
-        else byToken.set(ref.role, [{ path: repoRel, verb: ref.verb }]);
-      }
-    });
-    // Cache only when no invalidation landed mid-scan; the caller still gets
-    // this snapshot (at worst one write stale — same as the pre-scan world),
-    // but a stale snapshot must never STICK for a TTL. The next call re-scans.
-    if ((this.generation.get(workspaceId) ?? 0) === startedUnder) {
-      this.cache.set(workspaceId, { loadedAt: Date.now(), byToken });
+    let flight = this.inFlight.get(workspaceId);
+    if (!flight) {
+      flight = { gen: 0, scans: 0 };
+      this.inFlight.set(workspaceId, flight);
     }
-    return byToken;
+    flight.scans++;
+    const startedUnder = flight.gen;
+    try {
+      const repoDir = await this.repoDir(workspaceId);
+      const candidates = await this.collectCandidateFiles(workspaceId);
+      const texts = await Promise.all(
+        candidates.map(async (repoRel) => {
+          try {
+            return await fs.readFile(path.join(repoDir, repoRel), 'utf-8');
+          } catch {
+            return null;
+          }
+        }),
+      );
+      const byToken = new Map<string, ReferenceHit[]>();
+      candidates.forEach((repoRel, i) => {
+        const text = texts[i];
+        if (text === null) return;
+        for (const ref of findRoleRefsInText(text, true, isAccessMdPath(repoRel))) {
+          const list = byToken.get(ref.role);
+          if (list) list.push({ path: repoRel, verb: ref.verb });
+          else byToken.set(ref.role, [{ path: repoRel, verb: ref.verb }]);
+        }
+      });
+      // Cache only when no invalidation landed mid-scan; the caller still gets
+      // this snapshot (at worst one write stale — same as the pre-scan world),
+      // but a stale snapshot must never STICK for a TTL. The next call re-scans.
+      if (flight.gen === startedUnder) {
+        this.cache.set(workspaceId, { loadedAt: Date.now(), byToken });
+      }
+      return byToken;
+    } finally {
+      flight.scans--;
+      if (flight.scans === 0) this.inFlight.delete(workspaceId);
+    }
   }
 
   /**
