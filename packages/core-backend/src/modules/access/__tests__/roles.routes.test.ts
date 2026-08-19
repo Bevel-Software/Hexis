@@ -65,7 +65,6 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
     eligibleWriters: vi.fn(async () => ({ roles: ['Admin'], users: [] })),
     invalidate: vi.fn(),
     validateRolesYaml: (t: string) => realAccess.validateRolesYaml(t),
-    referencesToRole: vi.fn(async () => []),
   } as unknown as IAccessControl;
 
   const resolve = (wsRel: string) => path.join(workspaceDir, wsRel);
@@ -188,6 +187,20 @@ describe('/api/access/roles routes', () => {
       body: JSON.stringify({ group: 'GTM Team' }),
     });
     expect(assignGroup.status).toBe(403);
+    const removeMember = await fetch(
+      `${h.baseUrl}/api/access/roles/sales/members/${encodeURIComponent('felix@example.com')}`,
+      { method: 'DELETE' },
+    );
+    expect(removeMember.status).toBe(403);
+    const unassignGroup = await fetch(
+      `${h.baseUrl}/api/access/roles/sales/groups/${encodeURIComponent('GTM Team')}`,
+      { method: 'DELETE' },
+    );
+    expect(unassignGroup.status).toBe(403);
+    const convert = await fetch(`${h.baseUrl}/api/access/roles/sales/convert-to-group`, {
+      method: 'POST',
+    });
+    expect(convert.status).toBe(403);
   });
 
   it('role CRUD endpoints are GONE: create/rename/delete answer 404 even for admins', async () => {
