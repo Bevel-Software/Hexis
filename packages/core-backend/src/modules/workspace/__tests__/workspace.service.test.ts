@@ -435,32 +435,9 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
     await svc.getOrCreateForBranch('alice/draft');
     expect(cloned).toEqual([workspaceIdForBranch('alice/draft')]);
   });
-
-  // An upgraded deployment REUSES the persistent clone, so a top-up bound to
-  // fresh clones alone never runs a new build's scaffolding or migrations —
-  // the Groups→Plugins rename sat out an upgrade exactly this way. Every boot
-  // must offer the top-up to an existing clone once.
-  it('offers the scaffolding top-up to an existing clone once per process', async () => {
-    const seed = {
-      ensureRemoteSeeded: vi.fn(async () => {}),
-      topUpWorkspace: vi.fn(async () => {}),
-    };
-    const firstBoot = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base');
-    firstBoot.setSeedService(seed);
-    await firstBoot.getOrCreateForBranch('target-company-state');
-    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(1); // the fresh clone
-
-    // A new process over the same workspaces dir — the deployed-upgrade case:
-    // the clone exists, and the top-up must still run, once, not per access.
-    const nextBoot = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base');
-    nextBoot.setSeedService(seed);
-    await nextBoot.getOrCreateForBranch('target-company-state');
-    await nextBoot.getOrCreateForBranch('target-company-state');
-    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(2);
-  });
 });
 
-describe('WorkspaceService — scaffolding top-up on restart-survivor clones', () => {
+describe('WorkspaceService.sweepOrphanedWorkspaces', () => {
   let root: string;
 
   beforeEach(async () => {
@@ -475,81 +452,15 @@ describe('WorkspaceService — scaffolding top-up on restart-survivor clones', (
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  // The top-up MOVES files (the Groups→Plugins migration runs inside it), so a
-  // caller handed the workspace mid-run reads a tree with both halves missing.
-  it('makes a concurrent opener wait out the in-flight top-up instead of returning mid-migration', async () => {
-    await seedBranchWorkspace(root, 'target-company-state');
+  it('removes the clone of a branch that is not in the known set', async () => {
+    const { workspaceId, workspaceDir } = await seedBranchWorkspace(root, 'target-company-state');
     const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
-    let release!: () => void;
-    const gate = new Promise<void>((r) => { release = r; });
-    const seed = {
-      ensureRemoteSeeded: vi.fn(async () => {}),
-      topUpWorkspace: vi.fn(() => gate),
-    };
-    svc.setSeedService(seed);
-
-    let aDone = false;
-    let bDone = false;
-    const a = svc.getOrCreateForBranch('target-company-state').then((v) => { aDone = true; return v; });
-    const b = svc.getOrCreateForBranch('target-company-state').then((v) => { bDone = true; return v; });
-    // Wait until the top-up has started (the fake clone makes the preceding
-    // git-config repair fail slowly, so poll rather than sleep), then give
-    // both callers time to settle against the gate.
-    await vi.waitFor(() => expect(seed.topUpWorkspace).toHaveBeenCalledTimes(1));
-    await new Promise((r) => setTimeout(r, 30));
-    // Neither caller has been handed the workspace while the top-up runs —
-    // and the second did not start a rival run.
-    expect(aDone).toBe(false);
-    expect(bDone).toBe(false);
-    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(1);
-
-    release();
-    const [infoA, infoB] = await Promise.all([a, b]);
-    expect(infoA.id).toBe(infoB.id);
-  });
-
-  it('re-offers the top-up after deleteWorkspace — the claim died with the clone', async () => {
-    await seedBranchWorkspace(root, 'target-company-state');
-    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
-    const seed = {
-      ensureRemoteSeeded: vi.fn(async () => {}),
-      topUpWorkspace: vi.fn(async () => {}),
-    };
-    svc.setSeedService(seed);
-
     await svc.getOrCreateForBranch('target-company-state');
-    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(1);
-
-    await svc.deleteWorkspace(workspaceIdForBranch('target-company-state'));
-    // A later bootstrap re-creates the clone (seeded by hand here); it must
-    // be offered the top-up afresh — the old claim was about a clone that no
-    // longer exists.
-    await seedBranchWorkspace(root, 'target-company-state');
-    await svc.getOrCreateForBranch('target-company-state');
-    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(2);
-  });
-
-  it('re-offers the top-up after the orphan sweep removes the clone — same eviction rule', async () => {
-    await seedBranchWorkspace(root, 'target-company-state');
-    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
-    const seed = {
-      ensureRemoteSeeded: vi.fn(async () => {}),
-      topUpWorkspace: vi.fn(async () => {}),
-    };
-    svc.setSeedService(seed);
-
-    await svc.getOrCreateForBranch('target-company-state');
-    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(1);
 
     // The branch vanishes from the known set; the sweep reclaims its clone.
     const { removed } = await svc.sweepOrphanedWorkspaces([]);
-    expect(removed).toContain(workspaceIdForBranch('target-company-state'));
-
-    // Re-created before any restart: the fresh clone must still get its one
-    // top-up — the claim died with the directory the sweep removed.
-    await seedBranchWorkspace(root, 'target-company-state');
-    await svc.getOrCreateForBranch('target-company-state');
-    expect(seed.topUpWorkspace).toHaveBeenCalledTimes(2);
+    expect(removed).toContain(workspaceId);
+    await expect(fs.stat(workspaceDir)).rejects.toThrow();
   });
 });
 

@@ -6,6 +6,7 @@ import type {
 import type { ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { IErasureParticipant } from '../modules/auth/account-erasure.service.js';
+import type { OnServerStart } from '../modules/workspace/startup/on-server-start.js';
 
 /**
  * Every seam the enterprise overlay can fill in the CORE composition
@@ -91,6 +92,12 @@ export interface CorePorts {
    * should arrive carrying READMEs.
    */
   kbExtraRootDirs?: readonly string[];
+  /**
+   * Steps THIS distribution appends to the KB startup phase, run after core's
+   * own steps in array order (see `startup/on-server-start.ts` for the
+   * contract each step signs up to). Core default: `[]`.
+   */
+  kbStartupSteps?: readonly OnServerStart[];
 }
 
 /**

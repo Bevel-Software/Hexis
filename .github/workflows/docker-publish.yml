@@ -1,0 +1,76 @@
+name: Publish Docker image
+
+# Builds the production image and pushes it to GHCR, so self-hosters pull
+# ghcr.io/bevel-software/hexis instead of compiling the monorepo on their own
+# server (deployment/docker-compose.image.yml is the consumer).
+#
+# Runs on VERSION TAGS, not on every main push — that is what retired the
+# previous incarnation (#72): an hour of multi-arch QEMU work per merge, for
+# images nobody pulled between releases. A release is the moment an image is
+# worth having, and the tag is what names it.
+on:
+  push:
+    tags: ['v*']
+  # Manual backfill (an already-published version that predates this workflow,
+  # or a re-push after a registry hiccup): run it on the tag from the Actions
+  # UI. On a non-tag ref this publishes only a sha-named tag — never `latest`,
+  # never a version.
+  workflow_dispatch:
+
+jobs:
+  # "Only tested commits ship" — the suite runs on the exact commit being
+  # published. test.yml declared `workflow_call` for precisely this caller.
+  test:
+    uses: ./.github/workflows/test.yml
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    # Actions pinned to reviewed commit SHAs (release tag alongside each),
+    # same policy as test.yml: this job holds a token that can publish what
+    # customers run, so a moved or compromised action tag must not reach it.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # arm64 runs emulated. Slow (the pnpm build roughly doubles), but a
+      # release build a few times a month can afford it, and Graviton EC2
+      # customers cannot run an amd64-only image.
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/bevel-software/hexis
+          # `latest` means "newest release", so it moves only on version tags —
+          # a workflow_dispatch from a branch must not be able to hijack what
+          # every `:latest` deployment pulls next.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+            type=sha
+
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # `GET /api/health` reports this sha; the compose file's comment
+          # about the GIT_SHA build arg is pointing at exactly this line.
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

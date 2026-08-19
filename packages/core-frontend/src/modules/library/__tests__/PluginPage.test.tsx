@@ -84,6 +84,9 @@ const nonAdmin: AdminContextValue = {
   runRolesRecovery: vi.fn(),
 };
 
+/** The same caller with the admin bit set — the empty band's doorway is theirs. */
+const asAdmin: AdminContextValue = { ...nonAdmin, isAdmin: true };
+
 const connectedTool = (over: Partial<ToolSecrets> = {}): ToolSecrets => ({
   slug: 'heyreach',
   name: 'heyreach',
@@ -155,10 +158,10 @@ function LocationProbe() {
   return <div aria-label="href">{location.pathname + location.search}</div>;
 }
 
-function renderPlugin(name: string, children?: ReactNode) {
+function renderPlugin(name: string, children?: ReactNode, admin: AdminContextValue = nonAdmin) {
   return render(
     <MemoryRouter initialEntries={[`/skills-and-tools/plugins/${encodeURIComponent(name)}`]}>
-      <AdminContext.Provider value={nonAdmin}>
+      <AdminContext.Provider value={admin}>
         <WorkspaceContext.Provider value={workspace}>
           <LibraryToastProvider>
             <LibraryProvider>
@@ -298,10 +301,60 @@ describe('PluginPage', () => {
     dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
     pluginsMock.listPlugins.mockResolvedValue([gtm({ skillCount: 0, toolCount: 0 })]);
     renderPlugin('GTM');
+    // A non-admin reads one plain sentence: the fact, and the agent as the
+    // door that IS theirs. No inline action, so nothing is split around it.
     expect(
-      await screen.findByText('No skills yet. Add one, or ask your agent to write one for GTM.'),
+      await screen.findByText('No skills yet. Ask your agent to write one for GTM.'),
     ).toBeInTheDocument();
     expect(screen.getByText('No tools yet.')).toBeInTheDocument();
+  });
+
+  it('keeps the empty band a dead end for a non-admin — no doorway, no arrow', async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ skillCount: 0, toolCount: 0 })]);
+    renderPlugin('GTM');
+    await screen.findByText(/No skills yet/);
+    expect(screen.queryByRole('button', { name: 'Add the first skill' })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('chalk-arrow')).not.toBeInTheDocument();
+  });
+
+  it('keeps the doorway but not the dialog-less click when the plugins endpoint failed', async () => {
+    // The add dialog mounts only with a summary and its primary folder. When
+    // the endpoint failed there is neither, so an admin's "Add the first
+    // skill" would be a button that does nothing — the band must fall back to
+    // the sentence whose one door (the agent) still works.
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+    pluginsMock.listPlugins.mockRejectedValue(new Error('boom'));
+    renderPlugin('GTM', undefined, asAdmin);
+    expect(
+      await screen.findByText('No skills yet. Ask your agent to write one for GTM.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add the first skill' })).not.toBeInTheDocument();
+    // The title row's `+` is under the same prerequisite: both ways to add
+    // must agree that adding is impossible here.
+    expect(
+      screen.queryByRole('button', { name: 'Add a skill or tool to GTM' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('makes the empty Skills band a doorway for an admin: its link opens the same add dialog as `+`', async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ skillCount: 0, toolCount: 0 })]);
+    renderPlugin('GTM', undefined, asAdmin);
+    // The sentence is split around its inline action, so it is asserted in its
+    // parts: the fact, the doorway, and the agent as the other door.
+    expect(await screen.findByText(/No skills yet/)).toBeInTheDocument();
+    expect(screen.getByText(/or ask your agent to write one for GTM/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Add the first skill' }));
+    expect(
+      await screen.findByRole('heading', { name: 'Add a skill or tool to GTM' }),
+    ).toBeInTheDocument();
+  });
+
+  it('drops the nudge once a skill exists — the arrow belongs to the empty band only', async () => {
+    renderPlugin('GTM', undefined, asAdmin); // CATALOG carries outreach in GTM
+    await screen.findByRole('button', { name: /^outreach/ });
+    expect(screen.queryByRole('button', { name: 'Add the first skill' })).not.toBeInTheDocument();
   });
 
   it('keeps Share on an EMPTY plugin. The folder is what carries access, not the items', async () => {
@@ -395,10 +448,48 @@ describe('PluginPage', () => {
     pluginsMock.listPlugins.mockRejectedValue(new Error("Couldn't load plugins."));
     renderPlugin('GTM');
     expect(await screen.findByTestId('library-card-skill-outreach')).toBeInTheDocument();
-    // No verified principals, so no claim about them. The add door still opens
-    // — it writes nothing, so there is no permission to be wrong about.
+    // No verified principals, so no claim about them.
     expect(screen.queryByText(/^Run by/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Add a skill or tool to GTM' })).toBeInTheDocument();
+    // The add door is GONE. It used to be asserted present-and-enabled, on
+    // the reasoning that adding writes nothing a permission could be wrong
+    // about — but permission was never what stops it here: `AddToPluginDialog`
+    // needs `summary && primaryFolder` to mount, and the failed endpoint left
+    // neither, so the button opened nothing at all. Omitted, like `Share`
+    // is when there is no folder to manage.
+    expect(
+      screen.queryByRole('button', { name: 'Add a skill or tool to GTM' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('brings the add door back once plugin discovery lands', async () => {
+    // The page renders as soon as the CATALOG has items, so the summary can be
+    // missing simply because plugins are still on their way. The button is
+    // absent for that moment and appears when there is something behind it —
+    // an affordance arriving, never one that was there and stopped working.
+    let settle!: (plugins: PluginSummary[]) => void;
+    pluginsMock.listPlugins.mockReturnValue(new Promise((resolve) => (settle = resolve)));
+    renderPlugin('GTM');
+    await screen.findByTestId('library-card-skill-outreach');
+    expect(
+      screen.queryByRole('button', { name: 'Add a skill or tool to GTM' }),
+    ).not.toBeInTheDocument();
+
+    settle([gtm()]);
+    expect(
+      await screen.findByRole('button', { name: 'Add a skill or tool to GTM' }),
+    ).toBeInTheDocument();
+  });
+
+  it('offers no add door to a caller who only reached the plugin through an item grant', async () => {
+    // A per-file grant puts one skill from GTM in this caller's catalog while
+    // no summary vouches for the plugin. Discovery worked — they simply have
+    // no folder of their own to add into, so there is no door to offer.
+    pluginsMock.listPlugins.mockResolvedValue([]);
+    renderPlugin('GTM');
+    await screen.findByTestId('library-card-skill-outreach');
+    expect(
+      screen.queryByRole('button', { name: 'Add a skill or tool to GTM' }),
+    ).not.toBeInTheDocument();
   });
 
   it('does not claim a missing plugin is gone while the endpoint is still failing', async () => {

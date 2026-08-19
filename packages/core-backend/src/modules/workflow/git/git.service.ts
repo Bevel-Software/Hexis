@@ -1761,6 +1761,14 @@ export class GitService implements IGitService {
       try {
         const { stdout } = await this.git(cwd, [
           'show',
+          // Patch only, no commit header — and not for looks: whether `show`
+          // prints the header for a commit the pathspec does not touch is
+          // git-version-dependent (older gits simplified the commit away,
+          // newer ones print the header over an empty diff). Suppressing the
+          // format makes "commit didn't touch the file" mean an EMPTY string
+          // on every git. The metadata the header carried already reaches the
+          // history view via `logForFile`.
+          '--format=',
           sha,
           '--',
           repoRelativePath,

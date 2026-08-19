@@ -1,15 +1,18 @@
-import { useMemo, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Badge, Banner } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
-import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
+import { useAdmin } from '../../admin/state/admin.context';
+import { attentionOf, useLibrary, workspaceHasNoPlugins, type LibraryItem } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
 import { LIBRARY_ROOT, pathForPlugin } from '../routes/library-paths';
 import { ownersTextOf } from '../utils/plugin-summary';
 import type { PluginSummary } from '../services/plugins.api';
+import { EmptyStateAction } from './plugin-page-parts';
 import { PluginIndexRow } from './PluginIndexRow';
 import { LockGlyph } from './LockGlyph';
 import { ManagedPluginRequests } from './ManagedPluginRequests';
+import { NewPluginDialog } from './NewPluginDialog';
 
 /**
  * The all-plugins index — `/skills-and-tools`, where the Library opens.
@@ -38,9 +41,12 @@ interface IndexEntry {
 }
 
 export function PluginsIndexPage() {
-  const { items, pluginSummaries, pluginsLoading, pluginsError, reloadPlugins } = useLibrary();
+  const lib = useLibrary();
+  const { items, pluginSummaries, pluginsLoading, pluginsError, reload, reloadPlugins } = lib;
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { isAdmin } = useAdmin();
+  const [newPluginOpen, setNewPluginOpen] = useState(false);
 
   const personalName = personalPluginName(user?.name);
   const ungroupedSkills = countKind(items, null, 'skill');
@@ -114,6 +120,29 @@ export function PluginsIndexPage() {
       ) : (
         <>
           <SectionHead count={mine.length}>Your plugins</SectionHead>
+          {/* The one page a person with no plugins is guaranteed to land on —
+              the Library opens here — so it is where the app says how a plugin
+              comes to exist, instead of a blank section that reads as "not for
+              you". The sidebar's `+` does the same thing; this one is written
+              out because a newcomer has not found that `+` yet.
+
+              Same verdict as the nav's version, from the same shared
+              predicate — `workspaceHasNoPlugins` — so the two surfaces cannot
+              disagree about whether a workspace is untouched. It is false for
+              locked plugins too (`mine.length === 0` alone would promise "the
+              first plugin" to someone simply not added to the twenty that
+              exist), and false until both plugin witnesses settle
+              successfully: a catalog still loading, or a summaries call that
+              failed, is an unanswered question, not an untouched workspace. */}
+          {isAdmin && workspaceHasNoPlugins(lib) && (
+            <p className="text-ui text-ink-faint">
+              {"You're not in any plugins yet. "}
+              <EmptyStateAction onClick={() => setNewPluginOpen(true)}>
+                Create the first plugin
+              </EmptyStateAction>
+              {' to share skills and tools with your team.'}
+            </p>
+          )}
           <RowList>
             {mine.map((entry) => (
               <PluginIndexRow
@@ -173,6 +202,20 @@ export function PluginsIndexPage() {
             </>
           )}
         </>
+      )}
+
+      {newPluginOpen && (
+        <NewPluginDialog
+          // Every name this page can see — summaries and catalog-derived rows
+          // alike. Locked-but-undiscoverable plugins are absent from both; the
+          // provisioning endpoint is the authority that catches those.
+          existing={entries.map((e) => e.name)}
+          onClose={() => setNewPluginOpen(false)}
+          onCreated={() => {
+            reload();
+            reloadPlugins();
+          }}
+        />
       )}
     </div>
   );
