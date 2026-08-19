@@ -168,6 +168,60 @@ describe('KbReferenceScanner — event-bus cache invalidation', () => {
     }
   });
 
+  it('an invalidation landing MID-SCAN keeps the stale snapshot out of the cache', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-race-'));
+    try {
+      const repo = path.join(root, KB);
+      await write(repo, 'team/access.md', '---\nread:\n  - Sales\n---\n');
+      // The workspace stub invalidates DURING the first scan's tree listing —
+      // modelling a write that lands after the scan started reading.
+      const base = stubWorkspace(root);
+      let armed = true;
+      const ws = {
+        ...base,
+        listFiles: async (id: string) => {
+          const tree = await base.listFiles(id);
+          if (armed) {
+            armed = false;
+            scanner.invalidate('ws-1');
+          }
+          return tree;
+        },
+      } as unknown as IWorkspaceService;
+      const scanner = new KbReferenceScanner(ws, KB);
+
+      // The caller still gets the snapshot it asked for...
+      expect((await scanner.scan('ws-1')).get('sales')).toHaveLength(1);
+      // ...but the snapshot must not have STUCK in the cache: the write the
+      // invalidation announced is visible on the very next scan, well inside
+      // the TTL and with no further events.
+      await write(repo, 'team/access.md', '---\nread:\n  - Sales\n  - Support\n---\n');
+      expect((await scanner.scan('ws-1')).get('support')).toHaveLength(1);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores a scanned-extension change OUTSIDE the KB directory', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-bus3-'));
+    try {
+      const repo = path.join(root, KB);
+      await write(repo, 'team/access.md', '---\nread:\n  - Sales\n---\n');
+      const listeners: ((e: { kind: string; workspaceId?: string; path?: string }) => void)[] = [];
+      const bus = { onEmit: (l: (typeof listeners)[number]) => (listeners.push(l), () => undefined) };
+      const scanner = new KbReferenceScanner(stubWorkspace(root), KB, bus);
+
+      const first = await scanner.scan('ws-1');
+      for (const l of listeners) {
+        // Right extension, wrong tree: not scan material.
+        l({ kind: 'file-changed', workspaceId: 'ws-1', path: 'scratch/notes.md' });
+      }
+      expect(await scanner.scan('ws-1')).toBe(first);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('ignores events for non-scanned extensions and other kinds', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-refscan-bus2-'));
     try {

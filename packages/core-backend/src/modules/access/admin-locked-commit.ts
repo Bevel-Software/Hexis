@@ -214,10 +214,13 @@ export class AdminLockedCommits {
         const committedClean =
           this.committedCleanPaths.delete(this.cleanKey(workspaceId, h)) && !pushRetry;
         try {
-          if ((failure === null && committedClean) || unrestored?.has(h)) {
-            // Batch-committed path on success (clean tree — discard no-ops),
-            // or known-partial bytes (restore failed — discarding to HEAD
-            // beats committing them).
+          if (committedClean || unrestored?.has(h)) {
+            // Batch-committed path (clean tree — discard no-ops) — even when
+            // `fn` threw AFTER the commit+push landed: the failure says
+            // nothing about the tree, and releaseLock would enqueue a
+            // pointless commit whose enqueue failure strands a known-clean
+            // lock until TTL. Or known-partial bytes (restore failed —
+            // discarding to HEAD beats committing them).
             await this.deps.workflowService.releaseLockNoCommit(workspaceId, this.defaultBranch, h, actor);
           } else {
             // Push-retry (the enqueued commit retries the share), the

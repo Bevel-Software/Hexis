@@ -289,6 +289,13 @@ export class KbReferenceScanner {
     string,
     { loadedAt: number; byToken: Map<string, ReferenceHit[]> }
   >();
+  /**
+   * Bumped by every invalidation; a scan may only CACHE its result if the
+   * generation it started under is still current — an invalidation landing
+   * mid-scan otherwise gets repopulated by the in-flight scan's pre-change
+   * snapshot and sticks for a whole TTL.
+   */
+  private readonly generation = new Map<string, number>();
 
   constructor(
     private readonly workspaceService: IWorkspaceService,
@@ -298,8 +305,10 @@ export class KbReferenceScanner {
     eventBus?.onEmit?.((event) => {
       if (event.kind !== 'file-changed' && event.kind !== 'lock-released') return;
       if (!event.workspaceId || !event.path) return;
-      // Paths on the bus are workspace-relative (`<kbDir>/...`); only writes
-      // to files the scan reads can move references.
+      // Paths on the bus are workspace-relative; only writes UNDER the KB dir
+      // to files the scan reads can move references — a `.md` elsewhere in
+      // the workspace is not scan material.
+      if (!event.path.startsWith(`${this.kbDirName}/`)) return;
       if (!hasAccessFrontmatterExtension(event.path)) return;
       this.invalidate(event.workspaceId);
     });
@@ -307,6 +316,7 @@ export class KbReferenceScanner {
 
   invalidate(workspaceId: string): void {
     this.cache.delete(workspaceId);
+    this.generation.set(workspaceId, (this.generation.get(workspaceId) ?? 0) + 1);
   }
 
   /**
@@ -353,6 +363,7 @@ export class KbReferenceScanner {
     const hit = this.cache.get(workspaceId);
     if (hit && Date.now() - hit.loadedAt < SCAN_TTL_MS) return hit.byToken;
 
+    const startedUnder = this.generation.get(workspaceId) ?? 0;
     const repoDir = await this.repoDir(workspaceId);
     const candidates = await this.collectCandidateFiles(workspaceId);
     const texts = await Promise.all(
@@ -374,7 +385,12 @@ export class KbReferenceScanner {
         else byToken.set(ref.role, [{ path: repoRel, verb: ref.verb }]);
       }
     });
-    this.cache.set(workspaceId, { loadedAt: Date.now(), byToken });
+    // Cache only when no invalidation landed mid-scan; the caller still gets
+    // this snapshot (at worst one write stale — same as the pre-scan world),
+    // but a stale snapshot must never STICK for a TTL. The next call re-scans.
+    if ((this.generation.get(workspaceId) ?? 0) === startedUnder) {
+      this.cache.set(workspaceId, { loadedAt: Date.now(), byToken });
+    }
     return byToken;
   }
 

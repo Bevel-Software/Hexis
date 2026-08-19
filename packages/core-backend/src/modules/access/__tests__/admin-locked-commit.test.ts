@@ -102,6 +102,36 @@ describe('AdminLockedCommits.withFileLocks — release semantics', () => {
     }
   });
 
+  it('POST-COMMIT FAILURE: fn throwing after the batch landed still releases committed paths without the queue', async () => {
+    // The commit+push succeeded; a later step inside fn (roster read, event
+    // emission) blew up. The failure says nothing about the tree — the
+    // committed paths are clean, and enqueueing a release commit for them
+    // risks stranding a known-clean lock on a broken queue.
+    const h = makeHarness({ releaseLockError: new Error('enqueue exploded') });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(
+        h.locked.withFileLocks(WS, ACTOR, ['groups.yaml', 'roles.yaml'], async () => {
+          await h.locked.writeAndCommitLocked(
+            WS,
+            ACTOR,
+            [
+              { repoRel: 'groups.yaml', content: 'groups: {}\n', original: null },
+              { repoRel: 'roles.yaml', content: 'roles: {}\n', original: 'roles:\n' },
+            ],
+            'test commit',
+          );
+          throw new Error('post-commit boom');
+        }),
+      ).rejects.toThrow(/post-commit boom/);
+      expect(h.locks.size).toBe(0); // ZERO held locks
+      expect(h.releaseNoCommitCalls.sort()).toEqual([`${KB}/groups.yaml`, `${KB}/roles.yaml`]);
+      expect(h.releaseLockCalls).toEqual([]); // the queue was never touched
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('SUCCESS: a held path the batch never committed keeps commit-on-release (releaseLock)', async () => {
     // A prior holder's queued work could still be dirty on such a path — a
     // discard would destroy it, so the untouched lock releases the old way.
