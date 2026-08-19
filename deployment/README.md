@@ -12,6 +12,28 @@ folder: `docker-compose.yml` (the base every deployment uses) and
 `docker-compose.override.yml` (the local-quickstart port publish — Compose
 only auto-merges it under exactly that name in the project root).
 
+## docker-compose.image.yml — run the published image, skip the build
+
+Uses `ghcr.io/bevel-software/hexis` (published by CI on every release)
+instead of compiling the monorepo on your server. No Node toolchain, no
+multi-minute build, and a small instance suffices — the source build is
+exactly what needed the memory.
+
+```sh
+docker compose -f docker-compose.yml -f deployment/docker-compose.image.yml up -d
+```
+
+Pin the version in `.env` so upgrades are deliberate:
+
+```sh
+HEXIS_VERSION=0.9.1
+```
+
+Upgrade = bump the value, then
+`docker compose -f docker-compose.yml -f deployment/docker-compose.image.yml pull app && docker compose -f docker-compose.yml -f deployment/docker-compose.image.yml up -d`.
+Unset, the tag is `latest` (the newest release) — fine for a first install, a
+footgun after: an unplanned `pull` becomes an unplanned upgrade.
+
 ## docker-compose.https.yml — public HTTPS without a reverse proxy
 
 For a server that has no proxy of its own: a bare EC2 instance, a plain VPS.
@@ -46,3 +68,19 @@ Worth knowing:
 - Already behind Coolify, Traefik or nginx? Skip this overlay — that proxy
   terminates TLS, and the base file alone is the right shape (see the main
   README's reverse-proxy section).
+
+## Combining overlays
+
+Overlays stack — pass every one that applies. The typical bare-EC2 install
+wants both:
+
+```sh
+DOMAIN=bevel.your-domain.com docker compose \
+  -f docker-compose.yml \
+  -f deployment/docker-compose.image.yml \
+  -f deployment/docker-compose.https.yml up -d
+```
+
+TLS never lives in the app image: the published image is the app alone, and
+Caddy runs beside it from the stock `caddy:2-alpine` image — which is what
+lets each overlay make sense without the other.

@@ -151,8 +151,12 @@ PUBLIC_BACKEND_URL=https://bevel.your-domain.com   # public origin; OAuth redire
 PUBLIC_FRONTEND_URL=https://bevel.your-domain.com  # same origin: the backend serves the SPA
 ```
 
-Then start everything (Postgres + the app). **Behind a reverse proxy**
-(Coolify, Traefik, nginx; recommended):
+Then start everything (Postgres + the app). Add
+`-f deployment/docker-compose.image.yml` to any variant below to pull the
+[prebuilt image](deployment/README.md) instead of compiling the monorepo on
+your server — faster, and a small instance suffices.
+
+**Behind a reverse proxy** (Coolify, Traefik, nginx; recommended):
 
 ```sh
 docker compose -f docker-compose.yml up -d
