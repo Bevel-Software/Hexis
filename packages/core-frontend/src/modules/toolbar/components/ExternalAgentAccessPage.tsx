@@ -216,7 +216,7 @@ export function ExternalAgentAccessPage() {
                 Desktop agents: Claude Code, Claude Desktop, Cursor, Windsurf, Cline and similar
               </summary>
               <div className="px-3 pb-3 space-y-2">
-                <p className="text-[11px] text-ink-muted leading-snug">
+                <p className="text-meta text-ink-muted leading-snug">
                   Recommended: runs this workspace as a local MCP server (needs Node), so the
                   agent gets everything the hosted endpoint serves, plus your plugins'
                   local-only tools — the ones{' '}
@@ -237,7 +237,7 @@ export function ExternalAgentAccessPage() {
                   rows={3}
                 />
                 <div>
-                  <p className="text-[11px] text-ink-muted mb-1 leading-snug">
+                  <p className="text-meta text-ink-muted mb-1 leading-snug">
                     Cursor, Windsurf and Cline take this JSON in their MCP config. Claude
                     Desktop takes it too, in its config file: Settings → Developer → Edit
                     Config (its Connectors UI only adds remote servers).
@@ -252,7 +252,7 @@ export function ExternalAgentAccessPage() {
                 Any other agent
               </summary>
               <div className="px-3 pb-3 space-y-3">
-                <p className="text-[11px] text-ink-muted leading-snug">
+                <p className="text-meta text-ink-muted leading-snug">
                   claude.ai, ChatGPT and other agents that can't run a process on your machine
                   connect to the hosted endpoint. No key needed: the first time the agent
                   connects, your browser opens so you can sign in and choose which tools to
@@ -481,7 +481,7 @@ export function ExternalAgentAccessPage() {
                 <div className="text-xs font-medium text-ink mb-1">
                   Desktop agents — the local server (recommended)
                 </div>
-                <p className="text-[11px] text-ink-muted mb-1 leading-snug">
+                <p className="text-meta text-ink-muted mb-1 leading-snug">
                   For agents that run on your machine: Claude Code, Claude Desktop, Cursor,
                   Windsurf, Cline and similar. Runs this workspace as a local MCP server (needs
                   Node): the agent gets everything the hosted endpoint serves, plus your
@@ -491,10 +491,10 @@ export function ExternalAgentAccessPage() {
                   readOnly
                   value={hexisMcpClaudeCommand(workspaceUrl, reveal.plaintext)}
                   rows={3}
-                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                  className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
                 />
-                <p className="text-[11px] text-ink-muted mt-2 mb-1 leading-snug">
+                <p className="text-meta text-ink-muted mt-2 mb-1 leading-snug">
                   Or as a JSON config, for Claude Desktop, Cursor, Windsurf, Cline and
                   similar:
                 </p>
@@ -502,7 +502,7 @@ export function ExternalAgentAccessPage() {
                   readOnly
                   value={hexisMcpJsonSnippet(workspaceUrl, reveal.plaintext)}
                   rows={13}
-                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                  className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
                 />
               </div>
@@ -510,7 +510,7 @@ export function ExternalAgentAccessPage() {
                 <div className="text-xs font-medium text-ink mb-1">
                   Web agents and pipelines — the hosted endpoint
                 </div>
-                <p className="text-[11px] text-ink-muted mb-1 leading-snug">
+                <p className="text-meta text-ink-muted mb-1 leading-snug">
                   For agents that can't run a process on your machine, and for CI where
                   installing Node is unwanted. Claude Code, via the hosted endpoint:
                 </p>
