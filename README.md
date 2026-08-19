@@ -126,9 +126,9 @@ Grab the two deployment files — no clone needed:
 
 ```sh
 mkdir hexis && cd hexis
-# v0.9.1 below = the release this page was written against; replace with the latest release tag
-wget https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.9.1/docker-compose.yml
-wget -O .env https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.9.1/.env.example
+# v0.10.0 below = the release this page was written against; replace with the latest release tag
+wget https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.10.0/docker-compose.yml
+wget -O .env https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.10.0/.env.example
 ```
 
 (Working from a git clone works identically — both files sit at the repo root;
@@ -159,7 +159,7 @@ DOMAIN=bevel.your-domain.com
 
 Then start everything. Deploying **pulls the image CI publishes on every
 release** — nothing compiles on your server, so a small instance suffices.
-Pin the version in `.env` (`HEXIS_VERSION=0.9.1`) so a later `pull` can't
+Pin the version in `.env` (`HEXIS_VERSION=0.10.0`) so a later `pull` can't
 become an unplanned upgrade — [UPGRADING.md](UPGRADING.md) covers upgrades
 and backups. Building from source instead (a staging server tracking a
 branch, a fork) is
@@ -206,7 +206,7 @@ the app on localhost. A clone already has it; next to the wget'd files, fetch
 it too:
 
 ```sh
-wget https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.9.1/docker-compose.override.yml
+wget https://raw.githubusercontent.com/Bevel-Software/Hexis/v0.10.0/docker-compose.override.yml
 docker compose up -d
 ```
 

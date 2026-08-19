@@ -38,7 +38,7 @@
         {
           "name": "HEXIS_VERSION",
           "label": "Version",
-          "default": "0.9.1",
+          "default": "0.10.0",
           "description": "Release to run (the published image tag). Pin it; bump deliberately to upgrade."
         }
       ]

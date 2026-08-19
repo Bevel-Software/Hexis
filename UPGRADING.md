@@ -2,7 +2,7 @@
 
 ## Upgrading
 
-Pin the version you run in `.env` (`HEXIS_VERSION=0.9.1`) — left unset it
+Pin the version you run in `.env` (`HEXIS_VERSION=0.10.0`) — left unset it
 tracks `latest`, and an unplanned `pull` becomes an unplanned upgrade.
 
 The app tells you when it's time: admins see an in-app banner when a newer

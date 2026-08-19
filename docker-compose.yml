@@ -28,7 +28,7 @@ services:
 
   app:
     # The image CI publishes on every release — deploying does not compile
-    # anything. Pin the version in `.env` (`HEXIS_VERSION=0.9.1`) so an
+    # anything. Pin the version in `.env` (`HEXIS_VERSION=0.10.0`) so an
     # upgrade is a deliberate act: bump the value, `docker compose pull app`,
     # `up -d`. Left unset it tracks `latest` (the newest release) — right for
     # a first install, a footgun after: an unplanned `pull` becomes an
