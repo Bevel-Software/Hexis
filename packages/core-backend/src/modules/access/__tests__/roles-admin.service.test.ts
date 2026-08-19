@@ -9,7 +9,9 @@ import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { FileTreeEntry, WorkflowEventPayload } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../access-control.service.js';
-import { RolesAdminService, rewriteRoleTokensInText, findRoleRefsInText } from '../roles-admin.service.js';
+import { RolesAdminService } from '../roles-admin.service.js';
+import { rewriteRoleTokensInText, findRoleRefsInText } from '../reference-scan.js';
+import { PushNeedsAgentResolutionError } from '../../workflow/workflow.errors.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 
@@ -298,42 +300,29 @@ describe('RolesAdminService', () => {
     expect(await readRoles()).not.toContain('juan@bevel.software');
   });
 
-  it('createRole rejects reserved/duplicate; deleteRole refuses Admin', async () => {
-    await expect(svc.createRole(ADMIN, 'everyone')).rejects.toMatchObject({ status: 422 });
-    await expect(svc.createRole(ADMIN, 'Sales')).rejects.toMatchObject({ status: 422 });
-    await expect(svc.deleteRole(ADMIN, 'admin')).rejects.toMatchObject({ status: 422 });
-    await svc.createRole(ADMIN, 'Marketing');
-    expect(await readRoles()).toContain('Marketing: []');
+  it('role CRUD is GONE from the service — roles are app-defined capabilities', () => {
+    // The editors were removed outright, not just un-routed: legacy roles stay
+    // membership-editable, but nothing can mint/rename/delete a role anymore.
+    const anySvc = svc as unknown as Record<string, unknown>;
+    expect(anySvc.createRole).toBeUndefined();
+    expect(anySvc.renameRole).toBeUndefined();
+    expect(anySvc.deleteRole).toBeUndefined();
   });
 
-  it('rename: Admin canonical change is refused (400); casing-only allowed', async () => {
-    await expect(svc.renameRole(ADMIN, 'admin', 'Administrators')).rejects.toMatchObject({ status: 400 });
-    await svc.renameRole(ADMIN, 'admin', 'ADMIN'); // casing-only OK
-    const roster = await svc.getRoster();
-    expect(roster.find((r) => r.canonical === 'admin')!.displayName).toBe('ADMIN');
-  });
-
-  it('rename (identity change) rewrites access.md AND node frontmatter in ONE commit', async () => {
-    await write(repo, 'Sales/access.md', `---\nwrite:\n  - Sales\n  - Other Team\n---\n# Sales folder\n`);
-    await write(repo, 'Sales/Deal.md', `---\nowner: Sales\n---\n# A deal\n`);
-    access.invalidate(WS);
-    const commitsBefore = workflow.commits.length;
-
-    await svc.renameRole(ADMIN, 'sales', 'Sales Team');
-
-    // roles.yaml + both referencing files, all in a single commit (verified by
-    // commits.length += 1; the per-file content is asserted on disk below).
-    expect(workflow.commits.length).toBe(commitsBefore + 1);
-    expect(await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8')).toContain('- Sales Team');
-    expect(await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8')).toContain('- Other Team'); // untouched
-    expect(await fs.readFile(path.join(repo, 'Sales/Deal.md'), 'utf-8')).toContain('owner: Sales Team');
-    expect(await readRoles()).toContain('Sales Team:');
+  it("addMember refuses a 'group:'-prefixed member with an actionable message", async () => {
+    await expect(svc.addMember(ADMIN, 'sales', 'group:lee@x.io')).rejects.toMatchObject({
+      status: 422,
+    });
+    await expect(svc.addMember(ADMIN, 'sales', 'group:gtm team')).rejects.toThrow(/group assignment/);
+    expect(await readRoles()).not.toContain('group:');
   });
 
   it('LOCKOUT-IMPOSSIBILITY: the validator rejects garbage in isolation', async () => {
     expect(access.validateRolesYaml('roles:\n  : []\n').ok).toBe(false);
+    // Group-only Admin is garbage too — the kept invariant.
+    expect(access.validateRolesYaml('roles:\n  Admin:\n    - group:ops\n').ok).toBe(false);
     // Happy path still keeps admins resolving (sanity baseline for the gate).
-    await svc.createRole(ADMIN, 'Marketing');
+    await svc.addMember(ADMIN, 'sales', 'marketing@example.com');
     expect(await access.canWrite(WS, 'razvan@bevel.software', 'roles.yaml')).toBe(true);
   });
 
@@ -348,7 +337,7 @@ describe('RolesAdminService', () => {
     const realValidate = access.validateRolesYaml.bind(access);
     access.validateRolesYaml = () => ({ ok: false, errors: ['forced parse failure'] });
     try {
-      await expect(svc.createRole(ADMIN, 'Marketing')).rejects.toMatchObject({ status: 422 });
+      await expect(svc.addMember(ADMIN, 'sales', 'x@example.com')).rejects.toMatchObject({ status: 422 });
     } finally {
       access.validateRolesYaml = realValidate;
     }
@@ -357,31 +346,30 @@ describe('RolesAdminService', () => {
     expect(await access.canWrite(WS, 'razvan@bevel.software', 'roles.yaml')).toBe(true);
   });
 
-  it('rename fails closed when a candidate cannot be read (no partial rewrite)', async () => {
-    // A referenced file that the rewrite cannot read must abort the WHOLE atomic
-    // rename — committing roles.yaml + the readable files while silently skipping
-    // the unreadable one would leave a half-renamed role pointing at the old name
-    // (lost access). Assert: the op throws, nothing is committed, roles.yaml is
-    // unchanged, and the role keeps its old identity.
-    await write(repo, 'Sales/access.md', `---\nwrite:\n  - Sales\n---\n# Sales\n`);
-    access.invalidate(WS);
-    const before = await readRoles();
-    const commitsBefore = workflow.commits.length;
-    // Point the candidate list at a path that does not exist on disk, so the
-    // rewrite's readFile throws and the fail-closed guard fires.
-    (ws as unknown as { listFiles: () => Promise<FileTreeEntry> }).listFiles = async () => ({
-      name: WS,
-      relativePath: '.',
-      type: 'directory',
-      children: [
-        { name: 'does-not-exist.md', relativePath: `${KB}/Sales/does-not-exist.md`, type: 'file' },
-      ],
+  it('a post-commit push failure does NOT revert the landed edit (saved; retried later)', async () => {
+    // workflowService.commitChanges throwing PushNeedsAgentResolutionError
+    // means the COMMIT landed and only the push needs help. The old twins
+    // restored pre-edit bytes here — publishing a compensating revert of a
+    // landed commit. The shared helper must keep the new bytes and surface
+    // the typed 409 as-is.
+    const failing = workflow.svc as unknown as {
+      commitChanges: (...args: unknown[]) => Promise<unknown>;
+    };
+    const realCommit = failing.commitChanges.bind(workflow.svc);
+    failing.commitChanges = async (...args: unknown[]) => {
+      await realCommit(...args); // the commit records — it "landed"
+      throw new PushNeedsAgentResolutionError(DEFAULT_BRANCH, 'roles.yaml', 'rejected', 'conflict');
+    };
+    await expect(svc.addMember(ADMIN, 'sales', 'pushed@example.com')).rejects.toMatchObject({
+      status: 409,
+      payload: { kind: 'push-needs-resolution' },
     });
-
-    await expect(svc.renameRole(ADMIN, 'sales', 'Sales Team')).rejects.toMatchObject({ status: 422 });
-
-    expect(workflow.commits.length).toBe(commitsBefore); // nothing committed
-    expect(await readRoles()).toBe(before); // roles.yaml untouched — role keeps old identity
+    // The edit SURVIVES on disk — no compensating restore of pre-edit bytes.
+    expect(await readRoles()).toContain('pushed@example.com');
+    // And the lock was released normally (a follow-up edit works).
+    failing.commitChanges = realCommit;
+    await svc.addMember(ADMIN, 'sales', 'after@example.com');
+    expect(await readRoles()).toContain('after@example.com');
   });
 
   it('concurrent edit is serialized — a mutation 409s while another admin holds the lock', async () => {
@@ -405,21 +393,6 @@ describe('RolesAdminService', () => {
     expect(bus.events).toHaveLength(0);
   });
 
-  it('rename emits file-changed for EVERY rewritten file (roles.yaml + refs)', async () => {
-    await write(repo, 'Sales/access.md', `---\nwrite:\n  - Sales\n---\n# Sales\n`);
-    await write(repo, 'Sales/Deal.md', `---\nowner: Sales\n---\n# A deal\n`);
-    access.invalidate(WS);
-
-    await svc.renameRole(ADMIN, 'sales', 'Sales Team');
-
-    const paths = bus.events
-      .filter((e) => e.kind === 'file-changed')
-      .map((e) => (e as { path: string }).path)
-      .sort();
-    expect(paths).toEqual(
-      [`${KB}/roles.yaml`, `${KB}/Sales/access.md`, `${KB}/Sales/Deal.md`].sort(),
-    );
-  });
 });
 
 describe('rewriteRoleTokensInText (reference-aware, frontmatter-only)', () => {

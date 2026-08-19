@@ -12,11 +12,14 @@ import type { Database } from '../../database/connection.js';
 import { createAccessRoutes } from '../access.routes.js';
 
 /**
- * HTTP-level contract tests for GROUP principals on the share surface: the
- * grant route's group grammar + validation (active-source membership,
- * plugin-name precedence refusal), the suggest endpoint's `groups` list, and
- * revoke accepting the group kind. The splice below the route is the same
- * bare-name token a plugin grant writes — these tests pin the ROUTE layer.
+ * HTTP-level contract tests for GROUP and ROLE principals on the share
+ * surface: the grant route's grammar (groups splice as the bare token, roles
+ * as the explicit `role/<Name>` token), the dropped collision refusals
+ * (precedence resolves them now), the suggest endpoint's `roles`+`groups`
+ * lists (with the deprecated `plugins` alias), and revoke accepting the group
+ * kind. These pin the ROUTE layer; the RESOLVER's group-first precedence and
+ * the real kbPrincipals shape are covered in access-groups.test.ts /
+ * access-mutation.service.test.ts against the real service.
  */
 
 const USER = { id: 'u-1', email: 'alice@bevel.software', name: 'Alice' };
@@ -25,7 +28,8 @@ const KB = 'knowledge-base';
 
 async function makeHarness(opts: {
   files?: Record<string, string>;
-  plugins?: string[];
+  roles?: string[];
+  groups?: string[];
 }): Promise<{ server: Server; baseUrl: string; files: Map<string, string> }> {
   const files = new Map<string, string>(Object.entries(opts.files ?? {}));
 
@@ -36,7 +40,11 @@ async function makeHarness(opts: {
     canOwner: vi.fn(async () => false),
     grantSources: vi.fn(async () => ({})),
     invalidate: vi.fn(),
-    kbPrincipals: vi.fn(async () => ({ plugins: opts.plugins ?? [], people: [] })),
+    kbPrincipals: vi.fn(async () => ({
+      roles: opts.roles ?? [],
+      groups: opts.groups ?? [],
+      people: [],
+    })),
     eligibleWriters: vi.fn(async () => ({ roles: [], users: [] })),
     eligibleReaders: vi.fn(async () => ({ restricted: true, roles: [], users: [] })),
     eligibleOwners: vi.fn(async () => ({ roles: [], users: [] })),
@@ -88,8 +96,6 @@ function close(s: Server): Promise<void> {
   return new Promise((resolve, reject) => s.close((e) => (e ? reject(e) : resolve())));
 }
 
-const GROUPS_FILE = 'groups:\n  GTM Team:\n    - pat@x.io\n  Product:\n    - lee@x.io\n';
-
 describe('group principals on the share surface', () => {
   let h: Awaited<ReturnType<typeof makeHarness>> | null = null;
   afterEach(async () => {
@@ -104,8 +110,8 @@ describe('group principals on the share surface', () => {
       body: JSON.stringify(body),
     });
 
-  it('grants read to a known manual group — spliced as the bare-name token', async () => {
-    h = await makeHarness({ files: { [`${KB}/groups.yaml`]: GROUPS_FILE } });
+  it('grants read to a known group — spliced as the bare-name token', async () => {
+    h = await makeHarness({ groups: ['GTM Team', 'Product'] });
     const res = await post('grant', {
       path: `${KB}/Sales`,
       kind: 'folder',
@@ -113,36 +119,39 @@ describe('group principals on the share surface', () => {
       principal: { kind: 'group', group: 'GTM Team' },
     });
     expect(res.status).toBe(200);
-    expect(h.files.get(`${KB}/Sales/access.md`)).toContain('GTM Team');
+    const md = h.files.get(`${KB}/Sales/access.md`)!;
+    expect(md).toContain('- GTM Team');
+    expect(md).not.toContain('role/'); // a GROUP grant is the bare token
   });
 
-  it('grants to a synced group when the deployment is in IdP mode', async () => {
-    h = await makeHarness({
-      files: {
-        // Synced file present → it IS the active source; the manual file is ignored.
-        [`${KB}/synced-groups.yaml`]: 'groups:\n  Engineering:\n    - ada@x.io\n',
-        [`${KB}/groups.yaml`]: GROUPS_FILE,
-      },
+  it('grants a ROLE as the explicit role/<Name> token', async () => {
+    h = await makeHarness({ roles: ['Everyone', 'Sales'] });
+    const res = await post('grant', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      verb: 'write',
+      principal: { kind: 'role', role: 'Sales' },
     });
-    const ok = await post('grant', {
+    expect(res.status).toBe(200);
+    expect(h.files.get(`${KB}/Sales/access.md`)).toContain('- role/Sales');
+  });
+
+  it('the built-in everyone grant stays a bare token (no role/ alias exists for it)', async () => {
+    h = await makeHarness({ roles: ['Everyone'] });
+    const res = await post('grant', {
       path: `${KB}/Sales`,
       kind: 'folder',
       verb: 'read',
-      principal: { kind: 'group', group: 'Engineering' },
+      principal: { kind: 'role', role: 'Everyone' },
     });
-    expect(ok.status).toBe(200);
-    // The retired manual file no longer validates grants.
-    const stale = await post('grant', {
-      path: `${KB}/Sales`,
-      kind: 'folder',
-      verb: 'read',
-      principal: { kind: 'group', group: 'GTM Team' },
-    });
-    expect(stale.status).toBe(404);
+    expect(res.status).toBe(200);
+    const md = h.files.get(`${KB}/Sales/access.md`)!;
+    expect(md).toContain('- Everyone');
+    expect(md).not.toContain('role/Everyone');
   });
 
   it('404s an unknown group with a typed body', async () => {
-    h = await makeHarness({ files: { [`${KB}/groups.yaml`]: GROUPS_FILE } });
+    h = await makeHarness({ groups: ['GTM Team'] });
     const res = await post('grant', {
       path: `${KB}/Sales`,
       kind: 'folder',
@@ -153,39 +162,56 @@ describe('group principals on the share surface', () => {
     expect(await res.json()).toMatchObject({ kind: 'unknown-group', group: 'Ghost Team' });
   });
 
-  it('refuses a group whose name a plugin already owns (plugin precedence)', async () => {
-    h = await makeHarness({
-      files: { [`${KB}/groups.yaml`]: GROUPS_FILE },
-      plugins: ['Product'],
-    });
+  it('404s an unknown role with a typed body', async () => {
+    h = await makeHarness({ roles: ['Everyone'] });
     const res = await post('grant', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      verb: 'write',
+      principal: { kind: 'role', role: 'Ghost Role' },
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ kind: 'unknown-role', role: 'Ghost Role' });
+  });
+
+  it('a group sharing a role name is grantable — precedence resolves it (no refusal)', async () => {
+    h = await makeHarness({ roles: ['Everyone', 'Product'], groups: ['Product'] });
+    const asGroup = await post('grant', {
       path: `${KB}/Sales`,
       kind: 'folder',
       verb: 'read',
       principal: { kind: 'group', group: 'Product' },
     });
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toContain('is a plugin');
+    expect(asGroup.status).toBe(200);
+    expect(h.files.get(`${KB}/Sales/access.md`)).toContain('- Product');
+    // The ROLE of the same name grants as the explicit token, side by side.
+    const asRole = await post('grant', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      verb: 'write',
+      principal: { kind: 'role', role: 'Product' },
+    });
+    expect(asRole.status).toBe(200);
+    expect(h.files.get(`${KB}/Sales/access.md`)).toContain('- role/Product');
   });
 
-  it('suggest lists active groups, withholding plugin-name collisions', async () => {
-    h = await makeHarness({
-      files: { [`${KB}/groups.yaml`]: GROUPS_FILE },
-      plugins: ['Product'],
-    });
+  it('suggest lists roles + groups without collision withholding, plus the deprecated plugins alias', async () => {
+    h = await makeHarness({ roles: ['Everyone', 'Product'], groups: ['GTM Team', 'Product'] });
     const res = await fetch(
       `${h.baseUrl}/api/workspace/${encodeURIComponent(WS)}/access/suggest?q=`,
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { plugins: string[]; groups: string[] };
-    expect(body.groups).toEqual(['GTM Team']); // Product withheld: the plugin wins
-    expect(body.plugins).toEqual(['Product']);
+    const body = (await res.json()) as { roles: string[]; groups: string[]; plugins: string[] };
+    expect(body.groups).toEqual(['GTM Team', 'Product']); // nothing withheld
+    expect(body.roles).toEqual(['Everyone', 'Product']);
+    // Deprecated alias — keeps the shipped dialog alive for one release.
+    expect(body.plugins).toEqual(body.roles);
   });
 
   it('revokes with a group principal (name-based, no existence check)', async () => {
     h = await makeHarness({
+      groups: ['GTM Team'],
       files: {
-        [`${KB}/groups.yaml`]: GROUPS_FILE,
         [`${KB}/Sales/access.md`]: '---\nread:\n  - Vanished Team\n---\n',
       },
     });
@@ -196,5 +222,23 @@ describe('group principals on the share surface', () => {
     });
     expect(res.status).toBe(200);
     expect(h.files.get(`${KB}/Sales/access.md`)).not.toContain('Vanished Team');
+  });
+
+  it('revoking a ROLE strips both spellings (legacy bare + role/ token)', async () => {
+    h = await makeHarness({
+      roles: ['Everyone', 'Sales'],
+      files: {
+        [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Sales\n  - role/Sales\n  - Admin\n---\n',
+      },
+    });
+    const res = await post('revoke', {
+      path: `${KB}/Sales`,
+      kind: 'folder',
+      principal: { kind: 'role', role: 'Sales' },
+    });
+    expect(res.status).toBe(200);
+    const md = h.files.get(`${KB}/Sales/access.md`)!;
+    expect(md).not.toContain('Sales');
+    expect(md).toContain('- Admin'); // untouched
   });
 });

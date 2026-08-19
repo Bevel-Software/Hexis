@@ -135,6 +135,54 @@ describe('group files as access principals', () => {
     expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(false);
   });
 
+  it('BROKEN groups degrade loudly: bare tokens fall through to roles, health marker set', async () => {
+    const svc = await makeService({
+      'roles.yaml': `roles:\n  Admin:\n    - admin@x.io\n  Engineering:\n    - lead@x.io\n`,
+      // Structurally broken manual file — groups contribute nothing…
+      'groups.yaml': 'groups:\n  - not\n  - a\n  - mapping\n',
+      'access.md': '---\nread:\n  - Engineering\n---\n',
+    });
+    // …and the bare token falls through to the ROLE per precedence, so
+    // access control keeps working (owner's degrade decision, not fail-closed).
+    expect(await svc.canRead(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(true);
+    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(false);
+
+    // The load-level health marker names the file and the reason.
+    const { loadActiveGroups } = await import('../access-control.service.js');
+    const active = await loadActiveGroups(async (f) =>
+      f === 'groups.yaml' ? 'groups:\n  - not\n  - a\n  - mapping\n' : null,
+    );
+    expect(active.groups.size).toBe(0);
+    expect(active.health).toMatchObject({ ok: false, file: 'groups.yaml' });
+    expect((active.health as { reason?: string }).reason).toMatch(/mapping|list/i);
+  });
+
+  it('a non-absence READ error on synced-groups.yaml is broken-groups, never a manual fallback', async () => {
+    const { loadActiveGroups } = await import('../access-control.service.js');
+    const active = await loadActiveGroups(async (f) => {
+      if (f === 'synced-groups.yaml') {
+        const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      // A fallback would read the manual file and resurrect retired groups.
+      return 'groups:\n  Retired Team:\n    - ghost@x.io\n';
+    });
+    expect(active.groups.size).toBe(0); // NOT the retired manual groups
+    expect(active.health).toMatchObject({ ok: false, file: 'synced-groups.yaml' });
+    // While genuine absence (ENOENT) still means manual mode:
+    const manual = await loadActiveGroups(async (f) => {
+      if (f === 'synced-groups.yaml') {
+        const err = new Error('ENOENT') as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        throw err;
+      }
+      return 'groups:\n  Live Team:\n    - here@x.io\n';
+    });
+    expect(manual.health).toEqual({ ok: true });
+    expect([...manual.groups.keys()]).toEqual(['live team']);
+  });
+
   it('a malformed synced file keeps IdP mode (no fallback to manual groups)', async () => {
     const svc = await makeService({
       'roles.yaml': ROLES_YAML,
@@ -146,30 +194,56 @@ describe('group files as access principals', () => {
     expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(false);
   });
 
-  it('a group colliding with a role name is excluded from resolution', async () => {
+  it('a bare name shared by a group and a role resolves to the GROUP (grant side)', async () => {
     const svc = await makeService({
       'roles.yaml': `roles:\n  Admin:\n    - admin@x.io\n  Engineering:\n    - lead@x.io\n`,
       // The group "Engineering" collides with the ROLE Engineering.
       'groups.yaml': GROUPS_YAML_TEXT,
       'access.md': '---\nread:\n  - Engineering\n---\n',
     });
-    // The role's member reads; the collided GROUP's members do not — the
-    // grant resolves against the role, never the shadowing group.
-    expect(await svc.canRead(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(true);
-    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(false);
+    // Group-first precedence: the group's members read; the role's member no
+    // longer resolves through the bare token (use role/Engineering for that).
+    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(true);
+    expect(await svc.canRead(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(false);
+    // The display surface resolves the bare token to the group too.
+    const readers = await svc.eligibleReaders(workspaceId, 'Knowledge/Doc.md');
+    expect(readers.roles).toContain('Engineering');
   });
 
-  it('an Entra group named Admin can never shadow the Admin role', async () => {
+  it('a bare-name DENY resolves to the group; role/<Name> reaches the role (writers included)', async () => {
+    const svc = await makeService({
+      'roles.yaml': `roles:\n  Admin:\n    - admin@x.io\n  Engineering:\n    - lead@x.io\n`,
+      'groups.yaml': GROUPS_YAML_TEXT,
+      'access.md':
+        '---\nread:\n  - everyone\n  - deny Engineering\nwrite:\n  - role/Engineering\n---\n',
+    });
+    // The deny bites the GROUP's members, not the role's.
+    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(false);
+    expect(await svc.canRead(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(true);
+    // The explicit token grants the ROLE write.
+    expect(await svc.canWrite(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(true);
+    expect(await svc.canWrite(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(false);
+    // eligibleWriters resolves the explicit token to the role's display name.
+    const writers = await svc.eligibleWriters(workspaceId, 'Knowledge/Doc.md');
+    expect(writers.roles).toContain('Engineering');
+  });
+
+  it('role/Admin resolves to the ROLE even when a synced group is named Admin', async () => {
     const svc = await makeService({
       'roles.yaml': ROLES_YAML,
       'synced-groups.yaml': 'groups:\n  Admin:\n    - attacker@evil.io\n',
-      'access.md': '---\nwrite:\n  - Admin\n---\n',
+      'access.md': '---\nwrite:\n  - role/Admin\nread:\n  - Admin\n---\n',
     });
+    // The explicit token is the role — the shadowing group gets nothing here.
     expect(await svc.canWrite(workspaceId, 'admin@x.io', 'Knowledge/Doc.md')).toBe(true);
     expect(await svc.canWrite(workspaceId, 'attacker@evil.io', 'Knowledge/Doc.md')).toBe(false);
-    // And the collided group grants nothing anywhere — including roles.yaml
-    // write, which is a pure is-admin check.
+    // The BARE token is the group now (group-first): its member reads.
+    expect(await svc.canRead(workspaceId, 'attacker@evil.io', 'Knowledge/Doc.md')).toBe(true);
+    // Admin CAPABILITY never leaks to the group: roles.yaml write is a pure
+    // is-admin check keyed on the role, and admin-rescue keeps working.
     expect(await svc.canWrite(workspaceId, 'attacker@evil.io', 'roles.yaml')).toBe(false);
+    expect(await svc.canWrite(workspaceId, 'admin@x.io', 'roles.yaml')).toBe(true);
+    expect(await svc.canWrite(workspaceId, 'admin@x.io', 'access.md')).toBe(true);
   });
 
   it('assigning a role to a group (`group:` ref) expands through membership', async () => {
@@ -195,16 +269,31 @@ describe('group files as access principals', () => {
     expect(await svc.canRead(workspaceId, 'rev@x.io', 'Knowledge/Doc.md')).toBe(true);
   });
 
-  it('refuses a group-assigned Admin role at parse and at load', async () => {
-    const bad = `roles:\n  Admin:\n    - admin@x.io\n    - group:Platform Admins\n`;
+  it('Admin group refs are allowed (NEW) and expand to admin capability', async () => {
+    const withRef = `roles:\n  Admin:\n    - admin@x.io\n    - group:Platform Admins\n`;
+    expect(parseRolesYaml(withRef).ok).toBe(true);
+    const svc = await makeService({
+      'roles.yaml': withRef,
+      'groups.yaml': 'groups:\n  Platform Admins:\n    - ops@x.io\n',
+      'access.md': '---\nwrite:\n  - role/Admin\n---\n',
+    });
+    // Group members expand into the Admin ROLE — capability included.
+    expect(await svc.canWrite(workspaceId, 'ops@x.io', 'Knowledge/Doc.md')).toBe(true);
+    expect(await svc.canWrite(workspaceId, 'ops@x.io', 'roles.yaml')).toBe(true);
+    expect(await svc.canWrite(workspaceId, 'admin@x.io', 'roles.yaml')).toBe(true);
+  });
+
+  it('a group-ONLY Admin is refused at parse and hard-errors at load (kept invariant)', async () => {
+    const bad = `roles:\n  Admin:\n    - group:Platform Admins\n`;
     const parsed = parseRolesYaml(bad);
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) {
-      expect(parsed.errors.join(' ')).toMatch(/Admin.*individual emails/);
+      expect(parsed.errors.join(' ')).toMatch(/direct email/);
     }
 
     const svc = await makeService({
       'roles.yaml': bad,
+      'groups.yaml': 'groups:\n  Platform Admins:\n    - ops@x.io\n',
       'access.md': '---\nwrite:\n  - Admin\n---\n',
     });
     await expect(svc.canWrite(workspaceId, 'admin@x.io', 'Knowledge/Doc.md')).rejects.toThrow(

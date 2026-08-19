@@ -131,7 +131,7 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
   it('roster: capability metadata, legacy flag, and members/groups split', async () => {
     const roster = await service.getRoster();
     const admin = roster.find((r) => r.canonical === 'admin')!;
-    expect(admin.capability).toMatchObject({ groupAssignable: false });
+    expect(admin.capability).toMatchObject({ groupAssignable: true });
     expect(admin.capability?.description).toContain('configuration');
 
     const creator = roster.find((r) => r.canonical === 'plugin creator')!;
@@ -162,14 +162,16 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     expect(await rolesYaml()).toBe(before);
   });
 
-  it('refuses to assign Admin to a group', async () => {
-    const before = await rolesYaml();
-    await expect(service.assignGroup(ADMIN, 'admin', 'Engineering')).rejects.toMatchObject({
-      status: 422,
-      message: expect.stringContaining('cannot be assigned to a group'),
-    });
-    // The refusal wrote NOTHING — the file is byte-identical.
-    expect(await rolesYaml()).toBe(before);
+  it('assigns a group to Admin (NEW) — the invariant lives in the direct-email rule, not a ban', async () => {
+    await service.assignGroup(ADMIN, 'admin', 'GTM Team');
+    expect(await rolesYaml()).toContain('- group:gtm team');
+    const roster = await service.getRoster();
+    expect(roster.find((r) => r.canonical === 'admin')?.groups).toEqual(['gtm team']);
+    // But Admin can never drop its LAST direct email — group refs don't count.
+    await expect(
+      service.removeMember(ADMIN, 'admin', 'admin@x.io', true),
+    ).rejects.toMatchObject({ status: 422, message: expect.stringContaining('direct email') });
+    expect(await rolesYaml()).toContain('- admin@x.io');
   });
 
   it('converts a legacy role to a group atomically; grants keep the name', async () => {

@@ -118,14 +118,70 @@ describe('GroupsAdminService', () => {
 
   const groupsYaml = () => fs.readFile(path.join(repo, 'groups.yaml'), 'utf-8');
 
-  it('roster: manual mode, groups with members and grant references', async () => {
+  it('roster: manual mode, groups with members, grant references, role assignments, health', async () => {
     await write(repo, 'Knowledge/Sales/access.md', '---\nread:\n  - GTM Team\n---\n');
+    await write(
+      repo,
+      'roles.yaml',
+      'roles:\n  Admin:\n    - admin@x.io\n  Reviewer:\n    - rev@x.io\n    - group:gtm team\n',
+    );
     const roster = await service.getRoster();
     expect(roster.mode).toBe('manual');
+    expect(roster.groupsHealth).toEqual({ ok: true });
     expect(roster.groups.map((g) => g.displayName).sort()).toEqual(['GTM Team', 'Product']);
     const gtm = roster.groups.find((g) => g.canonical === 'gtm team');
     expect(gtm?.members).toEqual(['sara@x.io']);
     expect(gtm?.referencedBy).toEqual([{ path: 'Knowledge/Sales/access.md', verb: 'read' }]);
+    // Which roles carry a group:<canonical> assignment — feeds the delete
+    // confirm's "these roles will lose members" warning.
+    expect(gtm?.assignedToRoles).toEqual(['reviewer']);
+    expect(roster.groups.find((g) => g.canonical === 'product')?.assignedToRoles).toEqual([]);
+  });
+
+  it('a broken MANUAL groups.yaml answers the roster with 422 + the parse message', async () => {
+    await write(repo, 'groups.yaml', 'groups:\n  - not\n  - a\n  - mapping\n');
+    const err = await service.getRoster().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GroupsAdminError);
+    expect((err as GroupsAdminError).status).toBe(422);
+    expect((err as GroupsAdminError).message).toMatch(/groups.yaml/);
+    expect((err as GroupsAdminError).payload).toMatchObject({ kind: 'broken-groups' });
+    // The message carries WHAT to fix — never a dead Groups page.
+    expect((err as GroupsAdminError).payload?.reason).toBeTruthy();
+  });
+
+  it('a broken SYNCED file keeps IdP mode: empty roster + groupsHealth marker (no manual fallback)', async () => {
+    await write(repo, 'synced-groups.yaml', 'groups:\n  - not\n  - a\n  - mapping\n');
+    const roster = await service.getRoster();
+    expect(roster.mode).toBe('idp');
+    // Falling back to groups.yaml would resurrect retired manual groups.
+    expect(roster.groups).toEqual([]);
+    expect(roster.groupsHealth).toMatchObject({ ok: false, file: 'synced-groups.yaml' });
+  });
+
+  it('deleteGroup unassigns roles.yaml group refs in the SAME atomic commit', async () => {
+    await write(
+      repo,
+      'roles.yaml',
+      'roles:\n  Admin:\n    - admin@x.io\n  Reviewer:\n    - rev@x.io\n    - group:gtm team\n  Ops:\n    - group:GTM  Team\n',
+    );
+    const roster = await service.deleteGroup(ADMIN, 'gtm team');
+    expect(roster.groups.some((g) => g.canonical === 'gtm team')).toBe(false);
+    expect(await groupsYaml()).not.toContain('GTM Team');
+    const roles = await fs.readFile(path.join(repo, 'roles.yaml'), 'utf-8');
+    // Every ref gone — including the un-normalized hand-written one — with
+    // the rest of each role intact, in ONE commit with the groups.yaml edit.
+    expect(roles).not.toContain('gtm');
+    expect(roles).toContain('- rev@x.io');
+    expect(commits).toHaveLength(1);
+    expect(commits[0].summary).toContain('Delete group gtm team');
+  });
+
+  it("createGroup refuses the reserved 'role/' prefix (name-safety)", async () => {
+    await expect(service.createGroup(ADMIN, 'role/ops')).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("role/"),
+    });
+    expect(await groupsYaml()).not.toContain('role/');
   });
 
   it('create → add → remove → delete lifecycle lands on disk', async () => {

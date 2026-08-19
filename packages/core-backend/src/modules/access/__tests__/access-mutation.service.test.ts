@@ -80,11 +80,21 @@ describe('AccessMutationService', () => {
     expect(text).toContain('# Sales folder');
   });
 
-  it('kbPrincipals surfaces the built-in Everyone plugin alongside declared roles', async () => {
-    const { plugins } = await access.kbPrincipals(WS);
-    expect(plugins).toContain('Everyone');
-    expect(plugins).toContain('Admin');
-    expect(plugins).toContain('Product Team');
+  it('kbPrincipals (REAL service): roles lists ROLE principals only, groups separately', async () => {
+    // Through the real resolver — the route-level tests stub this method,
+    // which is exactly how the every-group-listed-as-a-role bug hid.
+    await write(repo, 'groups.yaml', 'groups:\n  GTM Team:\n    - pat@x.io\n  Admin:\n    - shadow@x.io\n');
+    access.invalidate(WS);
+    const { roles, groups } = await access.kbPrincipals(WS);
+    expect(roles).toContain('Everyone');
+    expect(roles).toContain('Admin');
+    expect(roles).toContain('Product Team');
+    // NO group ever appears under roles — not even one shadowing a role name;
+    // and each role appears exactly once (the alias key must not double it).
+    expect(roles).not.toContain('GTM Team');
+    expect(roles.filter((r) => r === 'Admin')).toHaveLength(1);
+    expect(roles.filter((r) => r === 'Product Team')).toHaveLength(1);
+    expect(groups.sort()).toEqual(['Admin', 'GTM Team']);
   });
 
   it('grant everyone read makes the folder publicly readable (read: everyone)', async () => {
