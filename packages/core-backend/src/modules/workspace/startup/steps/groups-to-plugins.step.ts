@@ -13,7 +13,7 @@ import {
 } from '@bevel-software/platform-shared';
 import type { ToolManualDescriptor } from '../../../tool-manuals/tool-manuals.contract.js';
 import { normalizeToolManual } from '../../../tool-manuals/tool-manuals.service.js';
-import { parseOwnAccessEntries } from '../../../access/access-control.service.js';
+import { parseOwnAccessEntries } from '../../../access-model/access-grammar.js';
 import { containsVariableReference } from '../../../../shared/variable-refs.js';
 import { IGNORE_FILENAME } from '../../bevel-ignore.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';

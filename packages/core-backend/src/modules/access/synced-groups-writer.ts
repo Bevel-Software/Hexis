@@ -1,5 +1,5 @@
-import { EMAIL_REGEX, canonicalEmail, canonicalRoleName, RESERVED_ROLE_NAMES } from './access-control.service.js';
-import { unsafeNameReason } from './group-files.js';
+import { EMAIL_REGEX, canonicalEmail, canonicalRoleName, RESERVED_ROLE_NAMES } from '../access-model/access-grammar.js';
+import { unsafeNameReason } from '../access-model/group-files.js';
 
 /**
  * Locale-independent code-unit comparator. `localeCompare` would make the

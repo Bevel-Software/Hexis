@@ -34,10 +34,9 @@ import {
   GROUP_REF_PREFIX,
   canonicalRoleName,
   hasAccessFrontmatterExtension,
-  loadActiveGroups,
-  type GroupsHealth,
-} from './access-control.service.js';
-import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from './group-files.js';
+} from '../access-model/access-grammar.js';
+import { loadActiveGroups, type GroupsHealth } from './access-control.service.js';
+import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from '../access-model/group-files.js';
 import { parseRolesModel, removeGroupRefsEverywhere, renameGroupRefs, isGroupRefMember } from './roles-edit.js';
 import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
 import {

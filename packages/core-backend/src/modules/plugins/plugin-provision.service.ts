@@ -47,7 +47,7 @@ import {
 } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { creatorPrincipal } from '../access/creator-access.js';
+import { creatorPrincipal } from '../access-model/creator.js';
 import { spliceGrant } from '../access-model/access-splice.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
 

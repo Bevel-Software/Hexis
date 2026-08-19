@@ -8,7 +8,7 @@ import {
   PLUGIN_MCP_FILE,
   type AuthUser,
 } from '@bevel-software/platform-shared';
-import { type WorkspaceService } from '../workspace/workspace.service.js';
+import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { validatedVariables } from './mcp-json-discovery.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';

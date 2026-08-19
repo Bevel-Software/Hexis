@@ -5,7 +5,7 @@ import {
   canonicalEmail,
   canonicalRoleName,
   parseYamlSubset,
-} from './access-control.service.js';
+} from './access-grammar.js';
 
 /**
  * Group files — the "who you are" half of the roles/groups split.

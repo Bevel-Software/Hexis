@@ -24,7 +24,7 @@ import {
   EVERYONE_CANONICAL,
   ROLE_TOKEN_PREFIX,
   type Verb,
-} from './access-control.service.js';
+} from '../access-model/access-grammar.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
 import { toHttpError as sharedToHttpError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import { RolesAdminService } from './roles-admin.service.js';

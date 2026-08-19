@@ -41,7 +41,7 @@ import {
   KNOWN_VERBS,
   ROLE_TOKEN_PREFIX,
   canonicalRoleName,
-} from './access-control.service.js';
+} from '../access-model/access-grammar.js';
 import {
   spliceRevoke,
   spliceGrant,

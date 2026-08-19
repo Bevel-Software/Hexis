@@ -43,7 +43,7 @@ import {
 } from '@mastra/core/workspace';
 import type { AuthUser, Change, IWorkflowService } from '@bevel-software/platform-shared';
 import type { FileChangeNotifier } from './file-change-notifier.js';
-import type { CreationGrantPlan, ICreatorAccess } from '../access/creator-access.js';
+import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
 
 /** How many times to retry a contended acquire before giving up. */
 const ACQUIRE_RETRY_ATTEMPTS = 3;

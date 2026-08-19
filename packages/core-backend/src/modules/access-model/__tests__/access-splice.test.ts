@@ -7,7 +7,7 @@ import {
   AccessSpliceError,
   type Principal,
 } from '../access-splice.js';
-import { parseAccessEntry, canonicalEmail } from '../../access/access-control.service.js';
+import { parseAccessEntry, canonicalEmail } from '../access-grammar.js';
 
 const felix: Principal = { kind: 'user', email: 'felix.kissel@example.com', displayName: 'Felix' };
 const juan: Principal = { kind: 'user', email: 'juan@bevel.software', displayName: 'Juan V' };

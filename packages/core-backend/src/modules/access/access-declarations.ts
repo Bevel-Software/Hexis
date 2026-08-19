@@ -9,7 +9,7 @@ import {
   parseOwnAccessEntries,
   type ParsedEntry,
   type Verb,
-} from './access-control.service.js';
+} from '../access-model/access-grammar.js';
 
 /**
  * WHERE access rules are DECLARED inside a folder — a read-only inventory, not

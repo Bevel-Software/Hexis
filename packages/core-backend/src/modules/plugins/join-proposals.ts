@@ -3,7 +3,7 @@ import {
   parseAccessFile,
   type ParsedEntry,
   type Verb,
-} from '../access/access-control.service.js';
+} from '../access-model/access-grammar.js';
 
 /**
  * What a join branch is PROPOSING, relative to the default branch.

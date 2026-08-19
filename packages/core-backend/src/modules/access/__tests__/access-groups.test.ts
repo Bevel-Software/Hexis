@@ -6,7 +6,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { AccessControlService, parseRolesYaml } from '../access-control.service.js';
+import { AccessControlService } from '../access-control.service.js';
+import { parseRolesYaml } from '../../access-model/access-grammar.js';
 import { AccessConfigError } from '../../access-model/access-errors.js';
 import { addMember, parseRolesModel, emitRolesModel } from '../roles-edit.js';
 
@@ -102,7 +103,7 @@ describe('group files as access principals', () => {
   });
 
   it('validateGroupsFile (the WRITE gate) still refuses blank keys the reader forgives', async () => {
-    const { validateGroupsFile } = await import('../group-files.js');
+    const { validateGroupsFile } = await import('../../access-model/group-files.js');
     // Inside `groups:` — refused via the entry warning (strict gate).
     expect(validateGroupsFile('groups:\n  :\n    - a@x.io\n', 'groups.yaml').ok).toBe(false);
     // At the ROOT — the tolerant reader silently drops this without any

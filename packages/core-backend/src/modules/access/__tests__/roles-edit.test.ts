@@ -10,7 +10,7 @@ import {
   renameGroupRefs,
   RolesEditError,
 } from '../roles-edit.js';
-import { parseYamlSubset } from '../access-control.service.js';
+import { parseYamlSubset } from '../../access-model/access-grammar.js';
 
 const BASE = `roles:
   Admin:

@@ -4,12 +4,12 @@ import path from 'node:path';
 import os from 'node:os';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import { AccessControlService } from '../access-control.service.js';
 import {
-  AccessControlService,
   accessMdDeclaresBodyRules,
   accessMdSelfEntries,
   parseAccessFile,
-} from '../access-control.service.js';
+} from '../../access-model/access-grammar.js';
 import { spliceGrant, spliceRevoke } from '../../access-model/access-splice.js';
 
 /**
