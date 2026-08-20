@@ -7,7 +7,7 @@ import { ConfigError, USAGE, resolveConfig, type HexisMcpConfig } from './config
 import { DeploymentError, resolveMcpUrl } from './deployment.js';
 import { OAuthError, establishOAuthConfig } from './oauth.js';
 import { createHexisMcpServer } from './server.js';
-import { makeExitAfterShutdown, type ShutdownHolder } from './teardown.js';
+import { beginOrderlyExit, makeExitAfterShutdown, type ShutdownHolder } from './teardown.js';
 
 /**
  * stdio is the protocol channel: anything written to stdout that is not a
@@ -77,9 +77,10 @@ async function main(): Promise<void> {
     if (holder.exitRequested) {
       // The client let go while we were starting up: close what was just built
       // — children included — and leave, without ever connecting the transport.
-      holder.exiting = true;
-      await shutdown();
-      process.exit(0);
+      // Through the same bounded path the handler uses: a hung close must not
+      // keep the children alive forever.
+      beginOrderlyExit(holder);
+      return;
     }
     await server.connect(new StdioServerTransport());
   } catch (err) {

@@ -10,7 +10,10 @@
  *    client (which is what actually ends the spawned stdio grandchildren) and
  *    exit. The status is `process.exitCode ?? 0`: a recorded startup failure
  *    (say, `server.connect` rejecting) must not be laundered into a clean 0
- *    by the client's eventual hang-up.
+ *    by the client's eventual hang-up. The teardown itself is BOUNDED by a
+ *    cleanup watchdog: a `shutdown()` that hangs (a transport close that
+ *    never resolves) would otherwise leave the spawned servers alive
+ *    indefinitely — exactly the orphans teardown exists to prevent.
  *
  *  - Startup PENDING: only RECORD the request — there is nothing reachable to
  *    close yet — and arm a bounded force-exit. When creation resolves in time,
@@ -38,6 +41,34 @@ export interface ShutdownHolder {
  */
 export const STARTUP_LETGO_GRACE_MS = 5_000;
 
+/**
+ * How long the orderly teardown gets before the cleanup watchdog gives up on
+ * it. Closing the transports is milliseconds when the children are healthy;
+ * a shutdown still pending after this is wedged on one of them, and a forced
+ * exit (which at least collapses the stdio pipes) beats servers that outlive
+ * their client indefinitely.
+ */
+export const SHUTDOWN_GRACE_MS = 15_000;
+
+/**
+ * The orderly exit, wherever it starts (the let-go handler once startup is
+ * done, or main() finding `exitRequested` after create resolves): flips
+ * `exiting` so every other path stands down, runs `shutdown()`, and exits
+ * with the recorded status. Bounded — the watchdog force-exits a hung
+ * shutdown, and is cleared the moment shutdown completes (in tests, where
+ * `process.exit` is mocked and does not actually terminate, the cleared
+ * timer is also what keeps the exit from firing twice).
+ */
+export function beginOrderlyExit(holder: ShutdownHolder): void {
+  holder.exiting = true;
+  const watchdog = setTimeout(() => process.exit(process.exitCode || 1), SHUTDOWN_GRACE_MS);
+  watchdog.unref?.();
+  void holder.shutdown!().finally(() => {
+    clearTimeout(watchdog);
+    process.exit(process.exitCode ?? 0);
+  });
+}
+
 /** Build the handler cli.ts installs for stdin 'end'/'close', SIGINT and SIGTERM. */
 export function makeExitAfterShutdown(holder: ShutdownHolder): () => void {
   let forceExit: NodeJS.Timeout | null = null;
@@ -50,14 +81,14 @@ export function makeExitAfterShutdown(holder: ShutdownHolder): () => void {
       // failure to come up, and the status says so. Checked at FIRE time, not
       // arming time: when create resolves within the grace and the orderly
       // path takes over (`exiting` flips true), this stale timer must stand
-      // down rather than exit 1 out of a cleanup that is merely thorough.
+      // down rather than exit 1 out of a cleanup that is merely thorough —
+      // the orderly path carries its own bound (see `beginOrderlyExit`).
       forceExit ??= setTimeout(() => {
         if (!holder.exiting) process.exit(process.exitCode || 1);
       }, STARTUP_LETGO_GRACE_MS);
       forceExit.unref?.();
       return;
     }
-    holder.exiting = true;
-    void holder.shutdown().finally(() => process.exit(process.exitCode ?? 0));
+    beginOrderlyExit(holder);
   };
 }

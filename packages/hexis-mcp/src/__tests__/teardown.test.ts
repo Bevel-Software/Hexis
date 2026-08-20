@@ -1,6 +1,8 @@
 import { describe, expect, it, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import {
+  SHUTDOWN_GRACE_MS,
   STARTUP_LETGO_GRACE_MS,
+  beginOrderlyExit,
   makeExitAfterShutdown,
   type ShutdownHolder,
 } from '../teardown.js';
@@ -116,15 +118,41 @@ describe('makeExitAfterShutdown: startup still creating', () => {
     // exactly as cli.ts does it.
     holder.shutdown = shutdown;
     expect(holder.exitRequested).toBe(true);
-    holder.exiting = true;
-    await holder.shutdown();
+    beginOrderlyExit(holder);
+    await vi.advanceTimersByTimeAsync(0);
     // The handler itself stands down for good…
     letGo();
     expect(shutdown).toHaveBeenCalledTimes(1);
-    // …and so does the STALE force-exit: an orderly shutdown that outlasts
-    // the remaining grace must not be exit-1'd mid-cleanup by a timer armed
-    // for a startup that did, in fact, come up.
-    vi.advanceTimersByTime(STARTUP_LETGO_GRACE_MS * 2);
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(0);
+    // …and NEITHER stale timer fires again: the startup force-exit stands
+    // down (`exiting` is true) and the cleanup watchdog was cleared when
+    // shutdown completed.
+    await vi.advanceTimersByTimeAsync(STARTUP_LETGO_GRACE_MS * 2 + SHUTDOWN_GRACE_MS * 2);
+    expect(exit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('beginOrderlyExit: bounded cleanup', () => {
+  it('force-exits a HUNG shutdown after the cleanup grace — children must not outlive their client', async () => {
+    vi.useFakeTimers();
+    const holder = makeHolder(() => new Promise<void>(() => {}));
+    beginOrderlyExit(holder);
+    await vi.advanceTimersByTimeAsync(SHUTDOWN_GRACE_MS - 1);
     expect(exit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it('a completed shutdown exits once with the recorded status; the watchdog stands down', async () => {
+    vi.useFakeTimers();
+    const holder = makeHolder(async () => {});
+    beginOrderlyExit(holder);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(0);
+    await vi.advanceTimersByTimeAsync(SHUTDOWN_GRACE_MS * 2);
+    expect(exit).toHaveBeenCalledTimes(1);
   });
 });
