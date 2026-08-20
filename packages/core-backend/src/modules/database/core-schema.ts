@@ -211,6 +211,14 @@ export const fileLocks = pgTable('file_locks', {
   path: text('path').notNull(),
   holderUserId: uuid('holder_user_id').notNull().references(() => users.id),
   holderName: text('holder_name').notNull(),
+  // How the lock was acquired. 'edit' (the default) is a normal write hold —
+  // the holder is editing and the release publishes their bytes.
+  // 'coordination' is a pure-mutex hold (see IWorkflowService.acquireLock)
+  // that grants NO write authority. Persisted on the row — not inferred at
+  // release time — so the write/checkpoint/commit-enqueue paths can refuse
+  // to treat a coordination hold as write possession for as long as the row
+  // lives, across process restarts included.
+  mode: text('mode').notNull().default('edit'),
   acquiredAt: timestamp('acquired_at').defaultNow().notNull(),
   lastHeartbeatAt: timestamp('last_heartbeat_at').defaultNow().notNull(),
   expiresAt: timestamp('expires_at').notNull(),
@@ -220,6 +228,7 @@ export const fileLocks = pgTable('file_locks', {
   // table scan once the lock count grows.
   byExpiry: index('file_locks_by_expiry').on(t.expiresAt),
   byHolder: index('file_locks_by_holder').on(t.holderUserId),
+  modeCheck: check('file_locks_mode', sql`${t.mode} IN ('edit', 'coordination')`),
 }));
 
 /**

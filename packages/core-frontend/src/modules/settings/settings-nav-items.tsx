@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Boxes, CircleUserRound, KeyRound, Lock, SlidersHorizontal, Users } from 'lucide-react';
+import { Boxes, CircleUserRound, KeyRound, Lock, SlidersHorizontal, Users, UsersRound } from 'lucide-react';
 import { useAppRegistry, type AdminMenuItem } from '../../core/registry';
 
 /**
@@ -78,6 +78,14 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
     icon: <Users size={15} />,
     label: 'Roles & Members',
     path: '/roles-and-members',
+  },
+  {
+    id: 'directory-groups',
+    section: 'admin',
+    order: 15,
+    icon: <UsersRound size={15} />,
+    label: 'Groups',
+    path: '/directory-groups',
   },
   {
     id: 'user-accounts',

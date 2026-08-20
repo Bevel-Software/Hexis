@@ -3,12 +3,12 @@ import { describe, it, expect } from 'vitest';
 import {
   parseRolesModel,
   emitRolesModel,
-  createRole,
   deleteRole,
   addMember,
   removeMember,
-  renameRoleDisplay,
-  assertSafeRoleDisplayName,
+  removeGroupRefsEverywhere,
+  removeRoleGroupRef,
+  renameGroupRefs,
   RolesEditError,
 } from '../roles-edit.js';
 import { parseYamlSubset } from '../access-control.service.js';
@@ -64,19 +64,6 @@ describe('roles-edit: parse + emit', () => {
   });
 });
 
-describe('roles-edit: name guard', () => {
-  it('rejects structurally unsafe names', () => {
-    for (const bad of ['Sales: West', '#temp', 'a<b', 'a>b', '-leading', '']) {
-      expect(() => assertSafeRoleDisplayName(bad)).toThrow(RolesEditError);
-    }
-  });
-
-  it('allows ordinary multi-word names', () => {
-    expect(() => assertSafeRoleDisplayName('Product Team')).not.toThrow();
-    expect(() => assertSafeRoleDisplayName('GTM Team')).not.toThrow();
-  });
-});
-
 describe('roles-edit: mutations', () => {
   it('addMember is idempotent (no-op when already a member)', () => {
     const r = addMember(BASE, 'admin', 'JUAN@bevel.software');
@@ -100,12 +87,11 @@ describe('roles-edit: mutations', () => {
     expect(removeMember(BASE, 'admin', 'ghost@x.eu').changed).toBe(false);
   });
 
-  it('createRole appends `Name: []`, rejects reserved + duplicate', () => {
-    const r = createRole(BASE, 'Marketing');
-    expect(r.text).toContain('Marketing: []');
-    expect(() => createRole(BASE, 'everyone')).toThrow(RolesEditError);
-    expect(() => createRole(BASE, 'deny')).toThrow(RolesEditError);
-    expect(() => createRole(BASE, 'admin')).toThrow(RolesEditError); // duplicate canonical
+  it("addMember rejects a 'group:'-prefixed value with an actionable message", () => {
+    // 'group:lee@x.io' passes the email regex — without the guard it would
+    // land a dead group ref the resolver reads as an unknown group.
+    expect(() => addMember(BASE, 'admin', 'group:lee@x.io')).toThrow(/group assignment/);
+    expect(() => addMember(BASE, 'admin', 'group:gtm team')).toThrow(RolesEditError);
   });
 
   it('deleteRole removes the role; 404 when absent', () => {
@@ -114,14 +100,104 @@ describe('roles-edit: mutations', () => {
     expect(() => deleteRole(BASE, 'ghost')).toThrow(/not found/);
   });
 
-  it('renameRoleDisplay: casing-only keeps members, changes label', () => {
-    const r = renameRoleDisplay(BASE, 'product team', 'PRODUCT TEAM');
-    const role = parseRolesModel(r.text).find((x) => x.members.includes('felix@example.com'))!;
-    expect(role.displayName).toBe('PRODUCT TEAM');
+  it('removeGroupRefsEverywhere strips every ref to the group across roles', () => {
+    const text = [
+      'roles:',
+      '  Admin:',
+      '    - razvan@bevel.software',
+      '  Product Team:',
+      '    - felix@example.com',
+      '    - group:gtm team',
+      '  Ops:',
+      '    - group:GTM  Team', // un-normalized hand edit — canonical matching must catch it
+      '',
+    ].join('\n');
+    const r = removeGroupRefsEverywhere(text, 'gtm team');
+    expect(r.changed).toBe(true);
+    expect(r.text).not.toContain('gtm');
+    const model = parseRolesModel(r.text);
+    expect(model.find((x) => x.displayName === 'Product Team')?.members).toEqual(['felix@example.com']);
+    expect(model.find((x) => x.displayName === 'Ops')?.members).toEqual([]);
+    expect(removeGroupRefsEverywhere(BASE, 'gtm team').changed).toBe(false);
   });
 
-  it('renameRoleDisplay: rejects collision with another existing role', () => {
-    expect(() => renameRoleDisplay(BASE, 'product team', 'Admin')).toThrow(/already exists/);
+  it('renameGroupRefs: rewrites group:<ref> members across roles, deduping an existing target', () => {
+    const text = [
+      'roles:',
+      '  Admin:',
+      '    - razvan@bevel.software',
+      '  Product Team:',
+      '    - felix@example.com',
+      '    - group:gtm team',
+      '  Ops:',
+      '    - group:gtm team',
+      '    - group:go to market', // target already present → dedupe, not duplicate
+      '',
+    ].join('\n');
+    const r = renameGroupRefs(text, 'gtm team', 'go to market');
+    expect(r.changed).toBe(true);
+    expect(r.text).not.toContain('group:gtm team');
+    const model = parseRolesModel(r.text);
+    expect(model.find((x) => x.displayName === 'Product Team')?.members).toContain('group:go to market');
+    expect(
+      model.find((x) => x.displayName === 'Ops')?.members.filter((m) => m === 'group:go to market'),
+    ).toHaveLength(1);
+    // Untouched role stays untouched.
+    expect(model.find((x) => x.displayName === 'Admin')?.members).toEqual(['razvan@bevel.software']);
+  });
+
+  it('renameGroupRefs: no-op when nothing references the old name', () => {
+    const r = renameGroupRefs(BASE, 'gtm team', 'go to market');
+    expect(r.changed).toBe(false);
+  });
+
+  it('renameGroupRefs rewrites EVERY matching ref in a role, collapsing to one', () => {
+    // Two differently-formatted refs to the same group: both must follow the
+    // rename (a straggler would point at the renamed-away name forever), and
+    // only one ref to the new name survives.
+    const text = 'roles:\n  Ops:\n    - group:gtm team\n    - group:gtm  team\n';
+    const r = renameGroupRefs(text, 'gtm team', 'go to market');
+    expect(r.changed).toBe(true);
+    const ops = parseRolesModel(r.text).find((x) => x.displayName === 'Ops')!;
+    expect(ops.members.filter((m) => m === 'group:go to market')).toHaveLength(1);
+    expect(ops.members.some((m) => m.includes('gtm'))).toBe(false);
+  });
+
+  it('group-ref matching is canonical: an un-normalized hand-written ref still matches', () => {
+    // The resolver canonicalizes the ref's suffix (collapsing runs of
+    // spaces), so a hand-written `group:gtm  team` grants — the editors must
+    // find it too, or unassign/rename no-op while the roster still shows the
+    // group. (Parse lowercases members but keeps the double space.)
+    const text = 'roles:\n  Ops:\n    - group:GTM  Team\n';
+    const removed = removeMember(text, 'ops', 'nobody@x.io'); // sanity: parse keeps the un-collapsed ref
+    expect(removed.text).toContain('group:gtm  team');
+    const renamed = renameGroupRefs(text, 'gtm team', 'go to market');
+    expect(renamed.changed).toBe(true);
+    expect(renamed.text).toContain('group:go to market');
+    expect(renamed.text).not.toContain('gtm  team');
+  });
+
+  it('removeRoleGroupRef strips EVERY duplicate ref to the group, not just the first', () => {
+    // A hand-edited file may carry several differently-formatted refs to the
+    // same group. Removing only the first leaves stragglers the resolver
+    // still honors — the role silently keeps the group after an
+    // apparently-successful unassign.
+    const text = [
+      'roles:',
+      '  Ops:',
+      '    - lead@x.io',
+      '    - group:gtm team',
+      '    - group:GTM  Team', // un-normalized duplicate — must go too
+      '',
+    ].join('\n');
+    const r = removeRoleGroupRef(text, 'ops', 'gtm team');
+    expect(r.changed).toBe(true);
+    const ops = parseRolesModel(r.text).find((x) => x.displayName === 'Ops')!;
+    expect(ops.members).toEqual(['lead@x.io']);
+    // Idempotent afterwards.
+    expect(removeRoleGroupRef(r.text, 'ops', 'gtm team').changed).toBe(false);
+    // Other roles/refs untouched.
+    expect(() => removeRoleGroupRef(text, 'ghost', 'gtm team')).toThrow(/not found/);
   });
 
   it('only the changed role moves in the diff (other roles untouched)', () => {

@@ -28,6 +28,7 @@ import {
   createSecretsVaultPublicRoutes,
 } from '../modules/secrets-vault/index.js';
 import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js';
+import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.js';
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
@@ -266,6 +267,11 @@ export async function createCoreServer(
     core.mcpAuthMiddleware,
     core.authMiddleware,
     core.usageMeter,
+    // The local-token exchange: verifies an MCP OAuth access token and mints
+    // the loopback internal token the local MCP server uses for its REST reads.
+    core.internalTokenService,
+    core.mcpOAuthProvider,
+    core.mcpResourceMetadataUrl,
   ));
 
   // MCP OAuth 2.1 authorization server: /authorize, /token, /register,
@@ -427,6 +433,13 @@ export async function createCoreServer(
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));
+  // Groups admin (manual-mode CRUD; typed refusals in IdP mode) —
+  // admin-gated inside.
+  app.use('/api', core.authMiddleware, createGroupsAdminRoutes({
+    groupsAdmin: core.groupsAdminService,
+    adminAccess: core.adminAccess,
+    getUserById: async (id) => (await core.authService.getUserById(id)) ?? null,
+  }));
   // Update check (admin-only inside): the newest published release vs the
   // running version, cached server-side — see update-check.service.ts.
   app.use(

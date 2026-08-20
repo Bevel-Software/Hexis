@@ -96,6 +96,36 @@ export function urlForSkillFile(kbDirName: string, skillPath: string, file = 'SK
 }
 
 /**
+ * The canonical URL of one MCP server declared in a plugin's `mcp.json`.
+ *
+ * One `mcp.json` declares SEVERAL servers, so the declaring file's URL alone
+ * cannot name which tool page to open — the server's slug rides along as a
+ * QUERY param (`?server=<slug>`). A query param and NOT the hash, deliberately:
+ * the `#…` fragment on tool URLs is the OAuth callback's outcome channel
+ * (`#authorized=…` / `#error=…` — see `pathForTool`), and the two must be able
+ * to coexist on one URL.
+ */
+export function urlForMcpServer(kbDirName: string, mcpJsonPath: string, slug: string): string {
+  return `${urlForItemFile(kbDirName, mcpJsonPath)}?server=${encodeURIComponent(slug)}`;
+}
+
+/**
+ * Where a library item's card navigates — the ONE rule, shared by every
+ * card-open site so a card does the same thing wherever it is clicked: the
+ * item's canonical file URL, plus the `?server=` disambiguator when the item
+ * is an mcp.json-declared server (whose declaring file is shared with its
+ * sibling servers, so the file URL alone would not name it).
+ */
+export function urlForLibraryItem(
+  kbDirName: string,
+  item: { kind: 'skill' | 'integration'; id: string; path: string },
+): string {
+  return item.kind === 'integration' && item.path.endsWith('/mcp.json')
+    ? urlForMcpServer(kbDirName, item.path, item.id)
+    : urlForItemFile(kbDirName, item.path);
+}
+
+/**
  * Whether a location belongs to the LIBRARY surface — decided by URL SHAPE
  * alone, never by catalog contents: `/skills-and-tools/...`, or a
  * default-branch workspace URL under `Plugins/`

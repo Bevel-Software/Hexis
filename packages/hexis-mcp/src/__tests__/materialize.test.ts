@@ -6,11 +6,13 @@ import AdmZip from 'adm-zip';
 import {
   expandPlaceholders,
   extractArchive,
+  materializePlugin,
   prepareStdioSpec,
   readBodyCappedToFile,
   resolveCommand,
   type MaterializedPlugin,
 } from '../materialize.js';
+import type { HexisMcpConfig } from '../config.js';
 
 let root: string;
 let m: MaterializedPlugin;
@@ -25,6 +27,26 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await fs.rm(root, { recursive: true, force: true });
+});
+
+describe('materializePlugin: plugin folder names', () => {
+  // Every refusal below throws before any directory or request exists, so a
+  // dead deployment address is fine here.
+  const config: HexisMcpConfig = { baseUrl: 'http://127.0.0.1:1', connectionKey: 'k' };
+
+  it('refuses the reserved fallback namespace in ANY casing — the filesystems here fold case', async () => {
+    await expect(materializePlugin(config, '.hexis-fallbacks')).rejects.toThrow(/reserved/);
+    // A folder differing only in case would alias the reserved directory on
+    // Windows and default macOS, putting the stale-fallback sweep in reach of
+    // a "plugin"'s files.
+    await expect(materializePlugin(config, '.HEXiS-FALLBACKS')).rejects.toThrow(/reserved/);
+  });
+
+  it('refuses separators, dot-navigation and empty names', async () => {
+    for (const bad of ['', '.', '..', 'a/b', 'a\\b']) {
+      await expect(materializePlugin(config, bad)).rejects.toThrow(/not a plugin folder/);
+    }
+  });
 });
 
 describe('expandPlaceholders', () => {

@@ -351,3 +351,79 @@ export function jsonConfigSnippet(mcpUrl: string, bearer?: string): string {
 export function langdockSnippet(mcpUrl: string, bearer: string): string {
   return `URL: ${mcpUrl}\nHeader name: Authorization\nHeader value: Bearer ${bearer}`;
 }
+
+/* ------------------------------------------------------------------ *
+ * The LOCAL server (`npx @bevel-software/hexis-mcp`): the same workspace
+ * as a stdio server on the member's own machine, which is the only place
+ * a plugin's local-only tools — stdio servers, localhost services — can
+ * run. It serves everything the hosted endpoint serves plus those. It
+ * authenticates either interactively — keyless, opening the person's own
+ * browser to sign in on first run — or autonomously with a connection
+ * key, for pipelines with nobody present to sign in.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The base URL to hand the local server — deliberately NOT `mcpEndpointUrl`.
+ *
+ * `hexis-mcp` takes the WORKSPACE's address, not the MCP endpoint: it asks
+ * `GET <base>/api/config` for the real endpoint itself, the same field
+ * `configureMcpUrl` records up top. So what it needs is a base the config
+ * endpoint answers on — and the one address the browser has PROVEN serves
+ * this whole app, config endpoint included, is its own origin, because it
+ * loaded this page from it. The configured `mcpUrl` proves less: it may sit
+ * on a proxy domain that forwards only the MCP path.
+ */
+export function workspaceBaseUrl(): string {
+  return window.location.origin;
+}
+
+/**
+ * The JSON block that runs the workspace as a LOCAL MCP server. Read by the
+ * same clients as `jsonConfigSnippet` — Claude Desktop, Cursor, Windsurf,
+ * Cline, anything that loads servers from a JSON config — but the entry
+ * spawns `npx @bevel-software/hexis-mcp` instead of pointing at the hosted
+ * endpoint, so the command needs Node on the machine.
+ *
+ * Without a bearer there is NO key field at all: keyless is the interactive
+ * mode, where the server opens the person's browser to sign in on first run
+ * (the same OAuth flow the hosted endpoint puts web agents through). The
+ * bearer variant exists for the key-reveal modal, whose reader is setting up
+ * an autonomous pipeline that cannot open a browser.
+ */
+export function hexisMcpJsonSnippet(baseUrl: string, bearer?: string): string {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        'hexis-local': {
+          command: 'npx',
+          args: ['-y', '@bevel-software/hexis-mcp'],
+          env: {
+            HEXIS_URL: baseUrl,
+            ...(bearer ? { HEXIS_CONNECTION_KEY: bearer } : {}),
+          },
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * The `claude mcp add` one-liner for the local server. A stdio command, not
+ * a URL, so the address (and the key, when the autonomous variant carries
+ * one) travel as `--env` values — interpolated inside double quotes and
+ * escaped, exactly as the header is in `claudeCodeCommand`. Today's values
+ * are tame (a tenant-prefixed key, an https URL), but a URL can legally
+ * carry `$` or backtick, and quoting only the value that looks dangerous is
+ * how the other one bites later. Keyless = interactive sign-in, same as
+ * {@link hexisMcpJsonSnippet}.
+ */
+export function hexisMcpClaudeCommand(baseUrl: string, bearer?: string): string {
+  return (
+    `claude mcp add hexis-local` +
+    ` --env HEXIS_URL="${escapeForDoubleQuotes(baseUrl)}"` +
+    (bearer ? ` --env HEXIS_CONNECTION_KEY="${escapeForDoubleQuotes(bearer)}"` : '') +
+    ` -- npx -y @bevel-software/hexis-mcp`
+  );
+}

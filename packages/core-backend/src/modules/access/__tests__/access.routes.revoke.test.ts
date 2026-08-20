@@ -76,6 +76,10 @@ async function makeHarness(opts: {
     canWrite,
     grantSources,
     invalidate: vi.fn(),
+    // The mutation service consults the merged principal index to decide
+    // exact-vs-name token matching on revoke (group shadowing). No groups in
+    // these fixtures → unshadowed (name-level) matching, the legacy behavior.
+    kbPrincipals: vi.fn(async () => ({ roles: [], groups: [], people: [] })),
     // resolvedView() fans out to these after a successful mutation; harmless stubs.
     // canRead/canDownload/canOwner are ALSO consumed by denyHere's assert.
     canRead: vi.fn(async (_w: string, email: string) => effEmail(email, true)),
@@ -273,6 +277,50 @@ describe('POST /access/revoke — route classification + modes', () => {
       const res = await revoke({ path: `${KB}/Sales`, kind: 'folder', principal: ALICE });
       expect(res.status).toBe(200);
       expect(h.stubs.files.get(`${KB}/Sales/access.md`)).toContain('Admin'); // untouched
+    });
+
+    it('a GROUP revoke matches its exact bare token only — a VANISHED group never strips role/<Name>', async () => {
+      // The file grants BOTH spellings of one name: the bare token (the
+      // group's grant) and role/Product (the role's). The group has since
+      // vanished from the active source (kbPrincipals reports no groups), so
+      // the mutation layer's shadow probe reads "unshadowed" — name-level
+      // matching would strip BOTH spellings, silently revoking the ROLE. The
+      // route pins exact-token matching for group principals instead.
+      h = await makeHarness({
+        files: {
+          [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n---\n',
+        },
+        grantSources: () => ({}),
+      });
+      const res = await revoke({
+        path: `${KB}/Sales`,
+        kind: 'folder',
+        principal: { kind: 'group', group: 'Product' },
+      });
+      expect(res.status).toBe(200);
+      const text = h.stubs.files.get(`${KB}/Sales/access.md`)!;
+      // The group's bare grant is gone; the role's explicit grant survives.
+      expect(text).toContain('- role/Product');
+      expect(text.split('\n')).not.toContain('  - Product');
+    });
+
+    it('a ROLE revoke still sweeps legacy bare spellings when nothing shadows the name', async () => {
+      // Unshadowed role revokes keep the historical cleanup: both `Product`
+      // and `role/Product` are the ROLE's spellings, and both go.
+      h = await makeHarness({
+        files: {
+          [`${KB}/Sales/access.md`]: '---\nwrite:\n  - Product\n  - role/Product\n---\n',
+        },
+        grantSources: () => ({}),
+      });
+      const res = await revoke({
+        path: `${KB}/Sales`,
+        kind: 'folder',
+        principal: { kind: 'role', role: 'Product' },
+      });
+      expect(res.status).toBe(200);
+      const text = h.stubs.files.get(`${KB}/Sales/access.md`)!;
+      expect(text).not.toContain('Product');
     });
 
     it('refuses 403 when the caller cannot write the target access config', async () => {

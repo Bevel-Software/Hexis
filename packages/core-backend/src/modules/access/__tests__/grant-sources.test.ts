@@ -202,3 +202,70 @@ describe('AccessControlService.grantSources', () => {
     expect(src.download).toEqual([{ kind: 'direct' }]);
   });
 });
+
+describe('grantSources — principal kind under group shadowing', () => {
+  let root: string;
+  let repo: string;
+  let svc: AccessControlService;
+  const workspaceId = 'ws-gs-shadow';
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const workspaceDir = path.join(root, workspaceId);
+    repo = path.join(workspaceDir, PROCESS_MAP_DIR);
+    await fs.mkdir(repo, { recursive: true });
+    await writeFile(repo, 'roles.yaml', ROLES_YAML);
+    // A GROUP named Engineer shadows the Engineer ROLE: the bare token is the
+    // group's, `role/engineer` is the role's.
+    await writeFile(repo, 'groups.yaml', 'groups:\n  Engineer:\n    - pat@x.io\n');
+    svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("a shadowed BARE grant belongs to the GROUP — it must not hide the role's ancestor grant", async () => {
+    // The cubic case: bare (group) grant on the target, role/ grant on the
+    // ancestor. Attributing the bare token to the role would report the role
+    // as `direct` here — hiding the real role/<Name> ancestor grant and
+    // making its revoke a false no-op.
+    await writeFile(repo, 'access.md', '---\nwrite:\n  - role/Engineer\n---\n');
+    await writeFile(repo, 'Knowledge/access.md', '---\nwrite:\n  - Engineer\n---\n');
+
+    const roleSrc = await svc.grantSources(workspaceId, 'folder', 'Knowledge', {
+      kind: 'role',
+      role: 'role/Engineer',
+    });
+    // The ROLE's only entry is the ancestor role/ grant.
+    expect(roleSrc.write).toEqual([{ kind: 'ancestor', path: 'access.md' }]);
+
+    const groupSrc = await svc.grantSources(workspaceId, 'folder', 'Knowledge', {
+      kind: 'role',
+      role: 'Engineer', // bare = whoever owns the bare key = the group
+    });
+    // The GROUP's only entry is the direct bare grant.
+    expect(groupSrc.write).toEqual([{ kind: 'direct' }]);
+  });
+
+  it("a shadowed role/ grant is never attributed to the GROUP principal", async () => {
+    await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
+    await writeFile(repo, 'Knowledge/access.md', '---\nwrite:\n  - role/Engineer\n---\n');
+    const groupSrc = await svc.grantSources(workspaceId, 'folder', 'Knowledge', {
+      kind: 'role',
+      role: 'Engineer',
+    });
+    expect(groupSrc).toEqual({}); // the group holds nothing here
+  });
+
+  it('UNSHADOWED both spellings still count as the role (legacy bare grants stay removable)', async () => {
+    await fs.rm(path.join(repo, 'groups.yaml'));
+    await writeFile(repo, 'access.md', '---\nwrite:\n  - role/Engineer\n---\n');
+    await writeFile(repo, 'Knowledge/access.md', '---\nwrite:\n  - Engineer\n---\n');
+    const src = await svc.grantSources(workspaceId, 'folder', 'Knowledge', {
+      kind: 'role',
+      role: 'Engineer',
+    });
+    expect(src.write).toEqual([{ kind: 'direct' }, { kind: 'ancestor', path: 'access.md' }]);
+  });
+});

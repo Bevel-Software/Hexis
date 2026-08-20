@@ -35,6 +35,7 @@ import { OidcAuthProvider } from '../modules/auth/oidc-auth-provider.js';
 import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
 import { AccessControlService } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
+import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
@@ -63,6 +64,12 @@ import {
 } from '../modules/workflow/pending-commits.worker.js';
 import { ensureRecoveryBotUser } from '../modules/workflow/recovery-bot.js';
 import { AdminAccessService } from '../modules/admin/admin-access.service.js';
+import {
+  SyncedGroupsWriter,
+  type SyncedGroupsSource,
+} from '../modules/access/synced-groups-writer.js';
+import { createSyncedGroupsCommitter } from '../modules/access/synced-groups-committer.js';
+import { ensureDirectorySyncBot } from '../modules/access/directory-sync-bot.js';
 import { ExternalApiKeyService } from '../modules/tool-auth/external-api-key.service.js';
 import {
   InternalTokenService,
@@ -133,6 +140,20 @@ export interface CoreServices {
   pendingCommitsWorker: PendingCommitsWorker;
   recoveryBot: AuthUser;
   adminAccess: AdminAccessService;
+  /** Manual-mode groups CRUD + the manual→IdP retirement half. */
+  groupsAdminService: GroupsAdminService;
+  /**
+   * Build the debounced directory → `synced-groups.yaml` materializer for a
+   * directory source an OVERLAY provides (e.g. a SCIM mirror fed by the IdP's
+   * provisioning engine — core ships no directory integration of its own).
+   * Ensures the directory-sync bot user and closes over the git commit
+   * pipeline; the overlay only implements {@link SyncedGroupsSource} and
+   * calls `notifyMutation()` after each directory change.
+   */
+  createSyncedGroupsMaterializer: (
+    source: SyncedGroupsSource,
+    opts?: { debounceMs?: number; log?: (message: string) => void },
+  ) => Promise<SyncedGroupsWriter>;
   /** Newest-release lookup behind `GET /api/update-check` (admin-only). */
   updateCheckService: UpdateCheckService;
   /** Deployment settings, env-first — the KB remote resolves through these. */
@@ -151,6 +172,12 @@ export interface CoreServices {
   mcpService: McpService;
   mcpAuthMiddleware: ReturnType<typeof createMcpAuthMiddleware>;
   mcpOAuthProvider: BevelOAuthProvider;
+  /**
+   * RFC 9728 protected-resource-metadata URL carried on MCP 401 challenges.
+   * Published so the route layer's own challenges (the local-token exchange)
+   * advertise the same pointer the auth middleware does.
+   */
+  mcpResourceMetadataUrl: string;
   toolRegistry: ToolRegistry;
   toolAuthMiddleware: ReturnType<typeof createToolAuthMiddleware>;
   manualAuthMiddleware: ReturnType<typeof createManualAuthMiddleware>;
@@ -627,6 +654,7 @@ export async function createCoreServices(
     externalApiKeyService,
     mcpOAuthProvider,
     mcpResourceMetadataUrl,
+    internalTokenService,
   );
 
   // ── Unified tool surface ──────────────────────────────────────────────
@@ -725,6 +753,43 @@ export async function createCoreServices(
     );
   }
 
+  // Materializer factory for an overlay-provided directory source: every
+  // provisioning burst regenerates `synced-groups.yaml` on the default branch
+  // (debounced), committed by the sync bot — that file is what puts access
+  // resolution in IdP mode. Core itself ships no directory integration, so
+  // nothing is constructed here until an overlay brings a source.
+  const createSyncedGroupsMaterializer = async (
+    source: SyncedGroupsSource,
+    opts?: { debounceMs?: number; log?: (message: string) => void },
+  ): Promise<SyncedGroupsWriter> => {
+    const bot = await ensureDirectorySyncBot(db);
+    return new SyncedGroupsWriter({
+      source,
+      ...createSyncedGroupsCommitter({
+        workspaceService,
+        workflowService,
+        accessControl,
+        eventBus,
+        kbDirName,
+        bot,
+        defaultBranchOf: () => DEFAULT_BRANCH,
+      }),
+      debounceMs: opts?.debounceMs,
+      log: opts?.log ?? ((message) => console.warn(message)),
+    });
+  };
+  // Groups — the "who you are" principal sets. Manual-mode CRUD on
+  // groups.yaml, IdP-mode refusals, and the connect-time retirement the
+  // directory token route drives.
+  const groupsAdminService = new GroupsAdminService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    kbDirName,
+    () => DEFAULT_BRANCH,
+    eventBus,
+  );
+
   return {
     config,
     db,
@@ -759,6 +824,8 @@ export async function createCoreServices(
     pendingCommitsWorker,
     recoveryBot,
     adminAccess,
+    groupsAdminService,
+    createSyncedGroupsMaterializer,
     updateCheckService,
     secretsVaultService,
     externalApiKeyService,
@@ -766,6 +833,7 @@ export async function createCoreServices(
     mcpService,
     mcpAuthMiddleware,
     mcpOAuthProvider,
+    mcpResourceMetadataUrl,
     toolRegistry,
     toolAuthMiddleware,
     manualAuthMiddleware,

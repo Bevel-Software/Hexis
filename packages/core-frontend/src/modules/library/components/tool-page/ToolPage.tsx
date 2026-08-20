@@ -49,7 +49,13 @@ export function ToolPage({
   const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (oauthOutcome) window.history.replaceState(null, '', window.location.pathname);
+    // Consume the OAuth `#…` fragment, KEEPING the query string: on an
+    // mcp-declared tool the `?server=<slug>` param is the page's identity, and
+    // replacing with the bare pathname stranded a refresh (or any URL copy) on
+    // the ambiguous mcp.json address, which bounces to the plugin page.
+    if (oauthOutcome) {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
   }, [oauthOutcome]);
 
   // Same rule as the skill page: back goes to the page the tool LIVES on —

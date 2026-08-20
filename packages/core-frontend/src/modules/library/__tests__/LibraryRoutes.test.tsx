@@ -127,9 +127,9 @@ const TOOL_PAGE_STATE: ToolPageState = {
 /** Exposes the router's current pathname without a testid. */
 function LocationProbe() {
   const location = useLocation();
-  // Hash included so the OAuth-fragment redirect below is assertable; it is
-  // the empty string everywhere else.
-  return <div aria-label="pathname">{location.pathname}{location.hash}</div>;
+  // Search and hash included so the `?server=` and OAuth-fragment redirects
+  // below are assertable; both are the empty string everywhere else.
+  return <div aria-label="pathname">{location.pathname}{location.search}{location.hash}</div>;
 }
 
 /**
@@ -366,6 +366,25 @@ describe('LibraryRoutes', () => {
     );
   });
 
+  it('redirects an mcp-declared tool to its mcp.json URL with `?server=`, hash intact', async () => {
+    // One mcp.json declares several servers, so the redirect must carry the
+    // slug in the query — the bare file URL is ambiguous and would bounce to
+    // the plugin page, swallowing the OAuth outcome fragment with it.
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      tools: [
+        tool({ slug: 'granola', name: 'granola', path: 'Plugins/Everyone/mcp.json', type: 'mcp' }),
+        tool({ slug: 'linear', name: 'linear', path: 'Plugins/Everyone/mcp.json', type: 'mcp' }),
+      ],
+    });
+    renderAt('/skills-and-tools/tools/granola#authorized=granola_KEY');
+    await waitFor(() =>
+      expect(pathname()).toBe(
+        `/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/Everyone/mcp.json?server=granola#authorized=granola_KEY`,
+      ),
+    );
+  });
+
   it("/skills-and-tools/skills/:name redirects to the skill's canonical workspace URL", async () => {
     renderAt('/skills-and-tools/skills/outreach');
     await waitFor(() =>
@@ -383,6 +402,26 @@ describe('LibraryRoutes', () => {
       expect(pathname()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/GTM/heyreach.tool`),
     );
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('an mcp-declared integration card navigates to the `?server=` URL', async () => {
+    // The declaring file is shared with sibling servers, so the card cannot
+    // navigate to the bare file URL — that address is ambiguous and redirects
+    // to the plugin page, which is exactly the round-trip bug this pins.
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      tools: [
+        tool({ slug: 'granola', name: 'granola', path: 'Plugins/Everyone/mcp.json', type: 'mcp' }),
+        tool({ slug: 'linear', name: 'linear', path: 'Plugins/Everyone/mcp.json', type: 'mcp' }),
+      ],
+    });
+    renderAt('/skills-and-tools/everything');
+    fireEvent.click(await screen.findByRole('button', { name: /^granola/ }));
+    await waitFor(() =>
+      expect(pathname()).toBe(
+        `/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/Everyone/mcp.json?server=granola`,
+      ),
+    );
   });
 
   it('an unknown subpath redirects home', async () => {

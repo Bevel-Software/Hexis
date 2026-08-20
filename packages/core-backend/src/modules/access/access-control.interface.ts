@@ -1,7 +1,8 @@
 /**
- * Access-control service interface. The implementation reads `roles.yaml`
- * and the `access.md` tree from the per-user `knowledge-base` clone and
- * resolves write permissions against them.
+ * Access-control service interface. The implementation reads `roles.yaml`,
+ * the active group file (`synced-groups.yaml` / `groups.yaml`), and the
+ * `access.md` tree from the workspace's `knowledge-base` clone and resolves
+ * the access verbs (read / write / download / owner) against them.
  *
  * All `relativePath` arguments are repo-relative POSIX paths inside the KB
  * repo (e.g. `Knowledge/Sales/Foo.md`, `roles.yaml`) — NOT workspace-relative
@@ -20,8 +21,8 @@
  *
  * Only a principal NAMED in a file (a direct user grant `Name <email>`, or a
  * group/role token) produces sources. A USER who merely RESOLVES to access via a
- * plugin they belong to, the built-in `everyone`, or admin-rescue is NOT a
- * per-target file entry and produces NO source (the plugin itself shows as its own
+ * group or role they belong to, the built-in `everyone`, or admin-rescue is NOT a
+ * per-target file entry and produces NO source (the group/role itself shows as its own
  * row instead).
  */
 export type GrantSource =
@@ -49,6 +50,24 @@ export type AccessTargetKind = 'folder' | 'file';
 export type GrantPrincipal =
   | { kind: 'user'; email: string }
   | { kind: 'role'; role: string };
+
+/**
+ * One collective principal in a resolved eligible list, with WHAT it is: a
+ * ROLE (an app-defined capability) or a GROUP (a grant audience from the
+ * active group source). The resolver knows the kind from the merged principal
+ * index — a `role/<canonical>` alias hit is always the role; a bare token is
+ * whatever owns it under group-first precedence — and the share dialog needs
+ * it to badge each grantee row honestly ("Role" vs "Group") and to round-trip
+ * the row's principal with the right kind.
+ *
+ * Additive: `principals` rides NEXT TO the legacy `roles: string[]` (the same
+ * names, kind erased), which many name-only consumers (banners, owner
+ * contact lines, PR-routing messages) still read. It is optional in the
+ * interface so existing test doubles stay valid; the real service always
+ * returns it, and payload consumers fall back to `roles` (all treated as
+ * roles) when absent.
+ */
+export type ResolvedPrincipal = { name: string; kind: 'role' | 'group' };
 
 /**
  * Per-verb sources of a principal's access on a target. Only verbs the principal
@@ -155,7 +174,11 @@ export interface IAccessControl {
   eligibleOwners(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }>;
+  ): Promise<{
+    principals?: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }>;
 
   /**
    * The set of principals (roles + direct users) with `write` on this path.
@@ -167,7 +190,11 @@ export interface IAccessControl {
   eligibleWriters(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }>;
+  ): Promise<{
+    principals?: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }>;
 
   /**
    * Answers the file viewer's "who can see this?" affordance. `restricted` is
@@ -181,7 +208,12 @@ export interface IAccessControl {
   eligibleReaders(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ restricted: boolean; roles: string[]; users: { name: string; email: string }[] }>;
+  ): Promise<{
+    restricted: boolean;
+    principals?: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }>;
 
   /**
    * The set of principals (roles + direct users) with `download` on this path.
@@ -194,7 +226,11 @@ export interface IAccessControl {
   eligibleDownloaders(
     workspaceId: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] }>;
+  ): Promise<{
+    principals?: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  }>;
 
   /**
    * Finite expanded email set for configured users who could approve this path
@@ -237,12 +273,22 @@ export interface IAccessControl {
    *
    * Returns only the verbs the principal effectively holds; a verb with no
    * access is omitted. A principal with no access anywhere yields an empty map.
+   *
+   * `opts.tokenMatch: 'exact'` pins a ROLE-shaped principal to its literal
+   * token spelling: only the exact token (bare, or `role/<name>`) counts as
+   * the principal's own entry, regardless of group shadowing. The mutation
+   * layer uses this so a check runs against the SAME identity a pinned
+   * exact-token splice edited — e.g. verifying a GROUP deny whose group has
+   * vanished, where the default (alias-tolerant when unshadowed) matching
+   * would misattribute a same-named role's surviving `role/<name>` grant to
+   * the group. Omitted (or `'name'`) → the shadowing-derived default.
    */
   grantSources(
     workspaceId: string,
     kind: AccessTargetKind,
     relativePath: string,
     principal: GrantPrincipal,
+    opts?: { tokenMatch?: 'exact' | 'name' },
   ): Promise<GrantSources>;
 
   /**
@@ -265,33 +311,21 @@ export interface IAccessControl {
   validateRolesYaml(text: string): { ok: true } | { ok: false; errors: string[] };
 
   /**
-   * Find every folder-`access.md` reference to a role, by canonical name, in the
-   * cached model. ADVISORY ONLY — it powers the delete-confirmation "N rules
-   * will be ignored" warning, and it may UNDERCOUNT: `collectAccessFiles` only
-   * walks files literally named `access.md`, so a role granted in a node's OWN
-   * frontmatter is a real grant this scan misses. That is acceptable for a
-   * non-fatal warning. It must NOT be used to gate the rename rewrite — that
-   * needs the sound git-grep scan in `roles-admin.service.ts`, which also covers
-   * node frontmatter. An undercount there would silently orphan access.
-   */
-  referencesToRole(
-    workspaceId: string,
-    canonicalRole: string,
-  ): Promise<{ path: string; verb: string }[]>;
-
-  /**
    * Enumerate the grantable principals known to the KB, for the share-dialog
-   * autocomplete. `plugins` are the built-in `everyone` role plus the declared
-   * `roles.yaml` role display names (`everyone` is surfaced so the UI can
-   * grant public read; the grant route gates it to the `read` verb only).
-   * `people` are every email named in `roles.yaml` (name defaults to the local
-   * part) unioned with every `Name <email>` grant in any `access.md` (named).
-   * The login-only `users` table is unioned in by the caller — this method
-   * covers the KB-canonical people the users table misses.
+   * autocomplete. `roles` are the built-in `everyone` role plus the declared
+   * `roles.yaml` role display names — ROLE principals only, never groups
+   * (`everyone` is surfaced so the UI can grant public read; the grant route
+   * gates it to the `read` verb only). `groups` are the ACTIVE group source's
+   * display names as merged into the resolver's cached model — served from
+   * that cache precisely so suggest/grant don't re-read the files per call.
+   * `people` are every email named in `roles.yaml` (name defaults to the
+   * local part) unioned with every `Name <email>` grant in any `access.md`
+   * (named). The login-only `users` table is unioned in by the caller — this
+   * method covers the KB-canonical people the users table misses.
    */
   kbPrincipals(
     workspaceId: string,
-  ): Promise<{ plugins: string[]; people: { name: string; email: string }[] }>;
+  ): Promise<{ roles: string[]; groups: string[]; people: { name: string; email: string }[] }>;
 
   /**
    * Reverse-lookup an email by its SHA-256 hash (per `hashEmail` semantics)

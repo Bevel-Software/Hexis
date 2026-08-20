@@ -1,4 +1,5 @@
 import type { HexisMcpConfig } from './config.js';
+import { renewConnectionKeyNow } from './renewal.js';
 
 /**
  * The REST surface this server reads before it can serve anything. Everything
@@ -14,31 +15,61 @@ export class DeploymentError extends Error {}
 
 async function getJson(
   url: string,
-  init: RequestInit & { label: string },
+  init: RequestInit & { label: string; renew?: () => Promise<string> },
 ): Promise<unknown> {
-  let res: Response;
-  try {
-    res = await fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-  } catch (err) {
-    throw new DeploymentError(
-      `Could not reach ${init.label} at ${url}: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  const { renew, label, ...request } = init;
+  const attempt = async (freshBearer?: string): Promise<Response> => {
+    const headers = freshBearer
+      ? { ...(request.headers as Record<string, string>), Authorization: `Bearer ${freshBearer}` }
+      : request.headers;
+    try {
+      return await fetch(url, { ...request, headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    } catch (err) {
+      throw new DeploymentError(
+        `Could not reach ${label} at ${url}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+  let res = await attempt();
+  const authed = 'Authorization' in ((request.headers ?? {}) as Record<string, unknown>);
+  // OAuth mode's mid-run 401: the internal token expired, and one refresh →
+  // re-exchange (that is all `renew` does) earns exactly ONE retry. A second
+  // 401 means the authorization itself is gone — revoked, or the account lost
+  // access — which no amount of refreshing fixes, so it propagates below.
+  // 401 only: a 403 is a permission answer about a live credential.
+  let retried = false;
+  if (res.status === 401 && authed && renew) {
+    // The discarded response's body is drained before the retry replaces it —
+    // an unread body pins its connection (and, kept long enough, its memory)
+    // for as long as the runtime cares to wait.
+    await res.body?.cancel().catch(() => {});
+    res = await attempt(await renew());
+    retried = true;
   }
   if (res.status === 401 || res.status === 403) {
-    // Only a request that actually carried the key can blame the key: the
+    // Only a request that actually carried the credential can blame it: the
     // config endpoint is unauthenticated, so its 401/403 is something else
     // (an SSO gate, a proxy) answering in the deployment's place.
-    const authed = 'Authorization' in ((init.headers ?? {}) as Record<string, unknown>);
     throw new DeploymentError(
-      authed
-        ? `The connection key was rejected by ${init.label} (HTTP ${res.status}). ` +
-            'Mint a fresh one from the profile menu → External agent access.'
-        : `${init.label} refused access (HTTP ${res.status}) to a request that carries no credentials — ` +
-            'an SSO gate or proxy may be intercepting the deployment. Check that --url points at the workspace itself.',
+      !authed
+        ? `${label} refused access (HTTP ${res.status}) to a request that carries no credentials — ` +
+            'an SSO gate or proxy may be intercepting the deployment. Check that --url points at the workspace itself.'
+        : renew
+          ? res.status === 403
+            ? // A 403 is a PERMISSION answer about a live credential — the
+              // sign-in worked, the account simply may not do this. Telling
+              // the person to re-authorize would send them through a browser
+              // round trip that changes nothing.
+              `${label} denied access (HTTP 403): your signed-in account does not have permission for this. ` +
+                'The sign-in itself is valid — ask a workspace admin for access; signing in again will not change the answer.'
+            : `Your sign-in was rejected by ${label} (HTTP 401)${retried ? ' even after refreshing it' : ''} — ` +
+                'the authorization may have been revoked. Re-authorize by restarting hexis-mcp and signing in through your browser again.'
+          : `The connection key was rejected by ${label} (HTTP ${res.status}). ` +
+              'Mint a fresh one from the profile menu → External agent access.',
     );
   }
   if (!res.ok) {
-    throw new DeploymentError(`${init.label} returned HTTP ${res.status} from ${url}.`);
+    throw new DeploymentError(`${label} returned HTTP ${res.status} from ${url}.`);
   }
   // A 200 that is not JSON is a proxy or SPA fallback answering in the
   // deployment's place (a login page, a catch-all index.html). That is a
@@ -48,10 +79,24 @@ async function getJson(
     return await res.json();
   } catch {
     throw new DeploymentError(
-      `${init.label} at ${url} answered with something that is not JSON — ` +
+      `${label} at ${url} answered with something that is not JSON — ` +
         'a proxy or login page may be intercepting the deployment. Check that --url points at the workspace itself.',
     );
   }
+}
+
+/**
+ * The `renew` a request should consult, if the config carries one. It routes
+ * through `renewal.ts`'s SINGLE-FLIGHT — never `config.renewConnectionKey`
+ * directly — because the refresh token rotates: two racing renewals (startup's
+ * `Promise.all` fetches, or concurrent mid-run tool calls) would have the
+ * loser present a just-retired refresh token and kill the sign-in. The shared
+ * flight also updates `config.connectionKey`, so every LATER request carries
+ * the fresh token without each call site re-threading it.
+ */
+function renewer(config: HexisMcpConfig): (() => Promise<string>) | undefined {
+  if (!config.renewConnectionKey) return undefined;
+  return () => renewConnectionKeyNow(config);
 }
 
 /**
@@ -127,6 +172,7 @@ export async function fetchAllManuals(config: HexisMcpConfig): Promise<RawManual
   const body = (await getJson(`${config.baseUrl}/api/agent/all-tools?remote=false`, {
     label: 'the tool manual list',
     headers: { Authorization: `Bearer ${config.connectionKey}` },
+    renew: renewer(config),
   })) as { manuals?: unknown };
   // Shape drift is loud, not empty: an `[]` here would let the server start,
   // log success, and quietly serve none of the local-only tools it exists for.
@@ -152,6 +198,7 @@ export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map
       'Content-Type': 'application/json',
     },
     body: '{}',
+    renew: renewer(config),
   })) as { tools?: unknown };
   // Same loudness as `fetchAllManuals`: losing this list silently is losing
   // exactly the tools this server exists to add.
@@ -189,5 +236,6 @@ export async function callKbTool(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(args),
+    renew: renewer(config),
   });
 }

@@ -18,7 +18,25 @@
  * Normally run as a command (`npx @bevel-software/hexis-mcp`); the pieces are
  * exported for embedding it in another process.
  */
-export { type HexisMcpConfig, ConfigError, resolveConfig, USAGE } from './config.js';
+export { type HexisMcpConfig, type ResolvedCliConfig, ConfigError, resolveConfig, USAGE } from './config.js';
 export { DeploymentError, resolveMcpUrl, fetchAllManuals, fetchLocalOnlyManuals } from './deployment.js';
+export {
+  OAuthError,
+  discoverAuthServer,
+  readStoredCredentials,
+  writeStoredCredentials,
+  oauthStorePath,
+  refreshAccessToken,
+  authorizeInBrowser,
+  openInBrowser,
+  exchangeForLocalToken,
+  establishOAuthConfig,
+  type AuthServerEndpoints,
+  type StoredOAuthCredentials,
+  type BrowserFlowOptions,
+  type BrowserFlowResult,
+  type LocalTokenGrant,
+  type OAuthModeOptions,
+} from './oauth.js';
 export { REMOTE_MANUAL_NAME, remoteManualTemplate, localManualTemplates } from './manuals.js';
-export { createHexisMcpServer, listedTools } from './server.js';
+export { createHexisMcpServer, listedTools, type HexisMcpHandle } from './server.js';

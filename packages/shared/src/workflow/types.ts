@@ -85,6 +85,15 @@ export interface FileLock {
   path: string;
   holderUserId: string;
   holderName: string;
+  /**
+   * How the lock was acquired. `'edit'` (the default when absent) is a normal
+   * write hold — the holder is editing and the release publishes their bytes.
+   * `'coordination'` is a pure-mutex hold (see `IWorkflowService.acquireLock`)
+   * that grants NO write authority: the write/checkpoint/commit-enqueue paths
+   * must refuse to treat it as write possession, even though its contention,
+   * TTL, and heartbeat surface is identical.
+   */
+  mode?: 'edit' | 'coordination';
   /** ISO timestamp when the lock was first acquired. */
   acquiredAt: string;
   /** ISO timestamp of the most recent heartbeat — the autosave/keepalive ping. */

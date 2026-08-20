@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -226,6 +227,34 @@ describe('PluginPage', () => {
     expect(screen.queryByTestId('library-card-skill-roadmap')).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Skills' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Tools' })).toBeInTheDocument();
+  });
+
+  it('opens an mcp-declared tool card at its `?server=` URL, not the bare file URL', async () => {
+    // Several servers share one declaring mcp.json, so the bare file URL is
+    // ambiguous — navigating there bounced the click straight back to this
+    // plugin page. The query param names which server's page to open.
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      tools: [
+        connectedTool(),
+        connectedTool({ slug: 'granola', name: 'granola', path: 'Plugins/GTM/mcp.json', type: 'mcp' }),
+      ],
+    });
+    renderPlugin('GTM');
+    fireEvent.click(await screen.findByRole('button', { name: /^granola/ }));
+    await waitFor(() =>
+      expect(href()).toBe(
+        `/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/GTM/mcp.json?server=granola`,
+      ),
+    );
+  });
+
+  it('opens a `.tool`-declared card at its bare canonical file URL — unchanged', async () => {
+    renderPlugin('GTM');
+    fireEvent.click(await screen.findByRole('button', { name: /^heyreach/ }));
+    await waitFor(() =>
+      expect(href()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/GTM/heyreach.tool`),
+    );
   });
 
   it('leads with the plugin, not with who runs it', async () => {

@@ -68,8 +68,23 @@ const BOT_EMAIL = 'bevel-workflow@bevel.software';
  * we keep the new path and discard the old one.
  */
 export function parsePorcelainZ(stdout: string): string[] {
+  return parsePorcelainZDetailed(stdout).paths;
+}
+
+/**
+ * Like {@link parsePorcelainZ}, but also reports each rename/copy entry's
+ * OLD path (keyed by the new path). A pathspec-scoped commit needs the old
+ * path too: committing only the new path of a staged rename records an ADD
+ * and leaves the deletion of the old path behind — the rename becomes two
+ * files.
+ */
+export function parsePorcelainZDetailed(stdout: string): {
+  paths: string[];
+  renameOldByNew: Map<string, string>;
+} {
   const tokens = stdout.split('\0').filter((t) => t.length > 0);
   const paths = new Set<string>();
+  const renameOldByNew = new Map<string, string>();
   let i = 0;
   while (i < tokens.length) {
     const token = tokens[i];
@@ -77,12 +92,19 @@ export function parsePorcelainZ(stdout: string): string[] {
     if (token.length < 4) { i++; continue; }
     const x = token[0];
     const y = token[1];
-    paths.add(token.slice(3));
+    const newPath = token.slice(3);
+    paths.add(newPath);
     // Rename or copy in either the index or worktree position carries an
-    // extra NUL-separated old-path field we must skip.
-    i += (x === 'R' || x === 'C' || y === 'R' || y === 'C') ? 2 : 1;
+    // extra NUL-separated old-path field.
+    if (x === 'R' || x === 'C' || y === 'R' || y === 'C') {
+      const oldPath = tokens[i + 1];
+      if (oldPath) renameOldByNew.set(newPath, oldPath);
+      i += 2;
+    } else {
+      i += 1;
+    }
   }
-  return Array.from(paths);
+  return { paths: Array.from(paths), renameOldByNew };
 }
 
 /**
@@ -970,23 +992,30 @@ export class GitService implements IGitService {
   }
 
   /**
-   * Atomic multi-file commit — commits whatever is currently dirty in the
-   * working tree as ONE commit attributed to `user`, then returns its
-   * attribution (or null when the tree is clean — idempotent re-apply). The
-   * multi-file sibling of `commit()`: same `git add -A` + commit, but WITHOUT
-   * the one-file-per-change guard — the caller has assembled + written + validated
-   * a batch (bulk node upload; the role-rename rewrite via `LockingFilesystem`).
+   * Atomic multi-file commit — commits the caller's batch as ONE commit
+   * attributed to `user`, then returns its attribution (or null when nothing
+   * in scope is dirty — idempotent re-apply). The multi-file sibling of
+   * `commit()`, WITHOUT the one-file-per-change guard — the caller has
+   * assembled + written + validated a batch (bulk node upload; the lock-aware
+   * saves and admin roster writes via `LockingFilesystem` /
+   * `AdminLockedCommits`).
+   *
+   * `onlyPaths` (workspace-relative) scopes staging + commit to the caller's
+   * own files via git pathspecs: on the shared per-branch workspace other
+   * paths may be dirty from a concurrent save whose commit is still queued,
+   * and sweeping them in would land them under this caller's author/summary.
+   * Omitted → the whole dirty set (`git add -A`), for flows that own the
+   * workspace.
    *
    * Deliberately does NOT write file content itself — disk writes are the
-   * caller's job. This is the git layer: it only stages + commits what is already
-   * on disk (the working tree is expected otherwise-clean under save=share, so
-   * `git add -A` stages exactly the caller's batch). Caller pushes separately
-   * (mirrors `commitFile` + `push`).
+   * caller's job. This is the git layer: it only stages + commits what is
+   * already on disk. Caller pushes separately (mirrors `commitFile` + `push`).
    */
   async commitChanges(
     workspaceId: string,
     user: AuthUser,
     summary: string,
+    onlyPaths?: string[],
   ): Promise<CommitAttribution | null> {
     assertValidAuthor(user);
     const subject = summary?.trim();
@@ -1000,8 +1029,27 @@ export class GitService implements IGitService {
 
       // Nothing dirty → no-op (idempotent). Compute touched BEFORE `git add` so
       // the protected-branch gate sees the same path set `commit()` would.
-      const { stdout: porcelain } = await this.git(cwd, ['status', '--porcelain=v1', '-z']);
-      const touched = parsePorcelainZ(porcelain);
+      // `--untracked-files=all` lists every untracked FILE individually —
+      // without it a brand-new directory shows as one `?? dir/` entry, so a
+      // scoped batch creating files under a new folder would match nothing
+      // against `onlyPaths` and silently no-op.
+      const { stdout: porcelain } = await this.git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
+      const detailed = parsePorcelainZDetailed(porcelain);
+      let touched = detailed.paths;
+      // Scope to the caller's own paths (see the interface doc): other files
+      // may be dirty from a concurrent same-branch save whose commit is still
+      // queued — sweeping them in would land them under this caller's
+      // author/summary, and gate the commit on paths the caller never touched.
+      // An in-scope RENAME keeps its old path too: a pathspec naming only the
+      // new path records an add and strands the deletion of the old one.
+      if (onlyPaths) {
+        const scope = new Set(onlyPaths.map((p) => this.stripRepoPrefix(p)));
+        touched = touched.filter((p) => scope.has(p));
+        for (const p of touched.slice()) {
+          const oldPath = detailed.renameOldByNew.get(p);
+          if (oldPath && !touched.includes(oldPath)) touched.push(oldPath);
+        }
+      }
       if (touched.length === 0) return null;
 
       // Protected-branch access gate (defence in depth — callers already gate at
@@ -1011,20 +1059,83 @@ export class GitService implements IGitService {
         await this.assertCanWriteAtRef(workspaceId, 'HEAD', user.email, touched);
       }
 
-      await this.git(cwd, ['add', '-A']);
-      await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject]);
+      // Scoped → stage the batch (a brand-new file must be `add`ed before a
+      // pathspec commit will know it), then commit WITH the pathspec: it
+      // records exactly those paths, so neither other dirty files nor an
+      // unrelated entry someone left staged can ride along.
+      //
+      // Both stages feed the pathspecs over STDIN (`--pathspec-from-file=-`,
+      // NUL-separated) instead of argv: a several-hundred-file batch of long
+      // KB paths would otherwise blow Windows' ~32K command-line limit. The
+      // add is ONE spawn for the whole batch; only when git reports the ONE
+      // expected miss — a fully-staged deletion (or the old half of a rename)
+      // has nothing left in the worktree to match, which fails the entire
+      // batched add — do we fall back to per-path adds with the same
+      // tolerance, in argv-safe chunks of one path per spawn.
+      if (onlyPaths) {
+        const pathspecInput = touched.join('\0');
+        const pathspecArgs = ['--pathspec-from-file=-', '--pathspec-file-nul'];
+        const isExpectedMiss = (err: unknown): boolean => {
+          // (LC_ALL=C pins the message to English.)
+          const e = err as Error & { stderr?: string };
+          return /did not match any files/.test(`${e.stderr ?? ''}\n${e.message}`);
+        };
+        try {
+          await this.git(cwd, ['add', '-A', ...pathspecArgs], { input: pathspecInput });
+        } catch (err) {
+          // Any other add failure — index.lock contention, I/O — must abort:
+          // committing without staging would record stale index content as
+          // this caller's change.
+          if (!isExpectedMiss(err)) throw err;
+          for (const p of touched) {
+            try {
+              await this.git(cwd, ['add', '-A', '--', p]);
+            } catch (perPathErr) {
+              if (!isExpectedMiss(perPathErr)) throw perPathErr;
+            }
+          }
+        }
+        await this.git(
+          cwd,
+          ['commit', `--author=${user.name} <${user.email}>`, '-m', subject, ...pathspecArgs],
+          { input: pathspecInput },
+        );
+      } else {
+        await this.git(cwd, ['add', '-A']);
+        await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject]);
+      }
 
-      const { stdout } = await this.git(cwd, [
-        'log', '-1', '--pretty=format:%H%x00%an%x00%ae%x00%s%x00%aI',
-      ]);
-      const [sha, authorName, authorEmail, subj, committedAt] = stdout.split('\x00');
+      // CONTRACT: past this point the commit EXISTS, so this method must not
+      // throw — callers (writeAndCommitLocked) treat a throw as "nothing was
+      // committed" and restore their pre-edit bytes, which here would publish
+      // a compensating revert of a commit that DID land. The attribution read
+      // is best-effort; on failure fall back to what we already know.
+      let sha = '';
+      let authorName = user.name;
+      let authorEmail = user.email;
+      let subj = subject;
+      let committedAt = '';
+      try {
+        const { stdout } = await this.git(cwd, [
+          'log', '-1', '--pretty=format:%H%x00%an%x00%ae%x00%s%x00%aI',
+        ]);
+        [sha, authorName, authorEmail, subj, committedAt] = stdout.split('\x00');
+      } catch {
+        // The commit landed; only its attribution read failed. Give the sha
+        // one simpler second chance — callers use it as the commit id, and an
+        // empty sha would make a landed change unidentifiable downstream.
+        try {
+          const { stdout } = await this.git(cwd, ['rev-parse', 'HEAD']);
+          sha = stdout;
+        } catch { /* keep the fallback attribution */ }
+      }
       this.accessControl?.invalidate(workspaceId);
       return {
         sha: sha?.trim() ?? '',
         authorName: authorName ?? '',
         authorEmail: authorEmail ?? '',
         subject: subj ?? subject,
-        committedAt: committedAt?.trim() ?? new Date().toISOString(),
+        committedAt: committedAt?.trim() || new Date().toISOString(),
       };
     });
   }
@@ -1467,18 +1578,26 @@ export class GitService implements IGitService {
    * Used by the pending-commits worker's no-op arm: a clean tree does NOT
    * mean "nothing to share" when a prior best-effort push (the autosave
    * path) failed and left the committed change stranded locally.
+   *
+   * Serialized under the workspace mutex: a pull-rebase in flight moves HEAD
+   * through states where the local commits are momentarily unreachable, and
+   * an unserialized read there answers "nothing unpushed" about work that is
+   * about to be replayed — callers use this as a publication PROOF, so it may
+   * only ever see settled states.
    */
   async hasUnpushedCommits(workspaceId: string): Promise<boolean> {
-    const cwd = await this.repoDir(workspaceId);
-    const branch = await this.currentBranch(cwd);
-    try {
-      const { stdout } = await this.git(cwd, [
-        'rev-list', '--count', `refs/remotes/origin/${branch}..HEAD`,
-      ]);
-      return Number(stdout.trim()) > 0;
-    } catch {
-      return true;
-    }
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const branch = await this.currentBranch(cwd);
+      try {
+        const { stdout } = await this.git(cwd, [
+          'rev-list', '--count', `refs/remotes/origin/${branch}..HEAD`,
+        ]);
+        return Number(stdout.trim()) > 0;
+      } catch {
+        return true;
+      }
+    });
   }
 
   /**
@@ -2279,9 +2398,21 @@ export class GitService implements IGitService {
     return stdout.trim().length > 0;
   }
 
-  private async git(cwd: string, args: string[]): Promise<GitRunResult> {
+  private async git(
+    cwd: string,
+    args: string[],
+    opts?: {
+      /**
+       * Bytes to feed the subprocess on stdin — used by the
+       * `--pathspec-from-file=-` commit/add paths so a several-hundred-file
+       * batch never has to ride the argv (Windows caps a command line at
+       * ~32K chars).
+       */
+      input?: string;
+    },
+  ): Promise<GitRunResult> {
     try {
-      const { stdout, stderr } = await execFileAsync('git', args, {
+      const pending = execFileAsync('git', args, {
         cwd,
         // `GIT_LITERAL_PATHSPECS=1` makes git treat every pathspec literally
         // instead of interpreting `[`, `]`, `*`, `?`, `!`, or `:(magic)` as
@@ -2302,6 +2433,14 @@ export class GitService implements IGitService {
         env: { ...process.env, GIT_LITERAL_PATHSPECS: '1', LC_ALL: 'C', LANG: 'C' },
         maxBuffer: 32 * 1024 * 1024,
       });
+      if (opts?.input !== undefined && pending.child.stdin) {
+        // A dying git can close stdin mid-write; the promise below still
+        // rejects with the exit code, which is the error we want to surface.
+        pending.child.stdin.on('error', () => undefined);
+        pending.child.stdin.write(opts.input);
+        pending.child.stdin.end();
+      }
+      const { stdout, stderr } = await pending;
       return { stdout: stdout.toString(), stderr: stderr.toString() };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

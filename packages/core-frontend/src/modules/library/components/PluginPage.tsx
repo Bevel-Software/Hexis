@@ -6,7 +6,7 @@ import { useLibraryToast } from '../state/toast.context';
 import {
   decodePluginSegment,
   pathForPluginsIndex,
-  urlForItemFile,
+  urlForLibraryItem,
 } from '../routes/library-paths';
 import { primaryFolderOf } from '../utils/plugin-summary';
 import { PluginJoinRequests } from './PluginJoinRequests';
@@ -149,7 +149,7 @@ export function PluginPage() {
       setReviewing(item);
       return;
     }
-    if (kbDirName) navigate(urlForItemFile(kbDirName, item.path));
+    if (kbDirName) navigate(urlForLibraryItem(kbDirName, item));
   }
 
   /**

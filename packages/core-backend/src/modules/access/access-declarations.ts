@@ -4,6 +4,7 @@ import { accessMdPathForFolder } from './access-mutation.service.js';
 import {
   EVERYONE_CANONICAL,
   KNOWN_VERBS,
+  hasAccessFrontmatterExtension,
   parseAccessFile,
   parseOwnAccessEntries,
   type ParsedEntry,
@@ -81,9 +82,11 @@ export class AccessDeclarationsError extends WorkflowDomainError {
   }
 }
 
-/** Node files whose own frontmatter may declare verbs. */
+/** Node files whose own frontmatter may declare verbs — the resolver's shared
+ *  extension set (`ACCESS_FRONTMATTER_EXTENSIONS`), which the reference
+ *  scanner mirrors. */
 function isNodeCandidate(name: string): boolean {
-  return name.endsWith('.md') || name.endsWith('.tool');
+  return hasAccessFrontmatterExtension(name);
 }
 
 /** Walk a workspace-relative path down the file tree; null when absent. */

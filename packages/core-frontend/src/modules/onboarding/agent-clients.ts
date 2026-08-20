@@ -1,9 +1,13 @@
-import { jsonConfigSnippet } from '../../shared/mcp';
+import { hexisMcpJsonSnippet, jsonConfigSnippet, workspaceBaseUrl } from '../../shared/mcp';
 
 /**
- * The three ways an agent connects, named by PRODUCT rather than surface —
+ * The ways an agent connects, named by PRODUCT rather than surface —
  * someone knows which assistant they use before they know which build of it
- * they are in (prototype `AGENT_CLIENTS`).
+ * they are in (prototype `AGENT_CLIENTS`). The one exception is the first
+ * entry: the LOCAL server leads, because it is the recommended connection for
+ * every desktop agent — it serves everything the hosted endpoint does PLUS
+ * the plugins' local-only tools — and the entries after it exist for the
+ * agents that cannot run a local process (web assistants, cloud platforms).
  *
  * This file is now the welcome page's PICKER and nothing else: which clients
  * to offer, what to call them, and how to say where the snippet goes. The
@@ -20,7 +24,7 @@ import { jsonConfigSnippet } from '../../shared/mcp';
  */
 
 export interface AgentClient {
-  id: 'claude' | 'chatgpt' | 'other';
+  id: 'claude' | 'chatgpt' | 'other' | 'local';
   label: string;
   /** Where the snippet goes, said as the path through that client's own UI. */
   hint: string;
@@ -30,9 +34,19 @@ export interface AgentClient {
 
 export const AGENT_CLIENTS: AgentClient[] = [
   {
+    id: 'local',
+    label: 'Desktop agents',
+    hint: 'Recommended for Claude Code, Claude Desktop, Cursor, Windsurf, Cline and any agent that runs on your machine: everything the options below give, plus your plugins’ local-only tools. Needs Node. The first time it starts, your browser opens so you can sign in.',
+    // The passed endpoint is deliberately unused: the local server takes the
+    // WORKSPACE address and asks it for the MCP endpoint itself
+    // (`GET /api/config`), so the URL every other client pastes is the wrong
+    // value here — see `workspaceBaseUrl`.
+    snip: () => hexisMcpJsonSnippet(workspaceBaseUrl()),
+  },
+  {
     id: 'claude',
     label: 'Claude',
-    hint: 'claude.ai or Claude Desktop: Settings → Connectors → Add custom connector, then paste this. In Claude Code, `claude mcp add` takes the same URL.',
+    hint: 'For claude.ai on the web: Settings → Connectors → Add custom connector, then paste this. (On your own machine, Desktop agents is the better connection.)',
     snip: (url) => url,
   },
   {
@@ -45,8 +59,8 @@ export const AGENT_CLIENTS: AgentClient[] = [
   },
   {
     id: 'other',
-    label: 'Cursor & Others',
-    hint: 'For clients that read their servers from a JSON config, like Cursor, Windsurf and Cline.',
+    label: 'Other',
+    hint: 'For web and cloud clients that read their servers from a JSON config but can’t run a local process.',
     snip: (url) => jsonConfigSnippet(url),
   },
 ];

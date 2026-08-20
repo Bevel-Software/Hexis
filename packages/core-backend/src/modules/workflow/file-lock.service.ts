@@ -38,6 +38,9 @@ function rowToFileLock(row: typeof fileLocks.$inferSelect): FileLock {
     path: row.path,
     holderUserId: row.holderUserId,
     holderName: row.holderName,
+    // The column carries a NOT NULL 'edit' default, so rows predating the
+    // mode column read back as plain edit locks — the strictest reading.
+    mode: row.mode === 'coordination' ? 'coordination' : 'edit',
     acquiredAt: row.acquiredAt.toISOString(),
     lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
     expiresAt: row.expiresAt.toISOString(),
@@ -58,12 +61,21 @@ export class FileLockService {
    *     "Locked by X" without a follow-up call.
    *   - Existing row, live, same user: refresh TTL + `{ acquired: true }`
    *     so re-acquiring your own lock is idempotent.
+   *
+   * `opts.coordination` stamps the row's `mode` as `'coordination'` — a
+   * pure-mutex hold that grants no write authority (see
+   * `IWorkflowService.acquireLock`). The mode is persisted so the workflow
+   * service's write paths can refuse to treat the hold as write possession
+   * for the row's whole lifetime; a takeover of an expired row re-stamps the
+   * mode, so a stale coordination row can't launder a later edit acquire
+   * (or vice versa).
    */
   async acquire(
     workspaceId: string,
     branch: string,
     targetPath: string,
     user: AuthUser,
+    opts?: { coordination?: boolean },
   ): Promise<AcquireLockResult> {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
@@ -96,6 +108,7 @@ export class FileLockService {
     // `heartbeat()` (which has its own same-user UPDATE), and the
     // editor's save flow detects "I already hold it" via `getLock` in
     // `workspace.routes.withLock` rather than re-acquiring.
+    const mode = opts?.coordination ? 'coordination' : 'edit';
     const upsertResult = await this.db
       .insert(fileLocks)
       .values({
@@ -104,6 +117,7 @@ export class FileLockService {
         path: targetPath,
         holderUserId: user.id,
         holderName: user.name,
+        mode,
         acquiredAt: now,
         lastHeartbeatAt: now,
         expiresAt,
@@ -113,6 +127,7 @@ export class FileLockService {
         set: {
           holderUserId: user.id,
           holderName: user.name,
+          mode,
           acquiredAt: now,
           lastHeartbeatAt: now,
           expiresAt,

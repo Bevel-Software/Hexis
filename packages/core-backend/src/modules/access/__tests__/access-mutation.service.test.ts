@@ -80,11 +80,21 @@ describe('AccessMutationService', () => {
     expect(text).toContain('# Sales folder');
   });
 
-  it('kbPrincipals surfaces the built-in Everyone plugin alongside declared roles', async () => {
-    const { plugins } = await access.kbPrincipals(WS);
-    expect(plugins).toContain('Everyone');
-    expect(plugins).toContain('Admin');
-    expect(plugins).toContain('Product Team');
+  it('kbPrincipals (REAL service): roles lists ROLE principals only, groups separately', async () => {
+    // Through the real resolver — the route-level tests stub this method,
+    // which is exactly how the every-group-listed-as-a-role bug hid.
+    await write(repo, 'groups.yaml', 'groups:\n  GTM Team:\n    - pat@x.io\n  Admin:\n    - shadow@x.io\n');
+    access.invalidate(WS);
+    const { roles, groups } = await access.kbPrincipals(WS);
+    expect(roles).toContain('Everyone');
+    expect(roles).toContain('Admin');
+    expect(roles).toContain('Product Team');
+    // NO group ever appears under roles — not even one shadowing a role name;
+    // and each role appears exactly once (the alias key must not double it).
+    expect(roles).not.toContain('GTM Team');
+    expect(roles.filter((r) => r === 'Admin')).toHaveLength(1);
+    expect(roles.filter((r) => r === 'Product Team')).toHaveLength(1);
+    expect(groups.sort()).toEqual(['Admin', 'GTM Team']);
   });
 
   it('grant everyone read makes the folder publicly readable (read: everyone)', async () => {
@@ -303,6 +313,57 @@ describe('AccessMutationService', () => {
       expect(await access.canWrite(WS, 'razvan@bevel.software', 'access.md')).toBe(true);
     });
 
+    it('GROUP deny with a VANISHED group succeeds even when a same-named ROLE keeps a role/<Name> grant', async () => {
+      // The false-negative this pins: the route pins tokenMatch:'exact' for a
+      // GROUP principal, so the deny strips/denies ONLY the bare token. The
+      // post-write effectiveness assert must judge the SAME exact identity —
+      // with the group vanished the name reads "unshadowed", and the
+      // alias-tolerant default would read the surviving `role/Product Team`
+      // grant as the GROUP still having access, roll back a fully effective
+      // deny, and answer 409 deny-ineffective.
+      await write(
+        repo,
+        'Sales/access.md',
+        // The bare grant is the (now vanished) GROUP's; the role/ grant is the
+        // same-named ROLE's own. No groups.yaml exists — the group is gone.
+        '---\nwrite:\n  - Product Team\n  - role/Product Team\n---\n# Sales folder\n',
+      );
+      access.invalidate(WS);
+
+      const r = await mutation.denyHere(
+        WS,
+        'folder',
+        'Sales',
+        { kind: 'role', role: 'Product Team' },
+        undefined,
+        { tokenMatch: 'exact' },
+      );
+      expect(r.changed).toBe(true);
+      access.invalidate(WS);
+
+      const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+      // The bare (group) grant became a deny...
+      expect(text).toContain('deny Product Team');
+      // ...and the ROLE's own grant was never touched.
+      expect(text).toContain('role/Product Team');
+      expect(text).not.toContain('deny role/Product Team');
+      // The role still resolves its grant through the surviving role/ entry.
+      const roleSources = await access.grantSources(WS, 'folder', 'Sales', {
+        kind: 'role',
+        role: 'role/Product Team',
+      });
+      expect(roleSources.write).toEqual([{ kind: 'direct' }]);
+      // The exact bare token — the group's identity — holds nothing anymore.
+      const groupSources = await access.grantSources(
+        WS,
+        'folder',
+        'Sales',
+        { kind: 'role', role: 'Product Team' },
+        { tokenMatch: 'exact' },
+      );
+      expect(groupSources).toEqual({});
+    });
+
     it('is a no-op (changed:false) when the principal is already fully denied here', async () => {
       await write(
         repo,
@@ -435,5 +496,110 @@ describe('AccessMutationService', () => {
       const parent = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
       expect(parent).not.toContain('alice@example.com');
     });
+  });
+});
+
+
+// The four grant/revoke x shadowed/unshadowed cases, end-to-end through the
+// REAL resolver (kbPrincipals decides shadowing) — the token-kind family.
+describe('token-kind family — shadow-aware revoke, exact-token grant (real resolver)', () => {
+  let root: string;
+  let repo: string;
+  let access: AccessControlService;
+  let mutation: AccessMutationService;
+
+  const roleP: Principal = { kind: 'role', role: 'role/Product Team' }; // the ROLE, explicit
+  const bareP: Principal = { kind: 'role', role: 'Product Team' }; // the bare name (group when shadowed)
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const workspaceDir = path.join(root, WS);
+    repo = path.join(workspaceDir, KB);
+    await fs.mkdir(repo, { recursive: true });
+    await write(repo, 'roles.yaml', ROLES_YAML);
+    await write(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
+    const ws = stubWorkspace(workspaceDir);
+    access = new AccessControlService(ws, KB);
+    mutation = new AccessMutationService(ws, access, KB);
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  /** Shadow on = a GROUP named "Product Team" exists (owns the bare token). */
+  async function shadow(on: boolean): Promise<void> {
+    if (on) {
+      await write(repo, 'groups.yaml', 'groups:\n  Product Team:\n    - pat@x.io\n');
+    }
+    access.invalidate(WS);
+  }
+
+  it('GRANT shadowed: the group grant lands even though role/<Name> is already granted', async () => {
+    await shadow(true);
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - role/Product Team\n---\n');
+    const r = await mutation.grant(WS, 'folder', 'Sales', 'write', bareP);
+    expect(r.changed).toBe(true); // exact-token idempotency: bare and role/ are different principals
+    const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+    expect(text).toContain('- role/Product Team');
+    expect(text.split('\n')).toContain('  - Product Team');
+    // The group member now resolves write through the bare token.
+    access.invalidate(WS);
+    expect(await access.canWrite(WS, 'pat@x.io', 'Sales/Deal.md')).toBe(true);
+  });
+
+  it('GRANT unshadowed: same-spelling grants stay idempotent', async () => {
+    await shadow(false);
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - role/Product Team\n---\n');
+    const r = await mutation.grant(WS, 'folder', 'Sales', 'write', roleP);
+    expect(r.changed).toBe(false);
+  });
+
+  it("REVOKE shadowed: revoking the ROLE leaves the group's bare grant intact", async () => {
+    await shadow(true);
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - Product Team\n  - role/Product Team\n---\n');
+    const r = await mutation.revoke(WS, 'folder', 'Sales', roleP, 'admin@x');
+    expect(r.changed).toBe(true);
+    const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+    expect(text).not.toContain('role/Product Team');
+    expect(text.split('\n')).toContain('  - Product Team'); // the GROUP's token survives the role revoke
+    // ...and the group member still resolves.
+    access.invalidate(WS);
+    expect(await access.canWrite(WS, 'pat@x.io', 'Sales/Deal.md')).toBe(true);
+  });
+
+  it("REVOKE shadowed: revoking the GROUP leaves the role's explicit grant intact", async () => {
+    await shadow(true);
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - Product Team\n  - role/Product Team\n---\n');
+    const r = await mutation.revoke(WS, 'folder', 'Sales', bareP, 'admin@x');
+    expect(r.changed).toBe(true);
+    const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+    expect(text).toContain('- role/Product Team'); // the ROLE's token survives the group revoke
+    expect(text.split('\n')).not.toContain('  - Product Team');
+    // The role member (felix, per roles.yaml) still resolves via role/.
+    access.invalidate(WS);
+    expect(await access.canWrite(WS, 'felix@example.com', 'Sales/Deal.md')).toBe(true);
+    // The group member no longer does.
+    expect(await access.canWrite(WS, 'pat@x.io', 'Sales/Deal.md')).toBe(false);
+  });
+
+  it('REVOKE unshadowed: revoking the role strips BOTH spellings (legacy bare cleanup)', async () => {
+    await shadow(false);
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - Product Team\n  - role/Product Team\n---\n');
+    const r = await mutation.revoke(WS, 'folder', 'Sales', roleP, 'admin@x');
+    expect(r.changed).toBe(true);
+    const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+    expect(text).not.toContain('Product Team');
+    access.invalidate(WS);
+    expect(await access.canWrite(WS, 'felix@example.com', 'Sales/Deal.md')).toBe(false);
+  });
+
+  it('REVOKE unshadowed: a bare revoke (group since vanished) also strips both spellings', async () => {
+    await shadow(false);
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - Product Team\n  - role/Product Team\n---\n');
+    const r = await mutation.revoke(WS, 'folder', 'Sales', bareP, 'admin@x');
+    expect(r.changed).toBe(true);
+    const text = await fs.readFile(path.join(repo, 'Sales/access.md'), 'utf-8');
+    expect(text).not.toContain('Product Team'); // unshadowed: both spellings are the role
   });
 });

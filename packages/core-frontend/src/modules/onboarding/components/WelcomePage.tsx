@@ -38,7 +38,7 @@ export function WelcomePage() {
   const onboarding = useOnboarding();
   const toast = useLibraryToast();
   const navigate = useNavigate();
-  const [clientId, setClientId] = useState<AgentClient['id']>('claude');
+  const [clientId, setClientId] = useState<AgentClient['id']>('local');
   const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
 
   // Once, on arrival — this is what makes the welcome redirect one-time.

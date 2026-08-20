@@ -136,7 +136,6 @@ function fakeAccessControl(adminEmails: string[]): IAccessControl {
     findEmailByHash: async () => null,
     kbPrincipals: async () => ({ plugins: [], people: [] }),
     validateRolesYaml: () => ({ ok: true }),
-    referencesToRole: async () => [],
     canWriteAtRef: async () => null,
     canWriteBatchAtRef: async () => null,
     eligibleWritersAtRef: async () => null,

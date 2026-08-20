@@ -1,70 +1,73 @@
 /**
- * Admin Roles & Members service — full CRUD on the default-branch `roles.yaml`.
+ * Admin Roles & Members service — MEMBERSHIP editing on the default-branch
+ * `roles.yaml`.
  *
- * This is the deferred "Slice 2" of `manage-access-grant-revoke`: the in-product
- * surface for creating/deleting roles, adding/removing members, and renaming a
- * role. It is the ONLY writer of `roles.yaml` outside a hand-edit, and it is
- * built around one non-negotiable safety property:
+ * Roles are APP-DEFINED capabilities (see `capability-registry.ts`): the
+ * product decides which roles exist; users can never create, rename, or
+ * delete one — those editors are gone. What remains admin-editable is
+ * MEMBERSHIP: adding/removing individual emails and assigning/unassigning
+ * groups (`group:<canonical>` members), on capability roles and on LEGACY
+ * people-set roles alike (pre-split roles keep resolving and stay editable;
+ * `convertRoleToGroup` is their migration path).
+ *
+ * It is the primary in-app writer of `roles.yaml` (the groups admin also
+ * rewrites its `group:` refs on group rename/delete, through the same shared
+ * validated pipeline), and it is built around one non-negotiable safety
+ * property:
  *
  *   roles.yaml has NO admin-rescue (canWrite('roles.yaml') is a pure isAdmin
  *   check) and loadModel HARD-THROWS on a parse failure (which isAdmin swallows
  *   into false for EVERYONE). So a single malformed write = a permanent,
  *   app-wide, in-app-unrecoverable admin lockout. Every mutation therefore runs
  *   the candidate text through the resolver's OWN parser (validateRolesYaml)
- *   before a byte hits disk; on any error it writes nothing.
+ *   before a byte hits disk; on any error it writes nothing. That parser also
+ *   carries the Admin invariant — at least one DIRECT email member, group
+ *   references alone are never enough — so no write path can land a
+ *   directory-dependent Admin.
  *
- * Two write paths, both gated by the same friendly pre-checks + validate gate:
- *
- *   Single-file ops (create/delete role, add/remove member) — `runEdit`:
- *     pre-check roles.yaml isn't locked  → RolesAdminError 409
- *     read CURRENT roles.yaml → parse → edit-in-memory → re-emit candidate
- *     validateRolesYaml(candidate)       → RolesAdminError 422, write nothing
- *     LockingFilesystem.writeFile(roles.yaml)  ← acquire → write → release;
- *       release IS the commit + push (default per-file summary), so the commit
- *       lands a beat after the write — same pipeline the human editor + agent
- *       use. The HTTP roster reads the (synchronously written) working tree.
- *
- *   Rename (`renameRole`) — keeps an ATOMIC multi-file special case because it
- *   rewrites roles.yaml + every reference in ONE commit (a partial rewrite =
- *   silent access drop):
- *     pre-check roles.yaml isn't locked  → RolesAdminError 409
- *     parse + rewrite refs (fail-closed) → validate gate
- *     LockingFilesystem.writeFiles(roles.yaml + refs)  ← acquires every path's
- *       lock, commits the curated set as ONE change (via the workflow service's
- *       commitChanges), then releases without a per-file commit.
- *
- * All reads and writes target the DEFAULT branch — the file admin status itself
- * derives from. Editing any other branch's copy would show a roster that
- * doesn't match who is actually an admin.
+ * Lock/commit plumbing is the SHARED `AdminLockedCommits` helper (one
+ * implementation for this service and the groups admin — the twins diverged
+ * once into a real bug). Reference scanning is the SHARED
+ * `KbReferenceScanner` (cached, so roster mutations don't rerun the full-KB
+ * sweep the GET pays for).
  */
 
-import path from 'node:path';
-import { promises as fs } from 'node:fs';
-
 import { workspaceIdForBranch } from '../workspace/workspace.service.js';
-import { LockingFilesystem } from '../workflow/locking-filesystem.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import type { AuthUser, FileTreeEntry, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
+import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../workflow/workflow.errors.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
   ADMIN_CANONICAL,
+  ROLE_TOKEN_PREFIX,
   canonicalRoleName,
   canonicalEmail,
-  parseAccessEntry,
+  loadActiveGroups,
 } from './access-control.service.js';
 import { makeRolesYamlWriteValidator } from './roles-yaml-guard.js';
 import { renderRolesYaml } from './render-roles-yaml.js';
 import {
   parseRolesModel,
-  createRole as editCreateRole,
   deleteRole as editDeleteRole,
   addMember as editAddMember,
   removeMember as editRemoveMember,
-  renameRoleDisplay as editRenameRoleDisplay,
+  addRoleGroupRef as editAddGroupRef,
+  removeRoleGroupRef as editRemoveGroupRef,
+  isGroupRefMember,
   RolesEditError,
   type EditResult,
 } from './roles-edit.js';
+import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from './group-files.js';
+import {
+  GroupsEditError,
+  assertSafeGroupDisplayName,
+  emitGroupsModel,
+  parseGroupsModel,
+} from './groups-edit.js';
+import { capabilityRoleFor, isLegacyPeopleSetRole } from './capability-registry.js';
+import { GROUP_REF_PREFIX, RESERVED_ROLE_NAMES } from './access-control.service.js';
+import { AdminLockedCommits } from './admin-locked-commit.js';
+import { KbReferenceScanner } from './reference-scan.js';
 
 /** A mutation that cannot proceed (invariant violation, contention, not found). */
 export class RolesAdminError extends WorkflowDomainError {
@@ -78,12 +81,24 @@ export class RolesAdminError extends WorkflowDomainError {
 export interface RoleRosterEntry {
   canonical: string;
   displayName: string;
+  /** Individual member EMAILS (group assignments are split into `groups`). */
   members: string[];
+  /** Canonical names of groups this role is assigned to (`group:` members). */
+  groups: string[];
   isAdmin: boolean;
   /**
-   * Every access rule referencing this role — folder `access.md` AND node
-   * frontmatter. Sound: this is the SAME scan the rename rewrite uses, so the
-   * delete warning's count matches what a delete/rename would actually touch.
+   * Registry metadata when this is a CAPABILITY role (Admin today); null for
+   * a legacy pre-split people-set role, which the UI flags with a
+   * convert-to-group action.
+   */
+  capability: { description: string; groupAssignable: boolean } | null;
+  /**
+   * Every access rule referencing this ROLE — folder `access.md` AND node
+   * frontmatter. `role/<name>` hits always count; a BARE-token hit counts
+   * only when no group shadows the name (bare tokens resolve group-first, so
+   * a shadowed bare grant is the GROUP's reference, listed on the groups
+   * roster instead). Sound: this is the SAME scan the group rename/delete
+   * rewrites use.
    */
   referencedBy: { path: string; verb: string }[];
 }
@@ -116,6 +131,11 @@ export interface RolesConfigHealth {
 }
 
 export class RolesAdminService {
+  /** Shared lock/commit plumbing — see module doc. */
+  private readonly locked: AdminLockedCommits;
+  /** Shared cached reference scanner — see module doc. */
+  private readonly references: KbReferenceScanner;
+
   constructor(
     private readonly workspaceService: IWorkspaceService,
     private readonly workflowService: IWorkflowService,
@@ -144,7 +164,25 @@ export class RolesAdminService {
      * recovery exists to escape.
      */
     private readonly recoveryAdmins: readonly string[] = [],
-  ) {}
+  ) {
+    this.locked = new AdminLockedCommits({
+      workspaceService,
+      workflowService,
+      kbDirName,
+      defaultBranchOf,
+      makeError: (message, status, payload) => new RolesAdminError(message, status, payload),
+      logTag: 'roles-admin',
+      contendedSubject: 'Roles',
+      // Defence in depth: this surface already validates candidates before
+      // writing, but the same pre-disk gate the editor/agent use guarantees a
+      // malformed roles.yaml can never land through here either.
+      validateWrite: makeRolesYamlWriteValidator(kbDirName),
+    });
+    // The event bus keeps the roster's `referencedBy` fresh: a share-dialog
+    // grant/revoke on any access.md happens outside this service, and the
+    // scanner invalidates its cache on those writes' events (TTL as backstop).
+    this.references = new KbReferenceScanner(workspaceService, kbDirName, eventBus);
+  }
 
   /** Resolved per call — see the constructor note on `defaultBranchOf`. */
   private get defaultBranch(): string {
@@ -184,38 +222,11 @@ export class RolesAdminService {
     return this.workspaceId;
   }
 
-  private async repoDir(workspaceId: string): Promise<string> {
-    const wsDir = await this.workspaceService.getWorkspacePath(workspaceId);
-    return path.join(wsDir, this.kbDirName);
-  }
-
-  /**
-   * A lock-aware filesystem scoped to `actor` — writes auto-commit + push as the
-   * actor on release, through the same pipeline as the human editor and agent.
-   * Built per-op because the lock context captures the acting user.
-   */
-  private async lockingFsForActor(workspaceId: string, actor: AuthUser): Promise<LockingFilesystem> {
-    const basePath = await this.workspaceService.getWorkspacePath(workspaceId);
-    return new LockingFilesystem(
-      { basePath, contained: true },
-      {
-        workflow: this.workflowService,
-        workspaceId,
-        branch: this.defaultBranch,
-        user: actor,
-        // Defence in depth: this surface already validates candidates before
-        // writing, but the same pre-disk gate the editor/agent use guarantees a
-        // malformed roles.yaml can never land through here either.
-        validateWrite: makeRolesYamlWriteValidator(this.kbDirName),
-      },
-    );
-  }
-
   /**
    * Fail fast with a friendly 409 if roles.yaml is already locked by someone
-   * else. The actual lock is taken by the LockingFilesystem write that follows;
-   * this only preserves the explicit "being edited by X" contract (the raw
-   * LockingFilesystem contention error is status-less and would surface as 500).
+   * else. The actual lock is taken by the write that follows; this only
+   * preserves the explicit "being edited by X" contract (the raw contention
+   * error is status-less and would surface as 500).
    */
   private async assertRolesUnlocked(workspaceId: string, actor: AuthUser): Promise<void> {
     const held = await this.workflowService.getLock(
@@ -231,33 +242,8 @@ export class RolesAdminService {
     }
   }
 
-  /**
-   * Run a lock-aware filesystem write, mapping its status-less contention error
-   * ("Skipped editing … — locked by …") to the friendly 409. {@link
-   * assertRolesUnlocked} pre-checks the common case (and names the holder), but
-   * it's a TOCTOU check — another admin can grab the lock between it and the
-   * actual acquire inside the write. This catches that race so contention always
-   * surfaces as a 409, never an unhandled 500.
-   */
-  private async mapLockContention<T>(write: () => Promise<T>): Promise<T> {
-    try {
-      return await write();
-    } catch (err) {
-      if (err instanceof Error && /locked by /.test(err.message)) {
-        throw new RolesAdminError('Roles are being edited by another admin. Try again in a moment.', 409);
-      }
-      throw err;
-    }
-  }
-
   private async readRolesYaml(workspaceId: string): Promise<string> {
-    try {
-      return await this.workspaceService.readFile(workspaceId, path.posix.join(this.kbDirName, ROLES_YAML));
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException | null)?.code;
-      if (code === 'ENOENT' || code === 'ENOTDIR') return '';
-      throw err;
-    }
+    return (await this.locked.readKbFile(workspaceId, ROLES_YAML)) ?? '';
   }
 
   // ---- Read -------------------------------------------------------------
@@ -267,20 +253,37 @@ export class RolesAdminService {
     const workspaceId = await this.ensureWorkspace();
     const text = await this.readRolesYaml(workspaceId);
     const model = parseRolesModel(text);
-    // ONE sound scan of every `.md` (folder access.md + node
-    // frontmatter), then index the references by canonical role. This is the
-    // SAME candidate set + parse the rename rewrite uses, so the delete warning
-    // can never undercount what the rename would actually touch.
-    const referencesByRole = await this.scanRoleReferences(workspaceId);
+    // ONE sound scan of every candidate file (folder access.md + node
+    // frontmatter) — cached in the shared scanner, so mutations returning the
+    // fresh roster don't rerun the full-KB sweep — indexed by canonical entry
+    // token. Attribution per spelling: a `role/<name>` hit is ALWAYS the
+    // role's; a BARE hit is the role's only when no group shadows the name —
+    // bare tokens resolve group-first, so a shadowed bare grant belongs to the
+    // GROUP (and the groups roster attributes it there — the mirror image).
+    const [referencesByToken, activeGroups] = await Promise.all([
+      this.references.scan(workspaceId),
+      loadActiveGroups((f) => this.locked.readKbFile(workspaceId, f)),
+    ]);
+    const groupOwnedBareNames = new Set(activeGroups.groups.keys());
     const out: RoleRosterEntry[] = [];
     for (const role of model) {
       const canonical = canonicalRoleName(role.displayName);
+      const registryEntry = capabilityRoleFor(role.displayName);
       out.push({
         canonical,
         displayName: role.displayName,
-        members: role.members,
+        members: role.members.filter((m) => !isGroupRefMember(m)),
+        groups: role.members
+          .filter(isGroupRefMember)
+          .map((m) => canonicalRoleName(m.slice(GROUP_REF_PREFIX.length))),
         isAdmin: canonical === ADMIN_CANONICAL,
-        referencedBy: referencesByRole.get(canonical) ?? [],
+        capability: registryEntry
+          ? { description: registryEntry.description, groupAssignable: registryEntry.groupAssignable }
+          : null,
+        referencedBy: [
+          ...(groupOwnedBareNames.has(canonical) ? [] : referencesByToken.get(canonical) ?? []),
+          ...(referencesByToken.get(`${ROLE_TOKEN_PREFIX}${canonical}`) ?? []),
+        ],
       });
     }
     return out;
@@ -350,10 +353,13 @@ export class RolesAdminService {
     }
 
     if (this.recoveryAdmins.length === 0) {
+      // 409, not 500: this is a CONFIGURATION refusal in a break-glass flow —
+      // the operator needs the actionable message, and the route helper hides
+      // every >=500 body behind a generic "Internal error." on purpose.
       throw new RolesAdminError(
         'Recovery needs a configured admin (ADMIN_EMAIL) to restore — a roles.yaml ' +
           'with no Admin is exactly the unusable state recovery exists to escape.',
-        500,
+        409,
         { kind: 'no-recovery-admins' },
       );
     }
@@ -362,8 +368,8 @@ export class RolesAdminService {
 
     // Back up the corrupted bytes and restore the good default atomically. The
     // default is valid, so the resolver loads immediately after this commit.
-    const fsys = await this.lockingFsForActor(workspaceId, actor);
-    await this.mapLockContention(() =>
+    const fsys = await this.locked.lockingFsForActor(workspaceId, actor);
+    await this.locked.mapLockContention(() =>
       fsys.writeFiles(
         [
           { path: `${this.kbDirName}/${OLD_ROLES_YAML}`, content: current },
@@ -378,19 +384,11 @@ export class RolesAdminService {
   }
 
   // ---- Mutations --------------------------------------------------------
-
-  async createRole(actor: AuthUser, displayName: string): Promise<RoleRosterEntry[]> {
-    await this.runEdit(actor, (text) => editCreateRole(text, displayName));
-    return this.getRoster();
-  }
-
-  async deleteRole(actor: AuthUser, canonical: string): Promise<RoleRosterEntry[]> {
-    if (canonical === ADMIN_CANONICAL) {
-      throw new RolesAdminError('The Admin role cannot be deleted', 422);
-    }
-    await this.runEdit(actor, (text) => editDeleteRole(text, canonical));
-    return this.getRoster();
-  }
+  //
+  // MEMBERSHIP ONLY. There is deliberately no createRole / renameRole /
+  // deleteRole: roles are app-defined capabilities (see capability-registry),
+  // so the admin surface cannot mint, rebrand, or retire one. Legacy roles
+  // migrate out via convertRoleToGroup.
 
   async addMember(actor: AuthUser, canonical: string, email: string): Promise<RoleRosterEntry[]> {
     await this.runEdit(actor, (text) => editAddMember(text, canonical, email));
@@ -398,9 +396,12 @@ export class RolesAdminService {
   }
 
   /**
-   * Remove a member. Refuses to empty the Admin role (422). Removing the
-   * caller's OWN last Admin membership requires `confirm` (409 otherwise) — no
-   * silent self-lockout, since admin status is read live from this file.
+   * Remove a member. Refuses to remove the Admin role's LAST DIRECT EMAIL
+   * (422) — the kept invariant: whatever groups Admin references, at least
+   * one directory-independent email member must remain, or a broken IdP
+   * connection becomes an admin lockout. Removing the caller's OWN last
+   * Admin membership requires `confirm` (409 otherwise) — no silent
+   * self-lockout, since admin status is read live from this file.
    */
   async removeMember(
     actor: AuthUser,
@@ -412,11 +413,15 @@ export class RolesAdminService {
       const target = canonicalEmail(email);
       if (canonical === ADMIN_CANONICAL) {
         const admin = parseRolesModel(text).find((r) => canonicalRoleName(r.displayName) === ADMIN_CANONICAL);
-        const members = admin?.members ?? [];
-        if (members.includes(target) && members.length <= 1) {
-          throw new RolesAdminError('The Admin role must keep at least one member', 422);
+        // The invariant counts DIRECT emails only — group refs don't rescue.
+        const directMembers = (admin?.members ?? []).filter((m) => !isGroupRefMember(m));
+        if (directMembers.includes(target) && directMembers.length <= 1) {
+          throw new RolesAdminError(
+            'The Admin role must keep at least one direct email member — group references alone are not enough.',
+            422,
+          );
         }
-        if (target === canonicalEmail(actor.email) && members.includes(target) && !confirm) {
+        if (target === canonicalEmail(actor.email) && directMembers.includes(target) && !confirm) {
           throw new RolesAdminError('You are about to remove your own admin access', 409, {
             kind: 'self-admin-removal',
           });
@@ -428,68 +433,149 @@ export class RolesAdminService {
   }
 
   /**
-   * Rename a role's display name.
-   *   - canonical UNCHANGED (casing/whitespace) → single roles.yaml edit.
-   *   - canonical CHANGES → rewrite every genuine role reference in access.md +
-   *     node frontmatter AND roles.yaml in ONE atomic commit.
-   *   - Admin canonical → non-admin canonical is refused (400): it would break
-   *     isAdminEmail's roles.has('admin') lookup. Casing-only Admin OK.
+   * Assign a role to a group — Admin included (the parse-time invariant keeps
+   * at least one direct email on Admin, so a group ref can never be its only
+   * membership).
+   *
+   * The ref must name a group the ACTIVE source knows: mergeGroupsIntoRoles
+   * ignores an unknown ref with only a log warning, so a typo here would be
+   * accepted and then silently grant the role to nobody. The check is
+   * BEST-EFFORT validation, not a race-free guarantee: the manual group
+   * file's lock is held across validate + write (so a concurrent groups-page
+   * deletion/rename can't invalidate the ref mid-flight), but the IdP sync
+   * writer commits through its own lock — a provisioning push can retire the
+   * group between this check and the next sync. That is fine by design: a
+   * dangling ref resolves to nothing, with a resolver warning naming it.
    */
-  async renameRole(actor: AuthUser, canonical: string, newDisplayName: string): Promise<RoleRosterEntry[]> {
-    const newCanonical = canonicalRoleName(newDisplayName);
-    if (canonical === ADMIN_CANONICAL && newCanonical !== ADMIN_CANONICAL) {
-      throw new RolesAdminError('The Admin role cannot be renamed to a different name', 400);
-    }
-
+  async assignGroup(actor: AuthUser, canonical: string, groupName: string): Promise<RoleRosterEntry[]> {
     const workspaceId = await this.ensureWorkspace();
-    // Preserve the friendly 409 on contention: writeFiles throws a status-less
-    // lock-skip error (→ 500), so pre-check the roles.yaml lock.
+    await this.locked.withFileLocks(workspaceId, actor, [GROUPS_YAML], async () => {
+      const { groups } = await loadActiveGroups((f) => this.locked.readKbFile(workspaceId, f));
+      if (!groups.has(canonicalRoleName(groupName))) {
+        throw new RolesAdminError(`No group named "${groupName.trim()}". Pick an existing group.`, 404, {
+          kind: 'unknown-group',
+          group: groupName.trim(),
+        });
+      }
+      await this.runEdit(actor, (text) => editAddGroupRef(text, canonical, groupName));
+    });
+    return this.getRoster();
+  }
+
+  async unassignGroup(actor: AuthUser, canonical: string, groupName: string): Promise<RoleRosterEntry[]> {
+    await this.runEdit(actor, (text) => editRemoveGroupRef(text, canonical, groupName));
+    return this.getRoster();
+  }
+
+  /**
+   * Convert a LEGACY people-set role into a manual group — the migration the
+   * roles/groups split defines: "Product" was never a capability, it was a
+   * team. Atomic two-file move (roles.yaml loses the role, groups.yaml gains
+   * the group with the same members) in ONE commit; grant references keep
+   * working untouched because the NAME does not change.
+   *
+   * Refusals: capability roles (they ARE roles — Admin included), roles with
+   * group assignments (unwind those first: a group containing a group is
+   * nesting), IdP mode (groups are managed in the identity provider — this
+   * would write a retired file), and a groups.yaml name collision.
+   */
+  async convertRoleToGroup(actor: AuthUser, canonical: string): Promise<RoleRosterEntry[]> {
+    const workspaceId = await this.ensureWorkspace();
+    if (!isLegacyPeopleSetRole(canonical)) {
+      throw new RolesAdminError(`'${canonical}' is a capability role — it cannot become a group`, 422);
+    }
+    if ((await this.locked.readKbFile(workspaceId, SYNCED_GROUPS_YAML)) !== null) {
+      throw new RolesAdminError(
+        'Groups are synced from your identity provider — recreate this team there instead.',
+        409,
+        { kind: 'idp-mode' },
+      );
+    }
     await this.assertRolesUnlocked(workspaceId, actor);
 
-    const text = await this.readRolesYaml(workspaceId);
-    const before = parseRolesModel(text);
-    if (!before.some((r) => canonicalRoleName(r.displayName) === canonical)) {
-      throw new RolesAdminError(`role not found: ${canonical}`, 404);
-    }
+    // Hold ALL THREE file locks across read → build → write: candidates are
+    // built from a snapshot, and without the hold another admin's edit could
+    // land in between and be silently overwritten. The synced file's lock is
+    // held too — the directory-sync materializer commits synced-groups.yaml
+    // through that same lock, so holding it serializes this conversion with a
+    // provisioning push and makes the IdP-mode recheck below race-free. It is
+    // a COORDINATION hold (never a write path): synced-groups.yaml is
+    // machine-owned — only the sync bot passes its write rule, so a
+    // write-intent acquire would refuse every human actor at the gate. The
+    // conversion only READS the file; coordination gives it the mutex without
+    // claiming write authority.
+    await this.locked.withFileLocks(
+      workspaceId,
+      actor,
+      [GROUPS_YAML, ROLES_YAML],
+      async () => {
+      // Re-check UNDER the synced file's lock: the pre-lock check above is a
+      // fast-path courtesy, but directory sync could materialize
+      // synced-groups.yaml between it and this point — and committing a new
+      // groups.yaml group in IdP mode writes a retired file.
+      if ((await this.locked.readKbFile(workspaceId, SYNCED_GROUPS_YAML)) !== null) {
+        throw new RolesAdminError(
+          'Groups are synced from your identity provider — recreate this team there instead.',
+          409,
+          { kind: 'idp-mode' },
+        );
+      }
+      const rolesText = await this.readRolesYaml(workspaceId);
+      const role = parseRolesModel(rolesText).find((r) => canonicalRoleName(r.displayName) === canonical);
+      if (!role) throw new RolesAdminError(`role not found: ${canonical}`, 404);
+      const groupRefs = role.members.filter(isGroupRefMember);
+      if (groupRefs.length > 0) {
+        throw new RolesAdminError(
+          'This role is assigned to groups — remove those assignments before converting it.',
+          422,
+        );
+      }
 
-    const rolesEdit = this.guardEdit(() => editRenameRoleDisplay(text, canonical, newDisplayName));
-    const writes: { repoRelativePath: string; content: string }[] = [];
+      // Build both candidates BEFORE any write, and validate both.
+      const rolesEdit = this.guardEdit(() => editDeleteRole(rolesText, canonical));
+      this.assertLoadable(rolesEdit.text);
+      makeRolesYamlWriteValidator(this.kbDirName)(`${this.kbDirName}/${ROLES_YAML}`, rolesEdit.text);
+      // Keep absent (null) distinct from existing-but-empty ('') — rollback
+      // must DELETE a groups.yaml it created, not truncate one already there.
+      // ONE parse + ONE emit: the group candidate is built on the model
+      // directly (name-safety + reserved + duplicate checks inline), not via
+      // per-member editor round-trips that each re-parse the whole file.
+      const groupsOriginal = await this.locked.readKbFile(workspaceId, GROUPS_YAML);
+      let groupsCandidate: string;
+      try {
+        assertSafeGroupDisplayName(role.displayName);
+        if (RESERVED_ROLE_NAMES.has(canonical)) {
+          throw new GroupsEditError(`'${role.displayName}' is a reserved name and cannot be a group`);
+        }
+        const groupsModel = parseGroupsModel(groupsOriginal ?? '');
+        if (groupsModel.some((g) => canonicalRoleName(g.displayName) === canonical)) {
+          throw new GroupsEditError(`a group named '${role.displayName}' already exists`);
+        }
+        groupsModel.push({ displayName: role.displayName, members: [...role.members] });
+        groupsCandidate = emitGroupsModel(groupsModel);
+      } catch (err) {
+        if (err instanceof GroupsEditError) throw new RolesAdminError(err.message, err.status);
+        throw err;
+      }
+      const groupsValid = validateGroupsFile(groupsCandidate, GROUPS_YAML);
+      if (!groupsValid.ok) {
+        throw new RolesAdminError(`groups.yaml would be invalid: ${groupsValid.errors.join('; ')}`, 422);
+      }
 
-    // The roles.yaml change itself (skip if the re-emit was a no-op).
-    // REPO-relative path (bare); the kbDirName prefix is added below.
-    if (rolesEdit.changed) {
-      writes.push({ repoRelativePath: ROLES_YAML, content: rolesEdit.text });
-    }
-
-    // Identity change → rewrite every genuine role reference, atomically.
-    // (Fail-closed: an unreadable candidate throws here, BEFORE any write.)
-    if (newCanonical !== canonical) {
-      const repoDir = await this.repoDir(workspaceId);
-      const refWrites = await this.rewriteRoleReferences(workspaceId, repoDir, canonical, newDisplayName.trim());
-      writes.push(...refWrites);
-    }
-
-    if (writes.length === 0) return this.getRoster(); // nothing changed
-
-    // The validate-gate: any roles.yaml write must parse via the resolver —
-    // runs BEFORE the atomic write so a bad candidate never reaches disk.
-    const rolesWrite = writes.find((w) => w.repoRelativePath === ROLES_YAML);
-    if (rolesWrite) this.assertLoadable(rolesWrite.content);
-
-    // Rename keeps the ATOMIC multi-file commit (roles.yaml + every rewritten
-    // reference land as ONE commit, or none): a partial rewrite would leave a
-    // renamed role with references still pointing at the old name = silent
-    // access drop. The lock-aware filesystem owns this — it acquires every
-    // path's lock, writes them, and commits the curated set as one change.
-    const fsys = await this.lockingFsForActor(workspaceId, actor);
-    await this.mapLockContention(() =>
-      fsys.writeFiles(
-        writes.map((w) => ({ path: `${this.kbDirName}/${w.repoRelativePath}`, content: w.content })),
-        `Rename role ${canonical} → ${newDisplayName.trim()}`,
-      ),
+      await this.locked.writeAndCommitLocked(
+        workspaceId,
+        actor,
+        [
+          { repoRel: ROLES_YAML, content: rolesEdit.text, original: rolesText },
+          { repoRel: GROUPS_YAML, content: groupsCandidate, original: groupsOriginal },
+        ],
+        `Convert role ${role.displayName} to a group`,
+      );
+      },
+      { coordinationFiles: [SYNCED_GROUPS_YAML] },
     );
     this.accessControl.invalidate(workspaceId);
-    this.emitWrites(workspaceId, actor, writes.map((w) => w.repoRelativePath));
+    this.emitWrites(workspaceId, actor, [ROLES_YAML, GROUPS_YAML]);
     return this.getRoster();
   }
 
@@ -513,15 +599,11 @@ export class RolesAdminService {
   }
 
   /**
-   * Single-file roles.yaml mutation. `pre` produces the candidate (and may throw
-   * RolesAdminError for invariant violations before any write). Skips on a no-op.
-   *
-   * The write goes through a {@link LockingFilesystem}: acquiring the per-file
-   * lock, writing, then releasing — and release IS the commit + push (attributed
-   * to `actor`), the same pipeline the human editor and agent use. So unlike the
-   * rename's synchronous atomic commit, the git commit here lands on release
-   * (a beat after the write); the HTTP response reads the working tree, which is
-   * already on disk, so the returned roster is correct.
+   * Single-file roles.yaml mutation under the shared file-lock/commit helper.
+   * `pre` produces the candidate (and may throw RolesAdminError for invariant
+   * violations before any write). Skips on a no-op. Every candidate passes
+   * the resolver's own parser (assertLoadable) plus the pre-disk validator
+   * before a byte lands.
    */
   private async runEdit(
     actor: AuthUser,
@@ -529,242 +611,32 @@ export class RolesAdminService {
   ): Promise<void> {
     const workspaceId = await this.ensureWorkspace();
     await this.assertRolesUnlocked(workspaceId, actor);
+    return this.locked.withFileLocks(workspaceId, actor, [ROLES_YAML], () =>
+      this.runEditLocked(workspaceId, actor, pre),
+    );
+  }
+
+  private async runEditLocked(
+    workspaceId: string,
+    actor: AuthUser,
+    pre: (currentText: string) => EditResult,
+  ): Promise<void> {
     const text = await this.readRolesYaml(workspaceId);
     const result = this.guardEdit(() => pre(text));
     if (!result.changed) return;
     this.assertLoadable(result.text);
-    // LockingFilesystem paths are WORKSPACE-relative, so carry the kbDirName
-    // prefix (unlike commitChanges' bare repo-relative paths). The release
-    // pipeline writes a default per-file commit summary ("Update roles.yaml");
-    // a bespoke summary isn't threadable through this path, which is fine for a
-    // single-file roles edit. The rename keeps its descriptive summary because
-    // it commits atomically via writeFiles.
-    const fsys = await this.lockingFsForActor(workspaceId, actor);
-    await this.mapLockContention(() => fsys.writeFile(`${this.kbDirName}/${ROLES_YAML}`, result.text));
+    // The lock is ALREADY OURS (withFileLocks; strict same-user acquire), so
+    // LockingFilesystem would contend against our own hold. Apply the same
+    // pre-disk validator it would have run, then plain-write + a path-scoped
+    // atomic commit.
+    makeRolesYamlWriteValidator(this.kbDirName)(`${this.kbDirName}/${ROLES_YAML}`, result.text);
+    await this.locked.writeAndCommitLocked(
+      workspaceId,
+      actor,
+      [{ repoRel: ROLES_YAML, content: result.text, original: text }],
+      `Update ${ROLES_YAML}`,
+    );
     this.accessControl.invalidate(workspaceId);
     this.emitWrites(workspaceId, actor, [ROLES_YAML]);
   }
-
-  /**
-   * Find every genuine role reference to `oldCanonical` across folder access.md
-   * AND node frontmatter, and rewrite each to `newDisplayName`. Reference-aware:
-   * a line is rewritten ONLY if it PARSES as a role entry whose canonical name
-   * == oldCanonical. Prose, comments, `Name <email>` user entries, other keys,
-   * and substrings never match. Returns the repo-relative writes to commit.
-   */
-  private async rewriteRoleReferences(
-    workspaceId: string,
-    repoDir: string,
-    oldCanonical: string,
-    newDisplayName: string,
-  ): Promise<{ repoRelativePath: string; content: string }[]> {
-    const writes: { repoRelativePath: string; content: string }[] = [];
-    const candidates = await this.collectCandidateFiles(workspaceId);
-    for (const repoRel of candidates) {
-      const abs = path.join(repoDir, repoRel);
-      let text: string;
-      try {
-        text = await fs.readFile(abs, 'utf-8');
-      } catch (err) {
-        // Fail closed: a candidate we cannot read might reference the
-        // old role. Skipping it would commit a partial rewrite (a half-renamed
-        // role pointing at the old name) and silently drop access. Abort the
-        // whole atomic rename instead so the admin can retry cleanly.
-        throw new RolesAdminError(
-          `Cannot read ${repoRel} while rewriting role references; rename aborted with no changes`,
-          422,
-          { cause: (err as Error)?.message },
-        );
-      }
-      const rewritten = rewriteRoleTokensInText(text, oldCanonical, newDisplayName);
-      if (rewritten !== text) {
-        // REPO-relative (bare repoRel) for commitChanges — repoDir already points
-        // at <workspaceDir>/<kbDirName>.
-        writes.push({ repoRelativePath: repoRel, content: rewritten });
-      }
-    }
-    return writes;
-  }
-
-  /**
-   * Repo-relative paths of every file that could carry a role reference: all
-   * `access.md` files plus every `.md` node (its own frontmatter). Sourced from
-   * the workspace file tree (which already skips `.git` and honours
-   * `.bevelignore`), filtered to `.md` under the KB dir and returned bare
-   * repo-relative. (`roles.yaml` isn't `.md`, so it's excluded; the rename
-   * commits it separately.) Under save=share the working tree matches the
-   * committed set, so this is the same candidate list git-tracking would give.
-   */
-  private async collectCandidateFiles(workspaceId: string): Promise<string[]> {
-    const tree = await this.workspaceService.listFiles(workspaceId);
-    const prefix = `${this.kbDirName}/`;
-    const out: string[] = [];
-    const visit = (node: FileTreeEntry): void => {
-      if (node.type === 'file') {
-        if (node.relativePath.startsWith(prefix) && node.relativePath.endsWith('.md')) {
-          out.push(node.relativePath.slice(prefix.length));
-        }
-        return;
-      }
-      for (const child of node.children ?? []) visit(child);
-    };
-    visit(tree);
-    return out;
-  }
-
-  /**
-   * Sound scan of EVERY `.md` (folder `access.md` + node frontmatter)
-   * for genuine role references, indexed by canonical role name. Shares the
-   * candidate set and the config-region role-entry parse with the rename
-   * rewrite (`findRoleRefsInText` / `rewriteRoleTokensInText`), so the delete
-   * warning and the rename rewrite see the SAME references — the warning can no
-   * longer undercount frontmatter the rename would touch. A file we cannot read
-   * is skipped (this is an advisory read, not the atomic write path): missing a
-   * reference here only weakens the warning, it cannot drop access.
-   */
-  private async scanRoleReferences(
-    workspaceId: string,
-  ): Promise<Map<string, { path: string; verb: string }[]>> {
-    const repoDir = await this.repoDir(workspaceId);
-    const candidates = await this.collectCandidateFiles(workspaceId);
-    const byRole = new Map<string, { path: string; verb: string }[]>();
-    for (const repoRel of candidates) {
-      let text: string;
-      try {
-        text = await fs.readFile(path.join(repoDir, repoRel), 'utf-8');
-      } catch {
-        continue;
-      }
-      for (const ref of findRoleRefsInText(text)) {
-        const list = byRole.get(ref.role);
-        if (list) list.push({ path: repoRel, verb: ref.verb });
-        else byRole.set(ref.role, [{ path: repoRel, verb: ref.verb }]);
-      }
-    }
-    return byRole;
-  }
-}
-
-/**
- * Resolve the [start, end) line range that role rewrites may touch — the YAML
- * config region only, NEVER the markdown body (CodeRabbit: a body line like
- * `- Sales` or `owner: Sales` must not be rewritten).
- *
- *   - A file with leading `---` frontmatter (folder `access.md`, node `.md`):
- *     only the lines BETWEEN the opening and closing `---` are eligible.
- *   - A fence-less file (e.g. a bare `roles.yaml`-style access config with no
- *     `---`): the whole file is config, so all lines are eligible.
- *   - A `.md` file with no frontmatter fence: no config region → empty range,
- *     nothing is rewritten.
- */
-function configLineRange(lines: string[], isMarkdown: boolean): { start: number; end: number } {
-  if (lines.length > 0 && lines[0].trim() === '---') {
-    for (let i = 1; i < lines.length; i++) {
-      if (lines[i].trim() === '---') return { start: 1, end: i };
-    }
-    // Unterminated frontmatter — treat nothing as eligible (don't risk the body).
-    return { start: 0, end: 0 };
-  }
-  // No fence: a markdown file has no config region; a non-markdown access file
-  // (no body) is entirely config.
-  return isMarkdown ? { start: 0, end: 0 } : { start: 0, end: lines.length };
-}
-
-/** A known access verb key: heads a block list or holds a scalar role value. */
-const VERB_KEY_RE = /^(\s*)(read|write|download|owner)(:\s*)(.*)$/;
-/** A block-list item: `  - <token>` (token may carry a leading `deny `). */
-const LIST_ITEM_RE = /^(\s*-\s+)(.*)$/;
-
-/**
- * Walk the CONFIG-REGION lines of `text`, invoking `onRoleRef` for every line
- * that PARSES as a genuine role entry — both the block-list form (`- <token>`
- * under a `read:`/`write:`/… key) and the inline scalar form (`owner: <token>`).
- * `verb` is the access verb the reference sits under; for a block list it is the
- * nearest enclosing verb key (lines before any verb key, or under an unknown
- * key, are skipped). This is the SINGLE source of truth for "what is a role
- * reference" — both the delete-warning scan and the rename rewrite drive off it,
- * so they cannot disagree. The callback may mutate `lines[i]` (the rewrite does;
- * the scan does not). User entries, other keys, comments and substrings never
- * fire it.
- */
-function walkRoleRefs(
-  lines: string[],
-  start: number,
-  end: number,
-  onRoleRef: (ctx: { i: number; verb: string; entry: { role: string; deny: boolean }; indent: string; prefix: string }) => void,
-): void {
-  let currentVerb: string | null = null;
-  /** A role-entry value → its parsed role entry, else null (user/empty/other). */
-  const roleEntry = (rawValue: string): { role: string; deny: boolean } | null => {
-    const parsed = parseAccessEntry(rawValue.replace(/\s+$/, ''));
-    return parsed.ok && parsed.entry.kind === 'role'
-      ? { role: parsed.entry.role, deny: parsed.entry.deny }
-      : null;
-  };
-  for (let i = start; i < end; i++) {
-    const line = lines[i];
-    // A verb key resets the block context. Its inline value (scalar form,
-    // `owner: Sales`) is itself a candidate reference under that same verb.
-    const kvM = line.match(VERB_KEY_RE);
-    if (kvM) {
-      currentVerb = kvM[2];
-      const inlineValue = kvM[4];
-      if (inlineValue.trim() !== '') {
-        const entry = roleEntry(inlineValue);
-        if (entry) onRoleRef({ i, verb: currentVerb, entry, indent: `${kvM[1]}${kvM[2]}${kvM[3]}`, prefix: '' });
-      }
-      continue;
-    }
-    // Block-list item — belongs to the nearest enclosing verb key. A list item
-    // with no verb in scope is not a resolvable access rule; skip it.
-    const listM = line.match(LIST_ITEM_RE);
-    if (listM && currentVerb !== null) {
-      const entry = roleEntry(listM[2]);
-      if (entry) onRoleRef({ i, verb: currentVerb, entry, indent: '', prefix: listM[1] });
-      continue;
-    }
-    // A non-empty, non-list, non-kv line ends the current block (e.g. a new
-    // top-level key whose value isn't a verb, or stray prose in config).
-    if (line.trim() !== '' && !listM) currentVerb = null;
-  }
-}
-
-/** Every genuine role reference in `text`'s config region, as {role, verb}. */
-export function findRoleRefsInText(text: string, isMarkdown = true): { role: string; verb: string }[] {
-  const lines = text.split('\n');
-  const { start, end } = configLineRange(lines, isMarkdown);
-  const out: { role: string; verb: string }[] = [];
-  if (start >= end) return out;
-  walkRoleRefs(lines, start, end, ({ verb, entry }) => out.push({ role: entry.role, verb }));
-  return out;
-}
-
-/**
- * Rewrite every CONFIG-REGION line that PARSES as a role reference whose
- * canonical name == `oldCanonical`, replacing the role token with
- * `newDisplayName` (preserving any leading `deny ` and indentation). Only the
- * frontmatter block of a markdown file is touched — the body is left
- * byte-for-byte intact, so a prose line like `- Sales` is never corrupted.
- * Lines that don't parse as a matching role entry (user entries, other keys,
- * substrings) are also untouched. Exported for test.
- *
- * `isMarkdown` (default true) marks files that carry a markdown body below the
- * frontmatter; pass false only for a pure-config file with no body.
- */
-export function rewriteRoleTokensInText(
-  text: string,
-  oldCanonical: string,
-  newDisplayName: string,
-  isMarkdown = true,
-): string {
-  const lines = text.split('\n');
-  const { start, end } = configLineRange(lines, isMarkdown);
-  if (start >= end) return text;
-  let changed = false;
-  walkRoleRefs(lines, start, end, ({ i, entry, indent, prefix }) => {
-    if (entry.role !== oldCanonical) return;
-    lines[i] = `${indent}${prefix}${entry.deny ? 'deny ' : ''}${newDisplayName}`;
-    changed = true;
-  });
-  return changed ? lines.join('\n') : text;
 }
