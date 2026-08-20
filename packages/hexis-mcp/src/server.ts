@@ -39,7 +39,7 @@ import {
 } from './deployment.js';
 import { materializePlugin, prepareStdioSpec, type StdioServerSpec } from './materialize.js';
 import { REMOTE_MANUAL_NAME, localManualTemplates, remoteManualTemplate } from './manuals.js';
-import { cancelProactiveRenewal } from './renewal.js';
+import { closeRenewal } from './renewal.js';
 
 /** Reported on `initialize`; the version is stamped at build time by the package. */
 const SERVER_NAME = 'hexis-mcp';
@@ -345,79 +345,24 @@ export async function createHexisMcpServer(
   const remote = remoteManualTemplate(mcpUrl, registeredKey);
 
   const client = await buildClient(config, [remote, ...local]);
-  const tools = withoutRemoteMetaTools(await discoverTools(client, remote, local));
-  remoteManualRegistered = true;
-  // A renewal that landed while registration was in flight hit the no-op
-  // guard above; without this reconciliation the manual would keep the
-  // retired bearer until the next renewal.
-  if (config.connectionKey !== registeredKey) {
-    await swapRemoteCredential(config.connectionKey);
-  }
 
-  console.error(
-    `[hexis-mcp] ${config.baseUrl} — ${tools.length} tool(s) ready ` +
-      `(${local.length} local-only manual(s) registered here, the rest served by the workspace).`,
-  );
-
-  const server = new Server(
-    { name: SERVER_NAME, version },
-    { capabilities: { tools: {}, prompts: {} } },
-  );
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listedTools(tools) }));
-
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
-    // Never start a call mid-swap — the remote manual may be between its
-    // deregister and re-register, where a repository lookup finds nothing.
-    while (swapInProgress) await swapInProgress;
-    inflightCalls += 1;
-    try {
-      const name = request.params.name;
-      if (META_TOOL_NAMES.has(name)) {
-        // No spill store: this process has nowhere to park an oversized chain
-        // result that `read_file` could read back, so the shared dispatcher
-        // returns a truncation notice instead of a ref that resolves nowhere.
-        return await dispatchMetaTool(client, name, request.params.arguments ?? {});
-      }
-      const tool = tools.find((t) => t.mcpName === name);
-      if (!tool) return toolError(`Unknown tool "${name}".`);
-      const progressToken = request.params._meta?.progressToken;
-      return await dispatchToolCall(client, tool, request.params.arguments ?? {}, (progress, message) =>
-        extra.sendNotification({
-          method: 'notifications/progress',
-          params: {
-            ...(progressToken !== undefined ? { progressToken } : {}),
-            progress,
-            message,
-          },
-        } as never),
-      );
-    } finally {
-      inflightCalls -= 1;
-    }
-  });
-
-  /**
-   * Prompts are skills, and they do NOT arrive through the remote manual: UTCP
-   * carries tools, so registering the deployment's MCP endpoint brings its
-   * tools and silently drops its prompts. We rebuild them from the same two KB
-   * tools the hosted server uses, so a skill reads identically either way.
-   */
-  server.setRequestHandler(ListPromptsRequestSchema, async () => listSkillPrompts(config));
-
-  server.setRequestHandler(GetPromptRequestSchema, async (request) =>
-    getSkillPrompt(config, request.params.name),
-  );
-
+  // Declared BEFORE the fallible phase below, so the failure path can run the
+  // very same teardown: from the moment the client exists, registrations spawn
+  // local stdio children, and a factory that throws past that point must not
+  // hand its caller a rejection AND the orphans — the caller has no handle to
+  // close (cli.ts's `holder.shutdown` is still null when create rejects).
+  let server: Server | null = null;
   const shutdown = async (): Promise<void> => {
     if (closed) return;
     closed = true;
     // No further renewals or credential swaps once we are going down: the
-    // proactive timer is disarmed, the listener is unhooked (renewal.ts reads
-    // it at notify time, so a renewal already in flight applies to nothing),
-    // and a swap that started before this point gets to finish before the
-    // client it operates on is closed out from under it.
-    cancelProactiveRenewal(config);
+    // renewal lifecycle is closed FOR GOOD (timer disarmed, and a renewal
+    // starting after this point — a straggling 401-retry — is refused, not
+    // merely de-fanged), the listener is unhooked (renewal.ts reads it at
+    // notify time, so a renewal already in flight applies to nothing), and a
+    // swap that started before this point gets to finish before the client it
+    // operates on is closed out from under it.
+    closeRenewal(config);
     if (config.onConnectionKeyRenewed === swapRemoteCredential) {
       config.onConnectionKeyRenewed = undefined;
     }
@@ -425,13 +370,88 @@ export async function createHexisMcpServer(
     // The SDK server too, not only the client: embedding callers connect the
     // transport themselves, and this handle should fully tear down — closing
     // the server closes its transport (and with it any pending requests).
-    await server.close().catch(() => {});
+    await server?.close().catch(() => {});
     // `UtcpClient.close()` releases every registered communication protocol;
     // @utcp/mcp's close tears down its sessions AND the stdio transports,
     // which is the only thing that reliably ends the spawned children.
     await client.close().catch(() => {});
   };
-  return { server, shutdown };
+
+  try {
+    const tools = withoutRemoteMetaTools(await discoverTools(client, remote, local));
+    remoteManualRegistered = true;
+    // A renewal that landed while registration was in flight hit the no-op
+    // guard above; without this reconciliation the manual would keep the
+    // retired bearer until the next renewal.
+    if (config.connectionKey !== registeredKey) {
+      await swapRemoteCredential(config.connectionKey);
+    }
+
+    console.error(
+      `[hexis-mcp] ${config.baseUrl} — ${tools.length} tool(s) ready ` +
+        `(${local.length} local-only manual(s) registered here, the rest served by the workspace).`,
+    );
+
+    server = new Server(
+      { name: SERVER_NAME, version },
+      { capabilities: { tools: {}, prompts: {} } },
+    );
+
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listedTools(tools) }));
+
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
+      // Never start a call mid-swap — the remote manual may be between its
+      // deregister and re-register, where a repository lookup finds nothing.
+      while (swapInProgress) await swapInProgress;
+      inflightCalls += 1;
+      try {
+        const name = request.params.name;
+        if (META_TOOL_NAMES.has(name)) {
+          // No spill store: this process has nowhere to park an oversized chain
+          // result that `read_file` could read back, so the shared dispatcher
+          // returns a truncation notice instead of a ref that resolves nowhere.
+          return await dispatchMetaTool(client, name, request.params.arguments ?? {});
+        }
+        const tool = tools.find((t) => t.mcpName === name);
+        if (!tool) return toolError(`Unknown tool "${name}".`);
+        const progressToken = request.params._meta?.progressToken;
+        return await dispatchToolCall(client, tool, request.params.arguments ?? {}, (progress, message) =>
+          extra.sendNotification({
+            method: 'notifications/progress',
+            params: {
+              ...(progressToken !== undefined ? { progressToken } : {}),
+              progress,
+              message,
+            },
+          } as never),
+        );
+      } finally {
+        inflightCalls -= 1;
+      }
+    });
+
+    /**
+     * Prompts are skills, and they do NOT arrive through the remote manual: UTCP
+     * carries tools, so registering the deployment's MCP endpoint brings its
+     * tools and silently drops its prompts. We rebuild them from the same two KB
+     * tools the hosted server uses, so a skill reads identically either way.
+     */
+    server.setRequestHandler(ListPromptsRequestSchema, async () => listSkillPrompts(config));
+
+    server.setRequestHandler(GetPromptRequestSchema, async (request) =>
+      getSkillPrompt(config, request.params.name),
+    );
+
+    return { server, shutdown };
+  } catch (err) {
+    // Discovery (or anything after the client came up) failed: local stdio
+    // children may already be spawned and the sign-in's proactive renewal is
+    // still armed, yet the caller gets a rejection instead of a handle — so
+    // the cleanup must happen HERE. Same teardown as the returned `shutdown`;
+    // it never throws, so the original failure is what propagates.
+    await shutdown();
+    throw err;
+  }
 }
 
 /**

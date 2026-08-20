@@ -118,10 +118,13 @@ describe('makeExitAfterShutdown: startup still creating', () => {
     expect(holder.exitRequested).toBe(true);
     holder.exiting = true;
     await holder.shutdown();
-    // main() calls process.exit(0) here; the armed force-exit never gets to
-    // fire in a live process. All this unit can assert is that the handler
-    // itself stood down for good.
+    // The handler itself stands down for good…
     letGo();
     expect(shutdown).toHaveBeenCalledTimes(1);
+    // …and so does the STALE force-exit: an orderly shutdown that outlasts
+    // the remaining grace must not be exit-1'd mid-cleanup by a timer armed
+    // for a startup that did, in fact, come up.
+    vi.advanceTimersByTime(STARTUP_LETGO_GRACE_MS * 2);
+    expect(exit).not.toHaveBeenCalled();
   });
 });

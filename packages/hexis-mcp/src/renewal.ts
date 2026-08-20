@@ -61,6 +61,14 @@ const timers = new WeakMap<HexisMcpConfig, NodeJS.Timeout>();
 // otherwise shutdown's cancel could be re-armed out of by a renewal it could
 // not see.
 const generations = new WeakMap<HexisMcpConfig, number>();
+// The generation only revokes attempts that were IN FLIGHT when a cancel
+// landed; an attempt STARTING afterwards (a REST call's 401-retry racing
+// shutdown) captures the post-cancel generation and would renew and re-arm
+// into a torn-down world. `closeRenewal` marks the config closed FOR GOOD —
+// one config is one process lifecycle — and closed configs refuse to start
+// renewals or arm timers at all. The ordinary re-arm cancel never sets this,
+// so the reactive 401 path keeps working through normal operation.
+const closedConfigs = new WeakSet<HexisMcpConfig>();
 
 function generationOf(config: HexisMcpConfig): number {
   return generations.get(config) ?? 0;
@@ -76,6 +84,12 @@ function generationOf(config: HexisMcpConfig): number {
 export function renewConnectionKeyNow(config: HexisMcpConfig): Promise<string> {
   const existing = inflight.get(config);
   if (existing) return existing;
+  if (closedConfigs.has(config)) {
+    // A flight that was already up when the close landed still completes (its
+    // joiners can use the grant); a NEW flight after close would rotate the
+    // stored refresh token and re-arm a timer for a server that is gone.
+    return Promise.reject(new Error('This configuration has been shut down — no further renewals.'));
+  }
   const renew = config.renewConnectionKey;
   if (!renew) {
     return Promise.reject(new Error('This configuration has no renewal (key mode).'));
@@ -118,6 +132,7 @@ export function renewConnectionKeyNow(config: HexisMcpConfig): Promise<string> {
  * old to say, and reactive renewal still covers the REST surface.
  */
 export function scheduleProactiveRenewal(config: HexisMcpConfig, expiresInMs?: number): void {
+  if (closedConfigs.has(config)) return;
   cancelProactiveRenewal(config);
   if (!config.renewConnectionKey) return;
   if (typeof expiresInMs !== 'number' || !Number.isFinite(expiresInMs) || expiresInMs <= 0) return;
@@ -125,16 +140,31 @@ export function scheduleProactiveRenewal(config: HexisMcpConfig, expiresInMs?: n
 }
 
 /**
- * Disarm the timer — shutdown hygiene; it is unref()d and never holds the
- * process anyway. Also revokes any IN-FLIGHT attempt's right to re-arm or
- * notify (see the generation note above): a renewal racing shutdown must not
- * schedule a retry, or apply a credential swap, into a world that is closing.
+ * Disarm the timer — re-arm hygiene (every `scheduleProactiveRenewal` cancels
+ * first); it is unref()d and never holds the process anyway. Also revokes any
+ * IN-FLIGHT attempt's right to re-arm or notify (see the generation note
+ * above): a renewal racing shutdown must not schedule a retry, or apply a
+ * credential swap, into a world that is closing. NOT final — a later renewal
+ * may start and re-arm; teardown wants `closeRenewal`.
  */
 export function cancelProactiveRenewal(config: HexisMcpConfig): void {
   const timer = timers.get(config);
   if (timer) clearTimeout(timer);
   timers.delete(config);
   generations.set(config, generationOf(config) + 1);
+}
+
+/**
+ * The FINAL cancel — teardown's entry. Everything `cancelProactiveRenewal`
+ * does, plus the config is marked closed for good: a renewal that STARTS after
+ * this point (a straggling REST call's 401-retry racing shutdown) is refused
+ * outright instead of renewing and re-arming the timer into a torn-down world.
+ * Irreversible by design — a config is one process lifecycle, and nothing
+ * legitimately renews for a server that shut down.
+ */
+export function closeRenewal(config: HexisMcpConfig): void {
+  closedConfigs.add(config);
+  cancelProactiveRenewal(config);
 }
 
 function armTimer(config: HexisMcpConfig, delayMs: number): void {

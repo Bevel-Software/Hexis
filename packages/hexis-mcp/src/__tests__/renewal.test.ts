@@ -4,6 +4,7 @@ import {
   RENEWAL_FRACTION,
   RETRY_AFTER_FAILURE_MS,
   cancelProactiveRenewal,
+  closeRenewal,
   renewConnectionKeyNow,
   scheduleProactiveRenewal,
 } from '../renewal.js';
@@ -183,6 +184,50 @@ describe('scheduleProactiveRenewal: the timer the remote manual depends on', () 
     expect(config.connectionKey).toBe('fresh');
     // …but nothing is notified into the shut-down server, and nothing re-arms.
     expect(applied).toEqual([]);
+    expect(renew).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a renewal that STARTS after closeRenewal — an ordinary cancel is not final', async () => {
+    vi.useFakeTimers();
+    const renew = vi.fn(async () => ({ token: 'fresh', expiresInMs: 10_000 }));
+    const config = makeConfig(renew);
+
+    // The re-arm cancel is hygiene, not teardown: the reactive 401 path must
+    // keep working through normal operation.
+    cancelProactiveRenewal(config);
+    expect(await renewConnectionKeyNow(config)).toBe('fresh');
+    expect(renew).toHaveBeenCalledTimes(1);
+
+    // The FINAL cancel: a renewal starting afterwards (a straggling REST
+    // 401-retry racing shutdown) is refused instead of renewing and re-arming
+    // the timer into a torn-down world — and nothing can arm again.
+    closeRenewal(config);
+    await expect(renewConnectionKeyNow(config)).rejects.toThrow(/shut down/);
+    scheduleProactiveRenewal(config, 10_000);
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    expect(renew).toHaveBeenCalledTimes(1);
+  });
+
+  it('a flight already up when closeRenewal lands still completes for its awaiters — but applies nothing', async () => {
+    const applied: string[] = [];
+    let resolveGrant!: (v: { token: string; expiresInMs: number }) => void;
+    const renew = vi.fn(
+      () => new Promise<{ token: string; expiresInMs: number }>((resolve) => (resolveGrant = resolve)),
+    );
+    const config = makeConfig(renew);
+    config.onConnectionKeyRenewed = (token) => {
+      applied.push(token);
+    };
+
+    const inFlight = renewConnectionKeyNow(config);
+    closeRenewal(config);
+    resolveGrant({ token: 'fresh', expiresInMs: 10_000 });
+
+    // Whoever was awaiting the flight legitimately gets the fresh bearer…
+    expect(await inFlight).toBe('fresh');
+    // …but nothing is notified or re-armed, and no NEW flight may start.
+    expect(applied).toEqual([]);
+    await expect(renewConnectionKeyNow(config)).rejects.toThrow(/shut down/);
     expect(renew).toHaveBeenCalledTimes(1);
   });
 

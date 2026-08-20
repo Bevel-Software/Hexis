@@ -362,7 +362,13 @@ export function createMcpRoutes(
       // real request then fails somewhere far from the cause. It is the same
       // 401 an expired token gets from the verifier, challenge and all — and
       // a non-finite expiresAt (a provider handing back garbage) is refused
-      // the same way rather than turned into a TTL.
+      // the same way rather than turned into a TTL. Deliberately STRICTER
+      // than the verifier at the boundary: AuthInfo floors the expiry to
+      // whole seconds, so a grant inside its final partial second computes
+      // as spent here even though the verifier (which compares the stored
+      // millisecond timestamp) just accepted it — but that sub-second
+      // remainder could only mint a token that is dead before its first use,
+      // and refusing it is exactly this guard's job.
       if (grantRemainingMs !== undefined && !(Number.isFinite(grantRemainingMs) && grantRemainingMs > 0)) {
         unauthorized('Invalid, expired, or revoked access token');
         return;

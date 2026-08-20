@@ -47,8 +47,13 @@ export function makeExitAfterShutdown(holder: ShutdownHolder): () => void {
     if (!holder.shutdown) {
       // Still creating — main() finishes the job if create resolves in time;
       // the timer is the bound for when it never does. A forced exit is a
-      // failure to come up, and the status says so.
-      forceExit ??= setTimeout(() => process.exit(process.exitCode || 1), STARTUP_LETGO_GRACE_MS);
+      // failure to come up, and the status says so. Checked at FIRE time, not
+      // arming time: when create resolves within the grace and the orderly
+      // path takes over (`exiting` flips true), this stale timer must stand
+      // down rather than exit 1 out of a cleanup that is merely thorough.
+      forceExit ??= setTimeout(() => {
+        if (!holder.exiting) process.exit(process.exitCode || 1);
+      }, STARTUP_LETGO_GRACE_MS);
       forceExit.unref?.();
       return;
     }

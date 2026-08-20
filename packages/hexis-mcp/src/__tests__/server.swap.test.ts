@@ -34,6 +34,10 @@ let onFirstInitialize: (() => Promise<void>) | null = null;
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // Module-level stub state must not leak between tests: a leftover recording
+  // (or an unconsumed initialize gate) would skew whatever runs next.
+  mcpPosts.length = 0;
+  onFirstInitialize = null;
 });
 
 beforeAll(async () => {
@@ -141,11 +145,12 @@ describe('credential swap around registration and shutdown', () => {
         await handle.shutdown();
       }
 
-      // A straggler renewal racing teardown (a REST read's 401 path) must
-      // apply NOTHING: the fresh bearer is still minted for whoever awaited
-      // it, but no swap runs against the closed client.
+      // A straggler renewal STARTING after teardown (a REST read's 401 path
+      // racing shutdown) is refused outright: no new grant is minted, and no
+      // swap runs against the closed client.
       const initsAfterShutdown = mcpPosts.filter((p) => p.method === 'initialize').length;
-      expect(await renewConnectionKeyNow(config)).toBe('tok-2');
+      await expect(renewConnectionKeyNow(config)).rejects.toThrow(/shut down/);
+      expect(minted).toBe(1);
       await new Promise((resolve) => setTimeout(resolve, 200));
       expect(mcpPosts.filter((p) => p.method === 'initialize').length).toBe(initsAfterShutdown);
     },
