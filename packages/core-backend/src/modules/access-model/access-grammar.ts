@@ -5,9 +5,10 @@
  * the resolver and the `AccessControlService` (filesystem/git model loading,
  * caching, permission gates) stay there and consume this grammar.
  *
- * This module is a LEAF: it may import only node builtins, platform-shared,
- * `@mastra/core/workspace` types, and `src/shared/*` — never another
- * `modules/*` sibling.
+ * This module is a LEAF: files here import each other freely, but from the
+ * outside world only node builtins, platform-shared, `@mastra/core/workspace`
+ * types, and `src/shared/*` — never another `modules/*` directory. (The
+ * `./group-files.js` import below is access-model's own file, not a breach.)
  */
 
 import type { GroupsIndex } from './group-files.js';

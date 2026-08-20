@@ -18,6 +18,19 @@ export function workspaceIdForBranch(branch: string): string {
   return encodeURIComponent(branch);
 }
 
+/**
+ * Map a workspace id back to its branch name. Workspace ids come in from
+ * request paths and from directory names on disk, so malformed input (a lone
+ * `%`, `%` without two hex digits) must not throw — `decodeURIComponent`
+ * would raise a `URIError` that surfaces as an unhandled 500 in every route
+ * that resolves an id. A malformed id can never equal a valid encoding, so
+ * returning it unchanged is safe: it simply names a branch that does not
+ * exist, and the caller's own lookup fails with its normal not-found path.
+ */
 export function branchForWorkspaceId(workspaceId: string): string {
-  return decodeURIComponent(workspaceId);
+  try {
+    return decodeURIComponent(workspaceId);
+  } catch {
+    return workspaceId;
+  }
 }
