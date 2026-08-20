@@ -63,6 +63,17 @@ describe('WorkspaceService — branch-keyed identity', () => {
     expect(workspaceIdForBranch('alice/feature')).toBe('alice%2Ffeature');
   });
 
+  it('a malformed workspace id (bad percent-escape) rejects as a 400 BranchNameError, not a 500', async () => {
+    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    // `%zz` fails decodeURIComponent, falls back to itself, and `%` never
+    // passes the branch-name rules — the cold-path bootstrap must surface
+    // that as the status-carrying domain error, not a wrapped plain Error.
+    await expect(svc.readFile('%zz', 'roles.yaml')).rejects.toMatchObject({
+      name: 'BranchNameError',
+      status: 400,
+    });
+  });
+
   it('returns workspace info derived from the branch — no .workspace.json on disk', async () => {
     const { workspaceId, workspaceDir } = await seedBranchWorkspace(root, 'target-company-state');
     const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');

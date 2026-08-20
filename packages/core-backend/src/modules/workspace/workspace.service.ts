@@ -7,6 +7,7 @@ import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '
 import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { BevelIgnoreStack } from './bevel-ignore.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../kb-fs/clone-config.js';
 import type { IDiffService } from '../diff/diff.interface.js';
@@ -1256,6 +1257,13 @@ export class WorkspaceService implements IWorkspaceService {
       // Bootstrap reported success but didn't register — defensive fallback.
       return workspaceDir;
     } catch (err) {
+      // Domain errors pass through intact: they carry the status the routes
+      // map (BranchNameError → 400), which is how a malformed or bogus
+      // workspace id stays a client error instead of the wrap below erasing
+      // the type and surfacing as a 500. A malformed id (bad percent-escape)
+      // decodes to itself, and `%` never passes the branch-name rules, so it
+      // lands here as a BranchNameError like any other invalid name.
+      if (err instanceof WorkflowDomainError) throw err;
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(`Invalid workspace ID "${workspaceId}": ${reason}`);
     }
