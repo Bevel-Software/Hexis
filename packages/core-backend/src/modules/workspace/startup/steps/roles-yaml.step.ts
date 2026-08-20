@@ -1,12 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { renderRolesYaml } from '../../../access/render-roles-yaml.js';
+import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /**
  * Write `roles.yaml` on any protected branch missing it, generated from the
  * configured seed admins (`ADMIN_EMAIL`) via the shared validated renderer
- * (../../../access/render-roles-yaml.ts — a malformed email stops the boot
+ * (../../../access-model/render-roles-yaml.ts — a malformed email stops the boot
  * with a message naming the fix). Never part of the template: a template copy
  * would seed repos with a stale hard-coded Admin list.
  *

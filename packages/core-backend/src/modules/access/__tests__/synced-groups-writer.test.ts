@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseGroupsFile } from '../group-files.js';
+import { parseGroupsFile } from '../../access-model/group-files.js';
 import {
   SyncedGroupsWriter,
   renderSyncedGroupsYaml,

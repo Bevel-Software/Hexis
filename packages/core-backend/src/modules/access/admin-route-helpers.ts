@@ -13,7 +13,7 @@
  */
 
 import type express from 'express';
-import { WorkflowDomainError } from '../workflow/workflow.errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 
 /** One error shape for every access-family route. */
 export function toHttpError(

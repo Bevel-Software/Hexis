@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isBranchModelConfigured } from '@bevel-software/platform-shared';
-import { workspaceIdForBranch } from '../workspace.service.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { KbBranch, OnServerStart, ServerStartContext } from './on-server-start.js';
 import { git, lsRemoteHeads, redactSecret, stampIdentity, withTempDir } from './kb-git.js';
 

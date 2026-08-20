@@ -4,7 +4,8 @@ import {
   type ChangeRequest,
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
-import { workspaceIdForBranch, type WorkspaceService } from '../workspace/workspace.service.js';
+import { type WorkspaceService } from '../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { hashEmail } from '../../shared/hash-email.js';
 import { resolveDeclaredId } from '../../shared/frontmatter-id.js';

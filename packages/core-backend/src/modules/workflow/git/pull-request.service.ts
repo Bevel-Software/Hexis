@@ -13,7 +13,7 @@ import { changeRequests } from '../../database/schema.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { GitService } from './git.service.js';
-import { WorkflowValidationError } from '../workflow.errors.js';
+import { WorkflowValidationError } from '../../../shared/domain-errors.js';
 import { hashEmail } from '../../../shared/hash-email.js';
 
 const LIST_PR_CACHE_TTL_MS = 30_000;

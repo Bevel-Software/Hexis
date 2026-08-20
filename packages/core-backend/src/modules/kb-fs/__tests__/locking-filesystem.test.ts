@@ -5,7 +5,7 @@ import os from 'node:os';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { LockingFilesystem } from '../locking-filesystem.js';
-import { PushNeedsAgentResolutionError } from '../workflow.errors.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 
 const USER: AuthUser = {
   id: 'user-1',

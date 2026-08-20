@@ -49,14 +49,14 @@ import type { GitService } from './git/git.service.js';
 import type { PullRequestService } from './git/pull-request.service.js';
 import type { IReviewWorkflowService } from './review-workflow/review-workflow.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { FileLockService } from './file-lock.service.js';
 import { PendingCommitsService } from './pending-commits.service.js';
 import type { WorkflowEventBus } from './event-bus.js';
-import type { FileChangeNotifier } from './file-change-notifier.js';
+import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
-import { WorkspaceMutex } from './git/mutex.js';
+import { WorkspaceMutex } from '../kb-fs/mutex.js';
 import { hashEmail } from '../../shared/hash-email.js';
 import {
   ChangeRequestConflictsError,
@@ -66,9 +66,9 @@ import {
   PushNeedsAgentResolutionError,
   WorkflowDomainError,
   WorkflowValidationError,
-} from './workflow.errors.js';
+} from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError } from '../access/access-errors.js';
+import { AccessDeniedError } from '../access-model/access-errors.js';
 
 const execFileAsync = promisify(execFile);
 

@@ -13,13 +13,13 @@ import type {
 import type { Database } from '../../database/connection.js';
 import { changeRequests, prComments, prFileApprovals, prMergeLog } from '../../database/schema.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import { isAccessMdPath } from '../../access/access-control.service.js';
+import { isAccessMdPath } from '../../access-model/access-grammar.js';
 import type { GitService } from '../git/git.service.js';
 import {
   ChangeRequestConflictsError,
   WorkflowDomainError,
   WorkflowValidationError,
-} from '../workflow.errors.js';
+} from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { hashEmail } from '../../../shared/hash-email.js';
 import type {

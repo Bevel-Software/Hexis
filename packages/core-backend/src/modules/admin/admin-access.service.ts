@@ -1,5 +1,6 @@
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { type WorkspaceService, workspaceIdForBranch } from '../workspace/workspace.service.js';
+import { type WorkspaceService } from '../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAdminAccessService } from './admin.interface.js';
 
 /**

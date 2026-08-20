@@ -1,4 +1,4 @@
-import { BranchNameError, WorkflowValidationError } from '../workflow.errors.js';
+import { BranchNameError, WorkflowValidationError } from '../../shared/domain-errors.js';
 
 // Single source of truth for the protected-branch list lives in `@bevel-software/platform-shared` so
 // the backend guard and the frontend banner/disabling logic can't drift apart.

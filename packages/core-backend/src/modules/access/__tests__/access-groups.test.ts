@@ -6,8 +6,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { AccessControlService, parseRolesYaml } from '../access-control.service.js';
-import { AccessConfigError } from '../access-errors.js';
+import { AccessControlService } from '../access-control.service.js';
+import { parseRolesYaml } from '../../access-model/access-grammar.js';
+import { AccessConfigError } from '../../access-model/access-errors.js';
 import { addMember, parseRolesModel, emitRolesModel } from '../roles-edit.js';
 
 const execFileAsync = promisify(execFile);
@@ -102,7 +103,7 @@ describe('group files as access principals', () => {
   });
 
   it('validateGroupsFile (the WRITE gate) still refuses blank keys the reader forgives', async () => {
-    const { validateGroupsFile } = await import('../group-files.js');
+    const { validateGroupsFile } = await import('../../access-model/group-files.js');
     // Inside `groups:` — refused via the entry warning (strict gate).
     expect(validateGroupsFile('groups:\n  :\n    - a@x.io\n', 'groups.yaml').ok).toBe(false);
     // At the ROOT — the tolerant reader silently drops this without any
@@ -114,7 +115,7 @@ describe('group files as access principals', () => {
   });
 
   it('parseGroupsFile applies the shared name-safety predicate (warn-and-skip), and the write gate refuses', async () => {
-    const { parseGroupsFile, validateGroupsFile } = await import('../group-files.js');
+    const { parseGroupsFile, validateGroupsFile } = await import('../../access-model/group-files.js');
     // `<`/`>` and control characters pass the YAML subset as plain keys but
     // fail unsafeNameReason — the parser must skip them (other groups keep
     // resolving) and the strict write gate must refuse the whole candidate.
@@ -133,7 +134,7 @@ describe('group files as access principals', () => {
   });
 
   it("parseGroupsFile skips a 'group:'-prefixed member (shapes like an email, but is the ref token)", async () => {
-    const { parseGroupsFile, validateGroupsFile } = await import('../group-files.js');
+    const { parseGroupsFile, validateGroupsFile } = await import('../../access-model/group-files.js');
     // `group:lee@x.io` PASSES the email regex — without the explicit skip it
     // would land as a member "email" nothing can ever log in as.
     const text = 'groups:\n  Team:\n    - group:lee@x.io\n    - real@x.io\n';

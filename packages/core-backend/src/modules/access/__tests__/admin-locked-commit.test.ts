@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 
 import { AdminLockedCommits } from '../admin-locked-commit.js';
-import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../workflow/workflow.errors.js';
+import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../../shared/domain-errors.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 
 const KB = 'knowledge-base';

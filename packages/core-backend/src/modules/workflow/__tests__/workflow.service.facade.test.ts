@@ -12,7 +12,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowService } from '../workflow.service.js';
-import { PullRebaseConflictError } from '../workflow.errors.js';
+import { PullRebaseConflictError } from '../../../shared/domain-errors.js';
 import type { Database } from '../../database/connection.js';
 
 // `deleteBranch`'s open-request guard is the only DB touch these tests

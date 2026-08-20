@@ -32,20 +32,20 @@
  * sweep the GET pays for).
  */
 
-import { workspaceIdForBranch } from '../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
-import { WorkflowDomainError } from '../workflow/workflow.errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
   ADMIN_CANONICAL,
   ROLE_TOKEN_PREFIX,
   canonicalRoleName,
   canonicalEmail,
-  loadActiveGroups,
-} from './access-control.service.js';
-import { makeRolesYamlWriteValidator } from './roles-yaml-guard.js';
-import { renderRolesYaml } from './render-roles-yaml.js';
+} from '../access-model/access-grammar.js';
+import { loadActiveGroups } from './access-control.service.js';
+import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
+import { renderRolesYaml } from '../access-model/render-roles-yaml.js';
 import {
   parseRolesModel,
   deleteRole as editDeleteRole,
@@ -57,7 +57,7 @@ import {
   RolesEditError,
   type EditResult,
 } from './roles-edit.js';
-import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from './group-files.js';
+import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from '../access-model/group-files.js';
 import {
   GroupsEditError,
   assertSafeGroupDisplayName,
@@ -65,7 +65,7 @@ import {
   parseGroupsModel,
 } from './groups-edit.js';
 import { capabilityRoleFor, isLegacyPeopleSetRole } from './capability-registry.js';
-import { GROUP_REF_PREFIX, RESERVED_ROLE_NAMES } from './access-control.service.js';
+import { GROUP_REF_PREFIX, RESERVED_ROLE_NAMES } from '../access-model/access-grammar.js';
 import { AdminLockedCommits } from './admin-locked-commit.js';
 import { KbReferenceScanner } from './reference-scan.js';
 

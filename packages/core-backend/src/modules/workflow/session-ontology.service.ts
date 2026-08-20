@@ -37,7 +37,7 @@ import { ontologyOf } from '../../shared/kb-layout.js';
 import type { Database } from '../database/connection.js';
 import { sessionOntologyTouches } from '../database/schema.js';
 import { recordTouch, decideWrite, type WriteDecision } from './session-ontology.policy.js';
-import { WorkspaceMutex } from './git/mutex.js';
+import { WorkspaceMutex } from '../kb-fs/mutex.js';
 
 export type OperationDecision =
   | { allow: true; touched: string[] }

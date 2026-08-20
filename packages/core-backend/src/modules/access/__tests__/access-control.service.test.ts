@@ -5,7 +5,7 @@ import os from 'node:os';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../access-control.service.js';
-import { AccessConfigError } from '../access-errors.js';
+import { AccessConfigError } from '../../access-model/access-errors.js';
 
 const PROCESS_MAP_DIR = 'knowledge-base';
 

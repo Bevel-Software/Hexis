@@ -25,21 +25,20 @@
  *     "repair" by re-creating groups over live bytes).
  */
 
-import { workspaceIdForBranch } from '../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
-import { WorkflowDomainError } from '../workflow/workflow.errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
   GROUP_REF_PREFIX,
   canonicalRoleName,
   hasAccessFrontmatterExtension,
-  loadActiveGroups,
-  type GroupsHealth,
-} from './access-control.service.js';
-import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from './group-files.js';
+} from '../access-model/access-grammar.js';
+import { loadActiveGroups, type GroupsHealth } from './access-control.service.js';
+import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from '../access-model/group-files.js';
 import { parseRolesModel, removeGroupRefsEverywhere, renameGroupRefs, isGroupRefMember } from './roles-edit.js';
-import { makeRolesYamlWriteValidator } from './roles-yaml-guard.js';
+import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
 import {
   GroupsEditError,
   parseGroupsModel,

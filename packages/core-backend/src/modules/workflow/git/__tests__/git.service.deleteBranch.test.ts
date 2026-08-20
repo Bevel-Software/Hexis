@@ -13,7 +13,7 @@ import {
   BranchAuthorshipError,
   ProtectedBranchError,
   WorkflowValidationError,
-} from '../../workflow.errors.js';
+} from '../../../../shared/domain-errors.js';
 
 const execFileAsync = promisify(execFile);
 

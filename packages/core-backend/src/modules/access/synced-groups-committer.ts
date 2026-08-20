@@ -1,12 +1,12 @@
 import path from 'node:path';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { AccessControlService } from './access-control.service.js';
-import { SYNCED_GROUPS_YAML } from './group-files.js';
+import { SYNCED_GROUPS_YAML } from '../access-model/group-files.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import { LockingFilesystem } from '../workflow/locking-filesystem.js';
-import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../workflow/workflow.errors.js';
+import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { SyncedGroupsWriterDeps } from './synced-groups-writer.js';
 
 /**

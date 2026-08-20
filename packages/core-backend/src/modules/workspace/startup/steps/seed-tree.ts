@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { renderRolesYaml } from '../../../access/render-roles-yaml.js';
+import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import { TEMPLATE_SOURCE_FALLBACKS, reservedRootDirs, templateSource } from './template-files.step.js';
 
 /**

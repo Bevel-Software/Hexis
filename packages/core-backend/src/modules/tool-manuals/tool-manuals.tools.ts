@@ -5,7 +5,7 @@ import type { ToolContext } from '../tool-helpers/tool.contract.js';
 import { toolDef } from '../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { workspaceIdForBranch } from '../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IToolManualService } from './tool-manuals.contract.js';
 

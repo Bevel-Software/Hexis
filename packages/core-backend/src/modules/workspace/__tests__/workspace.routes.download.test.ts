@@ -6,10 +6,10 @@ import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
-import { AccessConfigError } from '../../access/access-errors.js';
+import { AccessConfigError } from '../../access-model/access-errors.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
-import type { ICreatorAccess } from '../../access/creator-access.js';
+import type { ICreatorAccess } from '../../access-model/creator.js';
 import { FolderTooLargeError, type WorkspaceService } from '../workspace.service.js';
 
 const stubCreatorAccess: ICreatorAccess = {

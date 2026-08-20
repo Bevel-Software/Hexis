@@ -9,7 +9,7 @@ import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
 import { GitService } from '../git.service.js';
-import { AccessDeniedError } from '../../../access/access-errors.js';
+import { AccessDeniedError } from '../../../access-model/access-errors.js';
 
 const execFileAsync = promisify(execFile);
 const PROCESS_MAP_DIR = 'knowledge-base';

@@ -16,13 +16,13 @@ import {
 import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/tool-auth.middleware.js';
-import { workspaceIdForBranch } from './workspace.service.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a workflow service, so this stays inside the module boundary.
-import { assertValidBranchName } from '../workflow/git/branch-name.js';
+import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import type { ISessionSink } from './session-sink.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { toKbRelative, resolveReadableMap } from '../access/kb-read-filter.js';
+import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
 
 /** A directory entry as returned by `LocalFilesystem.readdir`. */

@@ -1,4 +1,4 @@
-import { WorkflowDomainError } from '../workflow/workflow.errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 
 export interface AccessDeniedDetails {
   /** repo-relative POSIX path the caller tried to write */

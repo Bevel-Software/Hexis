@@ -4,8 +4,8 @@ import {
   canonicalEmail,
   canonicalRoleName,
   RESERVED_ROLE_NAMES,
-} from './access-control.service.js';
-import { unsafeNameReason } from './group-files.js';
+} from '../access-model/access-grammar.js';
+import { unsafeNameReason } from '../access-model/group-files.js';
 
 /**
  * Locale-independent code-unit comparator. `localeCompare` would make the
