@@ -175,6 +175,38 @@ describe('WorkflowService.commitFileWhileLocked', () => {
     expect(emitSpy).not.toHaveBeenCalled();
   });
 
+  it('REFUSES a coordination hold — it is not write possession', async () => {
+    // A coordination hold skipped the write-authorization gate on acquire
+    // (pure mutex, see acquireLock). Letting the same holder checkpoint
+    // bytes through it would publish to a path — machine-owned files
+    // included — whose write rule they never passed.
+    const git = makeGit();
+    const locks = {
+      ...makeFileLocks(USER.id),
+      get: vi.fn().mockResolvedValue({
+        branch: 'feat/x',
+        path: 'foo.md',
+        holderUserId: USER.id,
+        holderName: 'Alice',
+        mode: 'coordination',
+        acquiredAt: '',
+        lastHeartbeatAt: '',
+        expiresAt: '',
+      }),
+    } as unknown as FileLockService;
+    const svc = makeFacade(git, locks, events);
+
+    const err = await svc
+      .commitFileWhileLocked('ws-1', 'feat/x', 'foo.md', USER)
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WorkflowValidationError);
+    expect((err as WorkflowValidationError).payload?.kind).toBe('coordination-hold');
+    expect(git.commitFile).not.toHaveBeenCalled();
+    expect(git.push).not.toHaveBeenCalled();
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
   it('still emits file-changed when push fails with a non-recoverable error (commit landed locally)', async () => {
     // Autosave is best-effort on push. If we can't ship the bytes upstream
     // (e.g. transient auth failure), we still emit `file-changed` so the

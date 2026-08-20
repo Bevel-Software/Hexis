@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
+import { LocalFilesystem } from '@mastra/core/workspace';
 import { LockingFilesystem } from '../locking-filesystem.js';
 import { PushNeedsAgentResolutionError } from '../workflow.errors.js';
 
@@ -28,6 +29,7 @@ function makeWorkflow(): IWorkflowService {
     }),
     releaseLock: vi.fn().mockResolvedValue(null),
     releaseLockNoCommit: vi.fn().mockResolvedValue(undefined),
+    releaseLockUntouched: vi.fn().mockResolvedValue(undefined),
     heartbeatLock: vi.fn(),
     getLock: vi.fn(),
     commitFileWhileLocked: vi.fn(),
@@ -509,16 +511,18 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     );
   });
 
-  it('a NO-OP seed lock releases COMMIT-ON-RELEASE — a prior save\'s queued bytes must survive', async () => {
+  it('a NO-OP seed lock releases UNTOUCHED — a prior save\'s queued bytes must survive as-is', async () => {
     // The prior-save-pending scenario: a previous save on the access.md
     // released its lock via releaseLock, so its bytes are DIRTY on the shared
     // workspace with the commit still queued. This batch then takes the seed
     // lock, finds the grant already present (apply() no-ops), and commits
     // only its own paths. Releasing the seed lock with NO-COMMIT semantics
     // would git-discard the path back to HEAD — silently destroying the prior
-    // save. The seed lock must release with commit-on-release (which no-ops
-    // when clean and preserves queued bytes when not); no-commit release is
-    // reserved for paths this batch committed itself.
+    // save. Releasing it with COMMIT-ON-RELEASE would be almost as bad: the
+    // enqueue refreshes the existing pending row's author to THIS user and
+    // resets its retry ladder — the prior save's bytes would publish under
+    // the wrong name. The seed lock must release UNTOUCHED (drop the lock
+    // row, leave disk and queue exactly as they are).
     await fs.mkdir(path.join(root, 'KnowledgeBase/Mine'), { recursive: true });
     const priorSave = '---\nread:\n  - Alice <alice@example.com>\n---\nprior queued bytes\n';
     await fs.writeFile(path.join(root, 'KnowledgeBase/Mine/access.md'), priorSave);
@@ -539,19 +543,21 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     expect(workflow.releaseLockNoCommit).toHaveBeenCalledWith(
       'ws-feat', 'feat', 'KnowledgeBase/Mine/doc.md', USER,
     );
-    // ...but the merely-locked seed path releases WITH commit-on-release.
-    expect(workflow.releaseLock).toHaveBeenCalledWith(
+    // ...but the merely-locked seed path releases UNTOUCHED — never the
+    // enqueue, never the discard.
+    expect(workflow.releaseLockUntouched).toHaveBeenCalledWith(
       'ws-feat', 'feat', 'KnowledgeBase/Mine/access.md', USER,
     );
+    expect(workflow.releaseLock).not.toHaveBeenCalled();
     expect(workflow.releaseLockNoCommit).not.toHaveBeenCalledWith(
       'ws-feat', 'feat', 'KnowledgeBase/Mine/access.md', USER,
     );
   });
 
-  it('locks acquired before an acquire CONTENTION release commit-on-release (nothing written yet)', async () => {
+  it('locks acquired before an acquire CONTENTION release UNTOUCHED (nothing written yet)', async () => {
     // First path acquires, second is contended: nothing has been written, so
     // the first path may hold ONLY someone else's still-queued bytes — the
-    // unwind must not discard them.
+    // unwind must neither discard them nor enqueue them under this user.
     const workflow = makeWorkflow();
     (workflow.acquireLock as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce({ acquired: true, lock: { holderUserId: 'user-1', holderName: 'Alice' } })
@@ -569,9 +575,139 @@ describe('LockingFilesystem — creator read grants on creation', () => {
         'batch',
       ),
     ).rejects.toThrow(/locked by Bob/);
-    expect(workflow.releaseLock).toHaveBeenCalledWith('ws-feat', 'feat', 'A.md', USER);
+    expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'A.md', USER);
+    expect(workflow.releaseLock).not.toHaveBeenCalled();
     expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
   }, 10_000);
+
+  it('a seed write that dies MID-WRITE restores the pre-image and releases UNTOUCHED', async () => {
+    // The partial-write hazard: super.writeFile throws after touching disk,
+    // leaving bytes that are neither the old content nor the new. The seed
+    // loop read the pre-image under this very lock, so it can put it back —
+    // after which the path is byte-identical to before the batch and must
+    // release untouched (a prior save's queued bytes, if any, survive).
+    await fs.mkdir(path.join(root, 'KnowledgeBase/Mine'), { recursive: true });
+    const priorBytes = 'prior queued bytes\n';
+    const seedPath = 'KnowledgeBase/Mine/access.md';
+    await fs.writeFile(path.join(root, seedPath), priorBytes);
+    const workflow = makeWorkflow();
+    const creatorAccess = makeCreatorAccess();
+    creatorAccess.planForCreate.mockResolvedValue({
+      kind: 'seed-access-md',
+      wsRelPath: seedPath,
+      apply: (current: string) => current + 'read: Alice\n',
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+    );
+    // Fail the SEED write once (simulating a mid-write death that left
+    // partial bytes); every other write — including the restore — passes
+    // through to the real filesystem.
+    const original = LocalFilesystem.prototype.writeFile;
+    let failedOnce = false;
+    const spy = vi
+      .spyOn(LocalFilesystem.prototype, 'writeFile')
+      .mockImplementation(async function (this: unknown, p, c, o) {
+        if (p === seedPath && !failedOnce) {
+          failedOnce = true;
+          await original.call(this as LocalFilesystem, p, 'PARTIAL');
+          throw new Error('disk exploded mid-write');
+        }
+        return original.call(this as LocalFilesystem, p, c, o);
+      });
+    try {
+      await fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
+    } finally {
+      spy.mockRestore();
+    }
+    // Pre-image restored — the partial bytes did not outlive the batch.
+    expect(await fs.readFile(path.join(root, seedPath), 'utf-8')).toBe(priorBytes);
+    // The failed seed stays OUT of the commit scope and releases untouched.
+    const commitPaths = (workflow.commitChanges as ReturnType<typeof vi.fn>).mock.calls[0][3];
+    expect(commitPaths).toEqual(['KnowledgeBase/Mine/doc.md']);
+    expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', seedPath, USER);
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalledWith(
+      'ws-feat', 'feat', seedPath, USER,
+    );
+    expect(workflow.releaseLock).not.toHaveBeenCalled();
+  });
+
+  it('a seed whose write AND restore both fail releases with DISCARD — partial bytes must never land', async () => {
+    // The double-failure residual: the seed write died mid-write and even the
+    // pre-image restore failed, so the path holds known-partial bytes. The
+    // release must reset it to HEAD (releaseLockNoCommit) — never enqueue the
+    // corrupt bytes as a commit, never leave them for the next acquirer.
+    await fs.mkdir(path.join(root, 'KnowledgeBase/Mine'), { recursive: true });
+    const seedPath = 'KnowledgeBase/Mine/access.md';
+    await fs.writeFile(path.join(root, seedPath), 'prior\n');
+    const workflow = makeWorkflow();
+    const creatorAccess = makeCreatorAccess();
+    creatorAccess.planForCreate.mockResolvedValue({
+      kind: 'seed-access-md',
+      wsRelPath: seedPath,
+      apply: (current: string) => current + 'read: Alice\n',
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+    );
+    const original = LocalFilesystem.prototype.writeFile;
+    const spy = vi
+      .spyOn(LocalFilesystem.prototype, 'writeFile')
+      .mockImplementation(async function (this: unknown, p, c, o) {
+        if (p === seedPath) throw new Error('disk exploded'); // seed write AND restore
+        return original.call(this as LocalFilesystem, p, c, o);
+      });
+    try {
+      await fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
+    } finally {
+      spy.mockRestore();
+    }
+    // The unrecoverable seed path releases via the discard, everything else
+    // untouched-or-no-commit as usual; the batch itself still succeeds.
+    expect(workflow.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', seedPath, USER);
+    expect(workflow.releaseLockUntouched).not.toHaveBeenCalledWith(
+      'ws-feat', 'feat', seedPath, USER,
+    );
+    expect(workflow.releaseLock).not.toHaveBeenCalled();
+    const commitPaths = (workflow.commitChanges as ReturnType<typeof vi.fn>).mock.calls[0][3];
+    expect(commitPaths).toEqual(['KnowledgeBase/Mine/doc.md']);
+  });
+
+  it('push-retry unwind: committed paths re-arm via releaseLock, a merely-locked seed stays untouched', async () => {
+    // PushNeedsAgentResolutionError with a no-op seed in the batch: the
+    // committed caller path must release commit-on-release (that enqueued row
+    // IS the push-retry vehicle), while the seed that never wrote must NOT be
+    // swept into the same enqueue — its path may carry a prior save's queued
+    // row that a fresh enqueue would re-attribute and reset.
+    await fs.mkdir(path.join(root, 'KnowledgeBase/Mine'), { recursive: true });
+    const seedPath = 'KnowledgeBase/Mine/access.md';
+    await fs.writeFile(path.join(root, seedPath), 'grant already present\n');
+    const workflow = makeWorkflow();
+    (workflow.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new PushNeedsAgentResolutionError('feat', '(batch)', 'non-fast-forward', 'rebase failed'),
+    );
+    const creatorAccess = makeCreatorAccess();
+    creatorAccess.planForCreate.mockResolvedValue({
+      kind: 'seed-access-md',
+      wsRelPath: seedPath,
+      apply: (current: string) => current, // no-op — merely locked
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+    );
+    await expect(
+      fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch'),
+    ).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
+    expect(workflow.releaseLock).toHaveBeenCalledWith(
+      'ws-feat', 'feat', 'KnowledgeBase/Mine/doc.md', USER,
+    );
+    expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', seedPath, USER);
+    expect(workflow.releaseLock).not.toHaveBeenCalledWith('ws-feat', 'feat', seedPath, USER);
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+  });
 
   it('a LANDED seed rides the commit scope with the caller paths', async () => {
     const workflow = makeWorkflow();

@@ -205,10 +205,14 @@ export interface IWorkflowService {
    * skips its write-permission gate for the path, because the caller only
    * wants to serialize against the path's writer (e.g. hold a machine-owned
    * file steady across a read → check → decide flow) and will never write the
-   * path itself. A coordination hold grants NO write authority — the commit
-   * and push gates still apply to anything that does try to land bytes there
-   * — and the lock row is otherwise identical (same contention, TTL, and
-   * release surface). Internal callers only; never plumbed from a route.
+   * path itself. A coordination hold grants NO write authority — the mode is
+   * persisted on the lock row, and every path that would treat "you hold the
+   * lock" as write possession (`commitFileWhileLocked`, `releaseLock`'s
+   * commit enqueue) refuses a coordination hold. Contention, TTL, and
+   * heartbeat behave identically. Release ONLY via `releaseLockNoCommit` (or
+   * `releaseLockUntouched`) — `releaseLock` rejects rather than ever enqueue
+   * a commit for a hold that was never allowed to write. Internal callers
+   * only; never plumbed from a route.
    */
   acquireLock(
     workspaceId: string,
@@ -278,6 +282,33 @@ export interface IWorkflowService {
     path: string,
     user: AuthUser,
   ): Promise<void>;
+  /**
+   * Drop the lock for a path the caller held but **never touched** — the
+   * third release shape, between `releaseLock` and `releaseLockNoCommit`.
+   * Neither enqueues a commit (on a shared workspace the path may carry a
+   * PRIOR save's dirty bytes whose queued commit an enqueue would re-attribute
+   * to this caller and whose retry ladder it would reset) nor discards (a
+   * discard back to HEAD would destroy those same still-queued bytes). Used
+   * by batch flows for paths that were merely locked — a creator seed that
+   * no-op'd, a path never reached before the batch failed. Idempotent like
+   * the other releases: a no-op when the caller doesn't hold the lock.
+   */
+  releaseLockUntouched(
+    workspaceId: string,
+    branch: string,
+    path: string,
+    user: AuthUser,
+  ): Promise<void>;
+  /**
+   * Whether the background commit queue holds a LIVE row (one the worker
+   * will still drive — pending or running, not a terminally-escalated one)
+   * for `(branch, path)`. Lets a caller that landed a commit but hit a push
+   * failure PROVE the retry vehicle exists instead of inferring it from
+   * lock state (a release that failed before its enqueue and a release that
+   * enqueued-then-dropped both leave the lock gone — only the queue itself
+   * can tell them apart).
+   */
+  hasQueuedCommit(workspaceId: string, branch: string, path: string): Promise<boolean>;
   /** Current lock holder for `(branch, path)`, or null when nobody holds it. */
   getLock(workspaceId: string, branch: string, path: string): Promise<FileLock | null>;
 

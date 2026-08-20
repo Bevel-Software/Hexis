@@ -588,13 +588,15 @@ export class WorkflowService implements IWorkflowService {
     // its IdP-mode recheck — and will never write the path. Gating those on
     // write permission would make a pure serialization hold impossible for
     // exactly the paths (machine-owned ones) that need it most. No write
-    // authority flows from the hold: the commit/push gates still apply.
+    // authority flows from the hold: the mode is persisted on the lock row
+    // and `commitFileWhileLocked` / `releaseLock` refuse to treat a
+    // coordination hold as write possession (see those methods).
     if (isProtectedBranch(branch) && !opts?.coordination) {
       // `assertCanWriteAtPath` throws AccessDeniedError on denial, with the
       // eligible-writers payload so the frontend can render a useful refusal.
       await this.assertCanWriteAtPath(workspaceId, branch, user.email, targetPath);
     }
-    const result = await this.fileLocks.acquire(workspaceId, branch, targetPath, user);
+    const result = await this.fileLocks.acquire(workspaceId, branch, targetPath, user, opts);
     if (result.acquired) {
       console.log(
         `[lock] ACQUIRE ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → acquired`,
@@ -658,6 +660,17 @@ export class WorkflowService implements IWorkflowService {
       throw new WorkflowValidationError(
         `Cannot commit "${targetPath}": you don't hold the lock.`,
         { kind: 'lock-not-held', branch, path: targetPath },
+      );
+    }
+    // A coordination hold is NOT write possession (see `acquireLock`): it was
+    // acquired past the write-authorization gate on the promise that nothing
+    // gets written under it. Treating it like an edit lock here would let the
+    // holder checkpoint bytes onto a path — machine-owned files included —
+    // whose write rule they never passed.
+    if (lock.mode === 'coordination') {
+      throw new WorkflowValidationError(
+        `Cannot commit "${targetPath}": the lock is a coordination hold, which grants no write authority.`,
+        { kind: 'coordination-hold', branch, path: targetPath },
       );
     }
     const change = await this.git.commitFile(workspaceId, user, targetPath, summary);
@@ -766,6 +779,24 @@ export class WorkflowService implements IWorkflowService {
       throw new WorkflowValidationError(
         `Cannot release lock on "${targetPath}": not held by you (or no longer exists).`,
         { kind: 'lock-not-held', branch, path: targetPath },
+      );
+    }
+    // Releasing a coordination hold must NEVER enqueue a commit: the hold was
+    // granted past the write-authorization gate (see `acquireLock`) on the
+    // promise that nothing gets written under it, so a release commit would
+    // publish whatever bytes are on disk — an unauthorized route write, a
+    // prior save's still-queued work — under this caller's name. Refusing
+    // (rather than silently degrading) surfaces the caller bug loudly; the
+    // sanctioned releases for a coordination hold are `releaseLockNoCommit`
+    // and `releaseLockUntouched`. Worst case a refused caller strands the
+    // row until its TTL.
+    if (lock.mode === 'coordination') {
+      console.warn(
+        `[lock] RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → coordination hold (no commit may be enqueued)`,
+      );
+      throw new WorkflowValidationError(
+        `Cannot release lock on "${targetPath}" with a commit: it is a coordination hold. Use releaseLockNoCommit.`,
+        { kind: 'coordination-hold', branch, path: targetPath },
       );
     }
     // Order matters here:
@@ -950,16 +981,40 @@ export class WorkflowService implements IWorkflowService {
     // acquirer under the wrong author. The system's invariant is now:
     // every release leaves the working tree clean. If we're not
     // committing the bytes, we're throwing them away.
-    try {
-      await this.git.discardPath(workspaceId, targetPath);
-    } catch (err) {
-      // Best-effort: a discard failure is logged but doesn't block the
-      // lock release. Worst case the working tree stays dirty for one
-      // path until the next save on it cleans up.
-      console.warn(
-        `[workflow] discardPath failed for workspace=${workspaceId} branch=${branch} path=${targetPath}:`,
-        err instanceof Error ? err.message : err,
-      );
+    //
+    // One refinement for COORDINATION holds: the holder never legitimately
+    // wrote the path (the write paths refuse coordination possession), so
+    // anything dirty there is either bytes smuggled in around the workflow —
+    // which the discard rightly wipes — or a PRIOR save's work whose commit
+    // is still queued. Only the queue can tell those apart: when a live
+    // pending-commit row exists for the path, the dirty bytes are that
+    // queued save's and the discard would silently destroy a landed edit,
+    // so we skip it and let the worker publish them.
+    let skipDiscard = false;
+    if (lock.mode === 'coordination') {
+      try {
+        skipDiscard = await this.pendingCommits.hasLiveRowFor(workspaceId, branch, targetPath);
+      } catch (err) {
+        // Queue unreadable — fall back to the discard (the strict default:
+        // never let a coordination hold end with publishable stray bytes).
+        console.warn(
+          `[workflow] pending-commit lookup failed for workspace=${workspaceId} path=${targetPath}; discarding:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+    if (!skipDiscard) {
+      try {
+        await this.git.discardPath(workspaceId, targetPath);
+      } catch (err) {
+        // Best-effort: a discard failure is logged but doesn't block the
+        // lock release. Worst case the working tree stays dirty for one
+        // path until the next save on it cleans up.
+        console.warn(
+          `[workflow] discardPath failed for workspace=${workspaceId} branch=${branch} path=${targetPath}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
     }
     await this.fileLocks.release(workspaceId, branch, targetPath, user);
     console.log(
@@ -982,6 +1037,50 @@ export class WorkflowService implements IWorkflowService {
       byUserId: user.id,
       byUserName: user.name,
     });
+  }
+
+  /**
+   * Third release shape (see the interface doc): the caller held the lock
+   * but never touched the path, so the release must leave BOTH the disk and
+   * the commit queue exactly as they are. `releaseLock` would enqueue a
+   * commit — re-attributing a prior save's still-queued dirty bytes to this
+   * caller and resetting that row's retry ladder; `releaseLockNoCommit`
+   * would discard to HEAD — destroying those same bytes. This drops the
+   * lock row, nothing else. Same idempotent non-holder no-op (and emit
+   * discipline) as `releaseLockNoCommit`.
+   */
+  async releaseLockUntouched(
+    workspaceId: string,
+    branch: string,
+    targetPath: string,
+    user: AuthUser,
+  ): Promise<void> {
+    console.log(
+      `[lock] RELEASE-UNTOUCHED start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`,
+    );
+    const lock = await this.fileLocks.get(workspaceId, branch, targetPath);
+    if (!lock || lock.holderUserId !== user.id) {
+      console.log(
+        `[lock] RELEASE-UNTOUCHED no-op ws=${workspaceId} path=${targetPath} → ${lock ? `held by ${lock.holderName}` : 'no lock row'}`,
+      );
+      return;
+    }
+    await this.fileLocks.release(workspaceId, branch, targetPath, user);
+    console.log(
+      `[lock] RELEASE-UNTOUCHED done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → released (disk + queue untouched)`,
+    );
+    this.events?.emit({
+      kind: 'lock-released',
+      workspaceId,
+      branch,
+      path: targetPath,
+    });
+    // No `file-changed` here on purpose — unlike the no-commit release,
+    // nothing on disk moved.
+  }
+
+  hasQueuedCommit(workspaceId: string, branch: string, targetPath: string): Promise<boolean> {
+    return this.pendingCommits.hasLiveRowFor(workspaceId, branch, targetPath);
   }
 
   getLock(

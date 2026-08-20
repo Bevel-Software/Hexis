@@ -25,7 +25,11 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  function makeDeps(workflowOverrides: Partial<Record<'commitChanges' | 'releaseLock', unknown>> = {}) {
+  function makeDeps(
+    workflowOverrides: Partial<
+      Record<'commitChanges' | 'releaseLock' | 'hasQueuedCommit', unknown>
+    > = {},
+  ) {
     const workspaceService = {
       getOrCreateForBranch: vi.fn(async () => ({})),
       getWorkspacePath: vi.fn(async () => root),
@@ -35,10 +39,14 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
     } as unknown as WorkspaceService;
     const releaseLock = vi.fn(async () => undefined);
     const releaseLockNoCommit = vi.fn(async () => undefined);
+    const releaseLockUntouched = vi.fn(async () => undefined);
+    const hasQueuedCommit = vi.fn(async () => false);
     const workflowService = {
       acquireLock: vi.fn(async () => ({ acquired: true, lock: {} })),
       releaseLock,
       releaseLockNoCommit,
+      releaseLockUntouched,
+      hasQueuedCommit,
       commitChanges: vi.fn(async () => ({})),
       ...workflowOverrides,
     } as unknown as IWorkflowService;
@@ -53,7 +61,7 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
       bot: BOT,
       defaultBranchOf: () => 'main',
     });
-    return { committer, releaseLock, releaseLockNoCommit };
+    return { committer, releaseLock, releaseLockNoCommit, hasQueuedCommit };
   }
 
   it('resolves (edit is saved) when only the PUSH failed after a landed commit', async () => {
@@ -74,11 +82,13 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
     expect(releaseLockNoCommit).not.toHaveBeenCalled();
   });
 
-  it('treats a lock-not-held answer from the arm probe as "retry already armed" (the normal shape)', async () => {
+  it('verifies the QUEUE when the arm probe answers lock-not-held, and resolves on a live row', async () => {
     // In production the writeFiles push-retry release has usually SUCCEEDED —
     // enqueue first, then drop the row — so the committer's verification
-    // release finds no lock to release. That proves the enqueue happened;
-    // persist must resolve.
+    // release finds no lock to release. But lock-not-held alone proves
+    // nothing: a release that died BEFORE its enqueue (expired/stolen lock)
+    // leaves the exact same answer. Only the queue itself can prove the
+    // vehicle — persist must consult it and resolve when a row exists.
     const releaseLock = vi
       .fn()
       // writeFiles' own push-retry release: succeeded (row enqueued + dropped).
@@ -89,14 +99,65 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
           kind: 'lock-not-held',
         }),
       );
+    const hasQueuedCommit = vi.fn(async () => true);
     const { committer } = makeDeps({
       commitChanges: vi.fn(async () => {
         throw new PushNeedsAgentResolutionError('main', '(batch)', 'non-fast-forward', 'rebase failed');
       }),
       releaseLock,
+      hasQueuedCommit,
     });
     await expect(committer.persist('groups:\n  Team:\n    - a@x.io\n')).resolves.toBeUndefined();
     expect(releaseLock).toHaveBeenCalledTimes(2);
+    expect(hasQueuedCommit).toHaveBeenCalledWith('main', 'main', `${KB}/synced-groups.yaml`);
+  });
+
+  it('REJECTS on lock-not-held with NO live queue row (release died before its enqueue)', async () => {
+    // The inference hole this pins: the ORIGINAL push-retry release hit an
+    // expired/stolen lock — releaseLock throws lock-not-held BEFORE its
+    // enqueue, writeFiles swallows it — and the committer's probe then gets
+    // the same lock-not-held. The old "lock gone ⇒ armed" inference reported
+    // success while NO pending row existed and the landed commit stayed
+    // unpublished forever. With the queue consulted directly, an empty queue
+    // must surface the original push failure.
+    const releaseLock = vi.fn().mockRejectedValue(
+      new WorkflowValidationError('Cannot release lock: not held by you.', {
+        kind: 'lock-not-held',
+      }),
+    );
+    const hasQueuedCommit = vi.fn(async () => false);
+    const { committer } = makeDeps({
+      commitChanges: vi.fn(async () => {
+        throw new PushNeedsAgentResolutionError('main', '(batch)', 'non-fast-forward', 'rebase failed');
+      }),
+      releaseLock,
+      hasQueuedCommit,
+    });
+    await expect(committer.persist('groups:\n  Team:\n    - a@x.io\n')).rejects.toBeInstanceOf(
+      PushNeedsAgentResolutionError,
+    );
+    expect(hasQueuedCommit).toHaveBeenCalled();
+  });
+
+  it('REJECTS when the queue itself cannot be read (armed must be PROVEN, never assumed)', async () => {
+    const releaseLock = vi.fn().mockRejectedValue(
+      new WorkflowValidationError('Cannot release lock: not held by you.', {
+        kind: 'lock-not-held',
+      }),
+    );
+    const hasQueuedCommit = vi.fn(async () => {
+      throw new Error('db down');
+    });
+    const { committer } = makeDeps({
+      commitChanges: vi.fn(async () => {
+        throw new PushNeedsAgentResolutionError('main', '(batch)', 'non-fast-forward', 'rebase failed');
+      }),
+      releaseLock,
+      hasQueuedCommit,
+    });
+    await expect(committer.persist('groups:\n  Team:\n    - a@x.io\n')).rejects.toBeInstanceOf(
+      PushNeedsAgentResolutionError,
+    );
   });
 
   it('re-arms the retry itself when the push-retry release could not enqueue its row', async () => {
