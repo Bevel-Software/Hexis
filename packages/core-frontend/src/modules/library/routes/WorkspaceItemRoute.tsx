@@ -80,7 +80,12 @@ export function WorkspaceItemRoute() {
   // callback's outcome channel — see `urlForMcpServer`). Before this branch
   // existed, the file fell through to the direct-file rule below and every
   // mcp-declared tool card bounced straight back to its plugin page.
-  if (last === 'mcp.json') {
+  //
+  // Only the plugin's DIRECT child qualifies (`tail.length === 1`): the
+  // backend's discovery reads exactly `Plugins/<plugin>/mcp.json`, so an
+  // `mcp.json` nested deeper is a skill's bundled file — an example, a
+  // template — and must render as that skill's file, not as a tool page.
+  if (last === 'mcp.json' && tail.length === 1) {
     const fromParam = searchParams.get('server');
     // A named server renders directly — ToolPage's own not-found handles a bad
     // slug once the secrets listing settles, exactly as it does for a typo.

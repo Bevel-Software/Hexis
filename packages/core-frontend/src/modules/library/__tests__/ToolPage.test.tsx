@@ -341,4 +341,26 @@ describe('ToolPage: OAuth round-trip', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Access denied 100%');
     await waitFor(() => expect(window.location.hash).toBe(''));
   });
+
+  /**
+   * The fragment-consumption navigation must keep the QUERY string: on an
+   * mcp-declared tool `?server=<slug>` is the page's identity, and stripping
+   * it left a refresh (or a copied URL) on the ambiguous bare mcp.json
+   * address, which bounces to the plugin page.
+   */
+  it('keeps the search string when consuming the fragment, so `?server=` survives a refresh', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/workspace/main/knowledge-base/Plugins/Everyone/mcp.json?server=heyreach#authorized=sec_1',
+    );
+    renderPage();
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Signed in to heyreach.');
+    await waitFor(() => expect(window.location.hash).toBe(''));
+    expect(window.location.search).toBe('?server=heyreach');
+    expect(window.location.pathname).toBe(
+      '/workspace/main/knowledge-base/Plugins/Everyone/mcp.json',
+    );
+  });
 });

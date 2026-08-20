@@ -15,7 +15,7 @@ import {
   refreshAccessToken,
   writeStoredCredentials,
 } from '../oauth.js';
-import { fetchAllManuals } from '../deployment.js';
+import { fetchAllManuals, fetchLocalOnlyManuals } from '../deployment.js';
 import type { HexisMcpConfig } from '../config.js';
 
 /**
@@ -41,6 +41,8 @@ interface AuthorityOptions {
   localToken?: (bearer: string) => Answer;
   /** Which internal tokens the REST surface accepts. Default: none. */
   restAccepts?: (bearer: string) => boolean;
+  /** Status the REST surface refuses with. Default 401; a 403 plays "live sign-in, no permission". */
+  restRefusal?: number;
   /** Override the AS metadata document. */
   asMetadata?: (base: string) => unknown;
   /** Override the protected-resource metadata document. */
@@ -121,7 +123,12 @@ async function stubAuthority(opts: AuthorityOptions = {}): Promise<Authority> {
       }
       if (pathname === '/api/agent/all-tools') {
         if (opts.restAccepts?.(bearer)) send(200, { manuals: [] });
-        else send(401);
+        else send(opts.restRefusal ?? 401);
+        return;
+      }
+      if (req.method === 'POST' && pathname === '/api/agent/tools/list_local_tools') {
+        if (opts.restAccepts?.(bearer)) send(200, { tools: [] });
+        else send(opts.restRefusal ?? 401);
         return;
       }
       send(404, {});
@@ -155,7 +162,10 @@ function fakeBrowser(code = 'code-1', mutateState?: (state: string) => string) {
     redirect.searchParams.set('code', code);
     const state = authUrl.searchParams.get('state')!;
     redirect.searchParams.set('state', mutateState ? mutateState(state) : state);
-    void fetch(redirect).then((res) => res.body?.cancel().catch(() => {}));
+    // The trailing catch matters: on a refused flow the loopback is torn down
+    // while this request is in flight, and its rejection would otherwise be
+    // an unhandled one failing an unrelated test.
+    void fetch(redirect).then((res) => res.body?.cancel().catch(() => {})).catch(() => {});
   };
   return { open, seen };
 }
@@ -239,6 +249,76 @@ describe('discoverAuthServer', () => {
       await expect(discoverAuthServer(authority.mcpUrl)).rejects.toThrow(/no "authorization_servers"/);
     } finally {
       await authority.close();
+    }
+  });
+
+  /**
+   * The discovery chain's SSRF gate: every URL it walks arrived over the
+   * network, and the next step either fetches it or POSTs credentials to it.
+   * Plain http is tolerable only on a literal loopback host (which is exactly
+   * what this suite's own stub is); anywhere else it must be refused BEFORE
+   * anything is sent — with a message that says what to do about it.
+   */
+  it('refuses a plain-http metadata URL on a non-loopback host, with an actionable message', async () => {
+    const authority = await stubAuthority({
+      challengeHeader: () => 'Bearer resource_metadata="http://internal-host.corp/.well-known/oauth-protected-resource"',
+    });
+    try {
+      const err = (await discoverAuthServer(authority.mcpUrl).catch((e: unknown) => e)) as Error;
+      expect(err).toBeInstanceOf(OAuthError);
+      expect(err.message).toMatch(/insecure resource metadata URL/);
+      expect(err.message).toMatch(/must be https/);
+      expect(err.message).toMatch(/loopback/);
+      expect(err.message).toMatch(/--key/);
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('holds the same gate on every discovered AS endpoint — the token endpoint receives credentials', async () => {
+    const authority = await stubAuthority({
+      asMetadata: (base) => ({
+        authorization_endpoint: `${base}/authorize`,
+        token_endpoint: 'http://internal-host.corp:9000/token',
+        registration_endpoint: `${base}/register`,
+      }),
+    });
+    try {
+      await expect(discoverAuthServer(authority.mcpUrl)).rejects.toThrow(/insecure token endpoint/);
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('refuses a redirecting metadata endpoint instead of following it somewhere the gate never saw', async () => {
+    let base = '';
+    const server = http.createServer((req, res) => {
+      const pathname = (req.url ?? '/').split('?')[0]!;
+      if (req.method === 'POST' && pathname === '/api/mcp') {
+        res
+          .writeHead(401, {
+            'WWW-Authenticate': `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"`,
+          })
+          .end();
+        return;
+      }
+      if (pathname === '/.well-known/oauth-protected-resource') {
+        // The redirect an interposed proxy (or a hostile answer) would give:
+        // following it re-aims the fetch at an address nothing validated.
+        res.writeHead(302, { Location: `${base}/somewhere-else` }).end();
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+      await expect(discoverAuthServer(`${base}/api/mcp`)).rejects.toThrow(
+        /Could not reach the resource metadata/,
+      );
+    } finally {
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 
@@ -438,7 +518,9 @@ describe('browser flow', () => {
       const redirect = new URL(authUrl.searchParams.get('redirect_uri')!);
       redirect.searchParams.set('state', authUrl.searchParams.get('state')!);
       redirect.searchParams.set('error', 'access_denied');
-      void fetch(redirect).then((res) => res.body?.cancel().catch(() => {}));
+      // Same as fakeBrowser: the flow rejects and closes the loopback, so the
+      // in-flight fetch must not surface as an unhandled rejection.
+      void fetch(redirect).then((res) => res.body?.cancel().catch(() => {})).catch(() => {});
     };
     try {
       await expect(
@@ -528,7 +610,7 @@ describe('mid-run 401', () => {
 
   it('a second 401 propagates, naming re-authorization — no retry loops', async () => {
     const authority = await stubAuthority({ restAccepts: () => false });
-    const renew = vi.fn(async () => 'still-rejected');
+    const renew = vi.fn(async () => ({ token: 'still-rejected' }));
     const config: HexisMcpConfig = {
       baseUrl: authority.base,
       connectionKey: 'expired',
@@ -539,6 +621,83 @@ describe('mid-run 401', () => {
       expect(err.message).toMatch(/even after refreshing/);
       expect(err.message).toMatch(/Re-authorize/);
       expect(renew).toHaveBeenCalledTimes(1);
+    } finally {
+      await authority.close();
+    }
+  });
+
+  /**
+   * A 403 is a PERMISSION answer about a LIVE credential: the sign-in worked
+   * and refreshing it changes nothing, so the message must say "access
+   * denied" and never send the person on a pointless re-authorization trip —
+   * that guidance is reserved for the 401-after-renewal path above.
+   */
+  it('a 403 with a live sign-in reads as access denied — no renewal, no re-authorize advice', async () => {
+    const authority = await stubAuthority({ restAccepts: () => false, restRefusal: 403 });
+    const renew = vi.fn(async () => ({ token: 'never-consulted' }));
+    const config: HexisMcpConfig = {
+      baseUrl: authority.base,
+      connectionKey: 'live-but-unprivileged',
+      renewConnectionKey: renew,
+    };
+    try {
+      const err = (await fetchAllManuals(config).catch((e: unknown) => e)) as Error;
+      expect(err.message).toMatch(/denied access \(HTTP 403\)/);
+      expect(err.message).toMatch(/does not have permission/);
+      expect(err.message).toMatch(/workspace admin/);
+      expect(err.message).not.toMatch(/Re-authorize/);
+      expect(err.message).not.toMatch(/browser/);
+      // A 403 is not a credential problem, so no renewal is spent on it.
+      expect(renew).not.toHaveBeenCalled();
+    } finally {
+      await authority.close();
+    }
+  });
+
+  /**
+   * The rotating refresh token makes concurrent renewals actively DESTRUCTIVE:
+   * the loser of the race presents a just-retired token and gets
+   * `invalid_grant`, killing a healthy sign-in. Startup does exactly this —
+   * `Promise.all` over two REST reads, both 401ing at once — so this test IS
+   * that startup: one live refresh token, two concurrent 401s, and the
+   * single-flight must spend the token exactly once for both callers.
+   */
+  it('concurrent 401s share ONE renewal — the rotating refresh token survives the race', async () => {
+    const liveRefresh = new Map([
+      ['r1', { access: 'a0', next: 'r2' }], // consumed by establishOAuthConfig
+      ['r2', { access: 'a1', next: 'r3' }], // the ONLY live token at race time
+    ]);
+    const authority = await stubAuthority({
+      refreshGrant: (params) => {
+        const grant = liveRefresh.get(params.get('refresh_token') ?? '');
+        if (!grant) return { status: 400, body: { error: 'invalid_grant' } };
+        liveRefresh.delete(params.get('refresh_token')!); // single-use, as rotation implies
+        return { status: 200, body: { access_token: grant.access, refresh_token: grant.next } };
+      },
+      localToken: (bearer) =>
+        bearer === 'a0'
+          ? { status: 200, body: { token: 'internal-dead' } }
+          : bearer === 'a1'
+            ? { status: 200, body: { token: 'internal-fresh' } }
+            : { status: 401 },
+      // internal-dead is ALREADY expired when the two REST reads race.
+      restAccepts: (bearer) => bearer === 'internal-fresh',
+    });
+    try {
+      await writeStoredCredentials(authority.base, { clientId: 'c1', refreshToken: 'r1' });
+      const config = await establishOAuthConfig(authority.base, authority.mcpUrl, { print: quiet });
+      expect(config.connectionKey).toBe('internal-dead');
+      const [manuals, locals] = await Promise.all([
+        fetchAllManuals(config),
+        fetchLocalOnlyManuals(config),
+      ]);
+      expect(manuals).toEqual([]);
+      expect(locals.size).toBe(0);
+      expect(config.connectionKey).toBe('internal-fresh');
+      // Exactly two refresh grants ever ran: startup's, and ONE for the race.
+      const refreshGrants = authority.record.token.filter((p) => p.get('grant_type') === 'refresh_token');
+      expect(refreshGrants).toHaveLength(2);
+      expect(await readStoredCredentials(authority.base)).toEqual({ clientId: 'c1', refreshToken: 'r3' });
     } finally {
       await authority.close();
     }

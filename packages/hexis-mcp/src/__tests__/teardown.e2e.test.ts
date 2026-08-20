@@ -218,9 +218,34 @@ describe('deterministic teardown', () => {
           await sleep(200);
         }
         expect(pidAlive(grandchildPid)).toBe(true);
-        // Let the CLI finish connecting its stdio transport (the ready line
-        // and the teardown handlers land right after the spawn we just saw).
-        await sleep(750);
+        // An initialize round-trip over the CLI's OWN stdio, not a sleep: a
+        // response can only arrive once the stdio transport is connected (and
+        // the teardown handlers were installed even earlier, before create) —
+        // so the hang-up below always lands on a fully wired process.
+        const initialized = new Promise<void>((resolve) => {
+          let buf = '';
+          const onData = (chunk: Buffer): void => {
+            buf += chunk.toString('utf8');
+            if (buf.includes('"id":1')) {
+              cli!.stdout!.off('data', onData);
+              resolve();
+            }
+          };
+          cli!.stdout!.on('data', onData);
+        });
+        cli.stdin!.write(
+          `${JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'initialize',
+            params: {
+              protocolVersion: '2024-11-05',
+              capabilities: {},
+              clientInfo: { name: 'teardown-e2e', version: '0.0.0' },
+            },
+          })}\n`,
+        );
+        await initialized; // bounded by the test's own timeout
 
         // The MCP client hangs up.
         cli.stdin!.end();

@@ -20,10 +20,18 @@ import type { HexisMcpConfig } from './config.js';
  * Layout: `~/.hexis/plugins/<host>/<plugin>` as PLUGIN_ROOT, refreshed on
  * every server start (a stale copy is the cost of a running session, not of a
  * lifetime) — or, when that root is held by a process a previous instance
- * leaked, a `<plugin>.<12-hex>` SIBLING (see `materializePlugin`);
- * `~/.hexis/plugin-data/<host>/<plugin>` as PLUGIN_DATA, created
- * once and NEVER cleared — it is the server's persistent state, and the spec
- * says the client manages its lifetime, not its contents.
+ * leaked, a FALLBACK root under the RESERVED sibling namespace
+ * `~/.hexis/plugins/<host>/.hexis-fallbacks/<plugin>/<12-hex>` (see
+ * `materializePlugin`); `~/.hexis/plugin-data/<host>/<plugin>` as PLUGIN_DATA,
+ * created once and NEVER cleared — it is the server's persistent state, and
+ * the spec says the client manages its lifetime, not its contents.
+ *
+ * `.hexis-fallbacks` is a reserved name: no plugin may be called that
+ * (`assertSegment` refuses it, and forbids path separators, so no plugin ever
+ * materializes INSIDE a subdirectory either). The reservation is what lets the
+ * stale-fallback sweep run inside that namespace ONLY — a legitimate plugin
+ * whose folder merely LOOKS like an old-style fallback (`GTM.abcdef123456`)
+ * can never be mistaken for one and swept.
  */
 
 /** Where a deployment's materialized plugins live, keyed by host so two workspaces never collide. */
@@ -42,10 +50,21 @@ export function hostKey(baseUrl: string): string {
   return `${host}-${createHash('sha256').update(baseUrl).digest('hex').slice(0, 8)}`;
 }
 
-/** One path segment, refusing separators and dot-navigation — a folder name, not a path. */
+/**
+ * The reserved sibling directory (under each host's plugin dir) that holds
+ * busy-rm FALLBACK roots, keyed by plugin: `.hexis-fallbacks/<plugin>/<12-hex>`.
+ * Reserved so the stale-fallback sweep can never confuse a real plugin folder
+ * with a fallback — see the layout note above.
+ */
+export const FALLBACKS_DIR = '.hexis-fallbacks';
+
+/** One path segment, refusing separators, dot-navigation and the reserved fallback namespace. */
 function assertSegment(name: string): void {
   if (!name || name === '.' || name === '..' || /[/\\]/.test(name)) {
     throw new Error(`"${name}" is not a plugin folder name`);
+  }
+  if (name === FALLBACKS_DIR) {
+    throw new Error(`"${name}" is a reserved folder name and cannot be a plugin`);
   }
 }
 
@@ -131,18 +150,22 @@ export async function materializePlugin(
   // stdio server spawned by a previous instance can outlive it (killing a
   // process does not kill its grandchildren on Windows), and its cwd sits
   // inside the root — which makes this rm fail EBUSY/EPERM/ENOTEMPTY there.
-  // The fallback is a fresh SIBLING root, so this instance still comes up on
-  // current bytes; PLUGIN_DATA stays the canonical shared dir, because state
-  // is shared by design. The held root becomes sweepable (below) the moment
-  // its holder dies. When the rm succeeds, the canonical path is returned
-  // unchanged — the fallback is strictly the busy-case escape hatch.
+  // The fallback is a fresh root under the RESERVED `.hexis-fallbacks/<folder>`
+  // namespace — a place no plugin folder can name (see `assertSegment`), so a
+  // fallback and a plugin can never be mistaken for one another — and this
+  // instance still comes up on current bytes; PLUGIN_DATA stays the canonical
+  // shared dir, because state is shared by design. The held root becomes
+  // sweepable (below) the moment its holder dies. When the rm succeeds, the
+  // canonical path is returned unchanged — the fallback is strictly the
+  // busy-case escape hatch.
+  const fallbacksDir = path.join(keyDir, FALLBACKS_DIR, folder);
   let pluginRoot = canonicalRoot;
   try {
     await fs.rm(pluginRoot, { recursive: true, force: true });
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== 'EBUSY' && code !== 'EPERM' && code !== 'ENOTEMPTY') throw err;
-    pluginRoot = path.join(keyDir, `${folder}.${randomBytes(6).toString('hex')}`);
+    pluginRoot = path.join(fallbacksDir, randomBytes(6).toString('hex'));
     console.error(
       `[hexis-mcp] the plugin root for "${folder}" is held by a live process (${code}) — ` +
         `likely a stdio server from a previous run; materializing into ${pluginRoot} instead.`,
@@ -187,31 +210,32 @@ export async function materializePlugin(
   const partialPrefix = `.${folder}.zip.`;
   const PARTIAL_SHAPE = /^[0-9a-f]{12}\.partial$/;
   const SWEEP_AGE_MS = 10 * 60 * 1000;
-  // Fallback ROOTS (see the busy-rm escape above) get the same sweep as the
-  // partials, for the same reason: a hard-killed or orphan-holding previous
-  // instance cannot clean up after itself, so the NEXT materialization of the
-  // same folder does. Folder-EXACT: the remainder after `<folder>.` must be
-  // exactly the 12-hex shape written above (the folder is regex-escaped, and
-  // `GTM.zip`'s fallbacks must never fall to `GTM`'s sweep). AGE-GATED with
-  // the same window: any startup finishes well inside it, so a concurrent
-  // instance's freshly-made fallback is never reclaimed — and fallbacks are
-  // born on Windows, where one still hosting a live server makes the rm fail,
-  // which is silently tolerated: it becomes sweepable the moment its holder
-  // dies.
-  const escapedFolder = folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const FALLBACK_SHAPE = new RegExp(`^${escapedFolder}\\.[0-9a-f]{12}$`);
   for (const entry of await fs.readdir(keyDir).catch(() => [] as string[])) {
     const abs = path.join(keyDir, entry);
-    if (FALLBACK_SHAPE.test(entry) && abs !== pluginRoot) {
-      const st = await fs.stat(abs).catch(() => null);
-      if (st === null || Date.now() - st.mtimeMs < SWEEP_AGE_MS) continue;
-      await fs.rm(abs, { recursive: true, force: true }).catch(() => {});
-      continue;
-    }
     if (!entry.startsWith(partialPrefix) || !PARTIAL_SHAPE.test(entry.slice(partialPrefix.length))) continue;
     const st = await fs.stat(abs).catch(() => null);
     if (st === null || Date.now() - st.mtimeMs < SWEEP_AGE_MS) continue;
     await fs.rm(abs, { force: true }).catch(() => {});
+  }
+  // Fallback ROOTS (see the busy-rm escape above) get the same sweep as the
+  // partials, for the same reason: a hard-killed or orphan-holding previous
+  // instance cannot clean up after itself, so the NEXT materialization of the
+  // same folder does. The sweep runs ONLY inside this folder's reserved
+  // namespace (`.hexis-fallbacks/<folder>/`), where every 12-hex entry is by
+  // construction a fallback this code wrote — a plugin folder in `keyDir`
+  // named like one (`GTM.abcdef123456`) is out of reach by design. AGE-GATED
+  // with the same window: any startup finishes well inside it, so a
+  // concurrent instance's freshly-made fallback is never reclaimed — and
+  // fallbacks are born on Windows, where one still hosting a live server
+  // makes the rm fail, which is silently tolerated: it becomes sweepable the
+  // moment its holder dies.
+  const FALLBACK_SHAPE = /^[0-9a-f]{12}$/;
+  for (const entry of await fs.readdir(fallbacksDir).catch(() => [] as string[])) {
+    const abs = path.join(fallbacksDir, entry);
+    if (!FALLBACK_SHAPE.test(entry) || abs === pluginRoot) continue;
+    const st = await fs.stat(abs).catch(() => null);
+    if (st === null || Date.now() - st.mtimeMs < SWEEP_AGE_MS) continue;
+    await fs.rm(abs, { recursive: true, force: true }).catch(() => {});
   }
   const tmpArchive = path.join(keyDir, `${partialPrefix}${randomBytes(6).toString('hex')}.partial`);
   try {

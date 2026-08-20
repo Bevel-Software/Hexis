@@ -4,8 +4,9 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import type { HexisMcpConfig } from './config.js';
+import type { HexisMcpConfig, RenewedGrant } from './config.js';
 import { hexisHome, hostKey } from './materialize.js';
+import { scheduleProactiveRenewal } from './renewal.js';
 
 /**
  * Browser sign-in (OAuth) for a person running this server without a
@@ -48,11 +49,22 @@ const b64url = (buf: Buffer): string => buf.toString('base64url');
 
 async function reachOrExplain(url: string, label: string, init?: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    // `redirect: 'error'`, everywhere in this flow: every URL here either came
+    // out of untrusted discovery metadata or carries a credential (the token,
+    // registration and exchange POSTs), and a redirect is how a compromised
+    // answer re-aims the request at a host the gate never saw. Refusing is
+    // safe because nothing in the OAuth chain legitimately redirects.
+    return await fetch(url, { redirect: 'error', ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   } catch (err) {
-    throw new OAuthError(
-      `Could not reach ${label} at ${url}: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    // fetch wraps the interesting part ("unexpected redirect", a DNS failure)
+    // in `cause` behind a generic "fetch failed" — surface it.
+    const detail =
+      err instanceof Error
+        ? err.cause instanceof Error && err.cause.message
+          ? `${err.message} (${err.cause.message})`
+          : err.message
+        : String(err);
+    throw new OAuthError(`Could not reach ${label} at ${url}: ${detail}`);
   }
 }
 
@@ -71,7 +83,31 @@ async function jsonOrExplain(res: Response, url: string, label: string): Promise
   }
 }
 
-/** An http(s) URL out of untrusted metadata, or a loud refusal naming the field. */
+/**
+ * A literal loopback host — the one place plain http is tolerable, because
+ * only this machine can answer it. Hexis-mcp's own copy of the semantics of
+ * core's `ensureSecureMcpUrl` (the packages share no code today): names are
+ * NOT resolved, so only the literal spellings qualify.
+ */
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '[::1]' || host === '::1') return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+/**
+ * An http(s) URL out of untrusted metadata, or a loud refusal naming the field.
+ *
+ * The https-or-loopback gate is the discovery chain's SSRF boundary: every URL
+ * validated here arrived over the network (a 401 header, a metadata document)
+ * and is about to be fetched with — or asked to receive — this process's
+ * credentials. Without the gate, a compromised or spoofed deployment could
+ * aim the token/registration POSTs (bearer, refresh token, code) at an
+ * arbitrary internal address, or send the person's BROWSER to one via the
+ * authorization URL. https is required everywhere; plain http only for a
+ * literal loopback host, which is what a local dev deployment looks like.
+ */
 function httpUrlOrExplain(raw: unknown, label: string, source: string): string {
   if (typeof raw !== 'string' || !raw.trim()) {
     throw new OAuthError(`${source} names no ${label} — the deployment's OAuth setup looks incomplete.`);
@@ -84,6 +120,14 @@ function httpUrlOrExplain(raw: unknown, label: string, source: string): string {
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new OAuthError(`${source} advertised a non-http ${label}: "${raw}".`);
+  }
+  if (parsed.protocol === 'http:' && !isLoopbackHost(parsed.hostname)) {
+    throw new OAuthError(
+      `${source} advertised an insecure ${label}: "${raw}". Discovered OAuth URLs must be https ` +
+        '(plain http is allowed only for a literal loopback host like 127.0.0.1 or localhost) — ' +
+        'refusing to send credentials there. If this deployment is really behind plain http on ' +
+        'another host, fix its TLS or use a connection key (--key) instead of browser sign-in.',
+    );
   }
   return parsed.toString();
 }
@@ -566,11 +610,12 @@ async function obtainAccessToken(
  * still execute on the deployment against its Secrets Vault, and nothing new
  * becomes readable locally.
  *
- * `renewConnectionKey` is the mid-run answer to an expired internal token:
- * refresh → re-exchange, no browser. deployment.ts consults it on a 401,
- * once; if the refresh itself is dead mid-run, the error tells the person to
- * restart and sign in again rather than popping a browser out from under a
- * running MCP session.
+ * `renewConnectionKey` is the answer to an expiring internal token: refresh →
+ * re-exchange, no browser. It is only ever run through `renewal.ts`'s
+ * single-flight (deployment.ts consults that on a mid-run 401; the proactive
+ * timer armed below consults it before expiry); if the refresh itself is dead
+ * mid-run, the error tells the person to restart and sign in again rather
+ * than popping a browser out from under a running MCP session.
  */
 export async function establishOAuthConfig(
   baseUrl: string,
@@ -580,10 +625,10 @@ export async function establishOAuthConfig(
   const endpoints = await discoverAuthServer(mcpUrl);
   const accessToken = await obtainAccessToken(baseUrl, endpoints, options);
   const grant = await exchangeForLocalToken(baseUrl, accessToken);
-  return {
+  const config: HexisMcpConfig = {
     baseUrl,
     connectionKey: grant.token,
-    renewConnectionKey: async (): Promise<string> => {
+    renewConnectionKey: async (): Promise<RenewedGrant> => {
       const stored = await readStoredCredentials(baseUrl);
       if (!stored) {
         throw new OAuthError(
@@ -600,7 +645,12 @@ export async function establishOAuthConfig(
       if (refreshed.refreshToken && refreshed.refreshToken !== stored.refreshToken) {
         await writeStoredCredentials(baseUrl, { clientId: stored.clientId, refreshToken: refreshed.refreshToken });
       }
-      return (await exchangeForLocalToken(baseUrl, refreshed.accessToken)).token;
+      return exchangeForLocalToken(baseUrl, refreshed.accessToken);
     },
   };
+  // Arm the first proactive renewal off the initial grant: without it the
+  // remote manual's transport — which never travels the reactive 401 path —
+  // would ride the first token to its death (see renewal.ts).
+  scheduleProactiveRenewal(config, grant.expiresInMs);
+  return config;
 }

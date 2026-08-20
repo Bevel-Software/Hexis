@@ -14,6 +14,13 @@
  * downstream needs to know which mode produced it.
  */
 
+/** What one renewal minted: the fresh bearer, and how long the deployment says it lives. */
+export interface RenewedGrant {
+  token: string;
+  /** Absent when the deployment predates reporting it; the caller falls back to reactive-only renewal. */
+  expiresInMs?: number;
+}
+
 export interface HexisMcpConfig {
   /** Base URL of the deployment, e.g. `https://demo.bevel.software`. No trailing slash. */
   baseUrl: string;
@@ -24,12 +31,20 @@ export interface HexisMcpConfig {
    */
   connectionKey: string;
   /**
-   * OAuth mode only: mint a fresh bearer after the current one is rejected
-   * (refresh → re-exchange). `deployment.ts` consults this on a mid-run 401,
-   * exactly once per request; a connection key has no renewal, so key mode
-   * leaves it unset.
+   * OAuth mode only: mint a fresh bearer (refresh → re-exchange). Never called
+   * directly by request code — `renewal.ts` wraps it in the ONE single-flight
+   * renewal per config, which `deployment.ts` consults on a mid-run 401 and a
+   * proactive timer consults before expiry. A connection key has no renewal,
+   * so key mode leaves it unset — and with it every renewal mechanism off.
    */
-  renewConnectionKey?: () => Promise<string>;
+  renewConnectionKey?: () => Promise<RenewedGrant>;
+  /**
+   * OAuth mode only, set by the server once it exists: called with each fresh
+   * bearer so the remote manual's transport can be re-registered with it — the
+   * registered MCP session captured the OLD `Authorization` header at creation
+   * and would otherwise keep dying on it until restart.
+   */
+  onConnectionKeyRenewed?: (token: string) => void | Promise<void>;
 }
 
 /**

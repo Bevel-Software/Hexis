@@ -405,6 +405,28 @@ describe('WorkspaceItemRoute', () => {
       // …and it has not been bounced away either: the URL is still the file's.
       expect(screen.getByLabelText('pathname')).toHaveTextContent('/Plugins/LocalLab/mcp.json');
     });
+
+    /**
+     * Only the plugin's DIRECT child is the declaring file — the backend reads
+     * exactly `Plugins/<plugin>/mcp.json`. An `mcp.json` bundled INSIDE a
+     * skill (an example, a template) is that skill's file, and rendering it as
+     * a tool page would 404 a perfectly real skill asset.
+     */
+    it("keeps a skill-bundled mcp.json as that skill's file, not a tool page", async () => {
+      renderAt(itemUrl('Plugins/Sales/create-sales-deck/mcp.json'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
+        'create-sales-deck::mcp.json',
+      );
+      expect(screen.queryByLabelText('tool-page')).toBeNull();
+    });
+
+    it('a `?server=` param cannot turn a nested mcp.json into a tool page either', async () => {
+      renderAt(`${itemUrl('Plugins/Sales/create-sales-deck/examples/mcp.json')}?server=granola`);
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
+        'create-sales-deck::examples/mcp.json',
+      );
+      expect(screen.queryByLabelText('tool-page')).toBeNull();
+    });
   });
 
   /**

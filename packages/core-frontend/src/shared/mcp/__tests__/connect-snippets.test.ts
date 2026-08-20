@@ -441,11 +441,12 @@ describe('snippets: one builder per client, keyed or not', () => {
     });
 
     /**
-     * Keyless is the onboarding picker's case: no key exists yet, and an
-     * empty env value would fail at connect time with nothing to say what
-     * was missing. The placeholder IS the instruction.
+     * Keyless is the interactive mode: the server opens the person's browser
+     * to sign in on first run, so no key belongs in the config — the env must
+     * carry the URL alone. An empty or placeholder HEXIS_CONNECTION_KEY would
+     * be read as key mode and fail at connect time.
      */
-    it('carries a readable placeholder when no key was minted', () => {
+    it('omits the key env entirely when no key was minted — keyless selects browser sign-in', () => {
       const parsed = JSON.parse(hexisMcpJsonSnippet(BASE));
       expect(parsed.mcpServers['hexis-local'].env).toEqual({
         HEXIS_URL: BASE,

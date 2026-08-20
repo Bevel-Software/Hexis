@@ -356,9 +356,10 @@ export function langdockSnippet(mcpUrl: string, bearer: string): string {
  * The LOCAL server (`npx @bevel-software/hexis-mcp`): the same workspace
  * as a stdio server on the member's own machine, which is the only place
  * a plugin's local-only tools — stdio servers, localhost services — can
- * run. It serves everything the hosted endpoint serves plus those, and it
- * authenticates by connection key alone: there is no browser on the far
- * side of a stdio pipe to open an OAuth flow in.
+ * run. It serves everything the hosted endpoint serves plus those. It
+ * authenticates either interactively — keyless, opening the person's own
+ * browser to sign in on first run — or autonomously with a connection
+ * key, for pipelines with nobody present to sign in.
  * ------------------------------------------------------------------ */
 
 /**
@@ -376,12 +377,6 @@ export function workspaceBaseUrl(): string {
   return window.location.origin;
 }
 
-/**
- * Where the connection key goes when none has been minted yet. A readable
- * instruction rather than an empty string, because the config is pasted
- * whole and an empty env value fails at connect time with nothing to say
- * what was missing.
- */
 /**
  * The JSON block that runs the workspace as a LOCAL MCP server. Read by the
  * same clients as `jsonConfigSnippet` — Claude Desktop, Cursor, Windsurf,

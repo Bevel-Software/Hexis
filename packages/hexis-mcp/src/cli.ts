@@ -46,9 +46,6 @@ async function main(): Promise<void> {
     const mcpUrl = await resolveMcpUrl({ baseUrl: resolved.baseUrl, connectionKey: '' });
     config = await establishOAuthConfig(resolved.baseUrl, mcpUrl, { noOpen: resolved.noOpen });
   }
-  const { server, shutdown } = await createHexisMcpServer(config, packageVersion());
-  await server.connect(new StdioServerTransport());
-
   // Deterministic teardown, on every way an MCP client lets go of us: stdin
   // EOF/close (the client hung up), SIGINT, SIGTERM. Killing this process
   // does NOT kill its grandchildren on Windows — only the transports' close()
@@ -56,16 +53,41 @@ async function main(): Promise<void> {
   // inside the materialized plugin root, holding it hostage (EBUSY) for every
   // later instance. So the spawned servers must die WITH this process, not be
   // left to a stdin-pipe EOF cascade that observably leaks.
+  //
+  // Installed BEFORE `createHexisMcpServer`, because the children spawn
+  // DURING it: a client that hangs up (or a Ctrl+C) mid-startup used to land
+  // in a window with no handler at all, leaving exactly the orphans the
+  // teardown exists to prevent. Until the handle exists there is nothing
+  // reachable to close — the UTCP client lives inside the create call — so an
+  // early let-go only RECORDS the request; the moment create resolves, main()
+  // sees it and shuts the freshly built handle down immediately.
+  const holder: { shutdown: (() => Promise<void>) | null; exitRequested: boolean } = {
+    shutdown: null,
+    exitRequested: false,
+  };
   let exiting = false;
   const exitAfterShutdown = (): void => {
     if (exiting) return; // 'end' then 'close' both fire; signals can repeat
+    holder.exitRequested = true;
+    if (!holder.shutdown) return; // still creating — main() finishes the job
     exiting = true;
-    void shutdown().finally(() => process.exit(0));
+    void holder.shutdown().finally(() => process.exit(0));
   };
   process.stdin.on('end', exitAfterShutdown);
   process.stdin.on('close', exitAfterShutdown);
   process.on('SIGINT', exitAfterShutdown);
   process.on('SIGTERM', exitAfterShutdown);
+
+  const { server, shutdown } = await createHexisMcpServer(config, packageVersion());
+  holder.shutdown = shutdown;
+  if (holder.exitRequested) {
+    // The client let go while we were starting up: close what was just built
+    // — children included — and leave, without ever connecting the transport.
+    exiting = true;
+    await shutdown();
+    process.exit(0);
+  }
+  await server.connect(new StdioServerTransport());
 }
 
 main().catch((err: unknown) => {

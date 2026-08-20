@@ -21,7 +21,9 @@ import '../tool-auth/external-api-key.interface.js'; // Express Request augmenta
  *      already accepts it, and refusing it here made OAuth-mode hexis-mcp
  *      fail at exactly one hop: registering this endpoint as its remote
  *      manual. Accepting it adds no new mint path — only this server creates
- *      them, always for an already-verified user.
+ *      them, always for an already-verified user. Only the `externalProxy`
+ *      shape is accepted: a plain in-process internal token is the loopback
+ *      surface's credential and must not double as an MCP caller.
  *   4. A regular JWT — same shape the web app uses. Lets a logged-in user
  *      hit the MCP endpoint from their browser if we ever need it
  *      (e.g. an in-app debugger). Keeps the surface from forking.
@@ -126,9 +128,28 @@ export function createMcpAuthMiddleware(
     // expired ones (a clean 401); the user row is loaded so `req.userEmail`
     // carries the same truth every other branch provides — the tool handlers
     // downstream resolve access against it.
+    //
+    // ONLY the `externalProxy` shape is admitted: that claim marks the
+    // loopback identity of an external caller (createSession's session
+    // bearer, the /mcp/local-token exchange), which is the one internal-token
+    // kind that has any business arriving here as an MCP client. A plain
+    // in-process internal token — the per-run credential the agent factory
+    // mints for its own code-mode client — is a loopback-surface credential,
+    // and accepting it would let it open an MCP session (createSession would
+    // even mint it a fresh externalProxy bearer, upgrading it).
     if (internalTokens.looksLikeInternalToken(token)) {
-      const claim = internalTokens.verify(token);
-      if (!claim) {
+      // `verify` answers null for the invalid/expired cases it can see coming,
+      // but a malformed token of plausible shape can still THROW from inside
+      // it (e.g. `timingSafeEqual` on same-length strings whose byte lengths
+      // differ). That is the caller's bad token, not a backend failure — 401,
+      // never a 500 or an unhandled throw into the error handler.
+      let claim: ReturnType<InternalTokenService['verify']>;
+      try {
+        claim = internalTokens.verify(token);
+      } catch {
+        claim = null;
+      }
+      if (!claim || claim.externalProxy !== true) {
         unauthorized(res, 'Invalid or expired internal token');
         return;
       }

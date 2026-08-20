@@ -9,7 +9,7 @@ import '@utcp/mcp'; // side effect: registers the 'mcp' call-template protocol
 import { CallTemplateSerializer, UtcpClientConfigSerializer } from '@utcp/sdk';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { registerManual } from '@bevel-software/platform-mcp-core';
-import { materializePlugin, prepareStdioSpec } from '../materialize.js';
+import { FALLBACKS_DIR, materializePlugin, prepareStdioSpec } from '../materialize.js';
 import type { HexisMcpConfig } from '../config.js';
 
 /**
@@ -275,17 +275,27 @@ describe('stdio end-to-end', () => {
     async () => {
       const first = await materializePlugin(config, 'GTM');
       const keyDir = path.dirname(first.pluginRoot);
+      // Fallback roots live in the RESERVED namespace, keyed by plugin —
+      // never as keyDir siblings a plugin folder's name could collide with.
+      const fallbacksDir = path.join(keyDir, FALLBACKS_DIR, 'GTM');
 
       // Stale + fresh fallback roots, as a hard-killed prior run leaves them.
       // Contents FIRST, utimes after — adding an entry would bump the dir's
       // mtime back inside the age gate.
-      const stale = path.join(keyDir, 'GTM.aaaaaaaaaaaa');
-      const fresh = path.join(keyDir, 'GTM.bbbbbbbbbbbb');
+      const stale = path.join(fallbacksDir, 'aaaaaaaaaaaa');
+      const fresh = path.join(fallbacksDir, 'bbbbbbbbbbbb');
       await fs.mkdir(stale, { recursive: true });
       await fs.writeFile(path.join(stale, 'junk.txt'), 'junk');
       const past = new Date(Date.now() - 11 * 60 * 1000);
       await fs.utimes(stale, past, past);
       await fs.mkdir(fresh, { recursive: true });
+      // The ambiguity the namespace exists to remove: a LEGITIMATE plugin
+      // whose folder merely looks like an old-style fallback sibling. However
+      // old it is, no sweep may ever touch it.
+      const lookalike = path.join(keyDir, 'GTM.abcdef123456');
+      await fs.mkdir(lookalike, { recursive: true });
+      await fs.writeFile(path.join(lookalike, 'plugin.json'), '{ "name": "lookalike" }\n');
+      await fs.utimes(lookalike, past, past);
 
       // A REAL holder: a live process whose cwd sits inside the canonical
       // root — exactly what an orphaned stdio server from a previous instance
@@ -309,26 +319,37 @@ describe('stdio end-to-end', () => {
           FIXTURE_SERVER,
         );
         if (process.platform === 'win32') {
-          // The fix: a sibling root instead of `skipping local server (EBUSY)`.
+          // The fix: a fallback root in the reserved namespace instead of
+          // `skipping local server (EBUSY)`.
           expect(second.pluginRoot).not.toBe(first.pluginRoot);
-          expect(path.dirname(second.pluginRoot)).toBe(keyDir);
-          expect(path.basename(second.pluginRoot)).toMatch(/^GTM\.[0-9a-f]{12}$/);
+          expect(path.dirname(second.pluginRoot)).toBe(fallbacksDir);
+          expect(path.basename(second.pluginRoot)).toMatch(/^[0-9a-f]{12}$/);
         } else {
           // The fast path stays byte-identical when the rm succeeds.
           expect(second.pluginRoot).toBe(first.pluginRoot);
         }
-        // The sweep beside it: the stale fallback is reclaimed, the fresh one
-        // (a possibly-live concurrent instance) and this run's own root are not.
-        const entries = await fs.readdir(keyDir);
-        expect(entries).not.toContain('GTM.aaaaaaaaaaaa');
-        expect(entries).toContain('GTM.bbbbbbbbbbbb');
-        expect(entries).toContain(path.basename(second.pluginRoot));
+        // The sweep inside the namespace: the stale fallback is reclaimed, the
+        // fresh one (a possibly-live concurrent instance) is not — and neither
+        // is this run's own root, wherever it landed.
+        const swept = await fs.readdir(fallbacksDir);
+        expect(swept).not.toContain('aaaaaaaaaaaa');
+        expect(swept).toContain('bbbbbbbbbbbb');
+        if (process.platform === 'win32') {
+          expect(swept).toContain(path.basename(second.pluginRoot));
+        }
+        // …and the fallback-shaped PLUGIN folder outside the namespace is
+        // untouched, old as it is: the sweep has no reach into keyDir.
+        expect(await fs.readdir(keyDir)).toContain('GTM.abcdef123456');
+        expect(
+          await fs.readFile(path.join(lookalike, 'plugin.json'), 'utf8'),
+        ).toContain('lookalike');
       } finally {
         holder.kill();
         // The holder must be GONE before afterAll's rm of the whole home —
         // Windows would EBUSY against its cwd otherwise.
         await new Promise<void>((resolve) => holder.once('exit', () => resolve()));
         await fs.rm(fresh, { recursive: true, force: true });
+        await fs.rm(lookalike, { recursive: true, force: true });
       }
     },
   );

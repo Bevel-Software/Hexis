@@ -46,7 +46,7 @@ afterEach(async () => {
 });
 
 function makeOAuthProvider(
-  verify?: (t: string) => Promise<{ extra?: Record<string, unknown> }>,
+  verify?: (t: string) => Promise<{ extra?: Record<string, unknown>; expiresAt?: number }>,
 ) {
   return {
     looksLikeAccessToken: (t: string) => typeof t === 'string' && t.startsWith('bevel-mcp_'),
@@ -105,6 +105,8 @@ describe('POST /mcp/local-token', () => {
   it('exchanges a valid OAuth access token for an internal token with the loopback identity + TTL', async () => {
     const oauth = makeOAuthProvider(async () => ({
       extra: { userId: 'user-5', userEmail: 'eve@example.com' },
+      // A grant with plenty of life left: the loopback constant is the binding cap.
+      expiresAt: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
     }));
     const { baseUrl, internalTokens } = await mount(oauth);
 
@@ -112,7 +114,8 @@ describe('POST /mcp/local-token', () => {
 
     expect(res.status).toBe(200);
     const body = (await res.json()) as { token: string; expiresInMs: number };
-    // Same TTL constant createSession's loopback bearer uses.
+    // Same TTL constant createSession's loopback bearer uses — the grant
+    // above outlives it, so the constant is the cap that binds.
     expect(body.expiresInMs).toBe(MCP_LOOPBACK_TOKEN_TTL_MS);
     // The minted token verifies to the resolved user with the externalProxy
     // flag — identical shape to the hosted session's loopback bearer.
@@ -128,6 +131,49 @@ describe('POST /mcp/local-token', () => {
       auth: { source: 'external', userId: 'user-5', scope: 'write' },
     });
     expect((oauth as any).verifyAccessToken).toHaveBeenCalledWith('bevel-mcp_valid123');
+  });
+
+  /**
+   * The binding that keeps the exchange from OUTLIVING its grant: an access
+   * token with less life left than the loopback constant caps the minted
+   * token's TTL at that remainder — otherwise a nearly-expired OAuth grant
+   * would buy five more hours of internal-token access.
+   */
+  it('caps expiresInMs at the access token\'s remaining lifetime when that is shorter', async () => {
+    const remainingSeconds = 90;
+    const oauth = makeOAuthProvider(async () => ({
+      extra: { userId: 'user-5' },
+      expiresAt: Math.floor(Date.now() / 1000) + remainingSeconds,
+    }));
+    const { baseUrl, internalTokens } = await mount(oauth);
+
+    const res = await exchange(baseUrl, 'Bearer bevel-mcp_shortlived');
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { token: string; expiresInMs: number };
+    // The returned number is the ACTUAL lifetime: at most the remainder,
+    // and nowhere near the 5h constant. (A tolerance below, for the
+    // seconds-granularity of expiresAt and the time the request takes.)
+    expect(body.expiresInMs).toBeLessThanOrEqual(remainingSeconds * 1000);
+    expect(body.expiresInMs).toBeGreaterThan((remainingSeconds - 10) * 1000);
+    expect(internalTokens.verify(body.token)).toEqual({ userId: 'user-5', externalProxy: true });
+  });
+
+  /**
+   * A provider that reports no expiry (the AuthInfo field is optional) falls
+   * back to the constant alone — absence must not read as "expires now".
+   */
+  it('falls back to the loopback constant when the provider reports no expiresAt', async () => {
+    const oauth = makeOAuthProvider(async () => ({
+      extra: { userId: 'user-5' },
+    }));
+    const { baseUrl } = await mount(oauth);
+
+    const res = await exchange(baseUrl, 'Bearer bevel-mcp_noexpiry');
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { expiresInMs: number };
+    expect(body.expiresInMs).toBe(MCP_LOOPBACK_TOKEN_TTL_MS);
   });
 
   it('401s with the resource_metadata challenge on an expired/revoked OAuth token', async () => {

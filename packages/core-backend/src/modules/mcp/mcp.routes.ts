@@ -291,9 +291,10 @@ export function createMcpRoutes(
    * The minted token is identical in shape to createSession's loopback bearer
    * (`{ userId, externalProxy: true }` → resolved as `source: 'external'` by
    * the tool-auth verifier, admitted to the external surface, refused from
-   * internal-only tools) and carries the same TTL. Nothing becomes reachable
-   * that the grant did not already reach — only the credential's spelling
-   * changes.
+   * internal-only tools) and carries the same TTL — CAPPED to the presented
+   * access token's remaining lifetime, so the exchange can never mint a
+   * credential that outlives its grant. Nothing becomes reachable that the
+   * grant did not already reach — only the credential's spelling changes.
    *
    * Auth semantics mirror McpAuthMiddleware's OAuth branch: an
    * invalid/expired/revoked token is a 401 re-challenging with
@@ -348,8 +349,22 @@ export function createMcpRoutes(
         unauthorized('Invalid access token');
         return;
       }
-      const minted = internalTokens.mint({ userId, externalProxy: true }, MCP_LOOPBACK_TOKEN_TTL_MS);
-      res.json({ token: minted, expiresInMs: MCP_LOOPBACK_TOKEN_TTL_MS });
+      // The minted token must never OUTLIVE the grant that authorized it: an
+      // OAuth access token revoked-by-expiry would otherwise leave a live
+      // internal token behind for the rest of the loopback TTL. Bind the TTL
+      // to whichever ends first — the constant, or the access token's own
+      // remaining lifetime (AuthInfo.expiresAt is epoch SECONDS, optional; a
+      // provider that reports none falls back to the constant alone).
+      const grantRemainingMs =
+        typeof info.expiresAt === 'number' ? info.expiresAt * 1000 - Date.now() : undefined;
+      const ttlMs =
+        grantRemainingMs === undefined
+          ? MCP_LOOPBACK_TOKEN_TTL_MS
+          : Math.min(MCP_LOOPBACK_TOKEN_TTL_MS, Math.max(grantRemainingMs, 0));
+      const minted = internalTokens.mint({ userId, externalProxy: true }, ttlMs);
+      // The ACTUAL lifetime, not the constant — the caller schedules its
+      // proactive renewal off this number.
+      res.json({ token: minted, expiresInMs: ttlMs });
     } catch (err) {
       // Same split as McpAuthMiddleware: a bad token is a clean 401 with the
       // discovery challenge; a backend failure is a 500 — the credential may

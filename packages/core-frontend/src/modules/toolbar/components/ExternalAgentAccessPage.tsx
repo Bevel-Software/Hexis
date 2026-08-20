@@ -231,11 +231,19 @@ export function ExternalAgentAccessPage() {
                   </button>{' '}
                   tab shows that setup.)
                 </p>
+                {/* "(local server)" disambiguates from the hosted drawer's
+                    ConnectionInstructions block, which labels ITS command
+                    "Connect Claude Code" — two identically named blocks on one
+                    page with different commands is a paste-the-wrong-one trap. */}
                 <CopyBlock
-                  label="Connect Claude Code"
+                  label="Connect Claude Code (local server)"
                   value={hexisMcpClaudeCommand(workspaceUrl)}
                   rows={3}
                 />
+                <p className="text-meta text-ink-muted leading-snug">
+                  On Windows, prefer the JSON config below — this one-liner assumes a POSIX shell
+                  (macOS, Linux, WSL or Git Bash).
+                </p>
                 <div>
                   <p className="text-meta text-ink-muted mb-1 leading-snug">
                     Cursor, Windsurf and Cline take this JSON in their MCP config. Claude
@@ -494,6 +502,10 @@ export function ExternalAgentAccessPage() {
                   className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
                 />
+                <p className="text-meta text-ink-muted mt-1 leading-snug">
+                  On Windows, prefer the JSON config below — this one-liner assumes a POSIX
+                  shell (macOS, Linux, WSL or Git Bash).
+                </p>
                 <p className="text-meta text-ink-muted mt-2 mb-1 leading-snug">
                   Or as a JSON config, for Claude Desktop, Cursor, Windsurf, Cline and
                   similar:

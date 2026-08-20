@@ -1,4 +1,5 @@
 import type { HexisMcpConfig } from './config.js';
+import { renewConnectionKeyNow } from './renewal.js';
 
 /**
  * The REST surface this server reads before it can serve anything. Everything
@@ -38,6 +39,10 @@ async function getJson(
   // 401 only: a 403 is a permission answer about a live credential.
   let retried = false;
   if (res.status === 401 && authed && renew) {
+    // The discarded response's body is drained before the retry replaces it —
+    // an unread body pins its connection (and, kept long enough, its memory)
+    // for as long as the runtime cares to wait.
+    await res.body?.cancel().catch(() => {});
     res = await attempt(await renew());
     retried = true;
   }
@@ -50,8 +55,15 @@ async function getJson(
         ? `${label} refused access (HTTP ${res.status}) to a request that carries no credentials — ` +
             'an SSO gate or proxy may be intercepting the deployment. Check that --url points at the workspace itself.'
         : renew
-          ? `Your sign-in was rejected by ${label} (HTTP ${res.status})${retried ? ' even after refreshing it' : ''} — ` +
-              'the authorization may have been revoked. Re-authorize by restarting hexis-mcp and signing in through your browser again.'
+          ? res.status === 403
+            ? // A 403 is a PERMISSION answer about a live credential — the
+              // sign-in worked, the account simply may not do this. Telling
+              // the person to re-authorize would send them through a browser
+              // round trip that changes nothing.
+              `${label} denied access (HTTP 403): your signed-in account does not have permission for this. ` +
+                'The sign-in itself is valid — ask a workspace admin for access; signing in again will not change the answer.'
+            : `Your sign-in was rejected by ${label} (HTTP 401)${retried ? ' even after refreshing it' : ''} — ` +
+                'the authorization may have been revoked. Re-authorize by restarting hexis-mcp and signing in through your browser again.'
           : `The connection key was rejected by ${label} (HTTP ${res.status}). ` +
               'Mint a fresh one from the profile menu → External agent access.',
     );
@@ -74,20 +86,17 @@ async function getJson(
 }
 
 /**
- * The `renew` a request should consult, if the config carries one. The wrapper
- * — rather than passing `config.renewConnectionKey` straight through — is what
- * updates `config.connectionKey`, so every LATER request carries the fresh
- * token without each call site re-threading it. This is the whole of the
- * OAuth-mode mutable state: one field on the one config object.
+ * The `renew` a request should consult, if the config carries one. It routes
+ * through `renewal.ts`'s SINGLE-FLIGHT — never `config.renewConnectionKey`
+ * directly — because the refresh token rotates: two racing renewals (startup's
+ * `Promise.all` fetches, or concurrent mid-run tool calls) would have the
+ * loser present a just-retired refresh token and kill the sign-in. The shared
+ * flight also updates `config.connectionKey`, so every LATER request carries
+ * the fresh token without each call site re-threading it.
  */
 function renewer(config: HexisMcpConfig): (() => Promise<string>) | undefined {
-  const renew = config.renewConnectionKey;
-  if (!renew) return undefined;
-  return async () => {
-    const fresh = await renew();
-    config.connectionKey = fresh;
-    return fresh;
-  };
+  if (!config.renewConnectionKey) return undefined;
+  return () => renewConnectionKeyNow(config);
 }
 
 /**

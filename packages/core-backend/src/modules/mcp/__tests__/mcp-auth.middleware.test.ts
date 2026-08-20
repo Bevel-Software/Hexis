@@ -298,5 +298,68 @@ describe('createMcpAuthMiddleware', () => {
       expect(next).not.toHaveBeenCalled();
       expect(status).toHaveBeenCalledWith(401);
     });
+
+    /**
+     * Only the externalProxy shape may be an MCP caller. A plain in-process
+     * internal token — the per-run credential the agent factory mints for its
+     * own code-mode client — is a loopback-surface credential, and admitting
+     * it here would let it open an MCP session (createSession would even mint
+     * it a fresh externalProxy bearer, upgrading it).
+     */
+    it('401s a VALID internal token that lacks the externalProxy claim', async () => {
+      const token = internal.mint({ userId: 'user-7' }, 60_000);
+      const auth = makeAuthService();
+      (auth.getUserById as ReturnType<typeof vi.fn>) = vi.fn(async () => ({
+        id: 'user-7',
+        email: 'seven@example.com',
+      }));
+      const mw = makeMw({ internal, auth });
+      const { req, res, next, status } = makeReqRes(`Bearer ${token}`);
+      await mw(req, res, next);
+      expect(next).not.toHaveBeenCalled();
+      expect(status).toHaveBeenCalledWith(401);
+      // Rejected before any user lookup — the shape alone disqualifies it.
+      expect(auth.getUserById).not.toHaveBeenCalled();
+    });
+
+    /**
+     * `verify` answers null for the invalid cases it can see coming, but a
+     * malformed token of plausible shape can still THROW from inside it
+     * (e.g. `timingSafeEqual` on same-length strings whose byte lengths
+     * differ). That is the caller's bad token — a clean 401, never a 500 or
+     * an unhandled throw.
+     */
+    it('401s — not 500s — when verify throws on a malformed token', async () => {
+      const throwing = {
+        looksLikeInternalToken: (t: string) => t.startsWith('bevel-int_'),
+        verify: () => {
+          throw new RangeError('Input buffers must have the same byte length');
+        },
+      } as unknown as InternalTokenService;
+      const mw = makeMw({ internal: throwing });
+      const { req, res, next, status } = makeReqRes('Bearer bevel-int_bödy.sïg');
+      await mw(req, res, next);
+      expect(next).not.toHaveBeenCalled();
+      expect(status).toHaveBeenCalledWith(401);
+    });
+
+    /**
+     * The real-token spelling of the throw above: a signature of the SAME
+     * string length whose non-ASCII characters change its BYTE length makes
+     * `timingSafeEqual` throw inside the real `verify` — proof the guard is
+     * needed against the genuine service, not only a mock.
+     */
+    it('401s a real token whose forged signature makes verify throw', async () => {
+      const token = internal.mint({ userId: 'user-7', externalProxy: true }, 60_000);
+      const dot = token.lastIndexOf('.');
+      const sig = token.slice(dot + 1);
+      // Same string LENGTH, different byte length: 'é' is two UTF-8 bytes.
+      const forged = `${token.slice(0, dot + 1)}é${sig.slice(1)}`;
+      const mw = makeMw({ internal });
+      const { req, res, next, status } = makeReqRes(`Bearer ${forged}`);
+      await mw(req, res, next);
+      expect(next).not.toHaveBeenCalled();
+      expect(status).toHaveBeenCalledWith(401);
+    });
   });
 });

@@ -39,6 +39,7 @@ import {
 } from './deployment.js';
 import { materializePlugin, prepareStdioSpec, type StdioServerSpec } from './materialize.js';
 import { REMOTE_MANUAL_NAME, localManualTemplates, remoteManualTemplate } from './manuals.js';
+import { cancelProactiveRenewal } from './renewal.js';
 
 /** Reported on `initialize`; the version is stamped at build time by the package. */
 const SERVER_NAME = 'hexis-mcp';
@@ -97,8 +98,27 @@ export async function discoverTools(
         'Check the URL and that the connection key is still valid.',
     );
   }
+  await removeRemoteMetaTools(client);
+  for (const manual of local) {
+    const result = await registerManual(client, manual);
+    if (!result.ok) {
+      console.error(`[hexis-mcp] skipping local tool "${String(manual.name)}": ${result.error}`);
+    }
+  }
+  const tools = await client.getTools();
+  return tools.map((tool: UtcpTool) => flattenManualTool(tool, REMOTE_MANUAL_NAME));
+}
+
+/**
+ * Purge the deployment's meta-tool copies from the registry. Runs at first
+ * registration AND after every credential-renewal re-registration of the
+ * remote manual — re-registering rediscovers the deployment's copies, and a
+ * copy left registered stays callable from chains against the remote registry
+ * that cannot see a local-only tool (see `discoverTools`).
+ */
+async function removeRemoteMetaTools(client: CodeModeUtcpClient): Promise<void> {
   for (const name of META_TOOL_NAMES) {
-    // A refused removal must not cost the startup: the listing filter below
+    // A refused removal must not cost the caller: the listing filter below
     // still keeps the copy out of the MCP surface, so the degradation is
     // "chains can see it", not "the server never came up". Named, not silent.
     try {
@@ -109,14 +129,6 @@ export async function discoverTools(
       );
     }
   }
-  for (const manual of local) {
-    const result = await registerManual(client, manual);
-    if (!result.ok) {
-      console.error(`[hexis-mcp] skipping local tool "${String(manual.name)}": ${result.error}`);
-    }
-  }
-  const tools = await client.getTools();
-  return tools.map((tool: UtcpTool) => flattenManualTool(tool, REMOTE_MANUAL_NAME));
 }
 
 /**
@@ -262,6 +274,65 @@ export async function createHexisMcpServer(
       `(${local.length} local-only manual(s) registered here, the rest served by the workspace).`,
   );
 
+  /**
+   * CREDENTIAL SWAP (OAuth mode). The remote manual's MCP session captured
+   * `Authorization: Bearer <token>` as a header when it was registered, so a
+   * renewed token does nothing for it until the manual is re-registered with
+   * a fresh template. `renewal.ts` calls `onConnectionKeyRenewed` on every
+   * successful renewal — proactive or 401-triggered — and this is the swap:
+   * deregister (which closes the manual's sessions), re-register with the new
+   * bearer, purge the rediscovered remote meta-tool copies.
+   *
+   * Serialization, as far as the UTCP API allows: the client offers no lock,
+   * so in-flight tool calls are COUNTED and the swap waits (bounded) for them
+   * to drain, while calls arriving DURING a swap await its completion before
+   * dispatch. The flattened `tools` list survives the swap untouched — it
+   * holds only names and schemas, and `callToolStreaming` resolves the call
+   * template from the repository BY NAME at call time, so re-registration is
+   * invisible to it (verified against @utcp/sdk's dispatch).
+   *
+   * Key mode sets no `renewConnectionKey`, so renewal.ts never renews, this
+   * listener is never called, and the gate below never engages.
+   */
+  let inflightCalls = 0;
+  let swapInProgress: Promise<void> | null = null;
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const swapRemoteCredential = async (token: string): Promise<void> => {
+    while (swapInProgress) await swapInProgress;
+    const run = (async (): Promise<void> => {
+      // Bounded drain: a wedged call must not hold the credential stale
+      // forever — after the deadline the swap proceeds and the straggler
+      // fails like any call racing a dying session would.
+      const deadline = Date.now() + 15_000;
+      while (inflightCalls > 0 && Date.now() < deadline) await sleep(50);
+      try {
+        // Closes the manual's MCP sessions and drops its repository entries.
+        await client.deregisterManual(REMOTE_MANUAL_NAME);
+      } catch (err) {
+        console.error(
+          `[hexis-mcp] deregistering the remote manual for the credential swap failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      const result = await registerManual(client, remoteManualTemplate(mcpUrl, token));
+      if (!result.ok) {
+        console.error(
+          `[hexis-mcp] re-registering the remote manual with the renewed credential failed: ${result.error}. ` +
+            'Remote tools may be unavailable until the next renewal or a restart.',
+        );
+        return;
+      }
+      await removeRemoteMetaTools(client);
+      console.error('[hexis-mcp] remote manual re-registered with the renewed credential.');
+    })();
+    swapInProgress = run.finally(() => {
+      swapInProgress = null;
+    });
+    await swapInProgress;
+  };
+  if (config.renewConnectionKey) {
+    config.onConnectionKeyRenewed = swapRemoteCredential;
+  }
+
   const server = new Server(
     { name: SERVER_NAME, version },
     { capabilities: { tools: {}, prompts: {} } },
@@ -270,26 +341,34 @@ export async function createHexisMcpServer(
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listedTools(tools) }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
-    const name = request.params.name;
-    if (META_TOOL_NAMES.has(name)) {
-      // No spill store: this process has nowhere to park an oversized chain
-      // result that `read_file` could read back, so the shared dispatcher
-      // returns a truncation notice instead of a ref that resolves nowhere.
-      return dispatchMetaTool(client, name, request.params.arguments ?? {});
+    // Never start a call mid-swap — the remote manual may be between its
+    // deregister and re-register, where a repository lookup finds nothing.
+    while (swapInProgress) await swapInProgress;
+    inflightCalls += 1;
+    try {
+      const name = request.params.name;
+      if (META_TOOL_NAMES.has(name)) {
+        // No spill store: this process has nowhere to park an oversized chain
+        // result that `read_file` could read back, so the shared dispatcher
+        // returns a truncation notice instead of a ref that resolves nowhere.
+        return await dispatchMetaTool(client, name, request.params.arguments ?? {});
+      }
+      const tool = tools.find((t) => t.mcpName === name);
+      if (!tool) return toolError(`Unknown tool "${name}".`);
+      const progressToken = request.params._meta?.progressToken;
+      return await dispatchToolCall(client, tool, request.params.arguments ?? {}, (progress, message) =>
+        extra.sendNotification({
+          method: 'notifications/progress',
+          params: {
+            ...(progressToken !== undefined ? { progressToken } : {}),
+            progress,
+            message,
+          },
+        } as never),
+      );
+    } finally {
+      inflightCalls -= 1;
     }
-    const tool = tools.find((t) => t.mcpName === name);
-    if (!tool) return toolError(`Unknown tool "${name}".`);
-    const progressToken = request.params._meta?.progressToken;
-    return dispatchToolCall(client, tool, request.params.arguments ?? {}, (progress, message) =>
-      extra.sendNotification({
-        method: 'notifications/progress',
-        params: {
-          ...(progressToken !== undefined ? { progressToken } : {}),
-          progress,
-          message,
-        },
-      } as never),
-    );
   });
 
   /**
@@ -308,6 +387,12 @@ export async function createHexisMcpServer(
   const shutdown = async (): Promise<void> => {
     if (closed) return;
     closed = true;
+    // No further renewals or credential swaps once we are going down.
+    cancelProactiveRenewal(config);
+    // The SDK server too, not only the client: embedding callers connect the
+    // transport themselves, and this handle should fully tear down — closing
+    // the server closes its transport (and with it any pending requests).
+    await server.close().catch(() => {});
     // `UtcpClient.close()` releases every registered communication protocol;
     // @utcp/mcp's close tears down its sessions AND the stdio transports,
     // which is the only thing that reliably ends the spawned children.
