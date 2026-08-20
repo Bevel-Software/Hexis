@@ -267,6 +267,11 @@ export async function createCoreServer(
     core.mcpAuthMiddleware,
     core.authMiddleware,
     core.usageMeter,
+    // The local-token exchange: verifies an MCP OAuth access token and mints
+    // the loopback internal token the local MCP server uses for its REST reads.
+    core.internalTokenService,
+    core.mcpOAuthProvider,
+    core.mcpResourceMetadataUrl,
   ));
 
   // MCP OAuth 2.1 authorization server: /authorize, /token, /register,

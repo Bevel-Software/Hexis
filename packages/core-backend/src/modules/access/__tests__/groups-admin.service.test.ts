@@ -355,6 +355,37 @@ describe('GroupsAdminService', () => {
     // Already gone → honest no-op.
     expect(await service.retireManualGroups(ADMIN)).toBe(false);
   });
+
+  it('retireManualGroups checks existence UNDER the lock — a create that races in still gets retired', async () => {
+    // groups.yaml is absent when retire is called, but a concurrent createGroup
+    // lands it right as the retire acquires the lock. Checked before the lock
+    // (the old shape) retire would answer false and the manual file would
+    // linger into IdP mode, ready to resurrect if the synced file ever goes
+    // away. Checked under the lock, the just-created file is seen and retired.
+    await fs.rm(path.join(repo, 'groups.yaml'));
+    const workspace = stubWorkspace(root);
+    const workflow = stubWorkflow();
+    const wf = workflow.svc as unknown as {
+      acquireLock: (w: string, b: string, p: string, u: AuthUser) => Promise<unknown>;
+    };
+    const origAcquire = wf.acquireLock.bind(workflow.svc);
+    wf.acquireLock = async (w, b, p, u) => {
+      if (p === `${KB}/groups.yaml`) {
+        await write(repo, 'groups.yaml', 'groups:\n  Late Team:\n    - late@x.io\n');
+      }
+      return origAcquire(w, b, p, u);
+    };
+    const svc = new GroupsAdminService(
+      workspace,
+      workflow.svc,
+      new AccessControlService(workspace as never, KB),
+      KB,
+      () => DEFAULT_BRANCH,
+    );
+    expect(await svc.retireManualGroups(ADMIN)).toBe(true);
+    await expect(groupsYaml()).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(workflow.commits.some((c) => c.summary.includes('Retire manual groups'))).toBe(true);
+  });
 });
 
 describe('groups-edit guardrails', () => {

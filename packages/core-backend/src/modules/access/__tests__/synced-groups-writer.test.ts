@@ -93,6 +93,66 @@ describe('renderSyncedGroupsYaml', () => {
     expect(rendered.warnings.join(' ')).toContain('malformed email');
   });
 
+  it("refuses the reserved 'group:' prefix as a member email (the read side skips it as a ref token)", () => {
+    const rendered = renderSyncedGroupsYaml([
+      group('Engineering', [member(), member({ email: 'group:lee@x.io' })]),
+    ]);
+    expect(rendered.text).toContain('ada@x.io');
+    expect(rendered.text).not.toContain('group:lee@x.io');
+    expect(rendered.warnings.join(' ')).toContain('malformed email');
+    // The emitted file round-trips warning-free through the parser.
+    const parsed = parseGroupsFile(rendered.text, 'synced-groups.yaml');
+    expect(parsed.ok && parsed.warnings).toEqual([]);
+  });
+
+  it('renders IdP names ESCAPED into warnings — control characters never reach the log verbatim', () => {
+    const rendered = renderSyncedGroupsYaml([
+      group('Evil\u001b[31mTeam\nFAKE LOG LINE', [member()]),
+    ]);
+    expect(rendered.groupCount).toBe(0);
+    expect(rendered.warnings).toHaveLength(1);
+    // The raw control chars must not appear; their JSON escapes must.
+    expect(rendered.warnings[0]).not.toContain('\n');
+    expect(rendered.warnings[0]).not.toContain('\u001b');
+    expect(rendered.warnings[0]).toContain('\\n');
+    expect(rendered.warnings[0]).toContain('\\u001b');
+  });
+
+  it('also escapes C1 controls and U+2028/U+2029 — the ranges JSON.stringify leaves raw', () => {
+    // JSON.stringify only escapes C0 (U+0000–U+001F): the one-byte CSI
+    // U+009B starts an ANSI sequence on its own, DEL (U+007F) is a control
+    // too, and U+2028/U+2029 are line breaks to JS consumers — all four
+    // would otherwise reach the log stream verbatim.
+    const raw = { csi: '\u009B', del: '\u007F', ls: '\u2028', ps: '\u2029' };
+    // C1/2028/2029 do NOT make a name unsafe (only C0 does), so the group
+    // is emitted — the name reaches the log through a MEMBER warning.
+    const rendered = renderSyncedGroupsYaml([
+      group(`Csi${raw.csi}31mTeam${raw.del}${raw.ls}${raw.ps}FAKE`, [member({ active: false })]),
+    ]);
+    expect(rendered.groupCount).toBe(1);
+    expect(rendered.warnings).toHaveLength(1);
+    const warning = rendered.warnings[0];
+    for (const c of Object.values(raw)) {
+      expect(warning).not.toContain(c);
+    }
+    expect(warning).toContain('\\u009b');
+    expect(warning).toContain('\\u007f');
+    expect(warning).toContain('\\u2028');
+    expect(warning).toContain('\\u2029');
+  });
+
+  it('full-key duplicate tie-break is collision-proof (JSON member key, not a delimiter join)', () => {
+    // Crafted so the OLD delimiter-joined keys collide: one malformed "email"
+    // containing the join delimiters serializes identically to two real
+    // members. A collision pushed the tie onto input order — the two renders
+    // below would then disagree on which duplicate wins first-wins dedup.
+    const a = group('Team', [member({ email: 'a@x.io:true,b@x.io' })], 'ext-1');
+    const b = group('Team', [member({ email: 'a@x.io' }), member({ email: 'b@x.io' })], 'ext-1');
+    const forward = renderSyncedGroupsYaml([a, b]);
+    const reversed = renderSyncedGroupsYaml([b, a]);
+    expect(forward.text).toBe(reversed.text);
+  });
+
   it('sorts by code units, not locale (byte-stable across deployments)', () => {
     // localeCompare in most locales collates 'é' before 'z'; code units put
     // 'z' (0x7a) before 'é' (0xe9). Pin the code-unit order so the rendered
@@ -118,7 +178,7 @@ describe('renderSyncedGroupsYaml', () => {
     expect(rendered.text).not.toContain('Ops: West');
     expect(rendered.text).not.toContain('everyone');
     const joined = rendered.warnings.join('\n');
-    expect(joined).toContain("'Ops: West' skipped");
+    expect(joined).toContain('"Ops: West" skipped');
     expect(joined).toContain('reserved');
     expect(joined).toContain('collides');
   });

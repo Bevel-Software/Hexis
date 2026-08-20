@@ -172,6 +172,12 @@ export interface CoreServices {
   mcpService: McpService;
   mcpAuthMiddleware: ReturnType<typeof createMcpAuthMiddleware>;
   mcpOAuthProvider: BevelOAuthProvider;
+  /**
+   * RFC 9728 protected-resource-metadata URL carried on MCP 401 challenges.
+   * Published so the route layer's own challenges (the local-token exchange)
+   * advertise the same pointer the auth middleware does.
+   */
+  mcpResourceMetadataUrl: string;
   toolRegistry: ToolRegistry;
   toolAuthMiddleware: ReturnType<typeof createToolAuthMiddleware>;
   manualAuthMiddleware: ReturnType<typeof createManualAuthMiddleware>;
@@ -648,6 +654,7 @@ export async function createCoreServices(
     externalApiKeyService,
     mcpOAuthProvider,
     mcpResourceMetadataUrl,
+    internalTokenService,
   );
 
   // ── Unified tool surface ──────────────────────────────────────────────
@@ -826,6 +833,7 @@ export async function createCoreServices(
     mcpService,
     mcpAuthMiddleware,
     mcpOAuthProvider,
+    mcpResourceMetadataUrl,
     toolRegistry,
     toolAuthMiddleware,
     manualAuthMiddleware,

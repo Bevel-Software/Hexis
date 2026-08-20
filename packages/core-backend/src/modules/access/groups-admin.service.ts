@@ -392,17 +392,25 @@ export class GroupsAdminService {
    */
   async retireManualGroups(actor: AuthUser): Promise<boolean> {
     const workspaceId = await this.ensureWorkspace();
-    if ((await this.locked.readKbFile(workspaceId, GROUPS_YAML)) === null) return false;
-    const fsys = await this.locked.lockingFsForActor(workspaceId, actor);
-    await this.locked.mapLockContention(() =>
-      fsys.writeFiles(
-        [],
+    let retired = false;
+    // Existence check AND delete under the SAME lock: checked outside it, a
+    // concurrent create could land groups.yaml right after a "not there"
+    // answer (leaving retired manual groups behind to resurrect if the synced
+    // file ever goes away), or a concurrent retire could delete it right
+    // after a "there" answer and fail this one on ENOENT.
+    await this.locked.withFileLocks(workspaceId, actor, [GROUPS_YAML], async () => {
+      const original = await this.locked.readKbFile(workspaceId, GROUPS_YAML);
+      if (original === null) return; // already absent — a no-op retire
+      await this.locked.writeAndCommitLocked(
+        workspaceId,
+        actor,
+        [{ repoRel: GROUPS_YAML, content: null, original }],
         'Retire manual groups — directory sync connected',
-        [`${this.kbDirName}/${GROUPS_YAML}`],
-      ),
-    );
-    this.afterWrite(workspaceId, actor, [GROUPS_YAML]);
-    return true;
+      );
+      retired = true;
+    });
+    if (retired) this.afterWrite(workspaceId, actor, [GROUPS_YAML]);
+    return retired;
   }
 
   // ---- Internals ----------------------------------------------------------

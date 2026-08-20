@@ -25,6 +25,7 @@ import { promises as fs } from 'node:fs';
 
 import type { FileTreeEntry, IWorkspaceService } from '@bevel-software/platform-shared';
 import {
+  KNOWN_VERBS,
   accessMdDeclaresBodyRules,
   hasAccessFrontmatterExtension,
   isAccessMdPath,
@@ -94,28 +95,30 @@ function ruleLineRanges(
   return [configLineRange(lines, isMarkdown)];
 }
 
-/** A known access verb key AT THE RULE MAPPING'S ROOT (indent 0 — the only
- *  level the resolver parses verbs from; see `parseAccessFile` /
- *  `parseOwnAccessEntries`, which read `Object.entries(root)`, and the splice
- *  writer's `findVerbBlock`, which requires `indent === 0` for the key). An
- *  INDENTED `read:` inside some nested config mapping is NOT an access rule
- *  and must never be scanned or rewritten. */
-const VERB_KEY_RE = /^(read|write|download|owner)(:\s*)(.*)$/;
-/** A block-list item: `  - <token>` (token may carry a leading `deny `). */
-const LIST_ITEM_RE = /^(\s*-\s+)(.*)$/;
+/** The access verb keys the resolver reads (kept in lockstep via KNOWN_VERBS). */
+const VERB_KEYS: ReadonlySet<string> = new Set<string>(KNOWN_VERBS);
 
 /**
  * Walk the CONFIG-REGION lines of `text`, invoking `onRoleRef` for every line
  * that PARSES as a genuine role entry — both the block-list form (`- <token>`
- * under a root-level `read:`/`write:`/… key) and the inline scalar form
- * (`owner: <token>`). `verb` is the access verb the reference sits under; for
- * a block list it is the nearest enclosing verb key (lines before any verb
- * key, or under an unknown key, are skipped). This is the SINGLE source of
- * truth for "what is a role reference" — both the delete-warning scan and the
- * rename rewrite drive off it, so they cannot disagree. The callback may
- * mutate `lines[i]` (the rewrite does; the scan does not). User entries,
- * other keys, nested mappings' verb-looking keys, comments and substrings
- * never fire it.
+ * under a ROOT-mapping `read:`/`write:`/… key) and the inline scalar form
+ * (`owner: <token>`). `verb` is the access verb the reference sits under.
+ * This is the SINGLE source of truth for "what is a role reference" — both
+ * the delete-warning scan and the rename rewrite drive off it, so they cannot
+ * disagree. The callback may mutate `lines[i]` (the rewrite does; the scan
+ * does not). User entries, other keys, nested mappings' verb-looking keys,
+ * comments and substrings never fire it.
+ *
+ * "Root" follows the resolver's OWN semantics, not column zero: the
+ * YAML-subset parser's root frame sits at indent -1 (`parseYamlSubset`), so a
+ * uniformly-INDENTED root mapping (`  read:` at column 2 with nothing
+ * enclosing it) is a live rule mapping the resolver enforces — a column-zero
+ * regex would silently skip it, and a rename would strand those grants. This
+ * walker mirrors the parser's frame stack: a key whose enclosing frame is the
+ * root is a root key; a verb key nested under some other mapping is not a
+ * rule. On a STRUCTURAL error the resolver rejects the whole region (an
+ * access.md hard-errors; node frontmatter yields no own-entries), so the walk
+ * stops — nothing there is an enforced rule.
  *
  * Comments follow the resolver's tokeniser rule (`stripComment`): they are
  * invisible to MATCHING — a trailing `# note` never becomes part of the
@@ -137,7 +140,6 @@ function walkRoleRefs(
     suffix: string;
   }) => void,
 ): void {
-  let currentVerb: string | null = null;
   /** A role-entry value → its parsed role entry, else null (user/empty/other). */
   const roleEntry = (rawValue: string): { role: string; deny: boolean } | null => {
     const parsed = parseAccessEntry(rawValue);
@@ -145,6 +147,14 @@ function walkRoleRefs(
       ? { role: parsed.entry.role, deny: parsed.entry.deny }
       : null;
   };
+  // Mirror of the subset parser's frame stack. `pending` is a key whose value
+  // is still unknown — the next token decides whether it opens a list (an
+  // item deeper than the key), a nested mapping (a kv deeper than the key),
+  // or nothing (a peer/outdented token pops it, i.e. the key was null).
+  // `verb` is set only on a ROOT verb key's frame — its list items are the
+  // entries the resolver reads for that verb.
+  type Frame = { indent: number; kind: 'pending' | 'list' | 'map'; verb: string | null };
+  const stack: Frame[] = [{ indent: -1, kind: 'map', verb: null }];
   for (let i = start; i < end; i++) {
     const raw = lines[i];
     // Match against the COMMENT-STRIPPED line — the resolver's tokeniser view.
@@ -155,31 +165,73 @@ function walkRoleRefs(
     // A full-line comment (or blank line) is invisible: not an entry, and it
     // does NOT end the current block — the tokeniser skips it entirely.
     if (!line.trim()) continue;
-    // A verb key at the rule mapping's root resets the block context. Its
-    // inline value (scalar form, `owner: Sales`) is itself a candidate
-    // reference under that same verb.
-    const kvM = line.match(VERB_KEY_RE);
-    if (kvM) {
-      currentVerb = kvM[1];
-      const inlineValue = kvM[3];
-      if (inlineValue.trim() !== '') {
-        const entry = roleEntry(inlineValue);
-        if (entry) onRoleRef({ i, verb: currentVerb, entry, indent: `${kvM[1]}${kvM[2]}`, prefix: '', suffix });
+    // Same indent rule as the tokeniser: leading SPACES only.
+    const indent = /^( *)/.exec(line)![1].length;
+    const content = line.slice(indent);
+    while (stack.length > 1 && stack[stack.length - 1].indent >= indent) stack.pop();
+    const top = stack[stack.length - 1];
+
+    if (content === '-' || content.startsWith('- ')) {
+      if (top.kind === 'pending') top.kind = 'list';
+      // An item with no enclosing list is a structural error — the resolver
+      // rejects the whole region, so nothing here is an enforced rule.
+      if (top.kind !== 'list') return;
+      if (top.verb !== null) {
+        const rest = content.slice(2);
+        const ws = /^\s*/.exec(rest)![0];
+        const entry = roleEntry(rest.trim());
+        if (entry) {
+          onRoleRef({
+            i,
+            verb: top.verb,
+            entry,
+            indent: '',
+            prefix: line.slice(0, indent + 2) + ws,
+            suffix,
+          });
+        }
       }
       continue;
     }
-    // Block-list item — belongs to the nearest enclosing verb key. A list item
-    // with no verb in scope is not a resolvable access rule; skip it.
-    const listM = line.match(LIST_ITEM_RE);
-    if (listM && currentVerb !== null) {
-      const entry = roleEntry(listM[2]);
-      if (entry) onRoleRef({ i, verb: currentVerb, entry, indent: '', prefix: listM[1], suffix });
+
+    const colonIdx = content.indexOf(':');
+    // Not a `key:` or `- value` line, or an empty key: a structural error the
+    // resolver rejects — stop, this region enforces nothing.
+    if (colonIdx < 0) return;
+    const key = content.slice(0, colonIdx).trim();
+    if (!key) return;
+    if (top.kind === 'pending') {
+      // The previous key's value turned out to be a nested MAPPING.
+      top.kind = 'map';
+      top.verb = null;
+    }
+    // A kv inside a list is a structural error (mapping key inside a list).
+    if (top.kind !== 'map') return;
+    // Root per the parser's frames — NOT "column zero".
+    const verbKey = stack.length === 1 && VERB_KEYS.has(key) ? key : null;
+    const value = content.slice(colonIdx + 1).trim();
+    if (value !== '') {
+      // Inline value — no frame opens. A scalar under a root verb key is the
+      // inline scalar reference form (`owner: Sales`); `[]` is an empty list.
+      if (verbKey && value !== '[]') {
+        const afterColon = content.slice(colonIdx + 1);
+        const ws = /^\s*/.exec(afterColon)![0];
+        const entry = roleEntry(value);
+        if (entry) {
+          onRoleRef({
+            i,
+            verb: verbKey,
+            entry,
+            indent: line.slice(0, indent + colonIdx + 1) + ws,
+            prefix: '',
+            suffix,
+          });
+        }
+      }
       continue;
     }
-    // Any other non-empty line ends the current block: a non-verb key, an
-    // INDENTED verb-looking key (a nested mapping's — not a rule the resolver
-    // parses), or stray prose in config.
-    if (!listM) currentVerb = null;
+    // Empty value: what it opens (list/map/null) is decided by the next token.
+    stack.push({ indent, kind: 'pending', verb: verbKey });
   }
 }
 

@@ -153,6 +153,33 @@ function folderPath(accessMdPath: string): string {
   return dir === '' ? 'the root folder' : dir;
 }
 
+/**
+ * A principal's row/chip identity. Kind is PART of it: a group and a role
+ * sharing a name are DIFFERENT principals server-side (bare token vs
+ * `role/<name>`), so they key — and chip — separately (`g:` vs `r:`). One
+ * name picked as both is two chips, and each grants its own kind.
+ */
+function principalKey(p: Principal): string {
+  return p.kind === 'role'
+    ? `r:${p.role.toLowerCase()}`
+    : p.kind === 'group'
+      ? `g:${p.group.toLowerCase()}`
+      : `u:${p.email.toLowerCase()}`;
+}
+
+/**
+ * Look a row/principal key up in a response's `sources` map. Group rows key
+ * as `g:<name>`; an older server still keys groups under `r:<name>`, so a
+ * miss on `g:` falls back to the shared legacy key (version skew only — a
+ * current server emits `g:` for groups).
+ */
+function lookupSources(
+  sources: AccessResponse['sources'] | undefined,
+  key: string,
+): GrantSources | undefined {
+  return sources?.[key] ?? (key.startsWith('g:') ? sources?.[`r:${key.slice(2)}`] : undefined);
+}
+
 /** The distinct ancestor `access.md` path(s) named across a per-verb sources map. */
 function ancestorsFromSources(sources: GrantSources | undefined): string[] {
   if (!sources) return [];
@@ -503,9 +530,13 @@ export function ManageAccessDialog({
     const collectivesOf = (list: AccessEligible): { name: string; kind: 'role' | 'group' }[] =>
       list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
     const touchCollective = (c: { name: string; kind: 'role' | 'group' }): PrincipalRow => {
-      // Groups share the `r:` row namespace with roles — the resolver keys its
-      // `sources` map that way, and one name is one row regardless of kind.
-      const key = `r:${c.name.toLowerCase()}`;
+      // Rows are keyed by KIND + name (`g:`/`r:`) — the backend treats a bare
+      // `Product` (group) and `role/Product` (role) as DIFFERENT principals,
+      // so a group and a role sharing a name are two rows, each mutating its
+      // own grant. Collapsing them to one row silently pointed every edit at
+      // the group and hid the role's grant entirely.
+      const key =
+        c.kind === 'group' ? `g:${c.name.toLowerCase()}` : `r:${c.name.toLowerCase()}`;
       let row = rows.get(key);
       if (!row) {
         row = {
@@ -520,11 +551,6 @@ export function ManageAccessDialog({
           ancestors: [],
         };
         rows.set(key, row);
-      } else if (c.kind === 'group' && row.kind === 'role') {
-        // Group-sticky, mirroring bare-token precedence: should the per-verb
-        // lists ever disagree on a shared name, the merged row is the group.
-        row.kind = 'group';
-        row.principal = { kind: 'group', group: c.name };
       }
       return row;
     };
@@ -566,9 +592,10 @@ export function ManageAccessDialog({
     for (const u of data.downloaders.users) touchUser(u).verbs.download = true;
 
     // Attach each row's per-verb source + manageability (direct / inherited /
-    // external) from the resolver's `sources` map, keyed by the same row key.
+    // external) from the resolver's `sources` map, keyed by the same row key
+    // (with the `g:` → `r:` version-skew fallback for group rows).
     for (const row of rows.values()) {
-      row.sources = data.sources?.[row.key];
+      row.sources = lookupSources(data.sources, row.key);
       const { manage, ancestors } = classifyManage(row.sources);
       row.manage = manage;
       row.ancestors = ancestors;
@@ -658,16 +685,6 @@ export function ManageAccessDialog({
     if (EMAIL_RE.test(q)) return { kind: 'user', email: q, displayName: q.split('@')[0] };
     return null;
   }, [query, suggest]);
-
-  // Groups and roles share the `r:` row namespace (the resolver keys both as
-  // `r:<name>`), so a group chip and a role chip with one name dedupe to one
-  // principal in the picker.
-  const principalKey = (p: Principal): string =>
-    p.kind === 'role'
-      ? `r:${p.role.toLowerCase()}`
-      : p.kind === 'group'
-        ? `r:${p.group.toLowerCase()}`
-        : `u:${p.email.toLowerCase()}`;
 
   const principalLabel = (p: Principal): string =>
     p.kind === 'role' ? p.role : p.kind === 'group' ? p.group : p.displayName || p.email;
@@ -831,7 +848,7 @@ export function ManageAccessDialog({
         // bit gone, the inherited bit silently remaining and the box re-checking).
         if (currentlyOn) {
           const key = principalKey(principal);
-          const stillForVerb = res.sources?.[key]?.[grantVerb] ?? [];
+          const stillForVerb = lookupSources(res.sources, key)?.[grantVerb] ?? [];
           const ancestors = ancestorsFromSources({ [grantVerb]: stillForVerb });
           if (ancestors.length > 0) {
             setConfirmRemove({
@@ -898,7 +915,7 @@ export function ManageAccessDialog({
         // finish the job instead of leaving a row that reappears as inherited (a
         // silent half-removal). We read the just-revoked row's post-revoke sources
         // straight from the response, so it reflects the real current tree.
-        const ancestors = ancestorsFromSources(res.sources?.[row.key]);
+        const ancestors = ancestorsFromSources(lookupSources(res.sources, row.key));
         if (ancestors.length > 0) {
           setConfirmRemove({ principal: row.principal, label: row.label, ancestors });
         }

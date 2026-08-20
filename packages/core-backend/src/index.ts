@@ -52,12 +52,15 @@ export type {
 } from './modules/tool-auth/external-api-key.interface.js';
 
 // Key port/seam types an overlay implements.
+// SyncedGroupsWriter is a CLASS — exported by VALUE so an overlay can
+// construct one; the seam types (including the writer's deps) stay type-only.
+export { SyncedGroupsWriter } from './modules/access/synced-groups-writer.js';
 export type {
   SyncedGroupsSource,
   SyncedGroupRecord,
   SyncedGroupMember,
-  SyncedGroupsWriter,
   SyncedGroupsWriteResult,
+  SyncedGroupsWriterDeps,
 } from './modules/access/synced-groups-writer.js';
 export type { ISessionSink } from './modules/workspace/session-sink.js';
 export type {

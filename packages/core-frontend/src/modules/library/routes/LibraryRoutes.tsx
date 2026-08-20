@@ -9,7 +9,7 @@ import { PluginsIndexPage } from '../components/PluginsIndexPage';
 import { PersonalPluginPage } from '../components/PersonalPluginPage';
 import { WelcomeRoute } from '../../onboarding/components/WelcomeRoute';
 import { WorkspaceItemRoute } from './WorkspaceItemRoute';
-import { decodePluginSegment, LIBRARY_ROOT, pathForPlugin, urlForItemFile, urlForSkillFile } from './library-paths';
+import { decodePluginSegment, LIBRARY_ROOT, pathForPlugin, urlForLibraryItem, urlForSkillFile } from './library-paths';
 
 /**
  * The Skills & Tools surface — everything under `/skills-and-tools/*`.
@@ -138,9 +138,11 @@ function LegacyToolRedirect() {
   const tool = data.items.find((i) => i.kind === 'integration' && i.id === decoded);
   if (kbDirName === null) return null;
   if (tool) {
-    return (
-      <Navigate to={{ pathname: urlForItemFile(kbDirName, tool.path), hash: location.hash }} replace />
-    );
+    // `urlForLibraryItem` adds `?server=<slug>` for an mcp.json-declared tool —
+    // several servers share the declaring file, so the file URL alone would
+    // bounce to the plugin page. The `#…` fragment rides AFTER the query, so
+    // the OAuth outcome and the disambiguator coexist on the one URL.
+    return <Navigate to={`${urlForLibraryItem(kbDirName, tool)}${location.hash}`} replace />;
   }
   if (data.loading) return null;
   return <Navigate to={LIBRARY_ROOT} replace />;

@@ -76,8 +76,13 @@ const LOOPBACK_TIMEOUT_MS = 15_000;
  * first thing to die under a session's normal lifecycle. A continuously-active
  * session CAN outlive it — its tool calls then fail at the loopback and the
  * client recovers by re-initializing, which mints a fresh token.
+ *
+ * Exported because `POST /api/mcp/local-token` (mcp.routes.ts) performs the
+ * same OAuth-access-token → internal-token exchange for the LOCAL MCP server,
+ * and must mint the exact same shape and lifetime — one constant, two
+ * consumers, so the two bridges can never drift apart.
  */
-const MCP_LOOPBACK_TOKEN_TTL_MS = 5 * 60 * 60 * 1000;
+export const MCP_LOOPBACK_TOKEN_TTL_MS = 5 * 60 * 60 * 1000;
 
 const callTemplateSerializer = new CallTemplateSerializer();
 

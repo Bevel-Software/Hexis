@@ -503,36 +503,44 @@ export function createAccessRoutes(
       ]);
 
     // Per-principal, per-verb origin (direct / ancestor — MECE over editable
-    // files). Keyed `u:<email>` / `r:<name>` to match the dialog's row keys, so
-    // each row can show where its access comes from and which verbs are
-    // removable here. GROUPS deliberately share the `r:` namespace with roles
-    // (the dialog keys both collective kinds to one row per name, and the
-    // eligible lists' `principals[].kind` — not this key — is what says which
-    // is which): the keys are only ever matched back against the same map and
-    // echoed on revoke, where the resolver/splice match BOTH spellings (bare
-    // and `role/<name>`) of a name, so classification and removal work for
-    // either kind. A row whose verbs resolve only via a group/everyone/rescue
-    // has no source (the verb is absent) and renders non-actionable. Built over
-    // the union of every principal in the four eligible lists.
-    const roleSet = new Set<string>([
-      ...eligible.roles,
-      ...readers.roles,
-      ...owners.roles,
-      ...downloaders.roles,
-    ]);
+    // files). Keyed `u:<email>` / `r:<role>` / `g:<group>` to match the
+    // dialog's row keys, so each row can show where its access comes from and
+    // which verbs are removable here. Groups get their OWN `g:` namespace: a
+    // group and a role sharing a name are DIFFERENT principals (bare token vs
+    // `role/<name>`), and one shared `r:` entry could only describe one of
+    // them. Each kind resolves through the token spelling that IS that
+    // principal — a group through its bare token (group-first precedence), a
+    // role through its explicit `role/<name>` alias (correct whether or not a
+    // group shadows the name; the built-in `everyone` keeps its bare spelling,
+    // it has no alias). A row whose verbs resolve only via a
+    // group/everyone/rescue has no source (the verb is absent) and renders
+    // non-actionable. Built over the union of every principal in the four
+    // eligible lists (kinded `principals`, with the name-only `roles` list as
+    // the all-roles fallback).
+    const collectives = new Map<string, { name: string; kind: 'role' | 'group' }>();
+    for (const list of [eligible, readers, owners, downloaders]) {
+      const kinded =
+        list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
+      for (const p of kinded) {
+        const key = `${p.kind === 'group' ? 'g' : 'r'}:${p.name.toLowerCase()}`;
+        if (!collectives.has(key)) collectives.set(key, p);
+      }
+    }
     const userSet = new Map<string, { name: string; email: string }>();
     for (const u of [...eligible.users, ...readers.users, ...owners.users, ...downloaders.users]) {
       if (!userSet.has(u.email.toLowerCase())) userSet.set(u.email.toLowerCase(), u);
     }
     const sources: Record<string, Awaited<ReturnType<IAccessControl['grantSources']>>> = {};
     await Promise.all([
-      ...[...roleSet].map(async (role) => {
-        sources[`r:${role.toLowerCase()}`] = await accessControl.grantSources(
-          workspaceId,
-          kind,
-          repoRelTarget,
-          { kind: 'role', role },
-        );
+      ...[...collectives.entries()].map(async ([key, p]) => {
+        const token =
+          p.kind === 'role' && canonicalRoleName(p.name) !== EVERYONE_CANONICAL
+            ? `${ROLE_TOKEN_PREFIX}${p.name}`
+            : p.name;
+        sources[key] = await accessControl.grantSources(workspaceId, kind, repoRelTarget, {
+          kind: 'role',
+          role: token,
+        });
       }),
       ...[...userSet.values()].map(async (u) => {
         sources[`u:${u.email.toLowerCase()}`] = await accessControl.grantSources(
@@ -735,10 +743,18 @@ export function createAccessRoutes(
     try {
       const mode = (req.body as { mode?: unknown }).mode;
       const { repoRelTarget, kind, principal: routePrincipal } = parseMutationBody(req.body);
-      // Revoke matching is name-based, so a group principal converts straight
-      // to the role-shaped token — no existence check (revoking a grant whose
-      // group has since vanished must keep working).
+      // A group principal converts straight to the role-shaped bare token —
+      // no existence check (revoking a grant whose group has since vanished
+      // must keep working).
       const principal = asSplicePrincipal(routePrincipal);
+      // GROUP revokes match the EXACT bare token only. The service's own
+      // shadow probe decides exact-vs-name for roles, but it cannot know a
+      // bare token was a GROUP once that group vanished from the active
+      // source — the name would read "unshadowed" and name-level matching
+      // would strip a same-named role's live `role/<Name>` grant. The route
+      // still knows the caller's kind, so it pins the matching here.
+      const revokeOpts =
+        routePrincipal.kind === 'group' ? ({ tokenMatch: 'exact' } as const) : undefined;
       // Optional `verb` scopes ALL three paths to a single verb: a default revoke
       // strips just that verb; remove-from-parent removes just that verb on the
       // ancestor; deny-here denies just that verb at the target. Absent ⇒ the
@@ -794,7 +810,7 @@ export function createAccessRoutes(
             );
           }
           // Scope the ancestor revoke to the same verb the user acted on (if any).
-          await mutation.revoke(workspaceId, 'folder', ancestorDir, principal, user.email, verb);
+          await mutation.revoke(workspaceId, 'folder', ancestorDir, principal, user.email, verb, revokeOpts);
         });
 
         accessControl.invalidate(workspaceId);
@@ -812,7 +828,7 @@ export function createAccessRoutes(
         await assertCanMutate(workspaceId, branch, user.email, gatePath);
         await withEditLock(workspaceId, branch, gatePath, user, async () => {
           // Scope the deny to the same verb the user acted on (if any).
-          await mutation.denyHere(workspaceId, kind, repoRelTarget, principal, verb);
+          await mutation.denyHere(workspaceId, kind, repoRelTarget, principal, verb, revokeOpts);
         });
         accessControl.invalidate(workspaceId);
         console.log(
@@ -830,7 +846,7 @@ export function createAccessRoutes(
       const editPath = gatePath;
       let changed = false;
       await withEditLock(workspaceId, branch, editPath, user, async () => {
-        const r = await mutation.revoke(workspaceId, kind, repoRelTarget, principal, user.email, verb);
+        const r = await mutation.revoke(workspaceId, kind, repoRelTarget, principal, user.email, verb, revokeOpts);
         changed = r.changed;
       });
 

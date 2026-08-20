@@ -493,10 +493,33 @@ export class RolesAdminService {
     }
     await this.assertRolesUnlocked(workspaceId, actor);
 
-    // Hold BOTH file locks across read → build → write: candidates are built
-    // from a snapshot, and without the hold another admin's edit could land
-    // in between and be silently overwritten.
-    await this.locked.withFileLocks(workspaceId, actor, [GROUPS_YAML, ROLES_YAML], async () => {
+    // Hold ALL THREE file locks across read → build → write: candidates are
+    // built from a snapshot, and without the hold another admin's edit could
+    // land in between and be silently overwritten. The synced file's lock is
+    // held too — the directory-sync materializer commits synced-groups.yaml
+    // through that same lock, so holding it serializes this conversion with a
+    // provisioning push and makes the IdP-mode recheck below race-free. It is
+    // a COORDINATION hold (never a write path): synced-groups.yaml is
+    // machine-owned — only the sync bot passes its write rule, so a
+    // write-intent acquire would refuse every human actor at the gate. The
+    // conversion only READS the file; coordination gives it the mutex without
+    // claiming write authority.
+    await this.locked.withFileLocks(
+      workspaceId,
+      actor,
+      [GROUPS_YAML, ROLES_YAML],
+      async () => {
+      // Re-check UNDER the synced file's lock: the pre-lock check above is a
+      // fast-path courtesy, but directory sync could materialize
+      // synced-groups.yaml between it and this point — and committing a new
+      // groups.yaml group in IdP mode writes a retired file.
+      if ((await this.locked.readKbFile(workspaceId, SYNCED_GROUPS_YAML)) !== null) {
+        throw new RolesAdminError(
+          'Groups are synced from your identity provider — recreate this team there instead.',
+          409,
+          { kind: 'idp-mode' },
+        );
+      }
       const rolesText = await this.readRolesYaml(workspaceId);
       const role = parseRolesModel(rolesText).find((r) => canonicalRoleName(r.displayName) === canonical);
       if (!role) throw new RolesAdminError(`role not found: ${canonical}`, 404);
@@ -548,7 +571,9 @@ export class RolesAdminService {
         ],
         `Convert role ${role.displayName} to a group`,
       );
-    });
+      },
+      { coordinationFiles: [SYNCED_GROUPS_YAML] },
+    );
     this.accessControl.invalidate(workspaceId);
     this.emitWrites(workspaceId, actor, [ROLES_YAML, GROUPS_YAML]);
     return this.getRoster();

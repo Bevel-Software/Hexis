@@ -171,7 +171,17 @@ export function sanitizeInputSchema(schema: unknown): unknown {
 export function flattenManualTool(tool: UtcpTool, kbManualName: string): ProxiedTool {
   const dot = tool.name.indexOf('.');
   const manual = dot >= 0 ? tool.name.slice(0, dot) : '';
-  const bare = dot >= 0 ? tool.name.slice(dot + 1) : tool.name;
+  let bare = dot >= 0 ? tool.name.slice(dot + 1) : tool.name;
+  // The KB manual's shape depends on its transport. The hosted proxy reaches
+  // it over HTTP, so names arrive `<manual>.<tool>` and one strip bares them.
+  // The local server registers the deployment as an MCP manual whose single
+  // server deliberately shares its name, so names arrive
+  // `<manual>.<manual>.<tool>` — without the second strip every core tool
+  // keeps a dot, fails MCP's name grammar, and the whole remote toolset is
+  // dropped from the listing.
+  if (manual === kbManualName && bare.startsWith(`${kbManualName}.`)) {
+    bare = bare.slice(kbManualName.length + 1);
+  }
   const mcpName = manual === kbManualName ? bare : tool.name.replace(/\./g, '_');
   return {
     utcpName: tool.name,

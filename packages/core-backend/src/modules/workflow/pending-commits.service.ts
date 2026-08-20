@@ -34,7 +34,7 @@
  *                                                    (status='needs_attention')
  */
 
-import { and, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { pendingCommits } from '../database/schema.js';
 
@@ -409,6 +409,32 @@ export class PendingCommitsService {
         ),
       );
     return rows[0]?.count ?? 0;
+  }
+
+  /**
+   * Is a LIVE row — `pending` or `running`, the statuses the worker will
+   * still drive — queued for `(workspaceId, branch, path)`? A
+   * `needs_attention` row deliberately does NOT count: its ladder has
+   * escalated to a human and nothing will retry it, so a caller asking
+   * "is my landed-but-unpushed commit going to be published?" must hear no.
+   * Backs `IWorkflowService.hasQueuedCommit` (the synced-groups committer's
+   * armed-retry proof) and the coordination-release discard guard.
+   */
+  async hasLiveRowFor(rawWorkspaceId: string, branch: string, path: string): Promise<boolean> {
+    const workspaceId = canonicalWorkspaceId(rawWorkspaceId);
+    const rows = await this.db
+      .select({ id: pendingCommits.id })
+      .from(pendingCommits)
+      .where(
+        and(
+          eq(pendingCommits.workspaceId, workspaceId),
+          eq(pendingCommits.branch, branch),
+          eq(pendingCommits.path, path),
+          inArray(pendingCommits.status, ['pending', 'running']),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
   }
 
   /**

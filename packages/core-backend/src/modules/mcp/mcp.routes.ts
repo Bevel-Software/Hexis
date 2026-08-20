@@ -1,5 +1,6 @@
 import express, { type Request, type RequestHandler } from 'express';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
@@ -8,7 +9,9 @@ import {
   TokenStillActiveError,
 } from '../tool-auth/external-api-key.errors.js';
 import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
-import type { McpService } from './mcp.service.js';
+import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
+import { MCP_LOOPBACK_TOKEN_TTL_MS, type McpService } from './mcp.service.js';
+import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
 import type { ILlmUsageMeter } from '../tool-auth/llm-usage-meter.js';
 import '../tool-auth/external-api-key.interface.js'; // req.externalApiKeyId augmentation
 
@@ -37,10 +40,14 @@ function extractBearer(req: Request): string {
  *   POST   /mcp/external-api-keys         — mint a new key (returns plaintext ONCE)
  *   DELETE /mcp/external-api-keys/:id     — revoke
  *
+ *   POST   /mcp/local-token               — exchange an MCP OAuth access token
+ *                                           for a loopback internal token
+ *
  * The `/mcp` endpoints accept either a connection key or a JWT (see
  * McpAuthMiddleware). The `/mcp/external-api-keys/*` endpoints accept only the JWT —
  * minting/revoking via a connection key would let a leaked key roll itself
- * over and stay alive forever.
+ * over and stay alive forever. `/mcp/local-token` accepts ONLY an MCP OAuth
+ * access token — every other credential already opens the surface it bridges to.
  */
 export function createMcpRoutes(
   mcpService: McpService,
@@ -48,6 +55,11 @@ export function createMcpRoutes(
   mcpAuthMiddleware: RequestHandler,
   jwtAuthMiddleware: RequestHandler,
   llmUsageService: ILlmUsageMeter,
+  internalTokens: InternalTokenService,
+  oauthProvider: BevelOAuthProvider,
+  // RFC 9728 pointer carried on this router's own 401 challenges (the
+  // local-token exchange), same value McpAuthMiddleware advertises.
+  resourceMetadataUrl: string,
 ): express.Router {
   const router = express.Router();
 
@@ -256,6 +268,129 @@ export function createMcpRoutes(
       }
       const msg = err instanceof Error ? err.message : 'Unknown error';
       res.status(500).json({ error: msg });
+    }
+  });
+
+  // ── Local-server token exchange (OAuth-access-token-only) ──────────────
+
+  /**
+   * Exchange an MCP OAuth access token for a short-lived internal token.
+   *
+   * Why it exists: the LOCAL MCP server's REST reads — the all-tools manual,
+   * `list_local_tools`, the plugin archive — live on `/api/agent/*`, which
+   * accepts connection keys and internal tokens ONLY; an MCP OAuth access
+   * token deliberately 401s there. Hosted OAuth sessions cross that gap
+   * inside `McpService.createSession`, which mints a loopback internal token
+   * for the resolved user. This endpoint is the same exchange for an external
+   * caller: the one bridge that lets a local server configured via the
+   * deployment's MCP OAuth (instead of a connection key) reach those reads.
+   *
+   * Why it is NOT a widening of the trust boundary: the caller must present a
+   * VERIFIED OAuth grant for this exact user — the same credential that
+   * already drives full tool execution through the hosted `/mcp` endpoint.
+   * The minted token is identical in shape to createSession's loopback bearer
+   * (`{ userId, externalProxy: true }` → resolved as `source: 'external'` by
+   * the tool-auth verifier, admitted to the external surface, refused from
+   * internal-only tools) and carries the same TTL — CAPPED to the presented
+   * access token's remaining lifetime, so the exchange can never mint a
+   * credential that outlives its grant. Nothing becomes reachable that the
+   * grant did not already reach — only the credential's spelling changes.
+   *
+   * Auth semantics mirror McpAuthMiddleware's OAuth branch: an
+   * invalid/expired/revoked token is a 401 re-challenging with
+   * `resource_metadata` (RFC 9728) so the client can re-authorize; a backend
+   * failure during verification is a 500. A connection key, internal token,
+   * or JWT is a 403 — those credentials need no exchange, so accepting them
+   * here would only manufacture a second credential from a first.
+   *
+   * Response: `{ token, expiresInMs }`.
+   */
+  router.post('/mcp/local-token', async (req, res) => {
+    const wwwAuthenticate = `Bearer realm="bevel-mcp", resource_metadata="${resourceMetadataUrl}"`;
+    const unauthorized = (error: string) => {
+      res.setHeader('WWW-Authenticate', wwwAuthenticate);
+      res.status(401).json({ error });
+    };
+
+    const header = req.headers.authorization;
+    if (!header || !header.toLowerCase().startsWith('bearer ')) {
+      unauthorized('Missing or invalid Authorization header');
+      return;
+    }
+    const token = extractBearer(req);
+
+    if (!oauthProvider.looksLikeAccessToken(token)) {
+      // A recognizable non-OAuth credential gets an explicit 403: a
+      // connection key or internal token already opens `/api/agent/*`
+      // directly, and a JWT holder mints a connection key from the settings
+      // UI — none of them has anything to exchange.
+      if (
+        externalApiKeyService.looksLikeExternalApiKey(token) ||
+        internalTokens.looksLikeInternalToken(token) ||
+        token.startsWith('eyJ')
+      ) {
+        res.status(403).json({
+          error:
+            'This endpoint exchanges MCP OAuth access tokens only. Connection keys, ' +
+            'internal tokens, and JWTs need no exchange — use them directly.',
+        });
+        return;
+      }
+      // Unrecognizable bearer — re-challenge so an OAuth-capable client can
+      // discover the authorization server and obtain a real access token.
+      unauthorized('Invalid access token');
+      return;
+    }
+
+    try {
+      const info = await oauthProvider.verifyAccessToken(token);
+      const userId = String(info.extra?.userId ?? '');
+      if (!userId) {
+        unauthorized('Invalid access token');
+        return;
+      }
+      // The minted token must never OUTLIVE the grant that authorized it: an
+      // OAuth access token revoked-by-expiry would otherwise leave a live
+      // internal token behind for the rest of the loopback TTL. Bind the TTL
+      // to whichever ends first — the constant, or the access token's own
+      // remaining lifetime (AuthInfo.expiresAt is epoch SECONDS, optional; a
+      // provider that reports none falls back to the constant alone).
+      const grantRemainingMs =
+        typeof info.expiresAt === 'number' ? info.expiresAt * 1000 - Date.now() : undefined;
+      // A grant with no life left mints NOTHING: a 200 carrying an
+      // already-dead token would read as success to the caller, whose first
+      // real request then fails somewhere far from the cause. It is the same
+      // 401 an expired token gets from the verifier, challenge and all — and
+      // a non-finite expiresAt (a provider handing back garbage) is refused
+      // the same way rather than turned into a TTL. Deliberately STRICTER
+      // than the verifier at the boundary: AuthInfo floors the expiry to
+      // whole seconds, so a grant inside its final partial second computes
+      // as spent here even though the verifier (which compares the stored
+      // millisecond timestamp) just accepted it — but that sub-second
+      // remainder could only mint a token that is dead before its first use,
+      // and refusing it is exactly this guard's job.
+      if (grantRemainingMs !== undefined && !(Number.isFinite(grantRemainingMs) && grantRemainingMs > 0)) {
+        unauthorized('Invalid, expired, or revoked access token');
+        return;
+      }
+      const ttlMs =
+        grantRemainingMs === undefined
+          ? MCP_LOOPBACK_TOKEN_TTL_MS
+          : Math.min(MCP_LOOPBACK_TOKEN_TTL_MS, grantRemainingMs);
+      const minted = internalTokens.mint({ userId, externalProxy: true }, ttlMs);
+      // The ACTUAL lifetime, not the constant — the caller schedules its
+      // proactive renewal off this number.
+      res.json({ token: minted, expiresInMs: ttlMs });
+    } catch (err) {
+      // Same split as McpAuthMiddleware: a bad token is a clean 401 with the
+      // discovery challenge; a backend failure is a 500 — the credential may
+      // be fine, we just can't check it right now.
+      if (err instanceof InvalidTokenError) {
+        unauthorized('Invalid, expired, or revoked access token');
+      } else {
+        console.error('[mcp] local-token exchange failed:', err);
+        res.status(500).json({ error: 'Authentication backend unavailable' });
+      }
     }
   });
 

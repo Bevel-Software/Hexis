@@ -101,6 +101,22 @@ export async function createGroup(displayName: string): Promise<GroupsRoster> {
   return parseRoster(res);
 }
 
+/**
+ * Rename a group. Canonical-changing renames rewrite every grant reference
+ * (and roles.yaml `group:` assignments) atomically server-side.
+ */
+export async function renameGroup(
+  canonical: string,
+  newDisplayName: string,
+): Promise<GroupsRoster> {
+  const res = await authFetch(`/api/admin/groups/${encodeURIComponent(canonical)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ newDisplayName }),
+  });
+  return parseRoster(res);
+}
+
 export async function deleteGroup(canonical: string): Promise<GroupsRoster> {
   const res = await authFetch(`/api/admin/groups/${encodeURIComponent(canonical)}`, {
     method: 'DELETE',

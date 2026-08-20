@@ -70,12 +70,27 @@ function stubWorkflow() {
   // exactly like FileLockService (nesting bugs must fail here too).
   const locks = new Map<string, AuthUser>();
   const lockRow = (h: AuthUser) => ({ holderUserId: h.id, holderName: h.name });
+  const acquireCalls: { path: string; coordination: boolean }[] = [];
   const svc = {
     getLock: async (_w: string, _b: string, p: string) => {
       const h = locks.get(p);
       return h ? lockRow(h) : null;
     },
-    acquireLock: async (_w: string, _b: string, p: string, user: AuthUser) => {
+    acquireLock: async (
+      _w: string,
+      _b: string,
+      p: string,
+      user: AuthUser,
+      opts?: { coordination?: boolean },
+    ) => {
+      acquireCalls.push({ path: p, coordination: !!opts?.coordination });
+      // Mirror the production lock-time write gate on the machine-owned file:
+      // synced-groups.yaml refuses every non-bot WRITE-intent acquire on the
+      // (always protected) default branch. Only a coordination acquire — a
+      // pure mutex claiming no write authority — may hold it for a human.
+      if (p === `${KB}/synced-groups.yaml` && !opts?.coordination) {
+        throw new Error(`Access denied: no write permission on "${p}" (machine-owned)`);
+      }
       const h = locks.get(p);
       if (h) return { acquired: false, lock: lockRow(h) };
       locks.set(p, user);
@@ -92,7 +107,7 @@ function stubWorkflow() {
       return {} as unknown;
     },
   } as unknown as WorkflowService;
-  return { svc, commits };
+  return { svc, commits, acquireCalls };
 }
 
 describe('RolesAdminService — capabilities, group assignment, conversion', () => {
@@ -187,6 +202,35 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     expect(accessMd).toContain('- Product');
   });
 
+  it('manual-mode conversion works for a HUMAN admin: the synced file is held as a COORDINATION lock', async () => {
+    // synced-groups.yaml is machine-owned — the lock-time write gate refuses
+    // every human actor (the stub's acquireLock enforces this exactly like
+    // production). The conversion still needs the file's lock to serialize
+    // with a provisioning push, so it must take it as a coordination hold
+    // that claims no write authority. A write-intent acquire here would fail
+    // EVERY manual-mode conversion at lock acquisition.
+    const workspace = stubWorkspace(root);
+    const workflow = stubWorkflow();
+    const svc = new RolesAdminService(
+      workspace,
+      workflow.svc,
+      new AccessControlService(workspace as never, KB),
+      KB,
+      () => DEFAULT_BRANCH,
+    );
+    const roster = await svc.convertRoleToGroup(ADMIN, 'product');
+    expect(roster.some((r) => r.canonical === 'product')).toBe(false);
+    expect(await groupsYaml()).toContain('Product:');
+    // The synced file WAS locked (the serialization is real), via coordination;
+    // the written files keep their write-gated acquires.
+    expect(workflow.acquireCalls).toContainEqual({
+      path: `${KB}/synced-groups.yaml`,
+      coordination: true,
+    });
+    expect(workflow.acquireCalls).toContainEqual({ path: `${KB}/roles.yaml`, coordination: false });
+    expect(workflow.acquireCalls).toContainEqual({ path: `${KB}/groups.yaml`, coordination: false });
+  });
+
   it('conversion refusals: capability role, group-assigned role, IdP mode', async () => {
     await expect(service.convertRoleToGroup(ADMIN, 'admin')).rejects.toMatchObject({
       status: 422,
@@ -202,6 +246,49 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
       status: 409,
       payload: { kind: 'idp-mode' },
     });
+  });
+
+  it('conversion re-checks IdP mode UNDER the synced file lock (TOCTOU: a sync landing mid-flight refuses)', async () => {
+    // The pre-lock IdP check passes (no synced file yet). Directory sync then
+    // materializes synced-groups.yaml just before the conversion gets its
+    // locks — the same interleaving the synced file's lock serializes in
+    // production. The under-lock recheck must refuse with the typed 409 and
+    // write nothing (committing a groups.yaml group in IdP mode writes a
+    // retired file).
+    const workspace = stubWorkspace(root);
+    const workflow = stubWorkflow();
+    const wf = workflow.svc as unknown as {
+      acquireLock: (
+        w: string,
+        b: string,
+        p: string,
+        u: AuthUser,
+        opts?: { coordination?: boolean },
+      ) => Promise<unknown>;
+    };
+    const origAcquire = wf.acquireLock.bind(workflow.svc);
+    wf.acquireLock = async (w, b, p, u, opts) => {
+      if (p === `${KB}/synced-groups.yaml`) {
+        // The sync's provisioning push won the race for this lock and landed.
+        await write(repo, 'synced-groups.yaml', 'groups:\n  Engineering:\n    - ada@x.io\n');
+      }
+      return origAcquire(w, b, p, u, opts);
+    };
+    const svc = new RolesAdminService(
+      workspace,
+      workflow.svc,
+      new AccessControlService(workspace as never, KB),
+      KB,
+      () => DEFAULT_BRANCH,
+    );
+    await expect(svc.convertRoleToGroup(ADMIN, 'product')).rejects.toMatchObject({
+      status: 409,
+      payload: { kind: 'idp-mode' },
+    });
+    // Nothing moved.
+    expect(await rolesYaml()).toBe(ROLES);
+    expect(await groupsYaml()).not.toContain('Product');
+    expect(workflow.commits).toHaveLength(0);
   });
 
   it('a failed conversion with NO pre-existing groups.yaml leaves no groups.yaml behind', async () => {

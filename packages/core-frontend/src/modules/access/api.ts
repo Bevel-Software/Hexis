@@ -64,11 +64,14 @@ export interface AccessResponse {
   downloaders: AccessEligible;
   /**
    * Per-principal, per-verb sources of access. Keyed `u:<email>` / `r:<role>`
-   * (lowercased) to match the dialog's row keys, so a row can show where its
-   * access comes from (direct, inherited, or both) and which verbs are removable
-   * here. After a revoke, a principal whose direct entry was stripped but who
-   * remains inherited still appears here with only their `ancestor` source(s) —
-   * which is how the dialog chains into "Remove from parent?".
+   * / `g:<group>` (lowercased) to match the dialog's row keys, so a row can
+   * show where its access comes from (direct, inherited, or both) and which
+   * verbs are removable here. Groups have their own `g:` namespace — a group
+   * and a role sharing a name are different principals with different
+   * sources (older servers keyed groups under `r:`; readers fall back). After
+   * a revoke, a principal whose direct entry was stripped but who remains
+   * inherited still appears here with only their `ancestor` source(s) — which
+   * is how the dialog chains into "Remove from parent?".
    */
   sources: Record<string, GrantSources>;
 }

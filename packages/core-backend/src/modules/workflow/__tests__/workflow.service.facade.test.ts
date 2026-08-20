@@ -386,7 +386,19 @@ describe('WorkflowService — file lock delegation', () => {
     const fileLocks = makeFileLockService();
     const svc = new WorkflowService(makeDb(), makeGit(), makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), fileLocks, makePendingCommits(), 'knowledge-base');
     await svc.acquireLock('w1', 'b', 'p', makeUser());
-    expect(fileLocks.acquire).toHaveBeenCalledWith('w1', 'b', 'p', expect.objectContaining({ email: 'alice@example.com' }));
+    expect(fileLocks.acquire).toHaveBeenCalledWith('w1', 'b', 'p', expect.objectContaining({ email: 'alice@example.com' }), undefined);
+  });
+
+  it('acquireLock forwards the coordination flag so the lock row persists its mode', async () => {
+    // The mode must reach the store: an in-memory-only distinction would let
+    // a coordination hold masquerade as an edit lock on the very next read
+    // (which is how the write paths decide what the holder may do).
+    const fileLocks = makeFileLockService();
+    const svc = new WorkflowService(makeDb(), makeGit(), makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), fileLocks, makePendingCommits(), 'knowledge-base');
+    await svc.acquireLock('w1', 'b', 'p', makeUser(), { coordination: true });
+    expect(fileLocks.acquire).toHaveBeenCalledWith(
+      'w1', 'b', 'p', expect.objectContaining({ email: 'alice@example.com' }), { coordination: true },
+    );
   });
 
   it('getLock delegates to FileLockService.get', async () => {

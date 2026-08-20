@@ -134,6 +134,22 @@ describe('listedTools', () => {
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('localbox_read_file (duplicate)'));
   });
 
+  it('bares the deployment MCP-shaped names: manual.server.tool, both segments stripped', () => {
+    // The remote manual is MCP-protocol and its single server shares the
+    // manual's name, so core tools arrive as `hexis.hexis.read_file` — THREE
+    // segments. One strip left `hexis.read_file`, an invalid MCP name, and
+    // the entire remote toolset was dropped from the listing (caught live
+    // against a real deployment; the fixtures above had encoded the hosted
+    // proxy's two-segment HTTP shape instead).
+    const utcp = (name: string) =>
+      ({ name, description: '', inputs: { type: 'object', properties: {} } }) as unknown as UtcpTool;
+    expect(flattenManualTool(utcp('hexis.hexis.read_file'), REMOTE_MANUAL_NAME).mcpName).toBe('read_file');
+    // Local manuals keep their fully namespaced, underscore-sanitized names.
+    expect(
+      flattenManualTool(utcp('local_toolbox.local_toolbox.local_echo'), REMOTE_MANUAL_NAME).mcpName,
+    ).toBe('local_toolbox_local_toolbox_local_echo');
+  });
+
   it('drops a tool a meta-tool would shadow, so the listing never advertises an uncallable name', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const listed = listedTools([{ ...tool('read_file'), mcpName: 'call_tool_chain' }]);

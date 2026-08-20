@@ -7,10 +7,18 @@ A workspace already publishes a hosted MCP endpoint, and for most tools that is 
 This command closes that gap by being where those tools actually are, without giving up anything the hosted endpoint gives you.
 
 ```bash
-npx @bevel-software/hexis-mcp --url https://your-workspace.example --key bevel_…
+npx @bevel-software/hexis-mcp --url https://your-workspace.example
 ```
 
-Mint the key from the profile menu → **External agent access**.
+## Signing in
+
+Two ways in, and whether you pass a key decides:
+
+**No key (the default)** — the command opens your browser to sign in to the workspace, the same sign-in the web UI uses. The credential that keeps you signed in lands in `~/.hexis/oauth/`, readable only by you, so later runs skip the browser. On a machine with no display, `--no-open` (or `HEXIS_NO_BROWSER=1`) prints the sign-in URL instead of opening anything — follow it from any browser. Browser sign-in needs a deployment at least as new as this package; against an older one the command says so, and a connection key still works there.
+
+**With a key** — `--key bevel_…` (or `HEXIS_CONNECTION_KEY`) skips the browser entirely: the right mode for CI, pipelines, and anywhere nobody is present to sign in. Mint one from the profile menu → **External agent access**.
+
+Either way, the credential authenticates *this process* and nothing else changes: tools still execute where they always did, and the workspace's Secrets Vault stays on the server.
 
 ## In Claude Code
 
@@ -28,6 +36,8 @@ Mint the key from the profile menu → **External agent access**.
   }
 }
 ```
+
+Leave `HEXIS_CONNECTION_KEY` out and the first start opens your browser to sign in instead; after that the stored sign-in carries every start.
 
 ## What you get
 
@@ -56,7 +66,8 @@ The name is the UTCP-namespaced form: the `id` from the `.tool` file, an undersc
 | Flag | Environment | Meaning |
 |---|---|---|
 | `-u, --url` | `HEXIS_URL` | Workspace base URL |
-| `-k, --key` | `HEXIS_CONNECTION_KEY` | Connection key from External agent access |
+| `-k, --key` | `HEXIS_CONNECTION_KEY` | Connection key from External agent access; omit to sign in through your browser |
+| `--no-open` | `HEXIS_NO_BROWSER` | Print the sign-in URL instead of opening a browser |
 | `-h, --help` | | Usage |
 
 The MCP endpoint itself is not a setting: the server asks the deployment for it (`/api/config`), so a workspace behind a proxy or on a second domain is handled without you configuring anything twice. Older deployments that do not advertise it fall back to `<url>/api/mcp`, with a warning on stderr.
@@ -66,6 +77,8 @@ The MCP endpoint itself is not a setting: the server asks the deployment for it 
 Diagnostics go to **stderr** (stdout carries the protocol), and MCP clients surface them as server logs.
 
 - *"The connection key was rejected"* — the key was revoked or belongs to another workspace. Mint a new one.
+- *"Your sign-in was rejected"* / *"could not be refreshed"* — the workspace revoked the sign-in, or it expired. Restart the command to sign in through your browser again.
+- *"This deployment is too old for browser sign-in"* — the workspace predates the sign-in exchange. Upgrade it, or pass a connection key.
 - **A local tool is missing from the list** — it registered but failed; the log names it and why. A tool whose local server is not running is the usual cause.
 - **A local tool is listed but its calls fail on credentials** — its `${VAR}` is not in this process's environment. See above; note the namespaced prefix, with `-`/`_` in the tool id becoming `__`.
 - **A tool is missing entirely** — the workspace hides tools whose per-user credentials you have not set up yet, on key-authenticated sessions. Configure it on the workspace's Connect page.

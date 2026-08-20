@@ -1,4 +1,4 @@
-import { Navigate, useParams } from 'react-router-dom';
+import { Navigate, useParams, useSearchParams } from 'react-router-dom';
 import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useLibrary } from '../state/library-data';
@@ -13,10 +13,12 @@ import { LIBRARY_ROOT, pathForPlugin } from './library-paths';
  * is the one the reader already had and nothing remounts on the way in.
  *
  * Resolution is STRUCTURAL, not a catalog lookup: under `Plugins/<plugin>/`, a
- * `*.tool` file is a tool page, any other direct FILE (an extension, no
- * segments below it — `access.md`) belongs to the plugin page, and everything
- * else is a skill FOLDER whose name is the skill's id — the same identity the
- * old name-based route used. That is what makes a skill created a moment ago
+ * `*.tool` file is a tool page, the plugin's `mcp.json` is a tool page too
+ * (which of its servers is named by `?server=`, or by the catalog when the file
+ * declares only one), any other direct FILE (an extension, no segments below
+ * it — `access.md`) belongs to the plugin page, and everything else is a skill
+ * FOLDER whose name is the skill's id — the same identity the old name-based
+ * route used. That is what makes a skill created a moment ago
  * open instantly: its URL says everything the page needs, and `SkillPage`
  * fetches the skill by name itself. Waiting on the catalog here raced every
  * reload and lost (the just-created skill bounced to its plugin's page).
@@ -27,6 +29,7 @@ import { LIBRARY_ROOT, pathForPlugin } from './library-paths';
  */
 export function WorkspaceItemRoute() {
   const params = useParams<{ branch: string; '*': string }>();
+  const [searchParams] = useSearchParams();
   const splat = params['*'] ?? '';
   const branch = safeDecode(params.branch ?? '');
   const { kbDirName } = useWorkspace();
@@ -69,6 +72,31 @@ export function WorkspaceItemRoute() {
       (i) => i.kind === 'integration' && i.path === repoRel,
     )?.id;
     return <ToolPage slug={catalogSlug ?? last.slice(0, -'.tool'.length)} />;
+  }
+
+  // A plugin's `mcp.json` declares tools too — SEVERAL per file, so the file
+  // URL alone cannot name a page and `?server=<slug>` disambiguates (a QUERY
+  // param, never the hash: the `#…` fragment on tool URLs is the OAuth
+  // callback's outcome channel — see `urlForMcpServer`). Before this branch
+  // existed, the file fell through to the direct-file rule below and every
+  // mcp-declared tool card bounced straight back to its plugin page.
+  //
+  // Only the plugin's DIRECT child qualifies (`tail.length === 1`): the
+  // backend's discovery reads exactly `Plugins/<plugin>/mcp.json`, so an
+  // `mcp.json` nested deeper is a skill's bundled file — an example, a
+  // template — and must render as that skill's file, not as a tool page.
+  if (last === 'mcp.json' && tail.length === 1) {
+    const fromParam = searchParams.get('server');
+    // A named server renders directly — ToolPage's own not-found handles a bad
+    // slug once the secrets listing settles, exactly as it does for a typo.
+    if (fromParam) return <ToolPage slug={fromParam} />;
+    const declared = data.items.filter((i) => i.kind === 'integration' && i.path === repoRel);
+    if (declared.length === 1) return <ToolPage slug={declared[0]!.id} />;
+    // Several servers and nothing naming one: the bare URL is ambiguous and
+    // has no page — its plugin does. With NONE known, wait for the catalog
+    // (same wait-don't-guess posture as below) before drawing that inference.
+    if (declared.length === 0 && data.loading) return null;
+    return <Navigate to={pathForPlugin(plugin)} replace />;
   }
 
   // THE CATALOG IS THE AUTHORITY on which folder is a skill and what its id

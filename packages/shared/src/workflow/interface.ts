@@ -141,8 +141,10 @@ export interface IWorkflowService {
    * rare case where a group of files must land together or not at all (e.g. a
    * role rename rewriting `roles.yaml` + every reference). Does NOT write
    * content: the caller writes the files first (e.g. via the lock-aware
-   * filesystem) and is responsible for any validation. Returns null on a no-op
-   * (clean tree).
+   * filesystem) and is responsible for any validation. Returns null on a
+   * no-op — nothing to commit WITHIN SCOPE: with `onlyPaths` given, none of
+   * those paths is dirty (other paths may well be); without it, the whole
+   * tree is clean.
    *
    * `onlyPaths` (workspace-relative) scopes the commit to the caller's own
    * files: on a shared per-branch workspace other paths may be dirty from a
@@ -198,12 +200,26 @@ export interface IWorkflowService {
    *
    * Pessimistic per the spec. Auto-released when the lock expires past TTL
    * without a heartbeat — stale locks must not block forever.
+   *
+   * `opts.coordination` acquires the lock as a PURE MUTEX: the implementation
+   * skips its write-permission gate for the path, because the caller only
+   * wants to serialize against the path's writer (e.g. hold a machine-owned
+   * file steady across a read → check → decide flow) and will never write the
+   * path itself. A coordination hold grants NO write authority — the mode is
+   * persisted on the lock row, and every path that would treat "you hold the
+   * lock" as write possession (`commitFileWhileLocked`, `releaseLock`'s
+   * commit enqueue) refuses a coordination hold. Contention, TTL, and
+   * heartbeat behave identically. Release ONLY via `releaseLockNoCommit` (or
+   * `releaseLockUntouched`) — `releaseLock` rejects rather than ever enqueue
+   * a commit for a hold that was never allowed to write. Internal callers
+   * only; never plumbed from a route.
    */
   acquireLock(
     workspaceId: string,
     branch: string,
     path: string,
     user: AuthUser,
+    opts?: { coordination?: boolean },
   ): Promise<AcquireLockResult>;
   /** Heartbeat to keep an acquired lock alive past its current TTL. */
   heartbeatLock(workspaceId: string, branch: string, path: string, user: AuthUser): Promise<FileLock>;
@@ -252,10 +268,13 @@ export interface IWorkflowService {
    * lock-aware write — when the underlying op threw, we don't want the
    * normal `releaseLock` to commit + push whatever partial state happens
    * to be on disk. The lock row goes away (so the next caller can edit
-   * the file) and the path's working-tree changes are DISCARDED back to
-   * HEAD — every release leaves the tree clean; bytes not committed are
-   * thrown away. Idempotent like `releaseLock`: a no-op when the caller
-   * doesn't hold the lock.
+   * the file) and the path's working-tree changes are discarded back to
+   * HEAD on a BEST-EFFORT basis: the implementation logs and continues
+   * when the discard itself fails (releasing beats stranding the lock),
+   * so a caller must not treat a completed release as proof the tree is
+   * clean — worst case the path stays dirty until the next save on it.
+   * Idempotent like `releaseLock`: a no-op when the caller doesn't hold
+   * the lock.
    */
   releaseLockNoCommit(
     workspaceId: string,
@@ -263,6 +282,40 @@ export interface IWorkflowService {
     path: string,
     user: AuthUser,
   ): Promise<void>;
+  /**
+   * Drop the lock for a path the caller held but **never touched** — the
+   * third release shape, between `releaseLock` and `releaseLockNoCommit`.
+   * Neither enqueues a commit (on a shared workspace the path may carry a
+   * PRIOR save's dirty bytes whose queued commit an enqueue would re-attribute
+   * to this caller and whose retry ladder it would reset) nor discards (a
+   * discard back to HEAD would destroy those same still-queued bytes). Used
+   * by batch flows for paths that were merely locked — a creator seed that
+   * no-op'd, a path never reached before the batch failed. Idempotent like
+   * the other releases: a no-op when the caller doesn't hold the lock.
+   */
+  releaseLockUntouched(
+    workspaceId: string,
+    branch: string,
+    path: string,
+    user: AuthUser,
+  ): Promise<void>;
+  /**
+   * Whether the background commit queue holds a LIVE row (one the worker
+   * will still drive — pending or running, not a terminally-escalated one)
+   * for `(branch, path)`. Lets a caller that landed a commit but hit a push
+   * failure PROVE the retry vehicle exists instead of inferring it from
+   * lock state (a release that failed before its enqueue and a release that
+   * enqueued-then-dropped both leave the lock gone — only the queue itself
+   * can tell them apart).
+   */
+  hasQueuedCommit(workspaceId: string, branch: string, path: string): Promise<boolean>;
+  /**
+   * Whether the workspace's local branch is ahead of (or has no) upstream —
+   * i.e. holds commits not yet published. The complement of `hasQueuedCommit`
+   * for push-retry proofs: no live queued row AND nothing unpushed means the
+   * worker already drained the row and published it.
+   */
+  hasUnpushedCommits(workspaceId: string): Promise<boolean>;
   /** Current lock holder for `(branch, path)`, or null when nobody holds it. */
   getLock(workspaceId: string, branch: string, path: string): Promise<FileLock | null>;
 

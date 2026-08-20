@@ -47,7 +47,10 @@ const CHANGE: Change = {
   committedAt: '2026-04-20T00:00:00.000Z',
 };
 
-function makeFileLocks(holderUserId: string): FileLockService {
+function makeFileLocks(
+  holderUserId: string,
+  mode: 'edit' | 'coordination' = 'edit',
+): FileLockService {
   return {
     acquire: vi.fn(),
     heartbeat: vi.fn(),
@@ -57,6 +60,7 @@ function makeFileLocks(holderUserId: string): FileLockService {
       path: 'foo.md',
       holderUserId,
       holderName: 'Alice',
+      mode,
       acquiredAt: '',
       lastHeartbeatAt: '',
       expiresAt: '',
@@ -75,6 +79,7 @@ function makePending(): PendingCommitsService {
     markNeedsAttention: vi.fn().mockResolvedValue(undefined),
     listNeedsAttention: vi.fn().mockResolvedValue([]),
     countPending: vi.fn().mockResolvedValue(0),
+    hasLiveRowFor: vi.fn().mockResolvedValue(false),
     startupReconcile: vi.fn().mockResolvedValue(undefined),
   } as unknown as PendingCommitsService;
 }
@@ -93,6 +98,7 @@ function makeGit(overrides: Partial<{
   let pushCalls = 0;
   return {
     commitFile: vi.fn().mockResolvedValue(commitFileResult),
+    discardPath: vi.fn().mockResolvedValue(undefined),
     hasUnpushedCommits: vi.fn().mockResolvedValue(overrides.hasUnpushedCommits ?? false),
     push: vi.fn().mockImplementation(async () => {
       pushCalls++;
@@ -240,6 +246,138 @@ describe('WorkflowService.releaseLock — new (enqueue, no synchronous commit)',
     // No `lock-released` event when the release itself failed; the lock
     // is still held, and we'd lie to any SSE subscriber by emitting.
     expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  it('REFUSES to release a coordination hold — never enqueues, never drops the row', async () => {
+    // A coordination hold was acquired PAST the write-authorization gate on
+    // the promise that nothing gets written under it. If releaseLock treated
+    // it like an edit lock, the enqueued release commit would publish
+    // whatever bytes sit on disk — on machine-owned paths included — under
+    // this caller's name. The sanctioned release is releaseLockNoCommit.
+    const git = makeGit();
+    const locks = makeFileLocks(USER.id, 'coordination');
+    const pending = makePending();
+    const svc = makeFacade(git, locks, pending, events);
+
+    const err = await svc
+      .releaseLock('ws-1', 'feat/x', 'foo.md', USER)
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WorkflowValidationError);
+    expect((err as WorkflowValidationError).payload?.kind).toBe('coordination-hold');
+    expect(pending.enqueue).not.toHaveBeenCalled();
+    expect(locks.release).not.toHaveBeenCalled();
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkflowService.releaseLockUntouched — drop the row, leave disk AND queue alone', () => {
+  let events: WorkflowEventBus;
+  let emitSpy: MockInstance;
+
+  beforeEach(() => {
+    events = new WorkflowEventBus();
+    emitSpy = vi.spyOn(events, 'emit');
+  });
+
+  it('releases the lock without enqueueing or discarding, emits lock-released only', async () => {
+    const git = makeGit();
+    const locks = makeFileLocks(USER.id);
+    const pending = makePending();
+    const svc = makeFacade(git, locks, pending, events);
+
+    await svc.releaseLockUntouched('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(locks.release).toHaveBeenCalledTimes(1);
+    // The whole point: a prior save's dirty bytes on this path must survive
+    // (no discard) without being re-attributed to this caller (no enqueue).
+    expect(pending.enqueue).not.toHaveBeenCalled();
+    expect(git.discardPath).not.toHaveBeenCalled();
+    expect(git.commitFile).not.toHaveBeenCalled();
+    expect(git.push).not.toHaveBeenCalled();
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual(['lock-released']);
+  });
+
+  it('no-ops (idempotent) when the caller does not hold the lock', async () => {
+    const git = makeGit();
+    const locks = makeFileLocks('someone-else');
+    const pending = makePending();
+    const svc = makeFacade(git, locks, pending, events);
+
+    await expect(
+      svc.releaseLockUntouched('ws-1', 'feat/x', 'foo.md', USER),
+    ).resolves.toBeUndefined();
+    expect(locks.release).not.toHaveBeenCalled();
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkflowService.releaseLockNoCommit — coordination-hold discard guard', () => {
+  let events: WorkflowEventBus;
+
+  beforeEach(() => {
+    events = new WorkflowEventBus();
+  });
+
+  it('discards as usual on an EDIT hold, without consulting the queue', async () => {
+    const git = makeGit();
+    const pending = makePending();
+    const svc = makeFacade(git, makeFileLocks(USER.id), pending, events);
+
+    await svc.releaseLockNoCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(git.discardPath).toHaveBeenCalledWith('ws-1', 'foo.md');
+    expect(pending.hasLiveRowFor).not.toHaveBeenCalled();
+  });
+
+  it('discards a coordination hold when the queue has NO live row (wipes smuggled bytes)', async () => {
+    const git = makeGit();
+    const pending = makePending();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const svc = makeFacade(git, makeFileLocks(USER.id, 'coordination'), pending, events);
+
+    await svc.releaseLockNoCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(pending.hasLiveRowFor).toHaveBeenCalledWith('ws-1', 'feat/x', 'foo.md');
+    expect(git.discardPath).toHaveBeenCalledWith('ws-1', 'foo.md');
+    // The disk really changed here, so watchers are told.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'lock-released',
+      'file-changed',
+    ]);
+  });
+
+  it('SKIPS the discard on a coordination hold when a live queued row exists (a prior save owns the bytes)', async () => {
+    // The coordination holder never legitimately wrote the path, so dirty
+    // bytes covered by a live pending-commit row belong to an EARLIER save
+    // whose commit hasn't drained yet — discarding to HEAD would silently
+    // destroy that landed edit.
+    const git = makeGit();
+    const pending = makePending();
+    (pending.hasLiveRowFor as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    const emitSpy = vi.spyOn(events, 'emit');
+    const svc = makeFacade(git, makeFileLocks(USER.id, 'coordination'), pending, events);
+
+    await svc.releaseLockNoCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(git.discardPath).not.toHaveBeenCalled();
+    // The lock still releases — only the discard is skipped. And since the
+    // disk did NOT change, no file-changed goes out: announcing one would
+    // false-refresh every watcher of a file that is exactly as it was.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'lock-released',
+    ]);
+  });
+});
+
+describe('WorkflowService.hasQueuedCommit', () => {
+  it('delegates to the pending-commits queue per (workspace, branch, path)', async () => {
+    const pending = makePending();
+    (pending.hasLiveRowFor as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    const svc = makeFacade(makeGit(), makeFileLocks(USER.id), pending, new WorkflowEventBus());
+
+    await expect(svc.hasQueuedCommit('ws-1', 'feat/x', 'foo.md')).resolves.toBe(true);
+    expect(pending.hasLiveRowFor).toHaveBeenCalledWith('ws-1', 'feat/x', 'foo.md');
   });
 });
 

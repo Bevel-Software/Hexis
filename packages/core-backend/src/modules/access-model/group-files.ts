@@ -1,5 +1,6 @@
 import {
   EMAIL_REGEX,
+  GROUP_REF_PREFIX,
   RESERVED_ROLE_NAMES,
   ROLE_TOKEN_PREFIX,
   canonicalEmail,
@@ -127,18 +128,23 @@ export function parseGroupsFile(
       warnings.push(`${filename}: empty group name — skipped`);
       continue;
     }
-    if (RESERVED_ROLE_NAMES.has(canonical)) {
+    // THE shared name-safety predicate (see `unsafeNameReason` above) — the
+    // same rules every write surface asserts. The parser must apply it too:
+    // a name the writers refuse (control chars, `<`/`>`, a leading `-`, the
+    // reserved `role/` prefix) can still reach a group file by hand edit or
+    // through a skewed writer, and accepting it here would let the resolver
+    // honor — and `validateGroupsFile` pass — a name no editor can ever
+    // produce or reference safely.
+    const unsafe = unsafeNameReason(displayName);
+    if (unsafe) {
       warnings.push(
-        `${filename}: group '${displayName}' uses reserved name '${canonical}' — skipped`,
+        `${filename}: group ${JSON.stringify(displayName)} ${unsafe} — skipped`,
       );
       continue;
     }
-    if (canonical.startsWith(ROLE_TOKEN_PREFIX)) {
-      // Reserved spelling: `role/<Name>` is the explicit role token in access
-      // entries, so a group named that way could never be referenced — and
-      // letting it into the index would shadow a role's alias key.
+    if (RESERVED_ROLE_NAMES.has(canonical)) {
       warnings.push(
-        `${filename}: group '${displayName}' uses the reserved '${ROLE_TOKEN_PREFIX}' prefix — skipped`,
+        `${filename}: group '${displayName}' uses reserved name '${canonical}' — skipped`,
       );
       continue;
     }
@@ -159,6 +165,17 @@ export function parseGroupsFile(
         continue;
       }
       const email = canonicalEmail(raw);
+      // The reserved `group:` prefix would PASS the email regex
+      // (`group:lee@x.io` shapes like an email) but it is the roles.yaml
+      // group-reference token, not an address — groups contain emails, never
+      // other groups. Skip it with its own warning so the write gate refuses
+      // it and the resolver never grants a colon-bearing "email".
+      if (email.startsWith(GROUP_REF_PREFIX)) {
+        warnings.push(
+          `${filename}: group '${displayName}' has a '${GROUP_REF_PREFIX}'-prefixed entry ${JSON.stringify(raw)} — groups contain emails, not group references; entry skipped`,
+        );
+        continue;
+      }
       if (!EMAIL_REGEX.test(email)) {
         warnings.push(
           `${filename}: group '${displayName}' has malformed email '${raw}' — entry skipped`,

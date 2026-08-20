@@ -15,6 +15,7 @@ import {
   getGroupsRoster,
   GroupsApiError,
   removeGroupMember,
+  renameGroup,
   type GroupsRoster,
 } from '../services/groups.api';
 
@@ -27,6 +28,7 @@ vi.mock('../services/groups.api', async (importOriginal) => {
     deleteGroup: vi.fn(),
     addGroupMember: vi.fn(),
     removeGroupMember: vi.fn(),
+    renameGroup: vi.fn(),
   };
 });
 
@@ -99,6 +101,7 @@ beforeEach(() => {
   vi.mocked(deleteGroup).mockReset().mockResolvedValue(MANUAL_ROSTER);
   vi.mocked(addGroupMember).mockReset().mockResolvedValue(MANUAL_ROSTER);
   vi.mocked(removeGroupMember).mockReset().mockResolvedValue(MANUAL_ROSTER);
+  vi.mocked(renameGroup).mockReset().mockResolvedValue(MANUAL_ROSTER);
 });
 
 describe('DirectoryGroupsPage', () => {
@@ -188,6 +191,43 @@ describe('DirectoryGroupsPage', () => {
     );
   });
 
+  it('manual mode: renaming a group inline calls the PATCH api and applies the returned roster', async () => {
+    vi.mocked(renameGroup).mockResolvedValue({
+      mode: 'manual',
+      groups: [
+        {
+          canonical: 'product & platform',
+          displayName: 'Product & Platform',
+          members: ['pat@example.com'],
+          referencedBy: [],
+          assignedToRoles: [],
+        },
+        MANUAL_ROSTER.groups[1],
+      ],
+      groupsHealth: { ok: true },
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename Product' }));
+    const input = screen.getByRole('textbox', { name: 'Rename Product' });
+    await userEvent.clear(input);
+    await userEvent.type(input, 'Product & Platform{Enter}');
+    await waitFor(() => expect(renameGroup).toHaveBeenCalledWith('product', 'Product & Platform'));
+    expect(await screen.findByText('Product & Platform')).toBeInTheDocument();
+    // The editor closed back into the heading view.
+    expect(screen.queryByRole('textbox', { name: /Rename/ })).not.toBeInTheDocument();
+  });
+
+  it('manual mode: Escape cancels a rename without a request; an unchanged name is a local no-op', async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename Product' }));
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('textbox', { name: /Rename/ })).not.toBeInTheDocument();
+    // Reopen and submit the SAME name — no request either.
+    await userEvent.click(screen.getByRole('button', { name: 'Rename Product' }));
+    await userEvent.keyboard('{Enter}');
+    expect(renameGroup).not.toHaveBeenCalled();
+  });
+
   it('manual mode: deleting a group requires a confirm and warns about references', async () => {
     renderPage();
     await userEvent.click(await screen.findByRole('button', { name: 'Delete Product' }));
@@ -248,6 +288,22 @@ describe('DirectoryGroupsPage', () => {
     expect(
       await screen.findByText(/Groups appear here after its first provisioning push/),
     ).toBeInTheDocument();
+  });
+
+  it('a connection flipping true closes an open delete confirm (no delete against an IdP-owned roster)', async () => {
+    renderPage({
+      directoryPanel: ({ onConnectedChange }) => (
+        <button onClick={() => onConnectedChange(true)}>simulate-connect</button>
+      ),
+    });
+    // Open the delete confirm against the manual roster…
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete Product' }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    // …then the directory connects. The manual view unmounts; the confirm
+    // must go with it — confirming now would delete from a roster the IdP owns.
+    await userEvent.click(screen.getByRole('button', { name: 'simulate-connect' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(deleteGroup).not.toHaveBeenCalled();
   });
 
   it('no registry panel means the page never mentions a directory connection', async () => {

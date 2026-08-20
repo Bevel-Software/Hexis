@@ -17,9 +17,12 @@ export {
   claudeInstallUrl,
   configureMcpUrl,
   connectorName,
+  hexisMcpClaudeCommand,
+  hexisMcpJsonSnippet,
   jsonConfigSnippet,
   langdockSnippet,
   mcpEndpointUrl,
+  workspaceBaseUrl,
 } from './connect-snippets';
 
 export { ClaudeInstallLink } from './ClaudeInstallLink';

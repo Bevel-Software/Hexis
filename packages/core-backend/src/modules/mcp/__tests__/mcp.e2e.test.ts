@@ -82,7 +82,9 @@ async function connectClient(): Promise<Client> {
     publicFrontendUrl: 'http://localhost:5173',
   });
   const stub = {} as never;
-  app.use('/api', createMcpRoutes(mcpService, stub, fakeAuth, fakeAuth, stub));
+  // local-token deps (internal tokens / OAuth provider / metadata URL) are only
+  // dereferenced by that route's handler — stubs suffice here.
+  app.use('/api', createMcpRoutes(mcpService, stub, fakeAuth, fakeAuth, stub, stub, stub, ''));
   app.use('/api', createManualRoutes(registry, fakeAuth));
 
   const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/api/mcp`), {

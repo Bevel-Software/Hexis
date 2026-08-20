@@ -42,6 +42,7 @@ import {
   type WriteOptions,
 } from '@mastra/core/workspace';
 import type { AuthUser, Change, IWorkflowService } from '@bevel-software/platform-shared';
+import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { FileChangeNotifier } from './file-change-notifier.js';
 import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
 
@@ -167,6 +168,10 @@ export class LockingFilesystem extends LocalFilesystem {
    * `git commit`, then push), and release WITHOUT a per-file commit. Fail-closed:
    * if any lock can't be acquired, or a write/commit throws, nothing is committed
    * (the failure-path `releaseLockNoCommit` discards the uncommitted bytes).
+   * The ONE exception is `PushNeedsAgentResolutionError` — a POST-commit
+   * failure (the commit landed, the push didn't): locks release via
+   * `releaseLock` so the enqueued release commit arms the pending-commits
+   * worker's push retry, and the error still propagates to the caller.
    *
    * `writes[].path` is workspace-relative (like `writeFile`). We do the disk
    * write here; `commitChanges` only stages + commits what's on disk (the git
@@ -210,13 +215,50 @@ export class LockingFilesystem extends LocalFilesystem {
     // locked too (a delete mutates that path just like a write).
     const paths = [...new Set([...writes.map((w) => w.path), ...deletes])].sort();
     const acquired: string[] = [];
-    const releaseAll = async (): Promise<void> => {
+    // Paths whose on-disk bytes THIS batch replaced (caller writes/deletes,
+    // recorded just before each disk op so a mid-write throw still counts).
+    // Deliberately NOT the seed paths: a seed write is an additive merge of
+    // the CURRENT bytes, and a failed one restores its pre-image itself —
+    // only a seed whose restore ALSO failed joins the discard set, via
+    // `failedSeedDiscards` (see the seed loop).
+    const dirtied = new Set<string>();
+    // Seed paths left holding known-partial bytes: the seed write threw
+    // mid-write AND the pre-image restore failed too. These must release
+    // with the discard so the corrupt bytes can't outlive the batch.
+    const failedSeedDiscards = new Set<string>();
+    // Release every acquired lock, each with the semantics its outcome
+    // earned. Three shapes (mirroring the three WorkflowService releases):
+    //
+    //   'discard'   → releaseLockNoCommit: resets the path's working tree to
+    //     HEAD. Only for bytes this batch itself owns — its committed paths
+    //     (clean tree, the discard no-ops), its own failed writes, and a
+    //     failed-restore seed (fail-closed: partial bytes must not land).
+    //   'enqueue'   → releaseLock: enqueues a commit-on-release row. Only
+    //     for the push-retry unwind, and only on the batch's OWN committed
+    //     paths — the enqueued row is the vehicle that retries the push.
+    //   'untouched' → releaseLockUntouched: drops the lock row and nothing
+    //     else. For every path the batch merely LOCKED (a creator seed that
+    //     no-op'd or fully restored itself, a caller path never reached):
+    //     such a path may hold a PRIOR save's dirty bytes whose commit is
+    //     still queued — a discard would silently destroy that landed save,
+    //     and an enqueue would re-attribute its queued row to THIS user and
+    //     reset its retry ladder.
+    const releaseAll = async (
+      modeOf: (p: string) => 'discard' | 'enqueue' | 'untouched',
+    ): Promise<void> => {
       for (const p of acquired) {
         try {
-          await workflow.releaseLockNoCommit(workspaceId, branch, p, user);
+          const mode = modeOf(p);
+          if (mode === 'discard') {
+            await workflow.releaseLockNoCommit(workspaceId, branch, p, user);
+          } else if (mode === 'enqueue') {
+            await workflow.releaseLock(workspaceId, branch, p, user);
+          } else {
+            await workflow.releaseLockUntouched(workspaceId, branch, p, user);
+          }
         } catch (releaseErr) {
           console.warn(
-            `[locking-fs] releaseLockNoCommit failed for "${p}" during writeFiles:`,
+            `[locking-fs] lock release failed for "${p}" during writeFiles:`,
             releaseErr instanceof Error ? releaseErr.message : releaseErr,
           );
         }
@@ -237,7 +279,9 @@ export class LockingFilesystem extends LocalFilesystem {
         if (attempt < ACQUIRE_RETRY_ATTEMPTS - 1) await sleep(ACQUIRE_RETRY_DELAY_MS);
       }
       if (!ok) {
-        await releaseAll();
+        // Nothing written yet — every held lock is a merely-locked path, so
+        // the unwind must leave disk and queue exactly as they are.
+        await releaseAll(() => 'untouched');
         throw new Error(
           `Skipped editing "${p}" — locked by ${holderName ?? 'another user'}. ` +
             `Continuing with other edits; try this one again later.`,
@@ -263,59 +307,173 @@ export class LockingFilesystem extends LocalFilesystem {
       }
     }
 
+    // The paths this batch actually TOUCHED — the caller's writes + deletes,
+    // plus each seed whose bytes really landed below. Kept separate from
+    // `acquired` (which only tracks held LOCKS): a seed lock is taken before
+    // we know whether the seed write happens, and scoping the commit to a
+    // merely-locked path would sweep in another save's still-queued dirty
+    // bytes on that path under this batch's author/summary.
+    const touched = [...paths];
+    // Seeds whose bytes LANDED, with the pre-image read under their lock:
+    // if the batch's commit then fails, these must be rolled back to that
+    // pre-image (not to HEAD — the pre-image may be a prior save's queued
+    // bytes) so an uncommitted grant can't sit on disk as if it were real.
+    const landedSeeds = new Map<string, { current: string; existedBefore: boolean }>();
     let change: Change | null;
     try {
       // Write/delete every file to disk inside the locks (workspace-relative;
       // LocalFilesystem resolves against basePath), then commit + push the whole
       // set as ONE change. `commitChanges` only stages + commits what's on disk.
-      for (const w of writes) await super.writeFile(w.path, w.content);
-      for (const p of deletes) await super.deleteFile(p);
+      for (const w of writes) {
+        dirtied.add(w.path);
+        await super.writeFile(w.path, w.content);
+      }
+      for (const p of deletes) {
+        dirtied.add(p);
+        await super.deleteFile(p);
+      }
       // Seeds merge into the CURRENT on-disk bytes (read under the lock) so a
       // concurrent creator's grant survives; per-seed failures are best-effort.
       for (const [p, apply] of seeds) {
-        try {
-          let current = '';
-          const absolute = this.resolveAbsolutePath(p);
-          if (absolute) {
-            try {
-              current = await fs.readFile(absolute, 'utf-8');
-            } catch {
-              // Not there yet — the normal case for a brand-new directory.
-            }
+        let current = '';
+        let existedBefore = false;
+        const absolute = this.resolveAbsolutePath(p);
+        if (absolute) {
+          try {
+            current = await fs.readFile(absolute, 'utf-8');
+            existedBefore = true;
+          } catch {
+            // Not there yet — the normal case for a brand-new directory.
           }
-          const next = apply(current);
-          if (next !== current) await super.writeFile(p, next);
+        }
+        let next: string;
+        try {
+          next = apply(current);
         } catch (err) {
+          // Plan failed before any bytes moved — the path is untouched.
           console.warn(
             `[locking-fs] creator access.md seed failed for "${p}":`,
             err instanceof Error ? err.message : err,
           );
+          continue;
+        }
+        if (next === current) continue;
+        try {
+          await super.writeFile(p, next);
+          touched.push(p);
+          landedSeeds.set(p, { current, existedBefore });
+        } catch (err) {
+          // The write itself threw — it may have died MID-WRITE, leaving
+          // partial bytes on disk. Left alone, those bytes would ride the
+          // path's release (or the next save) as if they were real content.
+          // Restore the pre-image we read under this very lock: on success
+          // the path is byte-identical to before the batch and releases as
+          // merely-locked; only when even the restore fails does the path
+          // join the discard set (reset to HEAD on release — fail-closed,
+          // partial bytes must never land). Residual risk, documented: in
+          // that double-failure case a prior save's still-queued dirty bytes
+          // on this path are lost to the discard — accepted, because the
+          // alternative is committing known-corrupt bytes under their name.
+          console.warn(
+            `[locking-fs] creator access.md seed failed for "${p}":`,
+            err instanceof Error ? err.message : err,
+          );
+          let restored = false;
+          try {
+            if (existedBefore) {
+              await super.writeFile(p, current);
+              restored = true;
+            } else if (absolute) {
+              // Didn't exist before — remove whatever the failed write left.
+              await fs.rm(absolute, { force: true });
+              restored = true;
+            }
+          } catch {
+            // Fall through to the discard set.
+          }
+          if (!restored) {
+            failedSeedDiscards.add(p);
+            console.warn(
+              `[locking-fs] could not restore pre-seed bytes for "${p}" — releasing with discard`,
+            );
+          }
         }
       }
       // Scope the commit to this batch's own paths (caller paths + landed
       // seeds): on the shared per-branch workspace another save's bytes may be
       // dirty with their commit still queued, and an unscoped commit would
       // sweep them in under this batch's author/summary.
-      change = await workflow.commitChanges(workspaceId, user, summary, acquired);
+      change = await workflow.commitChanges(workspaceId, user, summary, touched);
       if (seeds.size > 0) this.lockContext.creatorAccess?.noteAccessFileWritten(workspaceId);
     } catch (err) {
-      // A write or the commit threw — nothing should land. releaseLockNoCommit
-      // discards the uncommitted bytes for each acquired path.
-      await releaseAll();
+      if (err instanceof PushNeedsAgentResolutionError) {
+        // POST-commit failure: the commit LANDED and only the push needs help
+        // (thrown "with the commit intact"). Routing this through the discard
+        // release would strand the landed commit with nothing to retry the
+        // push — the next identical write no-ops against the committed bytes
+        // and the change stays unpublished forever. Release the batch's OWN
+        // committed paths WITH commit-on-release instead (the same posture
+        // AdminLockedCommits takes): each enqueued release commit no-ops on
+        // the clean tree, and the pending-commits worker then notices the
+        // unpushed commits and re-runs the cooperative push ladder. Merely-
+        // locked paths still release untouched — arming the retry never
+        // justifies re-attributing someone else's queued row (see
+        // releaseAll), and `touched` is never empty here (the commit that
+        // just landed had to have paths in scope).
+        const committed = new Set(touched);
+        await releaseAll((p) =>
+          committed.has(p) ? 'enqueue' : failedSeedDiscards.has(p) ? 'discard' : 'untouched',
+        );
+        throw err;
+      }
+      // A write or the commit threw — nothing of THIS batch should land.
+      // Landed seed bytes are uncommitted now too: roll each back to the
+      // pre-image read under its lock (which may be a prior save's queued
+      // bytes — a discard to HEAD would destroy those), and only a seed
+      // whose rollback ALSO fails joins the discard set, same fail-closed
+      // posture as a failed seed write.
+      for (const [p, pre] of landedSeeds) {
+        try {
+          if (pre.existedBefore) {
+            await super.writeFile(p, pre.current);
+          } else {
+            const absolute = this.resolveAbsolutePath(p);
+            if (absolute) await fs.rm(absolute, { force: true });
+          }
+        } catch {
+          failedSeedDiscards.add(p);
+          console.warn(
+            `[locking-fs] could not roll back seed bytes for "${p}" after a failed batch — releasing with discard`,
+          );
+        }
+      }
+      // The batch's own dirtied paths (and any failed-restore seed) release
+      // no-commit (the discard reverts them). Merely-locked paths — rolled-
+      // back seeds included — release untouched (see releaseAll).
+      await releaseAll((p) =>
+        dirtied.has(p) || failedSeedDiscards.has(p) ? 'discard' : 'untouched',
+      );
       throw err;
     }
-    // Commit already landed synchronously — release WITHOUT a per-file commit,
-    // else `releaseLock` would enqueue a second (duplicate) commit per path.
-    await releaseAll();
+    // Commit already landed synchronously — the `touched` paths are clean
+    // (nothing to discard, nothing to enqueue), so they release no-commit
+    // like the batch's other own-bytes paths; the discard no-ops on the
+    // clean tree, and a failed-restore seed's discard reverts its partial
+    // bytes. A seed lock whose write no-op'd (or fully restored itself)
+    // releases untouched: it was never this batch's to discard OR enqueue.
+    const committed = new Set(touched);
+    await releaseAll((p) =>
+      committed.has(p) || failedSeedDiscards.has(p) ? 'discard' : 'untouched',
+    );
     // This batch path commits via `commitChanges`, NOT the per-file queue, so it
     // skips `runPendingCommit`'s emit — fire the post-commit hook here with the
     // WHOLE batch as one event, so an expensive subscriber (id-repair rebuilds the
     // id index) reacts once per batch, not once per file. A no-op commit (clean
     // tree) changed nothing, so it emits nothing.
     if (change) {
-      // `acquired` = caller paths + any creator-grant seeds that landed in the
+      // `touched` = caller paths + any creator-grant seeds that landed in the
       // same commit — the exact set this batch may have touched.
-      this.lockContext.fileChanges?.emit({ workspaceId, branch, paths: acquired, byUser: user });
+      this.lockContext.fileChanges?.emit({ workspaceId, branch, paths: touched, byUser: user });
     }
     return change;
   }
