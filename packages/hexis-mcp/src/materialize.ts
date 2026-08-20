@@ -26,9 +26,9 @@ import type { HexisMcpConfig } from './config.js';
  * created once and NEVER cleared — it is the server's persistent state, and
  * the spec says the client manages its lifetime, not its contents.
  *
- * `.hexis-fallbacks` is a reserved name: no plugin may be called that
- * (`assertSegment` refuses it, and forbids path separators, so no plugin ever
- * materializes INSIDE a subdirectory either). The reservation is what lets the
+ * `.hexis-fallbacks` is a reserved name: no plugin may be called that in any
+ * casing (`assertSegment` refuses it, and forbids path separators, so no
+ * plugin ever materializes INSIDE a subdirectory either). The reservation is what lets the
  * stale-fallback sweep run inside that namespace ONLY — a legitimate plugin
  * whose folder merely LOOKS like an old-style fallback (`GTM.abcdef123456`)
  * can never be mistaken for one and swept.
@@ -63,7 +63,10 @@ function assertSegment(name: string): void {
   if (!name || name === '.' || name === '..' || /[/\\]/.test(name)) {
     throw new Error(`"${name}" is not a plugin folder name`);
   }
-  if (name === FALLBACKS_DIR) {
+  // Case-insensitively: the filesystems this materializes onto (Windows, the
+  // macOS default) fold case, so `.HEXIS-FALLBACKS` would alias the reserved
+  // directory just as surely as the exact spelling.
+  if (name.toLowerCase() === FALLBACKS_DIR) {
     throw new Error(`"${name}" is a reserved folder name and cannot be a plugin`);
   }
 }

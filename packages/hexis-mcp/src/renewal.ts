@@ -42,11 +42,29 @@ export const RENEWAL_FRACTION = 0.8;
  */
 export const RETRY_AFTER_FAILURE_MS = 60_000;
 
+/**
+ * setTimeout's ceiling (2^31-1 ms): Node treats anything above it as 1ms, so a
+ * deployment granting a lifetime past ~24.8 days would turn the proactive
+ * timer into a millisecond-cadence renewal loop. Renewing far EARLIER than 80%
+ * is always safe; the clamp trades precision for that safety.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 // WeakMaps rather than fields on the config: HexisMcpConfig is a public shape
 // assembled by callers (and tests) as object literals, and the renewal state
 // is this module's private business, not part of that contract.
 const inflight = new WeakMap<HexisMcpConfig, Promise<string>>();
 const timers = new WeakMap<HexisMcpConfig, NodeJS.Timeout>();
+// Every cancel bumps the generation (a re-arm cancels first, so arming epochs
+// count too). An attempt that was IN FLIGHT when its arming was revoked can
+// then tell: it neither re-arms a timer nor notifies the credential listener —
+// otherwise shutdown's cancel could be re-armed out of by a renewal it could
+// not see.
+const generations = new WeakMap<HexisMcpConfig, number>();
+
+function generationOf(config: HexisMcpConfig): number {
+  return generations.get(config) ?? 0;
+}
 
 /**
  * Run one renewal — or join the one already running. On success the config's
@@ -62,20 +80,27 @@ export function renewConnectionKeyNow(config: HexisMcpConfig): Promise<string> {
   if (!renew) {
     return Promise.reject(new Error('This configuration has no renewal (key mode).'));
   }
+  // Captured BEFORE the exchange: a cancel that lands while it is in flight
+  // (shutdown) revokes the re-arm and the notification below — the fresh
+  // bearer itself is still swapped in and returned, because every caller
+  // already awaiting this flight can legitimately use it.
+  const generation = generationOf(config);
   const run = (async (): Promise<string> => {
     const grant = await renew();
     config.connectionKey = grant.token;
-    scheduleProactiveRenewal(config, grant.expiresInMs);
-    // The swap listener runs INSIDE the single flight, so a renewal is not
-    // "done" until the remote manual had its chance to pick the token up —
-    // but its failure must not fail the renewal: the fresh bearer is real and
-    // every REST caller can use it regardless.
-    try {
-      await config.onConnectionKeyRenewed?.(grant.token);
-    } catch (err) {
-      console.error(
-        `[hexis-mcp] applying the renewed credential failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    if (generationOf(config) === generation) {
+      scheduleProactiveRenewal(config, grant.expiresInMs);
+      // The swap listener runs INSIDE the single flight, so a renewal is not
+      // "done" until the remote manual had its chance to pick the token up —
+      // but its failure must not fail the renewal: the fresh bearer is real and
+      // every REST caller can use it regardless.
+      try {
+        await config.onConnectionKeyRenewed?.(grant.token);
+      } catch (err) {
+        console.error(
+          `[hexis-mcp] applying the renewed credential failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
     return grant.token;
   })();
@@ -99,16 +124,23 @@ export function scheduleProactiveRenewal(config: HexisMcpConfig, expiresInMs?: n
   armTimer(config, Math.max(1_000, Math.round(expiresInMs * RENEWAL_FRACTION)));
 }
 
-/** Disarm the timer — shutdown hygiene; it is unref()d and never holds the process anyway. */
+/**
+ * Disarm the timer — shutdown hygiene; it is unref()d and never holds the
+ * process anyway. Also revokes any IN-FLIGHT attempt's right to re-arm or
+ * notify (see the generation note above): a renewal racing shutdown must not
+ * schedule a retry, or apply a credential swap, into a world that is closing.
+ */
 export function cancelProactiveRenewal(config: HexisMcpConfig): void {
   const timer = timers.get(config);
   if (timer) clearTimeout(timer);
   timers.delete(config);
+  generations.set(config, generationOf(config) + 1);
 }
 
 function armTimer(config: HexisMcpConfig, delayMs: number): void {
   const timer = setTimeout(() => {
     timers.delete(config);
+    const generation = generationOf(config);
     renewConnectionKeyNow(config).catch((err: unknown) => {
       console.error(
         `[hexis-mcp] proactive credential renewal failed: ${err instanceof Error ? err.message : String(err)} — ` +
@@ -117,10 +149,11 @@ function armTimer(config: HexisMcpConfig, delayMs: number): void {
       // A success inside the failed attempt could not have re-armed (it did
       // not happen), so this retry is the only next attempt — unless a 401
       // path renews first, whose success re-arms from the fresh grant and
-      // cancels this retry via scheduleProactiveRenewal.
-      armTimer(config, RETRY_AFTER_FAILURE_MS);
+      // cancels this retry via scheduleProactiveRenewal. A cancel that landed
+      // while the attempt was pending revokes the retry outright.
+      if (generationOf(config) === generation) armTimer(config, RETRY_AFTER_FAILURE_MS);
     });
-  }, delayMs);
+  }, Math.min(delayMs, MAX_TIMER_DELAY_MS));
   timer.unref?.();
   timers.set(config, timer);
 }

@@ -255,24 +255,6 @@ export async function createHexisMcpServer(
   version: string,
 ): Promise<HexisMcpHandle> {
   const mcpUrl = await resolveMcpUrl(config);
-  const [allManuals, localOnly] = await Promise.all([
-    fetchAllManuals(config),
-    fetchLocalOnlyManuals(config),
-  ]);
-  const local = await prepareLocalManuals(
-    config,
-    localManualTemplates(allManuals, new Set(localOnly.keys())),
-    localOnly,
-  );
-  const remote = remoteManualTemplate(mcpUrl, config.connectionKey);
-
-  const client = await buildClient(config, [remote, ...local]);
-  const tools = withoutRemoteMetaTools(await discoverTools(client, remote, local));
-
-  console.error(
-    `[hexis-mcp] ${config.baseUrl} — ${tools.length} tool(s) ready ` +
-      `(${local.length} local-only manual(s) registered here, the rest served by the workspace).`,
-  );
 
   /**
    * CREDENTIAL SWAP (OAuth mode). The remote manual's MCP session captured
@@ -282,6 +264,15 @@ export async function createHexisMcpServer(
    * successful renewal — proactive or 401-triggered — and this is the swap:
    * deregister (which closes the manual's sessions), re-register with the new
    * bearer, purge the rediscovered remote meta-tool copies.
+   *
+   * Installed BEFORE discovery: the proactive timer armed at sign-in keeps
+   * running through the fetch/materialize/registration work below (a large
+   * plugin download can outlast 80% of a short grant), and a renewal firing
+   * in that window must not be dropped for want of a listener. Until the
+   * remote manual is registered the swap is a no-op — registration itself
+   * reads `config.connectionKey`, which renewal.ts already updated — and a
+   * renewal that lands WHILE registration is in flight is reconciled right
+   * after it (see the registeredKey check below).
    *
    * Serialization, as far as the UTCP API allows: the client offers no lock,
    * so in-flight tool calls are COUNTED and the swap waits (bounded) for them
@@ -294,11 +285,17 @@ export async function createHexisMcpServer(
    * Key mode sets no `renewConnectionKey`, so renewal.ts never renews, this
    * listener is never called, and the gate below never engages.
    */
+  let closed = false;
+  let remoteManualRegistered = false;
   let inflightCalls = 0;
   let swapInProgress: Promise<void> | null = null;
   const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
   const swapRemoteCredential = async (token: string): Promise<void> => {
+    // `client` (below) exists from the moment the manual is registered, so
+    // the guard also keeps this closure off it before its declaration.
+    if (closed || !remoteManualRegistered) return;
     while (swapInProgress) await swapInProgress;
+    if (closed) return; // shutdown landed while awaiting the previous swap
     const run = (async (): Promise<void> => {
       // Bounded drain: a wedged call must not hold the credential stale
       // forever — after the deadline the swap proceeds and the straggler
@@ -332,6 +329,35 @@ export async function createHexisMcpServer(
   if (config.renewConnectionKey) {
     config.onConnectionKeyRenewed = swapRemoteCredential;
   }
+
+  const [allManuals, localOnly] = await Promise.all([
+    fetchAllManuals(config),
+    fetchLocalOnlyManuals(config),
+  ]);
+  const local = await prepareLocalManuals(
+    config,
+    localManualTemplates(allManuals, new Set(localOnly.keys())),
+    localOnly,
+  );
+  // Read at registration time, not at entry: a renewal during the fetches
+  // above must be the credential the remote manual registers with.
+  const registeredKey = config.connectionKey;
+  const remote = remoteManualTemplate(mcpUrl, registeredKey);
+
+  const client = await buildClient(config, [remote, ...local]);
+  const tools = withoutRemoteMetaTools(await discoverTools(client, remote, local));
+  remoteManualRegistered = true;
+  // A renewal that landed while registration was in flight hit the no-op
+  // guard above; without this reconciliation the manual would keep the
+  // retired bearer until the next renewal.
+  if (config.connectionKey !== registeredKey) {
+    await swapRemoteCredential(config.connectionKey);
+  }
+
+  console.error(
+    `[hexis-mcp] ${config.baseUrl} — ${tools.length} tool(s) ready ` +
+      `(${local.length} local-only manual(s) registered here, the rest served by the workspace).`,
+  );
 
   const server = new Server(
     { name: SERVER_NAME, version },
@@ -383,12 +409,19 @@ export async function createHexisMcpServer(
     getSkillPrompt(config, request.params.name),
   );
 
-  let closed = false;
   const shutdown = async (): Promise<void> => {
     if (closed) return;
     closed = true;
-    // No further renewals or credential swaps once we are going down.
+    // No further renewals or credential swaps once we are going down: the
+    // proactive timer is disarmed, the listener is unhooked (renewal.ts reads
+    // it at notify time, so a renewal already in flight applies to nothing),
+    // and a swap that started before this point gets to finish before the
+    // client it operates on is closed out from under it.
     cancelProactiveRenewal(config);
+    if (config.onConnectionKeyRenewed === swapRemoteCredential) {
+      config.onConnectionKeyRenewed = undefined;
+    }
+    if (swapInProgress) await swapInProgress.catch(() => {});
     // The SDK server too, not only the client: embedding callers connect the
     // transport themselves, and this handle should fully tear down — closing
     // the server closes its transport (and with it any pending requests).

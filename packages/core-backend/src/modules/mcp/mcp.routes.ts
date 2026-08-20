@@ -357,10 +357,20 @@ export function createMcpRoutes(
       // provider that reports none falls back to the constant alone).
       const grantRemainingMs =
         typeof info.expiresAt === 'number' ? info.expiresAt * 1000 - Date.now() : undefined;
+      // A grant with no life left mints NOTHING: a 200 carrying an
+      // already-dead token would read as success to the caller, whose first
+      // real request then fails somewhere far from the cause. It is the same
+      // 401 an expired token gets from the verifier, challenge and all — and
+      // a non-finite expiresAt (a provider handing back garbage) is refused
+      // the same way rather than turned into a TTL.
+      if (grantRemainingMs !== undefined && !(Number.isFinite(grantRemainingMs) && grantRemainingMs > 0)) {
+        unauthorized('Invalid, expired, or revoked access token');
+        return;
+      }
       const ttlMs =
         grantRemainingMs === undefined
           ? MCP_LOOPBACK_TOKEN_TTL_MS
-          : Math.min(MCP_LOOPBACK_TOKEN_TTL_MS, Math.max(grantRemainingMs, 0));
+          : Math.min(MCP_LOOPBACK_TOKEN_TTL_MS, grantRemainingMs);
       const minted = internalTokens.mint({ userId, externalProxy: true }, ttlMs);
       // The ACTUAL lifetime, not the constant — the caller schedules its
       // proactive renewal off this number.

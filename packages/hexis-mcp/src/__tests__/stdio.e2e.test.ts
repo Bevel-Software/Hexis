@@ -302,13 +302,19 @@ describe('stdio end-to-end', () => {
       // does. On Windows that makes the refresh rm fail EBUSY (the observed
       // bug); POSIX unlinks a held directory without complaint, so the
       // fallback assertions are win32-only while the sweep ones hold anywhere.
-      const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
-        cwd: first.pluginRoot,
-        stdio: 'ignore',
-      });
+      // Wait for the holder's JS to RUN, not merely for 'spawn': on Windows
+      // the cwd handle is opened during child-side process initialization, so
+      // right after CreateProcess there is a window (long under load) where
+      // the directory is not yet held and the refresh rm sails through.
+      const holder = spawn(
+        process.execPath,
+        ['-e', 'process.stdout.write("held\\n"); setInterval(() => {}, 1000)'],
+        { cwd: first.pluginRoot, stdio: ['ignore', 'pipe', 'ignore'] },
+      );
       await new Promise<void>((resolve, reject) => {
-        holder.once('spawn', resolve);
+        holder.stdout!.once('data', () => resolve());
         holder.once('error', reject);
+        holder.once('exit', () => reject(new Error('holder exited before holding')));
       });
       try {
         const second = await materializePlugin(config, 'GTM');

@@ -20,7 +20,9 @@ import type { BevelOAuthProvider } from '../oauth/bevel-oauth-provider.js';
  *     gets (right userId, externalProxy → source 'external'), with the shared
  *     MCP_LOOPBACK_TOKEN_TTL_MS lifetime;
  *   - an expired/revoked OAuth token re-challenges (401 + resource_metadata),
- *     mirroring McpAuthMiddleware's OAuth branch;
+ *     mirroring McpAuthMiddleware's OAuth branch — including a grant the
+ *     provider verifies but reports as out of lifetime, which must never
+ *     become a 200 carrying a dead token;
  *   - every other credential shape (connection key, JWT) is 403 — those need
  *     no exchange, so accepting them would mint a second credential from a
  *     first;
@@ -174,6 +176,43 @@ describe('POST /mcp/local-token', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { expiresInMs: number };
     expect(body.expiresInMs).toBe(MCP_LOOPBACK_TOKEN_TTL_MS);
+  });
+
+  /**
+   * The other end of the lifetime binding: a grant the provider verifies but
+   * reports as ALREADY out of lifetime must be a 401, not a 200 carrying a
+   * token that is dead on arrival — the caller would read that as success and
+   * fail somewhere far from the cause.
+   */
+  it('401s — never 200 with a dead token — when the verified grant has no remaining lifetime', async () => {
+    const oauth = makeOAuthProvider(async () => ({
+      extra: { userId: 'user-5' },
+      expiresAt: Math.floor(Date.now() / 1000) - 60,
+    }));
+    const { baseUrl } = await mount(oauth);
+
+    const res = await exchange(baseUrl, 'Bearer bevel-mcp_outlived');
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toContain(
+      `resource_metadata="${RESOURCE_METADATA_URL}"`,
+    );
+    await expect(res.json()).resolves.toEqual(
+      expect.objectContaining({ error: expect.stringMatching(/invalid|expired|revoked/i) }),
+    );
+  });
+
+  it('401s on a garbage (non-finite) expiresAt rather than minting with a NaN TTL', async () => {
+    const oauth = makeOAuthProvider(async () => ({
+      extra: { userId: 'user-5' },
+      expiresAt: Number.NaN,
+    }));
+    const { baseUrl } = await mount(oauth);
+
+    const res = await exchange(baseUrl, 'Bearer bevel-mcp_garbage-expiry');
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toContain('resource_metadata=');
   });
 
   it('401s with the resource_metadata challenge on an expired/revoked OAuth token', async () => {

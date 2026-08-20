@@ -139,4 +139,61 @@ describe('scheduleProactiveRenewal: the timer the remote manual depends on', () 
     expect(renew).toHaveBeenCalledTimes(2);
     expect(config.connectionKey).toBe('recovered');
   });
+
+  it('a cancel while a FAILING attempt is in flight revokes the retry — shutdown is never re-armed out of', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    let rejectGrant!: (err: Error) => void;
+    const renew = vi.fn(
+      () => new Promise<{ token: string }>((_resolve, reject) => (rejectGrant = reject)),
+    );
+    const config = makeConfig(renew);
+
+    scheduleProactiveRenewal(config, 10_000);
+    await vi.advanceTimersByTimeAsync(10_000 * RENEWAL_FRACTION);
+    expect(renew).toHaveBeenCalledTimes(1);
+
+    // Shutdown lands while the attempt is still pending; its failure must not
+    // arm the after-failure retry into a world that is closing.
+    cancelProactiveRenewal(config);
+    rejectGrant(new Error('deployment down'));
+    await vi.advanceTimersByTimeAsync(RETRY_AFTER_FAILURE_MS * 5);
+    expect(renew).toHaveBeenCalledTimes(1);
+  });
+
+  it('a cancel while a SUCCEEDING attempt is in flight revokes the re-arm and the listener — the grant itself is kept', async () => {
+    vi.useFakeTimers();
+    const applied: string[] = [];
+    let resolveGrant!: (v: { token: string; expiresInMs: number }) => void;
+    const renew = vi.fn(
+      () => new Promise<{ token: string; expiresInMs: number }>((resolve) => (resolveGrant = resolve)),
+    );
+    const config = makeConfig(renew);
+    config.onConnectionKeyRenewed = (token) => {
+      applied.push(token);
+    };
+
+    scheduleProactiveRenewal(config, 10_000);
+    await vi.advanceTimersByTimeAsync(10_000 * RENEWAL_FRACTION);
+    cancelProactiveRenewal(config);
+    resolveGrant({ token: 'fresh', expiresInMs: 10_000 });
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+
+    // Callers already awaiting the flight legitimately get the fresh bearer…
+    expect(config.connectionKey).toBe('fresh');
+    // …but nothing is notified into the shut-down server, and nothing re-arms.
+    expect(applied).toEqual([]);
+    expect(renew).toHaveBeenCalledTimes(1);
+  });
+
+  it('clamps the delay to Node\'s timer ceiling — an over-long grant must not overflow setTimeout into a 1ms loop', async () => {
+    // REAL timers, deliberately: fake ones do not reproduce Node's
+    // over-2^31-1 overflow-to-1ms, which is exactly what this pins.
+    const renew = vi.fn(async () => ({ token: 'fresh' }));
+    const config = makeConfig(renew);
+    scheduleProactiveRenewal(config, Number.MAX_SAFE_INTEGER);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(renew).not.toHaveBeenCalled();
+    cancelProactiveRenewal(config);
+  });
 });
