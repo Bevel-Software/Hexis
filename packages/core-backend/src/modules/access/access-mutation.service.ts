@@ -338,13 +338,18 @@ export class AccessMutationService {
     this.accessControl.invalidate(workspaceId);
 
     // (3) Assert the deny actually removed effective access on the targeted
-    // verb(s) — else roll back.
+    // verb(s) — else roll back. The check evaluates the SAME token identity
+    // the deny above spliced (`tokenMatch` rides along): with a pinned exact
+    // GROUP deny whose group has vanished, alias-tolerant matching would read
+    // a same-named role's surviving `role/<Name>` grant as the group still
+    // having access — rolling back a fully effective deny as "ineffective".
     const stillHas = await this.principalStillHasAccess(
       workspaceId,
       kind,
       repoRelTarget,
       principal,
       verb,
+      tokenMatch,
     );
     if (stillHas) {
       await this.workspaceService.writeFile(workspaceId, wsRelative, original);
@@ -380,6 +385,10 @@ export class AccessMutationService {
    * ever holds access by being NAMED in a file (no rescue / role-via-role /
    * everyone indirection applies to a role token), so `grantSources` IS its
    * complete effective-access answer (scoped to `verb` when given).
+   * `tokenMatch` keeps the check on the same token identity the preceding
+   * splice used: 'exact' asks `grantSources` to count only the literally
+   * spelled token — see the denyHere call site for why that matters when a
+   * same-named group and role diverge.
    */
   private async principalStillHasAccess(
     workspaceId: string,
@@ -387,6 +396,7 @@ export class AccessMutationService {
     repoRelTarget: string,
     principal: Principal,
     verb?: Verb,
+    tokenMatch?: TokenMatch,
   ): Promise<boolean> {
     if (principal.kind === 'user') {
       const email = principal.email;
@@ -400,10 +410,13 @@ export class AccessMutationService {
       const results = await Promise.all(verbs.map((v) => canOf[v]()));
       return results.some(Boolean);
     }
-    const sources = await this.accessControl.grantSources(workspaceId, kind, repoRelTarget, {
-      kind: 'role',
-      role: principal.role,
-    });
+    const sources = await this.accessControl.grantSources(
+      workspaceId,
+      kind,
+      repoRelTarget,
+      { kind: 'role', role: principal.role },
+      tokenMatch ? { tokenMatch } : undefined,
+    );
     return verb ? sources[verb] !== undefined : Object.keys(sources).length > 0;
   }
 

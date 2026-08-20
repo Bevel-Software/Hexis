@@ -6,7 +6,7 @@ import type { AccessControlService } from './access-control.service.js';
 import { SYNCED_GROUPS_YAML } from './group-files.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { LockingFilesystem } from '../workflow/locking-filesystem.js';
-import { PushNeedsAgentResolutionError } from '../workflow/workflow.errors.js';
+import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../workflow/workflow.errors.js';
 import type { SyncedGroupsWriterDeps } from './synced-groups-writer.js';
 
 /**
@@ -84,11 +84,37 @@ export function createSyncedGroupsCommitter(deps: {
       } catch (err) {
         if (err instanceof PushNeedsAgentResolutionError) {
           // POST-commit failure: the update IS committed locally — only the
-          // push needs help, and the pending-commits ladder (armed by the
-          // writeFiles release path) retries it. Treat the persist as done:
-          // rejecting here would route a LANDED commit through the writer's
-          // failure path, and the next sync would read the committed bytes,
-          // see a no-op, and never publish the update.
+          // push needs help, and the pending-commits ladder retries it. But
+          // the ladder is only armed if the writeFiles push-retry release
+          // managed to ENQUEUE its pending-commit row — that enqueue is
+          // best-effort (a failure is logged and the lock stays held), and
+          // without a row there is no retry vehicle: the next sync reads the
+          // committed bytes, sees a no-op, and the update stays unpublished
+          // forever. So VERIFY the vehicle before reporting success, by
+          // releasing our lock once more:
+          //   - lock already gone → the earlier release ran, which means its
+          //     enqueue succeeded first (releaseLock enqueues BEFORE dropping
+          //     the row) → retry armed.
+          //   - lock still ours → the earlier enqueue failed; this release
+          //     retries it. Success arms the retry (and frees the lock).
+          //   - this release fails too → no proven vehicle: rethrow, so the
+          //     writer logs a real failure instead of a phantom success.
+          // Rejecting is still the LAST resort — a landed commit routed
+          // through the failure path stays locally live but unpublished until
+          // an operator (or any later write on the branch) pushes it.
+          try {
+            await workflowService.releaseLock(workspaceId, branch, wsRelPath, bot);
+          } catch (armErr) {
+            const lockAlreadyReleased =
+              armErr instanceof WorkflowDomainError && armErr.payload?.kind === 'lock-not-held';
+            if (!lockAlreadyReleased) {
+              console.warn(
+                '[directory-sync] synced-groups commit landed, the push needs resolution, and the retry could not be armed — surfacing the failure:',
+                armErr instanceof Error ? armErr.message : armErr,
+              );
+              throw err;
+            }
+          }
           console.warn(
             '[directory-sync] synced-groups commit landed but the push needs resolution — publishing will be retried',
           );

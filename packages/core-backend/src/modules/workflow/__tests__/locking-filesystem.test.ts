@@ -509,6 +509,70 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     );
   });
 
+  it('a NO-OP seed lock releases COMMIT-ON-RELEASE — a prior save\'s queued bytes must survive', async () => {
+    // The prior-save-pending scenario: a previous save on the access.md
+    // released its lock via releaseLock, so its bytes are DIRTY on the shared
+    // workspace with the commit still queued. This batch then takes the seed
+    // lock, finds the grant already present (apply() no-ops), and commits
+    // only its own paths. Releasing the seed lock with NO-COMMIT semantics
+    // would git-discard the path back to HEAD — silently destroying the prior
+    // save. The seed lock must release with commit-on-release (which no-ops
+    // when clean and preserves queued bytes when not); no-commit release is
+    // reserved for paths this batch committed itself.
+    await fs.mkdir(path.join(root, 'KnowledgeBase/Mine'), { recursive: true });
+    const priorSave = '---\nread:\n  - Alice <alice@example.com>\n---\nprior queued bytes\n';
+    await fs.writeFile(path.join(root, 'KnowledgeBase/Mine/access.md'), priorSave);
+    const workflow = makeWorkflow();
+    const creatorAccess = makeCreatorAccess();
+    creatorAccess.planForCreate.mockResolvedValue({
+      kind: 'seed-access-md',
+      wsRelPath: 'KnowledgeBase/Mine/access.md',
+      apply: (current: string) => current, // grant already present → no-op
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+    );
+    await fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
+
+    // The batch's OWN committed path releases no-commit (clean — discard no-ops)...
+    expect(workflow.releaseLockNoCommit).toHaveBeenCalledWith(
+      'ws-feat', 'feat', 'KnowledgeBase/Mine/doc.md', USER,
+    );
+    // ...but the merely-locked seed path releases WITH commit-on-release.
+    expect(workflow.releaseLock).toHaveBeenCalledWith(
+      'ws-feat', 'feat', 'KnowledgeBase/Mine/access.md', USER,
+    );
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalledWith(
+      'ws-feat', 'feat', 'KnowledgeBase/Mine/access.md', USER,
+    );
+  });
+
+  it('locks acquired before an acquire CONTENTION release commit-on-release (nothing written yet)', async () => {
+    // First path acquires, second is contended: nothing has been written, so
+    // the first path may hold ONLY someone else's still-queued bytes — the
+    // unwind must not discard them.
+    const workflow = makeWorkflow();
+    (workflow.acquireLock as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ acquired: true, lock: { holderUserId: 'user-1', holderName: 'Alice' } })
+      .mockResolvedValue({ acquired: false, lock: { holderUserId: 'bob', holderName: 'Bob' } });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER },
+    );
+    await expect(
+      fsLayer.writeFiles(
+        [
+          { path: 'A.md', content: 'a' },
+          { path: 'B.md', content: 'b' },
+        ],
+        'batch',
+      ),
+    ).rejects.toThrow(/locked by Bob/);
+    expect(workflow.releaseLock).toHaveBeenCalledWith('ws-feat', 'feat', 'A.md', USER);
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+  }, 10_000);
+
   it('a LANDED seed rides the commit scope with the caller paths', async () => {
     const workflow = makeWorkflow();
     const creatorAccess = makeCreatorAccess();

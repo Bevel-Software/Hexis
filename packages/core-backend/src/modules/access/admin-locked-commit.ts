@@ -167,20 +167,41 @@ export class AdminLockedCommits {
    * concurrent edits (another tab, another admin, a conversion) both snapshot
    * the same base and the second write silently discards the first. See the
    * module doc for the release semantics.
+   *
+   * `opts.coordinationFiles` names files locked ONLY to serialize with their
+   * writer — `fn` never writes them. They're acquired with the workflow
+   * service's coordination flag (a pure mutex that skips the per-path write
+   * gate — required for machine-owned files like `synced-groups.yaml`, which
+   * a human actor may not, and need not, write) and always released with
+   * `releaseLockNoCommit`: there is never anything of ours to commit there,
+   * and enqueueing a release commit as an actor the path's write rule
+   * refuses would only feed the worker a doomed row. The discard inside that
+   * release no-ops: the machine writer commits synchronously under its own
+   * lock, so the path is clean whenever we could acquire it.
    */
   async withFileLocks<T>(
     workspaceId: string,
     actor: AuthUser,
     repoRelFiles: string[],
     fn: () => Promise<T>,
+    opts?: { coordinationFiles?: string[] },
   ): Promise<T> {
-    const paths = repoRelFiles.map((f) => this.wsRel(f)).sort();
+    const coordination = new Set((opts?.coordinationFiles ?? []).map((f) => this.wsRel(f)));
+    // One globally-sorted acquire order across BOTH kinds of path — a split
+    // order would reintroduce the deadlock the sort exists to prevent.
+    const paths = [...new Set([...repoRelFiles.map((f) => this.wsRel(f)), ...coordination])].sort();
     const held: string[] = [];
     let failure: unknown | null = null;
     let unrestored: Set<string> | null = null;
     try {
       for (const p of paths) {
-        const res = await this.deps.workflowService.acquireLock(workspaceId, this.defaultBranch, p, actor);
+        const res = await this.deps.workflowService.acquireLock(
+          workspaceId,
+          this.defaultBranch,
+          p,
+          actor,
+          coordination.has(p) ? { coordination: true } : undefined,
+        );
         if (!res.acquired) {
           throw this.deps.makeError(
             `${this.deps.contendedSubject} are being edited by ${res.lock.holderName || 'another admin'}. Try again in a moment.`,
@@ -215,7 +236,10 @@ export class AdminLockedCommits {
         const committedClean =
           this.committedCleanPaths.delete(this.cleanKey(workspaceId, h)) && !pushRetry;
         try {
-          if (committedClean || unrestored?.has(h)) {
+          if (coordination.has(h) || committedClean || unrestored?.has(h)) {
+            // Coordination-only hold (see the method doc): `fn` never wrote
+            // it, so no outcome — push-retry included — has anything to
+            // commit there; the no-commit release just drops the row. Or:
             // Batch-committed path (clean tree — discard no-ops) — even when
             // `fn` threw AFTER the commit+push landed: the failure says
             // nothing about the tree, and releaseLock would enqueue a

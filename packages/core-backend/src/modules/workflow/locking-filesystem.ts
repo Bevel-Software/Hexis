@@ -215,13 +215,34 @@ export class LockingFilesystem extends LocalFilesystem {
     // locked too (a delete mutates that path just like a write).
     const paths = [...new Set([...writes.map((w) => w.path), ...deletes])].sort();
     const acquired: string[] = [];
-    const releaseAll = async (): Promise<void> => {
+    // Paths whose on-disk bytes THIS batch replaced (caller writes/deletes,
+    // recorded just before each disk op so a mid-write throw still counts).
+    // Deliberately NOT the seed paths: a seed write is an additive merge of
+    // the CURRENT bytes, so even on failure its content preserves whatever
+    // was there before — discarding it could destroy a prior save's
+    // still-queued work (see releaseAll).
+    const dirtied = new Set<string>();
+    // Release every acquired lock. `discard` names the paths released with
+    // NO-COMMIT semantics — which resets the path's working tree to HEAD in
+    // the real WorkflowService. That is only safe for paths whose bytes this
+    // batch itself owns: its committed paths (clean tree — the discard
+    // no-ops) or its own failed writes (fail-closed — partial bytes must not
+    // land). Every OTHER acquired path releases with commit-on-release: a
+    // merely-locked path (a creator seed that no-op'd or failed, a caller
+    // path never reached) may hold a PRIOR save's dirty bytes whose commit is
+    // still queued, and a discard would silently destroy that landed save.
+    // The enqueued release commit no-ops when the path is clean.
+    const releaseAll = async (discard: ReadonlySet<string>): Promise<void> => {
       for (const p of acquired) {
         try {
-          await workflow.releaseLockNoCommit(workspaceId, branch, p, user);
+          if (discard.has(p)) {
+            await workflow.releaseLockNoCommit(workspaceId, branch, p, user);
+          } else {
+            await workflow.releaseLock(workspaceId, branch, p, user);
+          }
         } catch (releaseErr) {
           console.warn(
-            `[locking-fs] releaseLockNoCommit failed for "${p}" during writeFiles:`,
+            `[locking-fs] lock release failed for "${p}" during writeFiles:`,
             releaseErr instanceof Error ? releaseErr.message : releaseErr,
           );
         }
@@ -242,7 +263,8 @@ export class LockingFilesystem extends LocalFilesystem {
         if (attempt < ACQUIRE_RETRY_ATTEMPTS - 1) await sleep(ACQUIRE_RETRY_DELAY_MS);
       }
       if (!ok) {
-        await releaseAll();
+        // Nothing written yet — nothing of ours to discard (see releaseAll).
+        await releaseAll(dirtied);
         throw new Error(
           `Skipped editing "${p}" — locked by ${holderName ?? 'another user'}. ` +
             `Continuing with other edits; try this one again later.`,
@@ -280,8 +302,14 @@ export class LockingFilesystem extends LocalFilesystem {
       // Write/delete every file to disk inside the locks (workspace-relative;
       // LocalFilesystem resolves against basePath), then commit + push the whole
       // set as ONE change. `commitChanges` only stages + commits what's on disk.
-      for (const w of writes) await super.writeFile(w.path, w.content);
-      for (const p of deletes) await super.deleteFile(p);
+      for (const w of writes) {
+        dirtied.add(w.path);
+        await super.writeFile(w.path, w.content);
+      }
+      for (const p of deletes) {
+        dirtied.add(p);
+        await super.deleteFile(p);
+      }
       // Seeds merge into the CURRENT on-disk bytes (read under the lock) so a
       // concurrent creator's grant survives; per-seed failures are best-effort.
       for (const [p, apply] of seeds) {
@@ -336,14 +364,17 @@ export class LockingFilesystem extends LocalFilesystem {
         }
         throw err;
       }
-      // A write or the commit threw — nothing should land. releaseLockNoCommit
-      // discards the uncommitted bytes for each acquired path.
-      await releaseAll();
+      // A write or the commit threw — nothing of THIS batch should land, so
+      // its own dirtied paths release no-commit (the discard reverts them).
+      // Merely-locked paths keep commit-on-release (see releaseAll).
+      await releaseAll(dirtied);
       throw err;
     }
-    // Commit already landed synchronously — release WITHOUT a per-file commit,
-    // else `releaseLock` would enqueue a second (duplicate) commit per path.
-    await releaseAll();
+    // Commit already landed synchronously — the `touched` paths are clean, so
+    // release those WITHOUT a per-file commit (else `releaseLock` would
+    // enqueue a duplicate commit per path). A seed lock whose write no-op'd
+    // stays commit-on-release: it was never this batch's to discard.
+    await releaseAll(new Set(touched));
     // This batch path commits via `commitChanges`, NOT the per-file queue, so it
     // skips `runPendingCommit`'s emit — fire the post-commit hook here with the
     // WHOLE batch as one event, so an expensive subscriber (id-repair rebuilds the

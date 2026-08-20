@@ -273,12 +273,22 @@ export interface IAccessControl {
    *
    * Returns only the verbs the principal effectively holds; a verb with no
    * access is omitted. A principal with no access anywhere yields an empty map.
+   *
+   * `opts.tokenMatch: 'exact'` pins a ROLE-shaped principal to its literal
+   * token spelling: only the exact token (bare, or `role/<name>`) counts as
+   * the principal's own entry, regardless of group shadowing. The mutation
+   * layer uses this so a check runs against the SAME identity a pinned
+   * exact-token splice edited — e.g. verifying a GROUP deny whose group has
+   * vanished, where the default (alias-tolerant when unshadowed) matching
+   * would misattribute a same-named role's surviving `role/<name>` grant to
+   * the group. Omitted (or `'name'`) → the shadowing-derived default.
    */
   grantSources(
     workspaceId: string,
     kind: AccessTargetKind,
     relativePath: string,
     principal: GrantPrincipal,
+    opts?: { tokenMatch?: 'exact' | 'name' },
   ): Promise<GrantSources>;
 
   /**

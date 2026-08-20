@@ -118,6 +118,29 @@ describe('renderSyncedGroupsYaml', () => {
     expect(rendered.warnings[0]).toContain('\\u001b');
   });
 
+  it('also escapes C1 controls and U+2028/U+2029 — the ranges JSON.stringify leaves raw', () => {
+    // JSON.stringify only escapes C0 (U+0000–U+001F): the one-byte CSI
+    // U+009B starts an ANSI sequence on its own, DEL (U+007F) is a control
+    // too, and U+2028/U+2029 are line breaks to JS consumers — all four
+    // would otherwise reach the log stream verbatim.
+    const raw = { csi: '\u009B', del: '\u007F', ls: '\u2028', ps: '\u2029' };
+    // C1/2028/2029 do NOT make a name unsafe (only C0 does), so the group
+    // is emitted — the name reaches the log through a MEMBER warning.
+    const rendered = renderSyncedGroupsYaml([
+      group(`Csi${raw.csi}31mTeam${raw.del}${raw.ls}${raw.ps}FAKE`, [member({ active: false })]),
+    ]);
+    expect(rendered.groupCount).toBe(1);
+    expect(rendered.warnings).toHaveLength(1);
+    const warning = rendered.warnings[0];
+    for (const c of Object.values(raw)) {
+      expect(warning).not.toContain(c);
+    }
+    expect(warning).toContain('\\u009b');
+    expect(warning).toContain('\\u007f');
+    expect(warning).toContain('\\u2028');
+    expect(warning).toContain('\\u2029');
+  });
+
   it('full-key duplicate tie-break is collision-proof (JSON member key, not a delimiter join)', () => {
     // Crafted so the OLD delimiter-joined keys collide: one malformed "email"
     // containing the join delimiters serializes identically to two real

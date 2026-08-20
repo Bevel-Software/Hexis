@@ -47,13 +47,28 @@ export async function ensureDirectorySyncBot(db: Database): Promise<AuthUser> {
   // with it, or the override points at someone's address), silently binding
   // the materializer to that row would attribute every sync commit to them —
   // and, worse, hand their interactive session the bot's exclusive write
-  // authority. The bot row is only ever created by this function with
-  // DIRECTORY_SYNC_BOT_NAME, so a row under this email with any other name is
-  // NOT the bot: refuse loudly instead of adopting it.
-  if (row.name !== DIRECTORY_SYNC_BOT_NAME) {
+  // authority. The users schema carries no dedicated bot/provenance column,
+  // so adoption gates on the strongest invariants the row can carry:
+  //   1. NO PASSWORD. The bot is only ever created by this function, without
+  //      credentials, and never signs in — nothing legitimate ever provisions
+  //      it a password. A row with a password hash is a login-capable account
+  //      (a person, or a credential a person could use) no matter what its
+  //      display name says, so the hash is the hard evidence a name can't be.
+  //   2. THE EXPECTED NAME. A display name is mutable and a human account
+  //      could carry the bot's name (e.g. an SSO service account), so this is
+  //      only a tripwire — it still catches password-less human rows created
+  //      under their real names.
+  // A password-less SSO account that also mimics the bot's exact display name
+  // is indistinguishable at this layer; that shape only arises from the
+  // operator deliberately configuring it. Refuse loudly instead of adopting.
+  if (row.passwordHash !== null || row.name !== DIRECTORY_SYNC_BOT_NAME) {
+    const evidence =
+      row.passwordHash !== null
+        ? `it can sign in with a password (name '${row.name}')`
+        : `its name is '${row.name}'`;
     throw new Error(
       `directory-sync bot email ${DIRECTORY_SYNC_BOT_EMAIL} already belongs to an existing account ` +
-        `('${row.name}', id=${row.id}) that is not the sync bot — refusing to bind the materializer ` +
+        `(id=${row.id}) that is not the sync bot — ${evidence}. Refusing to bind the materializer ` +
         `to it. Set DIRECTORY_SYNC_BOT_EMAIL to an address no person uses.`,
     );
   }

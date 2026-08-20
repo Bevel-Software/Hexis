@@ -564,6 +564,7 @@ export class WorkflowService implements IWorkflowService {
     branch: string,
     targetPath: string,
     user: AuthUser,
+    opts?: { coordination?: boolean },
   ): Promise<AcquireLockResult> {
     // **Permission check at lock acquisition, not at commit time.** Under the
     // "disk is the source of truth" rule, once a write has landed on disk we
@@ -580,7 +581,15 @@ export class WorkflowService implements IWorkflowService {
     // boundary lives. Checking at HEAD (not at the working tree) so a user
     // can't grant themselves access by editing `roles.yaml` in the same
     // session.
-    if (isProtectedBranch(branch)) {
+    //
+    // **Coordination acquires skip the gate** (see the interface doc): the
+    // caller wants only mutual exclusion with the path's writer — e.g. the
+    // roles admin holding machine-owned `synced-groups.yaml` steady across
+    // its IdP-mode recheck — and will never write the path. Gating those on
+    // write permission would make a pure serialization hold impossible for
+    // exactly the paths (machine-owned ones) that need it most. No write
+    // authority flows from the hold: the commit/push gates still apply.
+    if (isProtectedBranch(branch) && !opts?.coordination) {
       // `assertCanWriteAtPath` throws AccessDeniedError on denial, with the
       // eligible-writers payload so the frontend can render a useful refusal.
       await this.assertCanWriteAtPath(workspaceId, branch, user.email, targetPath);

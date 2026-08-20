@@ -200,12 +200,22 @@ export interface IWorkflowService {
    *
    * Pessimistic per the spec. Auto-released when the lock expires past TTL
    * without a heartbeat — stale locks must not block forever.
+   *
+   * `opts.coordination` acquires the lock as a PURE MUTEX: the implementation
+   * skips its write-permission gate for the path, because the caller only
+   * wants to serialize against the path's writer (e.g. hold a machine-owned
+   * file steady across a read → check → decide flow) and will never write the
+   * path itself. A coordination hold grants NO write authority — the commit
+   * and push gates still apply to anything that does try to land bytes there
+   * — and the lock row is otherwise identical (same contention, TTL, and
+   * release surface). Internal callers only; never plumbed from a route.
    */
   acquireLock(
     workspaceId: string,
     branch: string,
     path: string,
     user: AuthUser,
+    opts?: { coordination?: boolean },
   ): Promise<AcquireLockResult>;
   /** Heartbeat to keep an acquired lock alive past its current TTL. */
   heartbeatLock(workspaceId: string, branch: string, path: string, user: AuthUser): Promise<FileLock>;

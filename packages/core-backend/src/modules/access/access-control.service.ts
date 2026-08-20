@@ -1240,6 +1240,7 @@ function resolveGrantSourcesForVerb(
   relativePath: string,
   principal: GrantPrincipal,
   fileOwn?: OwnEntries | null,
+  tokenMatch?: 'exact' | 'name',
 ): GrantSource[] {
   const scopes = resolveScopes(model, verb, relativePath, fileOwn);
   const out: GrantSource[] = [];
@@ -1259,13 +1260,21 @@ function resolveGrantSourcesForVerb(
     //     entries are its own. Counting the other spelling would attribute a
     //     shadowed bare token to the role (hiding a real `role/<name>`
     //     ancestor grant and making its revoke a false no-op), or vice versa.
+    //
+    //   - PINNED EXACT (`tokenMatch: 'exact'`): only the literally-spelled
+    //     token is this principal's entry, shadowing notwithstanding. The
+    //     caller pinned the same identity into the splice it is checking —
+    //     a GROUP whose group has VANISHED reads "unshadowed" here, and the
+    //     alias-tolerant pair would then attribute a same-named role's
+    //     surviving `role/<name>` grant to the group.
     const canonical = canonicalRoleName(principal.role);
     const explicit = canonical.startsWith(ROLE_TOKEN_PREFIX);
     const bare = explicit ? canonical.slice(ROLE_TOKEN_PREFIX.length) : canonical;
     const shadowed = model.roles.byCanonical.get(bare)?.kind === 'group';
-    const tokens = shadowed
-      ? [explicit ? `${ROLE_TOKEN_PREFIX}${bare}` : bare]
-      : [bare, `${ROLE_TOKEN_PREFIX}${bare}`];
+    const tokens =
+      tokenMatch === 'exact' || shadowed
+        ? [explicit ? `${ROLE_TOKEN_PREFIX}${bare}` : bare]
+        : [bare, `${ROLE_TOKEN_PREFIX}${bare}`];
     for (const scope of scopes) {
       const states = tokens.map((t) => scope.byRole.get(t));
       if (states.includes('grant')) {
@@ -1767,6 +1776,7 @@ export class AccessControlService implements IAccessControl {
     kind: AccessTargetKind,
     relativePath: string,
     principal: GrantPrincipal,
+    opts?: { tokenMatch?: 'exact' | 'name' },
   ): Promise<GrantSources> {
     const model = await this.loadModel(workspaceId);
     // A file target consults its own frontmatter as the most-specific scope; a
@@ -1778,7 +1788,15 @@ export class AccessControlService implements IAccessControl {
         : null;
     const out: GrantSources = {};
     for (const verb of KNOWN_VERBS) {
-      const sources = resolveGrantSourcesForVerb(model, verb, kind, relativePath, principal, own);
+      const sources = resolveGrantSourcesForVerb(
+        model,
+        verb,
+        kind,
+        relativePath,
+        principal,
+        own,
+        opts?.tokenMatch,
+      );
       if (sources.length > 0) out[verb] = sources;
     }
     return out;

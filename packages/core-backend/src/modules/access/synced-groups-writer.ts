@@ -120,7 +120,15 @@ export function renderSyncedGroupsYaml(groups: SyncedGroupRecord[]): RenderedSyn
   // logs — JSON.stringify them so a name carrying control characters (ANSI
   // escapes, newlines) is rendered escaped instead of verbatim into the log
   // stream (a newline-bearing name could otherwise forge whole log lines).
-  const printable = (name: string): string => JSON.stringify(name);
+  // JSON.stringify only escapes C0 controls (U+0000–U+001F) plus quote and
+  // backslash: C1 controls (U+007F–U+009F — including U+009B, the one-byte
+  // CSI that starts ANSI sequences on its own) and the JS line separators
+  // U+2028/U+2029 pass through raw, so escape those ourselves.
+  const printable = (name: string): string =>
+    JSON.stringify(name).replace(
+      /[\u007F-\u009F\u2028\u2029]/g,
+      (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
+    );
   for (const group of sorted) {
     const reason = unsafeNameReason(group.displayName);
     if (reason) {
