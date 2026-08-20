@@ -245,11 +245,16 @@ describe('creator welcome actions', () => {
     await user.click(screen.getByRole('button', { name: 'Create plugin' }));
 
     await waitFor(() => expect(serviceMocks.createPlugin).toHaveBeenCalledWith('Design'));
+    // The navigation is the LAST link of the create chain (create -> refresh
+    // indexes -> navigate), so it is the settled state to wait for; asserting
+    // it immediately races the refresh microtasks and flakes under CI load.
+    await waitFor(() =>
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(
+        '/skills-and-tools/plugins/Design',
+      ),
+    );
     expect(data.reload).toHaveBeenCalledOnce();
     expect(data.reloadPlugins).toHaveBeenCalledOnce();
-    expect(screen.getByLabelText('pathname')).toHaveTextContent(
-      '/skills-and-tools/plugins/Design',
-    );
   });
 
   it('creates a personal skill and opens its skill page', async () => {
@@ -270,14 +275,18 @@ describe('creator welcome actions', () => {
         userName: 'Juan Viera',
       }),
     );
-    expect(data.reload).toHaveBeenCalledOnce();
     // The skill's canonical address is its workspace FILE url, not the legacy
     // `skills/:name` route — that one survives only as a redirect. The dialog
     // owns this navigation, so the welcome page inherits whatever the rest of
-    // the Library does, which is the point of routing through it.
-    expect(screen.getByLabelText('pathname')).toHaveTextContent(
-      '/workspace/target-company-state/knowledge-base/Plugins/personal-u1/weekly-report/SKILL.md',
+    // the Library does, which is the point of routing through it. Waited for,
+    // not asserted immediately: navigation is the last link of the create
+    // chain and racing its microtasks is what made this test flake in CI.
+    await waitFor(() =>
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(
+        '/workspace/target-company-state/knowledge-base/Plugins/personal-u1/weekly-report/SKILL.md',
+      ),
     );
+    expect(data.reload).toHaveBeenCalledOnce();
   });
 
   it('holds the New skill dialog open while creation is pending', async () => {
