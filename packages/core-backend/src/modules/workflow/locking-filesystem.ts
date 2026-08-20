@@ -42,6 +42,7 @@ import {
   type WriteOptions,
 } from '@mastra/core/workspace';
 import type { AuthUser, Change, IWorkflowService } from '@bevel-software/platform-shared';
+import { PushNeedsAgentResolutionError } from './workflow.errors.js';
 import type { FileChangeNotifier } from './file-change-notifier.js';
 import type { CreationGrantPlan, ICreatorAccess } from '../access/creator-access.js';
 
@@ -167,6 +168,10 @@ export class LockingFilesystem extends LocalFilesystem {
    * `git commit`, then push), and release WITHOUT a per-file commit. Fail-closed:
    * if any lock can't be acquired, or a write/commit throws, nothing is committed
    * (the failure-path `releaseLockNoCommit` discards the uncommitted bytes).
+   * The ONE exception is `PushNeedsAgentResolutionError` — a POST-commit
+   * failure (the commit landed, the push didn't): locks release via
+   * `releaseLock` so the enqueued release commit arms the pending-commits
+   * worker's push retry, and the error still propagates to the caller.
    *
    * `writes[].path` is workspace-relative (like `writeFile`). We do the disk
    * write here; `commitChanges` only stages + commits what's on disk (the git
@@ -263,6 +268,13 @@ export class LockingFilesystem extends LocalFilesystem {
       }
     }
 
+    // The paths this batch actually TOUCHED — the caller's writes + deletes,
+    // plus each seed whose bytes really landed below. Kept separate from
+    // `acquired` (which only tracks held LOCKS): a seed lock is taken before
+    // we know whether the seed write happens, and scoping the commit to a
+    // merely-locked path would sweep in another save's still-queued dirty
+    // bytes on that path under this batch's author/summary.
+    const touched = [...paths];
     let change: Change | null;
     try {
       // Write/delete every file to disk inside the locks (workspace-relative;
@@ -284,7 +296,10 @@ export class LockingFilesystem extends LocalFilesystem {
             }
           }
           const next = apply(current);
-          if (next !== current) await super.writeFile(p, next);
+          if (next !== current) {
+            await super.writeFile(p, next);
+            touched.push(p);
+          }
         } catch (err) {
           console.warn(
             `[locking-fs] creator access.md seed failed for "${p}":`,
@@ -296,9 +311,31 @@ export class LockingFilesystem extends LocalFilesystem {
       // seeds): on the shared per-branch workspace another save's bytes may be
       // dirty with their commit still queued, and an unscoped commit would
       // sweep them in under this batch's author/summary.
-      change = await workflow.commitChanges(workspaceId, user, summary, acquired);
+      change = await workflow.commitChanges(workspaceId, user, summary, touched);
       if (seeds.size > 0) this.lockContext.creatorAccess?.noteAccessFileWritten(workspaceId);
     } catch (err) {
+      if (err instanceof PushNeedsAgentResolutionError) {
+        // POST-commit failure: the commit LANDED and only the push needs help
+        // (thrown "with the commit intact"). Routing this through the discard
+        // release would strand the landed commit with nothing to retry the
+        // push — the next identical write no-ops against the committed bytes
+        // and the change stays unpublished forever. Release WITH
+        // commit-on-release instead (the same posture AdminLockedCommits
+        // takes): the enqueued release commit no-ops on the clean tree, and
+        // the pending-commits worker then notices the unpushed commits and
+        // re-runs the cooperative push ladder.
+        for (const p of acquired) {
+          try {
+            await workflow.releaseLock(workspaceId, branch, p, user);
+          } catch (releaseErr) {
+            console.warn(
+              `[locking-fs] releaseLock failed for "${p}" during writeFiles push-retry release:`,
+              releaseErr instanceof Error ? releaseErr.message : releaseErr,
+            );
+          }
+        }
+        throw err;
+      }
       // A write or the commit threw — nothing should land. releaseLockNoCommit
       // discards the uncommitted bytes for each acquired path.
       await releaseAll();
@@ -313,9 +350,9 @@ export class LockingFilesystem extends LocalFilesystem {
     // id index) reacts once per batch, not once per file. A no-op commit (clean
     // tree) changed nothing, so it emits nothing.
     if (change) {
-      // `acquired` = caller paths + any creator-grant seeds that landed in the
+      // `touched` = caller paths + any creator-grant seeds that landed in the
       // same commit — the exact set this batch may have touched.
-      this.lockContext.fileChanges?.emit({ workspaceId, branch, paths: acquired, byUser: user });
+      this.lockContext.fileChanges?.emit({ workspaceId, branch, paths: touched, byUser: user });
     }
     return change;
   }

@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import { LockingFilesystem } from '../locking-filesystem.js';
+import { PushNeedsAgentResolutionError } from '../workflow.errors.js';
 
 const USER: AuthUser = {
   id: 'user-1',
@@ -280,6 +281,39 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     expect(emitted).toHaveLength(0);
   });
 
+  it('a POST-commit push failure releases WITH commit-on-release (arms the worker retry), never the discard path', async () => {
+    // PushNeedsAgentResolutionError means the commit LANDED and only the push
+    // needs help. Routing it through releaseLockNoCommit would leave the
+    // landed commit with no retry vehicle — the next identical write would
+    // no-op against the committed bytes and the change stays unpublished
+    // forever. The batch must releaseLock (the enqueued release commit no-ops
+    // on the clean tree and the worker's unpushed-commits check re-runs the
+    // push ladder) and still propagate the error.
+    const workflow = makeWorkflow();
+    (workflow.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new PushNeedsAgentResolutionError('feat', 'A.md', 'non-fast-forward', 'rebase failed'),
+    );
+    const emitted: unknown[] = [];
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      {
+        workflow,
+        workspaceId: 'ws-feat',
+        branch: 'feat',
+        user: USER,
+        fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
+      },
+    );
+
+    await expect(
+      fsLayer.writeFiles([{ path: 'A.md', content: 'x' }], 'batch'),
+    ).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
+
+    expect(workflow.releaseLock).toHaveBeenCalledWith('ws-feat', 'feat', 'A.md', USER);
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(emitted).toHaveLength(0);
+  });
+
   it('emits nothing on a no-op commit (clean tree)', async () => {
     const workflow = makeWorkflow();
     (workflow.commitChanges as ReturnType<typeof vi.fn>).mockResolvedValue(null);
@@ -429,6 +463,67 @@ describe('LockingFilesystem — creator read grants on creation', () => {
       'KnowledgeBase/Mine/access.md',
     ]);
     expect(creatorAccess.noteAccessFileWritten).toHaveBeenCalledWith('ws-feat');
+  });
+
+  it('a NO-OP seed stays OUT of the commit scope (its dirty bytes must never ride this batch)', async () => {
+    // The seed's access.md already carries the grant — apply() returns the
+    // current bytes unchanged. The lock is still taken (and released), but the
+    // path must NOT be passed to commitChanges: on the shared workspace it may
+    // be dirty from ANOTHER save whose commit is still queued, and scoping the
+    // batch to a merely-locked path would sweep those bytes in under this
+    // batch's author/summary.
+    await fs.mkdir(path.join(root, 'KnowledgeBase/Mine'), { recursive: true });
+    const seedContent = '---\nread:\n  - Alice <alice@example.com>\n---\n';
+    await fs.writeFile(path.join(root, 'KnowledgeBase/Mine/access.md'), seedContent);
+    const workflow = makeWorkflow();
+    const creatorAccess = makeCreatorAccess();
+    creatorAccess.planForCreate.mockResolvedValue({
+      kind: 'seed-access-md',
+      wsRelPath: 'KnowledgeBase/Mine/access.md',
+      apply: (current: string) => current, // grant already present → no-op
+    });
+    const emitted: { paths: string[] }[] = [];
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      {
+        workflow,
+        workspaceId: 'ws-feat',
+        branch: 'feat',
+        user: USER,
+        creatorAccess,
+        fileChanges: { emit: (c: { paths: string[] }) => emitted.push(c) } as never,
+      },
+    );
+    await fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
+
+    // The seed's lock cycle still ran (acquired + released)...
+    const locked = (workflow.acquireLock as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2]);
+    expect(locked).toContain('KnowledgeBase/Mine/access.md');
+    // ...but the commit is scoped to the caller's path only.
+    const commitPaths = (workflow.commitChanges as ReturnType<typeof vi.fn>).mock.calls[0][3];
+    expect(commitPaths).toEqual(['KnowledgeBase/Mine/doc.md']);
+    expect(emitted[0].paths).toEqual(['KnowledgeBase/Mine/doc.md']);
+    // The seeded file is untouched.
+    expect(await fs.readFile(path.join(root, 'KnowledgeBase/Mine/access.md'), 'utf-8')).toBe(
+      seedContent,
+    );
+  });
+
+  it('a LANDED seed rides the commit scope with the caller paths', async () => {
+    const workflow = makeWorkflow();
+    const creatorAccess = makeCreatorAccess();
+    creatorAccess.planForCreate.mockResolvedValue({
+      kind: 'seed-access-md',
+      wsRelPath: 'KnowledgeBase/Mine/access.md',
+      apply: () => '---\nread:\n  - Alice <alice@example.com>\n---\n',
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+    );
+    await fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
+    const commitPaths = (workflow.commitChanges as ReturnType<typeof vi.fn>).mock.calls[0][3];
+    expect(commitPaths).toEqual(['KnowledgeBase/Mine/doc.md', 'KnowledgeBase/Mine/access.md']);
   });
 
   it('a planner failure never blocks the write', async () => {

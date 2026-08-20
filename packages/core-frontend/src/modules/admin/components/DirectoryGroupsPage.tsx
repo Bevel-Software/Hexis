@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, Plus, Trash2, X } from 'lucide-react';
+import { Check, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Dialog } from '../../../shared/components/Dialog';
 import { useAdmin } from '../state/admin.context';
@@ -12,6 +12,7 @@ import {
   getGroupsRoster,
   GroupsApiError,
   removeGroupMember,
+  renameGroup,
   type GroupRosterEntry,
   type GroupsRoster,
 } from '../services/groups.api';
@@ -194,7 +195,13 @@ export function DirectoryGroupsPage() {
             <DirectoryPanel
               mode={roster.mode}
               onDirectoryChanged={refresh}
-              onConnectedChange={setDirectoryConnected}
+              onConnectedChange={(connected) => {
+                setDirectoryConnected(connected);
+                // A connection flipping true unmounts the manual CRUD view —
+                // a delete confirm still open would then operate on a roster
+                // the IdP now owns. Close it.
+                if (connected) setDeleteTarget(null);
+              }}
             />
           )}
         </div>
@@ -383,6 +390,30 @@ function ManualGroupCard({
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Inline rename: null = not renaming; otherwise the draft name.
+  const [renameDraft, setRenameDraft] = useState<string | null>(null);
+
+  const submitRename = async () => {
+    const trimmed = (renameDraft ?? '').trim();
+    if (!trimmed) {
+      setError('Enter a group name.');
+      return;
+    }
+    if (trimmed === group.displayName) {
+      setRenameDraft(null);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      onApply(await runExclusive(() => renameGroup(group.canonical, trimmed)));
+      setRenameDraft(null);
+    } catch (err) {
+      setError(errMessage(err, 'Failed to rename group'));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const submitAdd = async () => {
     const trimmed = email.trim();
@@ -423,9 +454,58 @@ function ManualGroupCard({
   return (
     <div className="border border-line rounded-lg p-3">
       <div className="flex items-start gap-3">
-        <h2 className="flex-1 min-w-0 text-sm font-semibold text-ink truncate">
-          {group.displayName}
-        </h2>
+        {renameDraft === null ? (
+          <h2 className="flex-1 min-w-0 text-sm font-semibold text-ink truncate">
+            {group.displayName}
+          </h2>
+        ) : (
+          <div className="flex-1 min-w-0 flex items-center gap-1.5">
+            <input
+              value={renameDraft}
+              onChange={(e) => setRenameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submitRename();
+                if (e.key === 'Escape') setRenameDraft(null);
+              }}
+              disabled={busy}
+              autoFocus
+              className="text-sm font-semibold px-2 py-0.5 border border-line rounded-sm focus:outline-none focus:border-accent flex-1 min-w-0"
+              aria-label={`Rename ${group.displayName}`}
+            />
+            <button
+              type="button"
+              onClick={submitRename}
+              disabled={busy}
+              className="p-1.5 rounded-sm hover:bg-hover text-accent disabled:opacity-50 shrink-0"
+              title="Save name"
+              aria-label={`Save name for ${group.displayName}`}
+            >
+              {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+            </button>
+            <button
+              type="button"
+              onClick={() => setRenameDraft(null)}
+              disabled={busy}
+              className="p-1.5 rounded-sm hover:bg-hover text-ink-faint disabled:opacity-50 shrink-0"
+              title="Cancel rename"
+              aria-label={`Cancel renaming ${group.displayName}`}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+        {renameDraft === null && (
+          <button
+            type="button"
+            onClick={() => setRenameDraft(group.displayName)}
+            disabled={busy}
+            className="p-1.5 rounded-sm hover:bg-hover text-ink-muted disabled:opacity-50 shrink-0"
+            title="Rename group"
+            aria-label={`Rename ${group.displayName}`}
+          >
+            <Pencil size={14} />
+          </button>
+        )}
         <button
           type="button"
           onClick={() => onDeleteRequest(group)}

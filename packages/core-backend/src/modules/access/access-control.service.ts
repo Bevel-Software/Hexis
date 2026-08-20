@@ -1374,19 +1374,21 @@ function eligibleHoldersResolved(
 ): { principals: ResolvedPrincipal[]; roles: string[]; users: { name: string; email: string }[] } {
   const { byRole, byEmail } = resolveAtPath(model, verb, relativePath, fileOwn);
 
-  // Display name → kind. The `byRole` keys are the merged index's canonical
-  // tokens exactly as granted (bare, or the `role/<canonical>` alias); the
-  // `byCanonical` record a key hits carries its kind — a `role/` alias always
-  // hits the role record, a bare key hits whichever principal owns it under
-  // group-first precedence. A token with no record (the built-in `everyone`,
-  // or a grant naming a since-vanished principal) degrades to 'role', the
-  // pre-groups display. In the rare case one display name is granted as BOTH
-  // (a role via its alias plus a same-named group via the bare token) the
-  // single deduped entry reads 'group' — mirroring bare-token precedence and
-  // the dialog's shared per-name row.
-  const kindByName = new Map<string, 'role' | 'group'>();
+  // (kind, display name) → one entry. The `byRole` keys are the merged
+  // index's canonical tokens exactly as granted (bare, or the
+  // `role/<canonical>` alias); the `byCanonical` record a key hits carries
+  // its kind — a `role/` alias always hits the role record, a bare key hits
+  // whichever principal owns it under group-first precedence. A token with no
+  // record (the built-in `everyone`, or a grant naming a since-vanished
+  // principal) degrades to 'role', the pre-groups display. When one display
+  // name is granted as BOTH (a role via its `role/` alias plus a same-named
+  // group via the bare token) BOTH entries survive — they are DIFFERENT
+  // principals, and collapsing them to one would hide the role's live
+  // `role/<name>` grant from every consumer of the eligible list.
+  const byIdentity = new Map<string, ResolvedPrincipal>();
   const addPrincipal = (name: string, kind: 'role' | 'group') => {
-    if (kindByName.get(name) !== 'group') kindByName.set(name, kind);
+    const key = `${kind}\0${name.toLowerCase()}`;
+    if (!byIdentity.has(key)) byIdentity.set(key, { name, kind });
   };
   for (const [canonical, state] of byRole) {
     if (state !== 'grant') continue;
@@ -1410,12 +1412,13 @@ function eligibleHoldersResolved(
     addPrincipal(adminRole ? adminRole.displayName : ADMIN_CANONICAL, 'role');
   }
 
-  const principals: ResolvedPrincipal[] = [...kindByName]
-    .map(([name, kind]) => ({ name, kind }))
-    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const principals: ResolvedPrincipal[] = [...byIdentity.values()].sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0,
+  );
   // Legacy name-only list, kind erased — kept for the many consumers that
   // only ever render names (banners, contact lines, PR-routing messages).
-  const roles = principals.map((p) => p.name);
+  // De-duplicated: a name granted as both group and role appears once here.
+  const roles = [...new Set(principals.map((p) => p.name))];
 
   const users: { name: string; email: string }[] = [];
   for (const [email, state] of byEmail) {

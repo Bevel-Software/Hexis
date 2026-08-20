@@ -113,6 +113,49 @@ describe('group files as access principals', () => {
     ).toBe(false);
   });
 
+  it('parseGroupsFile applies the shared name-safety predicate (warn-and-skip), and the write gate refuses', async () => {
+    const { parseGroupsFile, validateGroupsFile } = await import('../group-files.js');
+    // `<`/`>` and control characters pass the YAML subset as plain keys but
+    // fail unsafeNameReason — the parser must skip them (other groups keep
+    // resolving) and the strict write gate must refuse the whole candidate.
+    const text = 'groups:\n  Bad<Name>:\n    - a@x.io\n  Good Team:\n    - b@x.io\n';
+    const parsed = parseGroupsFile(text, 'groups.yaml');
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect([...parsed.groups.keys()]).toEqual(['good team']);
+      expect(parsed.warnings.join(' ')).toMatch(/Bad<Name>/);
+      expect(parsed.warnings.join(' ')).toMatch(/skipped/);
+    }
+    expect(validateGroupsFile(text, 'groups.yaml').ok).toBe(false);
+    // A leading '-' name (reachable via `-x:` — no space after the dash).
+    const dashed = parseGroupsFile('groups:\n  -lead:\n    - a@x.io\n', 'groups.yaml');
+    expect(dashed.ok && [...dashed.groups.keys()]).toEqual([]);
+  });
+
+  it("parseGroupsFile skips a 'group:'-prefixed member (shapes like an email, but is the ref token)", async () => {
+    const { parseGroupsFile, validateGroupsFile } = await import('../group-files.js');
+    // `group:lee@x.io` PASSES the email regex — without the explicit skip it
+    // would land as a member "email" nothing can ever log in as.
+    const text = 'groups:\n  Team:\n    - group:lee@x.io\n    - real@x.io\n';
+    const parsed = parseGroupsFile(text, 'groups.yaml');
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect([...parsed.groups.get('team')!.emails]).toEqual(['real@x.io']);
+      expect(parsed.warnings.join(' ')).toMatch(/group:/);
+      expect(parsed.warnings.join(' ')).toMatch(/emails, not group references/);
+    }
+    // Warnings are refusals on the write side.
+    expect(validateGroupsFile(text, 'groups.yaml').ok).toBe(false);
+    // And the resolver never grants through it.
+    const svc = await makeService({
+      'roles.yaml': ROLES_YAML,
+      'groups.yaml': text,
+      'access.md': '---\nread:\n  - Team\n---\n',
+    });
+    expect(await svc.canRead(workspaceId, 'real@x.io', 'Knowledge/Doc.md')).toBe(true);
+    expect(await svc.canRead(workspaceId, 'group:lee@x.io', 'Knowledge/Doc.md')).toBe(false);
+  });
+
   it('a group reference with no group file behind it grants nothing', async () => {
     const svc = await makeService({
       'roles.yaml': ROLES_YAML,
@@ -334,6 +377,26 @@ describe('group files as access principals', () => {
     const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR);
     expect(await svc.canWriteAtRef(workspaceId, 'main', 'ada@x.io', 'Knowledge/Doc.md')).toBe(true);
     expect(await svc.canWriteAtRef(workspaceId, 'main', 'zoe@x.io', 'Knowledge/Doc.md')).toBe(false);
+  });
+
+  it('eligible holders keep BOTH kinds when a group and a role share a name', async () => {
+    // A group named Engineering shadows the role Engineering. When a file
+    // grants BOTH spellings — the bare token (the group's) and role/… (the
+    // role's) — the eligible list must carry two entries, one per kind:
+    // collapsing them hides the role's live role/<name> grant entirely.
+    const svc = await makeService({
+      'roles.yaml': `roles:\n  Admin:\n    - admin@x.io\n  Engineering:\n    - lead@x.io\n`,
+      'groups.yaml': GROUPS_YAML_TEXT,
+      'access.md': '---\nread:\n  - Engineering\n  - role/Engineering\n---\n',
+    });
+    const readers = await svc.eligibleReaders(workspaceId, 'Knowledge/Doc.md');
+    expect(readers.principals).toContainEqual({ name: 'Engineering', kind: 'group' });
+    expect(readers.principals).toContainEqual({ name: 'Engineering', kind: 'role' });
+    // The legacy name-only list stays de-duplicated.
+    expect(readers.roles.filter((r) => r === 'Engineering')).toHaveLength(1);
+    // Both principals' members resolve.
+    expect(await svc.canRead(workspaceId, 'ada@x.io', 'Knowledge/Doc.md')).toBe(true);
+    expect(await svc.canRead(workspaceId, 'lead@x.io', 'Knowledge/Doc.md')).toBe(true);
   });
 
   it('synced-groups.yaml is machine-owned: only the sync bot writes it, ever', async () => {

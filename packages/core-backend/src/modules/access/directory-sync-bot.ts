@@ -41,5 +41,21 @@ export async function ensureDirectorySyncBot(db: Database): Promise<AuthUser> {
       `directory-sync bot (${DIRECTORY_SYNC_BOT_EMAIL}) disappeared between insert-conflict and re-select`,
     );
   }
+  // The bot's IDENTITY is its email: the machine-owned write rule on
+  // synced-groups.yaml authorizes by DIRECTORY_SYNC_BOT_EMAIL alone. If the
+  // email already belongs to a pre-existing HUMAN account (a person signed up
+  // with it, or the override points at someone's address), silently binding
+  // the materializer to that row would attribute every sync commit to them —
+  // and, worse, hand their interactive session the bot's exclusive write
+  // authority. The bot row is only ever created by this function with
+  // DIRECTORY_SYNC_BOT_NAME, so a row under this email with any other name is
+  // NOT the bot: refuse loudly instead of adopting it.
+  if (row.name !== DIRECTORY_SYNC_BOT_NAME) {
+    throw new Error(
+      `directory-sync bot email ${DIRECTORY_SYNC_BOT_EMAIL} already belongs to an existing account ` +
+        `('${row.name}', id=${row.id}) that is not the sync bot — refusing to bind the materializer ` +
+        `to it. Set DIRECTORY_SYNC_BOT_EMAIL to an address no person uses.`,
+    );
+  }
   return { id: row.id, email: row.email, name: row.name, avatarUrl: row.avatarUrl ?? undefined };
 }

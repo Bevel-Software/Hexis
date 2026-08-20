@@ -143,6 +143,13 @@ export class AccessMutationService {
    * the same model the resolver reads), so revoke agrees with resolution on
    * who owns the bare key. A model that fails to load yields no groups, i.e.
    * unshadowed — matching degrades to the pre-groups name-level behavior.
+   *
+   * GROUP revokes never take the name-level path: the route passes
+   * `tokenMatch: 'exact'` explicitly (see `revoke`'s `opts`), because this
+   * shadow probe cannot tell a group apart from a role once the group has
+   * VANISHED from the active source — the bare name then reads "unshadowed"
+   * and a name-level group revoke would strip a same-named role's live
+   * `role/<Name>` grant.
    */
   private async revokeTokenMatch(workspaceId: string, principal: Principal): Promise<TokenMatch> {
     if (principal.kind !== 'role') return 'exact'; // user matching ignores the mode
@@ -217,6 +224,12 @@ export class AccessMutationService {
     // When present, strip ONLY this verb (a per-checkbox toggle in the share UI);
     // absent strips the principal from every verb (the whole-principal Remove).
     verb?: Verb,
+    // `tokenMatch` overrides the shadow-derived matching. The route passes
+    // 'exact' for GROUP principals: a group's grant is its bare token only,
+    // and once the group has vanished the shadow probe can no longer tell it
+    // from a role — name-level matching would then strip a same-named role's
+    // `role/<Name>` grant.
+    opts?: { tokenMatch?: TokenMatch },
   ): Promise<{ changed: boolean; editPath: string }> {
     void _actingUserEmail; // referenced to satisfy no-unused-vars until something consumes it
     this.assertPrincipalSafe(principal); // same injection/shape guard grant runs
@@ -226,8 +239,8 @@ export class AccessMutationService {
     // — same rule grant() uses.
     const original = await this.readOrEmpty(workspaceId, editPath, kind === 'folder');
     // Alias-tolerant vs exact-token matching, decided by group shadowing —
-    // see revokeTokenMatch.
-    const tokenMatch = await this.revokeTokenMatch(workspaceId, principal);
+    // see revokeTokenMatch — unless the caller pinned it.
+    const tokenMatch = opts?.tokenMatch ?? (await this.revokeTokenMatch(workspaceId, principal));
     let next = original;
     let changed = false;
     try {
@@ -288,6 +301,8 @@ export class AccessMutationService {
     repoRelTarget: string,
     principal: Principal,
     verb?: Verb,
+    // Same override as `revoke` — the route pins 'exact' for GROUP principals.
+    opts?: { tokenMatch?: TokenMatch },
   ): Promise<{ changed: boolean; editPath: string }> {
     this.assertPrincipalSafe(principal);
     const { editPath, allowScalar } = this.fileToEdit(kind, repoRelTarget);
@@ -296,7 +311,7 @@ export class AccessMutationService {
     const verbsToDeny = verb ? [verb] : KNOWN_VERBS;
     // Same shadowing-aware matching as revoke(): the strip must not swallow a
     // same-named OTHER principal's grant (bare = group vs role/<name> = role).
-    const tokenMatch = await this.revokeTokenMatch(workspaceId, principal);
+    const tokenMatch = opts?.tokenMatch ?? (await this.revokeTokenMatch(workspaceId, principal));
     let next = original;
     try {
       for (const v of verbsToDeny) {

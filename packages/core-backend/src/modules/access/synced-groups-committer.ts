@@ -6,6 +6,7 @@ import type { AccessControlService } from './access-control.service.js';
 import { SYNCED_GROUPS_YAML } from './group-files.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { LockingFilesystem } from '../workflow/locking-filesystem.js';
+import { PushNeedsAgentResolutionError } from '../workflow/workflow.errors.js';
 import type { SyncedGroupsWriterDeps } from './synced-groups-writer.js';
 
 /**
@@ -75,10 +76,26 @@ export function createSyncedGroupsCommitter(deps: {
         { basePath, contained: true },
         { workflow: workflowService, workspaceId, branch, user: bot },
       );
-      await fsys.writeFiles(
-        [{ path: wsRelPath, content }],
-        'Sync directory groups from the identity provider',
-      );
+      try {
+        await fsys.writeFiles(
+          [{ path: wsRelPath, content }],
+          'Sync directory groups from the identity provider',
+        );
+      } catch (err) {
+        if (err instanceof PushNeedsAgentResolutionError) {
+          // POST-commit failure: the update IS committed locally — only the
+          // push needs help, and the pending-commits ladder (armed by the
+          // writeFiles release path) retries it. Treat the persist as done:
+          // rejecting here would route a LANDED commit through the writer's
+          // failure path, and the next sync would read the committed bytes,
+          // see a no-op, and never publish the update.
+          console.warn(
+            '[directory-sync] synced-groups commit landed but the push needs resolution — publishing will be retried',
+          );
+          return;
+        }
+        throw err;
+      }
     },
 
     onWritten: () => {

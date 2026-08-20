@@ -70,7 +70,8 @@ export interface LockedCommitDeps {
 
 export interface LockedWrite {
   repoRel: string;
-  content: string;
+  /** The new content; null = DELETE the file (restore writes `original` back). */
+  content: string | null;
   /** null = the file did not exist before (restore DELETES it). */
   original: string | null;
 }
@@ -253,7 +254,19 @@ export class AdminLockedCommits {
   ): Promise<void> {
     const { workspaceService, workflowService, logTag } = this.deps;
     try {
-      for (const f of files) await workspaceService.writeFile(workspaceId, this.wsRel(f.repoRel), f.content);
+      for (const f of files) {
+        if (f.content === null) {
+          // A DELETE entry. Tolerate an already-absent file — that IS the
+          // desired state (and the caller checked existence under the lock).
+          try {
+            await workspaceService.deleteFile(workspaceId, this.wsRel(f.repoRel));
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException | null)?.code !== 'ENOENT') throw err;
+          }
+        } else {
+          await workspaceService.writeFile(workspaceId, this.wsRel(f.repoRel), f.content);
+        }
+      }
       await workflowService.commitChanges(workspaceId, actor, summary, files.map((f) => this.wsRel(f.repoRel)));
       // Commit landed AND pushed — the tree at these paths is clean. Mark
       // them so withFileLocks releases them WITHOUT enqueueing a release

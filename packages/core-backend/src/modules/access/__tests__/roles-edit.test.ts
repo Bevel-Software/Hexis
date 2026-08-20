@@ -7,6 +7,7 @@ import {
   addMember,
   removeMember,
   removeGroupRefsEverywhere,
+  removeRoleGroupRef,
   renameGroupRefs,
   RolesEditError,
 } from '../roles-edit.js';
@@ -174,6 +175,29 @@ describe('roles-edit: mutations', () => {
     expect(renamed.changed).toBe(true);
     expect(renamed.text).toContain('group:go to market');
     expect(renamed.text).not.toContain('gtm  team');
+  });
+
+  it('removeRoleGroupRef strips EVERY duplicate ref to the group, not just the first', () => {
+    // A hand-edited file may carry several differently-formatted refs to the
+    // same group. Removing only the first leaves stragglers the resolver
+    // still honors — the role silently keeps the group after an
+    // apparently-successful unassign.
+    const text = [
+      'roles:',
+      '  Ops:',
+      '    - lead@x.io',
+      '    - group:gtm team',
+      '    - group:GTM  Team', // un-normalized duplicate — must go too
+      '',
+    ].join('\n');
+    const r = removeRoleGroupRef(text, 'ops', 'gtm team');
+    expect(r.changed).toBe(true);
+    const ops = parseRolesModel(r.text).find((x) => x.displayName === 'Ops')!;
+    expect(ops.members).toEqual(['lead@x.io']);
+    // Idempotent afterwards.
+    expect(removeRoleGroupRef(r.text, 'ops', 'gtm team').changed).toBe(false);
+    // Other roles/refs untouched.
+    expect(() => removeRoleGroupRef(text, 'ghost', 'gtm team')).toThrow(/not found/);
   });
 
   it('only the changed role moves in the diff (other roles untouched)', () => {

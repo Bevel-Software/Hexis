@@ -141,8 +141,10 @@ export interface IWorkflowService {
    * rare case where a group of files must land together or not at all (e.g. a
    * role rename rewriting `roles.yaml` + every reference). Does NOT write
    * content: the caller writes the files first (e.g. via the lock-aware
-   * filesystem) and is responsible for any validation. Returns null on a no-op
-   * (clean tree).
+   * filesystem) and is responsible for any validation. Returns null on a
+   * no-op — nothing to commit WITHIN SCOPE: with `onlyPaths` given, none of
+   * those paths is dirty (other paths may well be); without it, the whole
+   * tree is clean.
    *
    * `onlyPaths` (workspace-relative) scopes the commit to the caller's own
    * files: on a shared per-branch workspace other paths may be dirty from a
@@ -252,10 +254,13 @@ export interface IWorkflowService {
    * lock-aware write — when the underlying op threw, we don't want the
    * normal `releaseLock` to commit + push whatever partial state happens
    * to be on disk. The lock row goes away (so the next caller can edit
-   * the file) and the path's working-tree changes are DISCARDED back to
-   * HEAD — every release leaves the tree clean; bytes not committed are
-   * thrown away. Idempotent like `releaseLock`: a no-op when the caller
-   * doesn't hold the lock.
+   * the file) and the path's working-tree changes are discarded back to
+   * HEAD on a BEST-EFFORT basis: the implementation logs and continues
+   * when the discard itself fails (releasing beats stranding the lock),
+   * so a caller must not treat a completed release as proof the tree is
+   * clean — worst case the path stays dirty until the next save on it.
+   * Idempotent like `releaseLock`: a no-op when the caller doesn't hold
+   * the lock.
    */
   releaseLockNoCommit(
     workspaceId: string,

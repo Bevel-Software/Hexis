@@ -471,6 +471,92 @@ describe('ManageAccessDialog: grantee rows badge roles vs groups', () => {
     );
   });
 
+  it('a group and a role SHARING one name are two rows, each mutating its own kind', async () => {
+    // The backend treats bare `Product` (the group) and `role/Product` (the
+    // role) as different principals. One collapsed row silently pointed every
+    // edit at the group and hid the role's grant.
+    const user = userEvent.setup();
+    const SHARED = {
+      ...VIEW,
+      eligible: {
+        principals: [
+          { name: 'Product', kind: 'group' },
+          { name: 'Product', kind: 'role' },
+        ],
+        roles: ['Product'],
+        users: [],
+      },
+      readers: { restricted: true, principals: [], roles: [], users: [] },
+      sources: {
+        'g:product': { write: [{ kind: 'direct' }] },
+        'r:product': { write: [{ kind: 'direct' }] },
+      },
+    } as AccessResponse;
+    api.fetchFileAccess.mockResolvedValue(SHARED);
+    api.grantAccess.mockResolvedValue(SHARED);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    // Both rows render, one badged Group, one badged Role.
+    expect(await screen.findAllByText('Product')).toHaveLength(2);
+    expect(screen.getByText('Group')).toBeInTheDocument();
+    expect(screen.getByText('Role')).toBeInTheDocument();
+
+    // Toggling "Can download" on each row round-trips ITS kind. Rows render
+    // in eligible order (group first), after the add-row selector — so the
+    // trigger list is [add-row, group row, role row].
+    const triggers = await screen.findAllByRole('button', { name: /^can edit$/i });
+    expect(triggers).toHaveLength(3);
+    await user.click(triggers[1]); // the group row
+    await user.click(await screen.findByRole('button', { name: /^can download$/i }));
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalledTimes(1));
+    expect(api.grantAccess).toHaveBeenLastCalledWith(
+      'ws-1',
+      expect.objectContaining({ principal: { kind: 'group', group: 'Product' } }),
+    );
+
+    // Close the group row's still-open menu (its items also read "Can edit"),
+    // then open the role row's.
+    await user.click((await screen.findAllByRole('button', { name: /^can edit$/i }))[1]);
+    const after = await screen.findAllByRole('button', { name: /^can edit$/i });
+    expect(after).toHaveLength(3);
+    await user.click(after[2]); // the role row
+    await user.click(await screen.findByRole('button', { name: /^can download$/i }));
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalledTimes(2));
+    expect(api.grantAccess).toHaveBeenLastCalledWith(
+      'ws-1',
+      expect.objectContaining({ principal: { kind: 'role', role: 'Product' } }),
+    );
+  });
+
+  it('the picker keeps BOTH chips when a group and a role share the typed name', async () => {
+    const user = userEvent.setup();
+    api.suggestPrincipals.mockResolvedValue({
+      roles: ['Product'],
+      groups: ['Product'],
+      people: [],
+      peopleWithheld: false,
+    });
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const input = await screen.findByPlaceholderText(/add people, groups, or roles/i);
+    await user.type(input, 'prod');
+    // The group suggestion (tagged "group") chips first…
+    await user.click(await screen.findByRole('button', { name: /Product group/i }));
+    // …then the role suggestion must NOT be dropped as a duplicate.
+    await user.type(input, 'prod');
+    await user.click(await screen.findByRole('button', { name: /Product role/i }));
+
+    // Two chips — one per kind — each with its own remove affordance.
+    const chips = screen.getAllByRole('button', { name: /Remove Product/ });
+    expect(chips).toHaveLength(2);
+
+    await user.click(screen.getByRole('button', { name: /^Share$/ }));
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalledTimes(2));
+    const granted = api.grantAccess.mock.calls.map((c) => (c[1] as { principal: unknown }).principal);
+    expect(granted).toContainEqual({ kind: 'group', group: 'Product' });
+    expect(granted).toContainEqual({ kind: 'role', role: 'Product' });
+  });
+
   it('falls back to name-only `roles` (badged "Role") when `principals` is absent — version skew', async () => {
     api.fetchFileAccess.mockResolvedValue({
       ...VIEW,

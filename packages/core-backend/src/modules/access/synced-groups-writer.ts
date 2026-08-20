@@ -1,4 +1,10 @@
-import { EMAIL_REGEX, canonicalEmail, canonicalRoleName, RESERVED_ROLE_NAMES } from './access-control.service.js';
+import {
+  EMAIL_REGEX,
+  GROUP_REF_PREFIX,
+  canonicalEmail,
+  canonicalRoleName,
+  RESERVED_ROLE_NAMES,
+} from './access-control.service.js';
 import { unsafeNameReason } from './group-files.js';
 
 /**
@@ -97,32 +103,41 @@ export function renderSyncedGroupsYaml(groups: SyncedGroupRecord[]): RenderedSyn
     // Full-key duplicates: break the tie on membership, then on the RAW
     // display name (same canonical can differ in case/spacing, and the winner
     // of the first-wins dedup below decides the emitted name) — so the bytes
-    // never depend on source array order.
-    const byMembers = codeUnitCompare(
-      a.members.map((m) => `${m.email ?? ''}:${m.active}`).sort(codeUnitCompare).join(','),
-      b.members.map((m) => `${m.email ?? ''}:${m.active}`).sort(codeUnitCompare).join(','),
-    );
+    // never depend on source array order. The membership key is JSON — a
+    // plain delimiter join could collide (an email may legally contain the
+    // delimiter characters), and a collision between DIFFERENT member sets
+    // would push the tie-break back onto input order.
+    const memberKey = (members: SyncedGroupMember[]): string =>
+      JSON.stringify(
+        members.map((m) => `${JSON.stringify(m.email ?? '')}:${m.active}`).sort(codeUnitCompare),
+      );
+    const byMembers = codeUnitCompare(memberKey(a.members), memberKey(b.members));
     if (byMembers !== 0) return byMembers;
     return codeUnitCompare(a.displayName, b.displayName);
   });
 
+  // Group names are UNTRUSTED IdP input and flow into warnings that land in
+  // logs — JSON.stringify them so a name carrying control characters (ANSI
+  // escapes, newlines) is rendered escaped instead of verbatim into the log
+  // stream (a newline-bearing name could otherwise forge whole log lines).
+  const printable = (name: string): string => JSON.stringify(name);
   for (const group of sorted) {
     const reason = unsafeNameReason(group.displayName);
     if (reason) {
-      warnings.push(`group '${group.displayName}' skipped: ${reason} — rename it in the IdP`);
+      warnings.push(`group ${printable(group.displayName)} skipped: ${reason} — rename it in the IdP`);
       continue;
     }
     const canonical = canonicalRoleName(group.displayName);
     if (RESERVED_ROLE_NAMES.has(canonical)) {
       warnings.push(
-        `group '${group.displayName}' skipped: '${canonical}' is a reserved name — rename it in the IdP`,
+        `group ${printable(group.displayName)} skipped: '${canonical}' is a reserved name — rename it in the IdP`,
       );
       continue;
     }
     const existing = byCanonical.get(canonical);
     if (existing) {
       warnings.push(
-        `group '${group.displayName}' skipped: name collides with '${existing.displayName}' — rename one in the IdP`,
+        `group ${printable(group.displayName)} skipped: name collides with ${printable(existing.displayName)} — rename one in the IdP`,
       );
       continue;
     }
@@ -145,8 +160,11 @@ export function renderSyncedGroupsYaml(groups: SyncedGroupRecord[]): RenderedSyn
       // A leading '#' passes the regex but the emitted `- #…` reads back as a
       // comment (stripComment) — the member would silently vanish on the next
       // resolver read, so refuse it here where it at least gets a warning.
+      // The reserved `group:` prefix passes EMAIL_REGEX (`group:lee@x.io`)
+      // but the read-side parser skips it as a group reference — refuse it
+      // here so the file never carries an entry its own parser warns on.
       const email = canonicalEmail(member.email);
-      if (!EMAIL_REGEX.test(email) || email.startsWith('#')) {
+      if (!EMAIL_REGEX.test(email) || email.startsWith('#') || email.startsWith(GROUP_REF_PREFIX)) {
         malformedMembers++;
         continue;
       }
@@ -154,12 +172,12 @@ export function renderSyncedGroupsYaml(groups: SyncedGroupRecord[]): RenderedSyn
     }
     if (skippedMembers > 0) {
       warnings.push(
-        `group '${group.displayName}': ${skippedMembers} member${skippedMembers === 1 ? '' : 's'} not materialized (inactive or no email)`,
+        `group ${printable(group.displayName)}: ${skippedMembers} member${skippedMembers === 1 ? '' : 's'} not materialized (inactive or no email)`,
       );
     }
     if (malformedMembers > 0) {
       warnings.push(
-        `group '${group.displayName}': ${malformedMembers} member${malformedMembers === 1 ? '' : 's'} not materialized (malformed email)`,
+        `group ${printable(group.displayName)}: ${malformedMembers} member${malformedMembers === 1 ? '' : 's'} not materialized (malformed email)`,
       );
     }
     const name = group.displayName.trim();

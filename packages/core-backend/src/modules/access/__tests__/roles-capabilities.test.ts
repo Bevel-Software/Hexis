@@ -204,6 +204,43 @@ describe('RolesAdminService — capabilities, group assignment, conversion', () 
     });
   });
 
+  it('conversion re-checks IdP mode UNDER the synced file lock (TOCTOU: a sync landing mid-flight refuses)', async () => {
+    // The pre-lock IdP check passes (no synced file yet). Directory sync then
+    // materializes synced-groups.yaml just before the conversion gets its
+    // locks — the same interleaving the synced file's lock serializes in
+    // production. The under-lock recheck must refuse with the typed 409 and
+    // write nothing (committing a groups.yaml group in IdP mode writes a
+    // retired file).
+    const workspace = stubWorkspace(root);
+    const workflow = stubWorkflow();
+    const wf = workflow.svc as unknown as {
+      acquireLock: (w: string, b: string, p: string, u: AuthUser) => Promise<unknown>;
+    };
+    const origAcquire = wf.acquireLock.bind(workflow.svc);
+    wf.acquireLock = async (w, b, p, u) => {
+      if (p === `${KB}/synced-groups.yaml`) {
+        // The sync's provisioning push won the race for this lock and landed.
+        await write(repo, 'synced-groups.yaml', 'groups:\n  Engineering:\n    - ada@x.io\n');
+      }
+      return origAcquire(w, b, p, u);
+    };
+    const svc = new RolesAdminService(
+      workspace,
+      workflow.svc,
+      new AccessControlService(workspace as never, KB),
+      KB,
+      () => DEFAULT_BRANCH,
+    );
+    await expect(svc.convertRoleToGroup(ADMIN, 'product')).rejects.toMatchObject({
+      status: 409,
+      payload: { kind: 'idp-mode' },
+    });
+    // Nothing moved.
+    expect(await rolesYaml()).toBe(ROLES);
+    expect(await groupsYaml()).not.toContain('Product');
+    expect(workflow.commits).toHaveLength(0);
+  });
+
   it('a failed conversion with NO pre-existing groups.yaml leaves no groups.yaml behind', async () => {
     await fs.rm(path.join(repo, 'groups.yaml'));
     const workspace = stubWorkspace(root);

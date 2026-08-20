@@ -79,6 +79,49 @@ describe('findRoleRefsInText / rewriteRoleTokensInText — nested-mapping verb k
   });
 });
 
+describe('findRoleRefsInText / rewriteRoleTokensInText — indented ROOT mappings are live rules', () => {
+  // The resolver's YAML-subset parser accepts a root mapping at ANY indent
+  // (its root frame sits at indent -1), so `  read:` at column 2 with nothing
+  // enclosing it is a rule the resolver ENFORCES. A column-zero-only scanner
+  // would skip it — and a rename would strand the live grant.
+  const md = ['---', '  read:', '    - Sales', '---', ''].join('\n');
+
+  it('scan sees a uniformly-indented root verb key', () => {
+    expect(findRoleRefsInText(md)).toEqual([{ role: 'sales', verb: 'read' }]);
+  });
+
+  it('rename rewrites the indented root rule, preserving indentation', () => {
+    const out = rewriteRoleTokensInText(md, 'sales', 'Revenue');
+    expect(out.split('\n')).toContain('    - Revenue');
+    expect(out).not.toContain('Sales');
+  });
+
+  it('an indented root inline scalar matches and rewrites', () => {
+    const scalar = '---\n  owner: Sales # team\n---\n';
+    expect(findRoleRefsInText(scalar)).toEqual([{ role: 'sales', verb: 'owner' }]);
+    expect(rewriteRoleTokensInText(scalar, 'sales', 'Revenue')).toContain(
+      '  owner: Revenue # team',
+    );
+  });
+
+  it('a verb key nested under an INDENTED root mapping is still not a rule', () => {
+    // `config:` owns the root at indent 2; `read:` at indent 4 is ITS nested
+    // key, not a root verb — the resolver never parses it as a rule.
+    const nested = ['---', '  config:', '    read:', '      - Sales', '---', ''].join('\n');
+    expect(findRoleRefsInText(nested)).toEqual([]);
+    expect(rewriteRoleTokensInText(nested, 'sales', 'Revenue')).toBe(nested);
+  });
+
+  it('a structurally-broken region (the resolver rejects it) yields no refs and no rewrites', () => {
+    // `- Sales` at the SAME indent as its key is a parse error to the subset
+    // parser ("list item with no enclosing list") — the resolver enforces
+    // nothing from this file, so the scan must not report a live grant.
+    const broken = '---\nread:\n- Sales\n---\n';
+    expect(findRoleRefsInText(broken)).toEqual([]);
+    expect(rewriteRoleTokensInText(broken, 'sales', 'Revenue')).toBe(broken);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // KbReferenceScanner — candidates + freshness
 // ---------------------------------------------------------------------------

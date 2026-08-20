@@ -302,15 +302,20 @@ export function removeGroupRefsEverywhere(text: string, canonical: string): Edit
   return reemit(text, model);
 }
 
-/** Remove a role's group assignment. 404 unknown role; no-op if not assigned. */
+/** Remove a role's group assignment. 404 unknown role; no-op if not assigned.
+ *  Removes EVERY member whose ref canonicalises to the group — a hand-edited
+ *  file may carry several differently-formatted refs to the same group
+ *  (`group:gtm team` + `group:GTM  Team`), and stripping only the first would
+ *  leave stragglers the resolver still honors, so the role silently keeps the
+ *  group after an apparently-successful unassign. */
 export function removeRoleGroupRef(text: string, canonical: string, groupName: string): EditResult {
   const refCanonical = canonicalRoleName(groupName);
   if (!refCanonical) throw new RolesEditError('group name must not be empty');
   const model = parseRolesModel(text);
   const role = findRole(model, canonical);
   if (!role) throw new RolesEditError(`role not found: ${canonical}`, 404);
-  const idx = role.members.findIndex((m) => groupRefCanonical(m) === refCanonical);
-  if (idx < 0) return { text: emitRolesModel(model), changed: false };
-  role.members.splice(idx, 1);
+  const kept = role.members.filter((m) => groupRefCanonical(m) !== refCanonical);
+  if (kept.length === role.members.length) return { text: emitRolesModel(model), changed: false };
+  role.members = kept;
   return reemit(text, model);
 }
