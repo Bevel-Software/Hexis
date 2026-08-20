@@ -118,10 +118,10 @@ describe('the interactive tab: local first, hosted second, each with its own add
 
     const values = snippets();
     expect(values).toContain(
-      `claude mcp add hexis-local --env HEXIS_URL="${window.location.origin}" -- npx -y @bevel-software/hexis-mcp`,
+      `claude mcp add knowledge --env HEXIS_URL="${window.location.origin}" -- npx -y @bevel-software/hexis-mcp`,
     );
-    const json = values.find((v) => v.includes('mcpServers') && v.includes('hexis-local'));
-    const parsed = JSON.parse(json!).mcpServers['hexis-local'];
+    const json = values.find((v) => v.includes('mcpServers') && v.includes('"knowledge"'));
+    const parsed = JSON.parse(json!).mcpServers['knowledge'];
     expect(parsed.args).toEqual(['-y', '@bevel-software/hexis-mcp']);
     expect(parsed.env.HEXIS_URL).toBe(window.location.origin);
     // Keyless = interactive: the browser-sign-in mode carries no key env.
@@ -209,11 +209,11 @@ describe('the key-bearing snippets quote the deployment too', () => {
 
     // 7. the Claude Code stdio one-liner
     expect(values).toContain(
-      `claude mcp add hexis-local --env HEXIS_URL="${window.location.origin}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp`,
+      `claude mcp add knowledge --env HEXIS_URL="${window.location.origin}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp`,
     );
     // 8. the JSON config that spawns the package
-    const json = values.find((v) => v.includes('mcpServers') && v.includes('hexis-local'));
-    const parsed = JSON.parse(json!).mcpServers['hexis-local'];
+    const json = values.find((v) => v.includes('mcpServers') && v.includes('"knowledge"'));
+    const parsed = JSON.parse(json!).mcpServers['knowledge'];
     expect(parsed.args).toEqual(['-y', '@bevel-software/hexis-mcp']);
     expect(parsed.env.HEXIS_URL).toBe(window.location.origin);
     expect(parsed.env.HEXIS_CONNECTION_KEY).toBe(KEY);
@@ -246,7 +246,7 @@ describe('the one-click install link', () => {
     expect(href.origin + href.pathname).toBe('https://claude.ai/customize/connectors');
     expect(href.searchParams.get('modal')).toBe('add-custom-connector');
     expect(href.searchParams.get('connectorUrl')).toBe(PUBLIC_URL);
-    expect(href.searchParams.get('connectorName')).toBe('Hexis — kb.acme.com');
+    expect(href.searchParams.get('connectorName')).toBe('Knowledge — kb.acme.com');
   });
 
   it('opens in a new tab without handing Claude a window reference', () => {

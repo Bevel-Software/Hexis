@@ -388,7 +388,7 @@ describe('WelcomePage', () => {
       const href = new URL(link.getAttribute('href')!);
       expect(href.origin + href.pathname).toBe('https://claude.ai/customize/connectors');
       expect(href.searchParams.get('connectorUrl')).toBe('https://kb.acme.com/api/mcp');
-      expect(href.searchParams.get('connectorName')).toBe('Hexis — kb.acme.com');
+      expect(href.searchParams.get('connectorName')).toBe('Knowledge — kb.acme.com');
     });
 
     /**

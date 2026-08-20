@@ -165,7 +165,7 @@ export function McpServerSection({
             )}
             {server.local && (
               <div className="mt-1 text-ink-faint">
-                Runs locally — served by hexis-mcp on each member's machine, never by the workspace.
+                Runs locally — served by the local knowledge server on each member's machine, never by the workspace.
               </div>
             )}
           </dl>
