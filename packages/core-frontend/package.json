@@ -1,6 +1,6 @@
 {
   "name": "@bevel-software/platform-core-frontend",
-  "version": "0.11.1",
+  "version": "0.11.2",
   "description": "Open-source core UI of the Bevel platform (raw TS/TSX source): workspace explorer/viewer, branches & change requests, Library, secrets, tools, access control.",
   "type": "module",
   "main": "./src/index.ts",
