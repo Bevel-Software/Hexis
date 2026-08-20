@@ -309,6 +309,13 @@ export interface IWorkflowService {
    * can tell them apart).
    */
   hasQueuedCommit(workspaceId: string, branch: string, path: string): Promise<boolean>;
+  /**
+   * Whether the workspace's local branch is ahead of (or has no) upstream —
+   * i.e. holds commits not yet published. The complement of `hasQueuedCommit`
+   * for push-retry proofs: no live queued row AND nothing unpushed means the
+   * worker already drained the row and published it.
+   */
+  hasUnpushedCommits(workspaceId: string): Promise<boolean>;
   /** Current lock holder for `(branch, path)`, or null when nobody holds it. */
   getLock(workspaceId: string, branch: string, path: string): Promise<FileLock | null>;
 

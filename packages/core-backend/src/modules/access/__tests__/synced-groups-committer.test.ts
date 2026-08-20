@@ -27,7 +27,7 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
 
   function makeDeps(
     workflowOverrides: Partial<
-      Record<'commitChanges' | 'releaseLock' | 'hasQueuedCommit', unknown>
+      Record<'commitChanges' | 'releaseLock' | 'hasQueuedCommit' | 'hasUnpushedCommits', unknown>
     > = {},
   ) {
     const workspaceService = {
@@ -41,12 +41,16 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
     const releaseLockNoCommit = vi.fn(async () => undefined);
     const releaseLockUntouched = vi.fn(async () => undefined);
     const hasQueuedCommit = vi.fn(async () => false);
+    // Default: the branch still carries the landed-but-unpushed commit — the
+    // truthful answer everywhere except the worker-won-the-race scenario.
+    const hasUnpushedCommits = vi.fn(async () => true);
     const workflowService = {
       acquireLock: vi.fn(async () => ({ acquired: true, lock: {} })),
       releaseLock,
       releaseLockNoCommit,
       releaseLockUntouched,
       hasQueuedCommit,
+      hasUnpushedCommits,
       commitChanges: vi.fn(async () => ({})),
       ...workflowOverrides,
     } as unknown as IWorkflowService;
@@ -137,6 +141,32 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
       PushNeedsAgentResolutionError,
     );
     expect(hasQueuedCommit).toHaveBeenCalled();
+  });
+
+  it('resolves when the worker DRAINED the row between release and probe (nothing left unpushed)', async () => {
+    // The race the unpushed check closes: the pending-commits worker grabbed
+    // the freshly enqueued row and pushed it in the window between writeFiles'
+    // release and the committer's probe. The queue answers "no live row" —
+    // truthfully — but rethrowing would report a directory-sync failure AFTER
+    // successful publication. A branch with nothing left unpushed proves the
+    // worker won; persist must resolve.
+    const releaseLock = vi
+      .fn()
+      .mockResolvedValueOnce(undefined) // writeFiles' release: enqueued + dropped
+      .mockRejectedValue(
+        new WorkflowValidationError('Cannot release lock: not held by you.', {
+          kind: 'lock-not-held',
+        }),
+      );
+    const { committer } = makeDeps({
+      commitChanges: vi.fn(async () => {
+        throw new PushNeedsAgentResolutionError('main', '(batch)', 'non-fast-forward', 'rebase failed');
+      }),
+      releaseLock,
+      hasQueuedCommit: vi.fn(async () => false),
+      hasUnpushedCommits: vi.fn(async () => false),
+    });
+    await expect(committer.persist('groups:\n  Team:\n    - a@x.io\n')).resolves.toBeUndefined();
   });
 
   it('REJECTS when the queue itself cannot be read (armed must be PROVEN, never assumed)', async () => {

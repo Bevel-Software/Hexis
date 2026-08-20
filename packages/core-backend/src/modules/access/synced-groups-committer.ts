@@ -99,7 +99,12 @@ export function createSyncedGroupsCommitter(deps: {
           //      with the lock expired/stolen (NOT armed) — both leave the
           //      same lock-not-held answer. Only the queue itself can tell
           //      them apart: ask it directly for a live row on this path.
-          //   3. Anything else (or no row found) → no proven vehicle:
+          //   2b. No live row → one more possibility before giving up: the
+          //      worker may have DRAINED the row (and pushed) between the
+          //      first release and this probe. Nothing left unpushed on the
+          //      branch proves exactly that — the update is already
+          //      published, which is better than armed.
+          //   3. Anything else (or no proof either way) → no proven vehicle:
           //      rethrow, so the writer logs a real failure instead of a
           //      phantom success.
           // Rejecting is still the LAST resort — a landed commit routed
@@ -115,6 +120,12 @@ export function createSyncedGroupsCommitter(deps: {
             if (lockAlreadyReleased) {
               try {
                 armed = await workflowService.hasQueuedCommit(workspaceId, branch, wsRelPath);
+                if (!armed) {
+                  // The row may already be gone because the worker WON the
+                  // race: drained it and pushed. A branch with nothing left
+                  // unpushed cannot be holding our landed commit hostage.
+                  armed = !(await workflowService.hasUnpushedCommits(workspaceId));
+                }
               } catch (queueErr) {
                 console.warn(
                   '[directory-sync] could not verify the pending-commit queue:',

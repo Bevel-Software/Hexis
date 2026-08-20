@@ -333,12 +333,18 @@ describe('WorkflowService.releaseLockNoCommit — coordination-hold discard guar
   it('discards a coordination hold when the queue has NO live row (wipes smuggled bytes)', async () => {
     const git = makeGit();
     const pending = makePending();
+    const emitSpy = vi.spyOn(events, 'emit');
     const svc = makeFacade(git, makeFileLocks(USER.id, 'coordination'), pending, events);
 
     await svc.releaseLockNoCommit('ws-1', 'feat/x', 'foo.md', USER);
 
     expect(pending.hasLiveRowFor).toHaveBeenCalledWith('ws-1', 'feat/x', 'foo.md');
     expect(git.discardPath).toHaveBeenCalledWith('ws-1', 'foo.md');
+    // The disk really changed here, so watchers are told.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'lock-released',
+      'file-changed',
+    ]);
   });
 
   it('SKIPS the discard on a coordination hold when a live queued row exists (a prior save owns the bytes)', async () => {
@@ -349,12 +355,18 @@ describe('WorkflowService.releaseLockNoCommit — coordination-hold discard guar
     const git = makeGit();
     const pending = makePending();
     (pending.hasLiveRowFor as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    const emitSpy = vi.spyOn(events, 'emit');
     const svc = makeFacade(git, makeFileLocks(USER.id, 'coordination'), pending, events);
 
     await svc.releaseLockNoCommit('ws-1', 'feat/x', 'foo.md', USER);
 
     expect(git.discardPath).not.toHaveBeenCalled();
-    // The lock still releases — only the discard is skipped.
+    // The lock still releases — only the discard is skipped. And since the
+    // disk did NOT change, no file-changed goes out: announcing one would
+    // false-refresh every watcher of a file that is exactly as it was.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'lock-released',
+    ]);
   });
 });
 

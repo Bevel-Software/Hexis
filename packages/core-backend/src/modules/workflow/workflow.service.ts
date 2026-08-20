@@ -1003,9 +1003,11 @@ export class WorkflowService implements IWorkflowService {
         );
       }
     }
+    let discarded = false;
     if (!skipDiscard) {
       try {
         await this.git.discardPath(workspaceId, targetPath);
+        discarded = true;
       } catch (err) {
         // Best-effort: a discard failure is logged but doesn't block the
         // lock release. Worst case the working tree stays dirty for one
@@ -1018,7 +1020,7 @@ export class WorkflowService implements IWorkflowService {
     }
     await this.fileLocks.release(workspaceId, branch, targetPath, user);
     console.log(
-      `[lock] RELEASE-NO-COMMIT done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → discarded + released`,
+      `[lock] RELEASE-NO-COMMIT done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ${discarded ? 'discarded + released' : 'released (working tree untouched)'}`,
     );
     this.events?.emit({
       kind: 'lock-released',
@@ -1027,16 +1029,21 @@ export class WorkflowService implements IWorkflowService {
       path: targetPath,
     });
     // The disk just changed (revert / removal). Tell anyone watching so
-    // their open tabs refresh to the post-discard state.
-    this.events?.emit({
-      kind: 'file-changed',
-      workspaceId,
-      branch,
-      path: targetPath,
-      newSha: null,
-      byUserId: user.id,
-      byUserName: user.name,
-    });
+    // their open tabs refresh to the post-discard state — but only when the
+    // discard actually RAN: a skipped one (coordination hold shielding a
+    // queued save's bytes) or a failed one left the disk exactly as it was,
+    // and announcing a change would trigger refresh/invalidation for nothing.
+    if (discarded) {
+      this.events?.emit({
+        kind: 'file-changed',
+        workspaceId,
+        branch,
+        path: targetPath,
+        newSha: null,
+        byUserId: user.id,
+        byUserName: user.name,
+      });
+    }
   }
 
   /**
@@ -1081,6 +1088,10 @@ export class WorkflowService implements IWorkflowService {
 
   hasQueuedCommit(workspaceId: string, branch: string, targetPath: string): Promise<boolean> {
     return this.pendingCommits.hasLiveRowFor(workspaceId, branch, targetPath);
+  }
+
+  hasUnpushedCommits(workspaceId: string): Promise<boolean> {
+    return this.git.hasUnpushedCommits(workspaceId);
   }
 
   getLock(

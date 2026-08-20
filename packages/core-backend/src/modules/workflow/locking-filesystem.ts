@@ -314,6 +314,11 @@ export class LockingFilesystem extends LocalFilesystem {
     // merely-locked path would sweep in another save's still-queued dirty
     // bytes on that path under this batch's author/summary.
     const touched = [...paths];
+    // Seeds whose bytes LANDED, with the pre-image read under their lock:
+    // if the batch's commit then fails, these must be rolled back to that
+    // pre-image (not to HEAD — the pre-image may be a prior save's queued
+    // bytes) so an uncommitted grant can't sit on disk as if it were real.
+    const landedSeeds = new Map<string, { current: string; existedBefore: boolean }>();
     let change: Change | null;
     try {
       // Write/delete every file to disk inside the locks (workspace-relative;
@@ -356,6 +361,7 @@ export class LockingFilesystem extends LocalFilesystem {
         try {
           await super.writeFile(p, next);
           touched.push(p);
+          landedSeeds.set(p, { current, existedBefore });
         } catch (err) {
           // The write itself threw — it may have died MID-WRITE, leaving
           // partial bytes on disk. Left alone, those bytes would ride the
@@ -420,10 +426,30 @@ export class LockingFilesystem extends LocalFilesystem {
         );
         throw err;
       }
-      // A write or the commit threw — nothing of THIS batch should land, so
-      // its own dirtied paths (and any failed-restore seed) release no-commit
-      // (the discard reverts them). Merely-locked paths release untouched
-      // (see releaseAll).
+      // A write or the commit threw — nothing of THIS batch should land.
+      // Landed seed bytes are uncommitted now too: roll each back to the
+      // pre-image read under its lock (which may be a prior save's queued
+      // bytes — a discard to HEAD would destroy those), and only a seed
+      // whose rollback ALSO fails joins the discard set, same fail-closed
+      // posture as a failed seed write.
+      for (const [p, pre] of landedSeeds) {
+        try {
+          if (pre.existedBefore) {
+            await super.writeFile(p, pre.current);
+          } else {
+            const absolute = this.resolveAbsolutePath(p);
+            if (absolute) await fs.rm(absolute, { force: true });
+          }
+        } catch {
+          failedSeedDiscards.add(p);
+          console.warn(
+            `[locking-fs] could not roll back seed bytes for "${p}" after a failed batch — releasing with discard`,
+          );
+        }
+      }
+      // The batch's own dirtied paths (and any failed-restore seed) release
+      // no-commit (the discard reverts them). Merely-locked paths — rolled-
+      // back seeds included — release untouched (see releaseAll).
       await releaseAll((p) =>
         dirtied.has(p) || failedSeedDiscards.has(p) ? 'discard' : 'untouched',
       );

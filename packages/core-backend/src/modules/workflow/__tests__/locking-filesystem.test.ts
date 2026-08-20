@@ -633,6 +633,47 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     expect(workflow.releaseLock).not.toHaveBeenCalled();
   });
 
+  it('a LANDED seed rolls back to its pre-image when the batch commit fails — grant bytes must not outlive the batch uncommitted', async () => {
+    // The gap this pins: the seed write SUCCEEDED (path in `touched`) but
+    // `commitChanges` then failed, so nothing of the batch was committed.
+    // Releasing the seed untouched would leave its uncommitted grant bytes
+    // on disk as if they were real; discarding to HEAD would destroy a prior
+    // save's queued bytes. The right restore is the pre-image read under the
+    // seed's own lock.
+    await fs.mkdir(path.join(root, 'KnowledgeBase/Mine'), { recursive: true });
+    const priorBytes = 'prior queued bytes\n';
+    const seedPath = 'KnowledgeBase/Mine/access.md';
+    await fs.writeFile(path.join(root, seedPath), priorBytes);
+    const workflow = makeWorkflow();
+    (workflow.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('commit exploded'),
+    );
+    const creatorAccess = makeCreatorAccess();
+    creatorAccess.planForCreate.mockResolvedValue({
+      kind: 'seed-access-md',
+      wsRelPath: seedPath,
+      apply: (current: string) => current + 'read: Alice\n',
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+    );
+    await expect(
+      fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch'),
+    ).rejects.toThrow('commit exploded');
+    // The landed grant was rolled back to the pre-image, byte-identical…
+    expect(await fs.readFile(path.join(root, seedPath), 'utf-8')).toBe(priorBytes);
+    // …and the seed releases UNTOUCHED (the prior queued bytes are not this
+    // batch's to discard), while the caller's own write releases via discard.
+    expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', seedPath, USER);
+    expect(workflow.releaseLockNoCommit).toHaveBeenCalledWith(
+      'ws-feat', 'feat', 'KnowledgeBase/Mine/doc.md', USER,
+    );
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalledWith(
+      'ws-feat', 'feat', seedPath, USER,
+    );
+  });
+
   it('a seed whose write AND restore both fail releases with DISCARD — partial bytes must never land', async () => {
     // The double-failure residual: the seed write died mid-write and even the
     // pre-image restore failed, so the path holds known-partial bytes. The
