@@ -61,8 +61,12 @@ export const SHUTDOWN_GRACE_MS = 15_000;
  */
 export function beginOrderlyExit(holder: ShutdownHolder): void {
   holder.exiting = true;
+  // Deliberately REFERENCED, unlike the startup force-exit: `process.exit`
+  // in the finally guarantees a completed shutdown never outlives its
+  // clearTimeout, and a WEDGED one may have already closed/unref'd every
+  // other handle — an unref'd watchdog would let the process drift out with
+  // status 0 instead of enforcing the bound and reporting the failure.
   const watchdog = setTimeout(() => process.exit(process.exitCode || 1), SHUTDOWN_GRACE_MS);
-  watchdog.unref?.();
   void holder.shutdown!().finally(() => {
     clearTimeout(watchdog);
     process.exit(process.exitCode ?? 0);

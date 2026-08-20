@@ -1578,18 +1578,26 @@ export class GitService implements IGitService {
    * Used by the pending-commits worker's no-op arm: a clean tree does NOT
    * mean "nothing to share" when a prior best-effort push (the autosave
    * path) failed and left the committed change stranded locally.
+   *
+   * Serialized under the workspace mutex: a pull-rebase in flight moves HEAD
+   * through states where the local commits are momentarily unreachable, and
+   * an unserialized read there answers "nothing unpushed" about work that is
+   * about to be replayed — callers use this as a publication PROOF, so it may
+   * only ever see settled states.
    */
   async hasUnpushedCommits(workspaceId: string): Promise<boolean> {
-    const cwd = await this.repoDir(workspaceId);
-    const branch = await this.currentBranch(cwd);
-    try {
-      const { stdout } = await this.git(cwd, [
-        'rev-list', '--count', `refs/remotes/origin/${branch}..HEAD`,
-      ]);
-      return Number(stdout.trim()) > 0;
-    } catch {
-      return true;
-    }
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const branch = await this.currentBranch(cwd);
+      try {
+        const { stdout } = await this.git(cwd, [
+          'rev-list', '--count', `refs/remotes/origin/${branch}..HEAD`,
+        ]);
+        return Number(stdout.trim()) > 0;
+      } catch {
+        return true;
+      }
+    });
   }
 
   /**
