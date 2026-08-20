@@ -279,9 +279,9 @@ function isPrivateIpv6(bracketed: string): boolean {
  */
 export function connectorName(mcpUrl: string): string {
   try {
-    return `Hexis — ${new URL(mcpUrl).host}`;
+    return `Knowledge — ${new URL(mcpUrl).host}`;
   } catch {
-    return 'Hexis';
+    return 'Knowledge';
   }
 }
 
@@ -394,7 +394,7 @@ export function hexisMcpJsonSnippet(baseUrl: string, bearer?: string): string {
   return JSON.stringify(
     {
       mcpServers: {
-        'hexis-local': {
+        knowledge: {
           command: 'npx',
           args: ['-y', '@bevel-software/hexis-mcp'],
           env: {
@@ -421,7 +421,7 @@ export function hexisMcpJsonSnippet(baseUrl: string, bearer?: string): string {
  */
 export function hexisMcpClaudeCommand(baseUrl: string, bearer?: string): string {
   return (
-    `claude mcp add hexis-local` +
+    `claude mcp add knowledge` +
     ` --env HEXIS_URL="${escapeForDoubleQuotes(baseUrl)}"` +
     (bearer ? ` --env HEXIS_CONNECTION_KEY="${escapeForDoubleQuotes(bearer)}"` : '') +
     ` -- npx -y @bevel-software/hexis-mcp`

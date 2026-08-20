@@ -8,7 +8,7 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AccessControlService } from '../access-control.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import { createSyncedGroupsCommitter } from '../synced-groups-committer.js';
-import { PushNeedsAgentResolutionError, WorkflowValidationError } from '../../workflow/workflow.errors.js';
+import { PushNeedsAgentResolutionError, WorkflowValidationError } from '../../../shared/domain-errors.js';
 
 const KB = 'knowledge-base';
 const BOT: AuthUser = { id: 'bot-1', email: 'directory-sync@bevel.local', name: 'Directory Sync Bot' };

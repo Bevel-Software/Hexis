@@ -311,8 +311,8 @@ describe('claudeInstallUrl: the documented install link', () => {
    * contains spaces.
    */
   it('encodes spaces as %20 rather than +', () => {
-    const link = claudeInstallUrl(URL_UNDER_TEST, 'Hexis — kb.acme.com');
-    expect(link).toContain('connectorName=Hexis%20%E2%80%94%20kb.acme.com');
+    const link = claudeInstallUrl(URL_UNDER_TEST, 'Knowledge — kb.acme.com');
+    expect(link).toContain('connectorName=Knowledge%20%E2%80%94%20kb.acme.com');
     expect(link).not.toContain('+');
   });
 
@@ -327,7 +327,7 @@ describe('claudeInstallUrl: the documented install link', () => {
 
 describe('connectorName: what it is called in a connector list', () => {
   it('names the product and the deployment', () => {
-    expect(connectorName('https://kb.acme.com/api/mcp')).toBe('Hexis — kb.acme.com');
+    expect(connectorName('https://kb.acme.com/api/mcp')).toBe('Knowledge — kb.acme.com');
   });
 
   /**
@@ -343,11 +343,11 @@ describe('connectorName: what it is called in a connector list', () => {
 
   // `host`, not `hostname` — two instances on one machine differ only by port.
   it('keeps a non-default port', () => {
-    expect(connectorName('https://kb.acme.com:8443/api/mcp')).toBe('Hexis — kb.acme.com:8443');
+    expect(connectorName('https://kb.acme.com:8443/api/mcp')).toBe('Knowledge — kb.acme.com:8443');
   });
 
   it('still names something when the URL is unparseable', () => {
-    expect(connectorName('not a url')).toBe('Hexis');
+    expect(connectorName('not a url')).toBe('Knowledge');
   });
 });
 
@@ -430,7 +430,7 @@ describe('snippets: one builder per client, keyed or not', () => {
 
     it('builds a JSON config that spawns the package with the key', () => {
       const parsed = JSON.parse(hexisMcpJsonSnippet(BASE, KEY));
-      expect(parsed.mcpServers['hexis-local']).toEqual({
+      expect(parsed.mcpServers['knowledge']).toEqual({
         command: 'npx',
         args: ['-y', '@bevel-software/hexis-mcp'],
         env: {
@@ -448,7 +448,7 @@ describe('snippets: one builder per client, keyed or not', () => {
      */
     it('omits the key env entirely when no key was minted — keyless selects browser sign-in', () => {
       const parsed = JSON.parse(hexisMcpJsonSnippet(BASE));
-      expect(parsed.mcpServers['hexis-local'].env).toEqual({
+      expect(parsed.mcpServers['knowledge'].env).toEqual({
         HEXIS_URL: BASE,
       });
       expect(hexisMcpJsonSnippet(BASE)).not.toContain(KEY);
@@ -456,7 +456,7 @@ describe('snippets: one builder per client, keyed or not', () => {
 
     it('builds the Claude Code command as a stdio add with both env values', () => {
       expect(hexisMcpClaudeCommand(BASE, KEY)).toBe(
-        `claude mcp add hexis-local --env HEXIS_URL="${BASE}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp`,
+        `claude mcp add knowledge --env HEXIS_URL="${BASE}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp`,
       );
     });
 

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, test, vi } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { createToolManualsBrowserRoutes } from '../tool-manuals.routes.js';
 import { ToolManualService } from '../tool-manuals.service.js';
-import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { IToolManualService, ToolManualDetail } from '../tool-manuals.contract.js';

@@ -8,7 +8,7 @@ import { KbStartupRunner } from '../../kb-startup-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
 import { RolesYamlStep } from '../roles-yaml.step.js';
-import { renderRolesYaml } from '../../../../access/render-roles-yaml.js';
+import { renderRolesYaml } from '../../../../access-model/render-roles-yaml.js';
 import { TemplateFilesStep } from '../template-files.step.js';
 import { buildSeedTree } from '../seed-tree.js';
 import { defaultKbTemplateDir } from '../../../../../assets.js';

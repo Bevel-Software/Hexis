@@ -2,11 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import {
-  WorkspaceService,
-  workspaceIdForBranch,
-  type ReadTreeFilter,
-} from '../workspace.service.js';
+import { WorkspaceService, type ReadTreeFilter } from '../workspace.service.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 
 const KB = 'knowledge-base';
 

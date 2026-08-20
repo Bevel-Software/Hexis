@@ -1,8 +1,13 @@
 /**
  * Workflow domain errors. This is the single source of truth — every error
- * raised by the workflow module (branches, changes, change requests, access
+ * raised by the workflow domain (branches, changes, change requests, access
  * control, locks) lives here. Route handlers shape responses via the
  * `.status` + `.payload` contract on the base class.
+ *
+ * Lives in `src/shared` (not `modules/workflow`) because the classes are
+ * consumed across module boundaries — access, diff, plugins and workspace all
+ * catch or raise them — and `src/shared` is the layer with no module imports.
+ * Only a type from `@bevel-software/platform-shared` comes in; nothing else.
  *
  * Naming: classes use workflow vocabulary. `WorkflowDomainError` is the
  * abstract base; specific subclasses describe the workflow concept that

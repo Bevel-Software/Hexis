@@ -3,10 +3,10 @@ import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared
 import type { IDiffService } from './diff.interface.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { toKbRelative, resolveReadableMap } from '../access/kb-read-filter.js';
-import { WorkflowDomainError, WorkflowValidationError } from '../workflow/workflow.errors.js';
-import { LockingFilesystem } from '../workflow/locking-filesystem.js';
-import { branchForWorkspaceId } from '../workspace/workspace.service.js';
+import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
+import { WorkflowDomainError, WorkflowValidationError } from '../../shared/domain-errors.js';
+import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import '../auth/auth.middleware.js';
 
 function toHttpError(

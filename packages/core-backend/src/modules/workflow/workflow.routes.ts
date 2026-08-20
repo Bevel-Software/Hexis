@@ -27,9 +27,9 @@ import type {
 } from '@bevel-software/platform-shared';
 import type { AuthService } from '../auth/auth.service.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { branchForWorkspaceId } from '../workspace/workspace.service.js';
+import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from './event-bus.js';
-import { WorkflowDomainError } from './workflow.errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 function toHttpError(

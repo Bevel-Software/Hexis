@@ -1,10 +1,11 @@
 import { LocalFilesystem } from '@mastra/core/workspace';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
-import { LockingFilesystem } from '../workflow/locking-filesystem.js';
-import { ReadOnlyFilesystem } from '../workflow/read-only-filesystem.js';
-import { makeRolesYamlWriteValidator } from '../access/roles-yaml-guard.js';
-import type { ICreatorAccess } from '../access/creator-access.js';
-import { branchForWorkspaceId, type WorkspaceService } from '../workspace/workspace.service.js';
+import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { ReadOnlyFilesystem } from '../kb-fs/read-only-filesystem.js';
+import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
+import type { ICreatorAccess } from '../access-model/creator.js';
+import type { WorkspaceService } from '../workspace/workspace.service.js';
+import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthService } from '../auth/auth.service.js';
 import { ToolError, type ToolContext } from './tool.contract.js';

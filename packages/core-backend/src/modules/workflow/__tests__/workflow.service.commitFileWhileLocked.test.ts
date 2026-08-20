@@ -10,7 +10,7 @@ import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowEventBus } from '../event-bus.js';
 import { WorkflowService } from '../workflow.service.js';
 import type { Database } from '../../database/connection.js';
-import { WorkflowValidationError } from '../workflow.errors.js';
+import { WorkflowValidationError } from '../../../shared/domain-errors.js';
 
 /**
  * `commitFileWhileLocked` (autosave checkpoint) has subtler semantics

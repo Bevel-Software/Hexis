@@ -1,4 +1,4 @@
-import { parseRolesYaml } from './access-control.service.js';
+import { parseRolesYaml } from './access-grammar.js';
 
 /**
  * Render a `roles.yaml` granting Admin to each email — the ONE renderer every

@@ -4,8 +4,8 @@ import path from 'node:path';
 import os from 'node:os';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import type { IDiffService } from '../diff.interface.js';
-import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
-import { WorkflowValidationError } from '../../workflow/workflow.errors.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { WorkflowValidationError } from '../../../shared/domain-errors.js';
 import { rejectPathsLocked } from '../diff.routes.js';
 
 /**

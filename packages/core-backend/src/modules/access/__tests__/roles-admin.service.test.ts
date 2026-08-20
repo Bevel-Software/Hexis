@@ -7,11 +7,11 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { FileTreeEntry, WorkflowEventPayload } from '@bevel-software/platform-shared';
-import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { AccessControlService } from '../access-control.service.js';
 import { RolesAdminService } from '../roles-admin.service.js';
 import { rewriteRoleTokensInText, findRoleRefsInText } from '../reference-scan.js';
-import { PushNeedsAgentResolutionError } from '../../workflow/workflow.errors.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 

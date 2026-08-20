@@ -7,12 +7,12 @@ import type {
   GrantSources,
 } from './access-control.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { branchForWorkspaceId, workspaceIdForBranch } from '../workspace/workspace.service.js';
+import { branchForWorkspaceId, workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { WorkflowService } from '../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import { WorkflowDomainError } from '../workflow/workflow.errors.js';
-import { AccessDeniedError } from './access-errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { AccessDeniedError } from '../access-model/access-errors.js';
 import {
   AccessMutationService,
   AccessMutationError,
@@ -24,11 +24,11 @@ import {
   EVERYONE_CANONICAL,
   ROLE_TOKEN_PREFIX,
   type Verb,
-} from './access-control.service.js';
+} from '../access-model/access-grammar.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
 import { toHttpError as sharedToHttpError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import { RolesAdminService } from './roles-admin.service.js';
-import type { Principal } from './access-splice.js';
+import type { Principal } from '../access-model/access-splice.js';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
 import '../auth/auth.middleware.js';

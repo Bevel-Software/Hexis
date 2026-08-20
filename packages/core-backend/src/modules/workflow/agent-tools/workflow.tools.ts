@@ -5,7 +5,7 @@ import { ToolError, type ToolContext, type ToolHandler } from '../../tool-helper
 import { toolDef, withBranchInput } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
-import { workspaceIdForBranch } from '../../workspace/workspace.service.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 
 // A function, not a constant: the branch model is applied during boot, and a
 // module-scope capture would freeze this at the empty set that exists before it.

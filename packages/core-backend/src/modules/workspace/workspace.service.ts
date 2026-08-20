@@ -6,8 +6,10 @@ import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
 import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { BevelIgnoreStack } from './bevel-ignore.js';
-import { assertValidBranchName } from '../workflow/git/branch-name.js';
-import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../workflow/git/clone-config.js';
+import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { assertValidBranchName } from '../kb-fs/branch-name.js';
+import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../kb-fs/clone-config.js';
 import type { IDiffService } from '../diff/diff.interface.js';
 
 /**
@@ -86,24 +88,11 @@ function redactError(err: unknown): string {
 const FETCH_CACHE_TTL_MS = 30_000;
 
 /**
- * Map a branch name to the directory that contains its workspace clone.
- * `encodeURIComponent` handles `/` in branch names (e.g. `alice/foo`) by
- * encoding it to `%2F` — single-segment-safe on every supported filesystem.
- */
-export function workspaceIdForBranch(branch: string): string {
-  return encodeURIComponent(branch);
-}
-
-export function branchForWorkspaceId(workspaceId: string): string {
-  return decodeURIComponent(workspaceId);
-}
-
-/**
  * Per-directory read filter for the file tree. Given a batch of
  * workspace-relative entry paths (e.g. `staging-repo/Product/Knowledge/x.md`),
  * returns a verdict map keyed by those paths (`path → readable`). Injected by
  * the route from the access service so `WorkspaceService` stays access-agnostic
- * (it gets a function, not the access module). See `modules/access/kb-read-filter.ts`.
+ * (it gets a function, not the access module). See `modules/access-model/kb-read-filter.ts`.
  */
 export type ReadTreeFilter = (wsRelPaths: string[]) => Promise<Map<string, boolean>>;
 
@@ -408,7 +397,7 @@ export class WorkspaceService implements IWorkspaceService {
 
   /**
    * Collapse the clone's tracking config to a single fetch refspec and a single
-   * upstream ref for `branch` (see `workflow/git/clone-config.ts`). A clone that
+   * upstream ref for `branch` (see `kb-fs/clone-config.ts`). A clone that
    * accumulated a second `remote.origin.fetch` refspec or `branch.<b>.merge`
    * value makes git refuse to refresh it — "Cannot rebase onto multiple
    * branches" — which is how a post-merge pull of the target branch fails.
@@ -724,7 +713,7 @@ export class WorkspaceService implements IWorkspaceService {
 
     // This driver runs outside the git layer's per-workspace mutex, so it may
     // only run the safe implicit-fetch shape — see `SAFE_IMPLICIT_FETCH_ARGS`
-    // in `workflow/git/clone-config.ts` for the full rationale.
+    // in `kb-fs/clone-config.ts` for the full rationale.
     const promise = execFileAsync(
       'git',
       ['-C', repoDir, ...SAFE_IMPLICIT_FETCH_ARGS],
@@ -1268,6 +1257,13 @@ export class WorkspaceService implements IWorkspaceService {
       // Bootstrap reported success but didn't register — defensive fallback.
       return workspaceDir;
     } catch (err) {
+      // Domain errors pass through intact: they carry the status the routes
+      // map (BranchNameError → 400), which is how a malformed or bogus
+      // workspace id stays a client error instead of the wrap below erasing
+      // the type and surfacing as a 500. A malformed id (bad percent-escape)
+      // decodes to itself, and `%` never passes the branch-name rules, so it
+      // lands here as a BranchNameError like any other invalid name.
+      if (err instanceof WorkflowDomainError) throw err;
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(`Invalid workspace ID "${workspaceId}": ${reason}`);
     }
