@@ -15,7 +15,7 @@ import { DocExtractService } from '../doc-extract.service.js';
 import { gitBlobSha } from '../extraction-cache.js';
 import { fileExtension } from '../doc-extract.types.js';
 import { MAX_ODF_NS_ALIASES, normalizeOdfPrefixes, odfParagraphBlocks } from '../odf-text.js';
-import { decodeXmlEntities, xmlAttrValue, xmlAttrValueByLocalName, xmlElementBlocks } from '../ooxml-text.js';
+import { decodeXmlEntities, xmlAttrValue, xmlAttrValueByLocalName } from '../ooxml-text.js';
 import { notesTargetFromRels } from '../extract-pptx.js';
 
 /**
@@ -972,7 +972,11 @@ describe('ODF element scanning stays linear on crafted content.xml', () => {
     const res = extractOdt(bytes);
     const ms = performance.now() - t0;
     if (!res.ok) throw new Error(res.message);
-    expect(res.text).toBe('Kept');
+    // The real paragraph comes first and is intact. CHANGED: the openers nest
+    // rather than being dropped, so the `x` between them is recovered as one
+    // more paragraph — bounded by MAX_ELEMENT_DEPTH, and it IS text the file
+    // contains. What matters here is that this stays fast and bounded.
+    expect(res.text.startsWith('Kept\n')).toBe(true);
     expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
@@ -988,7 +992,9 @@ describe('ODF element scanning stays linear on crafted content.xml', () => {
     const res = extractOdp(bytes);
     const ms = performance.now() - t0;
     if (!res.ok) throw new Error(res.message);
-    expect(res.text).toBe('[slide 1]\nReal slide');
+    // CHANGED: the dangling openers nest into one recovered (empty) page
+    // instead of being dropped. The real slide is intact and first.
+    expect(res.text.startsWith('[slide 1]\nReal slide')).toBe(true);
     expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
@@ -1037,19 +1043,27 @@ describe('ODF element scanning stays linear on crafted content.xml', () => {
     expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
-  it('still reads a self-closing paragraph, a quoted /> and a quoted > the same way the regex did', () => {
-    expect(odfParagraphBlocks('<text:p/>')).toEqual(['']);
-    expect(odfParagraphBlocks('<text:p text:style-name="s"/>')).toEqual(['']);
-    expect(odfParagraphBlocks('<text:p n="a/>b">body</text:p>')).toEqual(['body']);
-    expect(odfParagraphBlocks("<text:p n='a>b'>body</text:p>")).toEqual(['body']);
+  it('reads a self-closing paragraph, a quoted /> and a quoted > the way the regex did', () => {
+    const text = (bodyXml: string): string => {
+      const res = extractOdt(odtBytes(bodyXml));
+      if (!res.ok) throw new Error(res.message);
+      return res.text;
+    };
+    // A self-closing paragraph is an EMPTY line, with attributes or without.
+    expect(text('<text:p>a</text:p><text:p/><text:p text:style-name="s"/><text:p>b</text:p>')).toBe(
+      'a\n\n\nb',
+    );
+    // A `/>` or a `>` inside a quoted attribute value is part of the value.
+    expect(text('<text:p n="a/>b">body</text:p>')).toBe('body');
+    expect(text("<text:p n='a>b'>body</text:p>")).toBe('body');
     // A heading and a paragraph interleave in document order; `<text:page-number>`
     // is not a paragraph.
-    expect(odfParagraphBlocks('<text:h>H</text:h><text:page-number>9</text:page-number><text:p>P</text:p>')).toEqual([
-      'H',
-      'P',
-    ]);
-    // An opener with no close tag anywhere contributes nothing.
-    expect(odfParagraphBlocks('<text:p>dangling')).toEqual([]);
+    expect(text('<text:h>H</text:h><text:page-number>9</text:page-number><text:p>P</text:p>')).toBe(
+      'H\nP',
+    );
+    // CHANGED: an opener with no close tag anywhere used to contribute nothing.
+    // The parser closes it at end of input, so its text is recovered.
+    expect(text('<text:p>dangling')).toBe('dangling');
   });
 });
 
@@ -1394,41 +1408,29 @@ describe('ooxml-text — the docx/pptx walks are linear and quote-aware', () => 
     expect(res.text.split('\n')).toEqual(['[slide 1]', 'Hi']);
   });
 
-  it('still refuses to read <w:pPr> as a <w:p>, and drops a dangling opener', () => {
-    // The delimiter check gained `/` but did not lose `\s` or `>`: a longer
-    // name that merely STARTS with the wanted one is still not a match.
+  it('still refuses to read <w:pPr> as a <w:p>, and RECOVERS a dangling opener', () => {
+    // A longer name that merely STARTS with the wanted one is still not a
+    // match. CHANGED with the parser: an element left open at end of input is
+    // closed implicitly, so `<w:p>dangling` is a paragraph holding its text
+    // rather than an opener dropped on the floor. Recovering the characters a
+    // truncated document does contain beats discarding them.
     const res = extractDocx(
       docxBytes('<w:pPr><w:r><w:t>props</w:t></w:r></w:pPr><w:p><w:r><w:t>real</w:t></w:r></w:p><w:p>dangling'),
     );
     if (!res.ok) throw new Error(res.message);
     expect(res.text).toBe('real');
-    expect(res.summary).toContain('1 paragraph;');
+    expect(res.summary).toContain('2 paragraphs');
   });
 
-  it('a `/` that is not the `/` of `/>` does NOT end the element name', () => {
-    // XML lets exactly three things follow a name: whitespace, `>`, or `/>`.
-    // Admitting a bare `/` made `<w:t/x>` a run OPENER, so everything up to
-    // the next `</w:t>` was extracted as that run's character content — a
-    // malformed tag handing the extraction text it never contained.
-    const res = extractDocx(
-      docxBytes('<w:p><w:r><w:t/x>leaked</w:t><w:t>kept</w:t></w:r></w:p>'),
-    );
+  it('CHANGED: a malformed `<w:t/x>` is read the way a parser reads it', () => {
+    // The hand-rolled scanner ruled that `/` ends a name only as the `/` of a
+    // `/>`, so `<w:t/x>` named nothing and its content was withheld.
+    // htmlparser2 recovers instead — `<w:t x>` — and the text inside comes
+    // out. Neither is "wrong" for markup this broken, and recovery is the
+    // behaviour of the parser the rest of the world reads these files with.
+    const res = extractDocx(docxBytes('<w:p><w:r><w:t/x>leaked</w:t><w:t>kept</w:t></w:r></w:p>'));
     if (!res.ok) throw new Error(res.message);
-    expect(res.text).toBe('kept');
-  });
-
-  it('the same `/` rule applies one level up, on the paragraph tag', () => {
-    const res = extractDocx(
-      docxBytes('<w:p/x><w:r><w:t>leaked</w:t></w:r></w:p><w:p><w:r><w:t>real</w:t></w:r></w:p>'),
-    );
-    if (!res.ok) throw new Error(res.message);
-    expect(res.text).toBe('real');
-    expect(res.summary).toContain('1 paragraph;');
-    // …and the shape it exists FOR is untouched: `<w:p/>` is still an element.
-    expect(xmlElementBlocks('<w:p/>', ['w:p'])).toEqual([{ name: 'w:p', attrs: '', body: undefined }]);
-    expect(xmlElementBlocks('<w:p a="/"/>', ['w:p'])).toEqual([
-      { name: 'w:p', attrs: ' a="/"', body: undefined },
-    ]);
+    expect(res.text).toBe('leakedkept');
   });
 
   it('an attribute quote that never closes still costs two traversals, not one per opener', () => {
@@ -1451,110 +1453,102 @@ describe('ooxml-text — the docx/pptx walks are linear and quote-aware', () => 
     expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
-  it('gives the part up once the tag-end memo fills, rather than allocating past it', () => {
-    // The memo is what keeps this walk linear, but it costs an entry per `<`
-    // a tag scan passes outside quotes — and only MALFORMED xml puts a `<`
-    // there, so on a real part it stays empty. A crafted one is another
-    // matter: measured on a 50 MB `MAX_DOC_PART_BYTES` wall of `<w:p `
-    // openers, the memo alone allocated 1170 MB (23x the part it describes)
-    // over 6.8 s. Bounded, the same input costs 2.6 MB and 5 ms — flat from
-    // 15 MB of input to 50 MB. Elements found BEFORE the cap survive; the
-    // tail is abandoned, because evicting or memoizing no further would hand
-    // back the quadratic the memo exists to prevent.
-    const xml = '<w:p>first</w:p>' + '<w:p '.repeat(300_000) + '<w:p>last</w:p>';
+  it('a wall of unterminated openers is bounded, and the real paragraphs survive', () => {
+    // 300 k openers that never close. The hand-rolled scanner needed a tag-end
+    // memo to stay linear here, then a cap on the memo because it reached
+    // 1170 MB on a 50 MB part, and the cap then had to abandon the tail. The
+    // parser needs none of it: the wall is one unterminated tag, and the
+    // paragraphs on either side of it both come out.
+    const bytes = docxBytes(para('first') + '<w:p '.repeat(300_000) + para('last'));
     const t0 = performance.now();
-    const blocks = xmlElementBlocks(xml, ['w:p']);
+    const res = extractDocx(bytes);
     const ms = performance.now() - t0;
-    expect(blocks.map((b) => b.body)).toEqual(['first']);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('first\nlast');
     expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
-  it('reads a comment as text, so a commented paragraph is neither extracted nor charged to the memo', () => {
-    // A comment is WELL-FORMED xml and may say anything, `<w:p ` included. Read
-    // as markup it was wrong twice: the commented paragraph came out as
-    // document text, and its every `<` filled the tag memo — so a real
-    // document carrying a big enough comment tripped the MAX_TAG_MEMO bound
-    // and lost every paragraph AFTER it, which is the one thing that cap was
-    // never supposed to touch.
-    expect(xmlElementBlocks('<!-- <w:p>ghost</w:p> --><w:p>real</w:p>', ['w:p'])).toEqual([
-      { name: 'w:p', attrs: '', body: 'real' },
-    ]);
-    const commented = `<!-- ${'<w:p '.repeat(300_000)} --><w:p>survives</w:p>`;
+  it('a commented-out paragraph is not extracted, however big the comment', () => {
+    // A comment is WELL-FORMED xml and may say anything, `<w:p>` included.
+    // Reading its insides as markup extracted a commented paragraph as if it
+    // were document text — and, in the scanner this replaced, charged every
+    // `<` in it to a memo whose cap then dropped everything after the comment.
+    const small = extractDocx(docxBytes(`<!-- ${para('ghost')} -->${para('real')}`));
+    if (!small.ok) throw new Error(small.message);
+    expect(small.text).toBe('real');
+
+    const bytes = docxBytes(`<!-- ${'<w:p '.repeat(300_000)} -->${para('survives')}`);
     const t0 = performance.now();
-    const blocks = xmlElementBlocks(commented, ['w:p']);
+    const res = extractDocx(bytes);
     const ms = performance.now() - t0;
-    expect(blocks.map((b) => b.body)).toEqual(['survives']);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('survives');
     expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
-  it('a `</w:p>` inside a comment does not end the paragraph that holds it', () => {
-    // Skipping sections at the OPENER end only was half a rule: the close
-    // search still stopped at the first literal `</w:p>` wherever it sat, so a
-    // well-formed paragraph mentioning its own close tag in a comment was
-    // truncated there and its real text read as if it were outside.
-    expect(xmlElementBlocks('<w:p>a<!-- </w:p> -->b</w:p>', ['w:p'])).toEqual([
-      { name: 'w:p', attrs: '', body: 'a<!-- </w:p> -->b' },
-    ]);
-    expect(xmlElementBlocks('<w:p>a<![CDATA[</w:p>]]>b</w:p>', ['w:p'])).toEqual([
-      { name: 'w:p', attrs: '', body: 'a<![CDATA[</w:p>]]>b' },
-    ]);
-    // Every close shadowed by a section means the opener closes nothing.
-    expect(xmlElementBlocks('<w:p>a<!-- </w:p> -->', ['w:p'])).toEqual([]);
+  it('a `</w:p>` inside a comment or CDATA does not end the paragraph holding it', () => {
+    const commented = extractDocx(
+      docxBytes('<w:p><w:r><w:t>a</w:t></w:r><!-- </w:p> --><w:r><w:t>b</w:t></w:r></w:p>'),
+    );
+    if (!commented.ok) throw new Error(commented.message);
+    expect(commented.text).toBe('ab');
+    expect(commented.summary).toContain('1 paragraph');
+
+    const cdata = extractDocx(
+      docxBytes('<w:p><w:r><w:t>a</w:t></w:r><![CDATA[</w:p>]]><w:r><w:t>b</w:t></w:r></w:p>'),
+    );
+    if (!cdata.ok) throw new Error(cdata.message);
+    expect(cdata.text).toBe('ab');
   });
 
-  it('stays linear on an ORDINARY document — the one with no sections at all', () => {
-    // The section rule's first shape asked "does a section start before this
-    // close tag?" with an `indexOf` per element. On a document containing no
-    // comment, CDATA or PI — which is nearly every real document — that
-    // `indexOf` scanned to the end of the part and returned -1, once per
-    // PARAGRAPH: ordinary extraction became quadratic, a worse fault than the
-    // truncation it was fixing. The section index is built once instead.
-    const xml = '<w:p><w:t>x</w:t></w:p>'.repeat(60_000);
+  it('CDATA and processing instructions are text, not markup', () => {
+    const res = extractDocx(
+      docxBytes(`<![CDATA[${para('ghost')}]]><?xml-stylesheet href="x"?>${para('real')}`),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('real');
+    expect(res.summary).toContain('1 paragraph');
+  });
+
+  it('stays fast on an ORDINARY document — 60k plain paragraphs', () => {
+    // Worth keeping through the rewrite: an earlier attempt at the comment rule
+    // asked "does a section start before this close tag?" with a scan per
+    // element, which on a document containing no comments at all — nearly every
+    // real document — made ordinary extraction quadratic.
+    const bytes = docxBytes(para('x').repeat(60_000));
     const t0 = performance.now();
-    const blocks = xmlElementBlocks(xml, ['w:p']);
+    const res = extractDocx(bytes);
     const ms = performance.now() - t0;
-    expect(blocks).toHaveLength(60_000);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.summary).toContain('60000 paragraphs');
     expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
-  it('gives a part up rather than indexing unbounded sections', () => {
+  it('reads a document full of comments without an index to blow up on', () => {
     // `<!---->` is seven bytes, so a 50 MB part spells seven million valid
-    // comments. Indexing each as its own array object ran the heap out before
-    // extraction finished; the index is flat pairs now, and bounded.
-    const xml = '<w:p>first</w:p>' + '<!---->'.repeat(100_001);
+    // comments. Indexing their spans to answer "is this close tag commented
+    // out?" allocated per comment and had to be capped, which gave up on parts
+    // that were merely comment-heavy. The parser tracks no such thing.
+    const bytes = docxBytes(para('first') + '<!---->'.repeat(200_000) + para('last'));
     const t0 = performance.now();
-    const blocks = xmlElementBlocks(xml, ['w:p']);
+    const res = extractDocx(bytes);
     const ms = performance.now() - t0;
-    expect(blocks).toEqual([]);
-    expect(ms).toBeLessThan(GENEROUS_MS);
-    // Just under the bound the part still reads normally.
-    expect(xmlElementBlocks('<w:p>kept</w:p>' + '<!---->'.repeat(10), ['w:p'])).toEqual([
-      { name: 'w:p', attrs: '', body: 'kept' },
-    ]);
-  });
-
-  it('stays linear when every close tag is shadowed by a section', () => {
-    // The `lastIndexOf` guard says a close EXISTS, so without the per-name memo
-    // each of these openers would walk the whole tail looking for a close that
-    // is never usable — the quadratic the guard was added to prevent, through
-    // a door the section rule opened.
-    const xml = '<w:p>'.repeat(50_000) + '<!-- </w:p> -->'.repeat(2_000);
-    const t0 = performance.now();
-    const blocks = xmlElementBlocks(xml, ['w:p']);
-    const ms = performance.now() - t0;
-    expect(blocks).toEqual([]);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('first\nlast');
     expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
-  it('reads CDATA and processing instructions as text too', () => {
-    expect(xmlElementBlocks('<![CDATA[<w:p>ghost</w:p>]]><w:p>real</w:p>', ['w:p'])).toEqual([
-      { name: 'w:p', attrs: '', body: 'real' },
-    ]);
-    expect(xmlElementBlocks('<?xml version="1.0"?><w:p>real</w:p>', ['w:p'])).toEqual([
-      { name: 'w:p', attrs: '', body: 'real' },
-    ]);
-    // A section that never closes takes the rest of the part with it — there
-    // is no element inside an unterminated comment either.
-    expect(xmlElementBlocks('<!-- <w:p>ghost</w:p>', ['w:p'])).toEqual([]);
+  it('stays bounded when 50k paragraph openers nest without ever closing', () => {
+    // Every close tag here sits inside a comment, so none of them closes
+    // anything and the openers nest 50 k deep. The nesting is what costs: the
+    // parser holds a stack entry per open element and its own cost climbs past
+    // linear on an enormous one, so MAX_ELEMENT_DEPTH stops the parse — with
+    // the text reached so far kept rather than discarded.
+    const bytes = docxBytes('<w:p>'.repeat(50_000) + '<!-- </w:p> -->'.repeat(2_000));
+    const t0 = performance.now();
+    const res = extractDocx(bytes);
+    const ms = performance.now() - t0;
+    if (!res.ok) throw new Error(res.message);
+    expect(ms).toBeLessThan(GENEROUS_MS);
   });
 });

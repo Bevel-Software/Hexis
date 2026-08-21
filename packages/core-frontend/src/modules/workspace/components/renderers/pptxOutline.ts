@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { XML_NCNAME, decodeXmlEntities, xmlElementBlocks } from './xmlEntities';
+import { elementText, relationshipTarget, xmlElementBlocks } from './xmlReading';
 
 /**
  * Client-side `.pptx` → text outline, the browser twin of the backend's
@@ -12,12 +12,13 @@ import { XML_NCNAME, decodeXmlEntities, xmlElementBlocks } from './xmlEntities';
  * the backend module is Node-only (AdmZip, Buffer); this one runs on JSZip in
  * the browser.
  *
- * The XML helpers are hand-rolled for the same reason as the backend's
- * `ooxml-text.ts`: the only question asked is "the character content of
- * `<a:t>` runs, grouped by paragraph", and a full XML parser dependency would
- * be a heavyweight addition for what a single linear scan does correctly on
- * well-formed OOXML (which a zip that PowerPoint produced always is; a
- * malformed one fails at the zip layer or yields fewer runs, never a crash).
+ * The XML reading lives in `xmlReading.ts` and is `htmlparser2`, matching the
+ * backend's `ooxml-text.ts`. Both were hand-rolled once, on the reasoning that
+ * the only question asked is "the character content of `<a:t>` runs, grouped
+ * by paragraph". The flaw in that reasoning is that the deck is UPLOADED, so
+ * the scan has to be right about every lexical rule of XML rather than the
+ * ones PowerPoint's own output exercises — and here it runs on the reader's
+ * main thread, which they cannot get back while it spins.
  */
 
 export interface PptxSlide {
@@ -46,11 +47,7 @@ function xmlBlocks(xml: string, tag: string): string[] {
  * contributes nothing.
  */
 function paragraphRunText(paragraphXml: string): string {
-  let out = '';
-  for (const run of xmlElementBlocks(paragraphXml, ['a:t'])) {
-    if (run.body !== undefined) out += decodeXmlEntities(run.body);
-  }
-  return out;
+  return elementText(paragraphXml, 'a:t');
 }
 
 /** Non-empty paragraph texts of one slide/notes part, in document order. */
@@ -131,76 +128,8 @@ function readEntryBounded(entry: JSZip.JSZipObject, budget: ReadBudget): Promise
   });
 }
 
+/** OPC relationship type whose Target is a slide's speaker-notes part. */
 const NOTES_REL_TYPE_SUFFIX = '/notesSlide';
-
-/**
- * One tag's attributes as `name → raw value` tokens, in document order — the
- * same left-to-right tokenizer as the backend's `ooxml-text.ts`: quoted
- * values (either quote style, whitespace around `=` tolerated) are skipped
- * over WHOLE, so an attribute-looking sequence INSIDE another attribute's
- * value can never be mistaken for an attribute of its own. Values are raw
- * (entities not decoded); a malformed tail (unterminated quote) ends the scan.
- */
-function xmlAttrTokens(tagXml: string): Array<{ name: string; value: string }> {
-  const out: Array<{ name: string; value: string }> = [];
-  let i = 0;
-  // Skip '<' (with an optional '/' or '?') and the tag name itself.
-  if (tagXml[i] === '<') {
-    i++;
-    if (tagXml[i] === '/' || tagXml[i] === '?') i++;
-  }
-  while (i < tagXml.length && !/[\s/>]/.test(tagXml[i])) i++;
-  while (i < tagXml.length) {
-    while (i < tagXml.length && /[\s/]/.test(tagXml[i])) i++;
-    if (i >= tagXml.length || tagXml[i] === '>') return out;
-    const nameStart = i;
-    while (i < tagXml.length && !/[\s=/>]/.test(tagXml[i])) i++;
-    const name = tagXml.slice(nameStart, i);
-    while (i < tagXml.length && /\s/.test(tagXml[i])) i++;
-    if (tagXml[i] !== '=') continue; // no value (not legal XML) — skip the token
-    i++;
-    while (i < tagXml.length && /\s/.test(tagXml[i])) i++;
-    const quote = tagXml[i];
-    if (quote !== '"' && quote !== "'") return out; // unquoted/malformed — stop
-    const valueStart = ++i;
-    const end = tagXml.indexOf(quote, i);
-    if (end === -1) return out; // unterminated quote — stop
-    if (name !== '') out.push({ name, value: tagXml.slice(valueStart, end) });
-    i = end + 1;
-  }
-  return out;
-}
-
-/** The value of the attribute whose LOCAL name (after any prefix) is `localName`, or undefined. */
-function xmlAttrValueByLocalName(tagXml: string, localName: string): string | undefined {
-  for (const attr of xmlAttrTokens(tagXml)) {
-    // `xmlns="…"` / `xmlns:Foo="…"` are namespace DECLARATIONS, not attributes
-    // — under local-name matching, `xmlns:Target` would otherwise read as a
-    // `Target` attribute and hand back a namespace URI.
-    if (attr.name === 'xmlns' || attr.name.startsWith('xmlns:')) continue;
-    if (attr.name.slice(attr.name.lastIndexOf(':') + 1) === localName) return attr.value;
-  }
-  return undefined;
-}
-
-/**
- * The Target of the first `notesSlide`-typed Relationship in a rels part, or
- * undefined. Matched by LOCAL name — a producer that binds the relationships
- * namespace to a prefix writes `<r:Relationship r:Type=… r:Target=…>`, and
- * dropping those would silently drop the deck's notes.
- */
-function notesTargetFromRels(relsXml: string): string | undefined {
-  // The prefix is a full XML NCName, not `\w`: a producer binding the
-  // relationships namespace to a non-ASCII prefix is legal XML, and an
-  // ASCII-only match here silently dropped that deck's speaker notes.
-  const relRe = new RegExp(`<(?:${XML_NCNAME}:)?Relationship(?=[\\s/>])[^>]*>`, 'g');
-  let m: RegExpExecArray | null;
-  while ((m = relRe.exec(relsXml)) !== null) {
-    const type = xmlAttrValueByLocalName(m[0], 'Type');
-    if (type !== undefined && type.endsWith(NOTES_REL_TYPE_SUFFIX)) return xmlAttrValueByLocalName(m[0], 'Target');
-  }
-  return undefined;
-}
 
 /** Resolve an OPC relationship Target against the part's base directory. */
 function resolveRelTarget(baseDir: string, target: string): string {
@@ -252,7 +181,7 @@ async function readNoteLines(zip: JSZip, slideName: string, budget: ReadBudget):
   const rels = zip.file(relsPartName(slideName));
   let notesPart: string | undefined;
   if (rels) {
-    const target = notesTargetFromRels(await readEntryBounded(rels, budget));
+    const target = relationshipTarget(await readEntryBounded(rels, budget), NOTES_REL_TYPE_SUFFIX);
     notesPart = target !== undefined ? resolveRelTarget('ppt/slides', target) : undefined;
   } else {
     notesPart = conventionalNotesPart(slideName);

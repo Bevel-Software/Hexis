@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import * as XLSX from 'xlsx';
-import { attachmentLine, htmlToEmailText, mailboxText } from '../emailMessage';
+import { attachmentLine, mailboxText } from '../emailMessage';
 import { parseEmlMessage } from '../emlMessage';
 import { parseMsgMessage } from '../msgMessage';
 
@@ -249,156 +249,86 @@ describe('parseMsgMessage', () => {
 
 // ── shared helpers ─────────────────────────────────────────────────────────
 
-describe('email text helpers', () => {
-  it('htmlToEmailText drops style/script whole, keeps paragraph structure, collapses blank runs', () => {
-    expect(
-      htmlToEmailText('<style>b{}</style><script>x()</script><p>one</p><p></p><p>two &#8212; three</p>'),
-    ).toBe('one\n\ntwo — three');
+describe('an HTML body, as the viewer renders it', () => {
+  /** The body text of an HTML-only message, through the parser the viewer uses. */
+  const bodyOf = async (html: string): Promise<string> => {
+    const view = await parseEmlMessage(
+      emlBytes(['From: ada@example.com', 'Content-Type: text/html; charset=utf-8', '', html]),
+    );
+    return view.body;
+  };
+
+  it('drops style/script/head whole and keeps paragraph structure', async () => {
+    expect(await bodyOf('<style>b{}</style><script>x()</script><p>one</p><p></p><p>two &#8212; three</p>')).toBe(
+      'one\n\ntwo — three',
+    );
+    expect(await bodyOf('<SCRIPT TYPE="text/javascript">evil()</SCRIPT>after')).toBe('after');
+    expect(await bodyOf('<Style Media="print">b{}</STYLE>rest')).toBe('rest');
+    expect(await bodyOf('<head><TITLE>t</TITLE></head>body')).toBe('body');
   });
 
-  it('htmlToEmailText never truncates a tag at a > inside a quoted attribute value', () => {
-    expect(htmlToEmailText('<a title="a > b">x</a>')).toBe('x');
-    expect(htmlToEmailText("<p align='x>y'>para</p>")).toBe('para');
-    expect(htmlToEmailText('<br data-note="1 > 0"/>line')).toBe('line');
-    expect(htmlToEmailText('<div class="a>b">block</div>')).toBe('block');
-    expect(htmlToEmailText('<style media="x>y">b{}</style>rest')).toBe('rest');
+  it('never truncates a tag at a > inside a quoted attribute value', async () => {
+    expect(await bodyOf('<a title="a > b">x</a>')).toBe('x');
+    expect(await bodyOf("<p align='x>y'>para</p>")).toBe('para');
+    expect(await bodyOf('<br data-note="1 > 0"/>line')).toBe('line');
+    expect(await bodyOf('<div class="a>b">block</div>')).toBe('block');
+    expect(await bodyOf('<style media="x>y">b{}</style>rest')).toBe('rest');
   });
 
-  it('htmlToEmailText treats an UNTERMINATED tag as literal text', () => {
-    expect(htmlToEmailText('<p>total</p> 2 < 3')).toBe('total\n2 < 3');
-    expect(htmlToEmailText('<a href="never closed>tail')).toBe('<a href="never closed>tail');
+  it('turns br and block-tag boundaries into line breaks', async () => {
+    expect(await bodyOf('a<br>b<br/>c<BR />d')).toBe('a\nb\nc\nd');
+    expect(await bodyOf('<h1>T</h1><div>d</div><li>i</li>')).toBe('T\n\nd\n\ni');
   });
 
-  it('htmlToEmailText drops script/style/head/title whole — attributes and mixed case included', () => {
-    expect(htmlToEmailText('<SCRIPT TYPE="text/javascript">evil()</SCRIPT>after')).toBe('after');
-    expect(htmlToEmailText('<Style Media="print">b{}</STYLE>rest')).toBe('rest');
-    expect(htmlToEmailText('<head><TITLE>t</TITLE></head>body')).toBe('body');
-    expect(htmlToEmailText('<script>alert(1)')).toBe('alert(1)');
+  it('keeps a comparison in the body: `2 < 3` is text, not a tag', async () => {
+    expect(await bodyOf('<p>total</p> 2 < 3')).toBe('total\n2 < 3');
   });
 
-  it('htmlToEmailText still turns br and block-tag boundaries into line breaks', () => {
-    expect(htmlToEmailText('a<br>b<br/>c<BR />d')).toBe('a\nb\nc\nd');
-    expect(htmlToEmailText('<h1>T</h1><div>d</div><li>i</li>')).toBe('T\n\nd\n\ni');
+  it('CHANGED: reads malformed markup the way a mail client would', async () => {
+    // These are htmlparser2's answers, which are a browser's — the useful
+    // standard for a mail body, because it is what the sender's recipient saw.
+    // The hand-rolled strip had rules of its own and they differed here.
+    expect(await bodyOf('<a href="never closed>tail')).toBe('');
+    expect(await bodyOf('<script>alert(1)')).toBe('');
+    expect(await bodyOf('<script/x>secret</script>tail')).toBe('tail');
+    expect(await bodyOf('x </ 2 > y')).toBe('x  y');
   });
 
-  it('htmlToEmailText survives an adversarial body: 20k < plus an attribute quote that never closes', () => {
-    // The shape the old quote-aware tag regexes died on — each `<` restarted a
-    // lazy expansion that could never pass the unclosed quote, freezing the
-    // tab on a message an attacker could simply send. The bound is loose on
-    // purpose: it catches a return of the blow-up, not CI's scheduler.
+  it('survives an adversarial body: 20k < plus an attribute quote that never closes', async () => {
     const bomb = '<'.repeat(20_000) + '<b title="never closed ' + 'x'.repeat(2_000) + '>';
     const t0 = performance.now();
-    const out = htmlToEmailText(bomb);
+    const out = await bodyOf(bomb);
     const ms = performance.now() - t0;
-    expect(out).toBe(bomb); // no tag ever terminates: it is all body text
+    expect(out).toBe('<'.repeat(20_000));
     expect(ms).toBeLessThan(5_000);
   });
 
-  it('htmlToEmailText keeps its offsets when the body holds an İ (U+0130)', () => {
-    // The lowercase copy is INDEX-PARALLEL with the original: tag names are
-    // sliced out of it at offsets computed on `html`, and container-close
-    // offsets found in it are fed back into `html`. `String.toLowerCase` is
-    // not length-preserving — `İ` becomes `i` plus a combining dot — so after
-    // one of these every later index was off by one: the `<script>` stopped
-    // being recognized and its code was rendered as body text.
-    expect(htmlToEmailText('İ<script>alert(1)</script>after')).toBe('İafter');
-    expect(htmlToEmailText('İ<p>one</p><p>two</p>')).toBe('İ\none\n\ntwo');
-    expect(htmlToEmailText('<p>aİb</p><style>c{}</style>tail')).toBe('aİb\ntail');
-  });
-
-  it('htmlToEmailText keeps a comparison as text: `1 < 2 > 0` is not a tag', () => {
-    // The span parses an EMPTY tag name. Advancing past it anyway discarded
-    // `< 2 >` from the visible body — this used to read `1  0`.
-    expect(htmlToEmailText('<p>1 < 2 > 0</p>')).toBe('1 < 2 > 0');
-    expect(htmlToEmailText('a <, b > c and <1>d')).toBe('a <, b > c and <1>d');
-    expect(htmlToEmailText('x </ 2 > y')).toBe('x </ 2 > y');
-  });
-
-  it('htmlToEmailText still removes real tags, markup declarations and quoted `>`', () => {
-    expect(htmlToEmailText('<!DOCTYPE html><p>doc</p>')).toBe('doc');
-    expect(htmlToEmailText('<?xml version="1.0"?><p>pi</p>')).toBe('pi');
-    expect(htmlToEmailText('<a title="a > b">x</a>')).toBe('x');
-    expect(htmlToEmailText('<o:p>word</o:p><my-widget>custom</my-widget>')).toBe('wordcustom');
-  });
-
-  it('htmlToEmailText stays linear on a wall of comparison spans before one far `>`', () => {
-    // Leaving a nameless span as text means the scanner no longer consumes it,
-    // so the next `<` starts a fresh tag scan — and a failure-only memo would
-    // record nothing here, because every one of these scans SUCCEEDS at the
-    // single `>` past the wall. Memoizing successes as well keeps it to one
-    // traversal; without it this is 50k x 100k characters, in the user's tab.
-    const bomb = '< '.repeat(50_000) + '<p>end</p>';
+  it('survives a body nested past any sane depth, keeping what it read', async () => {
     const t0 = performance.now();
-    const out = htmlToEmailText(bomb);
+    const out = await bodyOf('<p>top</p>' + '<div>'.repeat(200_000));
     const ms = performance.now() - t0;
-    expect(out.endsWith('end')).toBe(true);
-    expect(out).toContain('< <');
+    expect(out.startsWith('top')).toBe(true);
     expect(ms).toBeLessThan(5_000);
   });
 
-  it('keeps the body when the tag memo fills, rather than dropping it from there on', () => {
-    // The memo bound stops the quote-aware walk so a crafted body cannot
-    // allocate a map several times its size — but the walk used to abandon the
-    // pending text with it, so everything from the crafted span onward
-    // vanished from the reader's view, indistinguishable from a short mail.
-    // The remainder now comes through the loose strip: each `<` pairs with the
-    // next `>`, which is linear on exactly the input the walk gave up on.
-    const body = `<p>before</p><b ${'<'.repeat(100_001)}>after the wall</b><p>and the rest</p>`;
-    const t0 = performance.now();
-    const out = htmlToEmailText(body);
-    const ms = performance.now() - t0;
-    expect(out).toContain('before');
-    expect(out).toContain('after the wall');
-    expect(out).toContain('and the rest');
-    expect(ms).toBeLessThan(5_000);
+  it('an İ before a container does not shift what gets dropped', async () => {
+    // The strip this replaced kept an index-parallel lowercase copy, and
+    // `String.toLowerCase` is not length-preserving — `İ` (U+0130) becomes two
+    // code units — so after one of these a `<script>` stopped being
+    // recognized and its source was shown to the reader.
+    expect(await bodyOf('İ<script>alert(1)</script>after')).toBe('İafter');
+    expect(await bodyOf('İ<p>one</p><p>two</p>')).toBe('İ\none\n\ntwo');
+    expect(await bodyOf('<p>aİb</p><style>c{}</style>tail')).toBe('aİb\ntail');
   });
 
-  it('the fallback still hides script bodies and still breaks paragraphs', () => {
-    // Only the tag BOUNDARY is cruder past the memo bound; what the strip
-    // MEANS is unchanged. Stripping tags blindly there instead showed the
-    // script source and the stylesheet as body text in the viewer, and ran
-    // every paragraph together into one line.
-    const wall = '<b ' + '<'.repeat(100_001) + '>';
-    const out = htmlToEmailText(
-      `${wall}<p>one</p><p>two</p><script>alert(1)</script><style>b{}</style><p>three</p>`,
-    );
-    expect(out).not.toContain('alert(1)');
-    expect(out).not.toContain('b{}');
-    expect(out).toContain('one\n\ntwo');
-    expect(out).toContain('three');
+  it('a &nbsp; lands as an ordinary space, not U+00A0', async () => {
+    // It LOOKS like a space and is not one: a reader searching the message for
+    // "one two" would miss a line that reads exactly that.
+    expect(await bodyOf('<p>one&nbsp;two</p>')).toBe('one two');
   });
+});
 
-  it('the fallback sees tags nested inside a span that names nothing', () => {
-    // `< <script>` ends its span at the SCRIPT tag's own `>`. Consuming the
-    // whole span as text meant the container was never recognized and its code
-    // was rendered to the reader; the scan resumes one character in instead.
-    const wall = '<b ' + '<'.repeat(100_001) + '>';
-    const out = htmlToEmailText(`${wall}< <script>evil()</script>after`);
-    expect(out).not.toContain('evil()');
-    expect(out).toContain('after');
-  });
-
-  it('the fallback stays linear on a wall of delimiter-free `<` before one far `>`', () => {
-    // `<` is not whitespace, `/` or `>`, so the name scan ran clean through it
-    // — every one of these rescanned the same tail, and the fallback added to
-    // bound a quadratic was quadratic itself, in the reader's tab. A `<` met
-    // in the name region is where the next candidate starts; resume THERE.
-    const wall = '<b ' + '<'.repeat(100_001) + '>';
-    const body = `${wall}${'<'.repeat(60_000)}x>tail`;
-    const t0 = performance.now();
-    const out = htmlToEmailText(body);
-    const ms = performance.now() - t0;
-    expect(out).toContain('tail');
-    expect(ms).toBeLessThan(5_000);
-  });
-
-  it('the fallback does not let `<script/x>` open a container', () => {
-    // `/` ends a name only as the `/` of a `/>`, so this names no container —
-    // treating it as one hid real message text up to the next `</script>`.
-    const wall = '<b ' + '<'.repeat(100_001) + '>';
-    expect(htmlToEmailText(`${wall}<script/x>secret</script>tail`)).toContain('secret');
-  });
-
+describe('email helpers', () => {
   it('mailboxText renders whichever of name/address exists', () => {
     expect(mailboxText('Ada', 'ada@example.com')).toBe('Ada <ada@example.com>');
     expect(mailboxText(undefined, 'ada@example.com')).toBe('ada@example.com');
@@ -417,6 +347,8 @@ describe('email text helpers', () => {
     const read = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
     expect(read('../emailMessage.ts')).not.toContain("'./pptxOutline'");
     // The shared module both sides lean on must stay dependency-free.
-    expect(read('../xmlEntities.ts')).not.toMatch(/^import /m);
+    // It may import a parser; what it must NOT drag in is the presentation code.
+    expect(read('../xmlReading.ts')).not.toContain('jszip');
+    expect(read('../xmlReading.ts')).not.toContain("'./pptxOutline'");
   });
 });
