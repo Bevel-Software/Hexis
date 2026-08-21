@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import AdmZip from 'adm-zip';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
@@ -15,6 +16,7 @@ import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { SpillStore } from '../spill-store.js';
+import { DocExtractService } from '../doc-extract/doc-extract.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 
@@ -45,6 +47,8 @@ function denyReads(denied: Set<string>): IAccessControl {
 
 let httpServer: HttpServer | undefined;
 let tempDir = '';
+/** Fresh per-start doc-extraction cache root (OUTSIDE the workspace, like production). */
+let docCacheDir = '';
 let fs: LocalFilesystem;
 /**
  * Every branch / workspaceId `execute_command`'s handler resolves a workspace
@@ -68,6 +72,7 @@ async function start(
   access: IAccessControl = allowAll,
 ): Promise<string> {
   tempDir = await mkdtemp(join(tmpdir(), 'ws-tools-'));
+  docCacheDir = await mkdtemp(join(tmpdir(), 'ws-doc-cache-'));
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
   await fs.writeFile('a.md', 'hello\nworld\n');
   workspacePathCalls = [];
@@ -106,7 +111,7 @@ async function start(
   const app = express();
   app.use(express.json());
   const router = express.Router();
-  registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), access, KB_DIR, {
+  registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(docCacheDir), access, KB_DIR, {
     service: {} as never,
     enabled: false, // these tests predate and don't exercise the ontology boundary
     kbDirName: KB_DIR,
@@ -132,6 +137,10 @@ afterEach(async () => {
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = '';
+  }
+  if (docCacheDir) {
+    await rm(docCacheDir, { recursive: true, force: true });
+    docCacheDir = '';
   }
 });
 
@@ -417,6 +426,185 @@ describe('read-permission gating', () => {
 });
 
 /**
+ * Document reading: read_file/grep consume the doc-extract service for office
+ * documents and PDFs; the agent text-editing tools refuse them. Fixtures are
+ * REAL files built in-test (a docx is just a zip with word/document.xml).
+ */
+describe('office documents and PDFs', () => {
+  const docx = (...paragraphs: string[]): Buffer => {
+    const zip = new AdmZip();
+    zip.addFile('[Content_Types].xml', Buffer.from('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'));
+    zip.addFile(
+      'word/document.xml',
+      Buffer.from(
+        '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+          paragraphs.map((p) => `<w:p><w:r><w:t>${p}</w:t></w:r></w:p>`).join('') +
+          '</w:body></w:document>',
+      ),
+    );
+    return zip.toBuffer();
+  };
+
+  const pptx = (slides: string[][]): Buffer => {
+    const zip = new AdmZip();
+    zip.addFile('[Content_Types].xml', Buffer.from('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'));
+    slides.forEach((paragraphs, i) => {
+      zip.addFile(
+        `ppt/slides/slide${i + 1}.xml`,
+        Buffer.from(
+          '<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:txBody>' +
+            paragraphs.map((p) => `<a:p><a:r><a:t>${p}</a:t></a:r></a:p>`).join('') +
+            '</p:txBody></p:sld>',
+        ),
+      );
+    });
+    return zip.toBuffer();
+  };
+
+  /** Minimal valid one-page PDF with `text` as its text layer. */
+  const pdf = (text: string): Buffer => {
+    const stream = `BT /F1 12 Tf 72 720 Td (${text}) Tj ET`;
+    const objects = [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+      `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    ];
+    let out = '%PDF-1.4\n';
+    const offsets: number[] = [];
+    for (let i = 0; i < objects.length; i++) {
+      offsets.push(out.length);
+      out += `${i + 1} 0 obj\n${objects[i]}\nendobj\n`;
+    }
+    const xrefStart = out.length;
+    out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    for (const off of offsets) out += `${String(off).padStart(10, '0')} 00000 n \n`;
+    out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
+    return Buffer.from(out, 'latin1');
+  };
+
+  const readContent = async (base: string, path: string, extra: Record<string, unknown> = {}): Promise<string> => {
+    const res = (await (await post(`${base}/api/agent/tools/read_file`, { path, ...extra })).json()) as { content: string };
+    return res.content;
+  };
+
+  it('read_file returns marker + extracted text for a docx', async () => {
+    const base = await start();
+    await fs.writeFile('report.docx', docx('Hello from Word', 'Second paragraph'));
+    const content = await readContent(base, 'report.docx');
+    const lines = content.split('\n');
+    expect(lines[0]).toMatch(/^\[extracted text of report\.docx — 2 paragraphs;/);
+    expect(lines[0]).toContain('layout, images and formatting omitted');
+    expect(lines.slice(1)).toEqual(['Hello from Word', 'Second paragraph']);
+  });
+
+  it('read_file slices offset/limit AFTER assembling marker + text (unchanged semantics)', async () => {
+    const base = await start();
+    await fs.writeFile('report.docx', docx('Sliceable content here'));
+    const full = await readContent(base, 'report.docx');
+    const sliced = await readContent(base, 'report.docx', { offset: 5, limit: 12 });
+    expect(sliced).toBe(full.slice(5, 17));
+  });
+
+  it('read_file returns [page N] text for a PDF', async () => {
+    const base = await start();
+    await fs.writeFile('paper.pdf', pdf('Findings inside a PDF'));
+    const content = await readContent(base, 'paper.pdf');
+    expect(content).toMatch(/^\[extracted text of paper\.pdf — 1 page;/);
+    expect(content).toContain('[page 1]\nFindings inside a PDF');
+  });
+
+  it('grep finds a term inside a pptx, with the [slide N] marker line locating it', async () => {
+    const base = await start();
+    await fs.writeFile('deck.pptx', pptx([['Intro'], ['Roadmap 2026', 'Ship documents']]));
+    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'Roadmap' })).json()) as {
+      matches: { path: string; line: number; text: string }[];
+      note?: string;
+    };
+    expect(res.matches).toContainEqual(expect.objectContaining({ path: 'deck.pptx', text: 'Roadmap 2026' }));
+    // The extraction reads: marker line 1, [slide 1] line 2, Intro line 3,
+    // [slide 2] line 4, Roadmap line 5 — grep reports the extraction's numbers.
+    expect(res.matches.find((m) => m.text === 'Roadmap 2026')?.line).toBe(5);
+    // The structure markers themselves are searchable.
+    const markers = (await (await post(`${base}/api/agent/tools/grep`, { pattern: '\\[slide 2\\]' })).json()) as { matches: { path: string }[] };
+    expect(markers.matches).toContainEqual(expect.objectContaining({ path: 'deck.pptx' }));
+    expect(res.note).toBeUndefined();
+  });
+
+  it('grep extracts at most 20 uncached documents per call and notes the skipped rest; a re-run covers them', async () => {
+    const base = await start();
+    for (let i = 0; i < 22; i++) {
+      // Distinct content per file — identical bytes would share one cache entry
+      // and the walk would extract only once.
+      await fs.writeFile(`docs/f${String(i).padStart(2, '0')}.docx`, docx(`needle-${i} unique body ${i}`));
+    }
+    const first = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle-' })).json()) as {
+      matches: unknown[];
+      note?: string;
+    };
+    expect(first.matches).toHaveLength(20);
+    expect(first.note).toContain('2 office document(s)/PDF(s) were not searched');
+    // Second run: 20 are cached (free), budget covers the remaining 2.
+    const second = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle-' })).json()) as {
+      matches: unknown[];
+      note?: string;
+    };
+    expect(second.matches).toHaveLength(22);
+    expect(second.note).toBeUndefined();
+  });
+
+  it('read_file answers a corrupt docx with an honest could-not-parse message (no 500)', async () => {
+    const base = await start();
+    await fs.writeFile('broken.docx', Buffer.from('not really a zip'));
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'broken.docx' });
+    expect(res.status).toBe(200);
+    const { content } = (await res.json()) as { content: string };
+    expect(content).toContain('could not be parsed as a .docx');
+    expect(content).toContain('uploading a new version');
+  });
+
+  it('read_file answers a legacy .doc with the convert-to-modern hint', async () => {
+    const base = await start();
+    await fs.writeFile('old.doc', Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0x00, 0x01, 0x02]));
+    const content = await readContent(base, 'old.doc');
+    expect(content).toContain('legacy office format');
+    expect(content).toContain('.docx');
+  });
+
+  it('read_file answers other binary files with a one-line notice (zip names the unzip tool)', async () => {
+    const base = await start();
+    await fs.writeFile('img.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]));
+    const png = await readContent(base, 'img.png');
+    expect(png).toBe('[img.png is a binary file (image/png, 9 bytes) — not readable as text.]');
+    await fs.writeFile('bundle.zip', Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00]));
+    const zip = await readContent(base, 'bundle.zip');
+    expect(zip).toContain('application/zip');
+    expect(zip).toContain('unzip tool');
+  });
+
+  it('write_file / edit_file / write_files refuse document extensions with the round-trip explanation', async () => {
+    const base = await start();
+    await fs.writeFile('deck.pptx', pptx([['Original']]));
+    for (const [tool, body] of [
+      ['write_file', { path: 'new.docx', content: 'plain text' }],
+      ['edit_file', { path: 'deck.pptx', old_string: 'Original', new_string: 'Changed' }],
+      ['write_files', { files: [{ path: 'ok.md', content: 'fine' }, { path: 'sheet.xlsx', content: 'nope' }] }],
+    ] as const) {
+      const res = await post(`${base}/api/agent/tools/${tool}`, body);
+      expect(res.status, tool).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error, tool).toContain('EXTRACTED text');
+      expect(error, tool).toContain('uploading a new version');
+    }
+    // The batch was refused atomically — the innocent .md was not written either.
+    expect((await post(`${base}/api/agent/tools/read_file`, { path: 'ok.md' })).status).not.toBe(200);
+    // And the pptx is untouched: reading it still extracts the original text.
+    expect(await readContent(base, 'deck.pptx')).toContain('Original');
+  });
+});
+
+/**
  * start_session must mint a REAL chat thread and return its id (not a bare
  * random UUID), so the same id works for KB reads AND for `ask` (whose
  * sessionId IS a chat thread). This is what unifies the ontology boundary
@@ -458,7 +646,7 @@ describe('start_session', () => {
     const router = express.Router();
     registerWorkspaceTools(
       registry, router, auth, toolHandler,
-      new SpillStore(join(tmpdir(), 'bevel-test-spills')), allowAll, KB_DIR,
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, KB_DIR,
       { service: {} as never, enabled: false, kbDirName: KB_DIR, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
       new RoutineWritePolicyService(),
       fakeSessionSink,
@@ -522,6 +710,7 @@ describe('branch is a required parameter in the tool contract', () => {
       noopAuth,
       toolHandler,
       new SpillStore(join(tmpdir(), 'bevel-test-spills')),
+      new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')),
       allowAll,
       KB_DIR,
       { service: {} as never, enabled: false, kbDirName: KB_DIR, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },

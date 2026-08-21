@@ -24,6 +24,8 @@ import type { ISessionSink } from './session-sink.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
+import type { DocExtractService } from './doc-extract/doc-extract.service.js';
+import { fileExtension, isLegacyDocument, isSupportedDocument } from './doc-extract/doc-extract.types.js';
 
 /** A directory entry as returned by `LocalFilesystem.readdir`. */
 interface DirEntry {
@@ -110,6 +112,97 @@ function asText(content: string | Buffer): string {
   return typeof content === 'string' ? content : content.toString('utf8');
 }
 
+function asBytes(content: string | Buffer): Buffer {
+  return Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
+}
+
+/**
+ * How many NOT-yet-cached documents one `grep` call will extract. Extraction
+ * is the expensive step (unzip + parse; pdf.js for PDFs) and a cold grep over
+ * a document-heavy KB would otherwise extract the whole tree inside a single
+ * walk. Cached extractions are always searched (a cache hit costs one small
+ * JSON read); beyond the budget the walk skips the document and the result
+ * carries a note with the count, so the caller knows a re-run (or a
+ * `read_file`, which extracts unbudgeted) will cover the rest.
+ */
+const UNCACHED_DOCS_PER_GREP = 20;
+
+/** Per-grep-walk extraction state: the shared budget + how many documents it left unsearched. */
+interface DocGrepState {
+  extractor: DocExtractService;
+  uncachedBudget: number;
+  skippedUncached: number;
+}
+
+/** Minimal extension→mime map for the binary-read notice (fallback: octet-stream). */
+const MIME_BY_EXT: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
+  '.zip': 'application/zip',
+  '.gz': 'application/gzip',
+  '.tar': 'application/x-tar',
+  '.7z': 'application/x-7z-compressed',
+  '.rar': 'application/vnd.rar',
+  '.doc': 'application/msword',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.xls': 'application/vnd.ms-excel',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.pdf': 'application/pdf',
+  '.wasm': 'application/wasm',
+  '.exe': 'application/vnd.microsoft.portable-executable',
+};
+
+/**
+ * The honest one-line notice `read_file` returns INSTEAD of raw bytes for a
+ * binary file it cannot extract: what the file is (mime by extension + size),
+ * plus the actionable hint where one exists — unzip for archives, convert for
+ * legacy office formats. (Images get native handling in a later increment;
+ * for now they take the same one-liner naming their type.)
+ */
+function binaryReadNotice(path: string, sizeBytes: number): string {
+  const ext = fileExtension(path);
+  if (isLegacyDocument(path)) {
+    const modern = { '.doc': '.docx', '.ppt': '.pptx', '.xls': '.xlsx' }[ext];
+    return (
+      `[${path} is a legacy office format (${ext}, ${sizeBytes} bytes) — text extraction supports only the ` +
+      `modern format. Convert the document to ${modern} and upload that to read its text.]`
+    );
+  }
+  const mime = MIME_BY_EXT[ext] ?? 'application/octet-stream';
+  const zipHint = ext === '.zip' ? ' Use the unzip tool to extract its contents.' : '';
+  return `[${path} is a binary file (${mime}, ${sizeBytes} bytes) — not readable as text.${zipHint}]`;
+}
+
+/**
+ * The write-refusal for office documents/PDFs on the agent TEXT-editing tools
+ * (write_file / write_files / edit_file). `read_file` returns an EXTRACTION
+ * for these types, so an agent that "read" one and writes text back would
+ * silently destroy the real document. Uploads and the plain HTTP write routes
+ * are untouched — humans replacing a document is exactly the right move — and
+ * `unzip` stays the raw-access escape hatch.
+ */
+function assertNotDocumentEdit(path: string): void {
+  if (isSupportedDocument(path)) {
+    throw new ToolError(
+      `"${path}" is an office document/PDF. read_file returns EXTRACTED text for it — not the file's real ` +
+        'content — so text written back cannot round-trip and would corrupt the document. To change it, ' +
+        'replace the document by uploading a new version.',
+      400,
+    );
+  }
+}
+
 /** JS grep over the workspace tree (read methods only) — bounded by match + depth caps. */
 async function grepWalk(
   fs: LocalFilesystem,
@@ -120,6 +213,7 @@ async function grepWalk(
   depth: number,
   gate: ReadGate,
   recordOntologyRead: (path: string) => Promise<void>,
+  docs: DocGrepState,
 ): Promise<void> {
   if (out.length >= max || depth > 12) return;
   let entries;
@@ -136,19 +230,44 @@ async function grepWalk(
     if (e.name === '.git' || e.name === 'node_modules') continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
-      await grepWalk(fs, p, re, out, max, depth + 1, gate, recordOntologyRead);
+      await grepWalk(fs, p, re, out, max, depth + 1, gate, recordOntologyRead, docs);
     } else {
       // Opening a file under a named ontology is a read of that ontology — even
       // for a root-level grep that resolves to a neutral root. Record it so a
       // cross-ontology grep poisons later writes (closes the read-leak).
       await recordOntologyRead(p);
-      let content;
-      try {
-        content = asText(await fs.readFile(p));
-      } catch {
-        continue;
+      let content: string;
+      if (isSupportedDocument(p)) {
+        // Office document / PDF: grep the EXTRACTION (marker line included, so
+        // the [slide N]/[sheet: …]/[page N] lines are themselves searchable and
+        // line numbers match what read_file returns). Cached extractions are
+        // free; cold ones draw on the per-walk budget (see UNCACHED_DOCS_PER_GREP).
+        let extraction;
+        try {
+          const bytes = asBytes(await fs.readFile(p));
+          extraction = await docs.extractor.getCached(p, bytes);
+          if (!extraction) {
+            if (docs.uncachedBudget <= 0) {
+              docs.skippedUncached++;
+              continue;
+            }
+            docs.uncachedBudget--;
+            const res = await docs.extractor.extract(p, bytes);
+            if (!res.ok) continue; // corrupt document — nothing searchable
+            extraction = res;
+          }
+        } catch {
+          continue;
+        }
+        content = `${extraction.marker}\n${extraction.text}`;
+      } else {
+        try {
+          content = asText(await fs.readFile(p));
+        } catch {
+          continue;
+        }
+        if (content.includes(String.fromCharCode(0))) continue; // skip binary (NUL)
       }
-      if (content.includes(String.fromCharCode(0))) continue; // skip binary (NUL)
       const lines = content.split('\n');
       for (let i = 0; i < lines.length && out.length < max; i++) {
         re.lastIndex = 0;
@@ -173,6 +292,7 @@ export function registerWorkspaceTools(
   toolAuth: RequestHandler,
   toolHandler: ToolHandlerFactory,
   spillStore: SpillStore,
+  docExtract: DocExtractService,
   accessControl: IAccessControl,
   kbDirName: string,
   sessionOntologyGate: SessionOntologyGate,
@@ -274,7 +394,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'read_file',
     description:
-      'Read a workspace file as text. Returns `{ path, content }`. Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. A spill ref is workspace-independent: `branch` is ignored for it.' +
+      'Read a workspace file as text. Returns `{ path, content }`. Office documents (.docx/.pptx/.xlsx) and PDFs return their EXTRACTED text under an honest `[extracted text of …]` header, with `[slide N]`/`[sheet: Name]`/`[page N]` markers — the extraction is READ-ONLY (layout/images omitted; such files cannot be edited as text, only replaced by uploading a new version). Other binary files return a one-line description instead of raw bytes. Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. A spill ref is workspace-independent: `branch` is ignored for it.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -304,7 +424,19 @@ export function registerWorkspaceTools(
       await recordOntologyRead(sessionOntologyGate, ctx, p);
       await assertCanRead(readGateFor(a.branch as string, ctx), p);
       const fs = await ctx.getFilesystem(a.branch as string);
-      const content = asText(await fs.readFile(p));
+      // Extraction (and the binary notice) happen AFTER the access gate and the
+      // ontology-read recording above — a document read is still a KB read.
+      const raw = await fs.readFile(p);
+      let content: string;
+      if (isSupportedDocument(p)) {
+        const res = await docExtract.extract(p, asBytes(raw));
+        content = res.ok
+          ? `${res.marker}\n${res.text}`
+          : `[${p} ${res.message} — the file may be corrupt or mislabeled. To fix it, replace the document by uploading a new version.]`;
+      } else {
+        content = asText(raw);
+        if (content.includes('\0')) content = binaryReadNotice(p, asBytes(raw).length);
+      }
       const start = offset && offset > 0 ? offset : 0;
       const sliced = offset !== undefined || limit !== undefined
         ? content.slice(start, limit !== undefined ? start + limit : undefined)
@@ -388,7 +520,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'grep',
     description:
-      'Regex content search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced.' +
+      'Regex content search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. Searches INSIDE office documents (.docx/.pptx/.xlsx) and PDFs via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -416,6 +548,7 @@ export function registerWorkspaceTools(
           },
         },
         truncated: { type: 'boolean', description: 'True if the match cap was hit and results may be incomplete.' },
+        note: str('Present when some office documents/PDFs were not searched because their text was not yet extracted and the per-call extraction budget ran out — re-run grep to cover them.'),
       },
       required: ['matches', 'truncated'],
     },
@@ -435,6 +568,7 @@ export function registerWorkspaceTools(
       await recordOntologyRead(sessionOntologyGate, ctx, searchRoot);
       const out: { path: string; line: number; text: string }[] = [];
       const max = typeof a.max_results === 'number' ? Math.min(a.max_results, 1000) : 200;
+      const docs: DocGrepState = { extractor: docExtract, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
       await grepWalk(
         await ctx.getFilesystem(a.branch as string),
         searchRoot,
@@ -444,8 +578,20 @@ export function registerWorkspaceTools(
         0,
         readGateFor(a.branch as string, ctx),
         (p) => recordOntologyRead(sessionOntologyGate, ctx, p),
+        docs,
       );
-      return { matches: out, truncated: out.length >= max };
+      return {
+        matches: out,
+        truncated: out.length >= max,
+        ...(docs.skippedUncached > 0
+          ? {
+              note:
+                `${docs.skippedUncached} office document(s)/PDF(s) were not searched: their text was not yet ` +
+                `extracted and this call's extraction budget (${UNCACHED_DOCS_PER_GREP}) ran out. Re-run the ` +
+                'same grep to extract and search the next batch.',
+            }
+          : {}),
+      };
     },
   });
 
@@ -453,7 +599,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'write_file',
     description:
-      'Write (create or overwrite) a workspace file. The change is committed + pushed as you. Returns `{ path, bytes }`.' +
+      'Write (create or overwrite) a workspace file. The change is committed + pushed as you. Returns `{ path, bytes }`. Refuses office documents/PDFs (.docx/.pptx/.xlsx/.pdf) — their reads are text EXTRACTIONS that cannot round-trip; replace such a file by uploading a new version instead.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -473,6 +619,7 @@ export function registerWorkspaceTools(
     },
     write: true,
     handler: async (a, ctx: ToolContext) => {
+      assertNotDocumentEdit(a.path as string);
       // NB: this is a no-op for chat + `ontology_ingest` — it only bites when a
       // routine executor has explicitly restricted THIS session's `ctx.sessionId`
       // (today only `watchlist_check`, to `.html`). Unrestricted sessions pass straight
@@ -491,7 +638,8 @@ export function registerWorkspaceTools(
       'Batch-write many files in ONE commit — far faster than calling write_file once per file when ' +
       'creating many files at once (e.g. seeding a knowledge base). Each entry is `{ path, content }`; all ' +
       'are created/overwritten and committed + pushed together as you. Prefer this over many write_file ' +
-      'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Returns `{ count }`.' +
+      'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Refuses office ' +
+      'documents/PDFs (.docx/.pptx/.xlsx/.pdf) — their reads are text EXTRACTIONS that cannot round-trip. Returns `{ count }`.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -523,6 +671,7 @@ export function registerWorkspaceTools(
       if (files.length === 0) return { count: 0 };
       // Gate every path first (records ontology touches; a cross-ontology batch
       // is blocked exactly like the per-file write tools).
+      for (const f of files) assertNotDocumentEdit(f.path);
       for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f.path);
       for (const f of files) await assertOntologyWriteAllowed(sessionOntologyGate, ctx, f.path);
       // `write: true` guarantees a LockingFilesystem here; `writeFiles` lands the
@@ -541,7 +690,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'edit_file',
     description:
-      'Replace an exact string in a workspace file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.' +
+      'Replace an exact string in a workspace file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you. Refuses office documents/PDFs (.docx/.pptx/.xlsx/.pdf) — their reads are text EXTRACTIONS that cannot round-trip; replace such a file by uploading a new version instead.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -563,6 +712,7 @@ export function registerWorkspaceTools(
     },
     write: true,
     handler: async (a, ctx: ToolContext) => {
+      assertNotDocumentEdit(a.path as string);
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.path as string);
       const fs = await ctx.getFilesystem(a.branch as string);
