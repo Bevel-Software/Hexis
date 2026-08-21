@@ -1,6 +1,6 @@
 import AdmZip from 'adm-zip';
 import type { ExtractResult } from './doc-extract.types.js';
-import { paragraphRunText, xmlBlocks } from './ooxml-text.js';
+import { paragraphRunText, xmlBlocks, zipEntryOversize } from './ooxml-text.js';
 
 /**
  * Extract the BODY text of a `.docx` (Word) document.
@@ -20,6 +20,9 @@ export function extractDocx(bytes: Buffer): ExtractResult {
     if (!entry) {
       return { ok: false, message: 'could not be parsed as a .docx (no word/document.xml inside the archive)' };
     }
+    // Declared-uncompressed-size bound BEFORE inflation — see zipEntryOversize.
+    const oversize = zipEntryOversize(entry);
+    if (oversize) return { ok: false, message: `could not be extracted as a .docx (${oversize})` };
     xml = entry.getData().toString('utf8');
   } catch (err) {
     return { ok: false, message: `could not be parsed as a .docx (${(err as Error).message})` };

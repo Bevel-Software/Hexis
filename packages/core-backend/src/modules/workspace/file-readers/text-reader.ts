@@ -41,7 +41,7 @@ const MIME_BY_EXT: Record<string, string> = {
 export class TextReader implements FileReader {
   /** Fallback reader: matched by the registry's default, not by extension. */
   readonly extensions: readonly string[] = [];
-  readonly textEditable = true;
+  readonly textEditable: boolean = true;
 
   async read(bytes: Buffer, path: string): Promise<ReadResult> {
     const text = bytes.toString('utf8');
@@ -64,22 +64,43 @@ export class TextReader implements FileReader {
   }
 }
 
+/** The modern OOXML counterpart of each legacy binary office extension. */
+const MODERN_BY_LEGACY: Record<string, string> = { '.doc': '.docx', '.ppt': '.pptx', '.xls': '.xlsx' };
+
 /**
  * Legacy binary office formats (.doc/.ppt/.xls) — NOT extractable (text
  * extraction supports only the modern formats), so a binary read gets the
- * convert-to-modern hint instead of the generic notice. Everything else is
- * the text reader's behaviour: a legacy-named file that happens to hold plain
- * text still reads (and greps) as text.
+ * convert-to-modern hint instead of the generic notice. Reads and greps are
+ * otherwise the text reader's behaviour: a legacy-named file that happens to
+ * hold plain text still reads (and greps) as text.
+ *
+ * NOT text-editable: read_file cannot extract a binary legacy document, so an
+ * edit_file/write_file on one would overwrite the real document with text
+ * that never round-tripped — the write tools refuse with the convert-or-
+ * replace message below.
  */
 export class LegacyOfficeReader extends TextReader {
   override readonly extensions: readonly string[] = ['.doc', '.ppt', '.xls'];
+  override readonly textEditable: boolean = false;
+
+  /** The write-refusal for the agent text-editing tools (see `assertNotDocumentEdit`). */
+  editRefusal(path: string): string {
+    const ext = fileExtension(path);
+    const modern = MODERN_BY_LEGACY[ext] ?? 'the modern format';
+    return (
+      `"${path}" is a legacy binary office format (${ext}). read_file cannot extract its text, and text ` +
+      'written by the editing tools would destroy the binary document. Convert the document to ' +
+      `${modern} and upload that, or replace the file by uploading a new version.`
+    );
+  }
 
   protected override binaryNotice(path: string, sizeBytes: number): string {
     const ext = fileExtension(path);
-    const modern = { '.doc': '.docx', '.ppt': '.pptx', '.xls': '.xlsx' }[ext];
+    const modern = MODERN_BY_LEGACY[ext];
     return (
       `[${path} is a legacy office format (${ext}, ${sizeBytes} bytes) — text extraction supports only the ` +
-      `modern format. Convert the document to ${modern} and upload that to read its text.]`
+      `modern format. Convert the document to ${modern} and upload that to read its text, or replace it by ` +
+      'uploading a new version.]'
     );
   }
 }

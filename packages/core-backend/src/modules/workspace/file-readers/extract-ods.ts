@@ -1,5 +1,5 @@
 import type { ExtractResult } from './doc-extract.types.js';
-import { decodeXmlEntities } from './ooxml-text.js';
+import { decodeXmlEntities, xmlAttrValue } from './ooxml-text.js';
 import { odfParagraphBlocks, odfParagraphText, readOdfContentXml } from './odf-text.js';
 
 /**
@@ -54,7 +54,7 @@ function tableBlocks(xml: string): Array<{ name: string; xml: string }> {
   const out: Array<{ name: string; xml: string }> = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(xml)) !== null) {
-    const name = /table:name="([^"]*)"/.exec(m[1])?.[1];
+    const name = xmlAttrValue(m[1], 'table:name');
     out.push({ name: name ? decodeXmlEntities(name) : `Sheet${out.length + 1}`, xml: m[2] });
   }
   return out;
@@ -78,7 +78,9 @@ interface Repeated<T> {
  * `truncated` lists what the caps cut (mirrors the xlsx extractor's note).
  */
 function expandRows(tableXml: string): { rows: string[][]; truncated: string[] } {
-  const rowRe = /<table:table-row(?=[\s/>])((?:\s[^>]*)?)(?:\/>|>([\s\S]*?)<\/table:table-row>)/g;
+  // Lazy attrs: a self-closing row WITH attributes must hit the `/>` branch
+  // (see the drawPageBlocks note in extract-odp.ts).
+  const rowRe = /<table:table-row(?=[\s/>])((?:\s[^>]*?)?)\s*(?:\/>|>([\s\S]*?)<\/table:table-row>)/g;
   const parsed: Repeated<string[]>[] = [];
   let colsTruncated = false;
   let m: RegExpExecArray | null;
@@ -114,12 +116,19 @@ function expandRows(tableXml: string): { rows: string[][]; truncated: string[] }
  * is applied, then repeats expanded up to the column cap.
  */
 function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
-  const cellRe = /<table:(table-cell|covered-table-cell)(?=[\s/>])((?:\s[^>]*)?)(?:\/>|>([\s\S]*?)<\/table:\1>)/g;
+  const cellRe = /<table:(table-cell|covered-table-cell)(?=[\s/>])((?:\s[^>]*?)?)\s*(?:\/>|>([\s\S]*?)<\/table:\1>)/g;
   const parsed: Repeated<string>[] = [];
   let m: RegExpExecArray | null;
   while ((m = cellRe.exec(rowXml)) !== null) {
     // Covered cells (m[1] === 'covered-table-cell') carry no own text anyway.
-    const text = odfParagraphBlocks(m[3] ?? '').map(odfParagraphText).join(' ');
+    // Element-produced newlines/tabs INSIDE a cell (<text:line-break/>,
+    // <text:tab/>) become single spaces: the extraction's contract is one row
+    // per line with tab-separated cells, and a literal \n or \t inside a
+    // cell's text would silently break both.
+    const text = odfParagraphBlocks(m[3] ?? '')
+      .map(odfParagraphText)
+      .join(' ')
+      .replace(/[\t\n\r]+/g, ' ');
     parsed.push({ value: text, repeat: repeatCount(m[2], 'table:number-columns-repeated') });
   }
   while (parsed.length > 0 && parsed[parsed.length - 1].value === '') parsed.pop();
@@ -141,7 +150,7 @@ function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
 
 /** A `…-repeated="N"` attribute value, clamped to a sane positive integer. */
 function repeatCount(attrs: string, name: string): number {
-  const raw = new RegExp(`${name}="(\\d+)"`).exec(attrs)?.[1];
-  const n = raw ? parseInt(raw, 10) : 1;
+  const raw = xmlAttrValue(attrs, name);
+  const n = raw !== undefined ? parseInt(raw, 10) : 1;
   return Number.isFinite(n) && n >= 1 ? n : 1;
 }

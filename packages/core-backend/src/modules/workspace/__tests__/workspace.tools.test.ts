@@ -654,6 +654,22 @@ describe('office documents and PDFs', () => {
     expect(content).toContain('.docx');
   });
 
+  it('edit_file / write_file refuse a legacy .doc with the convert-or-replace message — a binary the reader cannot extract must never be text-overwritten', async () => {
+    const base = await start();
+    await fs.writeFile('old.doc', Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0x00, 0x01, 0x02]));
+    for (const [tool, body] of [
+      ['edit_file', { path: 'old.doc', old_string: 'a', new_string: 'b' }],
+      ['write_file', { path: 'old.doc', content: 'plain text' }],
+    ] as const) {
+      const res = await post(`${base}/api/agent/tools/${tool}`, body);
+      expect(res.status, tool).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error, tool).toContain('legacy binary office format');
+      expect(error, tool).toContain('.docx');
+      expect(error, tool).toContain('uploading a new version');
+    }
+  });
+
   it('read_file answers other binary files with a one-line notice (zip names the unzip tool)', async () => {
     const base = await start();
     // .mp3, not an image: images return native MCP image content (see below).

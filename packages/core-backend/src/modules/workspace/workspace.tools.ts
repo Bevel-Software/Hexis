@@ -147,14 +147,15 @@ interface DocGrepState {
  * `unzip` stays the raw-access escape hatch.
  */
 function assertNotDocumentEdit(readers: FileReaderRegistry, path: string): void {
-  if (!readers.readerFor(path).textEditable) {
-    throw new ToolError(
+  const reader = readers.readerFor(path);
+  if (reader.textEditable) return;
+  throw new ToolError(
+    reader.editRefusal?.(path) ??
       `"${path}" is an office document/PDF. read_file returns EXTRACTED text for it — not the file's real ` +
         'content — so text written back cannot round-trip and would corrupt the document. To change it, ' +
         'replace the document by uploading a new version.',
-      400,
-    );
-  }
+    400,
+  );
 }
 
 /** JS grep over the workspace tree (read methods only) — bounded by match + depth caps. */

@@ -43,7 +43,13 @@ describe('file-reader registry routing', () => {
       expect(reader.greppableText, p).toBeUndefined();
     }
     for (const p of ['a.doc', 'b.ppt', 'c.xls']) {
-      expect(registry.readerFor(p), p).toBeInstanceOf(LegacyOfficeReader);
+      const reader = registry.readerFor(p);
+      expect(reader, p).toBeInstanceOf(LegacyOfficeReader);
+      // Not text-editable: read_file can't extract a legacy binary, so an
+      // edit_file would destroy it — and the refusal names the way out.
+      expect(reader.textEditable, p).toBe(false);
+      expect(reader.editRefusal?.(p), p).toContain('Convert the document');
+      expect(reader.editRefusal?.(p), p).toContain('uploading a new version');
     }
   });
 

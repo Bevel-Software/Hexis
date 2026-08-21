@@ -38,6 +38,12 @@ export interface FileReader {
   greppableText?(bytes: Buffer, path: string): Promise<string | null>;
   /** May the agent TEXT-editing tools (write_file/write_files/edit_file) touch this file? */
   readonly textEditable: boolean;
+  /**
+   * Format-specific copy for the write-refusal thrown when `textEditable` is
+   * false (see `assertNotDocumentEdit` in workspace.tools.ts). Absent = the
+   * generic extracted-text/round-trip explanation.
+   */
+  editRefusal?(path: string): string;
 }
 
 /**

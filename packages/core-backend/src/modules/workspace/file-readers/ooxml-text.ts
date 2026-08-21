@@ -8,6 +8,45 @@
  * a malformed one fails parsing upstream at the zip layer or simply yields
  * fewer runs, never a crash).
  */
+import type AdmZip from 'adm-zip';
+
+/**
+ * Decompression bounds for the document extractors (OOXML, ODF and — as a
+ * plain byte cap — PDF). A zip's central directory declares each entry's
+ * UNCOMPRESSED size, so a zip bomb (a few KB that inflate to gigabytes) is
+ * detectable BEFORE any inflation happens; 50 MB of XML is far beyond any
+ * real office document part (a huge deck's slide parts run to single-digit
+ * MB) while staying well inside what a server can afford to decode.
+ * `MAX_DOC_TOTAL_BYTES` additionally bounds the SUM of the parts a multi-part
+ * extraction reads (pptx slides/notes, xlsx sheet parts) at 200 MB.
+ */
+export const MAX_DOC_PART_BYTES = 50 * 1024 * 1024; // 50 MB uncompressed, per part
+export const MAX_DOC_TOTAL_BYTES = 200 * 1024 * 1024; // 200 MB uncompressed, per document
+
+/**
+ * The typed-failure fragment for a zip entry whose DECLARED uncompressed size
+ * exceeds {@link MAX_DOC_PART_BYTES}, or null when the entry is within bounds.
+ * Checked against the central-directory header BEFORE `getData()` inflates
+ * anything, so an oversized (or bomb) entry costs nothing.
+ */
+export function zipEntryOversize(entry: AdmZip.IZipEntry): string | null {
+  const size = entry.header.size;
+  return size > MAX_DOC_PART_BYTES
+    ? `${entry.entryName} is ${size} bytes uncompressed — over the ${MAX_DOC_PART_BYTES}-byte (50 MB) extraction limit`
+    : null;
+}
+
+/**
+ * The value of attribute `name` inside one tag's text, or undefined. Accepts
+ * single- OR double-quoted values and whitespace around the `=` — all legal
+ * XML that a producer other than Word/LibreOffice may emit. The value is
+ * returned RAW (entities not decoded); callers decode where display matters.
+ */
+export function xmlAttrValue(tagXml: string, name: string): string | undefined {
+  const re = new RegExp(`(?<![\\w:.-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`);
+  const m = re.exec(tagXml);
+  return m ? (m[1] ?? m[2]) : undefined;
+}
 
 /** Decode the five XML named entities plus numeric (`&#65;` / `&#x41;`) references. */
 export function decodeXmlEntities(s: string): string {

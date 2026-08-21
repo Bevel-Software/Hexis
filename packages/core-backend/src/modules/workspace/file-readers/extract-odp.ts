@@ -43,11 +43,18 @@ export function extractOdp(bytes: Buffer): ExtractResult {
   };
 }
 
-/** The `<draw:page>…</draw:page>` bodies in document order (pages never nest). */
+/**
+ * The `<draw:page>…</draw:page>` bodies in document order (pages never nest).
+ * A SELF-CLOSING `<draw:page/>` is a legal, fully blank slide — it yields ''
+ * so the deck's numbering (and a deliberately blank deck) stays correct.
+ */
 function drawPageBlocks(xml: string): string[] {
-  const re = /<draw:page(?=[\s>])(?:\s[^>]*)?>([\s\S]*?)<\/draw:page>/g;
+  // LAZY attribute match, so `<draw:page a="b"/>` resolves to the `/>` branch
+  // instead of the attributes swallowing the `/` and the body running into
+  // the NEXT page (greedy attrs + a later close tag would merge two slides).
+  const re = /<draw:page(?=[\s/>])((?:\s[^>]*?)?)\s*(?:\/>|>([\s\S]*?)<\/draw:page>)/g;
   const out: string[] = [];
   let m: RegExpExecArray | null;
-  while ((m = re.exec(xml)) !== null) out.push(m[1]);
+  while ((m = re.exec(xml)) !== null) out.push(m[2] ?? '');
   return out;
 }

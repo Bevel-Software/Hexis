@@ -19,10 +19,13 @@ export function gitBlobSha(bytes: Buffer): string {
 const DEFAULT_MAX_TOTAL_BYTES = 512 * 1024 * 1024; // 512MB
 
 /**
- * On-disk cache of document extractions, keyed by git blob sha (content hash —
- * a re-upload of identical bytes, or the same document on another branch or
- * path, hits the same entry). One JSON file per entry (`<sha>.json` holding
- * the `{ summary, text }`), under a dedicated root that — like the spill
+ * On-disk cache of document extractions. The KEY is the caller's business —
+ * `DocExtractService` passes git blob sha + extension (content hash, so a
+ * re-upload of identical bytes, or the same document on another branch or
+ * path, hits the same entry; extension, so identical bytes under another
+ * FORMAT never return the wrong extractor's output). One JSON file per entry
+ * (`<key>.json` holding the `{ summary, text }`), under a dedicated root
+ * that — like the spill
  * store's — sits BESIDE the workspaces root, never inside a workspace and
  * never committed.
  *

@@ -498,7 +498,7 @@ describe('DocExtractService cache', () => {
     const first = await service.extract('a.docx', bytes, extractDocx);
     expect(first.ok).toBe(true);
     const entries = await readdir(cacheRoot);
-    expect(entries).toEqual([`${gitBlobSha(bytes)}.json`]);
+    expect(entries).toEqual([`${gitBlobSha(bytes)}.docx.json`]);
 
     // Tamper with the cached entry: if the second extract returns the tampered
     // text, it came from the cache — the parser did NOT run again. (Real-files
@@ -555,8 +555,283 @@ describe('DocExtractService cache', () => {
   it('the cached entry on disk is the {summary, text} JSON', async () => {
     const bytes = docxBytes(para('On disk'));
     await service.extract('a.docx', bytes, extractDocx);
-    const raw = JSON.parse(await readFile(join(cacheRoot, `${gitBlobSha(bytes)}.json`), 'utf8')) as { summary: string; text: string };
+    const raw = JSON.parse(await readFile(join(cacheRoot, `${gitBlobSha(bytes)}.docx.json`), 'utf8')) as { summary: string; text: string };
     expect(raw.text).toBe('On disk');
     expect(typeof raw.summary).toBe('string');
+  });
+
+  it('keys by content PLUS format: identical bytes under another extension re-extract, never cross-hit', async () => {
+    // One ODF package that both extractors accept: a text body holding a table.
+    const bytes = odfBytes(
+      'application/vnd.oasis.opendocument.text',
+      '<office:text><text:p>Prose line</text:p>' +
+        '<table:table table:name="Grid"><table:table-row>' +
+        `${odsCell('cell')}` +
+        '</table:table-row></table:table></office:text>',
+    );
+    const asOdt = await service.extract('doc.odt', bytes, extractOdt);
+    if (!asOdt.ok) throw new Error(asOdt.message);
+    expect(asOdt.text).toContain('Prose line');
+
+    // Same bytes, renamed .ods: the odt extraction must NOT come back.
+    const asOds = await service.extract('doc.ods', bytes, extractOds);
+    if (!asOds.ok) throw new Error(asOds.message);
+    expect(asOds.text.split('\n')[0]).toBe('[sheet: Grid]');
+    expect(asOds.marker).toContain('sheet');
+
+    const entries = await readdir(cacheRoot);
+    expect(entries.sort()).toEqual([`${gitBlobSha(bytes)}.ods.json`, `${gitBlobSha(bytes)}.odt.json`].sort());
+
+    // getCached honours the same format-qualified key.
+    const cachedOds = await service.getCached('doc.ods', bytes);
+    expect(cachedOds?.text.split('\n')[0]).toBe('[sheet: Grid]');
+  });
+});
+
+// ── rels-paired pptx notes ─────────────────────────────────────────────────
+
+describe('extractPptx notes pairing via rels', () => {
+  const RELS_NS = 'xmlns="http://schemas.openxmlformats.org/package/2006/relationships"';
+  const NOTES_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide';
+
+  function pptxWithRels(
+    slides: Record<number, string>,
+    notesParts: Record<string, string>,
+    rels: Record<number, string>,
+  ): Buffer {
+    const zip = new AdmZip();
+    zip.addFile('[Content_Types].xml', Buffer.from('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'));
+    for (const [n, xml] of Object.entries(slides)) zip.addFile(`ppt/slides/slide${n}.xml`, Buffer.from(xml));
+    for (const [name, xml] of Object.entries(notesParts)) zip.addFile(`ppt/notesSlides/${name}`, Buffer.from(xml));
+    for (const [n, xml] of Object.entries(rels)) zip.addFile(`ppt/slides/_rels/slide${n}.xml.rels`, Buffer.from(xml));
+    return zip.toBuffer();
+  }
+
+  it('pairs notes through the slide rels even when the notes part number differs from the slide number', () => {
+    const res = extractPptx(
+      pptxWithRels(
+        { 1: slideXml(['First']), 2: slideXml(['Second']) },
+        { 'notesSlide7.xml': slideXml(['note for slide two']) },
+        {
+          1: `<?xml version="1.0"?><Relationships ${RELS_NS}></Relationships>`,
+          2:
+            `<?xml version="1.0"?><Relationships ${RELS_NS}>` +
+            `<Relationship Id="rId9" Type="${NOTES_TYPE}" Target="../notesSlides/notesSlide7.xml"/>` +
+            '</Relationships>',
+        },
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual([
+      '[slide 1]',
+      'First',
+      '[slide 2]',
+      'Second',
+      '[slide 2 notes]',
+      'note for slide two',
+    ]);
+  });
+
+  it('accepts single-quoted rels attributes and whitespace around =', () => {
+    const res = extractPptx(
+      pptxWithRels(
+        { 1: slideXml(['Solo']) },
+        { 'notesSlide3.xml': slideXml(['quoted note']) },
+        {
+          1:
+            `<?xml version="1.0"?><Relationships ${RELS_NS}>` +
+            `<Relationship Id='r1' Type = '${NOTES_TYPE}' Target = '../notesSlides/notesSlide3.xml'/>` +
+            '</Relationships>',
+        },
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('[slide 1]\nSolo\n[slide 1 notes]\nquoted note');
+  });
+
+  it('with a rels part that names NO notes slide, the numeric twin is NOT attached', () => {
+    const res = extractPptx(
+      pptxWithRels(
+        { 1: slideXml(['No notes really']) },
+        { 'notesSlide1.xml': slideXml(['orphan notes part']) },
+        { 1: `<?xml version="1.0"?><Relationships ${RELS_NS}></Relationships>` },
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('[slide 1]\nNo notes really');
+  });
+
+  it('falls back to numeric pairing when the slide has no rels part', () => {
+    const res = extractPptx(
+      pptxBytes({ 1: slideXml(['Fallback slide']) }, { 1: slideXml(['numeric note']) }),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('[slide 1]\nFallback slide\n[slide 1 notes]\nnumeric note');
+  });
+});
+
+// ── ODF namespace-prefix normalization + attribute quoting ─────────────────
+
+describe('ODF prefix normalization and attribute robustness', () => {
+  it('extracts an odt whose producer bound NON-conventional prefixes to the ODF namespaces', () => {
+    const zip = new AdmZip();
+    zip.addFile('mimetype', Buffer.from('application/vnd.oasis.opendocument.text'));
+    zip.addFile(
+      'content.xml',
+      Buffer.from(
+        '<?xml version="1.0"?><o:document-content ' +
+          'xmlns:o="urn:oasis:names:tc:opendocument:xmlns:office:1.0" ' +
+          "xmlns:t='urn:oasis:names:tc:opendocument:xmlns:text:1.0'>" +
+          '<o:body><o:text>' +
+          '<t:h>Title</t:h>' +
+          "<t:p>a<t:tab/>b<t:line-break/>c<t:s t:c = '3'/>d</t:p>" +
+          '</o:text></o:body></o:document-content>',
+      ),
+    );
+    const res = extractOdt(zip.toBuffer());
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['Title', 'a\tb', 'c   d']);
+  });
+
+  it('extracts an odp whose draw/presentation prefixes are non-conventional', () => {
+    const zip = new AdmZip();
+    zip.addFile('mimetype', Buffer.from('application/vnd.oasis.opendocument.presentation'));
+    zip.addFile(
+      'content.xml',
+      Buffer.from(
+        '<?xml version="1.0"?><office:document-content ' +
+          'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" ' +
+          'xmlns:txt="urn:oasis:names:tc:opendocument:xmlns:text:1.0" ' +
+          'xmlns:d="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" ' +
+          'xmlns:pres="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0">' +
+          '<office:body><office:presentation>' +
+          '<d:page><d:frame><txt:p>Visible</txt:p></d:frame>' +
+          '<pres:notes><txt:p>a note</txt:p></pres:notes></d:page>' +
+          '</office:presentation></office:body></office:document-content>',
+      ),
+    );
+    const res = extractOdp(zip.toBuffer());
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['[slide 1]', 'Visible', '[slide 1 notes]', 'a note']);
+  });
+
+  it('reads single-quoted table:name and repeat attributes in an ods', () => {
+    const zip = new AdmZip();
+    zip.addFile('mimetype', Buffer.from('application/vnd.oasis.opendocument.spreadsheet'));
+    zip.addFile(
+      'content.xml',
+      Buffer.from(
+        '<?xml version="1.0"?><office:document-content ' +
+          'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" ' +
+          'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" ' +
+          'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">' +
+          '<office:body><office:spreadsheet>' +
+          "<table:table table:name = 'Quoted'><table:table-row>" +
+          "<table:table-cell table:number-columns-repeated = '3'><text:p>x</text:p></table:table-cell>" +
+          '<table:table-cell><text:p>end</text:p></table:table-cell>' +
+          '</table:table-row></table:table>' +
+          '</office:spreadsheet></office:body></office:document-content>',
+      ),
+    );
+    const res = extractOds(zip.toBuffer());
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['[sheet: Quoted]', 'x\tx\tx\tend']);
+  });
+});
+
+// ── odp self-closing pages / ods in-cell breaks ────────────────────────────
+
+describe('ODF edge shapes', () => {
+  it('a self-closing <draw:page/> is an EMPTY slide, not a dropped one', () => {
+    const res = extractOdp(
+      odfBytes(
+        'application/vnd.oasis.opendocument.presentation',
+        '<office:presentation>' +
+          odpPage(['First real slide']) +
+          '<draw:page draw:name="blank"/>' +
+          odpPage(['Third slide']) +
+          '</office:presentation>',
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['[slide 1]', 'First real slide', '[slide 2]', '[slide 3]', 'Third slide']);
+    expect(res.summary).toContain('3 slides');
+  });
+
+  it('a deck of ONLY self-closing pages still parses as its (blank) slides', () => {
+    const res = extractOdp(
+      odfBytes('application/vnd.oasis.opendocument.presentation', '<office:presentation><draw:page/><draw:page/></office:presentation>'),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('[slide 1]\n[slide 2]');
+  });
+
+  it('element-produced newlines/tabs INSIDE an ods cell become single spaces — the TSV row survives', () => {
+    const res = extractOds(
+      odsBytes(
+        '<table:table table:name="Wrapped"><table:table-row>' +
+          '<table:table-cell><text:p>line one<text:line-break/>line two<text:tab/>tabbed</text:p></table:table-cell>' +
+          '<table:table-cell><text:p>next cell</text:p></table:table-cell>' +
+          '</table:table-row></table:table>',
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    const lines = res.text.split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toBe('line one line two tabbed\tnext cell');
+  });
+});
+
+// ── decompression bounds (zip bombs) ───────────────────────────────────────
+
+describe('bounded extraction (zip bombs / oversized inputs)', () => {
+  const PART_LIMIT = 50 * 1024 * 1024;
+  // Compresses to a few KB, inflates past the 50 MB part limit.
+  const bigXml = (): Buffer => Buffer.alloc(PART_LIMIT + 1024, 0x20);
+
+  it('refuses a docx whose word/document.xml declares an over-limit uncompressed size', () => {
+    const zip = new AdmZip();
+    zip.addFile('word/document.xml', bigXml());
+    const res = extractDocx(zip.toBuffer());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('extraction limit');
+    expect(res.message).toContain('word/document.xml');
+  });
+
+  it('refuses an odt whose content.xml declares an over-limit uncompressed size', () => {
+    const zip = new AdmZip();
+    zip.addFile('mimetype', Buffer.from('application/vnd.oasis.opendocument.text'));
+    zip.addFile('content.xml', bigXml());
+    const res = extractOdt(zip.toBuffer());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('extraction limit');
+  });
+
+  it('refuses a pptx with an over-limit slide part', () => {
+    const zip = new AdmZip();
+    zip.addFile('ppt/slides/slide1.xml', bigXml());
+    const res = extractPptx(zip.toBuffer());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('extraction limit');
+  });
+
+  it('refuses an xlsx with an over-limit part BEFORE SheetJS inflates it', () => {
+    const zip = new AdmZip();
+    zip.addFile('xl/worksheets/sheet1.xml', bigXml());
+    const res = extractXlsx(zip.toBuffer());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('extraction limit');
+  });
+
+  it('refuses a PDF larger than the 50 MB byte cap without parsing it', async () => {
+    const big = Buffer.alloc(PART_LIMIT + 1, 0x25);
+    const res = await extractPdf(big);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('extraction limit');
   });
 });

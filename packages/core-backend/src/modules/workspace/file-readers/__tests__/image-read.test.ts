@@ -58,6 +58,11 @@ describe('imageDimensions', () => {
     expect(imageDimensions(GIF_1X1)).toEqual({ width: 1, height: 1 });
   });
 
+  it('requires the FULL GIF87a/GIF89a signature — a bare "GIF" prefix parses no dimensions', () => {
+    const fake = Buffer.from('GIFFY!\x05\x00\x07\x00 not a gif at all', 'latin1');
+    expect(imageDimensions(fake)).toBeUndefined();
+  });
+
   it('walks JPEG segments to the SOF0 frame header', () => {
     expect(imageDimensions(jpegWithSof(640, 480))).toEqual({ width: 640, height: 480 });
   });

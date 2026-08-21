@@ -66,9 +66,13 @@ export function imageDimensions(bytes: Buffer): ImageDimensions | undefined {
     if (bytes.length >= 24 && bytes.readUInt32BE(0) === 0x89504e47 && bytes.toString('latin1', 12, 16) === 'IHDR') {
       return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
     }
-    // GIF: "GIF87a"/"GIF89a", then the logical screen size at 6/8 (LE).
-    if (bytes.length >= 10 && bytes.toString('latin1', 0, 3) === 'GIF') {
-      return { width: bytes.readUInt16LE(6), height: bytes.readUInt16LE(8) };
+    // GIF: the FULL "GIF87a"/"GIF89a" signature, then the logical screen
+    // size at 6/8 (LE) — a bare "GIF" prefix is not a GIF header.
+    if (bytes.length >= 10) {
+      const sig = bytes.toString('latin1', 0, 6);
+      if (sig === 'GIF87a' || sig === 'GIF89a') {
+        return { width: bytes.readUInt16LE(6), height: bytes.readUInt16LE(8) };
+      }
     }
     // JPEG: walk the marker segments to the first SOFn frame header.
     if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
