@@ -379,3 +379,37 @@ describe('extractPptxOutline', () => {
     expect(slides[0].paragraphs).toEqual(['kept']);
   });
 });
+
+describe('entities and markup sections, through the outline', () => {
+  const outlineOf = async (slideBody: string): Promise<string[]> => {
+    const bytes = await zipBytes({ 'ppt/slides/slide1.xml': slideXml(slideBody) });
+    return (await extractPptxOutline(bytes))[0].paragraphs;
+  };
+
+  it('decodes the named and well-formed numeric references', async () => {
+    expect(await outlineOf(para('a &amp; b &lt;c&gt; &quot;d&quot; &apos;e&apos;'))).toEqual([
+      `a & b <c> "d" 'e'`,
+    ]);
+    expect(await outlineOf(para('&#65;&#x41;'))).toEqual(['AA']);
+  });
+
+  it('leaves a malformed or out-of-range reference literal', async () => {
+    // `&#12A;` must not decode as `&#12` with the `A` shrugged off — that
+    // invented a U+000C nobody wrote.
+    expect(await outlineOf(para('x&#12A;y'))).toEqual(['x&#12A;y']);
+    expect(await outlineOf(para('x&nosuch;y'))).toEqual(['x&nosuch;y']);
+    // A reference PAST the last code point is the one case that does not stay
+    // literal: XML says it is an invalid character reference, and the parser
+    // yields the replacement character rather than inventing a code point.
+    expect(await outlineOf(para('x&#1114112;y'))).toEqual(['x�y']);
+  });
+
+  it('reads a commented-out or CDATA-wrapped paragraph as text, not as markup', async () => {
+    expect(await outlineOf(`<!-- ${para('ghost')} -->${para('real')}`)).toEqual(['real']);
+    expect(await outlineOf(`<![CDATA[${para('ghost')}]]>${para('real')}`)).toEqual(['real']);
+    // A close tag inside a comment does not end the paragraph holding it.
+    expect(
+      await outlineOf('<a:p><a:r><a:t>a</a:t></a:r><!-- </a:p> --><a:r><a:t>b</a:t></a:r></a:p>'),
+    ).toEqual(['ab']);
+  });
+});
