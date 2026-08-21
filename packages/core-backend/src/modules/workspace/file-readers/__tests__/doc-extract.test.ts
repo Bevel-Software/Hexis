@@ -1502,6 +1502,21 @@ describe('ooxml-text — the docx/pptx walks are linear and quote-aware', () => 
     expect(xmlElementBlocks('<w:p>a<!-- </w:p> -->', ['w:p'])).toEqual([]);
   });
 
+  it('stays linear on an ORDINARY document — the one with no sections at all', () => {
+    // The section rule's first shape asked "does a section start before this
+    // close tag?" with an `indexOf` per element. On a document containing no
+    // comment, CDATA or PI — which is nearly every real document — that
+    // `indexOf` scanned to the end of the part and returned -1, once per
+    // PARAGRAPH: ordinary extraction became quadratic, a worse fault than the
+    // truncation it was fixing. The section index is built once instead.
+    const xml = '<w:p><w:t>x</w:t></w:p>'.repeat(60_000);
+    const t0 = performance.now();
+    const blocks = xmlElementBlocks(xml, ['w:p']);
+    const ms = performance.now() - t0;
+    expect(blocks).toHaveLength(60_000);
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
   it('stays linear when every close tag is shadowed by a section', () => {
     // The `lastIndexOf` guard says a close EXISTS, so without the per-name memo
     // each of these openers would walk the whole tail looking for a close that

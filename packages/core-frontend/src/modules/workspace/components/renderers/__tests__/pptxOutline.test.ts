@@ -327,6 +327,21 @@ describe('extractPptxOutline', () => {
     expect(ms).toBeLessThan(5_000);
   });
 
+  it('stays linear on an ORDINARY deck — the one with no sections at all', async () => {
+    // Asking "does a section start before this close tag?" with an `indexOf`
+    // per element scanned to the end of the part, once per PARAGRAPH, on any
+    // deck without a comment — which is nearly every deck. Quadratic rendering
+    // on valid input, on the user's own main thread. The index is built once.
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('x').repeat(20_000)),
+    });
+    const t0 = performance.now();
+    const slides = await extractPptxOutline(bytes);
+    const ms = performance.now() - t0;
+    expect(slides[0].paragraphs).toHaveLength(20_000);
+    expect(ms).toBeLessThan(5_000);
+  });
+
   it('a `</a:p>` inside a comment does not end the paragraph that holds it', async () => {
     // The close search used to stop at the first literal `</a:p>` wherever it
     // sat, so a well-formed paragraph mentioning its own close tag inside a

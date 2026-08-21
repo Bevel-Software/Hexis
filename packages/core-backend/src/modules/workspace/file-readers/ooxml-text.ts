@@ -328,14 +328,50 @@ function markupSectionEnd(xml: string, lt: number): number {
   return 0;
 }
 
-/** The nearest comment/CDATA/PI opener at or after `from`, or -1. */
-function nextSectionStart(xml: string, from: number): number {
-  let best = -1;
-  for (const [open] of MARKUP_SECTIONS) {
-    const at = xml.indexOf(open, from);
-    if (at !== -1 && (best === -1 || at < best)) best = at;
+/**
+ * Every comment/CDATA/PI span in the fragment, in document order, as
+ * `[start, endExclusive)` — an unterminated one running to the end.
+ *
+ * Built ONCE per walk, in one pass, because the obvious alternative is a trap:
+ * asking "is there a section before this close tag?" with an `indexOf` per
+ * element scans to the END OF THE PART and back for every paragraph of a
+ * document that contains no sections at all — which is nearly every real
+ * document — and that made ordinary extraction quadratic. Here each opener's
+ * `indexOf` resumes past the last span it found, so the scans are disjoint and
+ * the whole index costs one pass; a part with no sections leaves it empty and
+ * every later lookup is a no-op.
+ */
+function sectionSpans(xml: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const next = MARKUP_SECTIONS.map(([open]) => xml.indexOf(open));
+  for (;;) {
+    let k = -1;
+    for (let j = 0; j < next.length; j++) {
+      if (next[j] !== -1 && (k === -1 || next[j] < next[k])) k = j;
+    }
+    if (k === -1) return spans;
+    const end = markupSectionEnd(xml, next[k]);
+    const stop = end === -1 ? xml.length : end;
+    spans.push([next[k], stop]);
+    // A section opener found INSIDE the span just taken (a `<!--` within a
+    // CDATA, say) is not one — re-find each from past the span.
+    for (let j = 0; j < next.length; j++) {
+      if (next[j] !== -1 && next[j] < stop) next[j] = xml.indexOf(MARKUP_SECTIONS[j][0], stop);
+    }
   }
-  return best;
+}
+
+/** Does a section cover `at`? Binary search over the sorted, disjoint spans. */
+function sectionCovering(spans: ReadonlyArray<[number, number]>, at: number): [number, number] | undefined {
+  let lo = 0;
+  let hi = spans.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (at < spans[mid][0]) hi = mid - 1;
+    else if (at >= spans[mid][1]) lo = mid + 1;
+    else return spans[mid];
+  }
+  return undefined;
 }
 
 /**
@@ -348,24 +384,25 @@ function nextSectionStart(xml: string, from: number): number {
  * whose xml is perfectly well-formed and swallowing the rest as if it were
  * outside the element.
  *
- * Linear per call, and the reason is worth stating: every cursor here only
- * moves FORWARD. Each `nextSectionStart` scans from a position past the
- * section the previous one found, so their scans are disjoint; the close
- * search is re-run only when the close it found turned out to be inside a
- * section, and then it resumes past that section rather than from the start.
+ * Linear per call: each turn of the loop jumps past a whole section that
+ * shadowed a close tag, so the `indexOf` scans never overlap. With no sections
+ * in the part this is one `indexOf` and one lookup against an empty index —
+ * exactly what the plain search cost before sections were understood at all.
  */
-function closeOutsideSections(xml: string, close: string, from: number): number {
+function closeOutsideSections(
+  xml: string,
+  close: string,
+  from: number,
+  spans: ReadonlyArray<[number, number]>,
+): number {
   let at = from;
-  let closeAt = xml.indexOf(close, at);
-  let secAt = nextSectionStart(xml, at);
-  while (closeAt !== -1 && secAt !== -1 && secAt < closeAt) {
-    const end = markupSectionEnd(xml, secAt);
-    if (end === -1) return -1; // an unterminated section takes the rest of the part
-    at = end;
-    if (closeAt < at) closeAt = xml.indexOf(close, at);
-    secAt = nextSectionStart(xml, at);
+  for (;;) {
+    const closeAt = xml.indexOf(close, at);
+    if (closeAt === -1) return -1;
+    const shadow = spans.length === 0 ? undefined : sectionCovering(spans, closeAt);
+    if (shadow === undefined) return closeAt;
+    at = shadow[1];
   }
-  return closeAt;
 }
 
 export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElementBlock[] {
@@ -375,6 +412,8 @@ export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElem
   // document order, so a name that has no usable close from HERE has none from
   // any later opener either — without this, each one would re-walk the tail.
   const noUsableClose = new Set<string>();
+  // One pass, reused by every close search below — see `sectionSpans`.
+  const spans = sectionSpans(xml);
   const lastClose = new Map<string, number>();
   const lastCloseIndex = (name: string): number => {
     let known = lastClose.get(name);
@@ -444,7 +483,7 @@ export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElem
       continue;
     }
     const close = `</${name}>`;
-    const closeAt = closeOutsideSections(xml, close, bodyStart);
+    const closeAt = closeOutsideSections(xml, close, bodyStart, spans);
     if (closeAt === -1) {
       // A close tag exists (the guard above says so) but every one of them is
       // inside a comment, CDATA section or PI — so none of them ends anything.

@@ -193,11 +193,16 @@ function containerCloseEnd(lower: string, name: string, from: number, noClose: S
  */
 function looseStripFrom(html: string, lower: string, from: number, noClose: Set<string>): string {
   let out = '';
-  let at = from;
-  while (at < html.length) {
-    const lt = html.indexOf('<', at);
+  let textStart = from;
+  let i = from;
+  // The `>` this scan is pairing against. It only moves FORWARD, refreshed
+  // when the walk passes it — searching afresh from every `<` would rescan the
+  // same tail for each one, which is the cost this fallback exists to avoid.
+  let gt = -1;
+  while (i < html.length) {
+    const lt = html.indexOf('<', i);
     if (lt === -1) break;
-    const gt = html.indexOf('>', lt + 1);
+    if (gt <= lt) gt = html.indexOf('>', lt + 1);
     if (gt === -1) break;
     let p = lt + 1;
     const closing = html[p] === '/';
@@ -207,20 +212,27 @@ function looseStripFrom(html: string, lower: string, from: number, noClose: Set<
     while (q < gt && !/[\s/>]/.test(html[q])) q++;
     const name = lower.slice(p, q);
     if (!markup && !TAG_NAME.test(name)) {
-      out += html.slice(at, gt + 1); // names no element: the span is body text
-      at = gt + 1;
+      // Names no element, so the `<` is body text — and the scan resumes at
+      // the NEXT character rather than past the whole span. Consuming to the
+      // `>` swallowed whatever the span contained, and `< <script>evil()`
+      // ends its span at the script tag's own `>`: the container was never
+      // seen and its code was shown to the reader as text.
+      i = lt + 1;
       continue;
     }
-    out += html.slice(at, lt);
-    if (!closing && CONTAINER_TAGS.has(name)) {
+    out += html.slice(textStart, lt);
+    // `<script/x>` names no container: `/` ends a name only as the `/` of a
+    // `/>`. Without this the malformed tag opened a container here and hid the
+    // message text up to the next `</script>`, which the real scan never does.
+    if (!closing && CONTAINER_TAGS.has(name) && (q === gt || /\s/.test(html[q]))) {
       const closeEnd = containerCloseEnd(lower, name, gt + 1, noClose);
-      at = closeEnd !== -1 ? closeEnd : gt + 1;
+      textStart = i = closeEnd !== -1 ? closeEnd : gt + 1;
       continue;
     }
     if ((name === 'br' && !closing) || BLOCK_TAGS.has(name)) out += '\n';
-    at = gt + 1;
+    textStart = i = gt + 1;
   }
-  return out + html.slice(at);
+  return out + html.slice(textStart);
 }
 
 export function htmlToEmailText(html: string): string {

@@ -368,6 +368,23 @@ describe('email text helpers', () => {
     expect(out).toContain('three');
   });
 
+  it('the fallback sees tags nested inside a span that names nothing', () => {
+    // `< <script>` ends its span at the SCRIPT tag's own `>`. Consuming the
+    // whole span as text meant the container was never recognized and its code
+    // was rendered to the reader; the scan resumes one character in instead.
+    const wall = '<b ' + '<'.repeat(100_001) + '>';
+    const out = htmlToEmailText(`${wall}< <script>evil()</script>after`);
+    expect(out).not.toContain('evil()');
+    expect(out).toContain('after');
+  });
+
+  it('the fallback does not let `<script/x>` open a container', () => {
+    // `/` ends a name only as the `/` of a `/>`, so this names no container —
+    // treating it as one hid real message text up to the next `</script>`.
+    const wall = '<b ' + '<'.repeat(100_001) + '>';
+    expect(htmlToEmailText(`${wall}<script/x>secret</script>tail`)).toContain('secret');
+  });
+
   it('mailboxText renders whichever of name/address exists', () => {
     expect(mailboxText('Ada', 'ada@example.com')).toBe('Ada <ada@example.com>');
     expect(mailboxText(undefined, 'ada@example.com')).toBe('ada@example.com');
