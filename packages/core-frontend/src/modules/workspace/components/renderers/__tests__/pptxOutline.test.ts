@@ -1,0 +1,98 @@
+import { describe, it, expect } from 'vitest';
+import JSZip from 'jszip';
+import { extractPptxOutline } from '../pptxOutline';
+
+/**
+ * The parser against real zips, built here from minimal slide XML — the same
+ * fixtures a crafted-by-PowerPoint file reduces to. The conventions pinned
+ * here are shared with the backend's `extract-pptx.ts`, so an agent's
+ * `read_file` and this viewer describe the same deck the same way: numeric
+ * slide order, runs joined with NO separator, entities decoded, notes
+ * attached to their slide.
+ */
+
+/** One `<a:p>` paragraph whose `<a:t>` runs are exactly `runs`. */
+function para(...runs: string[]): string {
+  return `<a:p>${runs.map((r) => `<a:r><rPr b="1"/><a:t>${r}</a:t></a:r>`).join('')}</a:p>`;
+}
+
+function slideXml(...paragraphs: string[]): string {
+  return `<?xml version="1.0"?><p:sld xmlns:a="urn:a" xmlns:p="urn:p"><p:cSld><p:spTree>${paragraphs.join('')}</p:spTree></p:cSld></p:sld>`;
+}
+
+async function zipBytes(entries: Record<string, string>): Promise<ArrayBuffer> {
+  const zip = new JSZip();
+  for (const [name, content] of Object.entries(entries)) zip.file(name, content);
+  return zip.generateAsync({ type: 'arraybuffer' });
+}
+
+describe('extractPptxOutline', () => {
+  it('joins a paragraph\'s runs with no separator — PowerPoint splits them mid-word', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('Quart', 'erly ', 'results')),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides).toHaveLength(1);
+    expect(slides[0].paragraphs).toEqual(['Quarterly results']);
+  });
+
+  it('decodes XML entities, named and numeric', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(
+        para('R&amp;D &lt;2026&gt;'),
+        para('&#65;&#x42; &quot;quoted&apos;'),
+      ),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].paragraphs).toEqual(['R&D <2026>', 'AB "quoted\'']);
+  });
+
+  it('orders slides numerically by package number, not lexicographically', async () => {
+    const bytes = await zipBytes({
+      // Deliberately declared out of order, with a two-digit number that
+      // sorts before "2" as a STRING.
+      'ppt/slides/slide10.xml': slideXml(para('tenth')),
+      'ppt/slides/slide2.xml': slideXml(para('second')),
+      'ppt/slides/slide1.xml': slideXml(para('first')),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides.map((s) => s.number)).toEqual([1, 2, 10]);
+    expect(slides.map((s) => s.paragraphs[0])).toEqual(['first', 'second', 'tenth']);
+  });
+
+  it('attaches speaker notes to their slide and leaves other slides note-free', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('The pitch')),
+      'ppt/slides/slide2.xml': slideXml(para('The ask')),
+      'ppt/notesSlides/notesSlide2.xml': slideXml(para('pause here'), para('make eye contact')),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].notes).toEqual([]);
+    expect(slides[1].notes).toEqual(['pause here', 'make eye contact']);
+  });
+
+  it('drops empty paragraphs and keeps a text-free slide as an empty outline entry', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('kept'), '<a:p></a:p>', para('   ')),
+      // A picture-only slide: present in the deck, so present in the outline.
+      'ppt/slides/slide2.xml': slideXml(),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].paragraphs).toEqual(['kept']);
+    expect(slides[1]).toEqual({ number: 2, paragraphs: [], notes: [] });
+  });
+
+  it('rejects bytes that are not a zip', async () => {
+    const bytes = new TextEncoder().encode('this is not a zip archive').buffer as ArrayBuffer;
+    await expect(extractPptxOutline(bytes)).rejects.toThrow(
+      /could not be parsed as a \.pptx/,
+    );
+  });
+
+  it('rejects a zip with no slides in it', async () => {
+    const bytes = await zipBytes({ 'word/document.xml': '<w:document/>' });
+    await expect(extractPptxOutline(bytes)).rejects.toThrow(
+      /could not be parsed as a \.pptx \(no ppt\/slides/,
+    );
+  });
+});

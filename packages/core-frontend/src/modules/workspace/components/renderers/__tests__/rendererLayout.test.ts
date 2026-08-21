@@ -13,6 +13,12 @@ describe('getRendererLayout', () => {
     'Knowledge/notes.txt',
     'Knowledge/report.docx',
     'Knowledge/no-extension-file',
+    // The pptx outline view is a text document, not a viewport.
+    'Inbox/all-hands.pptx',
+    // The legacy-format note is one paragraph on the prose measure.
+    'old/memo.doc',
+    'old/deck.ppt',
+    'old/sheet.xls',
   ])('lays out %s as a document', (path) => {
     expect(getRendererLayout(path)).toBe('prose');
   });
@@ -37,12 +43,18 @@ describe('getRendererLayout', () => {
  * interpret.
  */
 describe('isBinaryFile', () => {
-  it.each(['Inbox/brief.pdf', 'Inbox/diagram.png', 'Inbox/report.docx', 'Data/book.xlsx'])(
-    'knows %s holds no countable text',
-    (path) => {
-      expect(isBinaryFile(path)).toBe(true);
-    },
-  );
+  it.each([
+    'Inbox/brief.pdf',
+    'Inbox/diagram.png',
+    'Inbox/report.docx',
+    'Data/book.xlsx',
+    'Inbox/all-hands.pptx',
+    'old/memo.doc',
+    'old/deck.ppt',
+    'old/sheet.xls',
+  ])('knows %s holds no countable text', (path) => {
+    expect(isBinaryFile(path)).toBe(true);
+  });
 
   // The one file whose bytes ARE text and still must not be counted: it goes
   // to `ImageRenderer` as a picture, so the character count would describe a
