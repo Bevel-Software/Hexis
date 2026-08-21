@@ -91,7 +91,7 @@ function expandRows(tableXml: string): { rows: string[][]; truncated: string[] }
   for (const row of xmlElementBlocks(tableXml, ['table:table-row'])) {
     const cells = expandCells(row.body ?? '');
     if (cells.truncated) colsTruncated = true;
-    parsed.push({ value: cells.cells, repeat: repeatCount(row.attrs, 'table:number-rows-repeated') });
+    parsed.push({ value: cells.cells, repeat: repeatCount(row.attributes['table:number-rows-repeated']) });
   }
   // Trailing empty rows: dropped with their repeats (grid padding, not data).
   while (parsed.length > 0 && parsed[parsed.length - 1].value.length === 0) parsed.pop();
@@ -131,7 +131,7 @@ function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
       .map(odfParagraphText)
       .join(' ')
       .replace(/[\t\n\r]+/g, ' ');
-    parsed.push({ value: text, repeat: repeatCount(cell.attrs, 'table:number-columns-repeated') });
+    parsed.push({ value: text, repeat: repeatCount(cell.attributes['table:number-columns-repeated']) });
   }
   while (parsed.length > 0 && parsed[parsed.length - 1].value === '') parsed.pop();
 
@@ -151,8 +151,7 @@ function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
 }
 
 /** A `…-repeated="N"` attribute value, clamped to a sane positive integer. */
-function repeatCount(attrs: string, name: string): number {
-  const raw = xmlAttrValue(attrs, name);
+function repeatCount(raw: string | undefined): number {
   const n = raw !== undefined ? parseInt(raw, 10) : 1;
   return Number.isFinite(n) && n >= 1 ? n : 1;
 }
