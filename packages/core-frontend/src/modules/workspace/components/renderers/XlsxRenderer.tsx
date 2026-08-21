@@ -70,26 +70,35 @@ export function XlsxRenderer({ filePath }: FileRendererProps) {
         }
         const parsed: SheetView[] = workbook.SheetNames.map((name) => {
           const sheet = workbook.Sheets[name];
-          // `sheetRows` would cap the PARSE too, but it caps every sheet the
-          // same and hides the real row count — and the honest "N of M rows"
-          // note needs M. Parsing in full and slicing keeps the note true.
-          const rows = sheet
-            ? (XLSX.utils.sheet_to_json(sheet, {
-                header: 1,
-                raw: false,
-                defval: '',
-              }) as unknown[][])
-            : [];
-          const totalCols = rows.reduce((max, r) => Math.max(max, r.length), 0);
+          const ref = sheet?.['!ref'];
+          if (!sheet || !ref) return { name, rows: [], totalRows: 0, totalCols: 0 };
+          // Cap the conversion range BEFORE materializing anything:
+          // `sheet_to_json` walks every cell of the range it is given, so a
+          // sparse sheet whose declared range is `A1:XFD1048576` (one stray
+          // cell at the far corner) would materialize 16k × 1M cells and
+          // freeze the tab. The honest "N of M" totals for the truncation
+          // note come from the DECLARED `!ref` itself — no full parse needed.
+          const range = XLSX.utils.decode_range(ref);
+          const totalRows = range.e.r - range.s.r + 1;
+          const totalCols = range.e.c - range.s.c + 1;
+          const bounded = {
+            s: range.s,
+            e: {
+              r: Math.min(range.e.r, range.s.r + MAX_ROWS - 1),
+              c: Math.min(range.e.c, range.s.c + MAX_COLS - 1),
+            },
+          };
+          const rows = XLSX.utils.sheet_to_json(sheet, {
+            header: 1,
+            raw: false,
+            defval: '',
+            range: XLSX.utils.encode_range(bounded),
+          }) as unknown[][];
           return {
             name,
-            totalRows: rows.length,
+            totalRows,
             totalCols,
-            rows: rows
-              .slice(0, MAX_ROWS)
-              .map((row) =>
-                row.slice(0, MAX_COLS).map((cell) => (cell == null ? '' : String(cell))),
-              ),
+            rows: rows.map((row) => row.map((cell) => (cell == null ? '' : String(cell)))),
           };
         });
         if (cancelled) return;

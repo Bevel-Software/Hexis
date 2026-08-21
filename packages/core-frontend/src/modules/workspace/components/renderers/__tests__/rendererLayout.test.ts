@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getRendererLayout, isBinaryFile } from '../index';
+import { getRendererLayout, isBinaryFile, isViewOnlyFile } from '../index';
 
 /**
  * The layout choice is the one thing in WP1 that cannot fail loudly: pick
@@ -15,10 +15,14 @@ describe('getRendererLayout', () => {
     'Knowledge/no-extension-file',
     // The pptx outline view is a text document, not a viewport.
     'Inbox/all-hands.pptx',
-    // The legacy-format note is one paragraph on the prose measure.
+    // The legacy-format / ODF no-preview note is one paragraph on the prose
+    // measure.
     'old/memo.doc',
     'old/deck.ppt',
     'old/sheet.xls',
+    'docs/spec.odt',
+    'decks/pitch.odp',
+    'data/numbers.ods',
   ])('lays out %s as a document', (path) => {
     expect(getRendererLayout(path)).toBe('prose');
   });
@@ -52,6 +56,9 @@ describe('isBinaryFile', () => {
     'old/memo.doc',
     'old/deck.ppt',
     'old/sheet.xls',
+    'docs/spec.odt',
+    'decks/pitch.odp',
+    'data/numbers.ods',
   ])('knows %s holds no countable text', (path) => {
     expect(isBinaryFile(path)).toBe(true);
   });
@@ -71,6 +78,31 @@ describe('isBinaryFile', () => {
     'knows %s is text',
     (path) => {
       expect(isBinaryFile(path)).toBe(false);
+    },
+  );
+});
+
+/**
+ * View-only routes render a no-preview note — there is no editing surface, so
+ * the page's write action (Edit / Propose) must not be offered for them.
+ */
+describe('isViewOnlyFile', () => {
+  it.each([
+    'old/memo.doc',
+    'old/deck.ppt',
+    'old/sheet.xls',
+    'docs/spec.odt',
+    'decks/pitch.odp',
+    'data/numbers.ods',
+    'docs/SPEC.ODT',
+  ])('marks %s view-only', (path) => {
+    expect(isViewOnlyFile(path)).toBe(true);
+  });
+
+  it.each(['Knowledge/Foo.md', 'Inbox/report.docx', 'Inbox/brief.pdf', 'Data/velocity.csv'])(
+    'leaves %s with its write action',
+    (path) => {
+      expect(isViewOnlyFile(path)).toBe(false);
     },
   );
 });

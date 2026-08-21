@@ -60,7 +60,8 @@ describe('extractPptxOutline', () => {
     expect(slides.map((s) => s.paragraphs[0])).toEqual(['first', 'second', 'tenth']);
   });
 
-  it('attaches speaker notes to their slide and leaves other slides note-free', async () => {
+  // No rels parts in this fixture — proves the numeric-name FALLBACK holds.
+  it('attaches speaker notes to their slide by numeric name when no rels part exists', async () => {
     const bytes = await zipBytes({
       'ppt/slides/slide1.xml': slideXml(para('The pitch')),
       'ppt/slides/slide2.xml': slideXml(para('The ask')),
@@ -70,6 +71,44 @@ describe('extractPptxOutline', () => {
     expect(slides[0].notes).toEqual([]);
     expect(slides[1].notes).toEqual(['pause here', 'make eye contact']);
   });
+
+  const RELS_NS = 'xmlns="http://schemas.openxmlformats.org/package/2006/relationships"';
+  const NOTES_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide';
+
+  it('pairs notes through each slide\'s rels — the notes part number need not match the slide number', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('First')),
+      'ppt/slides/slide2.xml': slideXml(para('Second')),
+      // Notes for slide 2 live in a part numbered 7 — only the rels say so.
+      'ppt/notesSlides/notesSlide7.xml': slideXml(para('note for slide two')),
+      'ppt/slides/_rels/slide1.xml.rels': `<?xml version="1.0"?><Relationships ${RELS_NS}></Relationships>`,
+      'ppt/slides/_rels/slide2.xml.rels':
+        `<?xml version="1.0"?><Relationships ${RELS_NS}>` +
+        `<Relationship Id="rId9" Type="${NOTES_TYPE}" Target="../notesSlides/notesSlide7.xml"/>` +
+        '</Relationships>',
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].notes).toEqual([]);
+    expect(slides[1].notes).toEqual(['note for slide two']);
+  });
+
+  it('a rels part WITHOUT a notesSlide relationship means no notes — the numeric twin is not guessed at', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('Solo')),
+      'ppt/notesSlides/notesSlide1.xml': slideXml(para('orphan notes part')),
+      'ppt/slides/_rels/slide1.xml.rels': `<?xml version="1.0"?><Relationships ${RELS_NS}></Relationships>`,
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].notes).toEqual([]);
+  });
+
+  it('rejects a deck whose slide part inflates past the 50 MB per-entry bound', async () => {
+    const padded = slideXml(para('tiny text')) + ' '.repeat(51 * 1024 * 1024);
+    const bytes = await zipBytes({ 'ppt/slides/slide1.xml': padded });
+    await expect(extractPptxOutline(bytes)).rejects.toThrow(
+      /could not be parsed as a \.pptx \(.*extraction bound/,
+    );
+  }, 30_000);
 
   it('drops empty paragraphs and keeps a text-free slide as an empty outline entry', async () => {
     const bytes = await zipBytes({

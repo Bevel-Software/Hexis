@@ -22,17 +22,28 @@ const pdfjsMock = vi.hoisted(() => {
       height: 800 * scale,
     })),
     render: vi.fn(() => renderTask),
+    cleanup: vi.fn(),
   };
   const doc = {
     numPages: 3,
-    getPage: vi.fn(async () => page),
+    getPage: vi.fn(async (_n: number) => page),
     destroy: vi.fn(async () => {}),
   };
+  // The renderer retains the LOADING TASK and destroys that (pdf.js's
+  // canonical teardown — it frees the doc in every state); the mock task's
+  // destroy forwards to doc.destroy the way the real one does.
+  const makeTask = (promise: Promise<unknown>) => ({
+    promise,
+    destroy: vi.fn(async () => {
+      await doc.destroy();
+    }),
+  });
   return {
     doc,
     page,
     renderTask,
-    getDocument: vi.fn(() => ({ promise: Promise.resolve(doc) })),
+    makeTask,
+    getDocument: vi.fn(() => makeTask(Promise.resolve(doc))),
   };
 });
 vi.mock('pdfjs-dist', () => ({
@@ -77,13 +88,13 @@ beforeEach(() => {
     get: () => CONTAINER_WIDTH,
   });
   pdfjsMock.getDocument.mockClear();
-  pdfjsMock.getDocument.mockImplementation(() => ({
-    promise: Promise.resolve(pdfjsMock.doc),
-  }));
+  pdfjsMock.getDocument.mockImplementation(() => pdfjsMock.makeTask(Promise.resolve(pdfjsMock.doc)));
   pdfjsMock.doc.getPage.mockClear();
+  pdfjsMock.doc.getPage.mockImplementation(async (_n: number) => pdfjsMock.page);
   pdfjsMock.doc.destroy.mockClear();
   pdfjsMock.page.getViewport.mockClear();
   pdfjsMock.page.render.mockClear();
+  pdfjsMock.page.cleanup.mockClear();
 });
 
 afterEach(() => {
@@ -170,9 +181,9 @@ describe('PdfRenderer', () => {
   it('says the file could not be parsed as a PDF when pdf.js rejects it, and still offers Download', async () => {
     stubPdfFetch();
     // A renamed .txt, a truncated upload — the fetch succeeded, the parse did not.
-    pdfjsMock.getDocument.mockImplementation(() => ({
-      promise: Promise.reject(new Error('Invalid PDF structure')),
-    }));
+    pdfjsMock.getDocument.mockImplementation(() =>
+      pdfjsMock.makeTask(Promise.reject(new Error('Invalid PDF structure'))),
+    );
     vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     renderWithWorkspace('ws-1');
@@ -208,6 +219,57 @@ describe('PdfRenderer', () => {
 
     unmount();
     expect(pdfjsMock.doc.destroy).toHaveBeenCalled();
+  });
+
+  it('destroys the LOADING TASK on unmount even while the document is still resolving — a doc that resolves after cancellation is torn down, not leaked', async () => {
+    stubPdfFetch();
+    let resolveDoc!: (d: unknown) => void;
+    let task!: ReturnType<typeof pdfjsMock.makeTask>;
+    pdfjsMock.getDocument.mockImplementation(() => {
+      task = pdfjsMock.makeTask(
+        new Promise((resolve) => {
+          resolveDoc = resolve;
+        }),
+      );
+      return task;
+    });
+
+    const { unmount } = renderWithWorkspace('ws-1');
+    // Let the fetch finish and getDocument fire.
+    await waitFor(() => expect(pdfjsMock.getDocument).toHaveBeenCalled());
+    unmount();
+    // The task is destroyed although its promise never resolved…
+    expect(task.destroy).toHaveBeenCalled();
+    // …and a late resolution changes nothing (destroy already covered it).
+    resolveDoc(pdfjsMock.doc);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(pdfjsMock.doc.destroy).toHaveBeenCalled();
+  });
+
+  it('releases the PRIOR page (page.cleanup) only after the next page has rendered — never mid-render', async () => {
+    stubPdfFetch();
+    const makePage = () => ({
+      getViewport: vi.fn(({ scale }: { scale: number }) => ({ width: 600 * scale, height: 800 * scale })),
+      render: vi.fn(() => ({ promise: Promise.resolve(), cancel: vi.fn() })),
+      cleanup: vi.fn(),
+    });
+    const pages: Record<number, ReturnType<typeof makePage>> = { 1: makePage(), 2: makePage() };
+    pdfjsMock.doc.getPage.mockImplementation(async (n: number) => pages[n] ?? makePage());
+
+    const user = userEvent.setup();
+    renderWithWorkspace('ws-1');
+    await screen.findByText('Page 1 of 3');
+    await waitFor(() => expect(pages[1].render).toHaveBeenCalled());
+    // Page 1's resources stay live while page 1 is the one on screen.
+    expect(pages[1].cleanup).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    await screen.findByText('Page 2 of 3');
+    await waitFor(() => expect(pages[2].render).toHaveBeenCalled());
+    // After page 2's render settles the prior page is released…
+    await waitFor(() => expect(pages[1].cleanup).toHaveBeenCalledTimes(1));
+    // …and the CURRENT page is not.
+    expect(pages[2].cleanup).not.toHaveBeenCalled();
   });
 
   it('does not fetch when workspaceId is null', async () => {

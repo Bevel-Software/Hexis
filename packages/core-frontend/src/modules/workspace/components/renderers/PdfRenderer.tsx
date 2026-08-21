@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
-import type { PDFDocumentProxy } from 'pdfjs-dist';
+import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Button } from '../../../../shared/components';
 import { useWorkspace } from '../../state/workspace.context';
@@ -41,6 +41,10 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
   const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // The page whose render last COMPLETED. Its cached resources are released
+  // only after the NEXT page's render settles — never mid-render (pdf.js
+  // corrupts a render whose page is cleaned up under it).
+  const renderedPageRef = useRef<PDFPageProxy | null>(null);
   // Fit-to-width: the page is scaled so its width matches the container's.
   // 0 = not measured yet; the render effect waits for a real measurement so
   // the first paint is already at the right size instead of flashing 1:1.
@@ -48,15 +52,17 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
 
   useEffect(() => {
     // Reset stale state from a prior filePath / workspaceId before starting
-    // the new load — including teardown (workspaceId → null).
+    // the new load — including teardown (workspaceId → null). The rendered-
+    // page ref dies with its document (task.destroy frees the pages).
     setDoc(null);
     setPageNumber(1);
     setError(null);
+    renderedPageRef.current = null;
 
     if (!workspaceId) return;
 
     let cancelled = false;
-    let loadedDoc: PDFDocumentProxy | null = null;
+    let loadingTask: PDFDocumentLoadingTask | null = null;
     (async () => {
       try {
         const res = await authFetch(
@@ -69,15 +75,25 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
         }
         const buffer = await res.arrayBuffer();
         if (cancelled) return;
+        let loadedDoc: PDFDocumentProxy;
         try {
-          loadedDoc = await getDocument({ data: new Uint8Array(buffer) }).promise;
+          // The TASK is retained (not just the resolved doc) so cleanup can
+          // tear it down in every state: still loading, resolved, or a doc
+          // that resolves only AFTER cancellation.
+          loadingTask = getDocument({ data: new Uint8Array(buffer) });
+          loadedDoc = await loadingTask.promise;
         } catch (parseErr) {
+          // A destroyed task rejects its promise — that is this effect's own
+          // cleanup, not a parse failure to report.
+          if (cancelled) return;
           // The bytes arrived but pdf.js rejected them — a renamed file, a
           // truncated upload. Distinct copy from the transport failure above.
           console.warn('[PdfRenderer] parse failed:', parseErr);
-          if (!cancelled) setError('This file could not be parsed as a PDF.');
+          setError('This file could not be parsed as a PDF.');
           return;
         }
+        // Resolved after cancellation: cleanup already destroyed the task
+        // (which destroys the document with it) — just don't publish it.
         if (cancelled) return;
         setDoc(loadedDoc);
       } catch (e) {
@@ -88,8 +104,9 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
 
     return () => {
       cancelled = true;
-      // Frees the worker-side document and every cached page.
-      loadedDoc?.destroy().catch(() => {});
+      // Destroying the loading task frees the worker-side document and every
+      // cached page, whether the load is mid-flight or long resolved.
+      loadingTask?.destroy().catch(() => {});
     };
   }, [workspaceId, filePath]);
 
@@ -134,6 +151,14 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
         // v5 API: hand over the canvas itself; pdf.js takes the 2D context.
         renderTask = page.render({ canvas, viewport });
         await renderTask.promise;
+        if (cancelled) return;
+        // THIS page's render has settled, so the PRIOR page's cached
+        // resources (fonts, operator lists) can be released. Sequenced here
+        // — after the render task resolves — because cleanup() during an
+        // active render is the one forbidden call.
+        const prior = renderedPageRef.current;
+        if (prior && prior !== page) prior.cleanup();
+        renderedPageRef.current = page;
       } catch (err) {
         // A cancelled render is this effect's own cleanup, not a failure.
         if (cancelled || (err as Error | null)?.name === 'RenderingCancelledException') return;

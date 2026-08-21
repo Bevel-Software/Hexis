@@ -58,6 +58,13 @@ const renderersByExtension: Record<string, ComponentType<FileRendererProps>> = {
   '.doc': LegacyOfficeRenderer,
   '.ppt': LegacyOfficeRenderer,
   '.xls': LegacyOfficeRenderer,
+  // OpenDocument files: agents read them fine (the backend extracts their
+  // text), but the browser has no viewer for them yet — the same no-preview
+  // note (with ODF-honest copy: download, no convert hint) beats the text
+  // fallback garbling a zip.
+  '.odt': LegacyOfficeRenderer,
+  '.odp': LegacyOfficeRenderer,
+  '.ods': LegacyOfficeRenderer,
   '.csv': CsvRenderer,
   '.tool': ToolRenderer,
 };
@@ -94,8 +101,9 @@ export function getFileRenderer(filePath: string): ComponentType<FileRendererPro
 export type RendererLayout = 'prose' | 'full-bleed';
 
 // NOT here, deliberately: `.docx` (mammoth's HTML is prose), `.pptx` (the
-// outline view is a text document), and the legacy `.doc`/`.ppt`/`.xls`
-// (a one-paragraph note) — all documents, all on the prose measure.
+// outline view is a text document), and the legacy `.doc`/`.ppt`/`.xls` plus
+// ODF `.odt`/`.odp`/`.ods` (a one-paragraph note) — all documents, all on
+// the prose measure.
 const FULL_BLEED_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico',
   '.pdf',
@@ -129,8 +137,25 @@ export function getRendererLayout(filePath: string): RendererLayout {
 const BINARY_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico',
   '.pdf', '.docx', '.xlsx', '.pptx', '.doc', '.ppt', '.xls', '.zip',
+  '.odt', '.odp', '.ods',
 ]);
 
 export function isBinaryFile(filePath: string): boolean {
   return BINARY_EXTENSIONS.has(filePath.slice(filePath.lastIndexOf('.')).toLowerCase());
+}
+
+/**
+ * Files whose page must not offer the WRITE action (Edit / Propose changes).
+ *
+ * These routes render a no-preview note (`LegacyOfficeRenderer`): there is no
+ * editing surface behind the button, so clicking Edit would acquire the file
+ * lock, flip the page into an edit mode the renderer ignores, and — worst —
+ * imply that saving text over a binary document is a thing that can be done.
+ * `FileViewer` suppresses both the pane bar's write action and the header's
+ * for these extensions.
+ */
+const VIEW_ONLY_EXTENSIONS = new Set(['.doc', '.ppt', '.xls', '.odt', '.odp', '.ods']);
+
+export function isViewOnlyFile(filePath: string): boolean {
+  return VIEW_ONLY_EXTENSIONS.has(filePath.slice(filePath.lastIndexOf('.')).toLowerCase());
 }

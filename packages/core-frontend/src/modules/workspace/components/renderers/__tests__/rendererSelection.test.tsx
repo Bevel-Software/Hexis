@@ -44,6 +44,15 @@ describe('getFileRenderer: document routing', () => {
     },
   );
 
+  // The text fallback would print a garbled zip for these — they get the
+  // no-preview note (with ODF-honest copy) until a real viewer exists.
+  it.each(['docs/spec.odt', 'decks/pitch.odp', 'data/numbers.ods', 'docs/SPEC.ODT'])(
+    'routes the OpenDocument %s to the no-preview note, never the text fallback',
+    (path) => {
+      expect(getFileRenderer(path)).toBe(LegacyOfficeRenderer);
+    },
+  );
+
   it('keeps the existing routes: unknown extensions fall back to text, images stay images', () => {
     expect(getFileRenderer('notes/scratch.unknown')).toBe(TextRenderer);
     expect(getFileRenderer('pics/logo.png')).toBe(ImageRenderer);
@@ -76,6 +85,20 @@ describe('LegacyOfficeRenderer', () => {
     expect(note.textContent).toContain(modern);
     expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
     // A note, not a parse attempt: nothing was fetched.
+    expect(apiMock.authFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['docs/spec.odt', 'text document'],
+    ['decks/pitch.odp', 'presentation'],
+    ['data/numbers.ods', 'spreadsheet'],
+  ])('for the OpenDocument %s: says no preview YET and offers Download — never a convert hint (agents read these fine)', (path, kind) => {
+    renderLegacy(path);
+    const note = screen.getByText(/No preview for OpenDocument files yet/);
+    expect(note.textContent).toContain(kind);
+    expect(note.textContent).toContain('Download the file to view it');
+    expect(note.textContent).not.toMatch(/[Cc]onvert/);
+    expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
     expect(apiMock.authFetch).not.toHaveBeenCalled();
   });
 });

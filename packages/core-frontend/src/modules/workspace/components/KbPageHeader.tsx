@@ -29,7 +29,7 @@ import { useDismissableMenu } from '../../../shared/components';
 
 /** Extensions we strip from the `<h1>`. Anything else stays verbatim. */
 const KNOWN_EXTENSIONS =
-  /\.(md|markdown|txt|csv|tsv|json|yaml|yml|html|htm|pdf|docx|xlsx|tool|png|jpe?g|gif|webp|svg)$/i;
+  /\.(md|markdown|txt|csv|tsv|json|yaml|yml|html|htm|pdf|docx|xlsx|pptx|doc|ppt|xls|odt|odp|ods|tool|png|jpe?g|gif|webp|svg)$/i;
 
 function titleOf(path: string): string {
   const base = path.slice(path.lastIndexOf('/') + 1);

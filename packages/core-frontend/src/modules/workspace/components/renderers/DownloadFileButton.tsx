@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useState } from 'react';
 import { Download } from 'lucide-react';
 import { Button } from '../../../../shared/components';
 import { useWorkspace } from '../../state/workspace.context';
-import { authFetch } from '../../../../lib/api';
+import { downloadViaBlob } from './downloadFile';
 
 /**
  * The document viewers' way out of the browser. Every office-document viewer
@@ -43,22 +43,14 @@ export function DownloadFileButton({
     setBusy(true);
     setError(null);
     try {
-      const res = await authFetch(
+      const outcome = await downloadViaBlob(
         `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}&download=1`,
+        fileName,
       );
-      if (!res.ok) {
-        setError(`Download failed (HTTP ${res.status})`);
+      if (!outcome.ok) {
+        setError(`Download failed (HTTP ${outcome.status})`);
         return;
       }
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(blobUrl);
     } catch (err) {
       console.error('[DownloadFileButton] download failed:', err);
       setError(err instanceof Error ? err.message : 'Download failed.');

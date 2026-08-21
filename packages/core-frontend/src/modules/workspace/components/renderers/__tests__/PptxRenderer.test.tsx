@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import JSZip from 'jszip';
 import {
   WorkspaceContext,
@@ -63,9 +63,12 @@ describe('PptxRenderer', () => {
     ).toBeTruthy();
     // Runs joined with no separator.
     expect(screen.getByText('Roadmap')).toBeInTheDocument();
-    // Notes under their slide.
-    expect(screen.getByText('Notes')).toBeInTheDocument();
-    expect(screen.getByText('pause for questions')).toBeInTheDocument();
+    // Notes under THEIR slide: scoped inside Slide 2's section, so a
+    // wrong-slide attachment fails instead of passing on a page-wide match.
+    const slide2Section = slide2.closest('section')!;
+    expect(within(slide2Section).getByText('Notes')).toBeInTheDocument();
+    expect(within(slide2Section).getByText('pause for questions')).toBeInTheDocument();
+    expect(within(slide1.closest('section')!).queryByText('Notes')).not.toBeInTheDocument();
     // The honest header: what this view is, and the way to the real deck.
     expect(screen.getByText(/Text outline of the presentation/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
