@@ -2,6 +2,7 @@ import '@utcp/direct-call';
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
+import { omitImagePayloads } from '@bevel-software/platform-mcp-core';
 import type { SpillStore } from '../workspace/spill-store.js';
 import { utcpNameToTsInterfaceName, findToolByName, AmbiguousToolNameError } from './code-mode-names.js';
 
@@ -43,7 +44,12 @@ export function createCallToolChainTool(
       const timeout = input.timeout ?? 30_000;
       const maxOutputSize = input.max_output_size ?? 200_000;
       try {
-        const { result, logs } = await client.callToolChain(input.code, timeout);
+        const { result: rawResult, logs } = await client.callToolChain(input.code, timeout);
+        // Same policy as the MCP surfaces' `call_tool_chain` (see
+        // `omitImagePayloads`): a chain result is stringified JSON, so an image
+        // read inside it comes back as an omitted-image note instead of a
+        // base64 flood — images are only delivered on a direct `read_file`.
+        const result = omitImagePayloads(rawResult);
         const json = JSON.stringify({ success: true, result, logs });
         if (json.length <= maxOutputSize) {
           return { success: true, result, logs };

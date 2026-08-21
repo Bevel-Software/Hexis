@@ -26,6 +26,15 @@ import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './doc-extract/doc-extract.service.js';
 import { fileExtension, isLegacyDocument, isSupportedDocument } from './doc-extract/doc-extract.types.js';
+import { mcpImageResult } from '@bevel-software/platform-mcp-core';
+import {
+  IMAGE_MAX_RAW_BYTES,
+  imageDimensions,
+  imageMimeType,
+  imageNote,
+  isImageFile,
+  oversizedImageNotice,
+} from './image-read.js';
 
 /** A directory entry as returned by `LocalFilesystem.readdir`. */
 interface DirEntry {
@@ -167,8 +176,8 @@ const MIME_BY_EXT: Record<string, string> = {
  * The honest one-line notice `read_file` returns INSTEAD of raw bytes for a
  * binary file it cannot extract: what the file is (mime by extension + size),
  * plus the actionable hint where one exists — unzip for archives, convert for
- * legacy office formats. (Images get native handling in a later increment;
- * for now they take the same one-liner naming their type.)
+ * legacy office formats. (Images never reach this: they are intercepted first
+ * and returned as native MCP image content — see `image-read.ts`.)
  */
 function binaryReadNotice(path: string, sizeBytes: number): string {
   const ext = fileExtension(path);
@@ -394,7 +403,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'read_file',
     description:
-      'Read a workspace file as text. Returns `{ path, content }`. Office documents (.docx/.pptx/.xlsx) and PDFs return their EXTRACTED text under an honest `[extracted text of …]` header, with `[slide N]`/`[sheet: Name]`/`[page N]` markers — the extraction is READ-ONLY (layout/images omitted; such files cannot be edited as text, only replaced by uploading a new version). Other binary files return a one-line description instead of raw bytes. Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. A spill ref is workspace-independent: `branch` is ignored for it.' +
+      'Read a workspace file as text. Returns `{ path, content }`. Images (.png/.jpg/.jpeg/.gif/.webp) return the IMAGE ITSELF as native MCP image content (plus a one-line text note naming the file), so you can look at the picture — up to 3.5 MB of raw image data; a larger image gets an honest refusal asking for a locally downscaled copy or a smaller export (`.svg` is text and reads as text). Images come back only on a DIRECT call: inside `call_tool_chain` an image read yields an `{ image_omitted, note }` stub instead. Office documents (.docx/.pptx/.xlsx) and PDFs return their EXTRACTED text under an honest `[extracted text of …]` header, with `[slide N]`/`[sheet: Name]`/`[page N]` markers — the extraction is READ-ONLY (layout/images omitted; such files cannot be edited as text, only replaced by uploading a new version). Other binary files return a one-line description instead of raw bytes. Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref; ignored for an image) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. A spill ref is workspace-independent: `branch` is ignored for it.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -424,9 +433,28 @@ export function registerWorkspaceTools(
       await recordOntologyRead(sessionOntologyGate, ctx, p);
       await assertCanRead(readGateFor(a.branch as string, ctx), p);
       const fs = await ctx.getFilesystem(a.branch as string);
-      // Extraction (and the binary notice) happen AFTER the access gate and the
-      // ontology-read recording above — a document read is still a KB read.
+      // Extraction (and the binary/image handling) happen AFTER the access gate
+      // and the ontology-read recording above — a document read is still a KB read.
       const raw = await fs.readFile(p);
+      // Images return the picture itself as an MCP image content block, so a
+      // multimodal model SEES it. The handler returns the `McpImageResult`
+      // sentinel; the MCP result shaping (`toCallToolResult` in
+      // platform-mcp-core) turns it into `content: [image, text-note]`. The
+      // declared `outputs` schema (`{ path, content }`) intentionally does NOT
+      // cover this shape: `outputs` is advisory documentation — never enforced
+      // at the route, and not advertised over MCP (`toListedTool` exposes
+      // `inputSchema` only) — and the image result is replaced wholesale by
+      // content blocks before any client could try to validate it, so the
+      // schema keeps describing the text path it has always described.
+      // `offset`/`limit` are meaningless on a picture and are ignored.
+      if (isImageFile(p)) {
+        const bytes = asBytes(raw);
+        const mime = imageMimeType(p);
+        if (bytes.length > IMAGE_MAX_RAW_BYTES) {
+          return { path: p, content: oversizedImageNotice(p, mime, bytes.length) };
+        }
+        return mcpImageResult(bytes.toString('base64'), mime, imageNote(p, mime, bytes.length, imageDimensions(bytes)));
+      }
       let content: string;
       if (isSupportedDocument(p)) {
         const res = await docExtract.extract(p, asBytes(raw));

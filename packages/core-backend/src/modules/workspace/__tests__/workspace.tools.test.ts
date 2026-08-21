@@ -574,9 +574,10 @@ describe('office documents and PDFs', () => {
 
   it('read_file answers other binary files with a one-line notice (zip names the unzip tool)', async () => {
     const base = await start();
-    await fs.writeFile('img.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]));
-    const png = await readContent(base, 'img.png');
-    expect(png).toBe('[img.png is a binary file (image/png, 9 bytes) — not readable as text.]');
+    // .mp3, not an image: images return native MCP image content (see below).
+    await fs.writeFile('song.mp3', Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]));
+    const mp3 = await readContent(base, 'song.mp3');
+    expect(mp3).toBe('[song.mp3 is a binary file (audio/mpeg, 9 bytes) — not readable as text.]');
     await fs.writeFile('bundle.zip', Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00]));
     const zip = await readContent(base, 'bundle.zip');
     expect(zip).toContain('application/zip');
@@ -601,6 +602,97 @@ describe('office documents and PDFs', () => {
     expect((await post(`${base}/api/agent/tools/read_file`, { path: 'ok.md' })).status).not.toBe(200);
     // And the pptx is untouched: reading it still extracts the original text.
     expect(await readContent(base, 'deck.pptx')).toContain('Original');
+  });
+});
+
+/**
+ * Image reads: `read_file` on an image returns the `McpImageResult` sentinel
+ * (base64 + mimeType + self-describing note) that the MCP result shaping turns
+ * into a native image content block — never raw bytes and never the binary
+ * notice. Real fixtures: a genuine 1×1 PNG and 1×1 GIF.
+ */
+describe('images', () => {
+  /** A real, complete 1×1 transparent PNG. */
+  const PNG_1X1 = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  /** A real, complete 1×1 GIF89a. */
+  const GIF_1X1 = Buffer.from('R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==', 'base64');
+
+  interface ImageSentinel {
+    kind: string;
+    data: string;
+    mimeType: string;
+    note: string;
+  }
+
+  it('read_file on a png returns the image sentinel with base64, mimeType and a note naming path + dimensions + size', async () => {
+    const base = await start();
+    await fs.writeFile('logo.png', PNG_1X1);
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'logo.png' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ImageSentinel;
+    expect(body.kind).toBe('bevel/mcp-image@v1');
+    expect(body.mimeType).toBe('image/png');
+    expect(body.data).toBe(PNG_1X1.toString('base64'));
+    expect(body.note).toContain('logo.png');
+    expect(body.note).toContain('image/png');
+    expect(body.note).toContain(`${PNG_1X1.length} bytes`);
+    expect(body.note).toContain('1×1 px');
+  });
+
+  it('read_file passes a gif through whole under the same cap (first frame is the client’s concern)', async () => {
+    const base = await start();
+    await fs.writeFile('anim.gif', GIF_1X1);
+    const body = (await (await post(`${base}/api/agent/tools/read_file`, { path: 'anim.gif' })).json()) as ImageSentinel;
+    expect(body.kind).toBe('bevel/mcp-image@v1');
+    expect(body.mimeType).toBe('image/gif');
+    expect(body.data).toBe(GIF_1X1.toString('base64'));
+    expect(body.note).toContain('1×1 px');
+  });
+
+  it('read_file maps .jpg/.jpeg to image/jpeg (dimensions omitted when the header has none to give)', async () => {
+    const base = await start();
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]); // SOI + EOI, no frame header
+    await fs.writeFile('photo.jpg', bytes);
+    const body = (await (await post(`${base}/api/agent/tools/read_file`, { path: 'photo.jpg' })).json()) as ImageSentinel;
+    expect(body.mimeType).toBe('image/jpeg');
+    expect(body.data).toBe(bytes.toString('base64'));
+    expect(body.note).toBe(`[image: photo.jpg — image/jpeg, ${bytes.length} bytes]`);
+  });
+
+  it('read_file refuses an image over 3.5 MiB raw with the downscale message, not a sentinel', async () => {
+    const base = await start();
+    // 3,670,016 is the cap; one byte over must refuse. PNG magic + zero fill.
+    const big = Buffer.alloc(3_670_017);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(big);
+    await fs.writeFile('huge.png', big);
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'huge.png' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { path: string; content: string };
+    expect(body.path).toBe('huge.png');
+    expect(body.content).toContain('too large to return over MCP');
+    expect(body.content).toContain('3670016 bytes');
+    expect(body.content).toContain('Downscale');
+    expect(body.content).not.toContain(big.toString('base64').slice(0, 40));
+  });
+
+  it('read_file keeps .svg on the TEXT path — it is markup, not an image block', async () => {
+    const base = await start();
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>';
+    await fs.writeFile('icon.svg', svg);
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: 'icon.svg' })).json()).toEqual({
+      path: 'icon.svg',
+      content: svg,
+    });
+  });
+
+  it('read_file on an image still honors the read gate (403 before any bytes are returned)', async () => {
+    const base = await start('write', denyReads(new Set(['Knowledge/Secret.png'])));
+    await fs.writeFile(`${KB_DIR}/Knowledge/Secret.png`, PNG_1X1);
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/Knowledge/Secret.png` });
+    expect(res.status).toBe(403);
   });
 });
 
