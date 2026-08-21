@@ -38,6 +38,7 @@
   "dependencies": {
     "@bevel-software/platform-mcp-core": "workspace:*",
     "@bevel-software/platform-shared": "workspace:*",
+    "@kenjiuno/msgreader": "^1.28.0",
     "@mastra/core": "1.35.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@utcp/code-mode": "^1.2.12",
@@ -54,6 +55,7 @@
     "jsonwebtoken": "^9.0.3",
     "pdfjs-dist": "^5.4.624",
     "pg": "^8.20.0",
+    "postal-mime": "^3.0.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "yaml": "^2.9.0",
     "zod": "^3.24.0"

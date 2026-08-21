@@ -65,3 +65,33 @@ describe('tools_info', () => {
     await expect(run(['solo.run', 'down.run'])).rejects.toThrow(/repository unavailable/);
   });
 });
+
+/**
+ * The in-process agent's `call_tool_chain` shares the MCP surfaces' image
+ * policy: a chain result is stringified into the transcript, so an image read
+ * inside it must come back as an omitted-image note — never inline base64.
+ */
+describe('call_tool_chain image scrub', () => {
+  it('replaces a chained image sentinel with a note before serialization', async () => {
+    const { createCallToolChainTool } = await import('../code-mode.tool.js');
+    const sentinel = {
+      kind: 'bevel/mcp-image@v1',
+      data: 'QUJDREVG',
+      mimeType: 'image/png',
+      note: '[image: Files/logo.png — image/png, 6 bytes]',
+    };
+    const chainClient = {
+      callToolChain: vi.fn(async () => ({ result: { pic: sentinel, ok: true }, logs: [] as string[] })),
+    } as unknown as CodeModeUtcpClient;
+    const spill = { write: vi.fn(async () => ({ ref: '__tool_chain_spill__/x.json', bytes: 1 })) };
+    const tool = createCallToolChainTool(chainClient, spill as never) as unknown as {
+      execute: (input: { code: string }) => Promise<unknown>;
+    };
+    const out = JSON.stringify(await tool.execute({ code: 'return 1' }));
+    expect(out).not.toContain('QUJDREVG');
+    expect(out).toContain('image_omitted');
+    expect(out).toContain('Files/logo.png');
+    expect(out).toContain('"ok":true');
+    expect(spill.write).not.toHaveBeenCalled();
+  });
+});

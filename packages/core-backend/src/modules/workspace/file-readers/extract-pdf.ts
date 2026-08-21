@@ -1,4 +1,5 @@
 import type { ExtractResult } from './doc-extract.types.js';
+import { MAX_DOC_PART_BYTES } from './ooxml-text.js';
 
 /**
  * Extract a PDF's TEXT LAYER page by page with pdf.js (`pdfjs-dist`,
@@ -13,6 +14,15 @@ import type { ExtractResult } from './doc-extract.types.js';
  * and the summary says "no text layer (scanned document?)" — no OCR in v1.
  */
 export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
+  // The same bounded-read guard the zip-based extractors apply per part: a
+  // PDF has no compressed container to pre-scan, so the bound is simply the
+  // file's raw size, checked before pdf.js parses anything.
+  if (bytes.length > MAX_DOC_PART_BYTES) {
+    return {
+      ok: false,
+      message: `could not be extracted as a PDF (the file is ${bytes.length} bytes — over the ${MAX_DOC_PART_BYTES}-byte (50 MB) extraction limit)`,
+    };
+  }
   let doc: Awaited<ReturnType<typeof openPdf>>;
   try {
     doc = await openPdf(bytes);

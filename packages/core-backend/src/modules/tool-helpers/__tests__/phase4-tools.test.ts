@@ -11,7 +11,7 @@ import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
 import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { SpillStore } from '../../workspace/spill-store.js';
-import { DocExtractService } from '../../workspace/doc-extract/doc-extract.service.js';
+import { DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
 
 const WS = 'target-company-state';
 let recorded: unknown[][] = [];

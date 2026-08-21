@@ -1,5 +1,7 @@
+import AdmZip from 'adm-zip';
 import * as XLSX from 'xlsx';
 import type { ExtractResult } from './doc-extract.types.js';
+import { MAX_DOC_TOTAL_BYTES, zipEntryOversize } from './ooxml-text.js';
 
 /**
  * Per-sheet extraction caps. A worksheet's declared range can be enormous
@@ -22,6 +24,27 @@ export function extractXlsx(bytes: Buffer): ExtractResult {
   // turn a corrupt upload into confident nonsense instead of an honest error.
   if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
     return { ok: false, message: 'could not be parsed as a .xlsx (not a zip archive)' };
+  }
+  // Zip-bomb bound BEFORE SheetJS inflates anything: the central directory
+  // declares every entry's uncompressed size, so per-part (50 MB) and
+  // aggregate (200 MB) limits cost one directory scan. A zip AdmZip cannot
+  // read falls through — SheetJS then reports its own parse failure.
+  try {
+    const zip = new AdmZip(bytes);
+    let total = 0;
+    for (const entry of zip.getEntries()) {
+      const oversize = zipEntryOversize(entry);
+      if (oversize) return { ok: false, message: `could not be extracted as a .xlsx (${oversize})` };
+      total += entry.header.size;
+      if (total > MAX_DOC_TOTAL_BYTES) {
+        return {
+          ok: false,
+          message: `could not be extracted as a .xlsx (the archive's parts exceed the ${MAX_DOC_TOTAL_BYTES}-byte (200 MB) total extraction limit)`,
+        };
+      }
+    }
+  } catch {
+    // not AdmZip-readable — let SheetJS produce the typed parse failure below
   }
   let wb: XLSX.WorkBook;
   try {
