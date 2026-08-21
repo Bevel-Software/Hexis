@@ -473,4 +473,82 @@ describe('omitImagePayloads', () => {
     expect(text).toContain('image_omitted');
     expect(text).toContain('[Circular]');
   });
+
+  it('calls toJSON with the JSON KEY, exactly as JSON.stringify does', () => {
+    // The spec calls `toJSON(key)`. Calling it with NO argument let a
+    // key-dependent hook answer the scrub one way and the transcript
+    // serializer that runs afterwards another — precisely the divergence the
+    // scrub exists to close. Here the hook is clean under its real key and
+    // dirty under any other, so a missing argument surfaces as an omitted
+    // image where the deck has none.
+    const keyed = new (class {
+      toJSON(key?: unknown): unknown {
+        return key === 'safe' ? { seen: key } : { img: sentinel };
+      }
+    })();
+    expect(JSON.stringify(omitImagePayloads({ safe: keyed }))).toBe('{"safe":{"seen":"safe"}}');
+  });
+
+  it('threads the root, array-index and property keys the way stringify numbers them', () => {
+    const seen: unknown[] = [];
+    const probe = new (class {
+      toJSON(key?: unknown): unknown {
+        seen.push(key);
+        return { at: key };
+      }
+    })();
+    omitImagePayloads(probe); // the root serializes under ''
+    omitImagePayloads(['zero', probe]); // an element under its stringified index
+    omitImagePayloads({ a: { b: probe } }); // a property under its own name
+    expect(seen).toEqual(['', '1', 'b']);
+  });
+
+  it('gives the SAME object two views when it is reachable under two different keys', () => {
+    // The view cache is keyed by (object, key), not by object: one slot would
+    // have emitted the first site's answer at the second site.
+    const keyed = new (class {
+      toJSON(key?: unknown): unknown {
+        return { under: key };
+      }
+    })();
+    const value = { first: keyed, second: keyed };
+    expect(JSON.stringify(omitImagePayloads(value))).toBe(
+      '{"first":{"under":"first"},"second":{"under":"second"}}',
+    );
+  });
+
+  it('never copies a function-valued toJSON out of a VIEW into the rebuilt record', () => {
+    // A hook's return value is rebuilt key by key. When one of those keys is
+    // an enumerable, function-valued `toJSON`, it landed on the sanitized
+    // record — and `toJSON` is the one method JSON.stringify consults on a
+    // plain object, so the hook fired AGAIN at transcript time and an impure
+    // one reintroduced the payload this walk had just removed.
+    let inner = 0;
+    const value = new (class {
+      toJSON(): unknown {
+        return {
+          data: 'kept',
+          toJSON(): unknown {
+            inner++;
+            return { img: sentinel };
+          },
+        };
+      }
+    })();
+    const text = JSON.stringify(omitImagePayloads({ value }));
+    expect(inner).toBe(0); // it never fired: not during the scrub, not after
+    expect(text).toBe('{"value":{"data":"kept"}}');
+    expect(text).not.toContain('QUJD');
+  });
+
+  it('but a `toJSON` that is DATA rather than a function is ordinary content and survives', () => {
+    // Only a CALLABLE toJSON can re-fire; JSON.stringify ignores a
+    // non-callable one, so dropping it would lose a caller's field. And no
+    // other function-valued key can affect serialization: a rebuilt record
+    // has Object.prototype, so there is no inherited `toJSON` left to reach
+    // an own `toISOString` (the way Date.prototype.toJSON would), and
+    // stringify simply skips function values.
+    const out = omitImagePayloads({ v: { toJSON: 'a string', toISOString: () => 'x', n: 1 } });
+    expect(JSON.stringify(out)).toBe('{"v":{"toJSON":"a string","n":1}}');
+  });
 });

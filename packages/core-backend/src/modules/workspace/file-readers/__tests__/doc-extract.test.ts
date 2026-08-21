@@ -15,7 +15,7 @@ import { DocExtractService } from '../doc-extract.service.js';
 import { gitBlobSha } from '../extraction-cache.js';
 import { fileExtension } from '../doc-extract.types.js';
 import { MAX_ODF_NS_ALIASES, normalizeOdfPrefixes, odfParagraphBlocks } from '../odf-text.js';
-import { decodeXmlEntities, xmlAttrValue, xmlAttrValueByLocalName } from '../ooxml-text.js';
+import { decodeXmlEntities, xmlAttrValue, xmlAttrValueByLocalName, xmlElementBlocks } from '../ooxml-text.js';
 import { notesTargetFromRels } from '../extract-pptx.js';
 
 /**
@@ -1102,6 +1102,43 @@ describe('extractPptx — two part names parsing to the SAME slide number', () =
     expect(res.text.split('\n')).toEqual(['[slide 1]', 'zero-padded twin', '[slide 2]', 'two']);
     expect(res.summary).toContain('2 slides');
   });
+
+  const NOTES_REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide';
+  const relsXml = (target: string): string =>
+    '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    `<Relationship Id="rId1" Type="${NOTES_REL}" Target="${target}"/></Relationships>`;
+
+  it('follows the SELECTED part name to the rels — a zero-padded winner keeps its own notes', () => {
+    // The regression the dedup introduced: the winner is chosen by NAME, but
+    // the notes lookup rebuilt the rels path from the NUMBER. With
+    // `slide01.xml` winning, `ppt/slides/_rels/slide1.xml.rels` is the LOSING
+    // part's relationships — so slide 1 either lost its notes or was handed
+    // the other file's.
+    const zip = new AdmZip();
+    zip.addFile('ppt/slides/slide1.xml', Buffer.from(slideXml(['canonical one'])));
+    zip.addFile('ppt/slides/slide01.xml', Buffer.from(slideXml(['zero-padded twin'])));
+    zip.addFile('ppt/slides/_rels/slide01.xml.rels', Buffer.from(relsXml('../notesSlides/notesSlide01.xml')));
+    zip.addFile('ppt/notesSlides/notesSlide01.xml', Buffer.from(slideXml(['the padded twin speaks'])));
+    zip.addFile('ppt/slides/_rels/slide1.xml.rels', Buffer.from(relsXml('../notesSlides/notesSlide1.xml')));
+    zip.addFile('ppt/notesSlides/notesSlide1.xml', Buffer.from(slideXml(['notes of the part that LOST'])));
+    const res = extractPptx(zip.toBuffer());
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual([
+      '[slide 1]',
+      'zero-padded twin',
+      '[slide 1 notes]',
+      'the padded twin speaks',
+    ]);
+  });
+
+  it('and the no-rels fallback mirrors the name too — slide01.xml pairs with notesSlide01.xml', () => {
+    const zip = new AdmZip();
+    zip.addFile('ppt/slides/slide01.xml', Buffer.from(slideXml(['only slide'])));
+    zip.addFile('ppt/notesSlides/notesSlide01.xml', Buffer.from(slideXml(['padded notes'])));
+    const res = extractPptx(zip.toBuffer());
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['[slide 1]', 'only slide', '[slide 1 notes]', 'padded notes']);
+  });
 });
 
 // ── rels parsing: namespace-prefixed Relationship elements ─────────────────
@@ -1366,5 +1403,69 @@ describe('ooxml-text — the docx/pptx walks are linear and quote-aware', () => 
     if (!res.ok) throw new Error(res.message);
     expect(res.text).toBe('real');
     expect(res.summary).toContain('1 paragraph;');
+  });
+
+  it('a `/` that is not the `/` of `/>` does NOT end the element name', () => {
+    // XML lets exactly three things follow a name: whitespace, `>`, or `/>`.
+    // Admitting a bare `/` made `<w:t/x>` a run OPENER, so everything up to
+    // the next `</w:t>` was extracted as that run's character content — a
+    // malformed tag handing the extraction text it never contained.
+    const res = extractDocx(
+      docxBytes('<w:p><w:r><w:t/x>leaked</w:t><w:t>kept</w:t></w:r></w:p>'),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('kept');
+  });
+
+  it('the same `/` rule applies one level up, on the paragraph tag', () => {
+    const res = extractDocx(
+      docxBytes('<w:p/x><w:r><w:t>leaked</w:t></w:r></w:p><w:p><w:r><w:t>real</w:t></w:r></w:p>'),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('real');
+    expect(res.summary).toContain('1 paragraph;');
+    // …and the shape it exists FOR is untouched: `<w:p/>` is still an element.
+    expect(xmlElementBlocks('<w:p/>', ['w:p'])).toEqual([{ name: 'w:p', attrs: '', body: undefined }]);
+    expect(xmlElementBlocks('<w:p a="/"/>', ['w:p'])).toEqual([
+      { name: 'w:p', attrs: ' a="/"', body: undefined },
+    ]);
+  });
+
+  it('an attribute quote that never closes still costs two traversals, not one per opener', () => {
+    // Cubic's round-5 note on the (now deleted) ODF scanner: a `<` met INSIDE
+    // an unterminated quote is recorded by nobody, so — the worry went — every
+    // opener behind it rescans the document. It does not. The FIRST scan that
+    // begins OUTSIDE the quote walks that same tail in the no-quote state and
+    // records every one of them, so the wall costs two traversals in total.
+    // Measured on the shared scanner at 3.2 M openers (15.6 MB): 1.78 s,
+    // growing ~2.6x per doubling — linear plus the memo's own GC cost, not the
+    // 4x a quadratic gives. With the memo bounded (see MAX_TAG_MEMO): 61 ms.
+    const bytes = docxBytes(
+      '<w:p><w:r><w:t>Kept</w:t></w:r></w:p><w:p w:rsidR="' + '<w:p '.repeat(40_000),
+    );
+    const t0 = performance.now();
+    const res = extractDocx(bytes);
+    const ms = performance.now() - t0;
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('Kept');
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
+  it('gives the part up once the tag-end memo fills, rather than allocating past it', () => {
+    // The memo is what keeps this walk linear, but it costs an entry per `<`
+    // a tag scan passes outside quotes — and only MALFORMED xml puts a `<`
+    // there, so on a real part it stays empty. A crafted one is another
+    // matter: measured on a 50 MB `MAX_DOC_PART_BYTES` wall of `<w:p `
+    // openers, the memo alone allocated 1170 MB (23x the part it describes)
+    // over 6.8 s. Bounded, the same input costs 2.6 MB and 5 ms — flat from
+    // 15 MB of input to 50 MB. Elements found BEFORE the cap survive; the
+    // tail is abandoned, because evicting or memoizing no further would hand
+    // back the quadratic the memo exists to prevent.
+    const xml = '<w:p>first</w:p>' + '<w:p '.repeat(300_000) + '<w:p>last</w:p>';
+    const t0 = performance.now();
+    const blocks = xmlElementBlocks(xml, ['w:p']);
+    const ms = performance.now() - t0;
+    expect(blocks.map((b) => b.body)).toEqual(['first']);
+    expect(ms).toBeLessThan(GENEROUS_MS);
   });
 });

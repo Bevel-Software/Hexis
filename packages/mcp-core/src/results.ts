@@ -296,22 +296,38 @@ export function omitImagePayloads(value: unknown): unknown {
   // A value's JSON view: what JSON.stringify would serialize for it — the
   // toJSON() result when it defines one (a throwing toJSON falls back to the
   // value itself, matching safeJsonText's degraded path), the value otherwise.
-  // Cached per object: toJSON is a USER hook, so it must fire at most once per
-  // object per scrub, and the rebuild must emit exactly the view that was
-  // inspected even if the hook is impure.
-  const viewCache = new WeakMap<object, unknown>();
-  const jsonView = (v: object): unknown => {
-    if (viewCache.has(v)) return viewCache.get(v);
+  //
+  // `key` is the JSON property name the value is being serialized UNDER, and
+  // it is passed to the hook because JSON.stringify passes it: the spec calls
+  // `toJSON(key)` — '' at the root, the property name inside an object, the
+  // stringified index inside an array. Calling it with NO argument made a
+  // key-dependent hook return one thing to this scrub and a different thing
+  // to the transcript serializer that runs afterwards, which is precisely the
+  // divergence the scrub exists to close.
+  //
+  // Cached per (object, key), not per object: the same object reachable under
+  // two different keys genuinely HAS two views, and one cache slot would let
+  // the second site emit the first site's answer. Within one (object, key)
+  // the hook still fires at most once, so the rebuild emits exactly the view
+  // it inspected even when the hook is impure.
+  const viewCache = new WeakMap<object, Map<string, unknown>>();
+  const jsonView = (v: object, key: string): unknown => {
+    let byKey = viewCache.get(v);
+    if (byKey === undefined) {
+      byKey = new Map<string, unknown>();
+      viewCache.set(v, byKey);
+    }
+    if (byKey.has(key)) return byKey.get(key);
     let view: unknown = v;
     const hook = userToJson(v);
     if (hook !== undefined) {
       try {
-        view = Reflect.apply(hook, v, []);
+        view = Reflect.apply(hook, v, [key]);
       } catch {
         /* keep the value itself */
       }
     }
-    viewCache.set(v, view);
+    byKey.set(key, view);
     return view;
   };
 
@@ -375,6 +391,36 @@ export function omitImagePayloads(value: unknown): unknown {
     Object.defineProperty(out, key, { value: val, enumerable: true, writable: true, configurable: true });
   };
 
+  /**
+   * The own enumerable keys to rebuild a record from — every key
+   * `JSON.stringify` would visit EXCEPT a function-valued `toJSON`.
+   *
+   * A rebuilt record is a plain object, and `JSON.stringify` consults exactly
+   * one method on a plain object: `toJSON`. Copying that key across therefore
+   * re-arms the hook on the sanitized value, and the transcript serializer
+   * that runs after this scrub calls it — an impure hook (clean when the
+   * scrub probed it, an image payload on the next call) hands the transcript
+   * base64 the walk never saw. It is reachable through a VIEW: a `toJSON()`
+   * that returns `{ data: …, toJSON() { …image… } }` is rebuilt from that
+   * view's keys, and `toJSON` is one of them.
+   *
+   * No other function-valued own key can do this. `toISOString` matters only
+   * because `Date.prototype.toJSON` calls it, and a rebuilt plain object has
+   * `Object.prototype` — no inherited `toJSON` to reach it — so the copied
+   * function is simply an own property `JSON.stringify` SKIPS, as it skips
+   * every function value. Same for `valueOf`, `toString` and friends:
+   * stringify consults none of them on an object.
+   */
+  const rebuildKeys = (src: object): string[] =>
+    Object.keys(src).filter((k) => {
+      if (k !== 'toJSON') return true;
+      try {
+        return typeof (src as Record<string, unknown>)[k] !== 'function';
+      } catch {
+        return false; // a throwing accessor named toJSON: never copy it
+      }
+    });
+
   // ITERATIVE depth-first rebuild: an explicit frame stack instead of
   // recursion, so arbitrarily deep nesting cannot overflow the call stack —
   // and, crucially, cannot ESCAPE the scrub the way a depth cutoff would let
@@ -394,8 +440,14 @@ export function omitImagePayloads(value: unknown): unknown {
 
   const active = new WeakSet<object>();
 
-  /** Resolve one value: a leaf to emit as-is, or a container frame to walk. */
-  const resolve = (v: unknown): { leaf: unknown } | { frame: Frame } => {
+  /**
+   * Resolve one value: a leaf to emit as-is, or a container frame to walk.
+   * `key` is the JSON property name `v` is serialized under — '' at the root,
+   * the property name in a record, the stringified index in an array — and is
+   * threaded through only so a `toJSON` hook receives the argument
+   * `JSON.stringify` would give it (see `jsonView`).
+   */
+  const resolve = (v: unknown, key: string): { leaf: unknown } | { frame: Frame } => {
     if (v === null || typeof v !== 'object') return { leaf: v };
     if (isMcpImageResult(v)) return { leaf: omittedNote(v.note ?? `an image (${v.mimeType})`) };
     if (isMcpImageBlockObject(v)) return { leaf: omittedNote(`an image (${v.mimeType})`) };
@@ -409,7 +461,7 @@ export function omitImagePayloads(value: unknown): unknown {
     // return a payload this scrub never inspected.
     const hook = userToJson(v);
     if (hook !== undefined) {
-      const view = jsonView(v);
+      const view = jsonView(v, key);
       // The view can BE the image shape — a toJSON() returning a sentinel or
       // image block directly. Scrub it here: falling through would build a
       // record frame from the view and copy its base64 `data` field, key by
@@ -429,7 +481,7 @@ export function omitImagePayloads(value: unknown): unknown {
           kind: 'record',
           src: view as Record<string, unknown>,
           out: {},
-          keys: Object.keys(view),
+          keys: rebuildKeys(view),
           i: 0,
           release,
         },
@@ -441,7 +493,7 @@ export function omitImagePayloads(value: unknown): unknown {
     }
     if (isPlainRecord(v)) {
       active.add(v);
-      return { frame: { kind: 'record', src: v, out: {}, keys: Object.keys(v), i: 0, release: [v] } };
+      return { frame: { kind: 'record', src: v, out: {}, keys: rebuildKeys(v), i: 0, release: [v] } };
     }
     // Non-plain object with no hook of its own: it IS its own JSON view, so it
     // passes through untouched (by reference) unless the shape below it needs
@@ -456,14 +508,16 @@ export function omitImagePayloads(value: unknown): unknown {
         kind: 'record',
         src: v as Record<string, unknown>,
         out: {},
-        keys: Object.keys(v),
+        keys: rebuildKeys(v),
         i: 0,
         release: [v],
       },
     };
   };
 
-  const seed = resolve(value);
+  // '' is the root key JSON.stringify uses: it serializes through a synthetic
+  // wrapper `{ '': value }`, so a root `toJSON` is called with the empty string.
+  const seed = resolve(value, '');
   if ('leaf' in seed) return seed.leaf;
   const stack: Frame[] = [seed.frame];
   while (stack.length > 0) {
@@ -475,7 +529,9 @@ export function omitImagePayloads(value: unknown): unknown {
         continue;
       }
       const idx = top.i++;
-      const r = resolve(top.src[idx]);
+      // An array element's JSON key is its stringified index — what
+      // JSON.stringify hands the element's own `toJSON`.
+      const r = resolve(top.src[idx], String(idx));
       if ('leaf' in r) {
         top.out[idx] = r.leaf;
       } else {
@@ -490,7 +546,7 @@ export function omitImagePayloads(value: unknown): unknown {
         continue;
       }
       const key = top.keys[top.i++];
-      const r = resolve(top.src[key]);
+      const r = resolve(top.src[key], key);
       if ('leaf' in r) {
         defineKey(top.out, key, r.leaf);
       } else {

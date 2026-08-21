@@ -53,7 +53,8 @@ export const MAX_EMAIL_BYTES = 50 * 1024 * 1024;
  * a scan that reaches end-of-input marks every `<` it passed OUTSIDE quotes
  * as known-literal (their scans would be identical tails), so no position is
  * rescanned from more than the three possible quote states. An unterminated
- * tag is literal text, not a tag.
+ * tag is literal text, not a tag — and so is a `<…>` span that names no
+ * element at all, which is how `1 < 2 > 0` survives into the body.
  */
 const CONTAINER_TAGS = new Set(['script', 'style', 'head', 'title']);
 const BLOCK_TAGS = new Set([
@@ -64,13 +65,60 @@ const BLOCK_TAGS = new Set([
 ]);
 
 /**
- * Index just past the `>` closing the tag that opens at `start`, or -1 when
- * the tag never terminates. Tracks quote state so a quoted `>` never ends the
- * tag. On failure, every `<` passed while OUTSIDE quotes is recorded in
- * `knownLiteral` — a scan from such a position is exactly this scan's tail,
- * so it too would fail; recording it keeps the whole pass linear.
+ * A length-preserving lowercase copy of `s`, mapping ASCII `A-Z` and nothing
+ * else.
+ *
+ * `String.prototype.toLowerCase` is NOT length-preserving — `İ` (U+0130)
+ * lowercases to `i` plus a combining dot, two code units where there was one
+ * — and this copy is used as an INDEX-PARALLEL view of the original: tag
+ * names are sliced out of it at offsets computed on `html`, and container
+ * close tags are found in it at offsets fed back into `html`. One such
+ * character anywhere in a body shifted every later index, so after it a
+ * `<script>` was no longer recognized and its code reached the rendered
+ * text, block tags stopped breaking lines, and a container's close offset
+ * landed a character short and ate part of the body. HTML element names are
+ * ASCII, so mapping only `A-Z` loses nothing.
  */
-function scanTagEnd(html: string, start: number, knownLiteral: Set<number>): number {
+function asciiLowerCase(s: string): string {
+  return s.replace(/[A-Z]+/g, (run) => run.toLowerCase());
+}
+
+/**
+ * An element name as this strip is willing to recognize one: an ASCII letter
+ * followed by name characters. `:` and `-` are in because email HTML is full
+ * of `<o:p>` (Word) and custom elements. Anything else — an EMPTY name most
+ * of all — is not a tag; see the call site.
+ */
+const TAG_NAME = /^[a-z][a-z0-9._:-]*$/;
+
+/**
+ * How many `<` positions {@link scanTagEnd}'s memo may hold before the strip
+ * gives up on the body. The memo only ever grows on a `<` sitting INSIDE what
+ * looks like a tag — malformed markup — so real mail never touches this;
+ * bounding it keeps a crafted 50 MB body from turning into a map several
+ * times its size in the user's tab. Stopping is the only bounded answer that
+ * stays linear: evicting, or memoizing no further, restores the per-`<`
+ * rescan the memo exists to prevent.
+ */
+const MAX_TAG_MEMO = 100_000;
+
+/** {@link scanTagEnd}'s "the memo is full" answer — distinct from -1, "no `>`". */
+const MEMO_EXHAUSTED = -2;
+
+/**
+ * Index just past the `>` closing the tag that opens at `start`, -1 when the
+ * tag never terminates, or {@link MEMO_EXHAUSTED}. Tracks quote state so a
+ * quoted `>` never ends the tag.
+ *
+ * Every `<` passed while OUTSIDE quotes is recorded in `known` with THIS
+ * scan's answer, whether that answer is an end or -1: such a `<` was reached
+ * in the no-quote state, so a tag starting there resumes the identical walk
+ * and can only reach the identical end. Memoizing the SUCCESSES matters as
+ * much as the failures now that a span naming no element stays literal text —
+ * a wall of `< ` before one far-away `>` leaves every scan succeeding, and a
+ * failure-only memo would record nothing and rescan the body per `<`.
+ */
+function scanTagEnd(html: string, start: number, known: Map<number, number>): number {
   let quote: '"' | "'" | null = null;
   const passedUnquoted: number[] = [];
   for (let i = start + 1; i < html.length; i++) {
@@ -78,10 +126,15 @@ function scanTagEnd(html: string, start: number, knownLiteral: Set<number>): num
     if (quote !== null) {
       if (c === quote) quote = null;
     } else if (c === '"' || c === "'") quote = c;
-    else if (c === '>') return i + 1;
-    else if (c === '<') passedUnquoted.push(i);
+    else if (c === '>') {
+      for (const p of passedUnquoted) known.set(p, i + 1);
+      return i + 1;
+    } else if (c === '<') {
+      if (known.size + passedUnquoted.length >= MAX_TAG_MEMO) return MEMO_EXHAUSTED;
+      passedUnquoted.push(i);
+    }
   }
-  for (const p of passedUnquoted) knownLiteral.add(p);
+  for (const p of passedUnquoted) known.set(p, -1);
   return -1;
 }
 
@@ -105,11 +158,12 @@ function containerCloseEnd(lower: string, name: string, from: number, noClose: S
 }
 
 export function htmlToEmailText(html: string): string {
-  const lower = html.toLowerCase();
+  const lower = asciiLowerCase(html);
   const lastGt = html.lastIndexOf('>');
-  const knownLiteral = new Set<number>();
+  const known = new Map<number, number>();
   const noContainerClose = new Set<string>();
   let commentSearchExhausted = false;
+  let memoExhausted = false;
   let s = '';
   let textStart = 0;
   let i = 0;
@@ -118,9 +172,10 @@ export function htmlToEmailText(html: string): string {
       i++;
       continue;
     }
-    // No `>` remains, or a previous failing scan proved this `<` unterminated:
-    // it is literal text (stays in the pending text run).
-    if (i > lastGt || knownLiteral.has(i)) {
+    const memo = known.size > 0 ? known.get(i) : undefined;
+    // No `>` remains, or a previous scan proved this `<` unterminated: it is
+    // literal text (stays in the pending text run).
+    if (i > lastGt || memo === -1) {
       i++;
       continue;
     }
@@ -133,18 +188,32 @@ export function htmlToEmailText(html: string): string {
       }
       commentSearchExhausted = true; // no `-->` this far right, nor further — generic tag scan below
     }
-    const end = scanTagEnd(html, i, knownLiteral);
+    const end = memo !== undefined ? memo : scanTagEnd(html, i, known);
+    if (end === MEMO_EXHAUSTED) {
+      memoExhausted = true; // see MAX_TAG_MEMO: the body is abandoned here
+      break;
+    }
     if (end === -1) {
       i++; // unterminated tag: the `<` is literal text
       continue;
     }
-    s += html.slice(textStart, i);
     let p = i + 1;
     const closing = html[p] === '/';
     if (closing) p++;
+    // `<!DOCTYPE …>`, a `<!-- …` whose `-->` never came, `<?xml …?>`: markup
+    // that names no element but is still not body text, and is still removed.
+    const markup = !closing && (html[p] === '!' || html[p] === '?');
     let q = p;
     while (q < end - 1 && !/[\s/>]/.test(html[q])) q++;
     const name = lower.slice(p, q);
+    // A body that says `1 < 2 > 0` parses an EMPTY tag name here. Treating
+    // the span as a tag anyway advanced past it, so the whole `< 2 >` was
+    // dropped from the visible text; a span that names no element is text.
+    if (!markup && !TAG_NAME.test(name)) {
+      i++;
+      continue;
+    }
+    s += html.slice(textStart, i);
     if (!closing && CONTAINER_TAGS.has(name) && (q === end - 1 || /\s/.test(html[q]))) {
       // `<style>` / `<style attrs>`: drop the whole container through the
       // matching `</style␣*>`; with no close, only the open tag is removed.
@@ -155,7 +224,7 @@ export function htmlToEmailText(html: string): string {
     if ((name === 'br' && !closing) || BLOCK_TAGS.has(name)) s += '\n';
     textStart = i = end;
   }
-  s += html.slice(textStart);
+  if (!memoExhausted) s += html.slice(textStart);
   s = decodeXmlEntities(s.replace(/&nbsp;/gi, ' '));
   const out: string[] = [];
   for (const raw of s.split('\n')) {

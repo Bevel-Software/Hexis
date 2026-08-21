@@ -217,21 +217,45 @@ function resolveRelTarget(baseDir: string, target: string): string {
 }
 
 /**
- * Slide `n`'s note paragraphs. Notes are paired through the slide's `.rels`
- * part (relationship type ending `notesSlide` — the package may number notes
- * parts differently from slides); the numeric `notesSlideN.xml` convention is
- * the fallback ONLY for a slide with no rels part at all. Mirrors the
- * backend's `extract-pptx.ts` exactly. The notes XML is parsed to its
- * paragraph strings here and never retained.
+ * The OPC relationships part of `partName` — `dir/_rels/base.rels`. Derived
+ * from the part NAME, never from the slide number: when a deck ships both
+ * `slide1.xml` and `slide01.xml`, the name-ordering rule below picks
+ * `slide01.xml`, whose rels part is `slide01.xml.rels`. Rebuilding the path
+ * from the number asked for `slide1.xml.rels` — a part belonging to the OTHER
+ * file — and so either lost that slide's speaker notes or attached the losing
+ * part's.
  */
-async function readNoteLines(zip: JSZip, n: number, budget: ReadBudget): Promise<string[]> {
-  const rels = zip.file(`ppt/slides/_rels/slide${n}.xml.rels`);
+function relsPartName(partName: string): string {
+  const cut = partName.lastIndexOf('/');
+  return `${partName.slice(0, cut)}/_rels/${partName.slice(cut + 1)}.rels`;
+}
+
+/**
+ * The conventional notes part for a slide part — `slide01.xml` →
+ * `notesSlide01.xml`. Derived from the name for the same reason as the rels
+ * path, so a zero-padded deck's fallback lands on the matching notes part.
+ */
+function conventionalNotesPart(partName: string): string {
+  const base = partName.slice(partName.lastIndexOf('/') + 1);
+  return `ppt/notesSlides/notes${base[0].toUpperCase()}${base.slice(1)}`;
+}
+
+/**
+ * The note paragraphs of the slide part named `slideName`. Notes are paired
+ * through that part's `.rels` (relationship type ending `notesSlide` — the
+ * package may number notes parts differently from slides); the conventional
+ * `notesSlideN.xml` name is the fallback ONLY for a slide with no rels part
+ * at all. Mirrors the backend's `extract-pptx.ts` exactly. The notes XML is
+ * parsed to its paragraph strings here and never retained.
+ */
+async function readNoteLines(zip: JSZip, slideName: string, budget: ReadBudget): Promise<string[]> {
+  const rels = zip.file(relsPartName(slideName));
   let notesPart: string | undefined;
   if (rels) {
     const target = notesTargetFromRels(await readEntryBounded(rels, budget));
     notesPart = target !== undefined ? resolveRelTarget('ppt/slides', target) : undefined;
   } else {
-    notesPart = `ppt/notesSlides/notesSlide${n}.xml`;
+    notesPart = conventionalNotesPart(slideName);
   }
   if (notesPart === undefined) return [];
   const entry = zip.file(notesPart);
@@ -266,13 +290,17 @@ export async function extractPptxOutline(bytes: ArrayBuffer | Uint8Array): Promi
     // order, and the same policy as the backend twin (`extract-pptx.ts`), so
     // viewer and `read_file` agree on which part a number's text comes from.
     slideEntries.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
-    const chosen = new Map<number, JSZip.JSZipObject>();
-    for (const [n, , entry] of slideEntries) {
-      if (!chosen.has(n)) chosen.set(n, entry);
+    // The winner's NAME is kept, not just its bytes: the notes lookup hangs
+    // off the part name (see `relsPartName`), so a zero-padded winner must not
+    // send it back to the number.
+    const chosen = new Map<number, [string, JSZip.JSZipObject]>();
+    for (const [n, name, entry] of slideEntries) {
+      if (!chosen.has(n)) chosen.set(n, [name, entry]);
     }
     for (const n of [...chosen.keys()].sort((a, b) => a - b)) {
-      const paragraphs = paragraphLines(await readEntryBounded(chosen.get(n)!, budget));
-      out.push({ number: n, paragraphs, notes: await readNoteLines(zip, n, budget) });
+      const [name, entry] = chosen.get(n)!;
+      const paragraphs = paragraphLines(await readEntryBounded(entry, budget));
+      out.push({ number: n, paragraphs, notes: await readNoteLines(zip, name, budget) });
     }
   } catch (err) {
     throw new Error(`could not be parsed as a .pptx (${(err as Error).message})`);

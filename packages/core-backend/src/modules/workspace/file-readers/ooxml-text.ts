@@ -166,14 +166,56 @@ export interface XmlElementBlock {
 }
 
 /**
- * What may follow an element name for the name to have ENDED there — the
- * regex `(?:\s[^>]*)?>` alternation's job, plus `/` for the self-closing
- * shape. Hoisted to module scope because {@link xmlElementBlocks} consults it
- * once per `<` in the part: a literal inside the loop allocates a fresh
- * RegExp on every evaluation, which on a real `word/document.xml` is tens of
- * thousands of throwaway objects per extraction.
+ * Hoisted to module scope because {@link nameEndsAt} consults it once per `<`
+ * in the part: a literal inside the loop allocates a fresh RegExp on every
+ * evaluation, which on a real `word/document.xml` is tens of thousands of
+ * throwaway objects per extraction.
  */
-const NAME_DELIMITER = /[\s/>]/;
+const NAME_SPACE = /\s/;
+
+/**
+ * Has the element name that began at `lt + 1` ENDED at `at`? What the regex's
+ * `(?:\s[^>]*)?>` alternation decided, plus the self-closing shape.
+ *
+ * A `/` ends the name ONLY when it is the `/` of a `/>`. XML admits exactly
+ * three continuations after a name — whitespace, `>`, or `/>` — so `<w:p/x>`
+ * names no element the scan wants. Accepting a bare `/` read it as a `w:p`
+ * OPENER instead, and everything up to the next `</w:p>` was extracted as
+ * that paragraph's text; the same shape on `<w:t/x>` emitted the run body of
+ * a tag that was never a run.
+ */
+function nameEndsAt(xml: string, at: number): boolean {
+  const c = xml[at];
+  if (c === undefined) return false; // the name runs to end-of-part: no tag
+  if (c === '>') return true;
+  if (c === '/') return xml[at + 1] === '>';
+  return NAME_SPACE.test(c);
+}
+
+/**
+ * How many `<` positions the tag-end memo may hold before {@link
+ * xmlElementBlocks} gives the part up.
+ *
+ * The memo is what keeps the walk linear, but it costs an entry per `<` that
+ * a tag scan passed OUTSIDE quotes — and a `<` inside a tag's attribute
+ * region only ever occurs in MALFORMED XML (a real attribute value spells it
+ * `&lt;`), so on every document a producer wrote the map stays EMPTY. A
+ * crafted part does not: 50 MB of repeated `<w:p ` openers is 10.5 M entries,
+ * measured at ~97 bytes apiece — a gigabyte of map to describe fifty
+ * megabytes of input, in a server process or, through the browser twin, in
+ * the user's tab.
+ *
+ * Past this bound the walk ABORTS and returns the elements found so far.
+ * Evicting instead, or simply not memoizing further, would hand the quadratic
+ * back — the very thing the memo exists to prevent — so the choice is between
+ * stopping and rescanning, and a part this malformed has no text left worth
+ * the CPU. 100 000 entries is ~8 MB of map and four orders of magnitude past
+ * anything a real document reaches.
+ */
+const MAX_TAG_MEMO = 100_000;
+
+/** {@link scanTagEnd}'s "the memo is full" answer — distinct from -1, "no `>`". */
+const MEMO_EXHAUSTED = -2;
 
 /**
  * Index of the `>` that ends the tag whose attribute region starts at `from`,
@@ -191,6 +233,12 @@ const NAME_DELIMITER = /[\s/>]/;
  * whose attribute scans all run to one far-away `>` — a close tag sitting
  * past the wall — terminates every scan successfully, so a failure-only memo
  * records nothing and the walk is quadratic all over again.
+ *
+ * Returns {@link MEMO_EXHAUSTED} rather than growing the memo past {@link
+ * MAX_TAG_MEMO} entries — the caller stops there. The budget counts the
+ * positions this scan is still holding as well as the ones already recorded,
+ * so a single scan over a 50 MB wall cannot buffer ten million offsets before
+ * the first `known.set`.
  */
 function scanTagEnd(xml: string, from: number, known: Map<number, number>): number {
   let quote: '"' | "'" | null = null;
@@ -203,7 +251,10 @@ function scanTagEnd(xml: string, from: number, known: Map<number, number>): numb
     else if (c === '>') {
       for (const p of passedUnquoted) known.set(p, i);
       return i;
-    } else if (c === '<') passedUnquoted.push(i);
+    } else if (c === '<') {
+      if (known.size + passedUnquoted.length >= MAX_TAG_MEMO) return MEMO_EXHAUSTED;
+      passedUnquoted.push(i);
+    }
   }
   for (const p of passedUnquoted) known.set(p, -1);
   return -1;
@@ -237,6 +288,10 @@ function scanTagEnd(xml: string, from: number, known: Map<number, number>): numb
  *  - a close tag is looked for only when one EXISTS at or after the search
  *    position — `lastIndexOf` per name, computed once — so a missing close tag
  *    costs one scan of the fragment in total, not one per opener.
+ *
+ * The memo itself is bounded — see {@link MAX_TAG_MEMO}: a part malformed
+ * enough to fill it is ABANDONED with whatever elements were found, because
+ * the only alternatives (evict, or stop memoizing) reinstate the quadratic.
  */
 export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElementBlock[] {
   // Longest first, so a name that PREFIXES another can never shadow it.
@@ -260,16 +315,13 @@ export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElem
   while (i < xml.length) {
     const lt = xml.indexOf('<', i);
     if (lt === -1) break;
-    // The delimiter check is what the regex's `(?:\s[^>]*)?>` alternation did:
-    // it keeps `<w:pPr>` from counting as a `<w:p>`. `/` joins `\s` and `>`
-    // here because a self-closing element IS one of the shapes we want. A
-    // plain loop rather than `find`, so matching costs no closure per tag.
+    // The name check is what the regex's `(?:\s[^>]*)?>` alternation did: it
+    // keeps `<w:pPr>` from counting as a `<w:p>`, and admits `/` only as the
+    // `/` of a self-closing `/>` (see `nameEndsAt`). A plain loop rather than
+    // `find`, so matching costs no closure per tag.
     let name: string | undefined;
     for (const candidate of wanted) {
-      if (
-        xml.startsWith(candidate, lt + 1) &&
-        NAME_DELIMITER.test(xml[lt + 1 + candidate.length] ?? '')
-      ) {
+      if (xml.startsWith(candidate, lt + 1) && nameEndsAt(xml, lt + 1 + candidate.length)) {
         name = candidate;
         break;
       }
@@ -285,6 +337,7 @@ export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElem
     // well-formed path to no hash lookup at all.
     const memo = known.size > 0 ? known.get(lt) : undefined;
     const gt = memo !== undefined ? memo : scanTagEnd(xml, attrsStart, known);
+    if (gt === MEMO_EXHAUSTED) break; // the part is past saving — see MAX_TAG_MEMO
     if (gt === -1) {
       i = lt + 1; // unterminated tag: not an element
       continue;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decodeXmlEntities } from '../xmlEntities';
+import { decodeXmlEntities, xmlElementBlocks } from '../xmlEntities';
 
 /**
  * The dependency-free decoder both browser readers lean on (the pptx outline
@@ -37,5 +37,64 @@ describe('decodeXmlEntities', () => {
 
   it('leaves an unknown named entity alone', () => {
     expect(decodeXmlEntities('&nbsp;&copy;')).toBe('&nbsp;&copy;');
+  });
+});
+
+/**
+ * The shared element scanner, browser copy. Its twin lives in the backend's
+ * `ooxml-text.ts` and is tested in core-backend's `doc-extract.test.ts`
+ * against the same shapes; the two must agree, or a deck reads one way in the
+ * viewer and another through an agent's `read_file`.
+ */
+describe('xmlElementBlocks', () => {
+  const bodies = (xml: string, name: string): Array<string | undefined> =>
+    xmlElementBlocks(xml, [name]).map((e) => e.body);
+
+  it('reads the ordinary shapes: open/close, self-closing, quoted `>` and `/`', () => {
+    expect(bodies('<a:p>body</a:p>', 'a:p')).toEqual(['body']);
+    expect(bodies('<a:p/>', 'a:p')).toEqual([undefined]);
+    expect(bodies('<a:p algn="a > b">body</a:p>', 'a:p')).toEqual(['body']);
+    expect(bodies('<a:p algn="a/>b"/>', 'a:p')).toEqual([undefined]);
+    expect(bodies('<a:pPr>props</a:pPr>', 'a:p')).toEqual([]);
+  });
+
+  it('a `/` that is not the `/` of `/>` does NOT end the element name', () => {
+    // XML lets exactly three things follow a name: whitespace, `>`, or `/>`.
+    // Admitting a bare `/` made `<a:p/x>` an OPENER, so everything up to the
+    // next `</a:p>` was rendered as that paragraph's text — a malformed tag
+    // handing the viewer text the deck never contained.
+    expect(bodies('<a:p/x>leaked</a:p>', 'a:p')).toEqual([]);
+    expect(bodies('<a:t/x>leaked</a:t><a:t>kept</a:t>', 'a:t')).toEqual(['kept']);
+  });
+
+  it('gives the part up once the tag-end memo fills, rather than allocating past it', () => {
+    // The memo is what keeps this walk linear, but it costs an entry per `<`
+    // a tag scan passes outside quotes — and only MALFORMED xml puts a `<`
+    // there, so on a real part it stays empty. A crafted one is another
+    // matter: measured on a 50 MB wall of `<a:p ` openers, the memo alone
+    // allocated 1170 MB (23x the part it describes) over 6.8 s — in the
+    // user's own tab. Bounded, the same input costs 2.6 MB and 5 ms, flat
+    // from 15 MB of input to 50 MB. Elements found BEFORE the cap survive;
+    // the tail is abandoned, because evicting or memoizing no further would
+    // hand back the quadratic the memo exists to prevent.
+    const xml = '<a:p>first</a:p>' + '<a:p '.repeat(300_000) + '<a:p>last</a:p>';
+    const t0 = performance.now();
+    const found = bodies(xml, 'a:p');
+    const ms = performance.now() - t0;
+    expect(found).toEqual(['first']);
+    expect(ms).toBeLessThan(5_000);
+  });
+
+  it('an attribute quote that never closes still costs two traversals, not one per opener', () => {
+    // A `<` met INSIDE an unterminated quote is recorded by nobody — but the
+    // first scan that BEGINS outside the quote walks that same tail in the
+    // no-quote state and records every one of them, so the wall costs two
+    // traversals in total rather than one apiece.
+    const xml = '<a:p>kept</a:p><a:p algn="' + '<a:p '.repeat(40_000);
+    const t0 = performance.now();
+    const found = bodies(xml, 'a:p');
+    const ms = performance.now() - t0;
+    expect(found).toEqual(['kept']);
+    expect(ms).toBeLessThan(5_000);
   });
 });

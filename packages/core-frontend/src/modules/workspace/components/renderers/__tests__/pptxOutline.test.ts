@@ -211,6 +211,41 @@ describe('extractPptxOutline', () => {
     expect(slides[1].paragraphs).toEqual(['two']);
   });
 
+  it('follows the SELECTED part name to the rels — a zero-padded winner keeps its own notes', async () => {
+    // The regression the dedup above introduced: the winner is chosen by
+    // NAME, but the notes lookup rebuilt the rels path from the NUMBER. With
+    // `slide01.xml` winning, `ppt/slides/_rels/slide1.xml.rels` is the LOSING
+    // part's relationships — so slide 1 either lost its notes or was handed
+    // the other file's. Same fixture as the backend twin's.
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('canonical one')),
+      'ppt/slides/slide01.xml': slideXml(para('zero-padded twin')),
+      'ppt/slides/_rels/slide01.xml.rels':
+        `<?xml version="1.0"?><Relationships ${RELS_NS}>` +
+        `<Relationship Id="rId1" Type="${NOTES_TYPE}" Target="../notesSlides/notesSlide01.xml"/>` +
+        '</Relationships>',
+      'ppt/notesSlides/notesSlide01.xml': slideXml(para('the padded twin speaks')),
+      'ppt/slides/_rels/slide1.xml.rels':
+        `<?xml version="1.0"?><Relationships ${RELS_NS}>` +
+        `<Relationship Id="rId1" Type="${NOTES_TYPE}" Target="../notesSlides/notesSlide1.xml"/>` +
+        '</Relationships>',
+      'ppt/notesSlides/notesSlide1.xml': slideXml(para('notes of the part that LOST')),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides).toEqual([
+      { number: 1, paragraphs: ['zero-padded twin'], notes: ['the padded twin speaks'] },
+    ]);
+  });
+
+  it('and the no-rels fallback mirrors the name too — slide01.xml pairs with notesSlide01.xml', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide01.xml': slideXml(para('only slide')),
+      'ppt/notesSlides/notesSlide01.xml': slideXml(para('padded notes')),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides).toEqual([{ number: 1, paragraphs: ['only slide'], notes: ['padded notes'] }]);
+  });
+
   // Fix for the peak-memory restructure: parts are parsed as they are read
   // (per slide, then its notes) — the outline must be identical to the old
   // hold-everything-then-parse order for a deck mixing rels-paired notes,

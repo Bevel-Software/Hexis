@@ -383,4 +383,48 @@ describe('htmlToEmailText', () => {
     expect(out).toBe(bomb);
     expect(ms).toBeLessThan(5_000);
   });
+
+  it('an İ before a container does not shift the tag offsets', () => {
+    // The lowercase copy is INDEX-PARALLEL with the original: tag names are
+    // sliced out of it at offsets computed on `html`, and container-close
+    // offsets found in it are fed back into `html`. `String.toLowerCase` is
+    // not length-preserving — `İ` (U+0130) becomes `i` plus a combining dot —
+    // so after one of these every later index was off by one: the `<script>`
+    // stopped being recognized and its code came out as body text.
+    expect(htmlToEmailText('İ<script>alert(1)</script>after')).toBe('İafter');
+    // …the same shift silently ate the block-tag newline.
+    expect(htmlToEmailText('İ<p>one</p><p>two</p>')).toBe('İ\none\n\ntwo');
+    // …and one INSIDE the body, past the first tag, moved the close offset.
+    expect(htmlToEmailText('<p>aİb</p><style>c{}</style>tail')).toBe('aİb\ntail');
+  });
+
+  it('a comparison in the body is text, not a tag: `1 < 2 > 0` keeps its span', () => {
+    // The span parses an EMPTY tag name. Advancing past it anyway discarded
+    // `< 2 >` from the visible body — this used to read `1  0`.
+    expect(htmlToEmailText('<p>1 < 2 > 0</p>')).toBe('1 < 2 > 0');
+    expect(htmlToEmailText('a <, b > c and <1>d')).toBe('a <, b > c and <1>d');
+    expect(htmlToEmailText('x </ 2 > y')).toBe('x </ 2 > y');
+  });
+
+  it('…while real tags, markup declarations and quoted `>` are unchanged', () => {
+    expect(htmlToEmailText('<!DOCTYPE html><p>doc</p>')).toBe('doc');
+    expect(htmlToEmailText('<?xml version="1.0"?><p>pi</p>')).toBe('pi');
+    expect(htmlToEmailText('<a title="a > b">x</a>')).toBe('x');
+    expect(htmlToEmailText('<o:p>word</o:p><my-widget>custom</my-widget>')).toBe('wordcustom');
+  });
+
+  it('a wall of comparison spans before ONE far-away `>` stays linear', () => {
+    // Leaving a nameless span as text means the scanner no longer consumes it,
+    // so the next `<` starts a fresh tag scan — and a failure-only memo would
+    // record nothing here, because every one of these scans SUCCEEDS at the
+    // single `>` past the wall. Memoizing successes as well keeps it to one
+    // traversal; without it this is 50k x 100k characters.
+    const bomb = '< '.repeat(50_000) + '<p>end</p>';
+    const t0 = performance.now();
+    const out = htmlToEmailText(bomb);
+    const ms = performance.now() - t0;
+    expect(out.endsWith('end')).toBe(true);
+    expect(out).toContain('< <');
+    expect(ms).toBeLessThan(5_000);
+  });
 });
