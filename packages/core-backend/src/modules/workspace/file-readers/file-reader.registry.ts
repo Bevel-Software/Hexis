@@ -1,6 +1,9 @@
 import type { DocExtractService } from './doc-extract.service.js';
 import { DocumentReader } from './document-reader.js';
+import { EmailReader } from './email-reader.js';
 import { extractDocx } from './extract-docx.js';
+import { extractEml } from './extract-eml.js';
+import { extractMsg } from './extract-msg.js';
 import { extractOdp } from './extract-odp.js';
 import { extractOds } from './extract-ods.js';
 import { extractOdt } from './extract-odt.js';
@@ -30,6 +33,10 @@ export function createFileReaderRegistry(docExtract: DocExtractService): FileRea
       new DocumentReader('.odt', extractOdt, docExtract),
       new DocumentReader('.odp', extractOdp, docExtract),
       new DocumentReader('.ods', extractOds, docExtract),
+      // Email files ride the same document machinery (cached extraction,
+      // greppable, not text-editable) with an email-honest write refusal.
+      new EmailReader('.eml', extractEml, docExtract),
+      new EmailReader('.msg', extractMsg, docExtract),
       new ImageReader(),
       new LegacyOfficeReader(),
     ],

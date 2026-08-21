@@ -639,6 +639,80 @@ describe('office documents and PDFs', () => {
     expect(content).toContain('uploading a new version');
   });
 
+  // Hand-written MIME — the email fixtures need no builder library.
+  const eml = (subject: string, body: string): Buffer =>
+    Buffer.from(
+      [
+        'From: Ada Lovelace <ada@example.com>',
+        'To: bob@example.com',
+        `Subject: ${subject}`,
+        'Date: Mon, 5 Jan 2026 10:00:00 +0000',
+        'Content-Type: text/plain; charset=utf-8',
+        '',
+        body,
+      ].join('\r\n'),
+    );
+
+  it('read_file returns marker + [from]/[subject] header block + body for a .eml email', async () => {
+    const base = await start();
+    await fs.writeFile('Inbox/offer.eml', eml('Quarterly numbers', 'Please see the summary.'));
+    const content = await readContent(base, 'Inbox/offer.eml');
+    expect(content.split('\n')).toEqual([
+      '[extracted text of Inbox/offer.eml — email message; formatting and full headers omitted]',
+      '[from] Ada Lovelace <ada@example.com>',
+      '[to] bob@example.com',
+      '[subject] Quarterly numbers',
+      '[date] 2026-01-05T10:00:00.000Z',
+      '',
+      'Please see the summary.',
+    ]);
+  });
+
+  it('grep finds a term inside a .eml, with the [subject] header line itself searchable', async () => {
+    const base = await start();
+    await fs.writeFile('Inbox/offer.eml', eml('Quarterly numbers', 'The needle-2026 is in the body.'));
+    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle-2026' })).json()) as {
+      matches: { path: string; line: number; text: string }[];
+    };
+    // Extraction: marker 1, [from] 2, [to] 3, [subject] 4, [date] 5, blank 6, body 7.
+    expect(res.matches).toContainEqual(
+      expect.objectContaining({ path: 'Inbox/offer.eml', text: 'The needle-2026 is in the body.', line: 7 }),
+    );
+    const header = (await (await post(`${base}/api/agent/tools/grep`, { pattern: '\\[subject\\] Quarterly' })).json()) as {
+      matches: { path: string; line: number }[];
+    };
+    expect(header.matches).toContainEqual(expect.objectContaining({ path: 'Inbox/offer.eml', line: 4 }));
+  });
+
+  it('write_file / edit_file refuse email files with the snapshot explanation', async () => {
+    const base = await start();
+    await fs.writeFile('Inbox/offer.eml', eml('original', 'original body'));
+    for (const [tool, body] of [
+      ['write_file', { path: 'Inbox/offer.eml', content: 'rewritten' }],
+      ['write_file', { path: 'Inbox/new-thread.msg', content: 'plain text' }],
+      ['edit_file', { path: 'Inbox/offer.eml', old_string: 'original', new_string: 'changed' }],
+    ] as const) {
+      const res = await post(`${base}/api/agent/tools/${tool}`, body);
+      expect(res.status, tool).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error, tool).toContain('email file');
+      expect(error, tool).toContain('snapshot');
+      expect(error, tool).toContain('uploading a new version');
+    }
+    // The email is untouched: reading it still extracts the original text.
+    expect(await readContent(base, 'Inbox/offer.eml')).toContain('original body');
+  });
+
+  it('read_file answers a corrupt .msg with an honest could-not-parse message (no 500)', async () => {
+    const base = await start();
+    await fs.writeFile('Inbox/broken.msg', Buffer.from('not a CFB container'));
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'Inbox/broken.msg' });
+    expect(res.status).toBe(200);
+    const { content } = (await res.json()) as { content: string };
+    expect(content).toContain('could not be parsed as a .msg');
+    expect(content).toContain('uploading a new version');
+  });
+
   it('read_file answers a corrupt docx with an honest could-not-parse message (no 500)', async () => {
     const base = await start();
     await fs.writeFile('broken.docx', Buffer.from('not really a zip'));
@@ -717,6 +791,8 @@ describe('office documents and PDFs', () => {
       expect(def, name).toBeDefined();
       // Modern extractable formats…
       expect(def!.description, name).toContain('.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf');
+      // …email files (extractions too, so the same refusal applies)…
+      expect(def!.description, name).toContain('.eml/.msg');
       // …the legacy binary family the refusal also covers…
       expect(def!.description, name).toContain('.doc/.ppt/.xls');
       // …and the replace-by-upload way out.

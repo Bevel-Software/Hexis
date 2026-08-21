@@ -35,6 +35,11 @@ const PdfRenderer = lazyRenderer('PDF', () =>
 const PptxRenderer = lazyRenderer('presentation', () =>
   import('./PptxRenderer').then((m) => ({ default: m.PptxRenderer })),
 );
+// The email viewer's own chunk is small (postal-mime is tiny) but it defers
+// per-format again inside: the `.msg` path alone pulls the CFB machinery.
+const EmailRenderer = lazyRenderer('email', () =>
+  import('./EmailRenderer').then((m) => ({ default: m.EmailRenderer })),
+);
 
 const renderersByExtension: Record<string, ComponentType<FileRendererProps>> = {
   '.md': MarkdownRenderer,
@@ -65,6 +70,11 @@ const renderersByExtension: Record<string, ComponentType<FileRendererProps>> = {
   '.odt': LegacyOfficeRenderer,
   '.odp': LegacyOfficeRenderer,
   '.ods': LegacyOfficeRenderer,
+  // Email files: headers + plain-text body + attachment names, parsed
+  // client-side — never the text fallback (a .msg is binary CFB, and a raw
+  // .eml is MIME plumbing nobody wants to scroll).
+  '.eml': EmailRenderer,
+  '.msg': EmailRenderer,
   '.csv': CsvRenderer,
   '.tool': ToolRenderer,
 };
@@ -101,9 +111,10 @@ export function getFileRenderer(filePath: string): ComponentType<FileRendererPro
 export type RendererLayout = 'prose' | 'full-bleed';
 
 // NOT here, deliberately: `.docx` (mammoth's HTML is prose), `.pptx` (the
-// outline view is a text document), and the legacy `.doc`/`.ppt`/`.xls` plus
-// ODF `.odt`/`.odp`/`.ods` (a one-paragraph note) — all documents, all on
-// the prose measure.
+// outline view is a text document), `.eml`/`.msg` (headers + a text body —
+// a letter, the prose measure's home turf), and the legacy `.doc`/`.ppt`/
+// `.xls` plus ODF `.odt`/`.odp`/`.ods` (a one-paragraph note) — all
+// documents, all on the prose measure.
 const FULL_BLEED_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico',
   '.pdf',
@@ -134,10 +145,13 @@ export function getRendererLayout(filePath: string): RendererLayout {
  * picture. Nobody reading a diagram wants to be told it is 4,812 characters of
  * XML, and the buffer the count would come from was never displayed.
  */
+// `.eml` IS here for the `.svg` reason: its bytes happen to be text, but the
+// renderer fetches the raw endpoint and parses the MIME itself — the text
+// buffer a character count would come from is never displayed.
 const BINARY_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico',
   '.pdf', '.docx', '.xlsx', '.pptx', '.doc', '.ppt', '.xls', '.zip',
-  '.odt', '.odp', '.ods',
+  '.odt', '.odp', '.ods', '.eml', '.msg',
 ]);
 
 export function isBinaryFile(filePath: string): boolean {
@@ -147,14 +161,15 @@ export function isBinaryFile(filePath: string): boolean {
 /**
  * Files whose page must not offer the WRITE action (Edit / Propose changes).
  *
- * These routes render a no-preview note (`LegacyOfficeRenderer`): there is no
- * editing surface behind the button, so clicking Edit would acquire the file
- * lock, flip the page into an edit mode the renderer ignores, and — worst —
- * imply that saving text over a binary document is a thing that can be done.
- * `FileViewer` suppresses both the pane bar's write action and the header's
- * for these extensions.
+ * These routes render a no-preview note (`LegacyOfficeRenderer`) or a
+ * read-only parsed view (`EmailRenderer`): there is no editing surface behind
+ * the button, so clicking Edit would acquire the file lock, flip the page
+ * into an edit mode the renderer ignores, and — worst — imply that saving
+ * text over a binary document (or a message snapshot) is a thing that can be
+ * done. `FileViewer` suppresses both the pane bar's write action and the
+ * header's for these extensions.
  */
-const VIEW_ONLY_EXTENSIONS = new Set(['.doc', '.ppt', '.xls', '.odt', '.odp', '.ods']);
+const VIEW_ONLY_EXTENSIONS = new Set(['.doc', '.ppt', '.xls', '.odt', '.odp', '.ods', '.eml', '.msg']);
 
 export function isViewOnlyFile(filePath: string): boolean {
   return VIEW_ONLY_EXTENSIONS.has(filePath.slice(filePath.lastIndexOf('.')).toLowerCase());

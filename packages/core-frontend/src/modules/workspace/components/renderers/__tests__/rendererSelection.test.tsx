@@ -33,6 +33,9 @@ describe('getFileRenderer: document routing', () => {
     ['Data/book.xlsx', 'LazyRenderer(spreadsheet)'],
     ['Inbox/report.docx', 'LazyRenderer(document)'],
     ['Inbox/all-hands.pptx', 'LazyRenderer(presentation)'],
+    ['Inbox/offer.eml', 'LazyRenderer(email)'],
+    ['Inbox/thread.msg', 'LazyRenderer(email)'],
+    ['Inbox/THREAD.MSG', 'LazyRenderer(email)'],
   ])('routes %s to its lazy viewer %s', (path, expected) => {
     expect(rendererName(getFileRenderer(path))).toBe(expected);
   });

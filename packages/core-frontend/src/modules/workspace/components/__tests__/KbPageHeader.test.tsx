@@ -48,6 +48,8 @@ describe('KbPageHeader', () => {
     ['old/deck.ppt', 'deck'],
     ['old/sheet.xls', 'sheet'],
     ['docs/spec.odt', 'spec'],
+    ['Inbox/offer.eml', 'offer'],
+    ['Inbox/thread.msg', 'thread'],
     ['decks/pitch.odp', 'pitch'],
     ['data/numbers.ods', 'numbers'],
   ])('strips the document extension of %s from the h1', (path, title) => {

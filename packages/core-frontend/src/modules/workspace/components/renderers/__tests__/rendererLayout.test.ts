@@ -23,6 +23,9 @@ describe('getRendererLayout', () => {
     'docs/spec.odt',
     'decks/pitch.odp',
     'data/numbers.ods',
+    // An email is a letter: headers + a text body on the prose measure.
+    'Inbox/offer.eml',
+    'Inbox/thread.msg',
   ])('lays out %s as a document', (path) => {
     expect(getRendererLayout(path)).toBe('prose');
   });
@@ -59,6 +62,11 @@ describe('isBinaryFile', () => {
     'docs/spec.odt',
     'decks/pitch.odp',
     'data/numbers.ods',
+    // .msg is binary CFB; .eml is the .svg case — its bytes are text, but the
+    // viewer fetches raw bytes and parses the MIME, so the text buffer a
+    // character count would describe is never shown.
+    'Inbox/thread.msg',
+    'Inbox/offer.eml',
   ])('knows %s holds no countable text', (path) => {
     expect(isBinaryFile(path)).toBe(true);
   });
@@ -95,6 +103,10 @@ describe('isViewOnlyFile', () => {
     'decks/pitch.odp',
     'data/numbers.ods',
     'docs/SPEC.ODT',
+    // A message snapshot has no editing surface either.
+    'Inbox/offer.eml',
+    'Inbox/thread.msg',
+    'Inbox/OFFER.EML',
   ])('marks %s view-only', (path) => {
     expect(isViewOnlyFile(path)).toBe(true);
   });

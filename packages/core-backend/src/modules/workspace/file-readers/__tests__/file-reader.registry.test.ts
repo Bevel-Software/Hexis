@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DocExtractService } from '../doc-extract.service.js';
 import { DocumentReader } from '../document-reader.js';
+import { EmailReader } from '../email-reader.js';
 import { FileReaderRegistry, type FileReader, type ReadResult } from '../file-reader.js';
 import { createFileReaderRegistry } from '../file-reader.registry.js';
 import { ImageReader } from '../image-reader.js';
@@ -26,6 +27,20 @@ describe('file-reader registry routing', () => {
       const reader = registry.readerFor(p);
       expect(reader, p).toBeInstanceOf(DocumentReader);
       expect(reader.textEditable, p).toBe(false);
+    }
+  });
+
+  it('routes the two email extensions to an EmailReader — a DocumentReader with the email write-refusal', () => {
+    for (const p of ['Inbox/offer.eml', 'a/b/thread.msg', 'Deals/OFFER.EML', 'old.MSG']) {
+      const reader = registry.readerFor(p);
+      expect(reader, p).toBeInstanceOf(EmailReader);
+      // An EmailReader IS a DocumentReader — grep's cold-extraction budget
+      // branch (`instanceof DocumentReader`) must keep covering emails.
+      expect(reader, p).toBeInstanceOf(DocumentReader);
+      expect(reader.textEditable, p).toBe(false);
+      expect(reader.editRefusal?.(p), p).toContain('email file');
+      expect(reader.editRefusal?.(p), p).toContain('snapshot');
+      expect(reader.editRefusal?.(p), p).toContain('uploading a new version');
     }
   });
 
