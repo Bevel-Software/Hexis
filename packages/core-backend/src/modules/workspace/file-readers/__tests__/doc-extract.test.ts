@@ -13,7 +13,7 @@ import { extractOdp } from '../extract-odp.js';
 import { extractOds } from '../extract-ods.js';
 import { DocExtractService } from '../doc-extract.service.js';
 import { gitBlobSha } from '../extraction-cache.js';
-import { fileExtension, isLegacyDocument, isSupportedDocument } from '../doc-extract.types.js';
+import { fileExtension } from '../doc-extract.types.js';
 
 /**
  * REAL fixtures, no mocks: docx/pptx are handcrafted OOXML zips built with
@@ -132,22 +132,12 @@ const odsBytes = (...tables: string[]): Buffer =>
 const odsCell = (text: string, repeat?: number): string =>
   `<table:table-cell${repeat ? ` table:number-columns-repeated="${repeat}"` : ''}>${text === '' ? '' : `<text:p>${text}</text:p>`}</table:table-cell>`;
 
-// ── extension classification ───────────────────────────────────────────────
+// ── extension parsing ──────────────────────────────────────────────────────
+// (Which extension belongs to which reader lives in the registry now — see
+// file-reader.registry.test.ts for the routing, case-insensitivity included.)
 
-describe('document type classification', () => {
-  it('recognises the seven supported types, case-insensitively', () => {
-    for (const p of ['a.docx', 'Plugins/GTM/Deck.PPTX', 'x/y.xlsx', 'r.pdf', 'n.odt', 'd.ODP', 'b/s.ods']) {
-      expect(isSupportedDocument(p), p).toBe(true);
-    }
-  });
-  it('legacy formats and everything else are not supported', () => {
-    for (const p of ['a.doc', 'a.ppt', 'a.xls', 'a.md', 'a.zip', 'noext', '.docx']) {
-      expect(isSupportedDocument(p), p).toBe(false);
-    }
-    expect(isLegacyDocument('old.doc')).toBe(true);
-    expect(isLegacyDocument('new.docx')).toBe(false);
-  });
-  it('fileExtension lowercases and ignores dot-files', () => {
+describe('fileExtension', () => {
+  it('lowercases and ignores dot-files', () => {
     expect(fileExtension('A/B/C.DocX')).toBe('.docx');
     expect(fileExtension('dir/.gitignore')).toBe('');
   });
@@ -505,7 +495,7 @@ describe('DocExtractService cache', () => {
 
   it('extracts ONCE per content: the second read is served from the cache file', async () => {
     const bytes = docxBytes(para('Cache me once'));
-    const first = await service.extract('a.docx', bytes);
+    const first = await service.extract('a.docx', bytes, extractDocx);
     expect(first.ok).toBe(true);
     const entries = await readdir(cacheRoot);
     expect(entries).toEqual([`${gitBlobSha(bytes)}.json`]);
@@ -514,7 +504,7 @@ describe('DocExtractService cache', () => {
     // text, it came from the cache — the parser did NOT run again. (Real-files
     // proof without spying on module internals.)
     await writeFile(join(cacheRoot, entries[0]), JSON.stringify({ summary: 'tampered summary', text: 'FROM CACHE' }), 'utf8');
-    const second = await service.extract('a.docx', bytes);
+    const second = await service.extract('a.docx', bytes, extractDocx);
     if (!second.ok) throw new Error(second.message);
     expect(second.text).toBe('FROM CACHE');
     expect(second.marker).toBe('[extracted text of a.docx — tampered summary]');
@@ -523,9 +513,9 @@ describe('DocExtractService cache', () => {
   it('is invalidated by CONTENT change (new blob sha → fresh extraction, new entry)', async () => {
     const v1 = docxBytes(para('version one'));
     const v2 = docxBytes(para('version two'));
-    await service.extract('a.docx', v1);
+    await service.extract('a.docx', v1, extractDocx);
     const after1 = await readdir(cacheRoot);
-    const res = await service.extract('a.docx', v2);
+    const res = await service.extract('a.docx', v2, extractDocx);
     if (!res.ok) throw new Error(res.message);
     expect(res.text).toBe('version two');
     const after2 = await readdir(cacheRoot);
@@ -535,9 +525,9 @@ describe('DocExtractService cache', () => {
 
   it('keys by content, not path: the same bytes under another path reuse the entry, marker names the read path', async () => {
     const bytes = docxBytes(para('Shared content'));
-    await service.extract('one.docx', bytes);
+    await service.extract('one.docx', bytes, extractDocx);
     expect(await readdir(cacheRoot)).toHaveLength(1);
-    const other = await service.extract('two/other.docx', bytes);
+    const other = await service.extract('two/other.docx', bytes, extractDocx);
     if (!other.ok) throw new Error(other.message);
     expect(other.marker).toMatch(/^\[extracted text of two\/other\.docx — /);
     expect(await readdir(cacheRoot)).toHaveLength(1);
@@ -546,13 +536,13 @@ describe('DocExtractService cache', () => {
   it('getCached misses before extraction and hits after — the grep budget contract', async () => {
     const bytes = docxBytes(para('Budget line'));
     expect(await service.getCached('a.docx', bytes)).toBeUndefined();
-    await service.extract('a.docx', bytes);
+    await service.extract('a.docx', bytes, extractDocx);
     const hit = await service.getCached('a.docx', bytes);
     expect(hit?.text).toBe('Budget line');
   });
 
   it('does NOT cache failures — a corrupt file is re-tried on the next read', async () => {
-    const res = await service.extract('bad.docx', Buffer.from('junk'));
+    const res = await service.extract('bad.docx', Buffer.from('junk'), extractDocx);
     expect(res.ok).toBe(false);
     expect(await readdir(cacheRoot)).toHaveLength(0);
   });
@@ -564,7 +554,7 @@ describe('DocExtractService cache', () => {
 
   it('the cached entry on disk is the {summary, text} JSON', async () => {
     const bytes = docxBytes(para('On disk'));
-    await service.extract('a.docx', bytes);
+    await service.extract('a.docx', bytes, extractDocx);
     const raw = JSON.parse(await readFile(join(cacheRoot, `${gitBlobSha(bytes)}.json`), 'utf8')) as { summary: string; text: string };
     expect(raw.text).toBe('On disk');
     expect(typeof raw.summary).toBe('string');

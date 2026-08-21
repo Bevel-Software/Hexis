@@ -34,27 +34,22 @@ export type ExtractResult =
   | ({ ok: true } & ExtractedDoc)
   | { ok: false; message: string };
 
+/**
+ * A format's PURE extract function — bytes in, `ExtractResult` out (async for
+ * pdf.js). One per supported format (extract-docx.ts and friends); each is
+ * paired with its extension by a `DocumentReader` entry in the file-reader
+ * registry, and cache-wrapped by `DocExtractService`.
+ */
+export type ExtractFn = (bytes: Buffer) => ExtractResult | Promise<ExtractResult>;
+
 /** Build the honest one-line header consumers prepend to extracted text. */
 export function extractionMarker(path: string, summary: string): string {
   return `[extracted text of ${path} — ${summary}]`;
 }
-
-const SUPPORTED_EXTENSIONS = new Set(['.docx', '.pptx', '.xlsx', '.pdf', '.odt', '.odp', '.ods']);
-const LEGACY_EXTENSIONS = new Set(['.doc', '.ppt', '.xls']);
 
 /** Lowercased extension of `path` including the dot, or '' when there is none. */
 export function fileExtension(path: string): string {
   const name = path.slice(path.lastIndexOf('/') + 1);
   const dot = name.lastIndexOf('.');
   return dot > 0 ? name.slice(dot).toLowerCase() : '';
-}
-
-/** Is this a document type the extractor supports (.docx/.pptx/.xlsx/.pdf and .odt/.odp/.ods)? */
-export function isSupportedDocument(path: string): boolean {
-  return SUPPORTED_EXTENSIONS.has(fileExtension(path));
-}
-
-/** Legacy binary office format (.doc/.ppt/.xls) — NOT extractable; reads get a convert-hint. */
-export function isLegacyDocument(path: string): boolean {
-  return LEGACY_EXTENSIONS.has(fileExtension(path));
 }

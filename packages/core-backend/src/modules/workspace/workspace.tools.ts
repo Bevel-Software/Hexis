@@ -24,17 +24,11 @@ import type { ISessionSink } from './session-sink.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
-import type { DocExtractService } from './doc-extract/doc-extract.service.js';
-import { fileExtension, isLegacyDocument, isSupportedDocument } from './doc-extract/doc-extract.types.js';
+import type { DocExtractService } from './file-readers/doc-extract.service.js';
+import type { FileReaderRegistry } from './file-readers/file-reader.js';
+import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
+import { DocumentReader } from './file-readers/document-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
-import {
-  IMAGE_MAX_RAW_BYTES,
-  imageDimensions,
-  imageMimeType,
-  imageNote,
-  isImageFile,
-  oversizedImageNotice,
-} from './image-read.js';
 
 /** A directory entry as returned by `LocalFilesystem.readdir`. */
 interface DirEntry {
@@ -138,71 +132,22 @@ const UNCACHED_DOCS_PER_GREP = 20;
 
 /** Per-grep-walk extraction state: the shared budget + how many documents it left unsearched. */
 interface DocGrepState {
-  extractor: DocExtractService;
+  readers: FileReaderRegistry;
   uncachedBudget: number;
   skippedUncached: number;
-}
-
-/** Minimal extension→mime map for the binary-read notice (fallback: octet-stream). */
-const MIME_BY_EXT: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.bmp': 'image/bmp',
-  '.ico': 'image/x-icon',
-  '.zip': 'application/zip',
-  '.gz': 'application/gzip',
-  '.tar': 'application/x-tar',
-  '.7z': 'application/x-7z-compressed',
-  '.rar': 'application/vnd.rar',
-  '.doc': 'application/msword',
-  '.ppt': 'application/vnd.ms-powerpoint',
-  '.xls': 'application/vnd.ms-excel',
-  '.mp3': 'audio/mpeg',
-  '.wav': 'audio/wav',
-  '.mp4': 'video/mp4',
-  '.mov': 'video/quicktime',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.ttf': 'font/ttf',
-  '.pdf': 'application/pdf',
-  '.wasm': 'application/wasm',
-  '.exe': 'application/vnd.microsoft.portable-executable',
-};
-
-/**
- * The honest one-line notice `read_file` returns INSTEAD of raw bytes for a
- * binary file it cannot extract: what the file is (mime by extension + size),
- * plus the actionable hint where one exists — unzip for archives, convert for
- * legacy office formats. (Images never reach this: they are intercepted first
- * and returned as native MCP image content — see `image-read.ts`.)
- */
-function binaryReadNotice(path: string, sizeBytes: number): string {
-  const ext = fileExtension(path);
-  if (isLegacyDocument(path)) {
-    const modern = { '.doc': '.docx', '.ppt': '.pptx', '.xls': '.xlsx' }[ext];
-    return (
-      `[${path} is a legacy office format (${ext}, ${sizeBytes} bytes) — text extraction supports only the ` +
-      `modern format. Convert the document to ${modern} and upload that to read its text.]`
-    );
-  }
-  const mime = MIME_BY_EXT[ext] ?? 'application/octet-stream';
-  const zipHint = ext === '.zip' ? ' Use the unzip tool to extract its contents.' : '';
-  return `[${path} is a binary file (${mime}, ${sizeBytes} bytes) — not readable as text.${zipHint}]`;
 }
 
 /**
  * The write-refusal for office documents/PDFs on the agent TEXT-editing tools
  * (write_file / write_files / edit_file). `read_file` returns an EXTRACTION
- * for these types, so an agent that "read" one and writes text back would
+ * for these types — their reader declares `textEditable: false` — so an agent
+ * that "read" one and writes text back would
  * silently destroy the real document. Uploads and the plain HTTP write routes
  * are untouched — humans replacing a document is exactly the right move — and
  * `unzip` stays the raw-access escape hatch.
  */
-function assertNotDocumentEdit(path: string): void {
-  if (isSupportedDocument(path)) {
+function assertNotDocumentEdit(readers: FileReaderRegistry, path: string): void {
+  if (!readers.readerFor(path).textEditable) {
     throw new ToolError(
       `"${path}" is an office document/PDF. read_file returns EXTRACTED text for it — not the file's real ` +
         'content — so text written back cannot round-trip and would corrupt the document. To change it, ' +
@@ -245,38 +190,33 @@ async function grepWalk(
       // for a root-level grep that resolves to a neutral root. Record it so a
       // cross-ontology grep poisons later writes (closes the read-leak).
       await recordOntologyRead(p);
-      let content: string;
-      if (isSupportedDocument(p)) {
-        // Office document / PDF: grep the EXTRACTION (marker line included, so
-        // the [slide N]/[sheet: …]/[page N] lines are themselves searchable and
-        // line numbers match what read_file returns). Cached extractions are
-        // free; cold ones draw on the per-walk budget (see UNCACHED_DOCS_PER_GREP).
-        let extraction;
-        try {
-          const bytes = asBytes(await fs.readFile(p));
-          extraction = await docs.extractor.getCached(p, bytes);
-          if (!extraction) {
-            if (docs.uncachedBudget <= 0) {
-              docs.skippedUncached++;
-              continue;
-            }
-            docs.uncachedBudget--;
-            const res = await docs.extractor.extract(p, bytes);
-            if (!res.ok) continue; // corrupt document — nothing searchable
-            extraction = res;
+      // What grep searches is the file's reader's business: text content for
+      // the text reader (null on NUL bytes — binary is not searchable), the
+      // EXTRACTION for a document reader (marker line included, so the
+      // [slide N]/[sheet: …]/[page N] lines are themselves searchable and
+      // line numbers match what read_file returns), nothing for images.
+      const reader = docs.readers.readerFor(p);
+      let content: string | null;
+      try {
+        const bytes = asBytes(await fs.readFile(p));
+        content = reader.greppableText ? await reader.greppableText(bytes, p) : null;
+        if (content === null && reader instanceof DocumentReader) {
+          // Cold document (extraction not yet cached): cached ones above are
+          // free, extracting draws on the per-walk budget (see
+          // UNCACHED_DOCS_PER_GREP) — beyond it the walk skips and counts.
+          if (docs.uncachedBudget <= 0) {
+            docs.skippedUncached++;
+            continue;
           }
-        } catch {
-          continue;
+          docs.uncachedBudget--;
+          const res = await reader.read(bytes, p);
+          // A non-text outcome is a corrupt document — nothing searchable.
+          content = res.kind === 'text' ? res.text : null;
         }
-        content = `${extraction.marker}\n${extraction.text}`;
-      } else {
-        try {
-          content = asText(await fs.readFile(p));
-        } catch {
-          continue;
-        }
-        if (content.includes(String.fromCharCode(0))) continue; // skip binary (NUL)
+      } catch {
+        continue;
       }
+      if (content === null) continue;
       const lines = content.split('\n');
       for (let i = 0; i < lines.length && out.length < max; i++) {
         re.lastIndex = 0;
@@ -308,6 +248,14 @@ export function registerWorkspaceTools(
   writePolicy: IRoutineWritePolicy,
   sessionSink: ISessionSink,
 ): void {
+  /**
+   * The one extension→reader registry every read-shaped decision routes
+   * through: read_file dispatches on it, grep asks it for searchable text,
+   * and the write-refusal consults its `textEditable`. Built once per mount
+   * around the shared extraction cache.
+   */
+  const readers = createFileReaderRegistry(docExtract);
+
   /** Build the per-call read gate from the tool's branch input + caller identity. */
   const readGateFor = (branch: string, ctx: ToolContext): ReadGate => ({
     accessControl,
@@ -433,9 +381,12 @@ export function registerWorkspaceTools(
       await recordOntologyRead(sessionOntologyGate, ctx, p);
       await assertCanRead(readGateFor(a.branch as string, ctx), p);
       const fs = await ctx.getFilesystem(a.branch as string);
-      // Extraction (and the binary/image handling) happen AFTER the access gate
-      // and the ontology-read recording above — a document read is still a KB read.
-      const raw = await fs.readFile(p);
+      // Reading (extraction, image and binary handling included) happens AFTER
+      // the access gate and the ontology-read recording above — a document
+      // read is still a KB read. ONE registry dispatch picks the reader by
+      // extension; everything below just maps its ReadResult onto the tool's
+      // result shape.
+      const result = await readers.readerFor(p).read(asBytes(await fs.readFile(p)), p);
       // Images return the picture itself as an MCP image content block, so a
       // multimodal model SEES it. The handler returns the `McpImageResult`
       // sentinel; the MCP result shaping (`toCallToolResult` in
@@ -447,24 +398,13 @@ export function registerWorkspaceTools(
       // content blocks before any client could try to validate it, so the
       // schema keeps describing the text path it has always described.
       // `offset`/`limit` are meaningless on a picture and are ignored.
-      if (isImageFile(p)) {
-        const bytes = asBytes(raw);
-        const mime = imageMimeType(p);
-        if (bytes.length > IMAGE_MAX_RAW_BYTES) {
-          return { path: p, content: oversizedImageNotice(p, mime, bytes.length) };
-        }
-        return mcpImageResult(bytes.toString('base64'), mime, imageNote(p, mime, bytes.length, imageDimensions(bytes)));
+      if (result.kind === 'image') {
+        return mcpImageResult(result.data, result.mimeType, result.note);
       }
-      let content: string;
-      if (isSupportedDocument(p)) {
-        const res = await docExtract.extract(p, asBytes(raw));
-        content = res.ok
-          ? `${res.marker}\n${res.text}`
-          : `[${p} ${res.message} — the file may be corrupt or mislabeled. To fix it, replace the document by uploading a new version.]`;
-      } else {
-        content = asText(raw);
-        if (content.includes('\0')) content = binaryReadNotice(p, asBytes(raw).length);
-      }
+      // Text and refusals alike land in `content` — a refusal (corrupt
+      // document, unreadable binary, oversized image) IS the file's honest
+      // textual answer, sliced like any other content.
+      const content = result.kind === 'text' ? result.text : result.message;
       const start = offset && offset > 0 ? offset : 0;
       const sliced = offset !== undefined || limit !== undefined
         ? content.slice(start, limit !== undefined ? start + limit : undefined)
@@ -596,7 +536,7 @@ export function registerWorkspaceTools(
       await recordOntologyRead(sessionOntologyGate, ctx, searchRoot);
       const out: { path: string; line: number; text: string }[] = [];
       const max = typeof a.max_results === 'number' ? Math.min(a.max_results, 1000) : 200;
-      const docs: DocGrepState = { extractor: docExtract, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
+      const docs: DocGrepState = { readers, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
       await grepWalk(
         await ctx.getFilesystem(a.branch as string),
         searchRoot,
@@ -647,7 +587,7 @@ export function registerWorkspaceTools(
     },
     write: true,
     handler: async (a, ctx: ToolContext) => {
-      assertNotDocumentEdit(a.path as string);
+      assertNotDocumentEdit(readers, a.path as string);
       // NB: this is a no-op for chat + `ontology_ingest` — it only bites when a
       // routine executor has explicitly restricted THIS session's `ctx.sessionId`
       // (today only `watchlist_check`, to `.html`). Unrestricted sessions pass straight
@@ -699,7 +639,7 @@ export function registerWorkspaceTools(
       if (files.length === 0) return { count: 0 };
       // Gate every path first (records ontology touches; a cross-ontology batch
       // is blocked exactly like the per-file write tools).
-      for (const f of files) assertNotDocumentEdit(f.path);
+      for (const f of files) assertNotDocumentEdit(readers, f.path);
       for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f.path);
       for (const f of files) await assertOntologyWriteAllowed(sessionOntologyGate, ctx, f.path);
       // `write: true` guarantees a LockingFilesystem here; `writeFiles` lands the
@@ -740,7 +680,7 @@ export function registerWorkspaceTools(
     },
     write: true,
     handler: async (a, ctx: ToolContext) => {
-      assertNotDocumentEdit(a.path as string);
+      assertNotDocumentEdit(readers, a.path as string);
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.path as string);
       const fs = await ctx.getFilesystem(a.branch as string);

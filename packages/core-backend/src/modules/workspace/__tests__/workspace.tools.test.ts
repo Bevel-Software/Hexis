@@ -16,7 +16,7 @@ import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { SpillStore } from '../spill-store.js';
-import { DocExtractService } from '../doc-extract/doc-extract.service.js';
+import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 

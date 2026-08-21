@@ -10,7 +10,7 @@
  * an oversized image gets an honest refusal telling the caller to downscale
  * locally or upload a smaller export.
  */
-import { fileExtension } from './doc-extract/doc-extract.types.js';
+import { fileExtension } from './doc-extract.types.js';
 
 /** The image types `read_file` returns as a native MCP image content block. `.svg` is TEXT and stays on the text path. */
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
@@ -21,6 +21,9 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
   '.gif': 'image/gif',
   '.webp': 'image/webp',
 };
+
+/** The extensions the `ImageReader` registers for — exactly the map above. */
+export const IMAGE_EXTENSIONS: readonly string[] = Object.keys(IMAGE_MIME_BY_EXT);
 
 /** Is this a file `read_file` should return as an image? */
 export function isImageFile(path: string): boolean {
