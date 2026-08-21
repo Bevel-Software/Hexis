@@ -153,37 +153,66 @@ function readEntryBounded(entry: JSZip.JSZipObject, budget: ReadBudget): Promise
   });
 }
 
-/** Entries matching `re` (capture 1 = number), read SEQUENTIALLY, keyed by number. */
-async function collectNumbered(zip: JSZip, re: RegExp, budget: ReadBudget): Promise<Map<number, string>> {
-  const entries: Array<[number, JSZip.JSZipObject]> = [];
-  zip.forEach((entryName, entry) => {
-    const m = re.exec(entryName);
-    if (m) entries.push([parseInt(m[1], 10), entry]);
-  });
-  const out = new Map<number, string>();
-  for (const [n, entry] of entries) out.set(n, await readEntryBounded(entry, budget));
-  return out;
-}
-
 const NOTES_REL_TYPE_SUFFIX = '/notesSlide';
 
 /**
- * The value of attribute `name` inside one tag's text — single- OR double-
- * quoted, whitespace around `=` tolerated. Raw (entities not decoded).
+ * One tag's attributes as `name → raw value` tokens, in document order — the
+ * same left-to-right tokenizer as the backend's `ooxml-text.ts`: quoted
+ * values (either quote style, whitespace around `=` tolerated) are skipped
+ * over WHOLE, so an attribute-looking sequence INSIDE another attribute's
+ * value can never be mistaken for an attribute of its own. Values are raw
+ * (entities not decoded); a malformed tail (unterminated quote) ends the scan.
  */
-function xmlAttrValue(tagXml: string, name: string): string | undefined {
-  const re = new RegExp(`(?<![\\w:.-])${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`);
-  const m = re.exec(tagXml);
-  return m ? (m[1] ?? m[2]) : undefined;
+function xmlAttrTokens(tagXml: string): Array<{ name: string; value: string }> {
+  const out: Array<{ name: string; value: string }> = [];
+  let i = 0;
+  // Skip '<' (with an optional '/' or '?') and the tag name itself.
+  if (tagXml[i] === '<') {
+    i++;
+    if (tagXml[i] === '/' || tagXml[i] === '?') i++;
+  }
+  while (i < tagXml.length && !/[\s/>]/.test(tagXml[i])) i++;
+  while (i < tagXml.length) {
+    while (i < tagXml.length && /[\s/]/.test(tagXml[i])) i++;
+    if (i >= tagXml.length || tagXml[i] === '>') return out;
+    const nameStart = i;
+    while (i < tagXml.length && !/[\s=/>]/.test(tagXml[i])) i++;
+    const name = tagXml.slice(nameStart, i);
+    while (i < tagXml.length && /\s/.test(tagXml[i])) i++;
+    if (tagXml[i] !== '=') continue; // no value (not legal XML) — skip the token
+    i++;
+    while (i < tagXml.length && /\s/.test(tagXml[i])) i++;
+    const quote = tagXml[i];
+    if (quote !== '"' && quote !== "'") return out; // unquoted/malformed — stop
+    const valueStart = ++i;
+    const end = tagXml.indexOf(quote, i);
+    if (end === -1) return out; // unterminated quote — stop
+    if (name !== '') out.push({ name, value: tagXml.slice(valueStart, end) });
+    i = end + 1;
+  }
+  return out;
 }
 
-/** The Target of the first `notesSlide`-typed Relationship in a rels part, or undefined. */
+/** The value of the attribute whose LOCAL name (after any prefix) is `localName`, or undefined. */
+function xmlAttrValueByLocalName(tagXml: string, localName: string): string | undefined {
+  for (const attr of xmlAttrTokens(tagXml)) {
+    if (attr.name.slice(attr.name.lastIndexOf(':') + 1) === localName) return attr.value;
+  }
+  return undefined;
+}
+
+/**
+ * The Target of the first `notesSlide`-typed Relationship in a rels part, or
+ * undefined. Matched by LOCAL name — a producer that binds the relationships
+ * namespace to a prefix writes `<r:Relationship r:Type=… r:Target=…>`, and
+ * dropping those would silently drop the deck's notes.
+ */
 function notesTargetFromRels(relsXml: string): string | undefined {
-  const relRe = /<Relationship(?=[\s/>])[^>]*>/g;
+  const relRe = /<(?:[\w.-]+:)?Relationship(?=[\s/>])[^>]*>/g;
   let m: RegExpExecArray | null;
   while ((m = relRe.exec(relsXml)) !== null) {
-    const type = xmlAttrValue(m[0], 'Type');
-    if (type !== undefined && type.endsWith(NOTES_REL_TYPE_SUFFIX)) return xmlAttrValue(m[0], 'Target');
+    const type = xmlAttrValueByLocalName(m[0], 'Type');
+    if (type !== undefined && type.endsWith(NOTES_REL_TYPE_SUFFIX)) return xmlAttrValueByLocalName(m[0], 'Target');
   }
   return undefined;
 }
@@ -203,55 +232,58 @@ function resolveRelTarget(baseDir: string, target: string): string {
 }
 
 /**
- * Slide number → notes XML. Notes are paired through each slide's `.rels`
+ * Slide `n`'s note paragraphs. Notes are paired through the slide's `.rels`
  * part (relationship type ending `notesSlide` — the package may number notes
  * parts differently from slides); the numeric `notesSlideN.xml` convention is
  * the fallback ONLY for a slide with no rels part at all. Mirrors the
- * backend's `extract-pptx.ts` exactly.
+ * backend's `extract-pptx.ts` exactly. The notes XML is parsed to its
+ * paragraph strings here and never retained.
  */
-async function collectNotes(zip: JSZip, slideNumbers: number[], budget: ReadBudget): Promise<Map<number, string>> {
-  const out = new Map<number, string>();
-  for (const n of slideNumbers) {
-    const rels = zip.file(`ppt/slides/_rels/slide${n}.xml.rels`);
-    let notesPart: string | undefined;
-    if (rels) {
-      const target = notesTargetFromRels(await readEntryBounded(rels, budget));
-      notesPart = target !== undefined ? resolveRelTarget('ppt/slides', target) : undefined;
-    } else {
-      notesPart = `ppt/notesSlides/notesSlide${n}.xml`;
-    }
-    if (notesPart === undefined) continue;
-    const entry = zip.file(notesPart);
-    if (entry) out.set(n, await readEntryBounded(entry, budget));
+async function readNoteLines(zip: JSZip, n: number, budget: ReadBudget): Promise<string[]> {
+  const rels = zip.file(`ppt/slides/_rels/slide${n}.xml.rels`);
+  let notesPart: string | undefined;
+  if (rels) {
+    const target = notesTargetFromRels(await readEntryBounded(rels, budget));
+    notesPart = target !== undefined ? resolveRelTarget('ppt/slides', target) : undefined;
+  } else {
+    notesPart = `ppt/notesSlides/notesSlide${n}.xml`;
   }
-  return out;
+  if (notesPart === undefined) return [];
+  const entry = zip.file(notesPart);
+  return entry ? paragraphLines(await readEntryBounded(entry, budget)) : [];
 }
 
 /**
  * Parse `.pptx` bytes into the outline. Throws an `Error` whose message reads
  * "could not be parsed as a .pptx (…)" — the caller shows it verbatim — when
  * the bytes are not a zip, hold no slides, or blow the decompression bounds.
+ *
+ * Each slide/notes part is parsed into its final paragraph strings AS IT IS
+ * READ and the decompressed XML is dropped before the next part is touched —
+ * near the 200 MB aggregate cap, retaining every part's XML until the end
+ * would hold the whole inflated deck in memory at once; this way the peak is
+ * one bounded part plus the small parsed outline.
  */
 export async function extractPptxOutline(bytes: ArrayBuffer | Uint8Array): Promise<PptxSlide[]> {
-  let slides: Map<number, string>;
-  let notes: Map<number, string>;
+  const out: PptxSlide[] = [];
   try {
     const zip = await JSZip.loadAsync(bytes);
     const budget: ReadBudget = { remaining: MAX_TOTAL_BYTES };
-    slides = await collectNumbered(zip, /^ppt\/slides\/slide(\d+)\.xml$/, budget);
-    notes = await collectNotes(zip, [...slides.keys()], budget);
+    const slideEntries: Array<[number, JSZip.JSZipObject]> = [];
+    zip.forEach((entryName, entry) => {
+      const m = /^ppt\/slides\/slide(\d+)\.xml$/.exec(entryName);
+      if (m) slideEntries.push([parseInt(m[1], 10), entry]);
+    });
+    slideEntries.sort((a, b) => a[0] - b[0]);
+    for (const [n, entry] of slideEntries) {
+      const paragraphs = paragraphLines(await readEntryBounded(entry, budget));
+      out.push({ number: n, paragraphs, notes: await readNoteLines(zip, n, budget) });
+    }
   } catch (err) {
     throw new Error(`could not be parsed as a .pptx (${(err as Error).message})`);
   }
-  if (slides.size === 0) {
+  if (out.length === 0) {
     throw new Error('could not be parsed as a .pptx (no ppt/slides/slideN.xml inside the archive)');
   }
-
-  return [...slides.keys()]
-    .sort((a, b) => a - b)
-    .map((n) => ({
-      number: n,
-      paragraphs: paragraphLines(slides.get(n)!),
-      notes: notes.has(n) ? paragraphLines(notes.get(n)!) : [],
-    }));
+  return out;
 }

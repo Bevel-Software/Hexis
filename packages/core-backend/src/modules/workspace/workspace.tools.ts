@@ -568,7 +568,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'write_file',
     description:
-      'Write (create or overwrite) a workspace file. The change is committed + pushed as you. Returns `{ path, bytes }`. Refuses Office/OpenDocument files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf) — their reads are text EXTRACTIONS that cannot round-trip; replace such a file by uploading a new version instead.' +
+      'Write (create or overwrite) a workspace file. The change is committed + pushed as you. Returns `{ path, bytes }`. Refuses document formats: Office/OpenDocument files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf), whose reads are text EXTRACTIONS that cannot round-trip, and legacy binary Office files (.doc/.ppt/.xls), which cannot be extracted at all; replace such a file by uploading a new version instead.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -607,8 +607,9 @@ export function registerWorkspaceTools(
       'Batch-write many files in ONE commit — far faster than calling write_file once per file when ' +
       'creating many files at once (e.g. seeding a knowledge base). Each entry is `{ path, content }`; all ' +
       'are created/overwritten and committed + pushed together as you. Prefer this over many write_file ' +
-      'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Refuses Office/OpenDocument ' +
-      'files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf) — their reads are text EXTRACTIONS that cannot round-trip. Returns `{ count }`.' +
+      'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Refuses document formats: ' +
+      'Office/OpenDocument files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf), whose reads are text EXTRACTIONS that cannot ' +
+      'round-trip, and legacy binary Office files (.doc/.ppt/.xls); replace such a file by uploading a new version instead. Returns `{ count }`.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -659,7 +660,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'edit_file',
     description:
-      'Replace an exact string in a workspace file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you. Refuses Office/OpenDocument files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf) — their reads are text EXTRACTIONS that cannot round-trip; replace such a file by uploading a new version instead.' +
+      'Replace an exact string in a workspace file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you. Refuses document formats: Office/OpenDocument files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf), whose reads are text EXTRACTIONS that cannot round-trip, and legacy binary Office files (.doc/.ppt/.xls), which cannot be extracted at all; replace such a file by uploading a new version instead.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',

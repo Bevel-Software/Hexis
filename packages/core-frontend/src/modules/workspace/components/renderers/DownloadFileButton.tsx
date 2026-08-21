@@ -5,6 +5,15 @@ import { useWorkspace } from '../../state/workspace.context';
 import { downloadViaBlob } from './downloadFile';
 
 /**
+ * The open file's resolved `download:` permission, provided by FileViewer
+ * from the access lookup it already performs (null = unknown/in flight —
+ * treated optimistically, like the editor; the backend stays the
+ * authoritative gate either way). A context rather than a renderer prop so
+ * the renderer contract stays permission-agnostic.
+ */
+export const CanDownloadContext = createContext<boolean | null>(null);
+
+/**
  * The document viewers' way out of the browser. Every office-document viewer
  * here is a REDUCTION — a pptx becomes an outline, an xlsx grid gets capped,
  * a legacy `.doc` is not rendered at all — so each one offers the original
@@ -15,15 +24,6 @@ import { downloadViaBlob } from './downloadFile';
  * per-path `download:` access verb and sets Content-Disposition; a 403
  * surfaces in the error text below rather than being preflighted away.
  */
-/**
- * The open file's resolved `download:` permission, provided by FileViewer
- * from the access lookup it already performs (null = unknown/in flight —
- * treated optimistically, like the editor; the backend stays the
- * authoritative gate either way). A context rather than a renderer prop so
- * the renderer contract stays permission-agnostic.
- */
-export const CanDownloadContext = createContext<boolean | null>(null);
-
 export function DownloadFileButton({
   filePath,
   size = 'tiny',

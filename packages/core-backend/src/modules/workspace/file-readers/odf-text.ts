@@ -1,5 +1,5 @@
 import AdmZip from 'adm-zip';
-import { decodeXmlEntities, xmlAttrValue, zipEntryOversize } from './ooxml-text.js';
+import { decodeXmlEntities, TAG_ATTRS, xmlAttrValue, zipEntryOversize } from './ooxml-text.js';
 
 /**
  * Minimal ODF (OpenDocument) text helpers shared by the odt/odp/ods
@@ -52,8 +52,10 @@ export function odfParagraphText(paragraphXml: string): string {
 export function odfParagraphBlocks(xml: string): string[] {
   // Attributes are matched LAZILY so a self-closing paragraph WITH attributes
   // (`<text:p text:style-name="s"/>`) hits the `/>` branch instead of its
-  // body swallowing everything up to the next paragraph's close tag.
-  const re = /<text:(p|h)(?=[\s/>])(?:\s[^>]*?)?\s*(?:\/>|>([\s\S]*?)<\/text:\1>)/g;
+  // body swallowing everything up to the next paragraph's close tag; the
+  // quote-aware TAG_ATTRS fragment keeps a `/>` INSIDE a quoted attribute
+  // value from being mistaken for that branch.
+  const re = new RegExp(`<text:(p|h)(?=[\\s/>])${TAG_ATTRS}(?:\\/>|>([\\s\\S]*?)<\\/text:\\1>)`, 'g');
   const out: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(xml)) !== null) out.push(m[2] ?? '');
@@ -86,6 +88,14 @@ const ODF_CONVENTIONAL_PREFIX: Record<string, string> = {
 };
 
 /**
+ * The most `xmlns:*` aliases one content.xml may bind to the five ODF URIs.
+ * Real producers declare each namespace ONCE; dozens of aliases only ever
+ * appear in crafted input, so past this bound the document is refused (a
+ * thrown Error, which `readOdfContentXml` turns into the typed parse failure).
+ */
+export const MAX_ODF_NS_ALIASES = 64;
+
+/**
  * Rewrite non-conventional namespace prefixes to the conventional ODF ones.
  *
  * Reads the ROOT element's `xmlns:*` declarations (where every real-world ODF
@@ -93,32 +103,46 @@ const ODF_CONVENTIONAL_PREFIX: Record<string, string> = {
  * hand-rolled scanner) and, for each prefix bound to one of the five ODF URIs
  * above under a different name, deterministically rewrites that prefix
  * wherever it starts a tag name (`<p:`, `</p:`) or an attribute name
- * (`␣p:name=`). Two passes over unique placeholders make simultaneous
- * renames safe (e.g. documents that SWAP two conventional prefixes).
+ * (`␣p:name=`). ONE combined pass over the document — a single alternation
+ * regex built from every alias's escaped name — so N declared aliases cost one
+ * scan, never N full-document rewrites (a crafted content.xml declaring many
+ * aliases must not become quadratic CPU). The single pass also makes
+ * simultaneous renames (documents that SWAP two conventional prefixes) safe
+ * for free: replaced text is never rescanned.
+ *
+ * Throws when the root binds more than {@link MAX_ODF_NS_ALIASES} aliases to
+ * the ODF URIs — see there.
  */
 export function normalizeOdfPrefixes(xml: string): string {
   const root = /<[A-Za-z_][^\s/>]*((?:"[^"]*"|'[^']*'|[^>"'])*)>/.exec(xml);
   if (!root) return xml;
   const declRe = /xmlns:([\w.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
-  const renames: Array<{ from: string; to: string }> = [];
+  // alias → canonical prefix; the FIRST declaration wins on a duplicate alias
+  // (namespace-well-formed XML cannot redeclare a prefix on one element).
+  const canonicalByAlias = new Map<string, string>();
+  let declared = 0;
   let m: RegExpExecArray | null;
   while ((m = declRe.exec(root[1])) !== null) {
     const to = ODF_CONVENTIONAL_PREFIX[m[2] ?? m[3]];
-    if (to !== undefined && to !== m[1]) renames.push({ from: m[1], to });
+    if (to === undefined) continue;
+    if (++declared > MAX_ODF_NS_ALIASES) {
+      throw new Error(
+        `content.xml binds more than ${MAX_ODF_NS_ALIASES} namespace aliases to the ODF namespaces`,
+      );
+    }
+    if (to !== m[1] && !canonicalByAlias.has(m[1])) canonicalByAlias.set(m[1], to);
   }
-  if (renames.length === 0) return xml;
-  let out = xml;
-  renames.forEach(({ from }, i) => {
-    const esc = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // A prefix use is always preceded by `<`, `</`, or attribute-separating
-    // whitespace — never by part of another name. The placeholder is
-    // NUL-delimited: XML may not contain NUL, so it cannot collide with text.
-    out = out.replace(new RegExp(`([<\\s/])${esc}:`, 'g'), `$1\u0000${i}\u0000`);
-  });
-  renames.forEach(({ to }, i) => {
-    out = out.split(`\u0000${i}\u0000`).join(`${to}:`);
-  });
-  return out;
+  if (canonicalByAlias.size === 0) return xml;
+  // Longest-first so an alias that PREFIXES another (`t` vs `t2`) can never be
+  // shadowed in the alternation; every alias is regex-escaped.
+  const alternation = [...canonicalByAlias.keys()]
+    .sort((a, b) => b.length - a.length)
+    .map((alias) => alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  // A prefix use is always preceded by `<`, `</`, or attribute-separating
+  // whitespace — never by part of another name.
+  const useRe = new RegExp(`([<\\s/])(${alternation}):`, 'g');
+  return xml.replace(useRe, (_whole, before: string, alias: string) => `${before}${canonicalByAlias.get(alias)}:`);
 }
 
 /**

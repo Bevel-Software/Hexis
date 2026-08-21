@@ -134,4 +134,60 @@ describe('extractPptxOutline', () => {
       /could not be parsed as a \.pptx \(no ppt\/slides/,
     );
   });
+
+  it('pairs notes through a namespace-PREFIXED <r:Relationship> — prefixed rels must not drop notes', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('Deck')),
+      'ppt/notesSlides/notesSlide4.xml': slideXml(para('prefixed note')),
+      'ppt/slides/_rels/slide1.xml.rels':
+        '<?xml version="1.0"?><r:Relationships xmlns:r="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        `<r:Relationship r:Id="rId2" r:Type="${NOTES_TYPE}" r:Target="../notesSlides/notesSlide4.xml"/>` +
+        '</r:Relationships>',
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].notes).toEqual(['prefixed note']);
+  });
+
+  it('ignores a Target-looking sequence INSIDE another rels attribute value', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('Deck')),
+      'ppt/notesSlides/notesSlide2.xml': slideXml(para('the real note')),
+      'ppt/notesSlides/evil.xml': slideXml(para('decoy')),
+      'ppt/slides/_rels/slide1.xml.rels':
+        `<?xml version="1.0"?><Relationships ${RELS_NS}>` +
+        `<Relationship Id="rId1" Comment="Target='../notesSlides/evil.xml'" Type="${NOTES_TYPE}" Target="../notesSlides/notesSlide2.xml"/>` +
+        '</Relationships>',
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].notes).toEqual(['the real note']);
+  });
+
+  // Fix for the peak-memory restructure: parts are parsed as they are read
+  // (per slide, then its notes) — the outline must be identical to the old
+  // hold-everything-then-parse order for a deck mixing rels-paired notes,
+  // numeric-fallback notes, and slides without notes.
+  it('streams part-by-part and still yields the identical outline for a mixed deck', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide3.xml': slideXml(para('third')),
+      'ppt/slides/slide1.xml': slideXml(para('first')),
+      'ppt/slides/slide2.xml': slideXml(para('second')),
+      // Slide 1: rels-paired notes in an oddly numbered part.
+      'ppt/slides/_rels/slide1.xml.rels':
+        `<?xml version="1.0"?><Relationships ${RELS_NS}>` +
+        `<Relationship Id="rId9" Type="${NOTES_TYPE}" Target="../notesSlides/notesSlide8.xml"/>` +
+        '</Relationships>',
+      'ppt/notesSlides/notesSlide8.xml': slideXml(para('one note')),
+      // Slide 2: numeric fallback (no rels part).
+      'ppt/notesSlides/notesSlide2.xml': slideXml(para('two note')),
+      // Slide 3: rels part naming no notes — the numeric twin must NOT attach.
+      'ppt/slides/_rels/slide3.xml.rels': `<?xml version="1.0"?><Relationships ${RELS_NS}></Relationships>`,
+      'ppt/notesSlides/notesSlide3.xml': slideXml(para('orphan')),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides).toEqual([
+      { number: 1, paragraphs: ['first'], notes: ['one note'] },
+      { number: 2, paragraphs: ['second'], notes: ['two note'] },
+      { number: 3, paragraphs: ['third'], notes: [] },
+    ]);
+  });
 });

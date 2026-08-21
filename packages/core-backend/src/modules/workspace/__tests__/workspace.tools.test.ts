@@ -66,6 +66,8 @@ let writePolicy: RoutineWritePolicyService;
  * branch-less `execute_command` falls back to the session's own workspace.
  */
 let focusedBranch: string | undefined;
+/** The registry the tools were mounted into, so a test can inspect their defs. */
+let toolRegistry: ToolRegistry;
 
 async function start(
   scope: 'read' | 'write' = 'write',
@@ -80,6 +82,7 @@ async function start(
   focusedBranch = undefined;
 
   const registry = new ToolRegistry();
+  toolRegistry = registry;
   const resolve = async (auth: ToolAuth, signal: AbortSignal, sessionId?: string): Promise<ToolContext> => ({
     user: { id: 'u', email: 'e@x', name: 'N' },
     scope: auth.scope,
@@ -704,6 +707,21 @@ describe('office documents and PDFs', () => {
     expect((await post(`${base}/api/agent/tools/read_file`, { path: 'ok.md' })).status).not.toBe(200);
     // And the pptx is untouched: reading it still extracts the original text.
     expect(await readContent(base, 'deck.pptx')).toContain('Original');
+  });
+
+  it('the write tools DESCRIBE every refused family — modern, legacy binary, and the upload path — so agents learn before the call', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const name of ['write_file', 'write_files', 'edit_file']) {
+      const def = tools.find((t) => t.name === name);
+      expect(def, name).toBeDefined();
+      // Modern extractable formats…
+      expect(def!.description, name).toContain('.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf');
+      // …the legacy binary family the refusal also covers…
+      expect(def!.description, name).toContain('.doc/.ppt/.xls');
+      // …and the replace-by-upload way out.
+      expect(def!.description, name).toContain('uploading a new version');
+    }
   });
 });
 

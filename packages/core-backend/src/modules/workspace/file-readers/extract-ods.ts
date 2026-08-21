@@ -1,5 +1,5 @@
 import type { ExtractResult } from './doc-extract.types.js';
-import { decodeXmlEntities, xmlAttrValue } from './ooxml-text.js';
+import { decodeXmlEntities, TAG_ATTRS, xmlAttrValue } from './ooxml-text.js';
 import { odfParagraphBlocks, odfParagraphText, readOdfContentXml } from './odf-text.js';
 
 /**
@@ -78,9 +78,13 @@ interface Repeated<T> {
  * `truncated` lists what the caps cut (mirrors the xlsx extractor's note).
  */
 function expandRows(tableXml: string): { rows: string[][]; truncated: string[] } {
-  // Lazy attrs: a self-closing row WITH attributes must hit the `/>` branch
-  // (see the drawPageBlocks note in extract-odp.ts).
-  const rowRe = /<table:table-row(?=[\s/>])((?:\s[^>]*?)?)\s*(?:\/>|>([\s\S]*?)<\/table:table-row>)/g;
+  // Lazy, quote-aware attrs: a self-closing row WITH attributes must hit the
+  // `/>` branch, and a `/>` inside a quoted attribute value must NOT (see the
+  // drawPageBlocks note in extract-odp.ts).
+  const rowRe = new RegExp(
+    `<table:table-row(?=[\\s/>])(${TAG_ATTRS})(?:\\/>|>([\\s\\S]*?)<\\/table:table-row>)`,
+    'g',
+  );
   const parsed: Repeated<string[]>[] = [];
   let colsTruncated = false;
   let m: RegExpExecArray | null;
@@ -116,7 +120,11 @@ function expandRows(tableXml: string): { rows: string[][]; truncated: string[] }
  * is applied, then repeats expanded up to the column cap.
  */
 function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
-  const cellRe = /<table:(table-cell|covered-table-cell)(?=[\s/>])((?:\s[^>]*?)?)\s*(?:\/>|>([\s\S]*?)<\/table:\1>)/g;
+  // Same lazy, quote-aware attribute handling as the row regex above.
+  const cellRe = new RegExp(
+    `<table:(table-cell|covered-table-cell)(?=[\\s/>])(${TAG_ATTRS})(?:\\/>|>([\\s\\S]*?)<\\/table:\\1>)`,
+    'g',
+  );
   const parsed: Repeated<string>[] = [];
   let m: RegExpExecArray | null;
   while ((m = cellRe.exec(rowXml)) !== null) {

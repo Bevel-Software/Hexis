@@ -1,4 +1,5 @@
 import type { ExtractResult } from './doc-extract.types.js';
+import { TAG_ATTRS } from './ooxml-text.js';
 import { odfParagraphLines, readOdfContentXml } from './odf-text.js';
 
 /**
@@ -52,9 +53,11 @@ function drawPageBlocks(xml: string): string[] {
   // LAZY attribute match, so `<draw:page a="b"/>` resolves to the `/>` branch
   // instead of the attributes swallowing the `/` and the body running into
   // the NEXT page (greedy attrs + a later close tag would merge two slides).
-  const re = /<draw:page(?=[\s/>])((?:\s[^>]*?)?)\s*(?:\/>|>([\s\S]*?)<\/draw:page>)/g;
+  // TAG_ATTRS is quote-aware: a `/>` INSIDE a quoted attribute value (a page
+  // name like `a/>b`) is part of the value, never the self-closing delimiter.
+  const re = new RegExp(`<draw:page(?=[\\s/>])${TAG_ATTRS}(?:\\/>|>([\\s\\S]*?)<\\/draw:page>)`, 'g');
   const out: string[] = [];
   let m: RegExpExecArray | null;
-  while ((m = re.exec(xml)) !== null) out.push(m[2] ?? '');
+  while ((m = re.exec(xml)) !== null) out.push(m[1] ?? '');
   return out;
 }

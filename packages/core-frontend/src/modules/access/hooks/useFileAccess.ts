@@ -99,7 +99,10 @@ export function useFileAccess(
     }
 
     let cancelled = false;
-    setState((s) => ({ ...s, loading: true, error: null }));
+    // Reset the verdicts to null (= optimistic/unknown) for the NEW lookup —
+    // carrying the previous file's canWrite/canDownload across a file switch
+    // would briefly show the old file's permissions on the new file.
+    setState((s) => ({ ...s, canWrite: null, canDownload: null, loading: true, error: null }));
     // Strip kbDirName/ so the backend resolver receives the repo-relative
     // path it expects (`Knowledge/Foo.md`, not `knowledge-base/…`).
     const repoRelative = workspacePath.slice(prefix.length);

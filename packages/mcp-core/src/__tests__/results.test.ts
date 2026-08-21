@@ -224,4 +224,79 @@ describe('omitImagePayloads', () => {
     expect(out.thing).toBe(thing);
     expect((out.res as { image_omitted?: boolean }).image_omitted).toBe(true);
   });
+
+  it('scrubs a sentinel hidden inside a CLASS INSTANCE — JSON.stringify would emit its base64 otherwise', () => {
+    class Holder {
+      label = 'holder';
+      payload: unknown = sentinel;
+    }
+    const holder = new Holder();
+    const out = omitImagePayloads({ holder }) as Record<string, unknown>;
+    const text = JSON.stringify(out);
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+    expect(text).toContain('"label":"holder"');
+    // The original instance is never mutated — the scrub rebuilt a copy.
+    expect((holder.payload as { data: string }).data).toBe('QUJD');
+    expect(out.holder).not.toBe(holder);
+  });
+
+  it('scrubs a sentinel delivered through toJSON — the serialized shape is what reaches the transcript', () => {
+    const value = {
+      wrapper: new (class {
+        toJSON(): unknown {
+          return { meta: 'from-toJSON', img: sentinel };
+        }
+      })(),
+    };
+    const text = JSON.stringify(omitImagePayloads(value));
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+    expect(text).toContain('"meta":"from-toJSON"');
+  });
+
+  it('a Map-like with enumerable own props holding an image is rebuilt as its sanitized JSON shape', () => {
+    const mapish = new Map<string, unknown>();
+    (mapish as unknown as Record<string, unknown>).stashed = { deep: [sentinel] };
+    const out = omitImagePayloads({ mapish }) as Record<string, unknown>;
+    const text = JSON.stringify(out);
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+    expect(out.mapish).not.toBe(mapish);
+  });
+
+  it('Date and RegExp pass through UNTOUCHED even next to an image', () => {
+    const when = new Date('2026-02-02T00:00:00Z');
+    const pattern = /ab+c/gi;
+    const out = omitImagePayloads({ when, pattern, res: sentinel }) as Record<string, unknown>;
+    expect(out.when).toBe(when);
+    expect(out.pattern).toBe(pattern);
+    expect(JSON.stringify(out)).not.toContain('QUJD');
+  });
+
+  it('an image-free class instance is preserved by reference even when its toJSON allocates', () => {
+    let calls = 0;
+    const obj = new (class {
+      toJSON(): unknown {
+        calls++;
+        return { plain: true };
+      }
+    })();
+    const out = omitImagePayloads({ obj }) as Record<string, unknown>;
+    expect(out.obj).toBe(obj);
+    expect(calls).toBeGreaterThan(0); // probed, not rebuilt
+  });
+
+  it('survives a cycle reachable only through a class instance holding an image', () => {
+    class Node {
+      img: unknown = sentinel;
+      self: unknown;
+    }
+    const node = new Node();
+    node.self = node;
+    const text = JSON.stringify(omitImagePayloads({ node }));
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+    expect(text).toContain('[Circular]');
+  });
 });

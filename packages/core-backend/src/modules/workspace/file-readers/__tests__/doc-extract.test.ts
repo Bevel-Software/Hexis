@@ -14,6 +14,9 @@ import { extractOds } from '../extract-ods.js';
 import { DocExtractService } from '../doc-extract.service.js';
 import { gitBlobSha } from '../extraction-cache.js';
 import { fileExtension } from '../doc-extract.types.js';
+import { MAX_ODF_NS_ALIASES, normalizeOdfPrefixes } from '../odf-text.js';
+import { xmlAttrValue, xmlAttrValueByLocalName } from '../ooxml-text.js';
+import { notesTargetFromRels } from '../extract-pptx.js';
 
 /**
  * REAL fixtures, no mocks: docx/pptx are handcrafted OOXML zips built with
@@ -833,5 +836,189 @@ describe('bounded extraction (zip bombs / oversized inputs)', () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.message).toContain('extraction limit');
+  });
+});
+
+// ── single-pass prefix normalization + alias bound ─────────────────────────
+
+describe('normalizeOdfPrefixes — combined single pass and alias bound', () => {
+  const TEXT_URI = 'urn:oasis:names:tc:opendocument:xmlns:text:1.0';
+  const OFFICE_URI = 'urn:oasis:names:tc:opendocument:xmlns:office:1.0';
+
+  it('normalizes a document declaring 50 ODF-bound aliases correctly (the combined-regex path)', () => {
+    // 49 text-URI aliases (a1…a49, only some used) + one office alias.
+    const aliasDecls = Array.from({ length: 49 }, (_, i) => `xmlns:a${i + 1}="${TEXT_URI}"`).join(' ');
+    const xml =
+      `<o:document-content xmlns:o="${OFFICE_URI}" ${aliasDecls}>` +
+      '<o:body><o:text>' +
+      '<a1:h>Title</a1:h>' +
+      '<a25:p>Mid<a49:span>dle</a49:span></a25:p>' +
+      '<a9:p a9:style-name="s">Last</a9:p>' +
+      '</o:text></o:body></o:document-content>';
+    const out = normalizeOdfPrefixes(xml);
+    expect(out).toContain('<office:body><office:text>');
+    expect(out).toContain('<text:h>Title</text:h>');
+    expect(out).toContain('<text:p>Mid<text:span>dle</text:span></text:p>');
+    expect(out).toContain('<text:p text:style-name="s">Last</text:p>');
+    expect(out).not.toContain('a25:');
+  });
+
+  it('does not let an alias that PREFIXES another shadow it (t vs t2, longest-first alternation)', () => {
+    const xml =
+      `<office:document-content xmlns:office="${OFFICE_URI}" xmlns:t="${TEXT_URI}" xmlns:t2="${TEXT_URI}">` +
+      '<office:body><t:p>one</t:p><t2:p>two</t2:p></office:body></office:document-content>';
+    const out = normalizeOdfPrefixes(xml);
+    expect(out).toContain('<text:p>one</text:p>');
+    expect(out).toContain('<text:p>two</text:p>');
+  });
+
+  it('still swaps two conventional prefixes correctly in the single pass', () => {
+    // text↔table swapped: replaced text must never be rescanned.
+    const TABLE_URI = 'urn:oasis:names:tc:opendocument:xmlns:table:1.0';
+    const xml =
+      `<office:document-content xmlns:office="${OFFICE_URI}" xmlns:table="${TEXT_URI}" xmlns:text="${TABLE_URI}">` +
+      '<office:body><table:p>prose</table:p><text:table>grid</text:table></office:body></office:document-content>';
+    const out = normalizeOdfPrefixes(xml);
+    expect(out).toContain('<text:p>prose</text:p>');
+    expect(out).toContain('<table:table>grid</table:table>');
+  });
+
+  it(`refuses more than ${MAX_ODF_NS_ALIASES} ODF-bound aliases with the typed parse failure`, () => {
+    const decls = Array.from({ length: MAX_ODF_NS_ALIASES + 1 }, (_, i) => `xmlns:b${i}="${TEXT_URI}"`).join(' ');
+    const zip = new AdmZip();
+    zip.addFile('mimetype', Buffer.from('application/vnd.oasis.opendocument.text'));
+    zip.addFile(
+      'content.xml',
+      Buffer.from(
+        `<?xml version="1.0"?><office:document-content xmlns:office="${OFFICE_URI}" ${decls}>` +
+          '<office:body><office:text><b0:p>x</b0:p></office:text></office:body></office:document-content>',
+      ),
+    );
+    const res = extractOdt(zip.toBuffer());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('could not be parsed as a .odt');
+    expect(res.message).toContain(`${MAX_ODF_NS_ALIASES} namespace aliases`);
+  });
+
+  it(`accepts exactly ${MAX_ODF_NS_ALIASES} ODF-bound aliases`, () => {
+    const decls = Array.from({ length: MAX_ODF_NS_ALIASES - 1 }, (_, i) => `xmlns:b${i}="${TEXT_URI}"`).join(' ');
+    const xml = `<office:document-content xmlns:office="${OFFICE_URI}" ${decls}><b0:p>x</b0:p></office:document-content>`;
+    expect(normalizeOdfPrefixes(xml)).toContain('<text:p>x</text:p>');
+  });
+});
+
+// ── attribute tokenizer (quoted-value skipping) ────────────────────────────
+
+describe('xmlAttrValue tokenizer', () => {
+  it('never matches an attribute-looking sequence INSIDE another attribute quoted value', () => {
+    expect(xmlAttrValue(`<a foo="Target='evil'" Target="real"/>`, 'Target')).toBe('real');
+    expect(xmlAttrValue(`<a foo="Target='evil'"/>`, 'Target')).toBeUndefined();
+    expect(xmlAttrValue(`<a foo='Target="evil"' Target='real'/>`, 'Target')).toBe('real');
+  });
+
+  it('accepts both quote styles and whitespace around =', () => {
+    expect(xmlAttrValue(`<t:s t:c = '3'/>`, 't:c')).toBe('3');
+    expect(xmlAttrValue('<t:s t:c="4"/>', 't:c')).toBe('4');
+  });
+
+  it('matches the full (prefixed) name exactly, and scans attrs-only fragments', () => {
+    expect(xmlAttrValue('<x a:n="p" n="bare"/>', 'n')).toBe('bare');
+    expect(xmlAttrValue(' table:number-columns-repeated="7"', 'table:number-columns-repeated')).toBe('7');
+  });
+
+  it('xmlAttrValueByLocalName matches through any namespace prefix', () => {
+    expect(xmlAttrValueByLocalName('<r:Relationship r:Target="notes.xml"/>', 'Target')).toBe('notes.xml');
+    expect(xmlAttrValueByLocalName('<Relationship Target="notes.xml"/>', 'Target')).toBe('notes.xml');
+    expect(xmlAttrValueByLocalName(`<r:Rel foo="Target='no'" r:Target='yes'/>`, 'Target')).toBe('yes');
+  });
+
+  it('stops safely on a malformed tail (unterminated quote, unquoted value)', () => {
+    expect(xmlAttrValue('<a b="ok" c="unterminated', 'b')).toBe('ok');
+    expect(xmlAttrValue('<a b=unquoted c="x"/>', 'c')).toBeUndefined();
+  });
+});
+
+// ── rels parsing: namespace-prefixed Relationship elements ─────────────────
+
+describe('notesTargetFromRels — prefixed rels', () => {
+  const NOTES_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide';
+
+  it('finds the notes Target on a namespace-prefixed <r:Relationship>', () => {
+    const rels =
+      '<?xml version="1.0"?><r:Relationships xmlns:r="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      `<r:Relationship r:Id="rId2" r:Type="${NOTES_TYPE}" r:Target="../notesSlides/notesSlide9.xml"/>` +
+      '</r:Relationships>';
+    expect(notesTargetFromRels(rels)).toBe('../notesSlides/notesSlide9.xml');
+  });
+
+  it('end-to-end: a pptx whose rels use a prefixed Relationship still pairs its notes', () => {
+    const zip = new AdmZip();
+    zip.addFile(
+      '[Content_Types].xml',
+      Buffer.from('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'),
+    );
+    zip.addFile('ppt/slides/slide1.xml', Buffer.from(slideXml(['Deck'])));
+    zip.addFile('ppt/notesSlides/notesSlide4.xml', Buffer.from(slideXml(['prefixed note'])));
+    zip.addFile(
+      'ppt/slides/_rels/slide1.xml.rels',
+      Buffer.from(
+        '<?xml version="1.0"?><r:Relationships xmlns:r="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          `<r:Relationship r:Id="rId2" Type="${NOTES_TYPE}" Target="../notesSlides/notesSlide4.xml"/>` +
+          '</r:Relationships>',
+      ),
+    );
+    const res = extractPptx(zip.toBuffer());
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('[slide 1]\nDeck\n[slide 1 notes]\nprefixed note');
+  });
+});
+
+// ── quote-aware block delimiters (`/>` inside attribute values) ────────────
+
+describe('ODF block regexes are quote-aware about /> inside attribute values', () => {
+  it('a draw:page whose attribute value contains /> keeps its body', () => {
+    const res = extractOdp(
+      odfBytes(
+        'application/vnd.oasis.opendocument.presentation',
+        '<office:presentation>' +
+          '<draw:page draw:name="a/>b" other="x/>y"><draw:frame><text:p>Survived</text:p></draw:frame></draw:page>' +
+          '</office:presentation>',
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('[slide 1]\nSurvived');
+  });
+
+  it('a text:p whose attribute value contains /> keeps its body (odt)', () => {
+    const res = extractOdt(odtBytes('<text:p text:style-name="s/>t">Kept</text:p>'));
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('Kept');
+  });
+
+  it('ods rows and cells with /> inside attribute values keep their content', () => {
+    const res = extractOds(
+      odsBytes(
+        '<table:table table:name="Q"><table:table-row table:style-name="r/>x">' +
+          '<table:table-cell table:style-name="c/>y"><text:p>alive</text:p></table:table-cell>' +
+          '<table:table-cell><text:p>next</text:p></table:table-cell>' +
+          '</table:table-row></table:table>',
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['[sheet: Q]', 'alive\tnext']);
+  });
+
+  it('self-closing elements WITH attributes still hit the /> branch after the rewrite', () => {
+    const res = extractOds(
+      odsBytes(
+        '<table:table table:name="S"><table:table-row>' +
+          '<table:table-cell table:number-columns-repeated="2"/>' +
+          '<table:table-cell><text:p>end</text:p></table:table-cell>' +
+          '</table:table-row></table:table>',
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['[sheet: S]', '\t\tend']);
   });
 });

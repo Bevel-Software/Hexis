@@ -210,11 +210,16 @@ export function toCallToolResult(value: unknown): CallToolResult {
  * MCP hop hands a chain (see `toCallToolResult`) — for
  * `{ image_omitted: true, note }`, keeping whatever structure the chain built
  * around it. The walk is ITERATIVE (explicit stack) and cycle-safe with no
- * depth cutoff — nesting depth can never smuggle a payload past the scrub —
- * and it rebuilds only arrays and plain records, preserving every other
- * object (Date, Map, class instances) by reference. Best-effort by design:
- * chain code that EXTRACTS the base64 string itself escapes the walk, and
- * then the ordinary max_output_size spill bounds the damage.
+ * depth cutoff — nesting depth can never smuggle a payload past the scrub.
+ * Arrays and plain records are rebuilt; a NON-plain object (class instance,
+ * Map-like with enumerable props) is judged by its JSON shape — `toJSON()`
+ * output when it defines one, enumerable own properties otherwise — because
+ * that is exactly what `JSON.stringify` will emit downstream: when that shape
+ * holds an image the object is rebuilt as a plain sanitized copy, and when it
+ * does not the original reference is preserved untouched (Date, RegExp, Map
+ * and friends are never mangled). Best-effort by design: chain code that
+ * EXTRACTS the base64 string itself escapes the walk, and then the ordinary
+ * max_output_size spill bounds the damage.
  */
 export function omitImagePayloads(value: unknown): unknown {
   const omittedNote = (what: string): { image_omitted: true; note: string } => ({
@@ -224,13 +229,57 @@ export function omitImagePayloads(value: unknown): unknown {
       '`call_tool_chain`. Call `read_file` on the image path as a DIRECT tool call (outside the chain) to see it.',
   });
 
-  // Only plain records (Object.prototype or null prototype) are rebuilt.
+  // Plain records (Object.prototype or null prototype) are always rebuilt.
   // Anything else — Date, Map, Buffer, class instances, other JSON-friendly
-  // oddities — is preserved BY REFERENCE: rebuilding would mangle it, and the
-  // image shapes the walk hunts are plain objects.
+  // oddities — is preserved BY REFERENCE unless its JSON shape actually holds
+  // an image (see subtreeHasImage below): rebuilding would mangle it.
   const isPlainRecord = (v: object): v is Record<string, unknown> => {
     const proto: unknown = Object.getPrototypeOf(v);
     return proto === Object.prototype || proto === null;
+  };
+
+  const hasToJson = (v: object): v is { toJSON(): unknown } =>
+    typeof (v as { toJSON?: unknown }).toJSON === 'function';
+
+  // A value's JSON view: what JSON.stringify would serialize for it — the
+  // toJSON() result when it defines one (a throwing toJSON falls back to the
+  // value itself, matching safeJsonText's degraded path), the value otherwise.
+  const jsonView = (v: object): unknown => {
+    if (!hasToJson(v)) return v;
+    try {
+      return v.toJSON();
+    } catch {
+      return v;
+    }
+  };
+
+  // Does the JSON shape reachable from `root` contain an image sentinel or
+  // spec-shaped image block? Iterative and cycle-safe (a visited set suffices
+  // for a boolean probe); non-plain objects are entered through their JSON
+  // view, exactly like the rebuild walk below.
+  const subtreeHasImage = (root: unknown): boolean => {
+    const visited = new WeakSet<object>();
+    const stack: unknown[] = [root];
+    while (stack.length > 0) {
+      const v = stack.pop();
+      if (v === null || typeof v !== 'object') continue;
+      if (isMcpImageResult(v) || isMcpImageBlockObject(v)) return true;
+      if (visited.has(v)) continue;
+      visited.add(v);
+      if (Array.isArray(v)) {
+        for (const entry of v) stack.push(entry);
+        continue;
+      }
+      if (!isPlainRecord(v)) {
+        const view = jsonView(v);
+        if (view !== v) {
+          stack.push(view);
+          continue;
+        }
+      }
+      for (const key of Object.keys(v)) stack.push((v as Record<string, unknown>)[key]);
+    }
+    return false;
   };
 
   // `out[key] = …` would be a prototype-pollution hazard for keys like
@@ -247,8 +296,15 @@ export function omitImagePayloads(value: unknown): unknown {
   // live descent (added on push, removed on pop), so real cycles become
   // '[Circular]' while diamond shares rebuild normally.
   type Frame =
-    | { kind: 'array'; src: readonly unknown[]; out: unknown[]; i: number }
-    | { kind: 'record'; src: Record<string, unknown>; out: Record<string, unknown>; keys: string[]; i: number };
+    | { kind: 'array'; src: readonly unknown[]; out: unknown[]; i: number; release: object[] }
+    | {
+        kind: 'record';
+        src: Record<string, unknown>;
+        out: Record<string, unknown>;
+        keys: string[];
+        i: number;
+        release: object[];
+      };
 
   const active = new WeakSet<object>();
 
@@ -260,13 +316,42 @@ export function omitImagePayloads(value: unknown): unknown {
     if (active.has(v)) return { leaf: '[Circular]' };
     if (Array.isArray(v)) {
       active.add(v);
-      return { frame: { kind: 'array', src: v, out: new Array<unknown>(v.length), i: 0 } };
+      return { frame: { kind: 'array', src: v, out: new Array<unknown>(v.length), i: 0, release: [v] } };
     }
     if (isPlainRecord(v)) {
       active.add(v);
-      return { frame: { kind: 'record', src: v, out: {}, keys: Object.keys(v), i: 0 } };
+      return { frame: { kind: 'record', src: v, out: {}, keys: Object.keys(v), i: 0, release: [v] } };
     }
-    return { leaf: v }; // non-plain object — preserved by reference
+    // Non-plain object. Untouched (by reference) unless its JSON shape — the
+    // thing JSON.stringify will actually emit for it — smuggles an image; only
+    // then is a plain sanitized copy rebuilt from that shape, toJSON applied
+    // first when the object defines one.
+    if (!subtreeHasImage(v)) return { leaf: v };
+    active.add(v);
+    const view = jsonView(v);
+    if (view === null || typeof view !== 'object') {
+      // Unreachable in practice (a primitive view cannot hold the image that
+      // subtreeHasImage found), kept total for safety.
+      active.delete(v);
+      return { leaf: view };
+    }
+    if (Array.isArray(view)) {
+      const release = view === (v as unknown) ? [v] : [v, view];
+      if (view !== (v as unknown)) active.add(view);
+      return { frame: { kind: 'array', src: view, out: new Array<unknown>(view.length), i: 0, release } };
+    }
+    const release = view === v ? [v] : [v, view];
+    if (view !== v) active.add(view);
+    return {
+      frame: {
+        kind: 'record',
+        src: view as Record<string, unknown>,
+        out: {},
+        keys: Object.keys(view),
+        i: 0,
+        release,
+      },
+    };
   };
 
   const seed = resolve(value);
@@ -276,7 +361,7 @@ export function omitImagePayloads(value: unknown): unknown {
     const top = stack[stack.length - 1];
     if (top.kind === 'array') {
       if (top.i >= top.src.length) {
-        active.delete(top.src as unknown as object);
+        for (const held of top.release) active.delete(held);
         stack.pop();
         continue;
       }
@@ -291,7 +376,7 @@ export function omitImagePayloads(value: unknown): unknown {
       }
     } else {
       if (top.i >= top.keys.length) {
-        active.delete(top.src);
+        for (const held of top.release) active.delete(held);
         stack.pop();
         continue;
       }

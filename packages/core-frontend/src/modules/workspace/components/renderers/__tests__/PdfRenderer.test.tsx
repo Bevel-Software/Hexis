@@ -192,6 +192,25 @@ describe('PdfRenderer', () => {
     expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
   });
 
+  it('destroys the rejected loading task on parse failure — the error view must not keep it alive — without double-destroying on unmount', async () => {
+    stubPdfFetch();
+    let task!: ReturnType<typeof pdfjsMock.makeTask>;
+    pdfjsMock.getDocument.mockImplementation(() => {
+      task = pdfjsMock.makeTask(Promise.reject(new Error('Invalid PDF structure')));
+      return task;
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const { unmount } = renderWithWorkspace('ws-1');
+    await screen.findByText('This file could not be parsed as a PDF.');
+    // Torn down on the rejection path, while the error view is mounted…
+    expect(task.destroy).toHaveBeenCalledTimes(1);
+
+    // …and the effect cleanup does not destroy it a second time.
+    unmount();
+    expect(task.destroy).toHaveBeenCalledTimes(1);
+  });
+
   it('renders an error message when the fetch returns a non-OK response', async () => {
     vi.stubGlobal(
       'fetch',

@@ -3,7 +3,7 @@ import type { ExtractResult } from './doc-extract.types.js';
 import {
   MAX_DOC_TOTAL_BYTES,
   paragraphRunText,
-  xmlAttrValue,
+  xmlAttrValueByLocalName,
   xmlBlocks,
   zipEntryOversize,
 } from './ooxml-text.js';
@@ -121,14 +121,19 @@ function collectNotes(zip: AdmZip, slideNumbers: number[], budget: ReadBudget): 
   return out;
 }
 
-/** The Target of the first `notesSlide`-typed Relationship in a rels part, or undefined. */
+/**
+ * The Target of the first `notesSlide`-typed Relationship in a rels part, or
+ * undefined. Matched by LOCAL name — a producer that binds the relationships
+ * namespace to a prefix writes `<r:Relationship r:Type=… r:Target=…>`, and
+ * dropping those would silently drop the deck's notes.
+ */
 export function notesTargetFromRels(relsXml: string): string | undefined {
-  const relRe = /<Relationship(?=[\s/>])[^>]*>/g;
+  const relRe = /<(?:[\w.-]+:)?Relationship(?=[\s/>])[^>]*>/g;
   let m: RegExpExecArray | null;
   while ((m = relRe.exec(relsXml)) !== null) {
-    const type = xmlAttrValue(m[0], 'Type');
+    const type = xmlAttrValueByLocalName(m[0], 'Type');
     if (type !== undefined && type.endsWith(NOTES_REL_TYPE_SUFFIX)) {
-      return xmlAttrValue(m[0], 'Target');
+      return xmlAttrValueByLocalName(m[0], 'Target');
     }
   }
   return undefined;

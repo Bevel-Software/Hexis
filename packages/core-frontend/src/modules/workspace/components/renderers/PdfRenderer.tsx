@@ -86,6 +86,11 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
           // A destroyed task rejects its promise — that is this effect's own
           // cleanup, not a parse failure to report.
           if (cancelled) return;
+          // A REJECTED task still holds worker-side state. Tear it down now —
+          // the error view may stay mounted indefinitely — and null the ref so
+          // the effect cleanup doesn't destroy it a second time.
+          loadingTask?.destroy().catch(() => {});
+          loadingTask = null;
           // The bytes arrived but pdf.js rejected them — a renamed file, a
           // truncated upload. Distinct copy from the transport failure above.
           console.warn('[PdfRenderer] parse failed:', parseErr);
