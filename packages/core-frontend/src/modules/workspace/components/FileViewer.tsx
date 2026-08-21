@@ -37,6 +37,7 @@ import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { suggestedPages } from '../utils/fileTree';
 import { getFileRenderer, getRendererLayout } from './renderers';
+import { CanDownloadContext } from './renderers/DownloadFileButton';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
@@ -920,8 +921,11 @@ export function FileViewer() {
 
   const rendererElement = (
     // The renderer is a dynamic per-extension lookup resolved in a useMemo
-    // above — not a component created during render.
+    // above — not a component created during render. The provider hands the
+    // open file's `download:` verdict to any DownloadFileButton inside the
+    // renderer without widening the renderer contract.
     // eslint-disable-next-line react-hooks/static-components
+    <CanDownloadContext.Provider value={access.canDownload}>
     <Renderer
       // **Why we key on `openFileSavedContent` (read-only mode only).**
       // When a teammate's save lands, the workspace state updates the
@@ -977,6 +981,7 @@ export function FileViewer() {
       onSaveStateChange={setManualSaveState}
       readOnly={isReviewingPending || !(editMode || proposeMode)}
     />
+    </CanDownloadContext.Provider>
   );
 
   // The pane bar's write action — the labelled button at the frame's top
