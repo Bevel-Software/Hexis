@@ -120,7 +120,7 @@ describe('dispatchMetaTool call_tool_chain — image results', () => {
       mimeType: 'image/png',
       note: '[image: Files/logo.png — image/png, 6 bytes]',
     };
-    callToolChain.mockResolvedValueOnce({ result: { pic: sentinel, ok: true }, logs: [] });
+    callToolChain.mockResolvedValueOnce({ result: { pic: sentinel, ok: true } as unknown as string, logs: [] });
     const res = await dispatchMetaTool(client, 'call_tool_chain', { code: 'return 1' });
     const text = resultText(res);
     expect(text).not.toContain('QUJDREVG');
