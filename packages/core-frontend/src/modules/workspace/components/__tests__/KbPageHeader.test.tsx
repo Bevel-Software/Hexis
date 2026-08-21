@@ -42,6 +42,19 @@ describe('KbPageHeader', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('roles.unknownext');
   });
 
+  it.each([
+    ['Decks/all-hands.pptx', 'all-hands'],
+    ['old/memo.doc', 'memo'],
+    ['old/deck.ppt', 'deck'],
+    ['old/sheet.xls', 'sheet'],
+    ['docs/spec.odt', 'spec'],
+    ['decks/pitch.odp', 'pitch'],
+    ['data/numbers.ods', 'numbers'],
+  ])('strips the document extension of %s from the h1', (path, title) => {
+    renderHeader({ path });
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(title);
+  });
+
   it('shows the name verbatim for a file with no extension', () => {
     renderHeader({ path: 'Knowledge/LICENSE' });
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('LICENSE');
