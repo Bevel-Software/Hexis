@@ -1,4 +1,5 @@
 import type { ExtractResult } from './doc-extract.types.js';
+import { localBlocks } from './ooxml-text.js';
 import { odfParagraphBlocks, odfParagraphText, readOdfContentXml } from './odf-text.js';
 
 /**
@@ -21,8 +22,11 @@ export function extractOdt(bytes: Buffer): ExtractResult {
 
   // Table cells contain their own <text:p>, so the flat paragraph scan renders
   // table text too (one line per cell paragraph, like the raw document order).
-  const bodyMatch = /<office:text(?:\s[^>]*)?>([\s\S]*?)<\/office:text>/.exec(content.xml);
-  const body = bodyMatch ? bodyMatch[1] : content.xml;
+  // The text BODY, read by the parser and matched on its LOCAL name: a
+  // comment mentioning `</office:text>` used to terminate the body early and
+  // drop every paragraph after it, and an ODT binding the office namespace to
+  // another prefix had no body at all.
+  const body = localBlocks(content.xml, 'text')[0] ?? content.xml;
 
   const lines = odfParagraphBlocks(body).map(odfParagraphText);
   const paragraphs = lines.length;

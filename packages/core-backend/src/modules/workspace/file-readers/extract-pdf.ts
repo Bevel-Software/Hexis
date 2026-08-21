@@ -13,6 +13,17 @@ import { MAX_DOC_PART_BYTES } from './ooxml-text.js';
  * A PDF with NO text layer (a scan) extracts to just the `[page N]` markers,
  * and the summary says "no text layer (scanned document?)" — no OCR in v1.
  */
+/**
+ * How much DECODED text one PDF may yield before extraction gives up.
+ *
+ * The raw-size cap below bounds what arrives; it does not bound what comes
+ * out. PDF text lives in compressed streams, so a file comfortably under
+ * 50 MB can decode to far more than that, and every character of it is held
+ * in `lines` until the extraction returns. This bound is the decoded
+ * counterpart, checked as the text accumulates rather than after.
+ */
+const MAX_PDF_TEXT_CHARS = 20 * 1024 * 1024; // 20M chars of extracted text
+
 export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
   // The same bounded-read guard the zip-based extractors apply per part: a
   // PDF has no compressed container to pre-scan, so the bound is simply the
@@ -31,6 +42,7 @@ export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
   }
   try {
     const lines: string[] = [];
+    let textChars = 0;
     let anyText = false;
     for (let n = 1; n <= doc.numPages; n++) {
       lines.push(`[page ${n}]`);
@@ -58,6 +70,12 @@ export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
       }
       flush();
       page.cleanup();
+      if (textChars > MAX_PDF_TEXT_CHARS) {
+        return {
+          ok: false,
+          message: `could not be extracted as a PDF (its text decodes to over ${MAX_PDF_TEXT_CHARS} characters — over the extraction limit)`,
+        };
+      }
     }
     const pages = `${doc.numPages} page${doc.numPages === 1 ? '' : 's'}`;
     return anyText

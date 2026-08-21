@@ -1,4 +1,4 @@
-import { extractionMarker, fileExtension, type ExtractFn } from './doc-extract.types.js';
+import { extractionMarker, fileExtension, type ExtractFn, type ExtractResult } from './doc-extract.types.js';
 import { DocExtractionCache, gitBlobSha } from './extraction-cache.js';
 
 /** An extraction ready for a consumer: the honest marker header + the text. */
@@ -28,10 +28,35 @@ export type DocExtractOutcome =
  * extract DIFFERENTLY per format: a `.odt` renamed `.ods` must run the ods
  * extractor, not return the odt extraction. Extraction is deterministic
  * (stable slide/sheet/page ordering), which is what makes a content-keyed
- * cache correct. Failures are NOT cached (rare, and fail fast).
+ * cache correct. Failures are NOT cached (rare, and fail fast). The key also carries
+ * `EXTRACTION_SCHEMA`, so an upgrade that changes what an extractor emits does
+ * not keep serving the previous release's text for unchanged bytes.
  */
+/**
+ * Bumped whenever extraction OUTPUT changes — a new extractor, a fixed one, a
+ * reworded summary, a different marker.
+ *
+ * The rest of the key is content, and content-addressing is only correct while
+ * the same bytes mean the same text. An upgrade that changes what an extractor
+ * emits breaks that: every already-cached document would keep serving the OLD
+ * extraction forever, because its bytes never changed. Bumping this retires
+ * those entries (the cache evicts by age, so they cost nothing for long).
+ *
+ * v2: extraction moved from hand-rolled scanning to a real XML/HTML parser,
+ * which changed self-closing paragraphs, entity edge cases and recovery from
+ * malformed parts.
+ */
+export const EXTRACTION_SCHEMA = 'v2';
+
 export class DocExtractService {
   private readonly cache: DocExtractionCache;
+  /**
+   * Cold extractions currently running, by cache key. Two reads of the same
+   * document arriving together would otherwise BOTH parse it — the expensive
+   * half of this service, run twice for one answer — because neither had
+   * written the cache entry yet when the other looked.
+   */
+  private readonly inFlight = new Map<string, Promise<ExtractResult>>();
 
   constructor(cacheRoot: string) {
     this.cache = new DocExtractionCache(cacheRoot);
@@ -53,7 +78,15 @@ export class DocExtractService {
     const key = this.cacheKey(path, bytes);
     const hit = await this.cache.get(key);
     if (hit) return { ok: true, marker: extractionMarker(path, hit.summary), text: hit.text };
-    const result = await extractFn(bytes);
+    const running = this.inFlight.get(key);
+    const result = await (running ??
+      (() => {
+        const started = (async (): Promise<ExtractResult> => extractFn(bytes))().finally(() =>
+          this.inFlight.delete(key),
+        );
+        this.inFlight.set(key, started);
+        return started;
+      })());
     if (!result.ok) return result;
     await this.cache.put(key, { summary: result.summary, text: result.text });
     return { ok: true, marker: extractionMarker(path, result.summary), text: result.text };
@@ -61,6 +94,6 @@ export class DocExtractService {
 
   /** Content hash + lowercased extension — e.g. `…sha….odt` (see the class doc). */
   private cacheKey(path: string, bytes: Buffer): string {
-    return `${gitBlobSha(bytes)}${fileExtension(path)}`;
+    return `${gitBlobSha(bytes)}${fileExtension(path)}.${EXTRACTION_SCHEMA}`;
   }
 }

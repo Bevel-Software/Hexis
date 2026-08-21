@@ -33,7 +33,20 @@ export class DocumentReader implements FileReader {
   }
 
   async read(bytes: Buffer, path: string): Promise<ReadResult> {
-    const res = await this.service.extract(path, bytes, this.extract);
+    // An extractor is contracted to ANSWER for bad content rather than throw,
+    // but it wraps third-party parsers, and one of those throwing past its own
+    // guard is a corrupt file — not a server fault. read_file says so instead
+    // of failing the whole tool call with a 500.
+    let res: Awaited<ReturnType<typeof this.service.extract>>;
+    try {
+      res = await this.service.extract(path, bytes, this.extract);
+    } catch (err) {
+      return {
+        kind: 'refusal',
+        message: `[${path} could not be extracted (${(err as Error).message}) — the file may be corrupt or mislabeled. To fix it, replace the document by uploading a new version.]`,
+      };
+    }
+
     return res.ok
       ? { kind: 'text', text: `${res.marker}\n${res.text}` }
       : {

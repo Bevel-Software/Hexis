@@ -11,7 +11,7 @@ import { extractPdf } from '../extract-pdf.js';
 import { extractOdt } from '../extract-odt.js';
 import { extractOdp } from '../extract-odp.js';
 import { extractOds } from '../extract-ods.js';
-import { DocExtractService } from '../doc-extract.service.js';
+import { DocExtractService, EXTRACTION_SCHEMA } from '../doc-extract.service.js';
 import { gitBlobSha } from '../extraction-cache.js';
 import { fileExtension } from '../doc-extract.types.js';
 import { MAX_ODF_NS_ALIASES, normalizeOdfPrefixes, odfParagraphBlocks } from '../odf-text.js';
@@ -56,11 +56,16 @@ function slideXml(...paragraphs: string[][]): string {
   return `<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" ${A_NS}><p:txBody>${ps}</p:txBody></p:sld>`;
 }
 
-function pptxBytes(slides: Record<number, string>, notes: Record<number, string> = {}): Buffer {
+function pptxBytes(
+  slides: Record<number, string>,
+  notes: Record<number, string> = {},
+  extra: Record<string, string> = {},
+): Buffer {
   const zip = new AdmZip();
   zip.addFile('[Content_Types].xml', Buffer.from('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'));
   for (const [n, xml] of Object.entries(slides)) zip.addFile(`ppt/slides/slide${n}.xml`, Buffer.from(xml));
   for (const [n, xml] of Object.entries(notes)) zip.addFile(`ppt/notesSlides/notesSlide${n}.xml`, Buffer.from(xml));
+  for (const [name, xml] of Object.entries(extra)) zip.addFile(name, Buffer.from(xml));
   return zip.toBuffer();
 }
 
@@ -110,6 +115,17 @@ function odfBytes(mimetype: string, bodyXml: string): Buffer {
   zip.addFile(
     'content.xml',
     Buffer.from(`<?xml version="1.0"?><office:document-content ${ODF_NS}><office:body>${bodyXml}</office:body></office:document-content>`),
+  );
+  return zip.toBuffer();
+}
+
+/** An ODF package whose ROOT attributes and whole content tree the test dictates. */
+function odfBytesRaw(mimetype: string, rootAttrs: string, contentXml: string): Buffer {
+  const zip = new AdmZip();
+  zip.addFile('mimetype', Buffer.from(mimetype));
+  zip.addFile(
+    'content.xml',
+    Buffer.from(`<?xml version="1.0"?><office:document-content ${ODF_NS} ${rootAttrs}>${contentXml}</office:document-content>`),
   );
   return zip.toBuffer();
 }
@@ -501,7 +517,7 @@ describe('DocExtractService cache', () => {
     const first = await service.extract('a.docx', bytes, extractDocx);
     expect(first.ok).toBe(true);
     const entries = await readdir(cacheRoot);
-    expect(entries).toEqual([`${gitBlobSha(bytes)}.docx.json`]);
+    expect(entries).toEqual([`${gitBlobSha(bytes)}.docx.${EXTRACTION_SCHEMA}.json`]);
 
     // Tamper with the cached entry: if the second extract returns the tampered
     // text, it came from the cache — the parser did NOT run again. (Real-files
@@ -558,7 +574,7 @@ describe('DocExtractService cache', () => {
   it('the cached entry on disk is the {summary, text} JSON', async () => {
     const bytes = docxBytes(para('On disk'));
     await service.extract('a.docx', bytes, extractDocx);
-    const raw = JSON.parse(await readFile(join(cacheRoot, `${gitBlobSha(bytes)}.docx.json`), 'utf8')) as { summary: string; text: string };
+    const raw = JSON.parse(await readFile(join(cacheRoot, `${gitBlobSha(bytes)}.docx.${EXTRACTION_SCHEMA}.json`), 'utf8')) as { summary: string; text: string };
     expect(raw.text).toBe('On disk');
     expect(typeof raw.summary).toBe('string');
   });
@@ -583,7 +599,7 @@ describe('DocExtractService cache', () => {
     expect(asOds.marker).toContain('sheet');
 
     const entries = await readdir(cacheRoot);
-    expect(entries.sort()).toEqual([`${gitBlobSha(bytes)}.ods.json`, `${gitBlobSha(bytes)}.odt.json`].sort());
+    expect(entries.sort()).toEqual([`${gitBlobSha(bytes)}.ods.${EXTRACTION_SCHEMA}.json`, `${gitBlobSha(bytes)}.odt.${EXTRACTION_SCHEMA}.json`].sort());
 
     // getCached honours the same format-qualified key.
     const cachedOds = await service.getCached('doc.ods', bytes);
@@ -841,70 +857,73 @@ describe('bounded extraction (zip bombs / oversized inputs)', () => {
 
 // ── single-pass prefix normalization + alias bound ─────────────────────────
 
-describe('normalizeOdfPrefixes — combined single pass and alias bound', () => {
-  const TEXT_URI = 'urn:oasis:names:tc:opendocument:xmlns:text:1.0';
-  const OFFICE_URI = 'urn:oasis:names:tc:opendocument:xmlns:office:1.0';
-
-  it('normalizes a document declaring 50 ODF-bound aliases correctly (the combined-regex path)', () => {
-    // 49 text-URI aliases (a1…a49, only some used) + one office alias.
-    const aliasDecls = Array.from({ length: 49 }, (_, i) => `xmlns:a${i + 1}="${TEXT_URI}"`).join(' ');
-    const xml =
-      `<o:document-content xmlns:o="${OFFICE_URI}" ${aliasDecls}>` +
-      '<o:body><o:text>' +
-      '<a1:h>Title</a1:h>' +
-      '<a25:p>Mid<a49:span>dle</a49:span></a25:p>' +
-      '<a9:p a9:style-name="s">Last</a9:p>' +
-      '</o:text></o:body></o:document-content>';
-    const out = normalizeOdfPrefixes(xml);
-    expect(out).toContain('<office:body><office:text>');
-    expect(out).toContain('<text:h>Title</text:h>');
-    expect(out).toContain('<text:p>Mid<text:span>dle</text:span></text:p>');
-    expect(out).toContain('<text:p text:style-name="s">Last</text:p>');
-    expect(out).not.toContain('a25:');
+describe('markup that only LOOKS like metadata', () => {
+  it('a <Relationship> written inside a comment does not point the notes lookup', async () => {
+    // A decoy in a comment used to answer as live metadata, so the notes for a
+    // slide came from whichever part its author named.
+    const bytes = pptxBytes(
+      { 1: slideXml(['Real slide']) },
+      { 2: slideXml(['the decoy notes']), 7: slideXml(['the real notes']) },
+      {
+        'ppt/slides/_rels/slide1.xml.rels':
+          '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          '<!-- <Relationship Id="rX" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide2.xml"/> -->' +
+          '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide7.xml"/>' +
+          '</Relationships>',
+      },
+    );
+    const res = await extractPptx(bytes);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toContain('the real notes');
+    expect(res.text).not.toContain('the decoy notes');
   });
 
-  it('does not let an alias that PREFIXES another shadow it (t vs t2, longest-first alternation)', () => {
-    const xml =
-      `<office:document-content xmlns:office="${OFFICE_URI}" xmlns:t="${TEXT_URI}" xmlns:t2="${TEXT_URI}">` +
-      '<office:body><t:p>one</t:p><t2:p>two</t2:p></office:body></office:document-content>';
-    const out = normalizeOdfPrefixes(xml);
-    expect(out).toContain('<text:p>one</text:p>');
-    expect(out).toContain('<text:p>two</text:p>');
+  it('a commented <w:body> does not answer as the document body', () => {
+    const res = extractDocx(docxBytes('<!-- <w:body>' + para('ghost') + '</w:body> -->' + para('real')));
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('real');
   });
+});
+describe('ODF namespace prefixes are the document’s own choice', () => {
+  // These used to be answered by rewriting every non-conventional prefix across
+  // content.xml before scanning it — a pass that had to be bounded against
+  // crafted alias lists and could still corrupt paragraph text that happened to
+  // look like an alias. Elements are matched on their LOCAL name now, so the
+  // prefix simply does not matter and the pass is gone.
+  const odtWith = (rootAttrs: string, body: string): Buffer =>
+    odfBytesRaw('application/vnd.oasis.opendocument.text', rootAttrs, body);
 
-  it('still swaps two conventional prefixes correctly in the single pass', () => {
-    // text↔table swapped: replaced text must never be rescanned.
-    const TABLE_URI = 'urn:oasis:names:tc:opendocument:xmlns:table:1.0';
-    const xml =
-      `<office:document-content xmlns:office="${OFFICE_URI}" xmlns:table="${TEXT_URI}" xmlns:text="${TABLE_URI}">` +
-      '<office:body><table:p>prose</table:p><text:table>grid</text:table></office:body></office:document-content>';
-    const out = normalizeOdfPrefixes(xml);
-    expect(out).toContain('<text:p>prose</text:p>');
-    expect(out).toContain('<table:table>grid</table:table>');
-  });
-
-  it(`refuses more than ${MAX_ODF_NS_ALIASES} ODF-bound aliases with the typed parse failure`, () => {
-    const decls = Array.from({ length: MAX_ODF_NS_ALIASES + 1 }, (_, i) => `xmlns:b${i}="${TEXT_URI}"`).join(' ');
-    const zip = new AdmZip();
-    zip.addFile('mimetype', Buffer.from('application/vnd.oasis.opendocument.text'));
-    zip.addFile(
-      'content.xml',
-      Buffer.from(
-        `<?xml version="1.0"?><office:document-content xmlns:office="${OFFICE_URI}" ${decls}>` +
-          '<office:body><office:text><b0:p>x</b0:p></office:text></office:body></office:document-content>',
+  it('extracts a document that binds the ODF namespaces to UNUSUAL prefixes', () => {
+    const res = extractOdt(
+      odtWith(
+        'xmlns:o="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:zz="urn:oasis:names:tc:opendocument:xmlns:text:1.0"',
+        '<o:body><o:text><zz:p>Renamed prefixes</zz:p><zz:h>And a heading</zz:h></o:text></o:body>',
       ),
     );
-    const res = extractOdt(zip.toBuffer());
-    expect(res.ok).toBe(false);
-    if (res.ok) return;
-    expect(res.message).toContain('could not be parsed as a .odt');
-    expect(res.message).toContain(`${MAX_ODF_NS_ALIASES} namespace aliases`);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('Renamed prefixes\nAnd a heading');
   });
 
-  it(`accepts exactly ${MAX_ODF_NS_ALIASES} ODF-bound aliases`, () => {
-    const decls = Array.from({ length: MAX_ODF_NS_ALIASES - 1 }, (_, i) => `xmlns:b${i}="${TEXT_URI}"`).join(' ');
-    const xml = `<office:document-content xmlns:office="${OFFICE_URI}" ${decls}><b0:p>x</b0:p></office:document-content>`;
-    expect(normalizeOdfPrefixes(xml)).toContain('<text:p>x</text:p>');
+  it('extracts a document that DEFAULTS the text namespace and uses no prefix at all', () => {
+    const res = extractOdt(
+      odtWith(
+        'xmlns="urn:oasis:names:tc:opendocument:xmlns:text:1.0"',
+        '<body><text><p>No prefix anywhere</p></text></body>',
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('No prefix anywhere');
+  });
+
+  it('leaves paragraph text that merely LOOKS like a prefix alone', () => {
+    const res = extractOdt(
+      odtWith(
+        'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"',
+        '<office:body><office:text><text:p>see t: and zz: in the prose</text:p></office:text></office:body>',
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('see t: and zz: in the prose');
   });
 });
 

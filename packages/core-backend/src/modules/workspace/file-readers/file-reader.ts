@@ -44,6 +44,15 @@ export interface FileReader {
    * generic extracted-text/round-trip explanation.
    */
   editRefusal?(path: string): string;
+  /**
+   * Refusal for OVERWRITING what this file ALREADY holds, or null to allow.
+   * Consulted only when `textEditable` is true: that answer covers the
+   * FORMAT, this one covers the CONTENT. The fallback reader needs it because
+   * an extensionless file may hold anything — `read_file` refuses binary
+   * content, and a write gate that did not ask would let an agent overwrite
+   * bytes it was never allowed to see.
+   */
+  editRefusalForExisting?(bytes: Buffer, path: string): string | null;
 }
 
 /**

@@ -747,6 +747,27 @@ describe('office documents and PDFs', () => {
     }
   });
 
+  it('write_file / edit_file refuse to overwrite BINARY content under any extension', async () => {
+    // read_file answers a NUL-bearing file with a notice instead of its bytes.
+    // A write gate that only asked about the EXTENSION let an agent overwrite
+    // exactly those bytes — destroying a file it was never allowed to see.
+    const base = await start();
+    await fs.writeFile('blob.dat', Buffer.from([0x00, 0x01, 0x02, 0x03, 0xff]));
+    for (const [tool, body] of [
+      ['write_file', { path: 'blob.dat', content: 'plain text' }],
+      ['edit_file', { path: 'blob.dat', old_string: 'a', new_string: 'b' }],
+    ] as const) {
+      const res = await post(`${base}/api/agent/tools/${tool}`, body);
+      expect(res.status, tool).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error, tool).toContain('binary content');
+      expect(error, tool).toContain('uploading a new version');
+    }
+    // …and a TEXT file under the same fallback reader still writes normally.
+    const ok = await post(`${base}/api/agent/tools/write_file`, { path: 'notes.dat', content: 'hello' });
+    expect(ok.status).toBe(200);
+  });
+
   it('read_file answers other binary files with a one-line notice (zip names the unzip tool)', async () => {
     const base = await start();
     // .mp3, not an image: images return native MCP image content (see below).

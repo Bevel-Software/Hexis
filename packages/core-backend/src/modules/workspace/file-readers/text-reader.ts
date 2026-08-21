@@ -50,6 +50,20 @@ export class TextReader implements FileReader {
       : { kind: 'text', text };
   }
 
+  /**
+   * Binary content is not editable, whatever its extension. `read` answers a
+   * NUL-bearing file with a notice INSTEAD of its bytes, so an agent asking to
+   * write text over one would be overwriting something it could not read. The
+   * write tools refuse instead. (Uploads and the HTTP write routes are
+   * untouched: a human replacing a file is exactly the right move.)
+   */
+  editRefusalForExisting(bytes: Buffer, path: string): string | null {
+    return bytes.includes(0)
+      ? `"${path}" holds binary content, which read_file cannot show as text. Writing text over it would ` +
+          `destroy those bytes — replace the file by uploading a new version instead.`
+      : null;
+  }
+
   async greppableText(bytes: Buffer): Promise<string | null> {
     const text = bytes.toString('utf8');
     return text.includes('\0') ? null : text; // skip binary (NUL)

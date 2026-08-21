@@ -158,6 +158,33 @@ function assertNotDocumentEdit(readers: FileReaderRegistry, path: string): void 
   );
 }
 
+/**
+ * The write-refusal for what a path ALREADY holds, as opposed to what its
+ * extension means (see `assertNotDocumentEdit` for that half). Only the
+ * fallback reader answers here today: an extensionless file may hold anything,
+ * and `read_file` refuses binary content — so a write gate that never asked
+ * would let an agent overwrite bytes it was not allowed to read.
+ *
+ * Costs one read of the existing file, and only for readers that ask the
+ * question. A path with nothing at it is a CREATE: there is nothing to destroy.
+ */
+async function assertNotBinaryOverwrite(
+  readers: FileReaderRegistry,
+  path: string,
+  fs: { readFile(p: string): Promise<string | Buffer> },
+): Promise<void> {
+  const reader = readers.readerFor(path);
+  if (reader.editRefusalForExisting === undefined) return;
+  let existing: Buffer;
+  try {
+    existing = asBytes(await fs.readFile(path));
+  } catch {
+    return; // nothing there yet
+  }
+  const refusal = reader.editRefusalForExisting(existing, path);
+  if (refusal !== null) throw new ToolError(refusal, 400);
+}
+
 /** JS grep over the workspace tree (read methods only) — bounded by match + depth caps. */
 async function grepWalk(
   fs: LocalFilesystem,
@@ -596,6 +623,7 @@ export function registerWorkspaceTools(
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.path as string);
       const fs = await ctx.getFilesystem(a.branch as string);
+      await assertNotBinaryOverwrite(readers, a.path as string, fs);
       await fs.writeFile(a.path as string, a.content as string);
       return { path: a.path, bytes: Buffer.byteLength(a.content as string, 'utf8') };
     },
@@ -648,7 +676,9 @@ export function registerWorkspaceTools(
       // whole batch as one commit. Structural cast avoids a workflow-internal import.
       const fs = (await ctx.getFilesystem(a.branch as string)) as unknown as {
         writeFiles(writes: { path: string; content: string }[], summary: string): Promise<void>;
+        readFile(p: string): Promise<string | Buffer>;
       };
+      for (const f of files) await assertNotBinaryOverwrite(readers, f.path, fs);
       await fs.writeFiles(
         files.map((f) => ({ path: f.path, content: f.content })),
         `Write ${files.length} file(s)`,
@@ -689,6 +719,7 @@ export function registerWorkspaceTools(
       const path = a.path as string;
       const oldStr = a.old_string as string;
       const newStr = a.new_string as string;
+      await assertNotBinaryOverwrite(readers, path, fs);
       const content = asText(await fs.readFile(path));
       const count = oldStr ? content.split(oldStr).length - 1 : 0;
       if (count === 0) throw new ToolError('old_string not found in the file.', 400);

@@ -218,8 +218,52 @@ interface OpenMatch {
  * Bodies are RAW slices of `xml` (entities not decoded), because the callers
  * re-scan them for nested elements and decode only the text they keep.
  */
-export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElementBlock[] {
+/** The part of a qualified XML name after its namespace prefix. */
+export function localName(qualified: string): string {
+  return qualified.slice(qualified.lastIndexOf(':') + 1);
+}
+
+/**
+ * The value of the attribute whose LOCAL name is `want`, or undefined.
+ * Namespace DECLARATIONS are not attributes and never answer for one.
+ */
+export function attrByLocalName(
+  attributes: Record<string, string>,
+  want: string,
+): string | undefined {
+  for (const [key, value] of Object.entries(attributes)) {
+    if (key === 'xmlns' || key.startsWith('xmlns:')) continue;
+    if (localName(key) === want) return value;
+  }
+  return undefined;
+}
+
+/**
+ * {@link xmlElementBlocks}, matching each element's LOCAL name instead of the
+ * qualified one — `p` finds `<w:p>`, `<a:p>` and an unprefixed `<p>` alike.
+ *
+ * Prefixes are a document's own choice: XML binds them to namespace URIs, and
+ * a producer may bind any prefix it likes or default the namespace and use
+ * none. Naming `a:p` or `text:p` literally therefore read only the documents
+ * whose authors happened to pick the usual prefix — a valid deck using `d:p`
+ * for DrawingML extracted as EMPTY, and an ODT that defaulted the text
+ * namespace found no paragraphs at all. Matching the local name reads both,
+ * and replaces the prefix-rewriting pass the ODF readers used to run over
+ * every document to paper over the same problem.
+ */
+export function localElementBlocks(xml: string, localNames: readonly string[]): XmlElementBlock[] {
+  const wanted = new Set(localNames);
+  return xmlElementBlocks(xml, wanted, (name) => wanted.has(localName(name)));
+}
+
+export function xmlElementBlocks(
+  xml: string,
+  names: Iterable<string>,
+  /** Overrides name matching — {@link localElementBlocks} matches local names with it. */
+  matches?: (name: string) => boolean,
+): XmlElementBlock[] {
   const wanted = new Set(names);
+  const isWanted = matches ?? ((name: string): boolean => wanted.has(name));
   const out: XmlElementBlock[] = [];
   let depth = 0;
   let open: OpenMatch | null = null;
@@ -227,7 +271,7 @@ export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElem
     {
       onopentag(name, attributes) {
         depth++;
-        if (open === null && wanted.has(name)) {
+        if (open === null && isWanted(name)) {
           open = { name, attributes, depth, tagEnd: parser.endIndex };
         }
         if (depth > MAX_ELEMENT_DEPTH) throw TOO_DEEP;
@@ -280,7 +324,7 @@ export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElem
  * `<w:t/>` is an empty run and contributes nothing, exactly as it did when
  * the pattern simply failed to match it.
  */
-export function paragraphRunText(paragraphXml: string, tag: 'w:t' | 'a:t'): string {
+export function paragraphRunText(paragraphXml: string, localTag: string): string {
   let out = '';
   let inRun = 0;
   let depth = 0;
@@ -288,7 +332,7 @@ export function paragraphRunText(paragraphXml: string, tag: 'w:t' | 'a:t'): stri
     {
       onopentag(name) {
         depth++;
-        if (name === tag) inRun++;
+        if (localName(name) === localTag) inRun++;
         if (depth > MAX_ELEMENT_DEPTH) throw TOO_DEEP;
       },
       // TEXT, never the raw body: a run's body is markup as well as characters
@@ -298,7 +342,7 @@ export function paragraphRunText(paragraphXml: string, tag: 'w:t' | 'a:t'): stri
         if (inRun > 0) out += text;
       },
       onclosetag(name) {
-        if (name === tag && inRun > 0) inRun--;
+        if (localName(name) === localTag && inRun > 0) inRun--;
         depth--;
       },
     },
@@ -320,6 +364,11 @@ export function paragraphRunText(paragraphXml: string, tag: 'w:t' | 'a:t'): stri
  * `<w:p/>` paragraph or `<w:tc/>` cell means. See {@link xmlElementBlocks} for
  * the non-nesting and quoting guarantees.
  */
+/** {@link xmlBlocks} by LOCAL name — see {@link localElementBlocks} for why. */
+export function localBlocks(xml: string, local: string): string[] {
+  return localElementBlocks(xml, [local]).map((e) => e.body ?? '');
+}
+
 export function xmlBlocks(xml: string, tag: string): string[] {
   return xmlElementBlocks(xml, [tag]).map((e) => e.body ?? '');
 }

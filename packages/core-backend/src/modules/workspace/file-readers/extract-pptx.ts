@@ -2,10 +2,10 @@ import AdmZip from 'adm-zip';
 import type { ExtractResult } from './doc-extract.types.js';
 import {
   MAX_DOC_TOTAL_BYTES,
-  XML_NCNAME,
+  attrByLocalName,
+  localBlocks,
+  localElementBlocks,
   paragraphRunText,
-  xmlAttrValueByLocalName,
-  xmlBlocks,
   zipEntryOversize,
 } from './ooxml-text.js';
 
@@ -65,8 +65,8 @@ export function extractPptx(bytes: Buffer): ExtractResult {
 /** Non-empty paragraph texts of one slide/notes part, in document order. */
 function paragraphLines(xml: string): string[] {
   const out: string[] = [];
-  for (const p of xmlBlocks(xml, 'a:p')) {
-    const text = paragraphRunText(p, 'a:t');
+  for (const p of localBlocks(xml, 'p')) {
+    const text = paragraphRunText(p, 't');
     if (text.trim() !== '') out.push(text);
   }
   return out;
@@ -170,20 +170,19 @@ function collectNotes(zip: AdmZip, slides: Map<number, SlidePart>, budget: ReadB
 
 /**
  * The Target of the first `notesSlide`-typed Relationship in a rels part, or
- * undefined. Matched by LOCAL name — a producer that binds the relationships
- * namespace to a prefix writes `<r:Relationship r:Type=… r:Target=…>`, and
- * dropping those would silently drop the deck's notes.
+ * undefined.
+ *
+ * Read by the parser: matched on the element's LOCAL name, so a producer that
+ * binds the relationships namespace to a prefix (`<r:Relationship r:Type=…>`)
+ * is read like any other — and a `<Relationship>`-looking fragment written
+ * inside a COMMENT or a CDATA section is text, not live metadata pointing the
+ * notes lookup at a part of its author's choosing.
  */
 export function notesTargetFromRels(relsXml: string): string | undefined {
-  // The prefix is a full XML NCName, not `\w`: a producer binding the
-  // relationships namespace to a non-ASCII prefix is legal XML, and an
-  // ASCII-only match here silently dropped that deck's speaker notes.
-  const relRe = new RegExp(`<(?:${XML_NCNAME}:)?Relationship(?=[\\s/>])[^>]*>`, 'g');
-  let m: RegExpExecArray | null;
-  while ((m = relRe.exec(relsXml)) !== null) {
-    const type = xmlAttrValueByLocalName(m[0], 'Type');
+  for (const rel of localElementBlocks(relsXml, ['Relationship'])) {
+    const type = attrByLocalName(rel.attributes, 'Type');
     if (type !== undefined && type.endsWith(NOTES_REL_TYPE_SUFFIX)) {
-      return xmlAttrValueByLocalName(m[0], 'Target');
+      return attrByLocalName(rel.attributes, 'Target');
     }
   }
   return undefined;

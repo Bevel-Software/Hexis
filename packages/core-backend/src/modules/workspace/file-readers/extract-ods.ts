@@ -1,5 +1,5 @@
 import type { ExtractResult } from './doc-extract.types.js';
-import { decodeXmlEntities, xmlAttrValue, xmlElementBlocks } from './ooxml-text.js';
+import { attrByLocalName, decodeXmlEntities, localElementBlocks } from './ooxml-text.js';
 import {
   odfParagraphBlocks,
   odfParagraphText,
@@ -54,12 +54,16 @@ export function extractOds(bytes: Buffer): ExtractResult {
  * grouping but never crashing.
  */
 function tableBlocks(xml: string): Array<{ name: string; xml: string }> {
-  const re = /<table:table(?=[\s>])((?:\s[^>]*)?)>([\s\S]*?)<\/table:table>/g;
+  // Read by the parser and matched on the LOCAL name: a comment or CDATA
+  // section holding a table-looking fragment used to answer as a real sheet,
+  // and a document binding the table namespace to another prefix had none.
   const out: Array<{ name: string; xml: string }> = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(xml)) !== null) {
-    const name = xmlAttrValue(m[1], 'table:name');
-    out.push({ name: name ? decodeXmlEntities(name) : `Sheet${out.length + 1}`, xml: m[2] });
+  for (const table of localElementBlocks(xml, ['table'])) {
+    const raw = attrByLocalName(table.attributes, 'name');
+    out.push({
+      name: raw ? decodeXmlEntities(raw) : `Sheet${out.length + 1}`,
+      xml: table.body ?? '',
+    });
   }
   return out;
 }
@@ -88,10 +92,10 @@ function expandRows(tableXml: string): { rows: string[][]; truncated: string[] }
   // (see `xmlElementBlocks`).
   const parsed: Repeated<string[]>[] = [];
   let colsTruncated = false;
-  for (const row of xmlElementBlocks(tableXml, ['table:table-row'])) {
+  for (const row of localElementBlocks(tableXml, ['table-row'])) {
     const cells = expandCells(row.body ?? '');
     if (cells.truncated) colsTruncated = true;
-    parsed.push({ value: cells.cells, repeat: repeatCount(row.attributes['table:number-rows-repeated']) });
+    parsed.push({ value: cells.cells, repeat: repeatCount(attrByLocalName(row.attributes, 'number-rows-repeated')) });
   }
   // Trailing empty rows: dropped with their repeats (grid padding, not data).
   while (parsed.length > 0 && parsed[parsed.length - 1].value.length === 0) parsed.pop();
@@ -122,7 +126,7 @@ function expandRows(tableXml: string): { rows: string[][]; truncated: string[] }
 function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
   // Same quote-aware scanner as the row walk above.
   const parsed: Repeated<string>[] = [];
-  for (const cell of xmlElementBlocks(rowXml, ['table:table-cell', 'table:covered-table-cell'])) {
+  for (const cell of localElementBlocks(rowXml, ['table-cell', 'covered-table-cell'])) {
     // Covered cells carry no own text anyway. Element-produced newlines/tabs
     // INSIDE a cell (<text:line-break/>, <text:tab/>) become single spaces:
     // the extraction's contract is one row per line with tab-separated cells,
@@ -131,7 +135,7 @@ function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
       .map(odfParagraphText)
       .join(' ')
       .replace(/[\t\n\r]+/g, ' ');
-    parsed.push({ value: text, repeat: repeatCount(cell.attributes['table:number-columns-repeated']) });
+    parsed.push({ value: text, repeat: repeatCount(attrByLocalName(cell.attributes, 'number-columns-repeated')) });
   }
   while (parsed.length > 0 && parsed[parsed.length - 1].value === '') parsed.pop();
 

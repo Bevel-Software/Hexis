@@ -1,6 +1,6 @@
 import type { ExtractResult } from './doc-extract.types.js';
 import { odfParagraphLines, readOdfContentXml } from './odf-text.js';
-import { xmlElementBlocks } from './ooxml-text.js';
+import { localBlocks, localElementBlocks } from './ooxml-text.js';
 
 /**
  * Extract the text of a `.odp` (OpenDocument Presentation) deck.
@@ -25,9 +25,12 @@ export function extractOdp(bytes: Buffer): ExtractResult {
   let anyNotes = false;
   pages.forEach((page, i) => {
     // Split the notes part out FIRST so its paragraphs don't render as slide text.
-    const notesRe = /<presentation:notes(?:\s[^>]*)?>([\s\S]*?)<\/presentation:notes>/;
-    const notesXml = notesRe.exec(page)?.[1] ?? '';
-    const slideXml = page.replace(notesRe, '');
+    // Notes read by the parser and matched on their LOCAL name: a comment that
+    // resembled `<presentation:notes>` used to be emitted as real speaker notes,
+    // and a deck binding the presentation namespace to another prefix had none.
+    const notesXml = localBlocks(page, 'notes')[0] ?? '';
+    // The slide's own text is everything the notes block does not cover.
+    const slideXml = notesXml === '' ? page : page.split(notesXml).join('');
     lines.push(`[slide ${i + 1}]`);
     lines.push(...odfParagraphLines(slideXml));
     const noteLines = odfParagraphLines(notesXml);
@@ -54,5 +57,5 @@ function drawPageBlocks(xml: string): string[] {
   // page name like `a/>b`) is part of the value, never the self-closing
   // delimiter, and a page whose close tag is missing costs one scan of the
   // document rather than one per opener (see `xmlElementBlocks`).
-  return xmlElementBlocks(xml, ['draw:page']).map((e) => e.body ?? '');
+  return localElementBlocks(xml, ['page']).map((e) => e.body ?? '');
 }

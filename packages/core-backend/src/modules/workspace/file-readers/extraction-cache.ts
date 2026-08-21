@@ -58,6 +58,14 @@ export class DocExtractionCache {
     }
   }
 
+  /**
+   * Bytes written since the last full scan. The scan costs a `readdir` plus a
+   * `stat` per entry, and running it on EVERY cold extraction made a cache that
+   * is nowhere near its bound pay for the bound anyway. Writes are accumulated
+   * instead and the scan runs once they could plausibly have reached it.
+   */
+  private writtenSinceScan = 0;
+
   /** Store an extraction under `sha`; prunes towards the size bound. Never throws. */
   async put(sha: string, doc: ExtractedDoc): Promise<void> {
     try {

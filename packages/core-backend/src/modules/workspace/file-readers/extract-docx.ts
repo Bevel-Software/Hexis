@@ -1,6 +1,6 @@
 import AdmZip from 'adm-zip';
 import type { ExtractResult } from './doc-extract.types.js';
-import { paragraphRunText, xmlBlocks, zipEntryOversize } from './ooxml-text.js';
+import { localBlocks, paragraphRunText, zipEntryOversize } from './ooxml-text.js';
 
 /**
  * Extract the BODY text of a `.docx` (Word) document.
@@ -28,8 +28,10 @@ export function extractDocx(bytes: Buffer): ExtractResult {
     return { ok: false, message: `could not be parsed as a .docx (${(err as Error).message})` };
   }
 
-  const bodyMatch = /<w:body(?:\s[^>]*)?>([\s\S]*?)<\/w:body>/.exec(xml);
-  const body = bodyMatch ? bodyMatch[1] : xml;
+  // The BODY element read by the parser rather than matched by a regex: a
+  // comment or CDATA section mentioning `<w:body>` could answer as the
+  // document body and hand back its text instead of the real one.
+  const body = localBlocks(xml, 'body')[0] ?? xml;
 
   const lines: string[] = [];
   let paragraphs = 0;
@@ -37,13 +39,13 @@ export function extractDocx(bytes: Buffer): ExtractResult {
   for (const block of splitDocxBlocks(body)) {
     if (block.kind === 'table') {
       tables++;
-      for (const row of xmlBlocks(block.xml, 'w:tr')) {
-        const cells = xmlBlocks(row, 'w:tc').map((cell) => paragraphRunText(cell, 'w:t'));
+      for (const row of localBlocks(block.xml, 'tr')) {
+        const cells = localBlocks(row, 'tc').map((cell) => paragraphRunText(cell, 't'));
         lines.push(cells.join('\t'));
       }
     } else {
-      for (const p of xmlBlocks(block.xml, 'w:p')) {
-        lines.push(paragraphRunText(p, 'w:t'));
+      for (const p of localBlocks(block.xml, 'p')) {
+        lines.push(paragraphRunText(p, 't'));
         paragraphs++;
       }
     }
