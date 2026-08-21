@@ -168,7 +168,7 @@ function containerCloseEnd(lower: string, name: string, from: number, noClose: S
  * message body from the first crafted-looking span onward — a reader cannot
  * tell that from a mail that simply said little.
  */
-function looseStripFrom(html: string, from: number): string {
+function looseStripFrom(html: string, lower: string, from: number, noClose: Set<string>): string {
   let out = '';
   let at = from;
   while (at < html.length) {
@@ -176,7 +176,25 @@ function looseStripFrom(html: string, from: number): string {
     if (lt === -1) break;
     const gt = html.indexOf('>', lt + 1);
     if (gt === -1) break;
+    let p = lt + 1;
+    const closing = html[p] === '/';
+    if (closing) p++;
+    const markup = !closing && (html[p] === '!' || html[p] === '?');
+    let q = p;
+    while (q < gt && !/[\s/>]/.test(html[q])) q++;
+    const name = lower.slice(p, q);
+    if (!markup && !TAG_NAME.test(name)) {
+      out += html.slice(at, gt + 1); // names no element: the span is body text
+      at = gt + 1;
+      continue;
+    }
     out += html.slice(at, lt);
+    if (!closing && CONTAINER_TAGS.has(name)) {
+      const closeEnd = containerCloseEnd(lower, name, gt + 1, noClose);
+      at = closeEnd !== -1 ? closeEnd : gt + 1;
+      continue;
+    }
+    if ((name === 'br' && !closing) || BLOCK_TAGS.has(name)) out += '\n';
     at = gt + 1;
   }
   return out + html.slice(at);
@@ -252,7 +270,9 @@ export function htmlToEmailText(html: string): string {
   // The quote-aware walk stopped early only when the memo filled; the body
   // from there on is still the reader's mail, so it comes through the loose
   // strip rather than being dropped.
-  s += memoExhausted ? looseStripFrom(html, textStart) : html.slice(textStart);
+  s += memoExhausted
+    ? looseStripFrom(html, lower, textStart, noContainerClose)
+    : html.slice(textStart);
   s = decodeXmlEntities(s.replace(/&nbsp;/gi, ' '));
   const out: string[] = [];
   for (const raw of s.split('\n')) {

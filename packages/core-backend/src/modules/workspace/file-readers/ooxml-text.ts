@@ -328,9 +328,53 @@ function markupSectionEnd(xml: string, lt: number): number {
   return 0;
 }
 
+/** The nearest comment/CDATA/PI opener at or after `from`, or -1. */
+function nextSectionStart(xml: string, from: number): number {
+  let best = -1;
+  for (const [open] of MARKUP_SECTIONS) {
+    const at = xml.indexOf(open, from);
+    if (at !== -1 && (best === -1 || at < best)) best = at;
+  }
+  return best;
+}
+
+/**
+ * The `</name>` that really ends an element whose body starts at `from` — the
+ * first one that does NOT sit inside a comment, CDATA section or processing
+ * instruction — or -1 when the element has no such close.
+ *
+ * Skipping sections only at the OPENER end was half a rule: `<w:p>a<!-- </w:p>
+ * -->b</w:p>` still ended at the commented close tag, truncating a paragraph
+ * whose xml is perfectly well-formed and swallowing the rest as if it were
+ * outside the element.
+ *
+ * Linear per call, and the reason is worth stating: every cursor here only
+ * moves FORWARD. Each `nextSectionStart` scans from a position past the
+ * section the previous one found, so their scans are disjoint; the close
+ * search is re-run only when the close it found turned out to be inside a
+ * section, and then it resumes past that section rather than from the start.
+ */
+function closeOutsideSections(xml: string, close: string, from: number): number {
+  let at = from;
+  let closeAt = xml.indexOf(close, at);
+  let secAt = nextSectionStart(xml, at);
+  while (closeAt !== -1 && secAt !== -1 && secAt < closeAt) {
+    const end = markupSectionEnd(xml, secAt);
+    if (end === -1) return -1; // an unterminated section takes the rest of the part
+    at = end;
+    if (closeAt < at) closeAt = xml.indexOf(close, at);
+    secAt = nextSectionStart(xml, at);
+  }
+  return closeAt;
+}
+
 export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElementBlock[] {
   // Longest first, so a name that PREFIXES another can never shadow it.
   const wanted = [...names].sort((a, b) => b.length - a.length);
+  // Names whose close tags are all shadowed by sections. Openers are met in
+  // document order, so a name that has no usable close from HERE has none from
+  // any later opener either — without this, each one would re-walk the tail.
+  const noUsableClose = new Set<string>();
   const lastClose = new Map<string, number>();
   const lastCloseIndex = (name: string): number => {
     let known = lastClose.get(name);
@@ -395,14 +439,17 @@ export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElem
       continue;
     }
     const bodyStart = gt + 1;
-    if (bodyStart > lastCloseIndex(name)) {
+    if (bodyStart > lastCloseIndex(name) || noUsableClose.has(name)) {
       i = lt + 1; // no `</name>` left in the fragment — this opener cannot match
       continue;
     }
     const close = `</${name}>`;
-    const closeAt = xml.indexOf(close, bodyStart);
+    const closeAt = closeOutsideSections(xml, close, bodyStart);
     if (closeAt === -1) {
-      i = lt + 1; // unreachable given the guard above; kept total
+      // A close tag exists (the guard above says so) but every one of them is
+      // inside a comment, CDATA section or PI — so none of them ends anything.
+      noUsableClose.add(name);
+      i = lt + 1;
       continue;
     }
     out.push({ name, attrs: xml.slice(attrsStart, gt), body: xml.slice(bodyStart, closeAt) });

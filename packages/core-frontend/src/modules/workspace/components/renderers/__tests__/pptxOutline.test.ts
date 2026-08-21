@@ -327,6 +327,19 @@ describe('extractPptxOutline', () => {
     expect(ms).toBeLessThan(5_000);
   });
 
+  it('a `</a:p>` inside a comment does not end the paragraph that holds it', async () => {
+    // The close search used to stop at the first literal `</a:p>` wherever it
+    // sat, so a well-formed paragraph mentioning its own close tag inside a
+    // comment was truncated there. The backend twin pins the same rule.
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(
+        '<a:p><a:r><a:t>keep</a:t></a:r><!-- </a:p> --><a:r><a:t> and this</a:t></a:r></a:p>',
+      ),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].paragraphs).toEqual(['keep and this']);
+  });
+
   it('CHANGED: a `>` inside a quoted attribute no longer leaks into the outline', async () => {
     // `[^>]*` stopped at the FIRST `>` even inside a quoted value, truncating
     // the tag: this run used to render as `q">Hi`. Quote-awareness fixes it,

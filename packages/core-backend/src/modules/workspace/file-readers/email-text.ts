@@ -175,16 +175,23 @@ function containerCloseEnd(lower: string, name: string, from: number, noClose: S
 
 /**
  * The rest of a body the quote-aware walk gave up on (see {@link
- * MAX_TAG_MEMO}), stripped of `<…>` spans by a monotone scan: every `<` pairs
- * with the NEXT `>` whatever quoting says, and a `<` with no `>` after it is
- * literal text. Two cursors that only move forward, so this stays linear on
- * exactly the input the quote-aware walk could not afford.
+ * MAX_TAG_MEMO}), read by the SAME rules but with a cheaper idea of where a
+ * tag ends: every `<` pairs with the NEXT `>`, whatever quoting says, and a
+ * `<` with no `>` after it is literal text. Two cursors that only move
+ * forward, so this stays linear on exactly the input the quote-aware walk
+ * could not afford.
  *
- * The alternative was dropping the remainder, which silently lost the whole
- * message body from the first crafted-looking span onward — a reader cannot
+ * Only the tag BOUNDARY is cruder here — everything the strip means is kept:
+ * `<script>`/`<style>` bodies are still dropped rather than displayed as
+ * text, block tags and `<br>` still break lines, and a span that names no
+ * element is still body text. Stripping tags blindly instead made the tail of
+ * such a mail read as one run-on paragraph with the stylesheet in it.
+ *
+ * Dropping the remainder — what this replaced — was worse still: the message
+ * vanished from the first crafted-looking span onward, and a reader cannot
  * tell that from a mail that simply said little.
  */
-function looseStripFrom(html: string, from: number): string {
+function looseStripFrom(html: string, lower: string, from: number, noClose: Set<string>): string {
   let out = '';
   let at = from;
   while (at < html.length) {
@@ -192,7 +199,25 @@ function looseStripFrom(html: string, from: number): string {
     if (lt === -1) break;
     const gt = html.indexOf('>', lt + 1);
     if (gt === -1) break;
+    let p = lt + 1;
+    const closing = html[p] === '/';
+    if (closing) p++;
+    const markup = !closing && (html[p] === '!' || html[p] === '?');
+    let q = p;
+    while (q < gt && !/[\s/>]/.test(html[q])) q++;
+    const name = lower.slice(p, q);
+    if (!markup && !TAG_NAME.test(name)) {
+      out += html.slice(at, gt + 1); // names no element: the span is body text
+      at = gt + 1;
+      continue;
+    }
     out += html.slice(at, lt);
+    if (!closing && CONTAINER_TAGS.has(name)) {
+      const closeEnd = containerCloseEnd(lower, name, gt + 1, noClose);
+      at = closeEnd !== -1 ? closeEnd : gt + 1;
+      continue;
+    }
+    if ((name === 'br' && !closing) || BLOCK_TAGS.has(name)) out += '\n';
     at = gt + 1;
   }
   return out + html.slice(at);
@@ -268,7 +293,9 @@ export function htmlToEmailText(html: string): string {
   // The quote-aware walk stopped early only when the memo filled; the body
   // from there on is still the reader's mail, so it comes through the loose
   // strip rather than being dropped.
-  s += memoExhausted ? looseStripFrom(html, textStart) : html.slice(textStart);
+  s += memoExhausted
+    ? looseStripFrom(html, lower, textStart, noContainerClose)
+    : html.slice(textStart);
   s = decodeXmlEntities(s.replace(/&nbsp;/gi, ' '));
   const out: string[] = [];
   for (const raw of s.split('\n')) {

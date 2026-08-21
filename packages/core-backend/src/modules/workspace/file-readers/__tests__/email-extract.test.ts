@@ -401,6 +401,21 @@ describe('htmlToEmailText', () => {
     expect(ms).toBeLessThan(5_000);
   });
 
+  it('the fallback still hides script bodies and still breaks paragraphs', () => {
+    // Only the tag BOUNDARY is cruder past the memo bound; what the strip
+    // MEANS is unchanged. Stripping tags blindly there instead put the
+    // stylesheet and the script source into the reader's view as text and ran
+    // every paragraph together into one line.
+    const wall = '<b ' + '<'.repeat(100_001) + '>';
+    const out = htmlToEmailText(
+      `${wall}<p>one</p><p>two</p><script>alert(1)</script><style>b{}</style><p>three</p>`,
+    );
+    expect(out).not.toContain('alert(1)');
+    expect(out).not.toContain('b{}');
+    expect(out).toContain('one\n\ntwo');
+    expect(out).toContain('three');
+  });
+
   it('an İ before a container does not shift the tag offsets', () => {
     // The lowercase copy is INDEX-PARALLEL with the original: tag names are
     // sliced out of it at offsets computed on `html`, and container-close

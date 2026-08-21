@@ -353,6 +353,21 @@ describe('email text helpers', () => {
     expect(ms).toBeLessThan(5_000);
   });
 
+  it('the fallback still hides script bodies and still breaks paragraphs', () => {
+    // Only the tag BOUNDARY is cruder past the memo bound; what the strip
+    // MEANS is unchanged. Stripping tags blindly there instead showed the
+    // script source and the stylesheet as body text in the viewer, and ran
+    // every paragraph together into one line.
+    const wall = '<b ' + '<'.repeat(100_001) + '>';
+    const out = htmlToEmailText(
+      `${wall}<p>one</p><p>two</p><script>alert(1)</script><style>b{}</style><p>three</p>`,
+    );
+    expect(out).not.toContain('alert(1)');
+    expect(out).not.toContain('b{}');
+    expect(out).toContain('one\n\ntwo');
+    expect(out).toContain('three');
+  });
+
   it('mailboxText renders whichever of name/address exists', () => {
     expect(mailboxText('Ada', 'ada@example.com')).toBe('Ada <ada@example.com>');
     expect(mailboxText(undefined, 'ada@example.com')).toBe('ada@example.com');

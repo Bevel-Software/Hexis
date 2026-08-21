@@ -1487,6 +1487,34 @@ describe('ooxml-text — the docx/pptx walks are linear and quote-aware', () => 
     expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
+  it('a `</w:p>` inside a comment does not end the paragraph that holds it', () => {
+    // Skipping sections at the OPENER end only was half a rule: the close
+    // search still stopped at the first literal `</w:p>` wherever it sat, so a
+    // well-formed paragraph mentioning its own close tag in a comment was
+    // truncated there and its real text read as if it were outside.
+    expect(xmlElementBlocks('<w:p>a<!-- </w:p> -->b</w:p>', ['w:p'])).toEqual([
+      { name: 'w:p', attrs: '', body: 'a<!-- </w:p> -->b' },
+    ]);
+    expect(xmlElementBlocks('<w:p>a<![CDATA[</w:p>]]>b</w:p>', ['w:p'])).toEqual([
+      { name: 'w:p', attrs: '', body: 'a<![CDATA[</w:p>]]>b' },
+    ]);
+    // Every close shadowed by a section means the opener closes nothing.
+    expect(xmlElementBlocks('<w:p>a<!-- </w:p> -->', ['w:p'])).toEqual([]);
+  });
+
+  it('stays linear when every close tag is shadowed by a section', () => {
+    // The `lastIndexOf` guard says a close EXISTS, so without the per-name memo
+    // each of these openers would walk the whole tail looking for a close that
+    // is never usable — the quadratic the guard was added to prevent, through
+    // a door the section rule opened.
+    const xml = '<w:p>'.repeat(50_000) + '<!-- </w:p> -->'.repeat(2_000);
+    const t0 = performance.now();
+    const blocks = xmlElementBlocks(xml, ['w:p']);
+    const ms = performance.now() - t0;
+    expect(blocks).toEqual([]);
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
   it('reads CDATA and processing instructions as text too', () => {
     expect(xmlElementBlocks('<![CDATA[<w:p>ghost</w:p>]]><w:p>real</w:p>', ['w:p'])).toEqual([
       { name: 'w:p', attrs: '', body: 'real' },
