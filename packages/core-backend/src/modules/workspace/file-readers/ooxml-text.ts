@@ -199,7 +199,10 @@ function nameEndsAt(xml: string, at: number): boolean {
  * The memo is what keeps the walk linear, but it costs an entry per `<` that
  * a tag scan passed OUTSIDE quotes — and a `<` inside a tag's attribute
  * region only ever occurs in MALFORMED XML (a real attribute value spells it
- * `&lt;`), so on every document a producer wrote the map stays EMPTY. A
+ * `&lt;`, and the one WELL-FORMED place a bare `<` may sit — a comment, a
+ * CDATA section, a processing instruction — is skipped whole before any of
+ * this, see {@link markupSectionEnd}), so on every document a producer wrote
+ * the map stays EMPTY. A
  * crafted part does not: 50 MB of repeated `<w:p ` openers is 10.5 M entries,
  * measured at ~97 bytes apiece — a gigabyte of map to describe fifty
  * megabytes of input, in a server process or, through the browser twin, in
@@ -293,6 +296,38 @@ function scanTagEnd(xml: string, from: number, known: Map<number, number>): numb
  * enough to fill it is ABANDONED with whatever elements were found, because
  * the only alternatives (evict, or stop memoizing) reinstate the quadratic.
  */
+/**
+ * The `<!-- … -->`, `<![CDATA[ … ]]>` and `<? … ?>` spans, whose insides are
+ * TEXT to this scanner and never markup — paired with the opener they start
+ * with.
+ */
+const MARKUP_SECTIONS: ReadonlyArray<readonly [open: string, close: string]> = [
+  ['<!--', '-->'],
+  ['<![CDATA[', ']]>'],
+  ['<?', '?>'],
+];
+
+/**
+ * Index just past the comment, CDATA section or processing instruction
+ * starting at `lt`; -1 when it never closes; 0 when `lt` starts none of them.
+ *
+ * These are the one place a WELL-FORMED part may spell a bare `<` outside a
+ * tag, and reading their insides as markup was wrong twice over: a commented
+ * `<w:t>x</w:t>` was extracted as if it were live document text, and — because
+ * every `<` in there was charged to the tag memo — a document carrying a large
+ * enough comment could exhaust {@link MAX_TAG_MEMO} and abandon every
+ * paragraph after it. A single `indexOf` per section, and the caller only ever
+ * moves forward past it, so skipping costs one pass over the section.
+ */
+function markupSectionEnd(xml: string, lt: number): number {
+  for (const [open, close] of MARKUP_SECTIONS) {
+    if (!xml.startsWith(open, lt)) continue;
+    const at = xml.indexOf(close, lt + open.length);
+    return at === -1 ? -1 : at + close.length;
+  }
+  return 0;
+}
+
 export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElementBlock[] {
   // Longest first, so a name that PREFIXES another can never shadow it.
   const wanted = [...names].sort((a, b) => b.length - a.length);
@@ -315,6 +350,15 @@ export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElem
   while (i < xml.length) {
     const lt = xml.indexOf('<', i);
     if (lt === -1) break;
+    // Comments, CDATA and processing instructions are skipped WHOLE: their
+    // insides are text, not elements (see `markupSectionEnd`). An unclosed one
+    // runs to the end of the part, and nothing inside it is an element either.
+    const section = markupSectionEnd(xml, lt);
+    if (section !== 0) {
+      if (section === -1) break;
+      i = section;
+      continue;
+    }
     // The name check is what the regex's `(?:\s[^>]*)?>` alternation did: it
     // keeps `<w:pPr>` from counting as a `<w:p>`, and admits `/` only as the
     // `/` of a self-closing `/>` (see `nameEndsAt`). A plain loop rather than

@@ -1468,4 +1468,34 @@ describe('ooxml-text — the docx/pptx walks are linear and quote-aware', () => 
     expect(blocks.map((b) => b.body)).toEqual(['first']);
     expect(ms).toBeLessThan(GENEROUS_MS);
   });
+
+  it('reads a comment as text, so a commented paragraph is neither extracted nor charged to the memo', () => {
+    // A comment is WELL-FORMED xml and may say anything, `<w:p ` included. Read
+    // as markup it was wrong twice: the commented paragraph came out as
+    // document text, and its every `<` filled the tag memo — so a real
+    // document carrying a big enough comment tripped the MAX_TAG_MEMO bound
+    // and lost every paragraph AFTER it, which is the one thing that cap was
+    // never supposed to touch.
+    expect(xmlElementBlocks('<!-- <w:p>ghost</w:p> --><w:p>real</w:p>', ['w:p'])).toEqual([
+      { name: 'w:p', attrs: '', body: 'real' },
+    ]);
+    const commented = `<!-- ${'<w:p '.repeat(300_000)} --><w:p>survives</w:p>`;
+    const t0 = performance.now();
+    const blocks = xmlElementBlocks(commented, ['w:p']);
+    const ms = performance.now() - t0;
+    expect(blocks.map((b) => b.body)).toEqual(['survives']);
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
+  it('reads CDATA and processing instructions as text too', () => {
+    expect(xmlElementBlocks('<![CDATA[<w:p>ghost</w:p>]]><w:p>real</w:p>', ['w:p'])).toEqual([
+      { name: 'w:p', attrs: '', body: 'real' },
+    ]);
+    expect(xmlElementBlocks('<?xml version="1.0"?><w:p>real</w:p>', ['w:p'])).toEqual([
+      { name: 'w:p', attrs: '', body: 'real' },
+    ]);
+    // A section that never closes takes the rest of the part with it — there
+    // is no element inside an unterminated comment either.
+    expect(xmlElementBlocks('<!-- <w:p>ghost</w:p>', ['w:p'])).toEqual([]);
+  });
 });

@@ -384,6 +384,23 @@ describe('htmlToEmailText', () => {
     expect(ms).toBeLessThan(5_000);
   });
 
+  it('keeps the body when the tag memo fills, rather than dropping it from there on', () => {
+    // Filling the memo stops the quote-aware walk — that bound is what keeps a
+    // crafted body from allocating a map several times its size. But the walk
+    // used to abandon the pending text run with it, so everything from the
+    // crafted span onward vanished and read exactly like a mail that said
+    // nothing. The remainder now comes through a loose strip instead: every
+    // `<` pairs with the next `>`, quoting be damned, which is linear.
+    const body = `<p>before</p><b ${'<'.repeat(100_001)}>after the wall</b><p>and the rest</p>`;
+    const t0 = performance.now();
+    const out = htmlToEmailText(body);
+    const ms = performance.now() - t0;
+    expect(out).toContain('before');
+    expect(out).toContain('after the wall');
+    expect(out).toContain('and the rest');
+    expect(ms).toBeLessThan(5_000);
+  });
+
   it('an İ before a container does not shift the tag offsets', () => {
     // The lowercase copy is INDEX-PARALLEL with the original: tag names are
     // sliced out of it at offsets computed on `html`, and container-close

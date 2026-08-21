@@ -309,6 +309,24 @@ describe('extractPptxOutline', () => {
     expect(ms).toBeLessThan(5_000);
   });
 
+  it('reads a comment as text, so a commented paragraph neither outlines nor fills the memo', async () => {
+    // A comment is WELL-FORMED xml and may hold anything, `<a:p ` included.
+    // Read as markup it was wrong twice: the commented paragraph outlined as
+    // if it were slide content, and its every `<` was charged to the tag memo
+    // — so a deck with a big enough comment tripped the MAX_TAG_MEMO bound and
+    // dropped every paragraph after it. The backend twin pins the same rule.
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(
+        `<!-- ${para('Ghost')}${'<a:p '.repeat(300_000)} -->${para('Alive')}`,
+      ),
+    });
+    const t0 = performance.now();
+    const slides = await extractPptxOutline(bytes);
+    const ms = performance.now() - t0;
+    expect(slides[0].paragraphs).toEqual(['Alive']);
+    expect(ms).toBeLessThan(5_000);
+  });
+
   it('CHANGED: a `>` inside a quoted attribute no longer leaks into the outline', async () => {
     // `[^>]*` stopped at the FIRST `>` even inside a quoted value, truncating
     // the tag: this run used to render as `q">Hi`. Quote-awareness fixes it,

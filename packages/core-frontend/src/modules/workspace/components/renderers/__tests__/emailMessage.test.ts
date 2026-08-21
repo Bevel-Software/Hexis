@@ -336,6 +336,23 @@ describe('email text helpers', () => {
     expect(ms).toBeLessThan(5_000);
   });
 
+  it('keeps the body when the tag memo fills, rather than dropping it from there on', () => {
+    // The memo bound stops the quote-aware walk so a crafted body cannot
+    // allocate a map several times its size — but the walk used to abandon the
+    // pending text with it, so everything from the crafted span onward
+    // vanished from the reader's view, indistinguishable from a short mail.
+    // The remainder now comes through the loose strip: each `<` pairs with the
+    // next `>`, which is linear on exactly the input the walk gave up on.
+    const body = `<p>before</p><b ${'<'.repeat(100_001)}>after the wall</b><p>and the rest</p>`;
+    const t0 = performance.now();
+    const out = htmlToEmailText(body);
+    const ms = performance.now() - t0;
+    expect(out).toContain('before');
+    expect(out).toContain('after the wall');
+    expect(out).toContain('and the rest');
+    expect(ms).toBeLessThan(5_000);
+  });
+
   it('mailboxText renders whichever of name/address exists', () => {
     expect(mailboxText('Ada', 'ada@example.com')).toBe('Ada <ada@example.com>');
     expect(mailboxText(undefined, 'ada@example.com')).toBe('ada@example.com');
