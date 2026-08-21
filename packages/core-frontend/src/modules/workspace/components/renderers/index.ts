@@ -4,25 +4,36 @@ import { MarkdownRenderer } from './MarkdownRenderer';
 import { TextRenderer } from './TextRenderer';
 import { ImageRenderer } from './ImageRenderer';
 import { HtmlRenderer } from './HtmlRenderer';
-import { PdfRenderer } from './PdfRenderer';
 import { CsvRenderer } from './CsvRenderer';
 import { ToolRenderer } from './ToolRenderer';
+import { LegacyOfficeRenderer } from './LegacyOfficeRenderer';
 import { lazyRenderer } from './lazyRenderer';
 
 export type { FileRendererProps, RendererSaveState } from './types';
 
 /**
- * `.xlsx` and `.docx` are code-split: their parsers (xlsx ~141 KB gzip,
- * mammoth ~119 KB) were 27% of the eager bundle for file types most sessions
- * never open. `lazyRenderer` carries its own Suspense fallback and error
- * boundary, so these stay plain `ComponentType<FileRendererProps>` values and
+ * The document viewers are code-split: their parsers (xlsx ~141 KB gzip,
+ * mammoth ~119 KB, pdf.js ~340 KB + its worker as a separate asset, jszip
+ * ~28 KB) would otherwise sit in the eager bundle for file types most
+ * sessions never open — pdf.js alone would grow it by more than a third.
+ * `lazyRenderer` carries its own Suspense fallback and error boundary, so
+ * these stay plain `ComponentType<FileRendererProps>` values and
  * `getFileRenderer()`'s contract is unchanged.
+ *
+ * (`LegacyOfficeRenderer` stays eager on purpose: it parses nothing — it is
+ * a note and a Download button, smaller than the lazy plumbing would be.)
  */
 const XlsxRenderer = lazyRenderer('spreadsheet', () =>
   import('./XlsxRenderer').then((m) => ({ default: m.XlsxRenderer })),
 );
 const DocxRenderer = lazyRenderer('document', () =>
   import('./DocxRenderer').then((m) => ({ default: m.DocxRenderer })),
+);
+const PdfRenderer = lazyRenderer('PDF', () =>
+  import('./PdfRenderer').then((m) => ({ default: m.PdfRenderer })),
+);
+const PptxRenderer = lazyRenderer('presentation', () =>
+  import('./PptxRenderer').then((m) => ({ default: m.PptxRenderer })),
 );
 
 const renderersByExtension: Record<string, ComponentType<FileRendererProps>> = {
@@ -40,6 +51,13 @@ const renderersByExtension: Record<string, ComponentType<FileRendererProps>> = {
   '.pdf': PdfRenderer,
   '.docx': DocxRenderer,
   '.xlsx': XlsxRenderer,
+  '.pptx': PptxRenderer,
+  // Pre-2007 Office binaries: nothing in the browser parses these, so the
+  // viewer says so and offers Download — never the text fallback, which
+  // would print megabytes of undecodable bytes.
+  '.doc': LegacyOfficeRenderer,
+  '.ppt': LegacyOfficeRenderer,
+  '.xls': LegacyOfficeRenderer,
   '.csv': CsvRenderer,
   '.tool': ToolRenderer,
 };
@@ -75,6 +93,9 @@ export function getFileRenderer(filePath: string): ComponentType<FileRendererPro
  */
 export type RendererLayout = 'prose' | 'full-bleed';
 
+// NOT here, deliberately: `.docx` (mammoth's HTML is prose), `.pptx` (the
+// outline view is a text document), and the legacy `.doc`/`.ppt`/`.xls`
+// (a one-paragraph note) — all documents, all on the prose measure.
 const FULL_BLEED_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico',
   '.pdf',
@@ -107,7 +128,7 @@ export function getRendererLayout(filePath: string): RendererLayout {
  */
 const BINARY_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico',
-  '.pdf', '.docx', '.xlsx', '.zip',
+  '.pdf', '.docx', '.xlsx', '.pptx', '.doc', '.ppt', '.xls', '.zip',
 ]);
 
 export function isBinaryFile(filePath: string): boolean {
