@@ -143,17 +143,43 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
     return () => ro.disconnect();
   }, [doc]);
 
+  // The render task most recently STARTED, surviving across effect runs: a
+  // canvas can only host one render at a time, and pdf.js rejects a second
+  // render() while the previous one — cancelled or not — has yet to settle.
+  // Each effect run parks on this before it draws.
+  const renderTaskRef = useRef<{ promise: Promise<unknown>; cancel(): void } | null>(null);
+
   // Render the current page into the canvas whenever the page or the width
   // changes. Cancellation matters twice over: a rapid Next-Next leaves the
   // first render mid-flight (pdf.js throws RenderingCancelledException into
   // the awaited promise), and a canvas can only host one render at a time.
   useEffect(() => {
     if (!doc || width <= 0) return;
+    // The loading task `doc` belongs to, captured now: if this render loses a
+    // race with a file switch (the load effect destroys the task — and the doc
+    // under it — before the null doc flushes), the failure path below must
+    // neither report an error over the NEW file nor release the new file's
+    // loading task.
+    const task = loadingTaskRef.current;
     let cancelled = false;
+    let page: PDFPageProxy | null = null;
     let renderTask: { promise: Promise<unknown>; cancel(): void } | null = null;
+    // Cancelled AFTER its render task settled: this page will never be the
+    // displayed one, so its resources go now — never the on-screen page's,
+    // and never mid-render (any superseding effect is still parked on this
+    // task's promise, so no render is active on the page).
+    const releaseCancelledPage = () => {
+      if (renderTask && page && page !== renderedPageRef.current) page.cleanup();
+    };
     (async () => {
       try {
-        const page = await doc.getPage(pageNumber);
+        // Wait out the previous render (its own cleanup has already requested
+        // cancellation): starting a second render on the shared canvas before
+        // the first settles is the concurrent use pdf.js rejects.
+        const priorTask = renderTaskRef.current;
+        if (priorTask) await priorTask.promise.catch(() => {});
+        if (cancelled) return;
+        page = await doc.getPage(pageNumber);
         if (cancelled) return;
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -168,9 +194,17 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
         canvas.style.width = `${Math.floor(viewport.width / dpr)}px`;
         canvas.style.height = `${Math.floor(viewport.height / dpr)}px`;
         // v5 API: hand over the canvas itself; pdf.js takes the 2D context.
-        renderTask = page.render({ canvas, viewport });
-        await renderTask.promise;
-        if (cancelled) return;
+        const startedTask: { promise: Promise<unknown>; cancel(): void } = page.render({
+          canvas,
+          viewport,
+        });
+        renderTask = startedTask;
+        renderTaskRef.current = startedTask;
+        await startedTask.promise;
+        if (cancelled) {
+          releaseCancelledPage();
+          return;
+        }
         // THIS page's render has settled, so the PRIOR page's cached
         // resources (fonts, operator lists) can be released. Sequenced here
         // — after the render task resolves — because cleanup() during an
@@ -180,7 +214,14 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
         renderedPageRef.current = page;
       } catch (err) {
         // A cancelled render is this effect's own cleanup, not a failure.
-        if (cancelled || (err as Error | null)?.name === 'RenderingCancelledException') return;
+        if (cancelled || (err as Error | null)?.name === 'RenderingCancelledException') {
+          releaseCancelledPage();
+          return;
+        }
+        // Superseded by a file switch mid-render: the load effect owns that
+        // teardown (this failure is its fallout), and `loadingTaskRef` may by
+        // now hold the NEW file's task — which must not be destroyed here.
+        if (task === null || loadingTaskRef.current !== task) return;
         console.error('[PdfRenderer] page render failed:', err);
         // The error view is terminal, so nothing will read `doc` again: release it
         // (and the loading task it retains) rather than leaving worker-side PDF

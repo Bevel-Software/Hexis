@@ -167,22 +167,31 @@ function assertNotDocumentEdit(readers: FileReaderRegistry, path: string): void 
  *
  * Costs one read of the existing file, and only for readers that ask the
  * question. A path with nothing at it is a CREATE: there is nothing to destroy.
+ * Returns the bytes it read (so a caller that needs the content next —
+ * `edit_file` — does not read the file a second time), or undefined when it
+ * had no reason to read or nothing existed.
  */
 async function assertNotBinaryOverwrite(
   readers: FileReaderRegistry,
   path: string,
   fs: { readFile(p: string): Promise<string | Buffer> },
-): Promise<void> {
+): Promise<Buffer | undefined> {
   const reader = readers.readerFor(path);
-  if (reader.editRefusalForExisting === undefined) return;
+  if (reader.editRefusalForExisting === undefined) return undefined;
   let existing: Buffer;
   try {
     existing = asBytes(await fs.readFile(path));
-  } catch {
-    return; // nothing there yet
+  } catch (err) {
+    // Only a MISSING file is a create (both raw Node errors and Mastra's
+    // FileNotFoundError carry code 'ENOENT'). Any other failure — permissions,
+    // I/O — means the existing content could not be inspected: propagate it
+    // rather than let the write destroy bytes the gate never saw.
+    if ((err as { code?: unknown } | null)?.code === 'ENOENT') return undefined; // nothing there yet
+    throw err;
   }
   const refusal = reader.editRefusalForExisting(existing, path);
   if (refusal !== null) throw new ToolError(refusal, 400);
+  return existing;
 }
 
 /** JS grep over the workspace tree (read methods only) — bounded by match + depth caps. */
@@ -544,7 +553,7 @@ export function registerWorkspaceTools(
           },
         },
         truncated: { type: 'boolean', description: 'True if the match cap was hit and results may be incomplete.' },
-        note: str('Present when some office documents/PDFs were not searched because their text was not yet extracted and the per-call extraction budget ran out — re-run grep to cover them.'),
+        note: str('Present when some documents (office/PDF/email files) were not searched because their text was not yet extracted and the per-call extraction budget ran out — re-run grep to cover them.'),
       },
       required: ['matches', 'truncated'],
     },
@@ -582,7 +591,7 @@ export function registerWorkspaceTools(
         ...(docs.skippedUncached > 0
           ? {
               note:
-                `${docs.skippedUncached} office document(s)/PDF(s) were not searched: their text was not yet ` +
+                `${docs.skippedUncached} document(s) (office/PDF/email files) were not searched: their text was not yet ` +
                 `extracted and this call's extraction budget (${UNCACHED_DOCS_PER_GREP}) ran out. Re-run the ` +
                 'same grep to extract and search the next batch.',
             }
@@ -719,8 +728,10 @@ export function registerWorkspaceTools(
       const path = a.path as string;
       const oldStr = a.old_string as string;
       const newStr = a.new_string as string;
-      await assertNotBinaryOverwrite(readers, path, fs);
-      const content = asText(await fs.readFile(path));
+      // The overwrite gate already read the file when its reader asked the
+      // binary question — reuse those bytes instead of reading twice.
+      const existing = await assertNotBinaryOverwrite(readers, path, fs);
+      const content = asText(existing ?? (await fs.readFile(path)));
       const count = oldStr ? content.split(oldStr).length - 1 : 0;
       if (count === 0) throw new ToolError('old_string not found in the file.', 400);
       if (count > 1 && a.replace_all !== true) {

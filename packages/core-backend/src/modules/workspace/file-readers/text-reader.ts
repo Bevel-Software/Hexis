@@ -1,5 +1,6 @@
+import { isUtf8 } from 'node:buffer';
 import { fileExtension } from './doc-extract.types.js';
-import type { FileReader, ReadResult } from './file-reader.js';
+import { displayPath, type FileReader, type ReadResult } from './file-reader.js';
 
 /** Minimal extension→mime map for the binary-read notice (fallback: octet-stream). */
 const MIME_BY_EXT: Record<string, string> = {
@@ -31,12 +32,24 @@ const MIME_BY_EXT: Record<string, string> = {
 };
 
 /**
+ * Text is what the fallback reader may hand to the text tools: no NUL byte
+ * AND valid UTF-8. A NUL-free file that does not decode as UTF-8 is still
+ * binary here — the decode would be lossy, so text written back could never
+ * round-trip the original bytes. Checked on the raw bytes, so a large binary
+ * is refused without allocating its full decoded string first.
+ */
+function isTextBytes(bytes: Buffer): boolean {
+  return !bytes.includes(0) && isUtf8(bytes);
+}
+
+/**
  * The DEFAULT reader — the registry's fallback for every extension no other
- * reader owns. Decodes utf8 text; content carrying a NUL byte is not text at
- * all, so the read answers with an honest one-line notice INSTEAD of raw
- * bytes: what the file is (mime by extension + size), plus the actionable
- * hint where one exists (unzip for archives). Same NUL test on the grep path:
- * binary content is simply not searchable.
+ * reader owns. Decodes utf8 text; content carrying a NUL byte or invalid
+ * UTF-8 is not (round-trippable) text at all, so the read answers with an
+ * honest one-line notice INSTEAD of raw bytes: what the file is (mime by
+ * extension + size), plus the actionable hint where one exists (unzip for
+ * archives). Same binary test on the grep path: binary content is simply not
+ * searchable.
  */
 export class TextReader implements FileReader {
   /** Fallback reader: matched by the registry's default, not by extension. */
@@ -44,29 +57,27 @@ export class TextReader implements FileReader {
   readonly textEditable: boolean = true;
 
   async read(bytes: Buffer, path: string): Promise<ReadResult> {
-    const text = bytes.toString('utf8');
-    return text.includes('\0')
-      ? { kind: 'refusal', message: this.binaryNotice(path, bytes.length) }
-      : { kind: 'text', text };
+    return isTextBytes(bytes)
+      ? { kind: 'text', text: bytes.toString('utf8') }
+      : { kind: 'refusal', message: this.binaryNotice(path, bytes.length) };
   }
 
   /**
    * Binary content is not editable, whatever its extension. `read` answers a
-   * NUL-bearing file with a notice INSTEAD of its bytes, so an agent asking to
+   * binary file with a notice INSTEAD of its bytes, so an agent asking to
    * write text over one would be overwriting something it could not read. The
    * write tools refuse instead. (Uploads and the HTTP write routes are
    * untouched: a human replacing a file is exactly the right move.)
    */
   editRefusalForExisting(bytes: Buffer, path: string): string | null {
-    return bytes.includes(0)
-      ? `"${path}" holds binary content, which read_file cannot show as text. Writing text over it would ` +
-          `destroy those bytes — replace the file by uploading a new version instead.`
-      : null;
+    return isTextBytes(bytes)
+      ? null
+      : `"${displayPath(path)}" holds binary content, which read_file cannot show as text. Writing text over it would ` +
+          `destroy those bytes — replace the file by uploading a new version instead.`;
   }
 
   async greppableText(bytes: Buffer): Promise<string | null> {
-    const text = bytes.toString('utf8');
-    return text.includes('\0') ? null : text; // skip binary (NUL)
+    return isTextBytes(bytes) ? bytes.toString('utf8') : null; // skip binary (NUL / invalid UTF-8)
   }
 
   /** The honest one-line notice returned INSTEAD of raw bytes for unreadable binary content. */
@@ -74,7 +85,7 @@ export class TextReader implements FileReader {
     const ext = fileExtension(path);
     const mime = MIME_BY_EXT[ext] ?? 'application/octet-stream';
     const zipHint = ext === '.zip' ? ' Use the unzip tool to extract its contents.' : '';
-    return `[${path} is a binary file (${mime}, ${sizeBytes} bytes) — not readable as text.${zipHint}]`;
+    return `[${displayPath(path)} is a binary file (${mime}, ${sizeBytes} bytes) — not readable as text.${zipHint}]`;
   }
 }
 
@@ -102,7 +113,7 @@ export class LegacyOfficeReader extends TextReader {
     const ext = fileExtension(path);
     const modern = MODERN_BY_LEGACY[ext] ?? 'the modern format';
     return (
-      `"${path}" is a legacy binary office format (${ext}). read_file cannot extract its text, and text ` +
+      `"${displayPath(path)}" is a legacy binary office format (${ext}). read_file cannot extract its text, and text ` +
       'written by the editing tools would destroy the binary document. Convert the document to ' +
       `${modern} and upload that, or replace the file by uploading a new version.`
     );
@@ -112,7 +123,7 @@ export class LegacyOfficeReader extends TextReader {
     const ext = fileExtension(path);
     const modern = MODERN_BY_LEGACY[ext];
     return (
-      `[${path} is a legacy office format (${ext}, ${sizeBytes} bytes) — text extraction supports only the ` +
+      `[${displayPath(path)} is a legacy office format (${ext}, ${sizeBytes} bytes) — text extraction supports only the ` +
       `modern format. Convert the document to ${modern} and upload that to read its text, or replace it by ` +
       'uploading a new version.]'
     );

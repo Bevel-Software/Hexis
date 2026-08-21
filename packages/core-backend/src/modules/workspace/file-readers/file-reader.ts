@@ -23,6 +23,15 @@ export type ReadResult =
   | { kind: 'image'; data: string; mimeType: string; note: string }
   | { kind: 'refusal'; message: string };
 
+/**
+ * `path` as interpolated into a ONE-LINE notice or refusal: CR/LF are shown
+ * as escapes rather than obeyed (the same rule as `extractionMarker`), so a
+ * filename cannot forge extra output lines.
+ */
+export function displayPath(path: string): string {
+  return path.replace(/[\r\n]/g, (c) => (c === '\r' ? '\\r' : '\\n'));
+}
+
 /** A per-format file reader. Register implementations in `createFileReaderRegistry`. */
 export interface FileReader {
   /** The extensions this reader owns — lowercase, with the dot. Empty for the default (fallback) reader. */
@@ -68,7 +77,12 @@ export class FileReaderRegistry {
     private readonly fallback: FileReader,
   ) {
     for (const reader of readers) {
-      for (const ext of reader.extensions) this.byExtension.set(ext, reader);
+      for (const ext of reader.extensions) {
+        // Duplicate claims fail LOUDLY: were the later registration to win
+        // silently, adding a format could disable an existing reader.
+        if (this.byExtension.has(ext)) throw new Error(`two file readers claim the extension "${ext}"`);
+        this.byExtension.set(ext, reader);
+      }
     }
   }
 

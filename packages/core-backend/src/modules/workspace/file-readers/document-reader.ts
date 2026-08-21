@@ -1,6 +1,6 @@
 import type { DocExtractService } from './doc-extract.service.js';
 import type { ExtractFn } from './doc-extract.types.js';
-import type { FileReader, ReadResult } from './file-reader.js';
+import { displayPath, type FileReader, type ReadResult } from './file-reader.js';
 
 /**
  * FileReader over one document format: a thin wrapper pairing the format's
@@ -41,9 +41,10 @@ export class DocumentReader implements FileReader {
     try {
       res = await this.service.extract(path, bytes, this.extract);
     } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
       return {
         kind: 'refusal',
-        message: `[${path} could not be extracted (${(err as Error).message}) — the file may be corrupt or mislabeled. To fix it, replace the document by uploading a new version.]`,
+        message: `[${displayPath(path)} could not be extracted (${reason}) — the file may be corrupt or mislabeled. To fix it, replace the document by uploading a new version.]`,
       };
     }
 
@@ -51,7 +52,7 @@ export class DocumentReader implements FileReader {
       ? { kind: 'text', text: `${res.marker}\n${res.text}` }
       : {
           kind: 'refusal',
-          message: `[${path} ${res.message} — the file may be corrupt or mislabeled. To fix it, replace the document by uploading a new version.]`,
+          message: `[${displayPath(path)} ${res.message} — the file may be corrupt or mislabeled. To fix it, replace the document by uploading a new version.]`,
         };
   }
 

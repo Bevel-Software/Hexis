@@ -65,17 +65,23 @@ export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
           if (lastY !== undefined && Math.abs(y - lastY) > 1) flush();
           lastY = y;
         }
-        if (item.str !== '') line += (line === '' ? '' : ' ') + item.str;
+        if (item.str !== '') {
+          // COUNTED before it is kept: the bound exists to stop the decoded
+          // text from accumulating, so it must fire mid-page, not after —
+          // and counting nothing (as this once did) fired never.
+          textChars += item.str.length;
+          if (textChars > MAX_PDF_TEXT_CHARS) {
+            return {
+              ok: false,
+              message: `could not be extracted as a PDF (its text decodes to over ${MAX_PDF_TEXT_CHARS} characters — over the extraction limit)`,
+            };
+          }
+          line += (line === '' ? '' : ' ') + item.str;
+        }
         if (item.hasEOL) flush();
       }
       flush();
       page.cleanup();
-      if (textChars > MAX_PDF_TEXT_CHARS) {
-        return {
-          ok: false,
-          message: `could not be extracted as a PDF (its text decodes to over ${MAX_PDF_TEXT_CHARS} characters — over the extraction limit)`,
-        };
-      }
     }
     const pages = `${doc.numPages} page${doc.numPages === 1 ? '' : 's'}`;
     return anyText

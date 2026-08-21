@@ -60,15 +60,21 @@ function xmlParser(handlers: ConstructorParameters<typeof Parser>[0]): Parser {
  * Bodies are RAW slices (entities not decoded): callers re-read them for
  * nested elements and decode only the text they keep.
  */
-export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElementBlock[] {
+export function xmlElementBlocks(
+  xml: string,
+  names: readonly string[],
+  /** Overrides name matching — {@link localElementBlocks} matches local names with it. */
+  matches?: (name: string) => boolean,
+): XmlElementBlock[] {
   const wanted = new Set(names);
+  const isWanted = matches ?? ((name: string): boolean => wanted.has(name));
   const out: XmlElementBlock[] = [];
   let depth = 0;
   let open: OpenMatch | null = null;
   const parser: Parser = xmlParser({
     onopentag(name, attributes) {
       depth++;
-      if (open === null && wanted.has(name)) {
+      if (open === null && isWanted(name)) {
         open = { name, attributes, depth, tagEnd: parser.endIndex };
       }
       if (depth > MAX_ELEMENT_DEPTH) throw TOO_DEEP;
@@ -111,29 +117,49 @@ export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElem
 }
 
 /**
- * The character content of every `<tag>` element in a fragment, concatenated
- * with NO separator — OOXML splits runs mid-word on formatting boundaries, so
- * any separator would break words apart.
+ * {@link xmlElementBlocks}, matching each element's LOCAL name instead of the
+ * qualified one — `p` finds `<a:p>`, `<d:p>` and an unprefixed `<p>` alike.
+ *
+ * Prefixes are a document's own choice: XML binds them to namespace URIs, and
+ * a producer may bind any prefix it likes or default the namespace and use
+ * none. Naming `a:p` literally therefore read only the decks whose authors
+ * happened to pick the usual prefix — a valid deck binding DrawingML to
+ * another prefix outlined as EMPTY. The backend extractor matches local names
+ * for the same reason (`ooxml-text.ts` `localElementBlocks`), and the viewer
+ * must agree with it about what a deck says.
+ */
+export function localElementBlocks(xml: string, localNames: readonly string[]): XmlElementBlock[] {
+  const wanted = new Set(localNames);
+  return xmlElementBlocks(xml, localNames, (name) => wanted.has(localName(name)));
+}
+
+/**
+ * The character content of every element whose LOCAL name is `localTag` in a
+ * fragment, concatenated with NO separator — OOXML splits runs mid-word on
+ * formatting boundaries, so any separator would break words apart. Local-name
+ * matching for the reason {@link localElementBlocks} gives: the prefix is the
+ * document's choice, and the backend twin (`paragraphRunText`) matches the
+ * same way.
  *
  * TEXT, never the raw body: a run's body is markup as well as characters when
  * the part is malformed enough to nest runs, and slicing it wholesale put
  * `<a:t>` tags into the rendered outline.
  */
-export function elementText(xml: string, tag: string): string {
+export function elementText(xml: string, localTag: string): string {
   let out = '';
   let inside = 0;
   let depth = 0;
   const parser = xmlParserDecoding({
     onopentag(name) {
       depth++;
-      if (name === tag) inside++;
+      if (localName(name) === localTag) inside++;
       if (depth > MAX_ELEMENT_DEPTH) throw TOO_DEEP;
     },
     ontext(text) {
       if (inside > 0) out += text;
     },
     onclosetag(name) {
-      if (name === tag && inside > 0) inside--;
+      if (localName(name) === localTag && inside > 0) inside--;
       depth--;
     },
   });
@@ -161,6 +187,7 @@ function xmlParserDecoding(handlers: ConstructorParameters<typeof Parser>[0]): P
  */
 export function relationshipTarget(relsXml: string, typeSuffix: string): string | undefined {
   let found: string | undefined;
+  let matched = false;
   let depth = 0;
   // DECODING parser: a part name may legally contain `&`, written `&amp;` in
   // the rels. Resolving the raw text looked for a zip entry spelled that way,
@@ -169,7 +196,7 @@ export function relationshipTarget(relsXml: string, typeSuffix: string): string 
     onopentag(name, attributes) {
       depth++;
       if (depth > MAX_ELEMENT_DEPTH) throw TOO_DEEP;
-      if (found !== undefined) return;
+      if (matched) return;
       if (localName(name) !== 'Relationship') return;
       const byLocal = (want: string): string | undefined => {
         for (const [key, value] of Object.entries(attributes)) {
@@ -178,7 +205,13 @@ export function relationshipTarget(relsXml: string, typeSuffix: string): string 
         }
         return undefined;
       };
-      if (byLocal('Type')?.endsWith(typeSuffix) === true) found = byLocal('Target');
+      // The FIRST matching Type decides, even when it carries no Target — a
+      // later relationship must not answer for it (the backend twin,
+      // `notesTargetFromRels`, stops the same way).
+      if (byLocal('Type')?.endsWith(typeSuffix) === true) {
+        matched = true;
+        found = byLocal('Target');
+      }
     },
     onclosetag() {
       depth--;

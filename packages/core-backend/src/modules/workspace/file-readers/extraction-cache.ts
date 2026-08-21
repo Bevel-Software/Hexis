@@ -29,11 +29,13 @@ const DEFAULT_MAX_TOTAL_BYTES = 512 * 1024 * 1024; // 512MB
  * store's — sits BESIDE the workspaces root, never inside a workspace and
  * never committed.
  *
- * Bounding: on each write the cache best-effort prunes OLDEST-MTIME entries
- * until the total size fits `maxTotalBytes` (simple LRU-ish eviction; reads
- * don't touch mtime, so it is closer to FIFO — good enough for a cache whose
- * entries are cheap to rebuild). Every filesystem error here is swallowed:
- * the cache is an accelerator, never a reason for a read to fail.
+ * Bounding: writes best-effort prune OLDEST-MTIME entries until the total
+ * size fits `maxTotalBytes` (simple LRU-ish eviction; reads don't touch
+ * mtime, so it is closer to FIFO — good enough for a cache whose entries are
+ * cheap to rebuild). The full scan is deferred until the writes since the
+ * last one could plausibly have reached the bound (see `writtenSinceScan`).
+ * Every filesystem error here is swallowed: the cache is an accelerator,
+ * never a reason for a read to fail.
  */
 export class DocExtractionCache {
   constructor(
@@ -66,12 +68,22 @@ export class DocExtractionCache {
    */
   private writtenSinceScan = 0;
 
+  /** Total size the last scan found (after eviction); undefined before the first scan, so the first write scans. */
+  private totalAtLastScan: number | undefined;
+
   /** Store an extraction under `sha`; prunes towards the size bound. Never throws. */
   async put(sha: string, doc: ExtractedDoc): Promise<void> {
     try {
       await fs.mkdir(this.root, { recursive: true });
-      await fs.writeFile(this.entryPath(sha), JSON.stringify({ summary: doc.summary, text: doc.text }), 'utf8');
-      await this.prune();
+      const payload = JSON.stringify({ summary: doc.summary, text: doc.text });
+      await fs.writeFile(this.entryPath(sha), payload, 'utf8');
+      this.writtenSinceScan += Buffer.byteLength(payload);
+      if (
+        this.totalAtLastScan === undefined ||
+        this.totalAtLastScan + this.writtenSinceScan > this.maxTotalBytes
+      ) {
+        await this.prune();
+      }
     } catch {
       // cache write failed — the extraction still returns; next read re-extracts
     }
@@ -95,12 +107,15 @@ export class DocExtractionCache {
         // vanished mid-scan — ignore
       }
     }
-    if (total <= this.maxTotalBytes) return;
-    entries.sort((a, b) => a.mtime - b.mtime);
-    for (const e of entries) {
-      if (total <= this.maxTotalBytes) return;
-      await fs.rm(e.p, { force: true });
-      total -= e.size;
+    if (total > this.maxTotalBytes) {
+      entries.sort((a, b) => a.mtime - b.mtime);
+      for (const e of entries) {
+        if (total <= this.maxTotalBytes) break;
+        await fs.rm(e.p, { force: true });
+        total -= e.size;
+      }
     }
+    this.totalAtLastScan = total;
+    this.writtenSinceScan = 0;
   }
 }

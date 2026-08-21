@@ -235,11 +235,14 @@ jobs:
             exit 0
           fi
 
-          # A job output is bounded (~1 MB); a verdict past that makes the write
-          # fail and strands the run. Cap it here and let `publish` report the
-          # ordinary no-verdict status instead.
+          # The handoff is bounded twice over: a job output at ~1 MB, and —
+          # tighter — `publish` reads this value as an environment variable,
+          # which Linux caps at 128 KiB per string. A verdict past either makes
+          # the handoff fail and strands the run. Cap it well under the tighter
+          # bound and let `publish` report the ordinary no-verdict status
+          # instead.
           verdict_b64=$(jq -c . "$VERDICT_FILE" | base64 -w0)
-          if [ "${#verdict_b64}" -gt 800000 ]; then
+          if [ "${#verdict_b64}" -gt 100000 ]; then
             echo "::warning::Verdict is ${#verdict_b64} encoded bytes — too large to publish; treating as no verdict."
             cat "$VERDICT_FILE"
             exit 0
@@ -247,7 +250,6 @@ jobs:
           echo "verdict_b64=$verdict_b64" >> "$GITHUB_OUTPUT"
           cat "$VERDICT_FILE"
 
-          cat "$VERDICT_FILE"
   # ---------------------------------------------------------------------------
   # The only job that speaks on the PR. It reads the agent's verdict and renders
   # it; it never reads the PR itself. Splitting it out is what lets the review
@@ -292,6 +294,7 @@ jobs:
           # (`tostring`, array coercion) for inputs of the wrong type.
           outcome=none
           headline=""
+          headline_md=""
           url=""
           : > findings.md
 
@@ -310,6 +313,14 @@ jobs:
 
             headline=$(jq -r '(.headline? // "") | tostring | gsub("[[:space:]]+"; " ") | .[0:120]' verdict.json)
 
+            # Backslash-escape Markdown metacharacters (and the colon, which
+            # defuses bare-URL autolinks) in every piece of agent prose that
+            # lands in the comment: it must render as inert text, never as a
+            # live link or markup the agent chose. The commit status keeps the
+            # raw headline — its description is plain text, not Markdown.
+            headline_md=$(printf '%s' "$headline" \
+              | jq -Rr 'gsub("(?<m>[\\\\`*_{}\\[\\]()<>#!|~:])"; "\\" + .m)')
+
             # One markdown bullet per finding, severity forced onto the
             # allowlist so the agent cannot invent a louder label.
             jq -r '
@@ -319,12 +330,18 @@ jobs:
               | (if $s == "violation" then "violation"
                  elif $s == "question" then "question"
                  else "risk" end) as $sev
-              | ((.text? // "") | tostring | gsub("[[:space:]]+"; " ") | .[0:200]) as $text
+              | ((.text? // "") | tostring | gsub("[[:space:]]+"; " ") | .[0:200]
+                 | gsub("(?<m>[\\\\`*_{}\\[\\]()<>#!|~:])"; "\\" + .m)) as $text
               | select($text != "")
               | "- **" + $sev + "** — " + $text
             ' verdict.json > findings.md
 
-            url=$(jq -r '(.one_pager_url? // "") | tostring | gsub("[[:space:]]"; "")' verdict.json)
+            # Keep only unambiguous URL characters: whitespace and anything
+            # that could break out of the Markdown link destination or smuggle
+            # a second link — (), [], <>, quotes, backticks, backslashes — are
+            # dropped BEFORE the origin check below, so the string it approves
+            # is exactly the string that gets posted.
+            url=$(jq -r '(.one_pager_url? // "") | tostring | gsub("[^A-Za-z0-9:/?#@!$&*+,;=._~%-]"; "")' verdict.json)
           fi
 
 
@@ -359,7 +376,7 @@ jobs:
 
           {
             printf '%s' "$title"
-            [ -n "$headline" ] && printf ' — %s' "$headline"
+            [ -n "$headline_md" ] && printf ' — %s' "$headline_md"
             printf '\n\n'
 
             if [ -s findings.md ]; then

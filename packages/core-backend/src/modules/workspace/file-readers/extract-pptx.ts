@@ -6,6 +6,7 @@ import {
   decodeXmlEntities,
   localBlocks,
   localElementBlocks,
+  localName,
   paragraphRunText,
   zipEntryOversize,
 } from './ooxml-text.js';
@@ -14,7 +15,10 @@ import {
  * Extract the text of a `.pptx` (PowerPoint) deck.
  *
  * Slides live at `ppt/slides/slideN.xml`; each is emitted under a `[slide N]`
- * marker line, sorted numerically (slide order in the package). Speaker notes
+ * marker line, in the PRESENTATION's slide order — `ppt/presentation.xml`'s
+ * `<p:sldIdLst>`, resolved through its rels part (see
+ * `slideOrderFromPresentation`) — with numeric filename order as the fallback
+ * when the package has no readable list. Speaker notes
  * follow their slide under `[slide N notes]` when non-empty. A slide's notes
  * part is resolved through the slide's RELATIONSHIPS part (the `_rels` twin of
  * the slide part's own NAME, relationship type ending `notesSlide`) — the
@@ -31,11 +35,13 @@ import {
 export function extractPptx(bytes: Buffer): ExtractResult {
   let slides: Map<number, SlidePart>;
   let notesBySlide: Map<number, string>;
+  let presOrder: string[] | undefined;
   try {
     const zip = new AdmZip(bytes);
     const budget = { remaining: MAX_DOC_TOTAL_BYTES };
     slides = collectNumbered(zip, /^ppt\/slides\/slide(\d+)\.xml$/, budget);
     notesBySlide = collectNotes(zip, slides, budget);
+    presOrder = slideOrderFromPresentation(zip, budget);
   } catch (err) {
     return { ok: false, message: `could not be parsed as a .pptx (${(err as Error).message})` };
   }
@@ -43,19 +49,46 @@ export function extractPptx(bytes: Buffer): ExtractResult {
     return { ok: false, message: 'could not be parsed as a .pptx (no ppt/slides/slideN.xml inside the archive)' };
   }
 
+  // Emission order: the presentation's own slide list when it resolves to
+  // selected parts, numeric filename order otherwise (parts the list does not
+  // name follow it, in filename order). When the LIST orders the deck, the
+  // markers number POSITIONS in it — what a viewer calls slide 1 — because a
+  // reordered deck's part filenames no longer mean anything positional.
+  const byFilename = [...slides.keys()].sort((a, b) => a - b);
+  let order = byFilename;
+  let positional = false;
+  if (presOrder !== undefined) {
+    const numByName = new Map<string, number>();
+    for (const [n, slide] of slides) numByName.set(slide.name, n);
+    const seen = new Set<number>();
+    const fromList: number[] = [];
+    for (const name of presOrder) {
+      const n = numByName.get(name);
+      if (n !== undefined && !seen.has(n)) {
+        seen.add(n);
+        fromList.push(n);
+      }
+    }
+    if (fromList.length > 0) {
+      order = [...fromList, ...byFilename.filter((n) => !seen.has(n))];
+      positional = true;
+    }
+  }
+
   const lines: string[] = [];
   let anyNotes = false;
-  for (const n of [...slides.keys()].sort((a, b) => a - b)) {
-    lines.push(`[slide ${n}]`);
+  order.forEach((n, i) => {
+    const label = positional ? i + 1 : n;
+    lines.push(`[slide ${label}]`);
     lines.push(...paragraphLines(slides.get(n)!.xml));
     const notesXml = notesBySlide.get(n);
     const noteLines = notesXml !== undefined ? paragraphLines(notesXml) : [];
     if (noteLines.length > 0) {
       anyNotes = true;
-      lines.push(`[slide ${n} notes]`);
+      lines.push(`[slide ${label} notes]`);
       lines.push(...noteLines);
     }
-  }
+  });
   return {
     ok: true,
     summary: `${slides.size} slide${slides.size === 1 ? '' : 's'}${anyNotes ? ' + notes' : ''}; layout, images and formatting omitted`,
@@ -111,7 +144,11 @@ function collectNumbered(zip: AdmZip, re: RegExp, budget: ReadBudget): Map<numbe
   const matched: Array<[number, string, AdmZip.IZipEntry]> = [];
   for (const entry of zip.getEntries()) {
     const m = re.exec(entry.entryName);
-    if (m) matched.push([parseInt(m[1], 10), entry.entryName, entry]);
+    if (!m) continue;
+    // A crafted name can spell a number past 2^53 (or Infinity): distinct
+    // parts would collide in the map and one would silently vanish.
+    const n = parseInt(m[1], 10);
+    if (Number.isSafeInteger(n)) matched.push([n, entry.entryName, entry]);
   }
   matched.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
   const out = new Map<number, SlidePart>();
@@ -122,6 +159,57 @@ function collectNumbered(zip: AdmZip, re: RegExp, budget: ReadBudget): Map<numbe
 }
 
 const NOTES_REL_TYPE_SUFFIX = '/notesSlide';
+const SLIDE_REL_TYPE_SUFFIX = '/slide';
+
+/**
+ * The value of the attribute whose LOCAL name is `want` AND that carries a
+ * namespace prefix. `<p:sldId>` holds both its own `id` and the relationship
+ * reference `r:id`; plain local-name matching answers with whichever is
+ * written first, so the relationship id must be the PREFIXED one.
+ */
+function prefixedAttrByLocalName(attributes: Record<string, string>, want: string): string | undefined {
+  for (const [key, value] of Object.entries(attributes)) {
+    if (key === 'xmlns' || key.startsWith('xmlns:')) continue;
+    if (key.includes(':') && localName(key) === want) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Slide part names in PRESENTATION order: `ppt/presentation.xml`'s
+ * `<p:sldIdLst>` entries, each `r:id` resolved through the presentation's own
+ * rels part — or undefined when the package has no readable list. Reordering
+ * slides in PowerPoint rewrites the sldIdLst and leaves the part names alone,
+ * so `slide1.xml` need not be the deck's first slide; the numeric filename
+ * sort is only the fallback for packages without the list.
+ */
+function slideOrderFromPresentation(zip: AdmZip, budget: ReadBudget): string[] | undefined {
+  const rels = zip.getEntry('ppt/_rels/presentation.xml.rels');
+  const pres = zip.getEntry('ppt/presentation.xml');
+  if (!rels || !pres) return undefined;
+  const targetById = new Map<string, string>();
+  for (const rel of localElementBlocks(readEntryBounded(rels, budget), ['Relationship'])) {
+    const type = attrByLocalName(rel.attributes, 'Type');
+    if (type === undefined || !type.endsWith(SLIDE_REL_TYPE_SUFFIX)) continue;
+    const id = attrByLocalName(rel.attributes, 'Id');
+    // Targets are RAW in the rels (see `notesTargetFromRels`) and relative to
+    // the presentation part's directory.
+    const target = attrByLocalName(rel.attributes, 'Target');
+    if (id !== undefined && target !== undefined) {
+      targetById.set(id, resolveRelTarget('ppt', decodeXmlEntities(target)));
+    }
+  }
+  if (targetById.size === 0) return undefined;
+  const list = localBlocks(readEntryBounded(pres, budget), 'sldIdLst')[0];
+  if (list === undefined) return undefined;
+  const order: string[] = [];
+  for (const sld of localElementBlocks(list, ['sldId'])) {
+    const rid = prefixedAttrByLocalName(sld.attributes, 'id');
+    const target = rid !== undefined ? targetById.get(rid) : undefined;
+    if (target !== undefined) order.push(target);
+  }
+  return order.length > 0 ? order : undefined;
+}
 
 /**
  * The OPC relationships part of `partName` — `dir/_rels/base.rels`. Derived

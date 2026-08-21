@@ -26,6 +26,42 @@ import type { FileRendererProps } from './types';
  * View-only: there is no edit mode for a message snapshot. The renderer
  * ignores `onSave` / `onValueChange` / `readOnly`.
  */
+/**
+ * Buffer a response body while refusing to hold more than `maxBytes`: the
+ * moment the received total crosses the cap the read stops, the connection is
+ * cancelled, and `null` comes back. Content-Length alone cannot enforce the
+ * cap — it can be absent (chunked) or understate the body. Falls back to
+ * `arrayBuffer()` (capped after the fact) where the body is not streamable,
+ * e.g. the test DOM's mocked responses.
+ */
+async function readBodyCapped(res: Response, maxBytes: number): Promise<ArrayBuffer | null> {
+  const body = res.body;
+  if (!body) {
+    const buffer = await res.arrayBuffer();
+    return buffer.byteLength > maxBytes ? null : buffer;
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > maxBytes) {
+      reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const merged = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged.buffer;
+}
+
 export function EmailRenderer({ filePath }: FileRendererProps) {
   const { workspaceId } = useWorkspace();
   const [view, setView] = useState<EmailMessageView | null>(null);
@@ -37,10 +73,14 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
     if (!workspaceId) return;
 
     let cancelled = false;
+    // Cleanup ABORTS, not just flags: flipping `cancelled` alone would let an
+    // abandoned view keep downloading and buffering the whole message.
+    const controller = new AbortController();
     (async () => {
       try {
         const res = await authFetch(
           `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}`,
+          { signal: controller.signal },
         );
         if (cancelled) return;
         if (!res.ok) {
@@ -49,14 +89,20 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
         }
         // The size bound belongs BEFORE the buffer, not after it: the parsers
         // check the limit once they hold the bytes, by which point a 300 MB
-        // message has already been allocated in the tab.
+        // message has already been allocated in the tab. The header check is
+        // the cheap early exit; the capped read below is the enforcement —
+        // Content-Length can be absent or understate the body.
         const declared = Number(res.headers?.get('content-length') ?? '');
         if (Number.isFinite(declared) && declared > MAX_EMAIL_BYTES) {
           setError('This email is too large to display.');
           return;
         }
-        const buffer = await res.arrayBuffer();
+        const buffer = await readBodyCapped(res, MAX_EMAIL_BYTES);
         if (cancelled) return;
+        if (buffer === null) {
+          setError('This email is too large to display.');
+          return;
+        }
         const parsed = filePath.toLowerCase().endsWith('.msg')
           ? (await import('./msgMessage')).parseMsgMessage(buffer)
           : await (await import('./emlMessage')).parseEmlMessage(buffer);
@@ -71,6 +117,7 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [workspaceId, filePath]);
 

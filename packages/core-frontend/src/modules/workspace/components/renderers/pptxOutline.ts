@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { elementText, relationshipTarget, xmlElementBlocks } from './xmlReading';
+import { elementText, localElementBlocks, relationshipTarget } from './xmlReading';
 
 /**
  * Client-side `.pptx` → text outline, the browser twin of the backend's
@@ -31,29 +31,30 @@ export interface PptxSlide {
 }
 
 /**
- * Split an XML fragment into its `<{tag}>…</{tag}>` blocks, in document order.
- * A self-closing `<{tag}/>` yields '' — an EMPTY block, which is what an empty
- * `<a:p/>` paragraph means. See {@link xmlElementBlocks} for the non-nesting,
- * quoting and linear-time guarantees.
+ * Split an XML fragment into its `<{tag}>…</{tag}>` blocks by LOCAL name —
+ * the prefix is the document's choice (see {@link localElementBlocks}) — in
+ * document order. A self-closing `<{tag}/>` yields '' — an EMPTY block, which
+ * is what an empty `<a:p/>` paragraph means. See {@link localElementBlocks}
+ * for the non-nesting, quoting and linear-time guarantees.
  */
-function xmlBlocks(xml: string, tag: string): string[] {
-  return xmlElementBlocks(xml, [tag]).map((e) => e.body ?? '');
+function xmlBlocks(xml: string, localTag: string): string[] {
+  return localElementBlocks(xml, [localTag]).map((e) => e.body ?? '');
 }
 
 /**
- * The text of one paragraph: every `<a:t>` run's character content,
- * concatenated with NO separator — runs split mid-word, so any separator
- * would break words apart. A self-closing `<a:t/>` is an empty run and
- * contributes nothing.
+ * The text of one paragraph: every `<a:t>` run's character content (matched
+ * by LOCAL name `t`, whatever prefix the deck bound), concatenated with NO
+ * separator — runs split mid-word, so any separator would break words apart.
+ * A self-closing `<a:t/>` is an empty run and contributes nothing.
  */
 function paragraphRunText(paragraphXml: string): string {
-  return elementText(paragraphXml, 'a:t');
+  return elementText(paragraphXml, 't');
 }
 
 /** Non-empty paragraph texts of one slide/notes part, in document order. */
 function paragraphLines(xml: string): string[] {
   const out: string[] = [];
-  for (const p of xmlBlocks(xml, 'a:p')) {
+  for (const p of xmlBlocks(xml, 'p')) {
     const text = paragraphRunText(p);
     if (text.trim() !== '') out.push(text);
   }
@@ -92,7 +93,12 @@ function readEntryBounded(entry: JSZip.JSZipObject, budget: ReadBudget): Promise
     const stream = (entry as unknown as { internalStream(type: 'uint8array'): EntryStream }).internalStream(
       'uint8array',
     );
-    const chunks: Uint8Array[] = [];
+    // Each chunk is decoded AS IT ARRIVES (streaming decode holds multi-byte
+    // sequences split across chunks) and then dropped. Collecting the chunks
+    // and assembling one big buffer at the end held a near-50 MB part in
+    // memory twice — bytes and copy — before the decoder added the string.
+    const decoder = new TextDecoder();
+    let text = '';
     let entryBytes = 0;
     let settled = false;
     stream
@@ -106,7 +112,7 @@ function readEntryBounded(entry: JSZip.JSZipObject, budget: ReadBudget): Promise
           reject(new Error(`${entry.name} inflates past the extraction bound`));
           return;
         }
-        chunks.push(chunk);
+        text += decoder.decode(chunk, { stream: true });
       })
       .on('error', (e) => {
         if (settled) return;
@@ -116,13 +122,7 @@ function readEntryBounded(entry: JSZip.JSZipObject, budget: ReadBudget): Promise
       .on('end', () => {
         if (settled) return;
         settled = true;
-        const all = new Uint8Array(entryBytes);
-        let off = 0;
-        for (const c of chunks) {
-          all.set(c, off);
-          off += c.length;
-        }
-        resolve(new TextDecoder().decode(all));
+        resolve(text + decoder.decode());
       })
       .resume();
   });
@@ -210,7 +210,13 @@ export async function extractPptxOutline(bytes: ArrayBuffer | Uint8Array): Promi
     const slideEntries: Array<[number, string, JSZip.JSZipObject]> = [];
     zip.forEach((entryName, entry) => {
       const m = /^ppt\/slides\/slide(\d+)\.xml$/.exec(entryName);
-      if (m) slideEntries.push([parseInt(m[1], 10), entryName, entry]);
+      if (!m) return;
+      const n = parseInt(m[1], 10);
+      // A crafted name can spell more digits than a double holds exactly —
+      // `parseInt` then rounds DISTINCT names to the same number (or to
+      // Infinity), silently dropping a part or rendering "Slide Infinity".
+      // No real deck numbers slides past 2^53; such a name is not a slide.
+      if (Number.isSafeInteger(n)) slideEntries.push([n, entryName, entry]);
     });
     // `slide1.xml` and `slide01.xml` both parse to number 1 — one slide per
     // NUMBER, or the outline would emit two slides with the same number and

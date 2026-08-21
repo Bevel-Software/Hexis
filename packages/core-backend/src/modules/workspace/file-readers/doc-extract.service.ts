@@ -81,14 +81,19 @@ export class DocExtractService {
     const running = this.inFlight.get(key);
     const result = await (running ??
       (() => {
-        const started = (async (): Promise<ExtractResult> => extractFn(bytes))().finally(() =>
-          this.inFlight.delete(key),
-        );
+        // The cache write stays INSIDE the shared promise: were the entry
+        // dropped as soon as parsing settled, a read arriving during the
+        // write would miss both the cache and the in-flight map — and parse
+        // the same document again.
+        const started = (async (): Promise<ExtractResult> => {
+          const res = await extractFn(bytes);
+          if (res.ok) await this.cache.put(key, { summary: res.summary, text: res.text });
+          return res;
+        })().finally(() => this.inFlight.delete(key));
         this.inFlight.set(key, started);
         return started;
       })());
     if (!result.ok) return result;
-    await this.cache.put(key, { summary: result.summary, text: result.text });
     return { ok: true, marker: extractionMarker(path, result.summary), text: result.text };
   }
 

@@ -191,6 +191,10 @@ export interface XmlElementBlock {
   attributes: Record<string, string>;
   /** The body between `>` and the matching close tag; undefined when self-closing. */
   body: string | undefined;
+  /** Index of the element's opening `<` in the scanned string. */
+  start: number;
+  /** One past the element's final `>` (as far as the parse got, for a block cut short by the depth cap). */
+  end: number;
 }
 
 /**
@@ -206,16 +210,21 @@ export interface XmlElementBlock {
  * the element still open, whose body is taken as far as the parse got, so a
  * paragraph holding real text before the crafted tail still yields that text.
  */
-const MAX_ELEMENT_DEPTH = 1_000;
+export const MAX_ELEMENT_DEPTH = 1_000;
 
-/** Thrown to stop the parse at {@link MAX_ELEMENT_DEPTH}; never leaves this module. */
-const TOO_DEEP = Symbol('too deep');
+/**
+ * Thrown to stop the parse at {@link MAX_ELEMENT_DEPTH}; never escapes an
+ * extractor (also shared by `email-text.ts`'s HTML strip).
+ */
+export const TOO_DEEP = Symbol('too deep');
 
 /** The match currently being collected by {@link xmlElementBlocks}. */
 interface OpenMatch {
   name: string;
   attributes: Record<string, string>;
   depth: number;
+  /** Index of the open tag's `<`. */
+  start: number;
   /** Index of the `>` that ends the open tag — the body starts one past it. */
   tagEnd: number;
 }
@@ -277,6 +286,27 @@ export function localElementBlocks(xml: string, localNames: readonly string[]): 
   return xmlElementBlocks(xml, wanted, (name) => wanted.has(localName(name)));
 }
 
+/**
+ * `xml` with every element named by `localNames` (matched on its LOCAL name)
+ * removed WHOLE — open tag through matching close tag — by the parsed block
+ * boundaries. The structural counterpart to string replacement, which deleted
+ * every occurrence of a block's serialized BODY: a slide whose visible text
+ * happened to serialize identically to its notes lost that text too.
+ */
+export function removeLocalElements(xml: string, localNames: readonly string[]): string {
+  const blocks = localElementBlocks(xml, localNames);
+  if (blocks.length === 0) return xml;
+  let out = '';
+  let at = 0;
+  // Blocks arrive in document order and never overlap (the scan does not
+  // descend into a match); the max() is belt and braces.
+  for (const { start, end } of blocks) {
+    out += xml.slice(at, Math.max(at, start));
+    at = Math.max(at, end);
+  }
+  return out + xml.slice(at);
+}
+
 export function xmlElementBlocks(
   xml: string,
   names: Iterable<string>,
@@ -293,7 +323,7 @@ export function xmlElementBlocks(
       onopentag(name, attributes) {
         depth++;
         if (open === null && isWanted(name)) {
-          open = { name, attributes, depth, tagEnd: parser.endIndex };
+          open = { name, attributes, depth, start: parser.startIndex, tagEnd: parser.endIndex };
         }
         if (depth > MAX_ELEMENT_DEPTH) throw TOO_DEEP;
       },
@@ -307,6 +337,8 @@ export function xmlElementBlocks(
             name,
             attributes: open.attributes,
             body: selfClosing ? undefined : xml.slice(open.tagEnd + 1, parser.startIndex),
+            start: open.start,
+            end: parser.endIndex + 1,
           });
           open = null;
         }
@@ -330,6 +362,8 @@ export function xmlElementBlocks(
         name: pending.name,
         attributes: pending.attributes,
         body: xml.slice(pending.tagEnd + 1, parser.startIndex),
+        start: pending.start,
+        end: parser.startIndex,
       });
     }
     parser.reset(); // drop the stack this part built before giving up on it
@@ -348,6 +382,7 @@ export function xmlElementBlocks(
 export function paragraphRunText(paragraphXml: string, localTag: string): string {
   let out = '';
   let inRun = 0;
+  let inCdata = false;
   let depth = 0;
   const parser = new Parser(
     {
@@ -359,15 +394,27 @@ export function paragraphRunText(paragraphXml: string, localTag: string): string
       // TEXT, never the raw body: a run's body is markup as well as characters
       // when the part is malformed enough to nest runs, and slicing it wholesale
       // put `<w:t xml:space="preserve">` into the document's extracted text.
+      //
+      // Entities decode through the module's STRICT decoder, not the parser's:
+      // the parser turns a numeric reference outside XML's `Char` production
+      // (`&#0;`, a lone surrogate) into replacement/control characters, where
+      // `decodeXmlEntities` keeps such a reference literal. CDATA text is
+      // already literal and must not decode at all.
       ontext(text) {
-        if (inRun > 0) out += text;
+        if (inRun > 0) out += inCdata ? text : decodeXmlEntities(text);
+      },
+      oncdatastart() {
+        inCdata = true;
+      },
+      oncdataend() {
+        inCdata = false;
       },
       onclosetag(name) {
         if (localName(name) === localTag && inRun > 0) inRun--;
         depth--;
       },
     },
-    { xmlMode: true, decodeEntities: true },
+    { xmlMode: true, decodeEntities: false },
   );
   try {
     parser.write(paragraphXml);

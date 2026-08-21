@@ -22,6 +22,7 @@
  */
 import type { ExtractedDoc } from './doc-extract.types.js';
 import { Parser } from 'htmlparser2';
+import { MAX_ELEMENT_DEPTH, TOO_DEEP } from './ooxml-text.js';
 
 /** One listed attachment. Size/type are printed only when known. */
 export interface EmailAttachment {
@@ -83,16 +84,9 @@ const BLOCK_TAGS = new Set([
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
 ]);
 
-/**
- * How deep the element stack may go before the strip gives up on the rest of
- * the body. Mail nests a few dozen levels even at its most table-happy; a
- * crafted body can nest as deep as it has bytes, and the parser holds a stack
- * entry per open element. What was read before the bound is kept.
- */
-const MAX_ELEMENT_DEPTH = 1_000;
-
-/** Thrown to stop the parse at {@link MAX_ELEMENT_DEPTH}; never leaves this module. */
-const TOO_DEEP = Symbol('too deep');
+// Depth bound shared with the OOXML/ODF extractors (`ooxml-text.ts`): mail
+// nests a few dozen levels even at its most table-happy; a crafted body can
+// nest as deep as it has bytes. What was read before the bound is kept.
 
 export function htmlToEmailText(html: string): string {
   let s = '';
@@ -142,23 +136,30 @@ export function htmlToEmailText(html: string): string {
   return out.join('\n');
 }
 
-/** `name (mimeType, N bytes)` with the parenthesis dropped when nothing is known. */
+/** `name (mimeType, N bytes)` with the parenthesis dropped when nothing is known.
+ * CR/LF in the metadata are shown as escapes rather than obeyed, so each
+ * attachment stays on ONE line and grep line numbers hold. */
 function attachmentLine(a: EmailAttachment): string {
   const details = [a.mimeType, a.sizeBytes !== undefined ? `${a.sizeBytes} bytes` : undefined]
     .filter((d): d is string => d !== undefined && d !== '')
     .join(', ');
-  return details === '' ? a.name : `${a.name} (${details})`;
+  const line = details === '' ? a.name : `${a.name} (${details})`;
+  return line.replace(/[\r\n]/g, (c) => (c === '\r' ? '\\r' : '\\n'));
 }
 
 /** Render the model into the marker summary + extraction text (see module doc). */
 export function emailExtraction(model: EmailModel): ExtractedDoc {
   const header: string[] = [];
-  if (model.from !== undefined) header.push(`[from] ${model.from}`);
-  if (model.to !== undefined) header.push(`[to] ${model.to}`);
-  if (model.cc !== undefined) header.push(`[cc] ${model.cc}`);
-  if (model.bcc !== undefined) header.push(`[bcc] ${model.bcc}`);
-  if (model.subject !== undefined) header.push(`[subject] ${model.subject}`);
-  if (model.date !== undefined) header.push(`[date] ${model.date}`);
+  // Absent OR blank fields are omitted — a header marker is never printed empty.
+  const pushHeader = (label: string, value: string | undefined): void => {
+    if (value !== undefined && value.trim() !== '') header.push(`[${label}] ${value}`);
+  };
+  pushHeader('from', model.from);
+  pushHeader('to', model.to);
+  pushHeader('cc', model.cc);
+  pushHeader('bcc', model.bcc);
+  pushHeader('subject', model.subject);
+  pushHeader('date', model.date);
 
   const sections: string[] = [];
   if (header.length > 0) sections.push(header.join('\n'));

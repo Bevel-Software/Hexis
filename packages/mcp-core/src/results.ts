@@ -41,28 +41,40 @@ export function mcpImageResult(data: string, mimeType: string, note?: string): M
 }
 
 export function isMcpImageResult(value: unknown): value is McpImageResult {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    (value as { kind?: unknown }).kind === MCP_IMAGE_RESULT_KIND &&
-    typeof (value as { data?: unknown }).data === 'string' &&
-    typeof (value as { mimeType?: unknown }).mimeType === 'string' &&
-    // A sentinel may have crossed a transport, so its shape is not this
-    // process's to assume: a non-string `note` would be accepted here and then
-    // emitted as a text block whose `text` is not a string — an invalid block.
-    ['undefined', 'string'].includes(typeof (value as { note?: unknown }).note)
-  );
+  if (typeof value !== 'object' || value === null) return false;
+  // The field reads are defensive: this guard runs on every candidate value
+  // (toCallToolResult, the scrub's probe), and a candidate can carry a
+  // THROWING getter on any of these names. Answering "not a sentinel" is the
+  // safe verdict — the value then rides the ordinary serialization fallback
+  // instead of turning a completed call into a handler failure.
+  try {
+    return (
+      (value as { kind?: unknown }).kind === MCP_IMAGE_RESULT_KIND &&
+      typeof (value as { data?: unknown }).data === 'string' &&
+      typeof (value as { mimeType?: unknown }).mimeType === 'string' &&
+      // A sentinel may have crossed a transport, so its shape is not this
+      // process's to assume: a non-string `note` would be accepted here and then
+      // emitted as a text block whose `text` is not a string — an invalid block.
+      ['undefined', 'string'].includes(typeof (value as { note?: unknown }).note)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** A spec-shaped MCP image content block (`{type:'image', data, mimeType}`). */
 function isMcpImageBlockObject(value: unknown): value is { type: 'image'; data: string; mimeType: string } {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    (value as { type?: unknown }).type === 'image' &&
-    typeof (value as { data?: unknown }).data === 'string' &&
-    typeof (value as { mimeType?: unknown }).mimeType === 'string'
-  );
+  if (typeof value !== 'object' || value === null) return false;
+  // Defensive like isMcpImageResult: a throwing getter means "not a block".
+  try {
+    return (
+      (value as { type?: unknown }).type === 'image' &&
+      typeof (value as { data?: unknown }).data === 'string' &&
+      typeof (value as { mimeType?: unknown }).mimeType === 'string'
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -247,8 +259,14 @@ export function toCallToolResult(value: unknown): CallToolResult {
  * carries a hook the walk did not already resolve. Best-effort by design:
  * chain code that EXTRACTS the base64 string itself escapes the walk, and then
  * the ordinary max_output_size spill bounds the damage.
+ *
+ * `rootKey` is the JSON property name the SCRUBBED value will be serialized
+ * under afterwards — '' (the default) when it is stringified standalone, the
+ * envelope key (e.g. `call_tool_chain`'s 'result') when a caller embeds it —
+ * so a key-sensitive root `toJSON` answers this scrub with the same view the
+ * transcript serializer will ask it for.
  */
-export function omitImagePayloads(value: unknown): unknown {
+export function omitImagePayloads(value: unknown, rootKey = ''): unknown {
   const omittedNote = (what: string): { image_omitted: true; note: string } => ({
     image_omitted: true,
     note:
@@ -333,6 +351,18 @@ export function omitImagePayloads(value: unknown): unknown {
   // to the transcript serializer that runs afterwards, which is precisely the
   // divergence the scrub exists to close.
   //
+  // JSON.stringify UNBOXES a primitive wrapper object (`new String(…)` /
+  // `new Number(…)` / `new Boolean(…)`) to its primitive before serializing.
+  // A boxed VIEW must get the same treatment: rebuilding `new String('abc')`
+  // from its enumerable keys would emit {"0":"a","1":"b","2":"c"} where JSON
+  // emits "abc".
+  const unboxed = (view: unknown): unknown => {
+    if (view instanceof String) return String(view);
+    if (view instanceof Number) return Number(view);
+    if (view instanceof Boolean) return view.valueOf();
+    return view;
+  };
+
   // Cached per (object, key), not per object: the same object reachable under
   // two different keys genuinely HAS two views, and one cache slot would let
   // the second site emit the first site's answer. Within one (object, key)
@@ -498,7 +528,9 @@ export function omitImagePayloads(value: unknown): unknown {
     // return a payload this scrub never inspected.
     const hook = userToJson(v);
     if (hook !== undefined) {
-      const view = jsonView(v, key);
+      // Unboxing first mirrors stringify's own order: a hook returning a boxed
+      // primitive serializes as that primitive, never as a record of index keys.
+      const view = unboxed(jsonView(v, key));
       // The view can BE the image shape — a toJSON() returning a sentinel or
       // image block directly. Scrub it here: falling through would build a
       // record frame from the view and copy its base64 `data` field, key by
@@ -552,9 +584,11 @@ export function omitImagePayloads(value: unknown): unknown {
     };
   };
 
-  // '' is the root key JSON.stringify uses: it serializes through a synthetic
-  // wrapper `{ '': value }`, so a root `toJSON` is called with the empty string.
-  const seed = resolve(value, '');
+  // '' is the root key JSON.stringify uses for a standalone value (it
+  // serializes through a synthetic wrapper `{ '': value }`); a caller that
+  // embeds the scrubbed value under an envelope key passes that key instead
+  // (see `rootKey` above).
+  const seed = resolve(value, rootKey);
   if ('leaf' in seed) return seed.leaf;
   const stack: Frame[] = [seed.frame];
   while (stack.length > 0) {

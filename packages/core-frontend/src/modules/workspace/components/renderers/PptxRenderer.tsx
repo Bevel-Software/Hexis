@@ -25,6 +25,61 @@ import type { FileRendererProps } from './types';
  * View-only: there is no edit mode for binary office formats. The renderer
  * ignores `onSave` / `onValueChange` / `readOnly`.
  */
+
+/**
+ * Compressed-archive bound. The parser caps what it DECOMPRESSES (see
+ * `pptxOutline.ts`), but those caps only run after the whole response is in
+ * memory — so the download itself is bounded too, or an oversized upload
+ * could exhaust the tab before the parser ever saw a byte. Matches the deck's
+ * 200 MB aggregate inflation budget; a media-heavy deck past it is
+ * download-only.
+ */
+const MAX_ARCHIVE_BYTES = 200 * 1024 * 1024;
+
+/**
+ * DOM bound per slide. The parser caps BYTES, not element counts — a crafted
+ * slide can spell millions of one-character paragraphs inside its 50 MB, and
+ * every rendered line is a DOM node on the reader's main thread. Far above
+ * any real slide (tens of lines); past it the outline truncates with a
+ * notice.
+ */
+const MAX_LINES_PER_SLIDE = 500;
+
+/**
+ * `res`'s bytes, or null once they exceed {@link MAX_ARCHIVE_BYTES}. A
+ * declared Content-Length over the cap is rejected before anything is
+ * buffered; a chunked/undeclared body is counted as it streams and abandoned
+ * the moment it crosses the cap, never held whole first.
+ */
+async function readArchiveBounded(res: Response): Promise<ArrayBuffer | Uint8Array | null> {
+  if (Number(res.headers?.get('content-length')) > MAX_ARCHIVE_BYTES) return null;
+  if (!res.body) {
+    // No stream on this response (test double) — buffer, then bound.
+    const buf = await res.arrayBuffer();
+    return buf.byteLength > MAX_ARCHIVE_BYTES ? null : buf;
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > MAX_ARCHIVE_BYTES) {
+      await reader.cancel(); // stop the transfer — nothing further is wanted
+      return null;
+    }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    all.set(c, off);
+    off += c.length;
+  }
+  return all;
+}
+
 export function PptxRenderer({ filePath }: FileRendererProps) {
   const { workspaceId } = useWorkspace();
   const [slides, setSlides] = useState<PptxSlide[] | null>(null);
@@ -46,8 +101,12 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
           setError(`Failed to load presentation (HTTP ${res.status})`);
           return;
         }
-        const buffer = await res.arrayBuffer();
+        const buffer = await readArchiveBounded(res);
         if (cancelled) return;
+        if (buffer === null) {
+          setError('This presentation is too large to preview — download it to view the slides.');
+          return;
+        }
         const outline = await extractPptxOutline(buffer);
         if (cancelled) return;
         setSlides(outline);
@@ -103,26 +162,43 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
           {slide.paragraphs.length === 0 && slide.notes.length === 0 ? (
             <p className="text-detail italic text-ink-faint">No text on this slide.</p>
           ) : (
-            slide.paragraphs.map((text, i) => (
-              // `whitespace-pre-wrap`: the extraction keeps the deck's own runs of
-              // spaces, and collapsing them here made the outline disagree with what
-              // `read_file` returns. `break-words` keeps a long token from widening
-              // the page.
-              <p key={i} className="mb-1 whitespace-pre-wrap break-words text-ui text-ink">
-                {text}
-              </p>
-            ))
+            <>
+              {slide.paragraphs.slice(0, MAX_LINES_PER_SLIDE).map((text, i) => (
+                // `whitespace-pre-wrap`: the extraction keeps the deck's own runs of
+                // spaces, and collapsing them here made the outline disagree with what
+                // `read_file` returns. `break-words` keeps a long token from widening
+                // the page.
+                <p key={i} className="mb-1 whitespace-pre-wrap break-words text-ui text-ink">
+                  {text}
+                </p>
+              ))}
+              {slide.paragraphs.length > MAX_LINES_PER_SLIDE && (
+                <p className="mb-1 text-detail italic text-ink-faint">
+                  … {slide.paragraphs.length - MAX_LINES_PER_SLIDE} more paragraphs not shown —
+                  download the file to read them.
+                </p>
+              )}
+            </>
           )}
           {slide.notes.length > 0 && (
             <div className="mt-2 border-l-2 border-line pl-3">
               <div className="mb-1 text-meta font-medium uppercase tracking-wide text-ink-faint">
                 Notes
               </div>
-              {slide.notes.map((text, i) => (
-                <p key={i} className="mb-1 text-detail text-ink-muted">
+              {slide.notes.slice(0, MAX_LINES_PER_SLIDE).map((text, i) => (
+                // Same whitespace/wrapping contract as the slide paragraphs above:
+                // notes keep their runs of spaces too, and a long token must not
+                // widen the prose column.
+                <p key={i} className="mb-1 whitespace-pre-wrap break-words text-detail text-ink-muted">
                   {text}
                 </p>
               ))}
+              {slide.notes.length > MAX_LINES_PER_SLIDE && (
+                <p className="mb-1 text-detail italic text-ink-faint">
+                  … {slide.notes.length - MAX_LINES_PER_SLIDE} more note paragraphs not shown —
+                  download the file to read them.
+                </p>
+              )}
             </div>
           )}
         </section>

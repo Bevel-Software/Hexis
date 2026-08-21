@@ -1,6 +1,6 @@
 import type { ExtractResult } from './doc-extract.types.js';
 import { odfParagraphLines, readOdfContentXml } from './odf-text.js';
-import { localBlocks, localElementBlocks } from './ooxml-text.js';
+import { localBlocks, localElementBlocks, removeLocalElements } from './ooxml-text.js';
 
 /**
  * Extract the text of a `.odp` (OpenDocument Presentation) deck.
@@ -29,8 +29,10 @@ export function extractOdp(bytes: Buffer): ExtractResult {
     // resembled `<presentation:notes>` used to be emitted as real speaker notes,
     // and a deck binding the presentation namespace to another prefix had none.
     const notesXml = localBlocks(page, 'notes')[0] ?? '';
-    // The slide's own text is everything the notes block does not cover.
-    const slideXml = notesXml === '' ? page : page.split(notesXml).join('');
+    // The slide's own text is the page with the notes ELEMENTS removed by
+    // their parsed boundaries — global string replacement of the notes BODY
+    // also deleted slide text that happened to serialize identically to it.
+    const slideXml = removeLocalElements(page, ['notes']);
     lines.push(`[slide ${i + 1}]`);
     lines.push(...odfParagraphLines(slideXml));
     const noteLines = odfParagraphLines(notesXml);

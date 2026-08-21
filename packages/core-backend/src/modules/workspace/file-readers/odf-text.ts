@@ -28,19 +28,40 @@ import { attrByLocalName, localElementBlocks, localName, zipEntryOversize } from
  * Read through the parser, so entities decode, CDATA sections are the text
  * they hold rather than markup, and a comment is not paragraph content.
  */
+/**
+ * Cap on the characters the whitespace ELEMENTS may add to ONE paragraph.
+ * Each `<text:s text:c="N"/>` is clamped on its own below, but nothing else
+ * bounds how many such elements a paragraph may hold — a content.xml well
+ * under the 50 MB part limit could still expand to gigabytes of spaces. The
+ * budget caps the SUM per paragraph; real layout whitespace is nowhere near it.
+ */
+const MAX_PARAGRAPH_WHITESPACE_CHARS = 10_000;
+
 export function odfParagraphText(paragraphXml: string): string {
   let out = '';
+  let whitespaceBudget = MAX_PARAGRAPH_WHITESPACE_CHARS;
   const parser = new Parser(
     {
       onopentag(name, attributes) {
         const local = localName(name);
-        if (local === 'tab') out += '\t';
-        else if (local === 'line-break') out += '\n';
-        else if (local === 's') {
+        if (local === 'tab') {
+          if (whitespaceBudget > 0) {
+            out += '\t';
+            whitespaceBudget--;
+          }
+        } else if (local === 'line-break') {
+          if (whitespaceBudget > 0) {
+            out += '\n';
+            whitespaceBudget--;
+          }
+        } else if (local === 's') {
           const raw = attrByLocalName(attributes, 'c');
           const count = raw !== undefined ? parseInt(raw, 10) : 1;
-          // Bounded defensively — a corrupt attribute must not balloon the extraction.
-          out += ' '.repeat(Number.isFinite(count) ? Math.min(Math.max(count, 0), 1000) : 1);
+          // Bounded defensively — a corrupt attribute must not balloon the
+          // extraction — and again by the per-paragraph budget above.
+          const spaces = Math.min(Number.isFinite(count) ? Math.min(Math.max(count, 0), 1000) : 1, whitespaceBudget);
+          out += ' '.repeat(spaces);
+          whitespaceBudget -= spaces;
         }
       },
       ontext(text) {

@@ -61,27 +61,26 @@ function tableBlocks(xml: string): Array<{ name: string; xml: string }> {
   for (const table of localElementBlocks(xml, ['table'])) {
     const raw = attrByLocalName(table.attributes, 'name');
     out.push({
-      name: raw ? decodeXmlEntities(raw) : `Sheet${out.length + 1}`,
+      // Control separators become spaces: a name holding an encoded newline
+      // or tab (`&#10;`) would corrupt the `[sheet: …]` marker's own line and
+      // the TSV structure under it.
+      name: raw ? decodeXmlEntities(raw).replace(/[\t\n\r]+/g, ' ') : `Sheet${out.length + 1}`,
       xml: table.body ?? '',
     });
   }
   return out;
 }
 
-/** One parsed (not yet repeat-expanded) unit: the content + its repeat count. */
-interface Repeated<T> {
-  value: T;
-  repeat: number;
-}
-
 /**
- * Expand a sheet's rows with BOUNDED repeat handling:
+ * Expand a sheet's rows with BOUNDED repeat handling, INCREMENTALLY — a row's
+ * expansion lands in the capped output as it parses, so the caps bound memory
+ * as well as output (materializing every row's cells before consulting the
+ * cap let an accepted ODS allocate its whole expansion first):
  *
- *  1. parse every row into its trailing-trimmed cell texts (columns already
- *     capped, per row),
- *  2. TRIM trailing all-empty rows — before their `table:number-rows-repeated`
- *     is ever applied, so a million-row empty tail simply disappears,
- *  3. expand the remaining row repeats up to the row cap.
+ *  - all-empty rows are buffered as a COUNT (with their
+ *    `table:number-rows-repeated` applied) and flushed only when a non-empty
+ *    row follows, so a million-row empty tail simply disappears,
+ *  - once the row cap is hit, the remaining rows are never parsed at all.
  *
  * `truncated` lists what the caps cut (mirrors the xlsx extractor's note).
  */
@@ -90,27 +89,28 @@ function expandRows(tableXml: string): { rows: string[][]; truncated: string[] }
   // still a row, a `/>` inside a quoted attribute value is not a delimiter,
   // and an UNCLOSED row costs one scan of the sheet rather than one per opener
   // (see `xmlElementBlocks`).
-  const parsed: Repeated<string[]>[] = [];
+  const rows: string[][] = [];
+  let pendingEmpty = 0;
+  let rowsTruncated = false;
   let colsTruncated = false;
   for (const row of localElementBlocks(tableXml, ['table-row'])) {
+    const repeat = repeatCount(attrByLocalName(row.attributes, 'number-rows-repeated'));
     const cells = expandCells(row.body ?? '');
-    if (cells.truncated) colsTruncated = true;
-    parsed.push({ value: cells.cells, repeat: repeatCount(attrByLocalName(row.attributes, 'number-rows-repeated')) });
-  }
-  // Trailing empty rows: dropped with their repeats (grid padding, not data).
-  while (parsed.length > 0 && parsed[parsed.length - 1].value.length === 0) parsed.pop();
-
-  const rows: string[][] = [];
-  let rowsTruncated = false;
-  for (const { value, repeat } of parsed) {
-    for (let i = 0; i < repeat; i++) {
-      if (rows.length >= MAX_ROWS_PER_SHEET) {
-        rowsTruncated = true;
-        break;
-      }
-      rows.push(value);
+    if (cells.cells.length === 0) {
+      // Empty rows are interior padding until a non-empty row proves it —
+      // trailing ones are dropped with their repeats (grid padding, not data).
+      pendingEmpty += repeat;
+      continue;
     }
-    if (rowsTruncated) break;
+    if (cells.truncated) colsTruncated = true;
+    for (; pendingEmpty > 0 && rows.length < MAX_ROWS_PER_SHEET; pendingEmpty--) rows.push([]);
+    let i = 0;
+    for (; i < repeat && rows.length < MAX_ROWS_PER_SHEET; i++) rows.push(cells.cells);
+    if (pendingEmpty > 0 || i < repeat) {
+      // The cap cut real content (a sheet that merely FILLS it is not truncated).
+      rowsTruncated = true;
+      break;
+    }
   }
   const truncated: string[] = [];
   if (rowsTruncated) truncated.push(`first ${MAX_ROWS_PER_SHEET} rows`);
@@ -120,13 +120,17 @@ function expandRows(tableXml: string): { rows: string[][]; truncated: string[] }
 
 /**
  * One row's cell texts: `<table:table-cell>` / `<table:covered-table-cell>`
- * in order, trailing EMPTY cells trimmed before `table:number-columns-repeated`
- * is applied, then repeats expanded up to the column cap.
+ * in order, expanded INCREMENTALLY like the rows above — trailing EMPTY cells
+ * are buffered as a count (their `table:number-columns-repeated` never
+ * expands) and the parse stops at the column cap.
  */
 function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
   // Same quote-aware scanner as the row walk above.
-  const parsed: Repeated<string>[] = [];
+  const cells: string[] = [];
+  let pendingEmpty = 0;
+  let truncated = false;
   for (const cell of localElementBlocks(rowXml, ['table-cell', 'covered-table-cell'])) {
+    const repeat = repeatCount(attrByLocalName(cell.attributes, 'number-columns-repeated'));
     // Covered cells carry no own text anyway. Element-produced newlines/tabs
     // INSIDE a cell (<text:line-break/>, <text:tab/>) become single spaces:
     // the extraction's contract is one row per line with tab-separated cells,
@@ -135,27 +139,27 @@ function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
       .map(odfParagraphText)
       .join(' ')
       .replace(/[\t\n\r]+/g, ' ');
-    parsed.push({ value: text, repeat: repeatCount(attrByLocalName(cell.attributes, 'number-columns-repeated')) });
-  }
-  while (parsed.length > 0 && parsed[parsed.length - 1].value === '') parsed.pop();
-
-  const cells: string[] = [];
-  let truncated = false;
-  for (const { value, repeat } of parsed) {
-    for (let i = 0; i < repeat; i++) {
-      if (cells.length >= MAX_COLS_PER_SHEET) {
-        truncated = true;
-        break;
-      }
-      cells.push(value);
+    if (text === '') {
+      pendingEmpty += repeat;
+      continue;
     }
-    if (truncated) break;
+    for (; pendingEmpty > 0 && cells.length < MAX_COLS_PER_SHEET; pendingEmpty--) cells.push('');
+    let i = 0;
+    for (; i < repeat && cells.length < MAX_COLS_PER_SHEET; i++) cells.push(text);
+    if (pendingEmpty > 0 || i < repeat) {
+      // The cap cut real content (a row that merely FILLS it is not truncated).
+      truncated = true;
+      break;
+    }
   }
   return { cells, truncated };
 }
 
 /** A `…-repeated="N"` attribute value, clamped to a sane positive integer. */
 function repeatCount(raw: string | undefined): number {
-  const n = raw !== undefined ? parseInt(raw, 10) : 1;
+  // Decoded first: the block scanner hands attribute values RAW, and a repeat
+  // legally written with character references (`&#49;&#48;`) must count as
+  // 10, not silently fall back to 1.
+  const n = raw !== undefined ? parseInt(decodeXmlEntities(raw), 10) : 1;
   return Number.isFinite(n) && n >= 1 ? n : 1;
 }

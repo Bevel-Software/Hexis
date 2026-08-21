@@ -586,7 +586,7 @@ describe('office documents and PDFs', () => {
       note?: string;
     };
     expect(first.matches).toHaveLength(20);
-    expect(first.note).toContain('2 office document(s)/PDF(s) were not searched');
+    expect(first.note).toContain('2 document(s) (office/PDF/email files) were not searched');
     // Second run: 20 are cached (free), budget covers the remaining 2.
     const second = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle-' })).json()) as {
       matches: unknown[];

@@ -1,5 +1,5 @@
 import type { ExtractResult } from './doc-extract.types.js';
-import { localBlocks } from './ooxml-text.js';
+import { localBlocks, removeLocalElements } from './ooxml-text.js';
 import { odfParagraphBlocks, odfParagraphText, readOdfContentXml } from './odf-text.js';
 
 /**
@@ -28,7 +28,13 @@ export function extractOdt(bytes: Buffer): ExtractResult {
   // another prefix had no body at all.
   const body = localBlocks(content.xml, 'text')[0] ?? content.xml;
 
-  const lines = odfParagraphBlocks(body).map(odfParagraphText);
+  // Tracked-change bookkeeping is not body text: `<text:tracked-changes>`
+  // stores every DELETION's content as ordinary paragraphs, so the flat scan
+  // below would read deleted text back in as document lines. Removed by its
+  // parsed element boundaries before the paragraph walk.
+  const visible = removeLocalElements(body, ['tracked-changes']);
+
+  const lines = odfParagraphBlocks(visible).map(odfParagraphText);
   const paragraphs = lines.length;
   while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
 

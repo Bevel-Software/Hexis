@@ -14,9 +14,10 @@ const MAX_COLS_PER_SHEET = 200;
 
 /**
  * Extract a `.xlsx` (Excel) workbook via SheetJS: per sheet a `[sheet: Name]`
- * marker, then the rows as tab-separated values (`sheet_to_csv` with a tab
- * field separator — SheetJS renders each cell's FORMATTED value, e.g. dates as
- * dates), with trailing empty rows trimmed.
+ * marker, then the rows as tab-separated values (each cell's FORMATTED value,
+ * e.g. dates as dates; tabs/newlines INSIDE a cell become single spaces so a
+ * cell's line break never reads as a row boundary), with trailing empty rows
+ * trimmed.
  */
 export function extractXlsx(bytes: Buffer): ExtractResult {
   // A real .xlsx is a zip. Check the signature OURSELVES because SheetJS
@@ -73,7 +74,14 @@ export function extractXlsx(bytes: Buffer): ExtractResult {
       lines.push(`[sheet truncated to the ${truncated.join(' and ')}]`);
       ws['!ref'] = XLSX.utils.encode_range(range);
     }
-    const rows = XLSX.utils.sheet_to_csv(ws, { FS: '\t' }).split(/\r?\n/);
+    // Rows via sheet_to_json (formatted cell text, one array per worksheet
+    // row): sheet_to_csv CSV-quotes a cell containing a line break, so
+    // splitting its output on newlines turned ONE worksheet row into several
+    // extracted rows. Cell-internal tabs/newlines become single spaces
+    // instead — the same one-line-per-row contract as the ods extractor.
+    const rows = XLSX.utils
+      .sheet_to_json<unknown[]>(ws, { header: 1, raw: false, defval: '', blankrows: true })
+      .map((cells) => cells.map((c) => String(c).replace(/[\t\n\r]+/g, ' ')).join('\t'));
     while (rows.length > 0 && rows[rows.length - 1].replace(/\t/g, '') === '') rows.pop();
     lines.push(...rows);
   }

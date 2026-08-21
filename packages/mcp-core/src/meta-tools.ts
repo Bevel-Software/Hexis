@@ -157,7 +157,7 @@ export async function dispatchMetaTool(
     // where base64 is context flood, not a picture. A chained `read_file` of an
     // image comes back as an omitted-image note instead (see omitImagePayloads);
     // the direct tool call is the sanctioned way to SEE an image.
-    const result = omitImagePayloads(rawResult);
+    const result = omitImagePayloads(rawResult, 'result');
     // Bound the payload: an external session has no ambient workspace, so an
     // oversized result spills to the shared store and we return only a ref —
     // parity with the in-process agent's `call_tool_chain`.

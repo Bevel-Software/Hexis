@@ -174,6 +174,10 @@ export function isBinaryFile(filePath: string): boolean {
 const VIEW_ONLY_EXTENSIONS = new Set([
   // No preview at all (LegacyOfficeRenderer) or a read-only parsed view.
   '.doc', '.ppt', '.xls', '.odt', '.odp', '.ods', '.eml', '.msg',
+  // No dedicated route: a .zip lands on the TEXT FALLBACK, whose buffer is
+  // undecodable archive bytes. The surface can technically edit, but saving
+  // that buffer back would corrupt the archive — no lock, no write action.
+  '.zip',
   // Rendered, but by a viewer with no editing surface either: a docx renders
   // as HTML, a spreadsheet as a grid, a deck as an outline, a PDF as pages, an
   // image as a picture. Edit would have acquired the lock and flipped the page

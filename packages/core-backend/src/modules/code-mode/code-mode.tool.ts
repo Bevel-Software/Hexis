@@ -49,7 +49,7 @@ export function createCallToolChainTool(
         // `omitImagePayloads`): a chain result is stringified JSON, so an image
         // read inside it comes back as an omitted-image note instead of a
         // base64 flood — images are only delivered on a direct `read_file`.
-        const result = omitImagePayloads(rawResult);
+        const result = omitImagePayloads(rawResult, 'result');
         const json = JSON.stringify({ success: true, result, logs });
         if (json.length <= maxOutputSize) {
           return { success: true, result, logs };
