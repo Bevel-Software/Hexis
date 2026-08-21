@@ -4,6 +4,7 @@ import {
   toCallToolResult,
   renderProgress,
   mcpImageResult,
+  isMcpImageResult,
   omitImagePayloads,
   MCP_IMAGE_RESULT_KIND,
 } from '../results.js';
@@ -550,5 +551,40 @@ describe('omitImagePayloads', () => {
     // stringify simply skips function values.
     const out = omitImagePayloads({ v: { toJSON: 'a string', toISOString: () => 'x', n: 1 } });
     expect(JSON.stringify(out)).toBe('{"v":{"toJSON":"a string","n":1}}');
+  });
+});
+
+describe('results that answer differently the second time they are read', () => {
+  it('an impure GETTER cannot slip an image past the scrub', () => {
+    // The probe reads a property; the serializer reads it again. A getter is
+    // free to answer differently, so an object carrying one is rebuilt from
+    // the value read during the walk rather than preserved by reference.
+    let reads = 0;
+    const payload = { kind: 'bevel/mcp-image@v1', data: 'AAAABASE64', mimeType: 'image/png' };
+    const value = {
+      label: 'report',
+      get attachment(): unknown {
+        reads += 1;
+        return reads === 1 ? { ok: true } : payload;
+      },
+    };
+    const scrubbed = omitImagePayloads(value);
+    expect(JSON.stringify(scrubbed)).not.toContain('AAAABASE64');
+  });
+
+  it('a sentinel whose note is not a string is not a sentinel', () => {
+    // It would be emitted as a text block whose `text` is not a string.
+    expect(isMcpImageResult({ kind: 'bevel/mcp-image@v1', data: 'd', mimeType: 'image/png', note: 7 })).toBe(false);
+    expect(isMcpImageResult({ kind: 'bevel/mcp-image@v1', data: 'd', mimeType: 'image/png' })).toBe(true);
+    expect(isMcpImageResult({ kind: 'bevel/mcp-image@v1', data: 'd', mimeType: 'image/png', note: 'hi' })).toBe(true);
+  });
+
+  it('reassembles a remote-hop image whose note decoded to a NON-string', () => {
+    // @utcp/mcp JSON-parses a text block, so the note "42" arrives as 42.
+    // Insisting on a string sent the whole thing — base64 included — through
+    // the JSON fallback and into the transcript.
+    const res = toCallToolResult([{ type: 'image', data: 'BASE64PAYLOAD', mimeType: 'image/png' }, 42]);
+    expect(res.content[0]).toEqual({ type: 'image', data: 'BASE64PAYLOAD', mimeType: 'image/png' });
+    expect(res.content[1]).toEqual({ type: 'text', text: '42' });
   });
 });

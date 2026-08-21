@@ -104,7 +104,11 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
             <p className="text-detail italic text-ink-faint">No text on this slide.</p>
           ) : (
             slide.paragraphs.map((text, i) => (
-              <p key={i} className="mb-1 text-ui text-ink">
+              // `whitespace-pre-wrap`: the extraction keeps the deck's own runs of
+              // spaces, and collapsing them here made the outline disagree with what
+              // `read_file` returns. `break-words` keeps a long token from widening
+              // the page.
+              <p key={i} className="mb-1 whitespace-pre-wrap break-words text-ui text-ink">
                 {text}
               </p>
             ))

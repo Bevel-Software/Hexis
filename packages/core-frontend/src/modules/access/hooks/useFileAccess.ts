@@ -81,7 +81,12 @@ export function useFileAccess(
     // access tree can't lock users out of their own scratch files.
     const prefix = `${kbDirName}/`;
     if (!workspacePath.startsWith(prefix)) {
-      setState({ canWrite: true, canDownload: true, eligible: EMPTY_ELIGIBLE, owners: EMPTY_ELIGIBLE, loading: false, error: null });
+      // `canDownload: null` — NOT true. The write short-circuits are this
+      // hook's own policy, and they match the backend's write gates; the raw
+      // endpoint gates EVERY download regardless of branch or path, so
+      // claiming permission here would promise something it can still refuse.
+      // Null keeps the button clickable and the backend authoritative.
+      setState({ canWrite: true, canDownload: null, eligible: EMPTY_ELIGIBLE, owners: EMPTY_ELIGIBLE, loading: false, error: null });
       return;
     }
     // Drafts are free-for-all (mirrors the backend's branch-protected gates
@@ -94,7 +99,12 @@ export function useFileAccess(
       return;
     }
     if (!isProtectedBranch(branch)) {
-      setState({ canWrite: true, canDownload: true, eligible: EMPTY_ELIGIBLE, owners: EMPTY_ELIGIBLE, loading: false, error: null });
+      // `canDownload: null` — NOT true. The write short-circuits are this
+      // hook's own policy, and they match the backend's write gates; the raw
+      // endpoint gates EVERY download regardless of branch or path, so
+      // claiming permission here would promise something it can still refuse.
+      // Null keeps the button clickable and the backend authoritative.
+      setState({ canWrite: true, canDownload: null, eligible: EMPTY_ELIGIBLE, owners: EMPTY_ELIGIBLE, loading: false, error: null });
       return;
     }
 

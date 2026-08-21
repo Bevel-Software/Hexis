@@ -3,6 +3,7 @@ import type { ExtractResult } from './doc-extract.types.js';
 import {
   MAX_DOC_TOTAL_BYTES,
   attrByLocalName,
+  decodeXmlEntities,
   localBlocks,
   localElementBlocks,
   paragraphRunText,
@@ -182,7 +183,10 @@ export function notesTargetFromRels(relsXml: string): string | undefined {
   for (const rel of localElementBlocks(relsXml, ['Relationship'])) {
     const type = attrByLocalName(rel.attributes, 'Type');
     if (type !== undefined && type.endsWith(NOTES_REL_TYPE_SUFFIX)) {
-      return attrByLocalName(rel.attributes, 'Target');
+      // Attribute values are RAW here (the block reader does not decode), and a
+      // part name may legally contain `&`, written `&amp;` in the rels.
+      const target = attrByLocalName(rel.attributes, 'Target');
+      return target !== undefined ? decodeXmlEntities(target) : undefined;
     }
   }
   return undefined;

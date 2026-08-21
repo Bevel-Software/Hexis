@@ -135,6 +135,27 @@ export function xmlAttrValueByLocalName(tagXml: string, localName: string): stri
 }
 
 /**
+ * Is `code` a character XML actually admits (the `Char` production)?
+ *
+ * Being inside Unicode's range is not enough: XML forbids NUL and the other
+ * C0 controls, the surrogate halves, and U+FFFE/U+FFFF. `&#0;` and `&#xD800;`
+ * used to decode anyway, putting a character into extracted text that no XML
+ * document can contain — and, for a lone surrogate, one that cannot even be
+ * encoded. Such a reference stays literal instead.
+ */
+function isXmlChar(code: number): boolean {
+  if (!Number.isFinite(code)) return false;
+  return (
+    code === 0x9 ||
+    code === 0xa ||
+    code === 0xd ||
+    (code >= 0x20 && code <= 0xd7ff) ||
+    (code >= 0xe000 && code <= 0xfffd) ||
+    (code >= 0x10000 && code <= 0x10ffff)
+  );
+}
+
+/**
  * Decode the five XML named entities plus numeric (`&#65;` / `&#x41;`)
  * references. Decimal references admit ONLY decimal digits and hex digits only
  * after `#x` — a malformed `&#12A;` must stay literal text, not be consumed
@@ -155,7 +176,7 @@ export function decodeXmlEntities(s: string): string {
         return "'";
       default: {
         const code = body[1] === 'x' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
-        return Number.isFinite(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+        return isXmlChar(code) ? String.fromCodePoint(code) : whole;
       }
     }
   });

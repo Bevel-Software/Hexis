@@ -235,7 +235,16 @@ jobs:
             exit 0
           fi
 
-          echo "verdict_b64=$(jq -c . "$VERDICT_FILE" | base64 -w0)" >> "$GITHUB_OUTPUT"
+          # A job output is bounded (~1 MB); a verdict past that makes the write
+          # fail and strands the run. Cap it here and let `publish` report the
+          # ordinary no-verdict status instead.
+          verdict_b64=$(jq -c . "$VERDICT_FILE" | base64 -w0)
+          if [ "${#verdict_b64}" -gt 800000 ]; then
+            echo "::warning::Verdict is ${#verdict_b64} encoded bytes — too large to publish; treating as no verdict."
+            cat "$VERDICT_FILE"
+            exit 0
+          fi
+          echo "verdict_b64=$verdict_b64" >> "$GITHUB_OUTPUT"
           cat "$VERDICT_FILE"
 
           cat "$VERDICT_FILE"
@@ -318,6 +327,14 @@ jobs:
             url=$(jq -r '(.one_pager_url? // "") | tostring | gsub("[[:space:]]"; "")' verdict.json)
           fi
 
+
+          # A status target_url and a comment body are both bounded; a URL past
+          # any sane length is not a link anyone can follow anyway.
+          if [ "${#url}" -gt 2000 ]; then
+            echo "::warning::Discarding over-long one_pager_url from the agent (${#url} chars)"
+            url=""
+          fi
+
           case "$url" in
             "${KB_ORIGIN%/}"/*|"$REPO_URL"/*) ;;
             "") ;;
@@ -378,6 +395,11 @@ jobs:
             --jq .html_url
 
       - name: Publish the review status
+        # `if: always()`: the comment step above can fail (a large body, a
+        # transient API error) and `set -e` would then skip this one, leaving the
+        # pending status `start` posted sitting on the commit for good. Every run
+        # closes its own status.
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}

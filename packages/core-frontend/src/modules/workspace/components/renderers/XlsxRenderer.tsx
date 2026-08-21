@@ -12,6 +12,14 @@ import type { FileRendererProps } from './types';
  * caps keep the DOM bounded; the note under the grid says exactly what was
  * cut, and the Download affordance is the path to the whole sheet.
  */
+/**
+ * The largest workbook this viewer will parse. SheetJS has no streaming or
+ * metadata-only mode: `read` materializes every cell of every sheet, so a dense
+ * file freezes the main thread long before the row and column caps below get a
+ * chance to bound the VIEW.
+ */
+const MAX_WORKBOOK_BYTES = 25 * 1024 * 1024; // 25 MB
+
 const MAX_ROWS = 1000;
 const MAX_COLS = 100;
 
@@ -58,8 +66,21 @@ export function XlsxRenderer({ filePath }: FileRendererProps) {
           setError(`Failed to load spreadsheet (HTTP ${res.status})`);
           return;
         }
+        // SheetJS parses EVERY cell of every sheet before this component can
+        // apply its row and column caps, so those caps bound what is DISPLAYED,
+        // never what is parsed. The byte bound is what keeps a dense workbook
+        // from freezing the tab, and it has to come before the buffer.
+        const declared = Number(res.headers?.get('content-length') ?? '');
+        if (Number.isFinite(declared) && declared > MAX_WORKBOOK_BYTES) {
+          setError('This spreadsheet is too large to preview. Download it to open in a spreadsheet app.');
+          return;
+        }
         const buffer = await res.arrayBuffer();
         if (cancelled) return;
+        if (buffer.byteLength > MAX_WORKBOOK_BYTES) {
+          setError('This spreadsheet is too large to preview. Download it to open in a spreadsheet app.');
+          return;
+        }
         let workbook: XLSX.WorkBook;
         try {
           workbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });

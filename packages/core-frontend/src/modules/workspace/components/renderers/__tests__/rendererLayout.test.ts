@@ -107,11 +107,21 @@ describe('isViewOnlyFile', () => {
     'Inbox/offer.eml',
     'Inbox/thread.msg',
     'Inbox/OFFER.EML',
+    // CHANGED: these DO render — as HTML, a grid, an outline, pages, a picture
+    // — but none of those viewers has an editing surface, so Edit acquired the
+    // lock and flipped the page into a mode the renderer ignores.
+    'Inbox/report.docx',
+    'Data/model.xlsx',
+    'decks/pitch.pptx',
+    'Inbox/brief.pdf',
+    'img/diagram.png',
+    'img/PHOTO.JPG',
+    'img/chart.svg',
   ])('marks %s view-only', (path) => {
     expect(isViewOnlyFile(path)).toBe(true);
   });
 
-  it.each(['Knowledge/Foo.md', 'Inbox/report.docx', 'Inbox/brief.pdf', 'Data/velocity.csv'])(
+  it.each(['Knowledge/Foo.md', 'Data/velocity.csv', 'notes/todo.txt'])(
     'leaves %s with its write action',
     (path) => {
       expect(isViewOnlyFile(path)).toBe(false);

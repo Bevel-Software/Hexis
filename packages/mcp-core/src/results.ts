@@ -46,7 +46,11 @@ export function isMcpImageResult(value: unknown): value is McpImageResult {
     value !== null &&
     (value as { kind?: unknown }).kind === MCP_IMAGE_RESULT_KIND &&
     typeof (value as { data?: unknown }).data === 'string' &&
-    typeof (value as { mimeType?: unknown }).mimeType === 'string'
+    typeof (value as { mimeType?: unknown }).mimeType === 'string' &&
+    // A sentinel may have crossed a transport, so its shape is not this
+    // process's to assume: a non-string `note` would be accepted here and then
+    // emitted as a text block whose `text` is not a string — an invalid block.
+    ['undefined', 'string'].includes(typeof (value as { note?: unknown }).note)
   );
 }
 
@@ -153,6 +157,19 @@ function safeJsonText(value: unknown): string {
   }
 }
 
+/**
+ * A note that survived a remote hop, whatever it decoded to.
+ *
+ * `@utcp/mcp` JSON-PARSES a text block's text, so a note that happens to read
+ * as JSON comes back as what it denotes — `42` for "42", null for "null" —
+ * not as a string. Insisting on strings meant such a result was not recognized
+ * as the image it is, and the fallback stringified the whole thing, base64 and
+ * all, into the transcript.
+ */
+function isJsonScalar(value: unknown): value is string | number | boolean | null {
+  return value === null || ['string', 'number', 'boolean'].includes(typeof value);
+}
+
 export function toCallToolResult(value: unknown): CallToolResult {
   // An image sentinel (see McpImageResult): the tool's result IS a picture.
   // Emit a native image content block so a multimodal client renders it, plus
@@ -182,10 +199,12 @@ export function toCallToolResult(value: unknown): CallToolResult {
   if (
     Array.isArray(value) &&
     value.some(isMcpImageBlockObject) &&
-    value.every((e) => isMcpImageBlockObject(e) || typeof e === 'string')
+    value.every((e) => isMcpImageBlockObject(e) || isJsonScalar(e))
   ) {
     return {
-      content: value.map((e) => (typeof e === 'string' ? { type: 'text' as const, text: e } : e)),
+      content: value.map((e) =>
+        isMcpImageBlockObject(e) ? e : { type: 'text' as const, text: String(e) },
+      ),
     };
   }
   // Already in MCP agentic format — pass through untouched, but only when every
@@ -276,6 +295,15 @@ export function omitImagePayloads(value: unknown): unknown {
     } catch {
       return false;
     }
+  };
+
+  /** Does this object define an enumerable own property backed by a GETTER? */
+  const hasAccessor = (v: object): boolean => {
+    for (const key of Object.keys(v)) {
+      const d = Object.getOwnPropertyDescriptor(v, key);
+      if (d !== undefined && d.get !== undefined) return true;
+    }
+    return false;
   };
 
   /**
@@ -369,6 +397,15 @@ export function omitImagePayloads(value: unknown): unknown {
       }
       visited.add(v);
       if (cached === false) continue;
+      // An ACCESSOR is user code too, and it runs again every time the value is
+      // read: a getter may answer the probe with something clean and hand the
+      // serializer an image. Preserving such an object by reference would let
+      // that second answer past the scrub, so its subtree is rebuilt from the
+      // values read HERE, once.
+      if (hasAccessor(v)) {
+        found = true;
+        break;
+      }
       if (userToJson(v) !== undefined) {
         found = true;
         break;

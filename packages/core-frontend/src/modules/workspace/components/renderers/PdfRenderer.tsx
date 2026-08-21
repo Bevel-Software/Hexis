@@ -44,6 +44,17 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
   // The page whose render last COMPLETED. Its cached resources are released
   // only after the NEXT page's render settles — never mid-render (pdf.js
   // corrupts a render whose page is cleaned up under it).
+  // The loading task, kept in a ref: it owns the worker-side document, and the
+  // page-render effect must be able to release it when it gives up for good.
+  const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null);
+
+  /** Tear down the worker-side document and forget it. Safe to call twice. */
+  const releaseDoc = useCallback(() => {
+    loadingTaskRef.current?.destroy().catch(() => {});
+    loadingTaskRef.current = null;
+    setDoc(null);
+  }, []);
+
   const renderedPageRef = useRef<PDFPageProxy | null>(null);
   // Fit-to-width: the page is scaled so its width matches the container's.
   // 0 = not measured yet; the render effect waits for a real measurement so
@@ -81,6 +92,7 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
           // tear it down in every state: still loading, resolved, or a doc
           // that resolves only AFTER cancellation.
           loadingTask = getDocument({ data: new Uint8Array(buffer) });
+          loadingTaskRef.current = loadingTask;
           loadedDoc = await loadingTask.promise;
         } catch (parseErr) {
           // A destroyed task rejects its promise — that is this effect's own
@@ -90,6 +102,7 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
           // the error view may stay mounted indefinitely — and null the ref so
           // the effect cleanup doesn't destroy it a second time.
           loadingTask?.destroy().catch(() => {});
+          loadingTaskRef.current = null;
           loadingTask = null;
           // The bytes arrived but pdf.js rejected them — a renamed file, a
           // truncated upload. Distinct copy from the transport failure above.
@@ -112,6 +125,7 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
       // Destroying the loading task frees the worker-side document and every
       // cached page, whether the load is mid-flight or long resolved.
       loadingTask?.destroy().catch(() => {});
+      loadingTaskRef.current = null;
     };
   }, [workspaceId, filePath]);
 
@@ -168,7 +182,11 @@ export function PdfRenderer({ filePath }: FileRendererProps) {
         // A cancelled render is this effect's own cleanup, not a failure.
         if (cancelled || (err as Error | null)?.name === 'RenderingCancelledException') return;
         console.error('[PdfRenderer] page render failed:', err);
+        // The error view is terminal, so nothing will read `doc` again: release it
+        // (and the loading task it retains) rather than leaving worker-side PDF
+        // resources held for the lifetime of the view.
         setError(`Could not render page ${pageNumber}.`);
+        releaseDoc();
       }
     })();
     return () => {

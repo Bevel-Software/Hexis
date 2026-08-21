@@ -162,7 +162,10 @@ function xmlParserDecoding(handlers: ConstructorParameters<typeof Parser>[0]): P
 export function relationshipTarget(relsXml: string, typeSuffix: string): string | undefined {
   let found: string | undefined;
   let depth = 0;
-  const parser = xmlParser({
+  // DECODING parser: a part name may legally contain `&`, written `&amp;` in
+  // the rels. Resolving the raw text looked for a zip entry spelled that way,
+  // and the deck simply lost its notes.
+  const parser = xmlParserDecoding({
     onopentag(name, attributes) {
       depth++;
       if (depth > MAX_ELEMENT_DEPTH) throw TOO_DEEP;

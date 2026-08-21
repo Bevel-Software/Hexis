@@ -3,7 +3,7 @@ import { Mail, Paperclip } from 'lucide-react';
 import { useWorkspace } from '../../state/workspace.context';
 import { authFetch } from '../../../../lib/api';
 import { DownloadFileButton } from './DownloadFileButton';
-import { attachmentLine, type EmailMessageView } from './emailMessage';
+import { MAX_EMAIL_BYTES, attachmentLine, type EmailMessageView } from './emailMessage';
 import type { FileRendererProps } from './types';
 
 /**
@@ -45,6 +45,14 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
         if (cancelled) return;
         if (!res.ok) {
           setError(`Failed to load email (HTTP ${res.status})`);
+          return;
+        }
+        // The size bound belongs BEFORE the buffer, not after it: the parsers
+        // check the limit once they hold the bytes, by which point a 300 MB
+        // message has already been allocated in the tab.
+        const declared = Number(res.headers?.get('content-length') ?? '');
+        if (Number.isFinite(declared) && declared > MAX_EMAIL_BYTES) {
+          setError('This email is too large to display.');
           return;
         }
         const buffer = await res.arrayBuffer();

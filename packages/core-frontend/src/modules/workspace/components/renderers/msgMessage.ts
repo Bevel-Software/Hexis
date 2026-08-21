@@ -54,8 +54,11 @@ export function parseMsgMessage(bytes: ArrayBuffer): EmailMessageView {
     throw new Error('could not be parsed as a .msg (not an Outlook message file)');
   }
 
-  const text = stringProp(streams, '', '1000');
-  const html = stringProp(streams, '', '1013') ?? binaryUtf8(streams, '', '1013');
+  // A message may carry an EMPTY plain-text property beside a real HTML body.
+  // Treating '' as the body hid the HTML and claimed bodySource 'text', so the
+  // viewer showed nothing at all. Blank is absent, exactly as extract-msg reads it.
+  const text = blankToUndefined(stringProp(streams, '', '1000'));
+  const html = blankToUndefined(stringProp(streams, '', '1013') ?? binaryUtf8(streams, '', '1013'));
   const hasRtf = streams.has('__substg1.0_10090102');
   const body = (text ?? (html !== undefined ? htmlToEmailText(html) : '')).replace(/\s+$/, '');
   const bodySource: EmailBodySource =
@@ -193,4 +196,10 @@ function messageDate(props: Uint8Array | undefined): string | undefined {
   const ticks = value.getUint32(4, true) * 2 ** 32 + value.getUint32(0, true);
   const ms = ticks / 10000 - 11644473600000;
   return Number.isFinite(ms) ? isoDate(new Date(ms).toISOString()) : undefined;
+}
+
+
+/** '' and whitespace-only property values mean the property is not there. */
+function blankToUndefined(value: string | undefined): string | undefined {
+  return value !== undefined && value.trim() !== '' ? value : undefined;
 }

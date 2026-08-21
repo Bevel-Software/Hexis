@@ -161,15 +161,26 @@ export function isBinaryFile(filePath: string): boolean {
 /**
  * Files whose page must not offer the WRITE action (Edit / Propose changes).
  *
- * These routes render a no-preview note (`LegacyOfficeRenderer`) or a
- * read-only parsed view (`EmailRenderer`): there is no editing surface behind
+ * These routes render a no-preview note (`LegacyOfficeRenderer`), a read-only
+ * parsed view (`EmailRenderer`), or a rendered-but-not-editable one (a docx as
+ * HTML, a workbook as a grid, a deck as an outline, a PDF as pages, an image
+ * as a picture). There is no editing surface behind
  * the button, so clicking Edit would acquire the file lock, flip the page
  * into an edit mode the renderer ignores, and — worst — imply that saving
  * text over a binary document (or a message snapshot) is a thing that can be
  * done. `FileViewer` suppresses both the pane bar's write action and the
  * header's for these extensions.
  */
-const VIEW_ONLY_EXTENSIONS = new Set(['.doc', '.ppt', '.xls', '.odt', '.odp', '.ods', '.eml', '.msg']);
+const VIEW_ONLY_EXTENSIONS = new Set([
+  // No preview at all (LegacyOfficeRenderer) or a read-only parsed view.
+  '.doc', '.ppt', '.xls', '.odt', '.odp', '.ods', '.eml', '.msg',
+  // Rendered, but by a viewer with no editing surface either: a docx renders
+  // as HTML, a spreadsheet as a grid, a deck as an outline, a PDF as pages, an
+  // image as a picture. Edit would have acquired the lock and flipped the page
+  // into a mode every one of these renderers ignores.
+  '.docx', '.xlsx', '.pptx', '.pdf',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico',
+]);
 
 export function isViewOnlyFile(filePath: string): boolean {
   return VIEW_ONLY_EXTENSIONS.has(filePath.slice(filePath.lastIndexOf('.')).toLowerCase());
