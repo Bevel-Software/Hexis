@@ -37,7 +37,7 @@ right scopes.
 ## Local development
 
 **`pnpm install` fails on Node version**
-The engine range is strict (`>=22 <23`) because of a native dependency's ABI.
+The engine range is strict (`>=22.13 <23`) because of a native dependency's ABI, and the floor is 22.13 because `pdfjs-dist` requires it.
 `nvm use` picks up the version from `.nvmrc`.
 
 ---

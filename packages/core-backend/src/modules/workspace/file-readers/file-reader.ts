@@ -32,6 +32,13 @@ export function displayPath(path: string): string {
   return path.replace(/[\r\n]/g, (c) => (c === '\r' ? '\\r' : '\\n'));
 }
 
+/**
+ * Any text interpolated into a ONE-LINE notice — a path, or an extractor's
+ * own failure message, which quotes bytes from the file and can therefore
+ * carry CR/LF of the document's choosing.
+ */
+export const oneLine = displayPath;
+
 /** A per-format file reader. Register implementations in `createFileReaderRegistry`. */
 export interface FileReader {
   /** The extensions this reader owns — lowercase, with the dot. Empty for the default (fallback) reader. */
@@ -77,7 +84,11 @@ export class FileReaderRegistry {
     private readonly fallback: FileReader,
   ) {
     for (const reader of readers) {
-      for (const ext of reader.extensions) {
+      for (const raw of reader.extensions) {
+        // Lookups arrive lowercased (`fileExtension`), so a key stored with any
+        // other casing could never match and its reader would silently fall back
+        // to the default — routing a .PDF-registered reader nowhere.
+        const ext = raw.toLowerCase();
         // Duplicate claims fail LOUDLY: were the later registration to win
         // silently, adding a format could disable an existing reader.
         if (this.byExtension.has(ext)) throw new Error(`two file readers claim the extension "${ext}"`);

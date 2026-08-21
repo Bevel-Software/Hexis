@@ -45,10 +45,14 @@ function zipDeclaredSize(buffer: ArrayBuffer): number | null {
   const stop = Math.max(0, buffer.byteLength - 22 - 0xffff);
   let eocd = -1;
   for (let i = buffer.byteLength - 22; i >= stop; i--) {
-    if (view.getUint32(i, true) === 0x06054b50) {
-      eocd = i;
-      break;
-    }
+    if (view.getUint32(i, true) !== 0x06054b50) continue;
+    // The signature is four ordinary bytes and may appear INSIDE the archive
+    // comment. The real record is the one whose declared comment length ends
+    // exactly at the file's end — a planted one almost never does, and a
+    // fake directory would otherwise be parsed and the size guard skipped.
+    if (i + 22 + view.getUint16(i + 20, true) !== buffer.byteLength) continue;
+    eocd = i;
+    break;
   }
   if (eocd < 0) return null;
   const entryCount = view.getUint16(eocd + 10, true);

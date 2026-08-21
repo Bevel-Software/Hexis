@@ -147,12 +147,21 @@ function attachmentLine(a: EmailAttachment): string {
   return line.replace(/[\r\n]/g, (c) => (c === '\r' ? '\\r' : '\\n'));
 }
 
+/** A header value with its line breaks made visible instead of obeyed. */
+function oneLine(value: string): string {
+  return value.replace(/[\r\n]/g, (c) => (c === '\r' ? '\\r' : '\\n'));
+}
+
 /** Render the model into the marker summary + extraction text (see module doc). */
 export function emailExtraction(model: EmailModel): ExtractedDoc {
   const header: string[] = [];
   // Absent OR blank fields are omitted — a header marker is never printed empty.
   const pushHeader = (label: string, value: string | undefined): void => {
-    if (value !== undefined && value.trim() !== '') header.push(`[${label}] ${value}`);
+    if (value === undefined || value.trim() === '') return;
+    // A header marker is ONE line. A From or Subject carrying CR/LF would
+    // otherwise forge further lines into the extraction — including lines that
+    // read like other markers — so the breaks are shown as escapes.
+    header.push(`[${label}] ${oneLine(value)}`);
   };
   pushHeader('from', model.from);
   pushHeader('to', model.to);

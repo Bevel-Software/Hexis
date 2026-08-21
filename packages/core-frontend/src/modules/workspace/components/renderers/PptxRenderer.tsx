@@ -91,10 +91,15 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
     if (!workspaceId) return;
 
     let cancelled = false;
+    // `cancelled` only stops this effect from PUBLISHING; the request itself
+    // ran to completion, so switching files left the old deck downloading and
+    // buffering in full. The abort ends it at the transport.
+    const abort = new AbortController();
     (async () => {
       try {
         const res = await authFetch(
           `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}`,
+          { signal: abort.signal },
         );
         if (cancelled) return;
         if (!res.ok) {
@@ -119,6 +124,7 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
 
     return () => {
       cancelled = true;
+      abort.abort();
     };
   }, [workspaceId, filePath]);
 

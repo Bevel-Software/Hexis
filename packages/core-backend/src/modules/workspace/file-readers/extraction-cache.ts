@@ -89,8 +89,17 @@ export class DocExtractionCache {
     }
   }
 
-  private entryPath(sha: string): string {
-    return path.join(this.root, `${sha}.json`);
+  /**
+   * The file backing `key`, always INSIDE the cache root.
+   *
+   * The key is built from a content hash and an extension taken from a
+   * workspace path, so a path spelling `../` — or a Windows backslash — would
+   * otherwise resolve outside the root and let a read or a write reach an
+   * arbitrary file. Only the characters a real key uses survive.
+   */
+  private entryPath(key: string): string {
+    const safe = key.replace(/[^A-Za-z0-9._-]/g, '_');
+    return path.join(this.root, `${safe}.json`);
   }
 
   /** Delete oldest-mtime entries until the total size fits the bound. */

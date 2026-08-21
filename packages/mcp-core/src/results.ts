@@ -178,8 +178,25 @@ function safeJsonText(value: unknown): string {
  * as the image it is, and the fallback stringified the whole thing, base64 and
  * all, into the transcript.
  */
+/** A JSON scalar: what a hop's note decodes to when it was not an object. */
 function isJsonScalar(value: unknown): value is string | number | boolean | null {
   return value === null || ['string', 'number', 'boolean'].includes(typeof value);
+}
+
+function noteText(value: unknown): string | undefined {
+  if (value === null || ['number', 'boolean'].includes(typeof value)) return String(value);
+  if (typeof value === 'string') return value;
+  // An OBJECT or an ARRAY: the note was JSON to begin with, and re-serializing
+  // it is the only faithful way back to the text block it left as. Refusing
+  // these sent the whole result — base64 included — through the fallback.
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return undefined; // cyclic: not a note this hop produced
+    }
+  }
+  return undefined;
 }
 
 export function toCallToolResult(value: unknown): CallToolResult {
@@ -187,10 +204,17 @@ export function toCallToolResult(value: unknown): CallToolResult {
   // Emit a native image content block so a multimodal client renders it, plus
   // the note as a text block so the transcript stays self-describing.
   if (isMcpImageResult(value)) {
+    // Read every field ONCE, here: the guard above proved their shapes, but a
+    // getter is free to answer differently the next time — or to throw — and
+    // the block would then carry something the guard never validated.
+    const snapshot = { data: value.data, mimeType: value.mimeType, note: value.note };
+    if (typeof snapshot.data !== 'string' || typeof snapshot.mimeType !== 'string') {
+      return { content: [{ type: 'text', text: safeJsonText(value) }] };
+    }
     return {
       content: [
-        { type: 'image', data: value.data, mimeType: value.mimeType },
-        ...(value.note !== undefined ? [{ type: 'text' as const, text: value.note }] : []),
+        { type: 'image', data: snapshot.data, mimeType: snapshot.mimeType },
+        ...(typeof snapshot.note === 'string' ? [{ type: 'text' as const, text: snapshot.note }] : []),
       ],
     };
   }
@@ -219,6 +243,23 @@ export function toCallToolResult(value: unknown): CallToolResult {
       ),
     };
   }
+  // The same hop, with a note that was JSON to begin with: `@utcp/mcp` parses
+  // the text block, so an object or array note arrives as the value it denotes
+  // rather than as text. ONLY the exact hop shape qualifies — one image block
+  // and one note — so a caller's ordinary array holding an image block beside
+  // its own data still takes the stringify path below and keeps its structure.
+  if (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    isMcpImageBlockObject(value[0]) &&
+    !isMcpImageBlockObject(value[1])
+  ) {
+    const note = noteText(value[1]);
+    if (note !== undefined) {
+      return { content: [value[0], { type: 'text', text: note }] };
+    }
+  }
+
   // Already in MCP agentic format — pass through untouched, but only when every
   // `content` entry is a real content block (has a string `type`).
   const content = (value as { content?: unknown })?.content;

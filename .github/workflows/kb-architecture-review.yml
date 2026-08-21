@@ -302,8 +302,13 @@ jobs:
             echo "No verdict recorded by the agent."
           elif ! printf '%s' "$VERDICT_B64" | base64 -d > verdict.json 2>/dev/null; then
             echo "::warning::Verdict payload did not decode — treating as no verdict."
-          elif ! jq -e 'type == "object"' verdict.json >/dev/null 2>&1; then
-            echo "::warning::Verdict is not a JSON object — treating as no verdict."
+          elif ! jq -s -e 'length == 1 and (.[0] | type == "object")' verdict.json >/dev/null 2>&1; then
+            # `-s` (slurp) is what makes this ONE document: jq streams a file
+            # holding `{…}{…}` as two, every later filter then prints one line
+            # PER document, and `outcome=$(…)` would carry a newline straight
+            # into $GITHUB_OUTPUT — a second line the agent chose. Exactly one
+            # top-level object, or there is no verdict.
+            echo "::warning::Verdict is not exactly one JSON object — treating as no verdict."
           else
             outcome=$(jq -r '(.outcome? // "") | tostring | ascii_downcase | gsub("[^a-z-]"; "")' verdict.json)
             case "$outcome" in

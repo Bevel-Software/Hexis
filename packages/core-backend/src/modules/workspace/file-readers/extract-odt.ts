@@ -32,7 +32,9 @@ export function extractOdt(bytes: Buffer): ExtractResult {
   // stores every DELETION's content as ordinary paragraphs, so the flat scan
   // below would read deleted text back in as document lines. Removed by its
   // parsed element boundaries before the paragraph walk.
-  const visible = removeLocalElements(body, ['tracked-changes']);
+  // `<office:annotation>` is a COMMENT on the document, stored as ordinary
+  // paragraphs: read flat, a reviewer's note came back as a document line.
+  const visible = removeLocalElements(body, ['tracked-changes', 'annotation']);
 
   const lines = odfParagraphBlocks(visible).map(odfParagraphText);
   const paragraphs = lines.length;

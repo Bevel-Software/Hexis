@@ -1,5 +1,10 @@
 import JSZip from 'jszip';
-import { elementText, localElementBlocks, relationshipTarget } from './xmlReading';
+import {
+  attrByLocalName,
+  elementText,
+  localElementBlocks,
+  relationshipTarget,
+} from './xmlReading';
 
 /**
  * Client-side `.pptx` → text outline, the browser twin of the backend's
@@ -192,6 +197,42 @@ async function readNoteLines(zip: JSZip, slideName: string, budget: ReadBudget):
 }
 
 /**
+ * The slide part names `presentation.xml` lists, in ITS order, or undefined
+ * when the deck has no usable list.
+ *
+ * A deck that has been REORDERED keeps its original part filenames, so
+ * `slide3.xml` may well be the first slide. The backend follows this list, and
+ * a viewer that followed filenames instead would number the same deck
+ * differently from what `read_file` reports — the one thing these twins exist
+ * to prevent.
+ */
+async function presentationOrder(zip: JSZip, budget: ReadBudget): Promise<string[] | undefined> {
+  const pres = zip.file('ppt/presentation.xml');
+  const rels = zip.file('ppt/_rels/presentation.xml.rels');
+  if (!pres || !rels) return undefined;
+  try {
+    const ids = localElementBlocks(await readEntryBounded(pres, budget), ['sldId'])
+      .map((e) => attrByLocalName(e.attributes, 'id'))
+      .filter((v): v is string => v !== undefined);
+    if (ids.length === 0) return undefined;
+    const relsXml = await readEntryBounded(rels, budget);
+    const targetById = new Map<string, string>();
+    for (const rel of localElementBlocks(relsXml, ['Relationship'])) {
+      const id = attrByLocalName(rel.attributes, 'Id');
+      const target = attrByLocalName(rel.attributes, 'Target');
+      if (id !== undefined && target !== undefined) targetById.set(id, target);
+    }
+    const names = ids
+      .map((id) => targetById.get(id))
+      .filter((t): t is string => t !== undefined)
+      .map((t) => resolveRelTarget('ppt', t));
+    return names.length > 0 ? names : undefined;
+  } catch {
+    return undefined; // an unreadable list is simply no list
+  }
+}
+
+/**
  * Parse `.pptx` bytes into the outline. Throws an `Error` whose message reads
  * "could not be parsed as a .pptx (…)" — the caller shows it verbatim — when
  * the bytes are not a zip, hold no slides, or blow the decompression bounds.
@@ -232,10 +273,35 @@ export async function extractPptxOutline(bytes: ArrayBuffer | Uint8Array): Promi
     for (const [n, name, entry] of slideEntries) {
       if (!chosen.has(n)) chosen.set(n, [name, entry]);
     }
-    for (const n of [...chosen.keys()].sort((a, b) => a - b)) {
+    // Emission order mirrors the backend: the presentation's own slide list
+    // when it resolves to parts this deck actually has, filename order
+    // otherwise — and when the LIST orders the deck the numbers are POSITIONS
+    // in it, because a reordered deck's filenames no longer mean anything
+    // positional. Numbering the same deck differently from what `read_file`
+    // reports is the one thing these twins exist to prevent.
+    const numberByName = new Map<string, number>();
+    for (const [n, [name]] of chosen) numberByName.set(name, n);
+    const listed = (await presentationOrder(zip, budget)) ?? [];
+    const fromList = [
+      ...new Set(
+        listed.map((name) => numberByName.get(name)).filter((n): n is number => n !== undefined),
+      ),
+    ];
+    const byFilename = [...chosen.keys()].sort((a, b) => a - b);
+    const positional = fromList.length > 0;
+    const order = positional
+      ? [...fromList, ...byFilename.filter((n) => !fromList.includes(n))]
+      : byFilename;
+    let position = 0;
+    for (const n of order) {
       const [name, entry] = chosen.get(n)!;
       const paragraphs = paragraphLines(await readEntryBounded(entry, budget));
-      out.push({ number: n, paragraphs, notes: await readNoteLines(zip, name, budget) });
+      position += 1;
+      out.push({
+        number: positional ? position : n,
+        paragraphs,
+        notes: await readNoteLines(zip, name, budget),
+      });
     }
   } catch (err) {
     throw new Error(`could not be parsed as a .pptx (${(err as Error).message})`);

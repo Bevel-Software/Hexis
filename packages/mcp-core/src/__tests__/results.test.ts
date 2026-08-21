@@ -145,8 +145,21 @@ describe('toCallToolResult — image results', () => {
     });
   });
 
-  it('leaves an array with any non-image, non-string entry on the stringify path', () => {
-    const value = [{ type: 'image', data: B64, mimeType: 'image/png' }, { other: true }];
+  it('CHANGED: an image block beside a NOTE OBJECT is the hop shape, not stringify bait', () => {
+    // This used to take the stringify path, which put the base64 into the text
+    // block it produced — the leak the hop recognition exists to prevent. A
+    // note that was JSON to begin with arrives parsed (@utcp/mcp parses text
+    // blocks), so the pair is reassembled and the note re-serialized.
+    const image = { type: 'image', data: B64, mimeType: 'image/png' };
+    expect(toCallToolResult([image, { other: true }])).toEqual({
+      content: [image, { type: 'text', text: '{"other":true}' }],
+    });
+  });
+
+  it('leaves a LONGER array holding ordinary data on the stringify path', () => {
+    // Only the exact hop shape (one image, one note) is reassembled, so a
+    // caller's own array keeps its structure.
+    const value = [{ type: 'image', data: B64, mimeType: 'image/png' }, { other: true }, { more: 1 }];
     expect(toCallToolResult(value)).toEqual({
       content: [{ type: 'text', text: JSON.stringify(value) }],
     });

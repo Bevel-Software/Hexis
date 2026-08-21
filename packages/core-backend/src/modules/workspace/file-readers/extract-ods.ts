@@ -1,5 +1,5 @@
 import type { ExtractResult } from './doc-extract.types.js';
-import { attrByLocalName, decodeXmlEntities, localElementBlocks } from './ooxml-text.js';
+import { attrByLocalName, decodeXmlEntities, localElementBlocks, localName } from './ooxml-text.js';
 import {
   odfParagraphBlocks,
   odfParagraphText,
@@ -135,10 +135,15 @@ function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
     // INSIDE a cell (<text:line-break/>, <text:tab/>) become single spaces:
     // the extraction's contract is one row per line with tab-separated cells,
     // and a literal \n or \t inside a cell's text would silently break both.
-    const text = odfParagraphBlocks(cell.body ?? '')
-      .map(odfParagraphText)
-      .join(' ')
-      .replace(/[\t\n\r]+/g, ' ');
+    // A COVERED cell is the hidden half of a merge: the visible cell carries
+    // the text. Such a cell may still hold stale content, and emitting it put
+    // a value in the grid where the sheet shows none.
+    const text = localName(cell.name) === 'covered-table-cell'
+      ? ''
+      : odfParagraphBlocks(cell.body ?? '')
+          .map(odfParagraphText)
+          .join(' ')
+          .replace(/[\t\n\r]+/g, ' ');
     if (text === '') {
       pendingEmpty += repeat;
       continue;

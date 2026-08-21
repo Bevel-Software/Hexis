@@ -150,9 +150,16 @@ function collectNumbered(zip: AdmZip, re: RegExp, budget: ReadBudget): Map<numbe
     const n = parseInt(m[1], 10);
     if (Number.isSafeInteger(n)) matched.push([n, entry.entryName, entry]);
   }
-  matched.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+  // A zip may list the SAME part name twice. Sorting by name leaves those two
+  // in archive order, so which one wins depends on how the file was written —
+  // and two archives with identical parts would extract differently. A part
+  // claimed twice is not a part this reader can resolve, so it is dropped.
+  const claims = new Map<string, number>();
+  for (const [, name] of matched) claims.set(name, (claims.get(name) ?? 0) + 1);
+  const unique = matched.filter(([, name]) => claims.get(name) === 1);
+  unique.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
   const out = new Map<number, SlidePart>();
-  for (const [n, name, entry] of matched) {
+  for (const [n, name, entry] of unique) {
     if (!out.has(n)) out.set(n, { name, xml: readEntryBounded(entry, budget) });
   }
   return out;

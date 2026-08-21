@@ -399,9 +399,11 @@ describe('entities and markup sections, through the outline', () => {
     expect(await outlineOf(para('x&#12A;y'))).toEqual(['x&#12A;y']);
     expect(await outlineOf(para('x&nosuch;y'))).toEqual(['x&nosuch;y']);
     // A reference PAST the last code point is the one case that does not stay
-    // literal: XML says it is an invalid character reference, and the parser
-    // yields the replacement character rather than inventing a code point.
-    expect(await outlineOf(para('x&#1114112;y'))).toEqual(['x�y']);
+    // literal: XML calls it an invalid character reference. The parser yields a
+    // replacement character, which the viewer drops — the backend keeps the
+    // reference literal, and a character XML cannot contain is the one thing
+    // neither side should render as content.
+    expect(await outlineOf(para('x&#1114112;y'))).toEqual(['xy']);
   });
 
   it('reads a commented-out or CDATA-wrapped paragraph as text, not as markup', async () => {

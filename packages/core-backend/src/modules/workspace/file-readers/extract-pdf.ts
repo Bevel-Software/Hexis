@@ -24,6 +24,33 @@ import { MAX_DOC_PART_BYTES } from './ooxml-text.js';
  */
 const MAX_PDF_TEXT_CHARS = 20 * 1024 * 1024; // 20M chars of extracted text
 
+/**
+ * How many pages one PDF may have before extraction gives up.
+ *
+ * The decoded-text bound does not cover a document whose cost is its PAGE
+ * COUNT rather than its prose: every page costs a `getPage`, a
+ * `getTextContent` and a retained `[page N]` marker even when it holds no
+ * text at all, so a file declaring hundreds of thousands of empty pages spends
+ * minutes and megabytes without ever tripping a character budget. Real
+ * documents do not come close — a 2,000-page manual is an outlier.
+ */
+const MAX_PDF_PAGES = 10_000;
+
+/**
+ * How many text items one PAGE may hold. `getTextContent` has no streaming
+ * form: it returns the entire page's items at once, so the per-character
+ * budget cannot fire until pdf.js has already built the whole array.
+ */
+const MAX_PDF_ITEMS_PER_PAGE = 200_000;
+
+/** The typed failure both decoded-text bounds return. */
+function overBudget(): ExtractResult {
+  return {
+    ok: false,
+    message: `could not be extracted as a PDF (its text decodes to over ${MAX_PDF_TEXT_CHARS} characters — over the extraction limit)`,
+  };
+}
+
 export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
   // The same bounded-read guard the zip-based extractors apply per part: a
   // PDF has no compressed container to pre-scan, so the bound is simply the
@@ -41,13 +68,34 @@ export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
     return { ok: false, message: `could not be parsed as a PDF (${(err as Error).message})` };
   }
   try {
+    if (doc.numPages > MAX_PDF_PAGES) {
+      return {
+        ok: false,
+        message: `could not be extracted as a PDF (it declares ${doc.numPages} pages — over the ${MAX_PDF_PAGES}-page extraction limit)`,
+      };
+    }
     const lines: string[] = [];
     let textChars = 0;
     let anyText = false;
     for (let n = 1; n <= doc.numPages; n++) {
       lines.push(`[page ${n}]`);
+      // The marker is retained text like any other line: a document whose cost
+      // is its page count must reach the same bound as one whose cost is prose.
+      textChars += n.toString().length + 8;
+      if (textChars > MAX_PDF_TEXT_CHARS) return overBudget();
       const page = await doc.getPage(n);
       const { items } = await page.getTextContent();
+      // `getTextContent` materializes the WHOLE page before returning, so a
+      // single crafted page can outrun the budget between two checks. pdf.js
+      // offers no streaming item API here, so the page's own item count is the
+      // bound: past it the page is not walked at all.
+      if (items.length > MAX_PDF_ITEMS_PER_PAGE) {
+        page.cleanup();
+        return {
+          ok: false,
+          message: `could not be extracted as a PDF (page ${n} holds ${items.length} text items — over the ${MAX_PDF_ITEMS_PER_PAGE}-item extraction limit)`,
+        };
+      }
       let line = '';
       let lastY: number | undefined;
       const flush = (): void => {
