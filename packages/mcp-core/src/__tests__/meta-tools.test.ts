@@ -110,3 +110,22 @@ describe('dispatchMetaTool tools_info', () => {
     expect(getTool).not.toHaveBeenCalled();
   });
 });
+
+describe('dispatchMetaTool call_tool_chain — image results', () => {
+  it('replaces a chained image read with an omitted-image note instead of stringifying base64', async () => {
+    const { client, callToolChain } = clientWith([]);
+    const sentinel = {
+      kind: 'bevel/mcp-image@v1',
+      data: 'QUJDREVG',
+      mimeType: 'image/png',
+      note: '[image: Files/logo.png — image/png, 6 bytes]',
+    };
+    callToolChain.mockResolvedValueOnce({ result: { pic: sentinel, ok: true }, logs: [] });
+    const res = await dispatchMetaTool(client, 'call_tool_chain', { code: 'return 1' });
+    const text = resultText(res);
+    expect(text).not.toContain('QUJDREVG');
+    expect(text).toContain('image_omitted');
+    expect(text).toContain('Files/logo.png');
+    expect(text).toContain('"ok":true');
+  });
+});

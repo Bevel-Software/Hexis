@@ -1,6 +1,67 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 /**
+ * Discriminator for {@link McpImageResult}. The slash + version suffix make it
+ * a value no ordinary tool result carries by accident — a domain object with a
+ * `kind` field holds things like `'image'` or `'file'`, never this string —
+ * so the result shaping below can act on the shape without ever mistaking
+ * caller data for it.
+ */
+export const MCP_IMAGE_RESULT_KIND = 'bevel/mcp-image@v1';
+
+/**
+ * The sentinel a tool HANDLER returns when its result is a picture, not JSON.
+ *
+ * Handlers normally return domain JSON that `toCallToolResult` stringifies
+ * into one text block. An image cannot ride that path — a multimodal client
+ * only SEES a picture delivered as a native MCP image content block — so a
+ * handler that wants the caller to see one returns this shape instead, and
+ * the MCP result shaping turns it into
+ * `content: [{type:'image', data, mimeType}, {type:'text', text: note}]`.
+ * The `note` keeps the transcript self-describing (path, size, dimensions);
+ * without it the result is the bare image block.
+ *
+ * The shape intentionally travels as plain JSON: it crosses the UTCP http hop
+ * (loopback REST → hosted proxy) unchanged, and only the final MCP surface
+ * turns it into content blocks.
+ */
+export interface McpImageResult {
+  kind: typeof MCP_IMAGE_RESULT_KIND;
+  /** Base64-encoded image bytes (no data-URI prefix). */
+  data: string;
+  /** e.g. `image/png` — what the MCP image block advertises. */
+  mimeType: string;
+  /** One-line description (path + size/dimensions) emitted as a text block beside the image. */
+  note?: string;
+}
+
+/** Build a {@link McpImageResult} for a handler to return. */
+export function mcpImageResult(data: string, mimeType: string, note?: string): McpImageResult {
+  return { kind: MCP_IMAGE_RESULT_KIND, data, mimeType, ...(note !== undefined ? { note } : {}) };
+}
+
+export function isMcpImageResult(value: unknown): value is McpImageResult {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as { kind?: unknown }).kind === MCP_IMAGE_RESULT_KIND &&
+    typeof (value as { data?: unknown }).data === 'string' &&
+    typeof (value as { mimeType?: unknown }).mimeType === 'string'
+  );
+}
+
+/** A spec-shaped MCP image content block (`{type:'image', data, mimeType}`). */
+function isMcpImageBlockObject(value: unknown): value is { type: 'image'; data: string; mimeType: string } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as { type?: unknown }).type === 'image' &&
+    typeof (value as { data?: unknown }).data === 'string' &&
+    typeof (value as { mimeType?: unknown }).mimeType === 'string'
+  );
+}
+
+/**
  * Extract a human-meaningful failure message from a tool-call error. UTCP's
  * HTTP protocol surfaces a non-2xx as an axios-style error whose `.response.data`
  * is the REST endpoint's JSON body (`{ error: "..." }`). Pull that out so the
@@ -93,6 +154,40 @@ function safeJsonText(value: unknown): string {
 }
 
 export function toCallToolResult(value: unknown): CallToolResult {
+  // An image sentinel (see McpImageResult): the tool's result IS a picture.
+  // Emit a native image content block so a multimodal client renders it, plus
+  // the note as a text block so the transcript stays self-describing.
+  if (isMcpImageResult(value)) {
+    return {
+      content: [
+        { type: 'image', data: value.data, mimeType: value.mimeType },
+        ...(value.note !== undefined ? [{ type: 'text' as const, text: value.note }] : []),
+      ],
+    };
+  }
+  // The same image result AFTER a remote MCP hop. The local stdio server
+  // (hexis-mcp) reaches the deployment's MCP endpoint through @utcp/mcp, whose
+  // `_processMcpToolResult` unwraps a CallToolResult's `content` array: text
+  // blocks are JSON-parsed (our prose note comes back as a bare string), other
+  // blocks pass through verbatim, and a single-entry list collapses to the
+  // entry itself. So the hosted proxy's `[image, text]` result arrives here as
+  // `[imageBlock, "note"]` — or, noteless, as the bare image block. Recognize
+  // both and reassemble the spec-shaped result instead of JSON-stringifying
+  // megabytes of base64 into a text block. A caller's ordinary data is safe:
+  // only arrays made EXCLUSIVELY of image blocks and strings (with at least
+  // one image block) qualify, and such a value already denotes image content.
+  if (isMcpImageBlockObject(value)) {
+    return { content: [value] };
+  }
+  if (
+    Array.isArray(value) &&
+    value.some(isMcpImageBlockObject) &&
+    value.every((e) => isMcpImageBlockObject(e) || typeof e === 'string')
+  ) {
+    return {
+      content: value.map((e) => (typeof e === 'string' ? { type: 'text' as const, text: e } : e)),
+    };
+  }
   // Already in MCP agentic format — pass through untouched, but only when every
   // `content` entry is a real content block (has a string `type`).
   const content = (value as { content?: unknown })?.content;
@@ -101,6 +196,57 @@ export function toCallToolResult(value: unknown): CallToolResult {
   }
   const text = typeof value === 'string' ? value : safeJsonText(value ?? null);
   return { content: [{ type: 'text', text: text || '(tool produced no output)' }] };
+}
+
+/**
+ * Replace image payloads inside a `call_tool_chain` result with a short note.
+ *
+ * A chain's return value is JSON that gets STRINGIFIED into the transcript
+ * (or spilled), so an image result reaching it would either flood the context
+ * with base64 or burn a spill for bytes no one can see — a chain has no way to
+ * deliver a native image block. Policy (v1): images are returned directly,
+ * never through tool chains. This walk swaps every image sentinel — and every
+ * spec-shaped image content block, which is what the local server's remote
+ * MCP hop hands a chain (see `toCallToolResult`) — for
+ * `{ image_omitted: true, note }`, keeping whatever structure the chain built
+ * around it. Best-effort by design: chain code that EXTRACTS the base64 string
+ * itself escapes the walk, and then the ordinary max_output_size spill bounds
+ * the damage.
+ */
+export function omitImagePayloads(value: unknown): unknown {
+  // Active-descent set: guards real cycles without mislabeling diamond shares.
+  const ancestors = new Set<object>();
+  const walk = (v: unknown, depth: number): unknown => {
+    if (v === null || typeof v !== 'object' || depth > 64) return v;
+    if (isMcpImageResult(v)) {
+      const what = v.note ?? `an image (${v.mimeType})`;
+      return {
+        image_omitted: true,
+        note:
+          `${what} — images are returned directly to you as native MCP image content, not through ` +
+          '`call_tool_chain`. Call `read_file` on the image path as a DIRECT tool call (outside the chain) to see it.',
+      };
+    }
+    if (isMcpImageBlockObject(v)) {
+      return {
+        image_omitted: true,
+        note:
+          `an image (${v.mimeType}) — images are returned directly to you as native MCP image content, not ` +
+          'through `call_tool_chain`. Call `read_file` on the image path as a DIRECT tool call (outside the chain) to see it.',
+      };
+    }
+    if (ancestors.has(v)) return '[Circular]';
+    ancestors.add(v);
+    try {
+      if (Array.isArray(v)) return v.map((e) => walk(e, depth + 1));
+      const out: Record<string, unknown> = {};
+      for (const [k, e] of Object.entries(v)) out[k] = walk(e, depth + 1);
+      return out;
+    } finally {
+      ancestors.delete(v);
+    }
+  };
+  return walk(value, 0);
 }
 
 export function renderProgress(chunk: unknown): string {

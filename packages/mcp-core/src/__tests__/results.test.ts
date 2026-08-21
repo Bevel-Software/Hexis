@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { describeToolFailure, toCallToolResult, renderProgress } from '../results.js';
+import {
+  describeToolFailure,
+  toCallToolResult,
+  renderProgress,
+  mcpImageResult,
+  omitImagePayloads,
+  MCP_IMAGE_RESULT_KIND,
+} from '../results.js';
 
 describe('describeToolFailure', () => {
   it('pulls the REST error body out of an axios-shaped failure', () => {
@@ -90,5 +97,95 @@ describe('renderProgress', () => {
     const s = renderProgress('x'.repeat(600));
     expect(s).toHaveLength(500);
     expect(s.endsWith('...')).toBe(true);
+  });
+});
+
+describe('toCallToolResult — image results', () => {
+  const B64 = 'aGVsbG8='; // any base64 payload
+
+  it('shapes an image sentinel into spec content: image block + text note', () => {
+    const value = mcpImageResult(B64, 'image/png', '[image: Files/logo.png — image/png, 5 bytes, 1×1 px]');
+    expect(toCallToolResult(value)).toEqual({
+      content: [
+        { type: 'image', data: B64, mimeType: 'image/png' },
+        { type: 'text', text: '[image: Files/logo.png — image/png, 5 bytes, 1×1 px]' },
+      ],
+    });
+  });
+
+  it('shapes a noteless sentinel into a lone image block', () => {
+    expect(toCallToolResult(mcpImageResult(B64, 'image/gif'))).toEqual({
+      content: [{ type: 'image', data: B64, mimeType: 'image/gif' }],
+    });
+  });
+
+  it('reassembles the remote-hop mangled form ([imageBlock, "note"]) instead of stringifying base64', () => {
+    // Exactly what @utcp/mcp's _processMcpToolResult hands the local server for
+    // the hosted proxy's [image, text] result: the image block verbatim, the
+    // prose note JSON-parse-failed back to a bare string.
+    const mangled = [{ type: 'image', data: B64, mimeType: 'image/jpeg' }, '[image: a.jpg — image/jpeg, 5 bytes]'];
+    expect(toCallToolResult(mangled)).toEqual({
+      content: [
+        { type: 'image', data: B64, mimeType: 'image/jpeg' },
+        { type: 'text', text: '[image: a.jpg — image/jpeg, 5 bytes]' },
+      ],
+    });
+  });
+
+  it('reassembles a bare image block (single-entry remote collapse) into spec content', () => {
+    const block = { type: 'image', data: B64, mimeType: 'image/webp' };
+    expect(toCallToolResult(block)).toEqual({ content: [block] });
+  });
+
+  it('leaves ordinary data untouched: a kind field that is not the sentinel constant stringifies as before', () => {
+    const value = { kind: 'image', data: B64, mimeType: 'image/png' };
+    expect(toCallToolResult(value)).toEqual({
+      content: [{ type: 'text', text: JSON.stringify(value) }],
+    });
+  });
+
+  it('leaves an array with any non-image, non-string entry on the stringify path', () => {
+    const value = [{ type: 'image', data: B64, mimeType: 'image/png' }, { other: true }];
+    expect(toCallToolResult(value)).toEqual({
+      content: [{ type: 'text', text: JSON.stringify(value) }],
+    });
+  });
+});
+
+describe('omitImagePayloads', () => {
+  const sentinel = mcpImageResult('QUJD', 'image/png', '[image: Files/logo.png — image/png, 3 bytes]');
+
+  it('replaces a top-level sentinel with an omitted-image note that keeps the file description', () => {
+    const out = omitImagePayloads(sentinel) as { image_omitted: boolean; note: string };
+    expect(out.image_omitted).toBe(true);
+    expect(out.note).toContain('Files/logo.png');
+    expect(out.note).toContain('read_file');
+    expect(JSON.stringify(out)).not.toContain('QUJD');
+  });
+
+  it('replaces sentinels nested inside the structure a chain built', () => {
+    const value = { files: [{ name: 'a', res: sentinel }], count: 1 };
+    const out = JSON.stringify(omitImagePayloads(value));
+    expect(out).not.toContain('QUJD');
+    expect(out).not.toContain(MCP_IMAGE_RESULT_KIND);
+    expect(out).toContain('"count":1');
+    expect(out).toContain('image_omitted');
+  });
+
+  it('replaces a spec-shaped image block too (what the remote MCP hop hands a local chain)', () => {
+    const value = [{ type: 'image', data: 'QUJD', mimeType: 'image/png' }, 'note'];
+    const out = JSON.stringify(omitImagePayloads(value));
+    expect(out).not.toContain('QUJD');
+    expect(out).toContain('image_omitted');
+    expect(out).toContain('"note"');
+  });
+
+  it('leaves ordinary values untouched and survives cycles', () => {
+    const value: Record<string, unknown> = { a: 1, list: ['x', 2, null] };
+    value.self = value;
+    const out = omitImagePayloads(value) as Record<string, unknown>;
+    expect(out.a).toBe(1);
+    expect(out.list).toEqual(['x', 2, null]);
+    expect(out.self).toBe('[Circular]');
   });
 });
