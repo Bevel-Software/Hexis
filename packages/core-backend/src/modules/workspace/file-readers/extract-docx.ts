@@ -1,6 +1,6 @@
 import AdmZip from 'adm-zip';
 import type { ExtractResult } from './doc-extract.types.js';
-import { localBlocks, paragraphRunText, zipEntryOversize } from './ooxml-text.js';
+import { localBlocks, localElementBlocks, localName, paragraphRunText, zipEntryOversize } from './ooxml-text.js';
 
 /**
  * Extract the BODY text of a `.docx` (Word) document.
@@ -36,18 +36,22 @@ export function extractDocx(bytes: Buffer): ExtractResult {
   const lines: string[] = [];
   let paragraphs = 0;
   let tables = 0;
-  for (const block of splitDocxBlocks(body)) {
-    if (block.kind === 'table') {
+  // Tables and paragraphs in DOCUMENT order, straight from the parser: a match
+  // is never descended into, so a table's own paragraphs stay inside it and are
+  // rendered once, as its rows. The hand-rolled splitter this replaces counted
+  // `<w:tbl>` opens and closes with a regex, which a comment or CDATA section
+  // mentioning either could throw off — splitting a paragraph in half and
+  // dropping its text.
+  for (const block of localElementBlocks(body, ['tbl', 'p'])) {
+    if (localName(block.name) === 'tbl') {
       tables++;
-      for (const row of localBlocks(block.xml, 'tr')) {
+      for (const row of localBlocks(block.body ?? '', 'tr')) {
         const cells = localBlocks(row, 'tc').map((cell) => paragraphRunText(cell, 't'));
-        lines.push(cells.join('\t'));
+        lines.push(cells.join('	'));
       }
     } else {
-      for (const p of localBlocks(block.xml, 'p')) {
-        lines.push(paragraphRunText(p, 't'));
-        paragraphs++;
-      }
+      lines.push(paragraphRunText(block.body ?? '', 't'));
+      paragraphs++;
     }
   }
   while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
@@ -61,38 +65,3 @@ export function extractDocx(bytes: Buffer): ExtractResult {
   };
 }
 
-/**
- * Split the document body into alternating text / table blocks, so table
- * paragraphs are rendered as tab-separated rows exactly once (not again as
- * free paragraphs). The table close is matched with DEPTH counting, so a
- * nested table stays inside its outer block.
- */
-function splitDocxBlocks(body: string): Array<{ kind: 'text' | 'table'; xml: string }> {
-  const blocks: Array<{ kind: 'text' | 'table'; xml: string }> = [];
-  // `(?=[\s>])` keeps `<w:tblPr>` / `<w:tblGrid>` from counting as table opens.
-  const openRe = /<w:tbl(?=[\s>])/g;
-  const tokenRe = /<w:tbl(?=[\s>])|<\/w:tbl>/g;
-  let pos = 0;
-  for (;;) {
-    openRe.lastIndex = pos;
-    const open = openRe.exec(body);
-    if (!open) {
-      if (pos < body.length) blocks.push({ kind: 'text', xml: body.slice(pos) });
-      return blocks;
-    }
-    if (open.index > pos) blocks.push({ kind: 'text', xml: body.slice(pos, open.index) });
-    tokenRe.lastIndex = open.index;
-    let depth = 0;
-    let end = body.length;
-    let token: RegExpExecArray | null;
-    while ((token = tokenRe.exec(body)) !== null) {
-      depth += token[0] === '</w:tbl>' ? -1 : 1;
-      if (depth === 0) {
-        end = tokenRe.lastIndex;
-        break;
-      }
-    }
-    blocks.push({ kind: 'table', xml: body.slice(open.index, end) });
-    pos = end;
-  }
-}
