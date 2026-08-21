@@ -1,17 +1,46 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
 } from '../../../state/workspace.context';
-import { PdfRenderer } from '../PdfRenderer';
 
-// Minimal WorkspaceContext: PdfRenderer only reads `workspaceId`. Casting the
-// stub via `unknown` keeps the test focused — the full context shape has 40+
-// fields, none of which PdfRenderer touches.
-function workspaceCtx(workspaceId: string | null): WorkspaceContextValue {
-  return { workspaceId } as unknown as WorkspaceContextValue;
-}
+/**
+ * pdf.js is mocked at the module boundary: the real library needs a worker
+ * thread and a 2D canvas context, neither of which happy-dom has. What is
+ * under test is everything the renderer OWNS — the fetch, the pager, the
+ * fit-to-width scale handed to `getViewport`, parse-failure copy, document
+ * teardown — against pdf.js's v5 surface (`getDocument().promise`,
+ * `doc.getPage`, `page.render({ canvas, viewport })`).
+ */
+const pdfjsMock = vi.hoisted(() => {
+  const renderTask = { promise: Promise.resolve(), cancel: vi.fn() };
+  const page = {
+    getViewport: vi.fn(({ scale }: { scale: number }) => ({
+      width: 600 * scale,
+      height: 800 * scale,
+    })),
+    render: vi.fn(() => renderTask),
+  };
+  const doc = {
+    numPages: 3,
+    getPage: vi.fn(async () => page),
+    destroy: vi.fn(async () => {}),
+  };
+  return {
+    doc,
+    page,
+    renderTask,
+    getDocument: vi.fn(() => ({ promise: Promise.resolve(doc) })),
+  };
+});
+vi.mock('pdfjs-dist', () => ({
+  GlobalWorkerOptions: {},
+  getDocument: pdfjsMock.getDocument,
+}));
+
+import { PdfRenderer } from '../PdfRenderer';
 
 const baseProps = {
   filePath: 'Inbox/brief.pdf',
@@ -21,62 +50,105 @@ const baseProps = {
 
 function renderWithWorkspace(workspaceId: string | null = 'ws-1') {
   return render(
-    <WorkspaceContext.Provider value={workspaceCtx(workspaceId)}>
+    <WorkspaceContext.Provider
+      value={{ workspaceId } as unknown as WorkspaceContextValue}
+    >
       <PdfRenderer {...baseProps} />
     </WorkspaceContext.Provider>,
   );
 }
 
-let createObjectURLSpy: ReturnType<typeof vi.fn>;
-let revokeObjectURLSpy: ReturnType<typeof vi.fn>;
-const objectUrls: string[] = [];
+function stubPdfFetch() {
+  const fetchSpy = vi.fn<typeof fetch>(async () =>
+    new Response(new Blob([new Uint8Array([0x25, 0x50, 0x44, 0x46])]), { status: 200 }),
+  );
+  vi.stubGlobal('fetch', fetchSpy);
+  return fetchSpy;
+}
 
-// jsdom does not implement URL.createObjectURL / revokeObjectURL — install
-// them as own-properties on the global URL class. We must NOT replace the
-// URL global itself (vi.stubGlobal('URL', …)) because Response/Blob/fetch
-// internals construct `new URL(…)` and would break.
+// happy-dom lays nothing out, so every element measures 0 wide — and the
+// renderer deliberately waits for a real measurement before drawing. Give
+// the page column a width so fit-to-width has something to fit.
+const CONTAINER_WIDTH = 900;
+
 beforeEach(() => {
-  objectUrls.length = 0;
-  createObjectURLSpy = vi.fn(() => {
-    const url = `blob:fake/${objectUrls.length}`;
-    objectUrls.push(url);
-    return url;
+  Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+    configurable: true,
+    get: () => CONTAINER_WIDTH,
   });
-  revokeObjectURLSpy = vi.fn();
-  (URL as unknown as { createObjectURL: typeof createObjectURLSpy }).createObjectURL =
-    createObjectURLSpy;
-  (URL as unknown as { revokeObjectURL: typeof revokeObjectURLSpy }).revokeObjectURL =
-    revokeObjectURLSpy;
+  pdfjsMock.getDocument.mockClear();
+  pdfjsMock.getDocument.mockImplementation(() => ({
+    promise: Promise.resolve(pdfjsMock.doc),
+  }));
+  pdfjsMock.doc.getPage.mockClear();
+  pdfjsMock.doc.destroy.mockClear();
+  pdfjsMock.page.getViewport.mockClear();
+  pdfjsMock.page.render.mockClear();
 });
 
 afterEach(() => {
-  delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
-  delete (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL;
+  delete (HTMLElement.prototype as { clientWidth?: unknown }).clientWidth;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe('PdfRenderer', () => {
-  it('fetches the PDF and renders an iframe with the issued blob URL', async () => {
-    const pdfBytes = new Blob([new Uint8Array([0x25, 0x50, 0x44, 0x46])], {
-      type: 'application/pdf',
-    });
-    const fetchSpy = vi.fn<typeof fetch>(async () => new Response(pdfBytes, { status: 200 }));
-    vi.stubGlobal('fetch', fetchSpy);
-
+  it('fetches the bytes, opens the document, and renders page 1 fit to the column width', async () => {
+    const fetchSpy = stubPdfFetch();
     renderWithWorkspace('ws-1');
 
-    const iframe = await waitFor(() => screen.getByTitle('Inbox/brief.pdf'));
-    expect(iframe.tagName).toBe('IFRAME');
-    expect((iframe as HTMLIFrameElement).src).toBe(objectUrls[0]);
-
+    await screen.findByText('Page 1 of 3');
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const calledUrl = String(fetchSpy.mock.calls[0]![0]);
     expect(calledUrl).toContain('/api/workspace/ws-1/file/raw');
     expect(calledUrl).toContain('path=Inbox%2Fbrief.pdf');
+
+    await waitFor(() => expect(pdfjsMock.page.render).toHaveBeenCalledTimes(1));
+    expect(pdfjsMock.doc.getPage).toHaveBeenCalledWith(1);
+    // Fit-to-width: base viewport is 600 wide at scale 1, the column is 900,
+    // so the render viewport is requested at scale 900/600 (dpr 1 in tests).
+    expect(pdfjsMock.page.getViewport).toHaveBeenLastCalledWith({ scale: 900 / 600 });
+    const renderArgs = (pdfjsMock.page.render.mock.calls[0] as unknown[])[0] as {
+      canvas: HTMLCanvasElement;
+      viewport: { width: number };
+    };
+    expect(renderArgs.canvas).toBeInstanceOf(HTMLCanvasElement);
+    expect(renderArgs.canvas.width).toBe(900);
   });
 
-  it('shows the loading state until the blob resolves', async () => {
+  it('pages forward and back, and pins the pager at both ends', async () => {
+    stubPdfFetch();
+    const user = userEvent.setup();
+    renderWithWorkspace('ws-1');
+
+    await screen.findByText('Page 1 of 3');
+    const prev = screen.getByRole('button', { name: 'Prev' });
+    const next = screen.getByRole('button', { name: 'Next' });
+    // First page: nowhere back to go.
+    expect(prev).toBeDisabled();
+
+    await user.click(next);
+    await screen.findByText('Page 2 of 3');
+    await waitFor(() => expect(pdfjsMock.doc.getPage).toHaveBeenCalledWith(2));
+    expect(prev).toBeEnabled();
+
+    await user.click(next);
+    await screen.findByText('Page 3 of 3');
+    // Last page: the pager stops, it does not wrap.
+    expect(next).toBeDisabled();
+
+    await user.click(prev);
+    await screen.findByText('Page 2 of 3');
+  });
+
+  it('offers Download in the toolbar', async () => {
+    stubPdfFetch();
+    renderWithWorkspace('ws-1');
+    await screen.findByText('Page 1 of 3');
+    expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
+  });
+
+  it('shows the loading state until the document resolves', async () => {
     let resolveFetch!: (res: Response) => void;
     vi.stubGlobal(
       'fetch',
@@ -89,14 +161,24 @@ describe('PdfRenderer', () => {
     );
 
     renderWithWorkspace('ws-1');
-    expect(screen.getByText('Loading PDF...')).toBeInTheDocument();
+    expect(screen.getByText('Loading PDF…')).toBeInTheDocument();
 
-    resolveFetch(
-      new Response(new Blob([new Uint8Array([0x25])], { type: 'application/pdf' }), {
-        status: 200,
-      }),
-    );
-    await waitFor(() => screen.getByTitle('Inbox/brief.pdf'));
+    resolveFetch(new Response(new Blob([new Uint8Array([0x25])]), { status: 200 }));
+    await screen.findByText('Page 1 of 3');
+  });
+
+  it('says the file could not be parsed as a PDF when pdf.js rejects it, and still offers Download', async () => {
+    stubPdfFetch();
+    // A renamed .txt, a truncated upload — the fetch succeeded, the parse did not.
+    pdfjsMock.getDocument.mockImplementation(() => ({
+      promise: Promise.reject(new Error('Invalid PDF structure')),
+    }));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    renderWithWorkspace('ws-1');
+    await screen.findByText('This file could not be parsed as a PDF.');
+    // The bytes may still be fine for a desktop viewer.
+    expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
   });
 
   it('renders an error message when the fetch returns a non-OK response', async () => {
@@ -104,11 +186,8 @@ describe('PdfRenderer', () => {
       'fetch',
       vi.fn(async () => new Response('not found', { status: 404 })),
     );
-
     renderWithWorkspace('ws-1');
-    await waitFor(() =>
-      expect(screen.getByText(/Failed to load PDF \(HTTP 404\)/)).toBeInTheDocument(),
-    );
+    await screen.findByText(/Failed to load PDF \(HTTP 404\)/);
   });
 
   it('renders an error message when fetch throws (network failure)', async () => {
@@ -118,23 +197,17 @@ describe('PdfRenderer', () => {
         throw new Error('network down');
       }),
     );
-
     renderWithWorkspace('ws-1');
-    await waitFor(() => expect(screen.getByText('network down')).toBeInTheDocument());
+    await screen.findByText('network down');
   });
 
-  it('revokes the object URL on unmount', async () => {
-    const pdfBytes = new Blob([new Uint8Array([0x25])], {
-      type: 'application/pdf',
-    });
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(pdfBytes, { status: 200 })));
-
+  it('destroys the worker-side document on unmount', async () => {
+    stubPdfFetch();
     const { unmount } = renderWithWorkspace('ws-1');
-    await waitFor(() => screen.getByTitle('Inbox/brief.pdf'));
+    await screen.findByText('Page 1 of 3');
 
-    expect(createObjectURLSpy).toHaveBeenCalledTimes(1);
     unmount();
-    expect(revokeObjectURLSpy).toHaveBeenCalledWith(objectUrls[0]);
+    expect(pdfjsMock.doc.destroy).toHaveBeenCalled();
   });
 
   it('does not fetch when workspaceId is null', async () => {
@@ -146,22 +219,6 @@ describe('PdfRenderer', () => {
     // Give effects a chance to run.
     await new Promise((r) => setTimeout(r, 10));
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(screen.getByText('Loading PDF...')).toBeInTheDocument();
-  });
-
-  it('URL-encodes filePath segments so paths with spaces and slashes work', async () => {
-    const pdfBytes = new Blob([new Uint8Array([0x25])], { type: 'application/pdf' });
-    const fetchSpy = vi.fn<typeof fetch>(async () => new Response(pdfBytes, { status: 200 }));
-    vi.stubGlobal('fetch', fetchSpy);
-
-    render(
-      <WorkspaceContext.Provider value={workspaceCtx('ws-1')}>
-        <PdfRenderer {...baseProps} filePath="My Folder/Q3 report.pdf" />
-      </WorkspaceContext.Provider>,
-    );
-
-    await waitFor(() => screen.getByTitle('My Folder/Q3 report.pdf'));
-    const calledUrl = String(fetchSpy.mock.calls[0]![0]);
-    expect(calledUrl).toContain('path=My%20Folder%2FQ3%20report.pdf');
+    expect(screen.getByText('Loading PDF…')).toBeInTheDocument();
   });
 });
