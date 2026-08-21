@@ -209,44 +209,103 @@ export function toCallToolResult(value: unknown): CallToolResult {
  * spec-shaped image content block, which is what the local server's remote
  * MCP hop hands a chain (see `toCallToolResult`) — for
  * `{ image_omitted: true, note }`, keeping whatever structure the chain built
- * around it. Best-effort by design: chain code that EXTRACTS the base64 string
- * itself escapes the walk, and then the ordinary max_output_size spill bounds
- * the damage.
+ * around it. The walk is ITERATIVE (explicit stack) and cycle-safe with no
+ * depth cutoff — nesting depth can never smuggle a payload past the scrub —
+ * and it rebuilds only arrays and plain records, preserving every other
+ * object (Date, Map, class instances) by reference. Best-effort by design:
+ * chain code that EXTRACTS the base64 string itself escapes the walk, and
+ * then the ordinary max_output_size spill bounds the damage.
  */
 export function omitImagePayloads(value: unknown): unknown {
-  // Active-descent set: guards real cycles without mislabeling diamond shares.
-  const ancestors = new Set<object>();
-  const walk = (v: unknown, depth: number): unknown => {
-    if (v === null || typeof v !== 'object' || depth > 64) return v;
-    if (isMcpImageResult(v)) {
-      const what = v.note ?? `an image (${v.mimeType})`;
-      return {
-        image_omitted: true,
-        note:
-          `${what} — images are returned directly to you as native MCP image content, not through ` +
-          '`call_tool_chain`. Call `read_file` on the image path as a DIRECT tool call (outside the chain) to see it.',
-      };
-    }
-    if (isMcpImageBlockObject(v)) {
-      return {
-        image_omitted: true,
-        note:
-          `an image (${v.mimeType}) — images are returned directly to you as native MCP image content, not ` +
-          'through `call_tool_chain`. Call `read_file` on the image path as a DIRECT tool call (outside the chain) to see it.',
-      };
-    }
-    if (ancestors.has(v)) return '[Circular]';
-    ancestors.add(v);
-    try {
-      if (Array.isArray(v)) return v.map((e) => walk(e, depth + 1));
-      const out: Record<string, unknown> = {};
-      for (const [k, e] of Object.entries(v)) out[k] = walk(e, depth + 1);
-      return out;
-    } finally {
-      ancestors.delete(v);
-    }
+  const omittedNote = (what: string): { image_omitted: true; note: string } => ({
+    image_omitted: true,
+    note:
+      `${what} — images are returned directly to you as native MCP image content, not through ` +
+      '`call_tool_chain`. Call `read_file` on the image path as a DIRECT tool call (outside the chain) to see it.',
+  });
+
+  // Only plain records (Object.prototype or null prototype) are rebuilt.
+  // Anything else — Date, Map, Buffer, class instances, other JSON-friendly
+  // oddities — is preserved BY REFERENCE: rebuilding would mangle it, and the
+  // image shapes the walk hunts are plain objects.
+  const isPlainRecord = (v: object): v is Record<string, unknown> => {
+    const proto: unknown = Object.getPrototypeOf(v);
+    return proto === Object.prototype || proto === null;
   };
-  return walk(value, 0);
+
+  // `out[key] = …` would be a prototype-pollution hazard for keys like
+  // `__proto__`; defineProperty makes every rebuilt key an ordinary own data
+  // property (JSON.stringify then serializes it exactly like the original).
+  const defineKey = (out: Record<string, unknown>, key: string, val: unknown): void => {
+    Object.defineProperty(out, key, { value: val, enumerable: true, writable: true, configurable: true });
+  };
+
+  // ITERATIVE depth-first rebuild: an explicit frame stack instead of
+  // recursion, so arbitrarily deep nesting cannot overflow the call stack —
+  // and, crucially, cannot ESCAPE the scrub the way a depth cutoff would let
+  // a deeply nested image reach the transcript. `active` tracks only the
+  // live descent (added on push, removed on pop), so real cycles become
+  // '[Circular]' while diamond shares rebuild normally.
+  type Frame =
+    | { kind: 'array'; src: readonly unknown[]; out: unknown[]; i: number }
+    | { kind: 'record'; src: Record<string, unknown>; out: Record<string, unknown>; keys: string[]; i: number };
+
+  const active = new WeakSet<object>();
+
+  /** Resolve one value: a leaf to emit as-is, or a container frame to walk. */
+  const resolve = (v: unknown): { leaf: unknown } | { frame: Frame } => {
+    if (v === null || typeof v !== 'object') return { leaf: v };
+    if (isMcpImageResult(v)) return { leaf: omittedNote(v.note ?? `an image (${v.mimeType})`) };
+    if (isMcpImageBlockObject(v)) return { leaf: omittedNote(`an image (${v.mimeType})`) };
+    if (active.has(v)) return { leaf: '[Circular]' };
+    if (Array.isArray(v)) {
+      active.add(v);
+      return { frame: { kind: 'array', src: v, out: new Array<unknown>(v.length), i: 0 } };
+    }
+    if (isPlainRecord(v)) {
+      active.add(v);
+      return { frame: { kind: 'record', src: v, out: {}, keys: Object.keys(v), i: 0 } };
+    }
+    return { leaf: v }; // non-plain object — preserved by reference
+  };
+
+  const seed = resolve(value);
+  if ('leaf' in seed) return seed.leaf;
+  const stack: Frame[] = [seed.frame];
+  while (stack.length > 0) {
+    const top = stack[stack.length - 1];
+    if (top.kind === 'array') {
+      if (top.i >= top.src.length) {
+        active.delete(top.src as unknown as object);
+        stack.pop();
+        continue;
+      }
+      const idx = top.i++;
+      const r = resolve(top.src[idx]);
+      if ('leaf' in r) {
+        top.out[idx] = r.leaf;
+      } else {
+        // The child's `out` fills in place as its frame drains.
+        top.out[idx] = r.frame.out;
+        stack.push(r.frame);
+      }
+    } else {
+      if (top.i >= top.keys.length) {
+        active.delete(top.src);
+        stack.pop();
+        continue;
+      }
+      const key = top.keys[top.i++];
+      const r = resolve(top.src[key]);
+      if ('leaf' in r) {
+        defineKey(top.out, key, r.leaf);
+      } else {
+        defineKey(top.out, key, r.frame.out);
+        stack.push(r.frame);
+      }
+    }
+  }
+  return seed.frame.out;
 }
 
 export function renderProgress(chunk: unknown): string {

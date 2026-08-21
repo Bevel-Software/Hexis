@@ -188,4 +188,40 @@ describe('omitImagePayloads', () => {
     expect(out.list).toEqual(['x', 2, null]);
     expect(out.self).toBe('[Circular]');
   });
+
+  it('omits an image buried 100 levels deep — no depth cutoff lets base64 escape into the transcript', () => {
+    let value: unknown = { res: sentinel };
+    for (let i = 0; i < 100; i++) value = { wrap: [value] };
+    const out = JSON.stringify(omitImagePayloads(value));
+    expect(out).not.toContain('QUJD');
+    expect(out).toContain('image_omitted');
+  });
+
+  it('rebuilds special keys as own data properties — no prototype pollution, no dropped keys', () => {
+    // JSON.parse creates an OWN `__proto__` data property (never a setter call).
+    const value = JSON.parse('{"__proto__": {"polluted": true}, "constructor": "kept"}') as Record<string, unknown>;
+    (value as { img?: unknown }).img = sentinel;
+    const out = omitImagePayloads(value) as Record<string, unknown>;
+    // The key survives as data…
+    expect(Object.getOwnPropertyDescriptor(out, '__proto__')?.value).toEqual({ polluted: true });
+    expect(out.constructor).toBe('kept');
+    expect(JSON.stringify(out)).toContain('"__proto__"');
+    // …and nothing leaked onto Object.prototype or the rebuilt object's chain.
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(({} as { polluted?: unknown }).polluted).toBeUndefined();
+  });
+
+  it('preserves non-plain objects by reference instead of mangling them into records', () => {
+    const when = new Date('2026-01-01T00:00:00Z');
+    const buf = new Map([['k', 'v']]);
+    class Thing {
+      label = 'thing';
+    }
+    const thing = new Thing();
+    const out = omitImagePayloads({ when, buf, thing, res: sentinel }) as Record<string, unknown>;
+    expect(out.when).toBe(when);
+    expect(out.buf).toBe(buf);
+    expect(out.thing).toBe(thing);
+    expect((out.res as { image_omitted?: boolean }).image_omitted).toBe(true);
+  });
 });
