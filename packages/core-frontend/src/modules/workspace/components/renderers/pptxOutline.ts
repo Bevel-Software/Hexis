@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { XML_NCNAME, decodeXmlEntities } from './xmlEntities';
+import { XML_NCNAME, decodeXmlEntities, xmlElementBlocks } from './xmlEntities';
 
 /**
  * Client-side `.pptx` → text outline, the browser twin of the backend's
@@ -15,7 +15,7 @@ import { XML_NCNAME, decodeXmlEntities } from './xmlEntities';
  * The XML helpers are hand-rolled for the same reason as the backend's
  * `ooxml-text.ts`: the only question asked is "the character content of
  * `<a:t>` runs, grouped by paragraph", and a full XML parser dependency would
- * be a heavyweight addition for what a linear regex scan does correctly on
+ * be a heavyweight addition for what a single linear scan does correctly on
  * well-formed OOXML (which a zip that PowerPoint produced always is; a
  * malformed one fails at the zip layer or yields fewer runs, never a crash).
  */
@@ -29,25 +29,27 @@ export interface PptxSlide {
   notes: string[];
 }
 
-/** Split an XML fragment into its `<{tag}>…</{tag}>` blocks (non-greedy, no nesting). */
+/**
+ * Split an XML fragment into its `<{tag}>…</{tag}>` blocks, in document order.
+ * A self-closing `<{tag}/>` yields '' — an EMPTY block, which is what an empty
+ * `<a:p/>` paragraph means. See {@link xmlElementBlocks} for the non-nesting,
+ * quoting and linear-time guarantees.
+ */
 function xmlBlocks(xml: string, tag: string): string[] {
-  const re = new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, 'g');
-  const out: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(xml)) !== null) out.push(m[1]);
-  return out;
+  return xmlElementBlocks(xml, [tag]).map((e) => e.body ?? '');
 }
 
 /**
  * The text of one paragraph: every `<a:t>` run's character content,
  * concatenated with NO separator — runs split mid-word, so any separator
- * would break words apart.
+ * would break words apart. A self-closing `<a:t/>` is an empty run and
+ * contributes nothing.
  */
 function paragraphRunText(paragraphXml: string): string {
-  const re = /<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g;
   let out = '';
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(paragraphXml)) !== null) out += decodeXmlEntities(m[1]);
+  for (const run of xmlElementBlocks(paragraphXml, ['a:t'])) {
+    if (run.body !== undefined) out += decodeXmlEntities(run.body);
+  }
   return out;
 }
 

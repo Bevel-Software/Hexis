@@ -1,7 +1,6 @@
 import type { ExtractResult } from './doc-extract.types.js';
-import { decodeXmlEntities, xmlAttrValue } from './ooxml-text.js';
+import { decodeXmlEntities, xmlAttrValue, xmlElementBlocks } from './ooxml-text.js';
 import {
-  odfElementBlocks,
   odfParagraphBlocks,
   odfParagraphText,
   readOdfContentXml,
@@ -86,10 +85,10 @@ function expandRows(tableXml: string): { rows: string[][]; truncated: string[] }
   // The shared quote-aware scanner: a self-closing row WITH attributes is
   // still a row, a `/>` inside a quoted attribute value is not a delimiter,
   // and an UNCLOSED row costs one scan of the sheet rather than one per opener
-  // (see `odfElementBlocks`).
+  // (see `xmlElementBlocks`).
   const parsed: Repeated<string[]>[] = [];
   let colsTruncated = false;
-  for (const row of odfElementBlocks(tableXml, ['table:table-row'])) {
+  for (const row of xmlElementBlocks(tableXml, ['table:table-row'])) {
     const cells = expandCells(row.body ?? '');
     if (cells.truncated) colsTruncated = true;
     parsed.push({ value: cells.cells, repeat: repeatCount(row.attrs, 'table:number-rows-repeated') });
@@ -123,7 +122,7 @@ function expandRows(tableXml: string): { rows: string[][]; truncated: string[] }
 function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
   // Same quote-aware scanner as the row walk above.
   const parsed: Repeated<string>[] = [];
-  for (const cell of odfElementBlocks(rowXml, ['table:table-cell', 'table:covered-table-cell'])) {
+  for (const cell of xmlElementBlocks(rowXml, ['table:table-cell', 'table:covered-table-cell'])) {
     // Covered cells carry no own text anyway. Element-produced newlines/tabs
     // INSIDE a cell (<text:line-break/>, <text:tab/>) become single spaces:
     // the extraction's contract is one row per line with tab-separated cells,

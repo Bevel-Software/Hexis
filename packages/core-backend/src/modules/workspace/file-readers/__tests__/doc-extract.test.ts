@@ -1021,6 +1021,22 @@ describe('ODF element scanning stays linear on crafted content.xml', () => {
     expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
+  it('an odt wall of openers ending at a FAR close tag stays linear too', () => {
+    // The residual hole in the round-4/5 ODF scanner, closed by sharing
+    // `xmlElementBlocks` with the OOXML walks: a failure-only memo recorded
+    // nothing when every attribute scan succeeded at a far-away `>`. Measured
+    // on this exact shape before the fix: 740 KB took 44.6 s.
+    const bytes = odtBytes(
+      '<text:p>Kept</text:p>' + '<text:p text:style-name="never closed'.repeat(20_000),
+    );
+    const t0 = performance.now();
+    const res = extractOdt(bytes);
+    const ms = performance.now() - t0;
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('Kept');
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
   it('still reads a self-closing paragraph, a quoted /> and a quoted > the same way the regex did', () => {
     expect(odfParagraphBlocks('<text:p/>')).toEqual(['']);
     expect(odfParagraphBlocks('<text:p text:style-name="s"/>')).toEqual(['']);
@@ -1185,5 +1201,170 @@ describe('ODF block regexes are quote-aware about /> inside attribute values', (
     );
     if (!res.ok) throw new Error(res.message);
     expect(res.text.split('\n')).toEqual(['[sheet: S]', '\t\tend']);
+  });
+});
+
+// ── docx/pptx: the OOXML scanner ───────────────────────────────────────────
+
+describe('ooxml-text — the docx/pptx walks are linear and quote-aware', () => {
+  /**
+   * The same shape that pinned the ODF extractors, in the OOXML twins that
+   * were deliberately left standing last round. `<w:p(?:\s[^>]*)?>([\s\S]*?)
+   * </w:p>` re-scanned everything to the right from EVERY opener whose close
+   * tag never came, so cost grew as openers x bytes. Measured before the
+   * rewrite: 80k openers (391 KB) took 19.4 s, QUADRUPLING per doubling —
+   * days of pinned CPU at the 50 MB `MAX_DOC_PART_BYTES` cap, from a
+   * .docx/.pptx that zips down to a few kilobytes. `word/document.xml` and
+   * `ppt/slides/slideN.xml` are user-uploaded bytes, so anyone who can add a
+   * file to a knowledge base could reach it.
+   *
+   * Generous by design (seconds): here to catch a RETURN of the quadratic,
+   * not to police CI's scheduler. The scanner does these in single-digit ms.
+   */
+  const GENEROUS_MS = 5_000;
+
+  it('a docx of 80k unmatched <w:p> openers extracts its real paragraph, fast', () => {
+    const bytes = docxBytes('<w:p><w:r><w:t>Kept</w:t></w:r></w:p>' + '<w:p>'.repeat(80_000));
+    const t0 = performance.now();
+    const res = extractDocx(bytes);
+    const ms = performance.now() - t0;
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('Kept');
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
+  it('a pptx of 80k unmatched <a:p> openers still reads its real slide text, fast', () => {
+    const bytes = pptxBytes({
+      1: `<p:sld ${A_NS}><a:p><a:r><a:t>Alive</a:t></a:r></a:p>${'<a:p algn="ctr">'.repeat(80_000)}</p:sld>`,
+    });
+    const t0 = performance.now();
+    const res = extractPptx(bytes);
+    const ms = performance.now() - t0;
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['[slide 1]', 'Alive']);
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
+  it('40k unmatched <w:t> RUN openers inside one paragraph stay linear too', () => {
+    // paragraphRunText carried the identical pattern, one level down.
+    const bytes = docxBytes(
+      `<w:p><w:r><w:t>Kept</w:t></w:r>${'<w:t xml:space="preserve">'.repeat(40_000)}</w:p>`,
+    );
+    const t0 = performance.now();
+    const res = extractDocx(bytes);
+    const ms = performance.now() - t0;
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('Kept');
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
+  it('an UNTERMINATED attribute quote ends the scan instead of restarting it per opener', () => {
+    // The second failure mode: quote-awareness means an unclosed quote runs to
+    // the end of the part, so without the dead-opener memo every opener would
+    // pay a full scan to discover that. Measured at 40k openers before the
+    // memo existed in this walk: 85 s.
+    const bytes = docxBytes(
+      '<w:p><w:r><w:t>Kept</w:t></w:r></w:p>' + '<w:p w:rsidR="never closed'.repeat(40_000),
+    );
+    const t0 = performance.now();
+    const res = extractDocx(bytes);
+    const ms = performance.now() - t0;
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('Kept');
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
+  it('a wall of openers whose attribute scan ends at a FAR close tag stays linear', () => {
+    // The shape a failure-only memo misses. Here every opener's attribute scan
+    // reaches the `>` of the `</w:body>` past the wall, so every scan SUCCEEDS
+    // — nothing is recorded as dead — and each one is then rejected by the
+    // `lastIndexOf` guard, at the cost of a full traversal apiece. Measured on
+    // the ODF twin, which shipped with exactly this hole: 740 KB took 44.6 s
+    // and quadrupled per doubling. The memo now records successes too.
+    const bytes = docxBytes(
+      '<w:p><w:r><w:t>Kept</w:t></w:r></w:p>' + '<w:p w:rsidR="never closed'.repeat(20_000),
+    );
+    const t0 = performance.now();
+    const res = extractDocx(bytes);
+    const ms = performance.now() - t0;
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('Kept');
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
+  it('CHANGED: a self-closing <w:p/> is an EMPTY paragraph, not a dropped one', () => {
+    // Before the rewrite the pattern admitted no `/>` branch, so `<w:p/>`
+    // matched nothing and vanished from the output entirely — an empty line
+    // the author wrote simply disappeared. It now reads as the empty
+    // paragraph it is, which is what `<w:p></w:p>` has always produced and
+    // what the ODF scanner does for `<text:p/>`.
+    const res = extractDocx(
+      docxBytes('<w:p><w:r><w:t>A</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>B</w:t></w:r></w:p>'),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['A', '', 'B']);
+    expect(res.summary).toContain('3 paragraphs');
+  });
+
+  it('CHANGED: a self-closing <w:p/> WITH attributes is an empty paragraph too', () => {
+    const res = extractDocx(
+      docxBytes('<w:p w:rsidR="00A1"/><w:p><w:r><w:t>B</w:t></w:r></w:p>'),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['', 'B']);
+  });
+
+  it('CHANGED: a self-closing <w:tc/> is an EMPTY table cell, not a dropped column', () => {
+    const res = extractDocx(
+      docxBytes(
+        '<w:tbl><w:tr><w:tc/><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['\tb']);
+  });
+
+  it('CHANGED: a `>` inside a quoted attribute no longer leaks into the text', () => {
+    // `[^>]*` stopped at the FIRST `>`, even inside a quoted value, so the tag
+    // was truncated: the block boundary landed mid-attribute and the attribute
+    // tail was emitted as document text. This paragraph used to extract as
+    // ` b">Hi` — the run property's value and a stray quote in the body.
+    const res = extractDocx(
+      docxBytes('<w:p><w:r><w:t w:val="a &gt; b" w:x="a > b">Hi</w:t></w:r></w:p>'),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('Hi');
+  });
+
+  it('CHANGED: a quoted `>` on the PARAGRAPH tag keeps the block boundary right', () => {
+    const res = extractDocx(
+      docxBytes('<w:p w:rsidR="a > b"><w:r><w:t>Hi</w:t></w:r></w:p>'),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('Hi');
+  });
+
+  it('a pptx paragraph with a quoted `>` and a self-closing empty one read correctly', () => {
+    // pptx DROPS blank paragraphs (a deck's outline is its non-empty lines),
+    // so `<a:p/>` stays invisible there — but the quoted `>` used to prepend
+    // `q">` to the slide's text.
+    const res = extractPptx(
+      pptxBytes({
+        1: `<p:sld ${A_NS}><a:p/><a:p><a:r><a:t x="p>q">Hi</a:t></a:r></a:p></p:sld>`,
+      }),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['[slide 1]', 'Hi']);
+  });
+
+  it('still refuses to read <w:pPr> as a <w:p>, and drops a dangling opener', () => {
+    // The delimiter check gained `/` but did not lose `\s` or `>`: a longer
+    // name that merely STARTS with the wanted one is still not a match.
+    const res = extractDocx(
+      docxBytes('<w:pPr><w:r><w:t>props</w:t></w:r></w:pPr><w:p><w:r><w:t>real</w:t></w:r></w:p><w:p>dangling'),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('real');
+    expect(res.summary).toContain('1 paragraph;');
   });
 });

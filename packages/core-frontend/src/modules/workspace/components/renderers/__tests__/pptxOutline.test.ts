@@ -239,4 +239,62 @@ describe('extractPptxOutline', () => {
       { number: 3, paragraphs: ['third'], notes: [] },
     ]);
   });
+  /**
+   * The viewer carried the SAME quadratic the backend extractors did: the
+   * `<a:p(?:\s[^>]*)?>([\s\S]*?)</a:p>` pattern re-scanned the rest of the
+   * slide part from every opener whose close tag never came, so cost grew as
+   * openers x bytes (measured on the backend twin: 391 KB took 19.4 s and
+   * quadrupled per doubling). A deck is opened in the user's own tab, which
+   * cannot be closed while the main thread is pinned.
+   */
+  it('a slide of 40k unmatched <a:p> openers still yields its real text, fast', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('Alive') + '<a:p algn="ctr">'.repeat(40_000)),
+    });
+    const t0 = performance.now();
+    const slides = await extractPptxOutline(bytes);
+    const ms = performance.now() - t0;
+    expect(slides[0].paragraphs).toEqual(['Alive']);
+    expect(ms).toBeLessThan(5_000);
+  });
+
+  // Every opener's attribute scan here reaches the `>` of the `</p:spTree>`
+  // that sits PAST the wall, so each scan succeeds and a failure-only memo
+  // records nothing — then the `lastIndexOf` guard rejects the opener anyway,
+  // one full traversal at a time. Measured on this exact path before the memo
+  // covered successes: 20k openers took 21.9 s.
+  it('an unterminated attribute quote ends the scan instead of restarting per opener', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('Alive') + '<a:p algn="never closed'.repeat(20_000)),
+    });
+    const t0 = performance.now();
+    const slides = await extractPptxOutline(bytes);
+    const ms = performance.now() - t0;
+    expect(slides[0].paragraphs).toEqual(['Alive']);
+    expect(ms).toBeLessThan(5_000);
+  });
+
+  it('CHANGED: a `>` inside a quoted attribute no longer leaks into the outline', async () => {
+    // `[^>]*` stopped at the FIRST `>` even inside a quoted value, truncating
+    // the tag: this run used to render as `q">Hi`. Quote-awareness fixes it,
+    // and matches what the backend extractor now emits for the same deck.
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml('<a:p algn="a > b"><a:r><a:t x="p>q">Hi</a:t></a:r></a:p>'),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].paragraphs).toEqual(['Hi']);
+  });
+
+  it('a self-closing <a:p/> stays invisible — the outline drops blank paragraphs', async () => {
+    // The scanner now reads `<a:p/>` as an EMPTY paragraph rather than no
+    // paragraph at all; the outline filters blanks either way, so the viewer's
+    // output is unchanged. Pinned so the parity with the backend (which DOES
+    // keep the blank line, because a docx body preserves empty paragraphs) is
+    // a decision on record rather than an accident.
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml('<a:p/>' + para('kept') + '<a:p style="s"/>'),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].paragraphs).toEqual(['kept']);
+  });
 });

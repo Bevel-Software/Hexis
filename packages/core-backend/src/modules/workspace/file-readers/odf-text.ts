@@ -1,12 +1,12 @@
 import AdmZip from 'adm-zip';
-import { decodeXmlEntities, xmlAttrValue, zipEntryOversize } from './ooxml-text.js';
+import { decodeXmlEntities, xmlAttrValue, xmlElementBlocks, zipEntryOversize } from './ooxml-text.js';
 
 /**
  * Minimal ODF (OpenDocument) text helpers shared by the odt/odp/ods
  * extractors. Same DELIBERATELY hand-rolled approach as `ooxml-text.ts`: an
  * ODF package's `content.xml` is well-formed XML (LibreOffice/OpenOffice wrote
  * it), and the extractors only need paragraph character content plus three
- * whitespace elements — a linear regex scan does that correctly without a new
+ * whitespace elements — a single linear scan does that correctly without a new
  * XML-parser dependency.
  */
 
@@ -42,129 +42,6 @@ export function odfParagraphText(paragraphXml: string): string {
   return out + decodeXmlEntities(paragraphXml.slice(last));
 }
 
-/** One element found by {@link odfElementBlocks}. */
-export interface OdfElementBlock {
-  /** The qualified name as written, e.g. `text:p` — which of `names` matched. */
-  name: string;
-  /** The attribute region verbatim (leading space included), '' when there is none. */
-  attrs: string;
-  /** The body between `>` and the matching close tag; undefined when self-closing. */
-  body: string | undefined;
-}
-
-/**
- * Index of the `>` that ends the tag whose attribute region starts at `from`,
- * or -1 when the tag never terminates. Quote-aware, so a `>` or `/>` INSIDE a
- * quoted attribute value is part of the value and never the delimiter.
- *
- * On failure, every `<` passed OUTSIDE quotes is recorded in `dead`: a tag
- * starting there would be scanned from the same quote state over the same
- * tail, so it too can only fail. That memo is what keeps the whole pass
- * linear — it is the argument `email-text.ts`'s scanner rests on.
- */
-function scanOdfTagEnd(xml: string, from: number, dead: Set<number>): number {
-  let quote: '"' | "'" | null = null;
-  const passedUnquoted: number[] = [];
-  for (let i = from; i < xml.length; i++) {
-    const c = xml[i];
-    if (quote !== null) {
-      if (c === quote) quote = null;
-    } else if (c === '"' || c === "'") quote = c;
-    else if (c === '>') return i;
-    else if (c === '<') passedUnquoted.push(i);
-  }
-  for (const p of passedUnquoted) dead.add(p);
-  return -1;
-}
-
-/**
- * The `<name …>…</name>` and self-closing `<name …/>` elements named by
- * `names`, in document order, treated as NON-NESTING (the first close tag
- * wins) — the four ODF shapes the extractors need: paragraphs, headings, draw
- * pages, table rows and cells.
- *
- * A SINGLE-PASS scanner, not a regex, for the reason `email-text.ts` gave up
- * its tag regexes. The pattern this replaces —
- * `<text:p(?=[\s/>])${TAG_ATTRS}(?:\/>|>([\s\S]*?)<\/text:p>)` — re-scanned
- * the rest of the document from EVERY opener whose match failed, and
- * `content.xml` is user-supplied bytes up to `MAX_DOC_PART_BYTES` (50 MB). A
- * crafted file of unmatched `<text:p>` openers therefore cost
- * O(openers x bytes): measured at 464 KB it took 2.3 s and quadrupled with
- * every doubling of the input — hours of pinned CPU at the size cap, from a
- * .odt/.odp/.ods that compresses to a few kilobytes.
- *
- * The scan is quote-aware exactly like the regex it replaces, and bounds both
- * failure modes:
- *
- *  - an attribute scan that runs off the end marks the openers it passed
- *    unquoted as dead (see `scanOdfTagEnd`), so no position is rescanned from
- *    more than the three possible quote states;
- *  - a close tag is looked for only when one EXISTS at or after the search
- *    position — `lastIndexOf` per name, computed once — so a missing close tag
- *    costs one scan of the document in total, not one per opener.
- */
-export function odfElementBlocks(xml: string, names: readonly string[]): OdfElementBlock[] {
-  // Longest first, so a name that PREFIXES another can never shadow it.
-  const wanted = [...names].sort((a, b) => b.length - a.length);
-  const lastClose = new Map<string, number>();
-  const lastCloseIndex = (name: string): number => {
-    let known = lastClose.get(name);
-    if (known === undefined) {
-      known = xml.lastIndexOf(`</${name}>`);
-      lastClose.set(name, known);
-    }
-    return known;
-  };
-  const dead = new Set<number>();
-  const out: OdfElementBlock[] = [];
-  let i = 0;
-  while (i < xml.length) {
-    const lt = xml.indexOf('<', i);
-    if (lt === -1) break;
-    if (dead.has(lt)) {
-      i = lt + 1;
-      continue;
-    }
-    // The delimiter check is the regex's `(?=[\s/>])` lookahead: it keeps
-    // `<text:page-number>` from counting as a `<text:p>`.
-    const name = wanted.find(
-      (n) => xml.startsWith(n, lt + 1) && /[\s/>]/.test(xml[lt + 1 + n.length] ?? ''),
-    );
-    if (name === undefined) {
-      i = lt + 1;
-      continue;
-    }
-    const attrsStart = lt + 1 + name.length;
-    const gt = scanOdfTagEnd(xml, attrsStart, dead);
-    if (gt === -1) {
-      i = lt + 1; // unterminated tag: not an element
-      continue;
-    }
-    // `<x a="/"/>` is self-closing, `<x a="/">` is not: the character before
-    // the delimiter is only ever a `/` of the tag's own when it sits outside
-    // every quote (a closing quote is `"` or `'`, never `/`).
-    if (gt > attrsStart && xml[gt - 1] === '/') {
-      out.push({ name, attrs: xml.slice(attrsStart, gt - 1), body: undefined });
-      i = gt + 1;
-      continue;
-    }
-    const bodyStart = gt + 1;
-    if (bodyStart > lastCloseIndex(name)) {
-      i = lt + 1; // no `</name>` left in the document — this opener cannot match
-      continue;
-    }
-    const close = `</${name}>`;
-    const closeAt = xml.indexOf(close, bodyStart);
-    if (closeAt === -1) {
-      i = lt + 1; // unreachable given the guard above; kept total
-      continue;
-    }
-    out.push({ name, attrs: xml.slice(attrsStart, gt), body: xml.slice(bodyStart, closeAt) });
-    i = closeAt + close.length;
-  }
-  return out;
-}
-
 /**
  * The `<text:p>` / `<text:h>` paragraph bodies of an XML fragment, in DOCUMENT
  * order (headings interleaved with paragraphs, as written). Self-closing
@@ -173,7 +50,7 @@ export function odfElementBlocks(xml: string, names: readonly string[]): OdfElem
  * correct because ODF paragraphs cannot nest.
  */
 export function odfParagraphBlocks(xml: string): string[] {
-  return odfElementBlocks(xml, ['text:p', 'text:h']).map((e) => e.body ?? '');
+  return xmlElementBlocks(xml, ['text:p', 'text:h']).map((e) => e.body ?? '');
 }
 
 /** Non-empty paragraph texts of an ODF fragment — what odp slides/notes render. */

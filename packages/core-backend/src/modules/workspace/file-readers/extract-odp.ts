@@ -1,5 +1,6 @@
 import type { ExtractResult } from './doc-extract.types.js';
-import { odfElementBlocks, odfParagraphLines, readOdfContentXml } from './odf-text.js';
+import { odfParagraphLines, readOdfContentXml } from './odf-text.js';
+import { xmlElementBlocks } from './ooxml-text.js';
 
 /**
  * Extract the text of a `.odp` (OpenDocument Presentation) deck.
@@ -52,6 +53,6 @@ function drawPageBlocks(xml: string): string[] {
   // The shared quote-aware scanner: a `/>` INSIDE a quoted attribute value (a
   // page name like `a/>b`) is part of the value, never the self-closing
   // delimiter, and a page whose close tag is missing costs one scan of the
-  // document rather than one per opener (see `odfElementBlocks`).
-  return odfElementBlocks(xml, ['draw:page']).map((e) => e.body ?? '');
+  // document rather than one per opener (see `xmlElementBlocks`).
+  return xmlElementBlocks(xml, ['draw:page']).map((e) => e.body ?? '');
 }
