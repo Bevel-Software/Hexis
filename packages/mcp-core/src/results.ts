@@ -244,28 +244,55 @@ export function omitImagePayloads(value: unknown): unknown {
   // A value's JSON view: what JSON.stringify would serialize for it — the
   // toJSON() result when it defines one (a throwing toJSON falls back to the
   // value itself, matching safeJsonText's degraded path), the value otherwise.
+  // Cached per object: toJSON is a USER hook, so it must fire at most once per
+  // object per scrub — not once in the probe and again in the rebuild — and
+  // both walks must observe the SAME view even if the hook is impure.
+  const viewCache = new WeakMap<object, unknown>();
   const jsonView = (v: object): unknown => {
-    if (!hasToJson(v)) return v;
-    try {
-      return v.toJSON();
-    } catch {
-      return v;
+    if (viewCache.has(v)) return viewCache.get(v);
+    let view: unknown = v;
+    if (hasToJson(v)) {
+      try {
+        view = v.toJSON();
+      } catch {
+        /* keep the value itself */
+      }
     }
+    viewCache.set(v, view);
+    return view;
   };
 
   // Does the JSON shape reachable from `root` contain an image sentinel or
   // spec-shaped image block? Iterative and cycle-safe (a visited set suffices
   // for a boolean probe); non-plain objects are entered through their JSON
-  // view, exactly like the rebuild walk below.
-  const subtreeHasImage = (root: unknown): boolean => {
-    const visited = new WeakSet<object>();
+  // view, exactly like the rebuild walk below. Verdicts are memoized: a clean
+  // probe proves every object it visited clean too (each one's reachable shape
+  // is a subset of what was just explored), so a nested non-plain object is
+  // probed once, not re-walked by every enclosing probe. A hit only proves the
+  // ROOT dirty — the image may sit outside an inner object's own subtree — so
+  // only the root's verdict is recorded then.
+  const probeCache = new WeakMap<object, boolean>();
+  const subtreeHasImage = (root: object): boolean => {
+    const known = probeCache.get(root);
+    if (known !== undefined) return known;
+    const visited = new Set<object>();
     const stack: unknown[] = [root];
+    let found = false;
     while (stack.length > 0) {
       const v = stack.pop();
       if (v === null || typeof v !== 'object') continue;
-      if (isMcpImageResult(v) || isMcpImageBlockObject(v)) return true;
+      if (isMcpImageResult(v) || isMcpImageBlockObject(v)) {
+        found = true;
+        break;
+      }
       if (visited.has(v)) continue;
+      const cached = probeCache.get(v);
+      if (cached === true) {
+        found = true;
+        break;
+      }
       visited.add(v);
+      if (cached === false) continue;
       if (Array.isArray(v)) {
         for (const entry of v) stack.push(entry);
         continue;
@@ -279,7 +306,9 @@ export function omitImagePayloads(value: unknown): unknown {
       }
       for (const key of Object.keys(v)) stack.push((v as Record<string, unknown>)[key]);
     }
-    return false;
+    probeCache.set(root, found);
+    if (!found) for (const v of visited) probeCache.set(v, false);
+    return found;
   };
 
   // `out[key] = …` would be a prototype-pollution hazard for keys like
@@ -327,14 +356,19 @@ export function omitImagePayloads(value: unknown): unknown {
     // then is a plain sanitized copy rebuilt from that shape, toJSON applied
     // first when the object defines one.
     if (!subtreeHasImage(v)) return { leaf: v };
-    active.add(v);
     const view = jsonView(v);
+    // The view can BE the image shape — a toJSON() returning a sentinel or
+    // image block directly. Scrub it here: falling through would build a
+    // record frame from the view and copy its base64 `data` field, key by key,
+    // straight into the rebuilt result.
+    if (isMcpImageResult(view)) return { leaf: omittedNote(view.note ?? `an image (${view.mimeType})`) };
+    if (isMcpImageBlockObject(view)) return { leaf: omittedNote(`an image (${view.mimeType})`) };
     if (view === null || typeof view !== 'object') {
       // Unreachable in practice (a primitive view cannot hold the image that
       // subtreeHasImage found), kept total for safety.
-      active.delete(v);
       return { leaf: view };
     }
+    active.add(v);
     if (Array.isArray(view)) {
       const release = view === (v as unknown) ? [v] : [v, view];
       if (view !== (v as unknown)) active.add(view);

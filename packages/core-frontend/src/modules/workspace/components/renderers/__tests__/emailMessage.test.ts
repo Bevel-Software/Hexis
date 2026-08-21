@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import * as XLSX from 'xlsx';
 import { attachmentLine, htmlToEmailText, mailboxText } from '../emailMessage';
@@ -141,6 +143,12 @@ describe('parseEmlMessage', () => {
       parseEmlMessage(new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0x01, 0x02, 0xff, 0xfe]).buffer as ArrayBuffer),
     ).rejects.toThrow('could not be parsed as a .eml (no email headers found)');
   });
+
+  it('a valid email whose ONLY header is Bcc: is recognized, not rejected as header-less', async () => {
+    const view = await parseEmlMessage(emlBytes(['Bcc: Eve <eve@example.com>', '', 'quiet copy']));
+    expect(view.bcc).toBe('Eve <eve@example.com>');
+    expect(view.body).toBe('quiet copy');
+  });
 });
 
 // ── .msg ───────────────────────────────────────────────────────────────────
@@ -218,6 +226,14 @@ describe('email text helpers', () => {
     ).toBe('one\n\ntwo — three');
   });
 
+  it('htmlToEmailText never truncates a tag at a > inside a quoted attribute value', () => {
+    expect(htmlToEmailText('<a title="a > b">x</a>')).toBe('x');
+    expect(htmlToEmailText("<p align='x>y'>para</p>")).toBe('para');
+    expect(htmlToEmailText('<br data-note="1 > 0"/>line')).toBe('line');
+    expect(htmlToEmailText('<div class="a>b">block</div>')).toBe('block');
+    expect(htmlToEmailText('<style media="x>y">b{}</style>rest')).toBe('rest');
+  });
+
   it('mailboxText renders whichever of name/address exists', () => {
     expect(mailboxText('Ada', 'ada@example.com')).toBe('Ada <ada@example.com>');
     expect(mailboxText(undefined, 'ada@example.com')).toBe('ada@example.com');
@@ -230,5 +246,12 @@ describe('email text helpers', () => {
       'a.pdf (application/pdf, 8 bytes)',
     );
     expect(attachmentLine({ name: 'a.pdf' })).toBe('a.pdf');
+  });
+
+  it('emailMessage never imports pptxOutline — jszip must not be evaluated (or bundled) by the email chunk', () => {
+    const read = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+    expect(read('../emailMessage.ts')).not.toContain("'./pptxOutline'");
+    // The shared module both sides lean on must stay dependency-free.
+    expect(read('../xmlEntities.ts')).not.toMatch(/^import /m);
   });
 });

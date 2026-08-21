@@ -219,6 +219,13 @@ describe('extractEml', () => {
     expect(res).toEqual({ ok: false, message: 'could not be parsed as a .eml (no email headers found)' });
   });
 
+  it('a valid email whose ONLY header is Bcc: is recognized, not rejected as header-less', async () => {
+    const res = await extractEml(emlBytes(['Bcc: Eve <eve@example.com>', '', 'quiet copy']));
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.text).toBe('[bcc] Eve <eve@example.com>\n\nquiet copy');
+  });
+
   it('refuses a file over the 50 MB extraction bound before parsing anything', async () => {
     const res = await extractEml(Buffer.alloc(MAX_DOC_PART_BYTES + 1));
     expect(res.ok).toBe(false);
@@ -287,6 +294,27 @@ describe('extractMsg', () => {
     expect(res.summary).toContain('body is RTF; no plain-text part');
   });
 
+  it('keeps a recipient whose PidTagRecipientType carries flag bits — msgreader leaks the raw number', () => {
+    // msgreader maps only the bare MAPI values 1/2/3 to 'to'/'cc'/'bcc'; a
+    // resubmit-flagged value like MAPI_TO | MAPI_P1 (0x10000001) comes through
+    // as a NUMBER, and a string-only comparison silently dropped the line.
+    const res = extractMsg(
+      msgBytes({
+        strings: { '0037': 'resubmitted' },
+        recipients: [
+          { name: 'Bob', email: 'bob@example.com', type: 0x10000001 },
+          { name: 'Dan', email: 'dan@example.com', type: 0x10000002 },
+          { name: 'Eve', email: 'eve@example.com', type: 0x10000003 },
+        ],
+      }),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.text).toContain('[to] Bob <bob@example.com>');
+    expect(res.text).toContain('[cc] Dan <dan@example.com>');
+    expect(res.text).toContain('[bcc] Eve <eve@example.com>');
+  });
+
   it('answers garbage bytes with the typed could-not-be-parsed failure (msgreader reports, never throws)', () => {
     const res = extractMsg(Buffer.from('total garbage, not a CFB container'));
     expect(res.ok).toBe(false);
@@ -313,5 +341,13 @@ describe('htmlToEmailText', () => {
           '<!-- c --><p>one</p><p></p><p></p><p>two &#8212; three</p>',
       ),
     ).toBe('one\n\ntwo — three');
+  });
+
+  it('never truncates a tag at a > inside a quoted attribute value — no attribute tail leaks into the body', () => {
+    expect(htmlToEmailText('<a title="a > b">x</a>')).toBe('x');
+    expect(htmlToEmailText("<p align='x>y'>para</p>")).toBe('para');
+    expect(htmlToEmailText('<br data-note="1 > 0"/>line')).toBe('line');
+    expect(htmlToEmailText('<div class="a>b">block</div>')).toBe('block');
+    expect(htmlToEmailText('<style media="x>y">b{}</style>rest')).toBe('rest');
   });
 });

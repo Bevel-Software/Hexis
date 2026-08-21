@@ -21,7 +21,7 @@
  * inside them, and the summary says that too.
  */
 import type { ExtractedDoc } from './doc-extract.types.js';
-import { decodeXmlEntities } from './ooxml-text.js';
+import { TAG_ATTRS, decodeXmlEntities } from './ooxml-text.js';
 
 /** One listed attachment. Size/type are printed only when known. */
 export interface EmailAttachment {
@@ -59,15 +59,26 @@ export const RTF_ONLY_BODY_LINE = '[body is RTF; no plain-text part]';
  * are decoded through the module's shared `decodeXmlEntities` (plus `&nbsp;`,
  * which HTML has and XML does not). Runs of blank lines collapse to one.
  */
+// Every attribute region below is the quote-aware `TAG_ATTRS` fragment, never
+// `[^>]*`: a `>` INSIDE a quoted attribute value (`<a title="a > b">`) must not
+// end the tag early and leak the attribute tail into the visible body text.
+const CONTAINER_TAG_RE = new RegExp(
+  String.raw`<(script|style|head|title)(?:\s${TAG_ATTRS})?>[\s\S]*?</\1\s*>`,
+  'gi',
+);
+const BR_TAG_RE = new RegExp(String.raw`<br(?:\s${TAG_ATTRS})?/?>`, 'gi');
+const BLOCK_TAG_RE = new RegExp(
+  String.raw`</?(?:p|div|section|article|header|footer|main|table|thead|tbody|tfoot|tr|td|th|li|ul|ol|dl|dt|dd|blockquote|pre|hr|h[1-6])(?:\s${TAG_ATTRS})?/?>`,
+  'gi',
+);
+const ANY_TAG_RE = new RegExp(String.raw`<${TAG_ATTRS}>`, 'g');
+
 export function htmlToEmailText(html: string): string {
   let s = html.replace(/<!--[\s\S]*?-->/g, '');
-  s = s.replace(/<(script|style|head|title)(?:\s[^>]*)?>[\s\S]*?<\/\1\s*>/gi, '');
-  s = s.replace(/<br(?:\s[^>]*)?\/?>/gi, '\n');
-  s = s.replace(
-    /<\/?(?:p|div|section|article|header|footer|main|table|thead|tbody|tfoot|tr|td|th|li|ul|ol|dl|dt|dd|blockquote|pre|hr|h[1-6])(?:\s[^>]*)?\/?>/gi,
-    '\n',
-  );
-  s = s.replace(/<[^>]*>/g, '');
+  s = s.replace(CONTAINER_TAG_RE, '');
+  s = s.replace(BR_TAG_RE, '\n');
+  s = s.replace(BLOCK_TAG_RE, '\n');
+  s = s.replace(ANY_TAG_RE, '');
   s = decodeXmlEntities(s.replace(/&nbsp;/gi, ' '));
   const out: string[] = [];
   for (const raw of s.split('\n')) {

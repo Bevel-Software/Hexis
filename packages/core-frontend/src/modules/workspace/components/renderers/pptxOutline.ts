@@ -1,4 +1,5 @@
 import JSZip from 'jszip';
+import { XML_NCNAME, decodeXmlEntities } from './xmlEntities';
 
 /**
  * Client-side `.pptx` → text outline, the browser twin of the backend's
@@ -26,31 +27,6 @@ export interface PptxSlide {
   paragraphs: string[];
   /** Speaker-note paragraphs, empty when the slide has none. */
   notes: string[];
-}
-
-/** Decode the five XML named entities plus numeric (`&#65;` / `&#x41;`) references. */
-export function decodeXmlEntities(s: string): string {
-  return s.replace(/&(amp|lt|gt|quot|apos|#x?[0-9a-fA-F]+);/g, (whole, body: string) => {
-    switch (body) {
-      case 'amp':
-        return '&';
-      case 'lt':
-        return '<';
-      case 'gt':
-        return '>';
-      case 'quot':
-        return '"';
-      case 'apos':
-        return "'";
-      default: {
-        const code =
-          body[1] === 'x' || body[1] === 'X' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
-        return Number.isFinite(code) && code >= 0 && code <= 0x10ffff
-          ? String.fromCodePoint(code)
-          : whole;
-      }
-    }
-  });
 }
 
 /** Split an XML fragment into its `<{tag}>…</{tag}>` blocks (non-greedy, no nesting). */
@@ -196,6 +172,10 @@ function xmlAttrTokens(tagXml: string): Array<{ name: string; value: string }> {
 /** The value of the attribute whose LOCAL name (after any prefix) is `localName`, or undefined. */
 function xmlAttrValueByLocalName(tagXml: string, localName: string): string | undefined {
   for (const attr of xmlAttrTokens(tagXml)) {
+    // `xmlns="…"` / `xmlns:Foo="…"` are namespace DECLARATIONS, not attributes
+    // — under local-name matching, `xmlns:Target` would otherwise read as a
+    // `Target` attribute and hand back a namespace URI.
+    if (attr.name === 'xmlns' || attr.name.startsWith('xmlns:')) continue;
     if (attr.name.slice(attr.name.lastIndexOf(':') + 1) === localName) return attr.value;
   }
   return undefined;
@@ -208,7 +188,10 @@ function xmlAttrValueByLocalName(tagXml: string, localName: string): string | un
  * dropping those would silently drop the deck's notes.
  */
 function notesTargetFromRels(relsXml: string): string | undefined {
-  const relRe = /<(?:[\w.-]+:)?Relationship(?=[\s/>])[^>]*>/g;
+  // The prefix is a full XML NCName, not `\w`: a producer binding the
+  // relationships namespace to a non-ASCII prefix is legal XML, and an
+  // ASCII-only match here silently dropped that deck's speaker notes.
+  const relRe = new RegExp(`<(?:${XML_NCNAME}:)?Relationship(?=[\\s/>])[^>]*>`, 'g');
   let m: RegExpExecArray | null;
   while ((m = relRe.exec(relsXml)) !== null) {
     const type = xmlAttrValueByLocalName(m[0], 'Type');
@@ -275,7 +258,15 @@ export async function extractPptxOutline(bytes: ArrayBuffer | Uint8Array): Promi
       if (m) slideEntries.push([parseInt(m[1], 10), entry]);
     });
     slideEntries.sort((a, b) => a[0] - b[0]);
+    // `slide1.xml` and `slide01.xml` both parse to number 1 — one slide per
+    // NUMBER (first occurrence wins), or the outline would emit two slides
+    // with the same number and the renderer two children with the same key.
+    // (The backend twin collects into a Map keyed by number, so it never
+    // duplicates either.)
+    const seen = new Set<number>();
     for (const [n, entry] of slideEntries) {
+      if (seen.has(n)) continue;
+      seen.add(n);
       const paragraphs = paragraphLines(await readEntryBounded(entry, budget));
       out.push({ number: n, paragraphs, notes: await readNoteLines(zip, n, budget) });
     }

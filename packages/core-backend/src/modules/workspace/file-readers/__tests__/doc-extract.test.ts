@@ -933,6 +933,16 @@ describe('xmlAttrValue tokenizer', () => {
     expect(xmlAttrValueByLocalName(`<r:Rel foo="Target='no'" r:Target='yes'/>`, 'Target')).toBe('yes');
   });
 
+  it('xmlAttrValueByLocalName never mistakes an xmlns declaration for the attribute', () => {
+    // `xmlns:Target` binds a namespace prefix named "Target" — it is a
+    // declaration, not a Target attribute, and its value is a URI.
+    expect(
+      xmlAttrValueByLocalName('<Relationship xmlns:Target="http://ns.example/x" Target="real.xml"/>', 'Target'),
+    ).toBe('real.xml');
+    expect(xmlAttrValueByLocalName('<Relationship xmlns:Type="http://ns.example/x"/>', 'Type')).toBeUndefined();
+    expect(xmlAttrValueByLocalName('<Relationship xmlns="http://ns.example/x"/>', 'xmlns')).toBeUndefined();
+  });
+
   it('stops safely on a malformed tail (unterminated quote, unquoted value)', () => {
     expect(xmlAttrValue('<a b="ok" c="unterminated', 'b')).toBe('ok');
     expect(xmlAttrValue('<a b=unquoted c="x"/>', 'c')).toBeUndefined();
@@ -950,6 +960,22 @@ describe('notesTargetFromRels — prefixed rels', () => {
       `<r:Relationship r:Id="rId2" r:Type="${NOTES_TYPE}" r:Target="../notesSlides/notesSlide9.xml"/>` +
       '</r:Relationships>';
     expect(notesTargetFromRels(rels)).toBe('../notesSlides/notesSlide9.xml');
+  });
+
+  it('accepts a NON-ASCII namespace prefix (full XML NCName) — an ASCII-only \\w match dropped these', () => {
+    const rels =
+      '<?xml version="1.0"?><sé:Relationships xmlns:sé="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      `<sé:Relationship sé:Id="rId2" sé:Type="${NOTES_TYPE}" sé:Target="../notesSlides/notesSlide5.xml"/>` +
+      '</sé:Relationships>';
+    expect(notesTargetFromRels(rels)).toBe('../notesSlides/notesSlide5.xml');
+  });
+
+  it('ignores xmlns:Type / xmlns:Target declarations on the Relationship element itself', () => {
+    const rels =
+      '<?xml version="1.0"?><Relationships>' +
+      `<Relationship xmlns:Target="http://ns.example/decl" Id="r1" Type="${NOTES_TYPE}" Target="../notesSlides/notesSlide2.xml"/>` +
+      '</Relationships>';
+    expect(notesTargetFromRels(rels)).toBe('../notesSlides/notesSlide2.xml');
   });
 
   it('end-to-end: a pptx whose rels use a prefixed Relationship still pairs its notes', () => {

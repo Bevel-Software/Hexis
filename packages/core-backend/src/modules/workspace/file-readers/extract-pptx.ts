@@ -2,6 +2,7 @@ import AdmZip from 'adm-zip';
 import type { ExtractResult } from './doc-extract.types.js';
 import {
   MAX_DOC_TOTAL_BYTES,
+  XML_NCNAME,
   paragraphRunText,
   xmlAttrValueByLocalName,
   xmlBlocks,
@@ -128,7 +129,10 @@ function collectNotes(zip: AdmZip, slideNumbers: number[], budget: ReadBudget): 
  * dropping those would silently drop the deck's notes.
  */
 export function notesTargetFromRels(relsXml: string): string | undefined {
-  const relRe = /<(?:[\w.-]+:)?Relationship(?=[\s/>])[^>]*>/g;
+  // The prefix is a full XML NCName, not `\w`: a producer binding the
+  // relationships namespace to a non-ASCII prefix is legal XML, and an
+  // ASCII-only match here silently dropped that deck's speaker notes.
+  const relRe = new RegExp(`<(?:${XML_NCNAME}:)?Relationship(?=[\\s/>])[^>]*>`, 'g');
   let m: RegExpExecArray | null;
   while ((m = relRe.exec(relsXml)) !== null) {
     const type = xmlAttrValueByLocalName(m[0], 'Type');

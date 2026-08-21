@@ -87,10 +87,29 @@ function mailboxText(name: string | undefined, address: string | undefined): str
   return n !== '' ? n : undefined;
 }
 
+/**
+ * The bucket a recipient belongs to. msgreader maps the MAPI `PidTagRecipientType`
+ * values 1/2/3 to these strings itself (lib/MsgReader.js, the `recipType` case)
+ * — but ONLY those three: any other raw PT_LONG value, e.g. `MAPI_TO | MAPI_P1`
+ * (0x10000001) on a resubmitted message, leaks through as a NUMBER despite the
+ * `'to' | 'cc' | 'bcc'` typing. Mask the resubmit/submitted flag bits and remap
+ * so such a recipient keeps its line instead of vanishing; anything else
+ * (including untyped) counts as `to`, matching the frontend's `msgMessage.ts`.
+ */
+function recipientBucket(recipType: unknown): 'to' | 'cc' | 'bcc' {
+  if (recipType === 'to' || recipType === 'cc' || recipType === 'bcc') return recipType;
+  if (typeof recipType === 'number') {
+    const base = recipType & 0x0fffffff; // strip MAPI_SUBMITTED (0x80000000) / MAPI_P1 (0x10000000)
+    if (base === 2) return 'cc';
+    if (base === 3) return 'bcc';
+  }
+  return 'to';
+}
+
 /** The comma-joined mailboxes of one recipient type. Untyped recipients count as `to`. */
 function recipientList(recipients: readonly FieldsData[], type: 'to' | 'cc' | 'bcc'): string | undefined {
   const s = recipients
-    .filter((r) => (r.recipType ?? 'to') === type)
+    .filter((r) => recipientBucket(r.recipType) === type)
     .map((r) => mailboxText(r.name, r.smtpAddress ?? r.email))
     .filter((t): t is string => t !== undefined)
     .join(', ');

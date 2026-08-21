@@ -162,6 +162,44 @@ describe('extractPptxOutline', () => {
     expect(slides[0].notes).toEqual(['the real note']);
   });
 
+  it('pairs notes through a NON-ASCII namespace prefix (full XML NCName) — \\w-only matching dropped these', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('Deck')),
+      'ppt/notesSlides/notesSlide5.xml': slideXml(para('accented note')),
+      'ppt/slides/_rels/slide1.xml.rels':
+        '<?xml version="1.0"?><sé:Relationships xmlns:sé="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        `<sé:Relationship sé:Id="rId2" sé:Type="${NOTES_TYPE}" sé:Target="../notesSlides/notesSlide5.xml"/>` +
+        '</sé:Relationships>',
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].notes).toEqual(['accented note']);
+  });
+
+  it('ignores xmlns:Type / xmlns:Target namespace DECLARATIONS on the Relationship element', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('Deck')),
+      'ppt/notesSlides/notesSlide2.xml': slideXml(para('the real note')),
+      'ppt/slides/_rels/slide1.xml.rels':
+        '<?xml version="1.0"?><Relationships>' +
+        `<Relationship xmlns:Target="http://ns.example/decl" Id="r1" Type="${NOTES_TYPE}" Target="../notesSlides/notesSlide2.xml"/>` +
+        '</Relationships>',
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].notes).toEqual(['the real note']);
+  });
+
+  it('emits ONE slide per number — slide1.xml and slide01.xml must not become duplicate keys', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('canonical one')),
+      'ppt/slides/slide01.xml': slideXml(para('zero-padded twin')),
+      'ppt/slides/slide2.xml': slideXml(para('two')),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides.map((s) => s.number)).toEqual([1, 2]);
+    // First occurrence wins: the canonical part was seen first.
+    expect(slides[0].paragraphs).toEqual(['canonical one']);
+  });
+
   // Fix for the peak-memory restructure: parts are parsed as they are read
   // (per slide, then its notes) — the outline must be identical to the old
   // hold-everything-then-parse order for a deck mixing rels-paired notes,

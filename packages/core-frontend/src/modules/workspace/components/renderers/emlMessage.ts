@@ -34,6 +34,7 @@ export async function parseEmlMessage(bytes: ArrayBuffer): Promise<EmailMessageV
     email.from === undefined &&
     email.to === undefined &&
     email.cc === undefined &&
+    email.bcc === undefined &&
     email.subject === undefined &&
     email.date === undefined &&
     email.messageId === undefined &&

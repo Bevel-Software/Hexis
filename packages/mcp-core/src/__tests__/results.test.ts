@@ -255,6 +255,80 @@ describe('omitImagePayloads', () => {
     expect(text).toContain('"meta":"from-toJSON"');
   });
 
+  it('scrubs a toJSON that returns the sentinel ITSELF — the view must never be copied into a record frame', () => {
+    const value = {
+      wrapper: new (class {
+        toJSON(): unknown {
+          return sentinel;
+        }
+      })(),
+    };
+    const out = omitImagePayloads(value) as Record<string, unknown>;
+    const text = JSON.stringify(out);
+    expect(text).not.toContain('QUJD');
+    expect(text).not.toContain(MCP_IMAGE_RESULT_KIND);
+    expect((out.wrapper as { image_omitted?: boolean }).image_omitted).toBe(true);
+    expect((out.wrapper as { note?: string }).note).toContain('Files/logo.png');
+  });
+
+  it('scrubs a toJSON that returns a spec-shaped image block directly', () => {
+    const value = {
+      wrapper: new (class {
+        toJSON(): unknown {
+          return { type: 'image', data: 'QUJD', mimeType: 'image/png' };
+        }
+      })(),
+    };
+    const text = JSON.stringify(omitImagePayloads(value));
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+  });
+
+  it('fires a user toJSON exactly ONCE per object per scrub — the probe and the rebuild share one view', () => {
+    let dirtyCalls = 0;
+    const dirty = new (class {
+      toJSON(): unknown {
+        dirtyCalls++;
+        return { img: sentinel };
+      }
+    })();
+    let cleanCalls = 0;
+    const clean = new (class {
+      toJSON(): unknown {
+        cleanCalls++;
+        return { plain: true };
+      }
+    })();
+    const out = omitImagePayloads({ dirty, clean });
+    // Counted BEFORE stringify: `clean` survives by reference, so serializing
+    // the result legitimately fires its hook once more.
+    expect(dirtyCalls).toBe(1);
+    expect(cleanCalls).toBe(1);
+    const text = JSON.stringify(out);
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+    expect(text).toContain('"plain":true');
+  });
+
+  it('a clean non-plain object nested under a dirty one is still probed and evaluated once', () => {
+    let innerCalls = 0;
+    const inner = new (class {
+      toJSON(): unknown {
+        innerCalls++;
+        return { fine: 'kept' };
+      }
+    })();
+    const outer = new (class {
+      constructor(public img: unknown = sentinel, public child: unknown = inner) {}
+    })();
+    const out = omitImagePayloads({ outer });
+    expect(innerCalls).toBe(1); // before stringify — the preserved reference serializes via its hook again
+    const text = JSON.stringify(out);
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('image_omitted');
+    expect(text).toContain('"fine":"kept"');
+  });
+
   it('a Map-like with enumerable own props holding an image is rebuilt as its sanitized JSON shape', () => {
     const mapish = new Map<string, unknown>();
     (mapish as unknown as Record<string, unknown>).stashed = { deep: [sentinel] };

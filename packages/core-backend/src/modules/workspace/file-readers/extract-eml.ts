@@ -14,7 +14,7 @@ import { MAX_DOC_PART_BYTES } from './ooxml-text.js';
  *
  * postal-mime is LENIENT — random bytes "parse" to an empty message rather
  * than throwing — so recognizability is checked here: a file yielding NO
- * email headers at all (no From/To/Cc/Subject/Date/Message-ID) and no
+ * email headers at all (no From/To/Cc/Bcc/Subject/Date/Message-ID) and no
  * attachments is not an email, and gets the typed could-not-be-parsed
  * failure instead of an empty extraction.
  */
@@ -37,6 +37,7 @@ export async function extractEml(bytes: Buffer): Promise<ExtractResult> {
     email.from === undefined &&
     email.to === undefined &&
     email.cc === undefined &&
+    email.bcc === undefined &&
     email.subject === undefined &&
     email.date === undefined &&
     email.messageId === undefined &&
