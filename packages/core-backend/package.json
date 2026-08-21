@@ -52,7 +52,9 @@
     "express": "^5.1.0",
     "ignore": "^7.0.5",
     "jsonwebtoken": "^9.0.3",
+    "pdfjs-dist": "^5.4.624",
     "pg": "^8.20.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "yaml": "^2.9.0",
     "zod": "^3.24.0"
   },
