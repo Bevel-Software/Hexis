@@ -200,6 +200,36 @@ describe('parseMsgMessage', () => {
     expect(rtf.bodySource).toBe('rtf-only');
   });
 
+  it('keeps a recipient whose PidTagRecipientType carries MAPI flag bits', () => {
+    // The raw PT_LONG may be MAPI_P1 (0x10000000) | the base type on a
+    // resubmitted message. Masking the flag bits off is what the backend's
+    // `extract-msg.ts` `recipientBucket` does, so the viewer and an agent's
+    // `read_file` file the same recipient under the same header.
+    const view = parseMsgMessage(
+      msgBytes({
+        '__substg1.0_0037001F': utf16('resubmitted'),
+        '__recip_version1.0_#00000000/__substg1.0_3001001F': utf16('Bob'),
+        '__recip_version1.0_#00000000/__substg1.0_3003001F': utf16('bob@example.com'),
+        '__recip_version1.0_#00000000/__properties_version1.0': propertiesStream(8, [
+          [0x0c150003, longValue(0x10000001)],
+        ]),
+        '__recip_version1.0_#00000001/__substg1.0_3001001F': utf16('Dan'),
+        '__recip_version1.0_#00000001/__substg1.0_3003001F': utf16('dan@example.com'),
+        '__recip_version1.0_#00000001/__properties_version1.0': propertiesStream(8, [
+          [0x0c150003, longValue(0x10000002)],
+        ]),
+        '__recip_version1.0_#00000002/__substg1.0_3001001F': utf16('Eve'),
+        '__recip_version1.0_#00000002/__substg1.0_3003001F': utf16('eve@example.com'),
+        '__recip_version1.0_#00000002/__properties_version1.0': propertiesStream(8, [
+          [0x0c150003, longValue(0x10000003)],
+        ]),
+      }),
+    );
+    expect(view.to).toBe('Bob <bob@example.com>');
+    expect(view.cc).toBe('Dan <dan@example.com>');
+    expect(view.bcc).toBe('Eve <eve@example.com>');
+  });
+
   it('decodes ANSI (001E) string properties when the unicode variant is absent', () => {
     const view = parseMsgMessage(
       msgBytes({ '__substg1.0_0037001E': new TextEncoder().encode('plain ansi subject') }),
@@ -232,6 +262,36 @@ describe('email text helpers', () => {
     expect(htmlToEmailText('<br data-note="1 > 0"/>line')).toBe('line');
     expect(htmlToEmailText('<div class="a>b">block</div>')).toBe('block');
     expect(htmlToEmailText('<style media="x>y">b{}</style>rest')).toBe('rest');
+  });
+
+  it('htmlToEmailText treats an UNTERMINATED tag as literal text', () => {
+    expect(htmlToEmailText('<p>total</p> 2 < 3')).toBe('total\n2 < 3');
+    expect(htmlToEmailText('<a href="never closed>tail')).toBe('<a href="never closed>tail');
+  });
+
+  it('htmlToEmailText drops script/style/head/title whole — attributes and mixed case included', () => {
+    expect(htmlToEmailText('<SCRIPT TYPE="text/javascript">evil()</SCRIPT>after')).toBe('after');
+    expect(htmlToEmailText('<Style Media="print">b{}</STYLE>rest')).toBe('rest');
+    expect(htmlToEmailText('<head><TITLE>t</TITLE></head>body')).toBe('body');
+    expect(htmlToEmailText('<script>alert(1)')).toBe('alert(1)');
+  });
+
+  it('htmlToEmailText still turns br and block-tag boundaries into line breaks', () => {
+    expect(htmlToEmailText('a<br>b<br/>c<BR />d')).toBe('a\nb\nc\nd');
+    expect(htmlToEmailText('<h1>T</h1><div>d</div><li>i</li>')).toBe('T\n\nd\n\ni');
+  });
+
+  it('htmlToEmailText survives an adversarial body: 20k < plus an attribute quote that never closes', () => {
+    // The shape the old quote-aware tag regexes died on — each `<` restarted a
+    // lazy expansion that could never pass the unclosed quote, freezing the
+    // tab on a message an attacker could simply send. The bound is loose on
+    // purpose: it catches a return of the blow-up, not CI's scheduler.
+    const bomb = '<'.repeat(20_000) + '<b title="never closed ' + 'x'.repeat(2_000) + '>';
+    const t0 = performance.now();
+    const out = htmlToEmailText(bomb);
+    const ms = performance.now() - t0;
+    expect(out).toBe(bomb); // no tag ever terminates: it is all body text
+    expect(ms).toBeLessThan(5_000);
   });
 
   it('mailboxText renders whichever of name/address exists', () => {

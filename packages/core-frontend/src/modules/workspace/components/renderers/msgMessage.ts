@@ -170,10 +170,18 @@ function propertyValue(stream: Uint8Array | undefined, headerLen: number, tag: n
   return undefined;
 }
 
-/** `PidTagRecipientType` (0x0C15, PT_LONG): 1 = to, 2 = cc, 3 = bcc. Untyped counts as `to`. */
+/**
+ * `PidTagRecipientType` (0x0C15, PT_LONG): 1 = to, 2 = cc, 3 = bcc. Untyped
+ * counts as `to`. The raw value may carry MAPI flag bits — `MAPI_SUBMITTED`
+ * (0x80000000) or `MAPI_P1` (0x10000000) on a resubmitted message — so the
+ * base type is masked out first (e.g. 0x10000002 is still `cc`), matching the
+ * backend's `extract-msg.ts` `recipientBucket`.
+ */
 function recipientType(props: Uint8Array | undefined): 'to' | 'cc' | 'bcc' {
   const value = propertyValue(props, 8, 0x0c150003)?.getUint32(0, true);
-  return value === 2 ? 'cc' : value === 3 ? 'bcc' : 'to';
+  if (value === undefined) return 'to';
+  const base = value & 0x0fffffff; // strip MAPI_SUBMITTED (0x80000000) / MAPI_P1 (0x10000000)
+  return base === 2 ? 'cc' : base === 3 ? 'bcc' : 'to';
 }
 
 /** The sent (0x0039) or delivered (0x0E06) PT_SYSTIME from the root properties stream, as ISO. */

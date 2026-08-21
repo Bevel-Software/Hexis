@@ -190,14 +190,25 @@ describe('extractPptxOutline', () => {
 
   it('emits ONE slide per number — slide1.xml and slide01.xml must not become duplicate keys', async () => {
     const bytes = await zipBytes({
+      // Declared canonical-first, so a zip-order tiebreak would pick the other
+      // part than the rule below does.
       'ppt/slides/slide1.xml': slideXml(para('canonical one')),
       'ppt/slides/slide01.xml': slideXml(para('zero-padded twin')),
       'ppt/slides/slide2.xml': slideXml(para('two')),
     });
     const slides = await extractPptxOutline(bytes);
     expect(slides.map((s) => s.number)).toEqual([1, 2]);
-    // First occurrence wins: the canonical part was seen first.
-    expect(slides[0].paragraphs).toEqual(['canonical one']);
+    // The winner is the first in ascending PART-NAME order — `slide01.xml`
+    // sorts before `slide1.xml` because '0' < '1'. Zip entry order is not a
+    // contract, so the name is what decides, and the backend twin
+    // (`extract-pptx.ts` `collectNumbered`) applies the identical rule: the
+    // same deck must not read one way in the viewer and another through an
+    // agent's `read_file`. The backend fixture for this parity lives in
+    // core-backend's `doc-extract.test.ts`
+    // ('extractPptx — two part names parsing to the SAME slide number'), and
+    // asserts this same text.
+    expect(slides[0].paragraphs).toEqual(['zero-padded twin']);
+    expect(slides[1].paragraphs).toEqual(['two']);
   });
 
   // Fix for the peak-memory restructure: parts are parsed as they are read

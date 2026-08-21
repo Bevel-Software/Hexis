@@ -36,14 +36,12 @@ export function zipEntryOversize(entry: AdmZip.IZipEntry): string | null {
     : null;
 }
 
-/**
- * Regex FRAGMENT for a tag's attribute region that never mistakes a `/>` (or
- * `>`) INSIDE a quoted attribute value for the tag's delimiter: the region is
- * consumed as either single non-quote characters or WHOLE quoted spans, so a
- * lazy expansion can only stop at a delimiter that sits outside every quote.
- * No capture groups — wrap in `(…)` at the use site when the attrs are needed.
- */
-export const TAG_ATTRS = String.raw`(?:[^>"']|"[^"]*"|'[^']*')*?`;
+// (The quote-aware `TAG_ATTRS` regex fragment used to live here. Every reader
+// that built a tag pattern from it — the email strip, the ODF paragraph, page,
+// row and cell walks — now uses a single-pass scanner instead: lazily expanding
+// that fragment re-scanned the rest of the document from every opener that
+// failed to match, which turned a crafted upload into minutes of pinned CPU.
+// See `htmlToEmailText` and `odfElementBlocks`.)
 
 /**
  * Regex FRAGMENT matching one XML NCName — the legal shape of a namespace
@@ -130,9 +128,14 @@ export function xmlAttrValueByLocalName(tagXml: string, localName: string): stri
   return undefined;
 }
 
-/** Decode the five XML named entities plus numeric (`&#65;` / `&#x41;`) references. */
+/**
+ * Decode the five XML named entities plus numeric (`&#65;` / `&#x41;`)
+ * references. Decimal references admit ONLY decimal digits and hex digits only
+ * after `#x` — a malformed `&#12A;` must stay literal text, not be consumed
+ * with `parseInt` silently stopping at the `A` and emitting U+000C.
+ */
 export function decodeXmlEntities(s: string): string {
-  return s.replace(/&(amp|lt|gt|quot|apos|#x?[0-9a-fA-F]+);/g, (whole, body: string) => {
+  return s.replace(/&(amp|lt|gt|quot|apos|#(?:[0-9]+|x[0-9a-fA-F]+));/g, (whole, body: string) => {
     switch (body) {
       case 'amp':
         return '&';
@@ -145,7 +148,7 @@ export function decodeXmlEntities(s: string): string {
       case 'apos':
         return "'";
       default: {
-        const code = body[1] === 'x' || body[1] === 'X' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+        const code = body[1] === 'x' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
         return Number.isFinite(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
       }
     }

@@ -252,22 +252,24 @@ export async function extractPptxOutline(bytes: ArrayBuffer | Uint8Array): Promi
   try {
     const zip = await JSZip.loadAsync(bytes);
     const budget: ReadBudget = { remaining: MAX_TOTAL_BYTES };
-    const slideEntries: Array<[number, JSZip.JSZipObject]> = [];
+    const slideEntries: Array<[number, string, JSZip.JSZipObject]> = [];
     zip.forEach((entryName, entry) => {
       const m = /^ppt\/slides\/slide(\d+)\.xml$/.exec(entryName);
-      if (m) slideEntries.push([parseInt(m[1], 10), entry]);
+      if (m) slideEntries.push([parseInt(m[1], 10), entryName, entry]);
     });
-    slideEntries.sort((a, b) => a[0] - b[0]);
     // `slide1.xml` and `slide01.xml` both parse to number 1 — one slide per
-    // NUMBER (first occurrence wins), or the outline would emit two slides
-    // with the same number and the renderer two children with the same key.
-    // (The backend twin collects into a Map keyed by number, so it never
-    // duplicates either.)
-    const seen = new Set<number>();
-    for (const [n, entry] of slideEntries) {
-      if (seen.has(n)) continue;
-      seen.add(n);
-      const paragraphs = paragraphLines(await readEntryBounded(entry, budget));
+    // NUMBER, or the outline would emit two slides with the same number and
+    // the renderer two children with the same key. The winner is the FIRST in
+    // ascending part-name order — deterministic regardless of zip entry
+    // order, and the same policy as the backend twin (`extract-pptx.ts`), so
+    // viewer and `read_file` agree on which part a number's text comes from.
+    slideEntries.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+    const chosen = new Map<number, JSZip.JSZipObject>();
+    for (const [n, , entry] of slideEntries) {
+      if (!chosen.has(n)) chosen.set(n, entry);
+    }
+    for (const n of [...chosen.keys()].sort((a, b) => a - b)) {
+      const paragraphs = paragraphLines(await readEntryBounded(chosen.get(n)!, budget));
       out.push({ number: n, paragraphs, notes: await readNoteLines(zip, n, budget) });
     }
   } catch (err) {

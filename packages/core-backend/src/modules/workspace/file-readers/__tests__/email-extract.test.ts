@@ -350,4 +350,37 @@ describe('htmlToEmailText', () => {
     expect(htmlToEmailText('<div class="a>b">block</div>')).toBe('block');
     expect(htmlToEmailText('<style media="x>y">b{}</style>rest')).toBe('rest');
   });
+
+  it('treats an UNTERMINATED tag as literal text instead of swallowing the body', () => {
+    expect(htmlToEmailText('<p>total</p> 2 < 3')).toBe('total\n2 < 3');
+    expect(htmlToEmailText('<a href="never closed>tail')).toBe('<a href="never closed>tail');
+  });
+
+  it('drops script/style/head/title containers whole — attributes and mixed case included', () => {
+    expect(htmlToEmailText('<SCRIPT TYPE="text/javascript">evil()</SCRIPT>after')).toBe('after');
+    expect(htmlToEmailText('<Style Media="print">b{}</STYLE>rest')).toBe('rest');
+    expect(htmlToEmailText('<head><TITLE>t</TITLE></head>body')).toBe('body');
+    // No close tag: only the opening tag goes; the text after it stays visible.
+    expect(htmlToEmailText('<script>alert(1)')).toBe('alert(1)');
+  });
+
+  it('still turns br and block-tag boundaries into line breaks', () => {
+    expect(htmlToEmailText('a<br>b<br/>c<BR />d')).toBe('a\nb\nc\nd');
+    expect(htmlToEmailText('<h1>T</h1><div>d</div><li>i</li>')).toBe('T\n\nd\n\ni');
+  });
+
+  it('completes on an adversarial body: 20k < characters plus an attribute quote that never closes', () => {
+    // The shape the old quote-aware tag regexes died on — each `<` restarted a
+    // lazy expansion that could never pass the unclosed quote, so the strip
+    // was quadratic (cubically, across the four passes) in the body length.
+    // The bound is deliberately loose: it exists to catch a return of the
+    // blow-up, not to police CI's scheduler. The scanner does this in ~12 ms.
+    const bomb = '<'.repeat(20_000) + '<b title="never closed ' + 'x'.repeat(2_000) + '>';
+    const t0 = performance.now();
+    const out = htmlToEmailText(bomb);
+    const ms = performance.now() - t0;
+    // No tag ever terminates, so every character is body text, unchanged.
+    expect(out).toBe(bomb);
+    expect(ms).toBeLessThan(5_000);
+  });
 });

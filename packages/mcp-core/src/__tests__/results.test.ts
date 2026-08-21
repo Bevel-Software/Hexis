@@ -300,11 +300,13 @@ describe('omitImagePayloads', () => {
       }
     })();
     const out = omitImagePayloads({ dirty, clean });
-    // Counted BEFORE stringify: `clean` survives by reference, so serializing
-    // the result legitimately fires its hook once more.
     expect(dirtyCalls).toBe(1);
     expect(cleanCalls).toBe(1);
     const text = JSON.stringify(out);
+    // …and STILL once after serialization: both were rebuilt from the view
+    // this scrub cached, so neither hook is left live in the result.
+    expect(dirtyCalls).toBe(1);
+    expect(cleanCalls).toBe(1);
     expect(text).not.toContain('QUJD');
     expect(text).toContain('image_omitted');
     expect(text).toContain('"plain":true');
@@ -322,8 +324,9 @@ describe('omitImagePayloads', () => {
       constructor(public img: unknown = sentinel, public child: unknown = inner) {}
     })();
     const out = omitImagePayloads({ outer });
-    expect(innerCalls).toBe(1); // before stringify — the preserved reference serializes via its hook again
+    expect(innerCalls).toBe(1);
     const text = JSON.stringify(out);
+    expect(innerCalls).toBe(1); // rebuilt from that one view, not re-hooked here
     expect(text).not.toContain('QUJD');
     expect(text).toContain('image_omitted');
     expect(text).toContain('"fine":"kept"');
@@ -348,7 +351,7 @@ describe('omitImagePayloads', () => {
     expect(JSON.stringify(out)).not.toContain('QUJD');
   });
 
-  it('an image-free class instance is preserved by reference even when its toJSON allocates', () => {
+  it('rebuilds an image-free object that has a toJSON — the hook must not stay live in the result', () => {
     let calls = 0;
     const obj = new (class {
       toJSON(): unknown {
@@ -357,8 +360,105 @@ describe('omitImagePayloads', () => {
       }
     })();
     const out = omitImagePayloads({ obj }) as Record<string, unknown>;
-    expect(out.obj).toBe(obj);
-    expect(calls).toBeGreaterThan(0); // probed, not rebuilt
+    // Rebuilt from the cached view, NOT preserved by reference: the reference
+    // would carry the hook into the transcript's own stringify pass.
+    expect(out.obj).not.toBe(obj);
+    expect(out.obj).toEqual({ plain: true });
+    expect(calls).toBe(1);
+    JSON.stringify(out);
+    expect(calls).toBe(1); // serializing the scrubbed result fires nothing
+  });
+
+  it('an IMPURE toJSON cannot smuggle base64 past the scrub on its second call', () => {
+    // Clean when the scrub looks, an image the next time — exactly what a
+    // preserved-by-reference hook would hand JSON.stringify downstream.
+    let calls = 0;
+    const sneaky = new (class {
+      toJSON(): unknown {
+        calls++;
+        return calls === 1 ? { plain: true } : sentinel;
+      }
+    })();
+    const out = omitImagePayloads({ sneaky });
+    expect(calls).toBe(1);
+    const text = JSON.stringify(out);
+    expect(calls).toBe(1); // the hook is gone from the result — nothing re-fired
+    expect(text).not.toContain('QUJD');
+    expect(text).not.toContain(MCP_IMAGE_RESULT_KIND);
+    expect(text).toContain('"plain":true');
+  });
+
+  it('an impure toJSON on a PLAIN record is rebuilt too — stringify applies toJSON before the shape', () => {
+    // A record literal is `isPlainRecord`, but JSON.stringify still calls its
+    // own `toJSON` first; rebuilding it key-by-key used to copy the function
+    // across, hook and all.
+    let calls = 0;
+    const value = {
+      label: 'plain',
+      toJSON(): unknown {
+        calls++;
+        return calls === 1 ? { label: 'plain' } : sentinel;
+      },
+    };
+    const text = JSON.stringify(omitImagePayloads({ value }));
+    expect(calls).toBe(1);
+    expect(text).not.toContain('QUJD');
+    expect(text).toContain('"label":"plain"');
+  });
+
+  it('a clean object with no toJSON anywhere below it still passes through BY REFERENCE', () => {
+    class Leaf {
+      note = 'leaf';
+    }
+    class Holder {
+      label = 'holder';
+      child = new Leaf();
+      list = [1, 2, 3];
+    }
+    const holder = new Holder();
+    const out = omitImagePayloads({ holder, res: sentinel }) as Record<string, unknown>;
+    expect(out.holder).toBe(holder); // no copy: nothing below it needs scrubbing
+    expect(JSON.stringify(out)).not.toContain('QUJD');
+  });
+
+  it('a clean object that merely CONTAINS a toJSON-bearing child is rebuilt around it', () => {
+    let calls = 0;
+    const child = new (class {
+      toJSON(): unknown {
+        calls++;
+        return calls === 1 ? { deep: 'clean' } : sentinel;
+      }
+    })();
+    class Holder {
+      label = 'holder';
+      child: unknown = child;
+    }
+    const holder = new Holder();
+    const out = omitImagePayloads({ holder }) as Record<string, unknown>;
+    expect(out.holder).not.toBe(holder); // rebuilt so the child's hook can be resolved
+    const text = JSON.stringify(out);
+    expect(calls).toBe(1);
+    expect(text).toContain('"label":"holder"');
+    expect(text).toContain('"deep":"clean"');
+    expect(text).not.toContain('QUJD');
+  });
+
+  it('a Date keeps passing by reference — its built-in toJSON can only yield null or a string', () => {
+    const when = new Date('2026-03-03T00:00:00Z');
+    const out = omitImagePayloads({ when }) as Record<string, unknown>;
+    expect(out.when).toBe(when);
+    expect(JSON.stringify(out)).toBe('{"when":"2026-03-03T00:00:00.000Z"}');
+    // …and the trust is pinned to the BUILT-IN pair, not to being a Date: an
+    // own `toJSON` is user code, and so is an own `toISOString`, which the
+    // built-in `toJSON` would go on to call.
+    const hookSpoof = Object.assign(new Date('2026-03-03T00:00:00Z'), {
+      toJSON: () => sentinel as unknown as string,
+    });
+    expect(JSON.stringify(omitImagePayloads({ hookSpoof }))).not.toContain('QUJD');
+    const isoSpoof = Object.assign(new Date('2026-03-03T00:00:00Z'), {
+      toISOString: () => sentinel as unknown as string,
+    });
+    expect(JSON.stringify(omitImagePayloads({ isoSpoof }))).not.toContain('QUJD');
   });
 
   it('survives a cycle reachable only through a class instance holding an image', () => {

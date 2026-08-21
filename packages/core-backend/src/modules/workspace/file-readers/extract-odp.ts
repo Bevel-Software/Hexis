@@ -1,6 +1,5 @@
 import type { ExtractResult } from './doc-extract.types.js';
-import { TAG_ATTRS } from './ooxml-text.js';
-import { odfParagraphLines, readOdfContentXml } from './odf-text.js';
+import { odfElementBlocks, odfParagraphLines, readOdfContentXml } from './odf-text.js';
 
 /**
  * Extract the text of a `.odp` (OpenDocument Presentation) deck.
@@ -50,14 +49,9 @@ export function extractOdp(bytes: Buffer): ExtractResult {
  * so the deck's numbering (and a deliberately blank deck) stays correct.
  */
 function drawPageBlocks(xml: string): string[] {
-  // LAZY attribute match, so `<draw:page a="b"/>` resolves to the `/>` branch
-  // instead of the attributes swallowing the `/` and the body running into
-  // the NEXT page (greedy attrs + a later close tag would merge two slides).
-  // TAG_ATTRS is quote-aware: a `/>` INSIDE a quoted attribute value (a page
-  // name like `a/>b`) is part of the value, never the self-closing delimiter.
-  const re = new RegExp(`<draw:page(?=[\\s/>])${TAG_ATTRS}(?:\\/>|>([\\s\\S]*?)<\\/draw:page>)`, 'g');
-  const out: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(xml)) !== null) out.push(m[1] ?? '');
-  return out;
+  // The shared quote-aware scanner: a `/>` INSIDE a quoted attribute value (a
+  // page name like `a/>b`) is part of the value, never the self-closing
+  // delimiter, and a page whose close tag is missing costs one scan of the
+  // document rather than one per opener (see `odfElementBlocks`).
+  return odfElementBlocks(xml, ['draw:page']).map((e) => e.body ?? '');
 }

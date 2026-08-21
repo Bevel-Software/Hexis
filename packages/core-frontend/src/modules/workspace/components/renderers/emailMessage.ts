@@ -1,4 +1,4 @@
-import { TAG_ATTRS, decodeXmlEntities } from './xmlEntities';
+import { decodeXmlEntities } from './xmlEntities';
 
 /**
  * The shared view model + text helpers for the email viewer (`EmailRenderer`),
@@ -38,32 +38,124 @@ export const MAX_EMAIL_BYTES = 50 * 1024 * 1024;
 
 /**
  * Strip an HTML email body to plain text — the same deliberately simple pass
- * as the backend's `email-text.ts`: `<style>`/`<script>`/`<head>` containers
- * and comments dropped whole, `<br>` and block-tag boundaries become
- * newlines so paragraphs survive, every other tag removed, entities decoded
- * (the shared XML five + numeric via `decodeXmlEntities`, plus `&nbsp;`).
- * Runs of blank lines collapse to one.
+ * as the backend's `email-text.ts`: comments and `<style>`/`<script>`/
+ * `<head>`/`<title>` containers dropped whole, `<br>` and block-tag
+ * boundaries become newlines so paragraphs survive, every other tag removed,
+ * entities decoded (the shared XML five + numeric via `decodeXmlEntities`,
+ * plus `&nbsp;`). Runs of blank lines collapse to one.
+ *
+ * Implemented as a SINGLE-PASS linear scanner, not regexes: the earlier
+ * quote-aware tag regexes re-scanned the remaining body from every `<` when a
+ * quoted attribute never closed — malformed input with many `<` characters
+ * plus one unterminated quote froze the tab quadratically. The scanner is
+ * quote-aware the same way (a `>` INSIDE a quoted attribute value, as in
+ * `<a title="a > b">`, never ends the tag early) but amortizes the failures:
+ * a scan that reaches end-of-input marks every `<` it passed OUTSIDE quotes
+ * as known-literal (their scans would be identical tails), so no position is
+ * rescanned from more than the three possible quote states. An unterminated
+ * tag is literal text, not a tag.
  */
-// Every attribute region below is the quote-aware `TAG_ATTRS` fragment, never
-// `[^>]*`: a `>` INSIDE a quoted attribute value (`<a title="a > b">`) must not
-// end the tag early and leak the attribute tail into the visible body text.
-const CONTAINER_TAG_RE = new RegExp(
-  String.raw`<(script|style|head|title)(?:\s${TAG_ATTRS})?>[\s\S]*?</\1\s*>`,
-  'gi',
-);
-const BR_TAG_RE = new RegExp(String.raw`<br(?:\s${TAG_ATTRS})?/?>`, 'gi');
-const BLOCK_TAG_RE = new RegExp(
-  String.raw`</?(?:p|div|section|article|header|footer|main|table|thead|tbody|tfoot|tr|td|th|li|ul|ol|dl|dt|dd|blockquote|pre|hr|h[1-6])(?:\s${TAG_ATTRS})?/?>`,
-  'gi',
-);
-const ANY_TAG_RE = new RegExp(String.raw`<${TAG_ATTRS}>`, 'g');
+const CONTAINER_TAGS = new Set(['script', 'style', 'head', 'title']);
+const BLOCK_TAGS = new Set([
+  'p', 'div', 'section', 'article', 'header', 'footer', 'main',
+  'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th',
+  'li', 'ul', 'ol', 'dl', 'dt', 'dd', 'blockquote', 'pre', 'hr',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+]);
+
+/**
+ * Index just past the `>` closing the tag that opens at `start`, or -1 when
+ * the tag never terminates. Tracks quote state so a quoted `>` never ends the
+ * tag. On failure, every `<` passed while OUTSIDE quotes is recorded in
+ * `knownLiteral` — a scan from such a position is exactly this scan's tail,
+ * so it too would fail; recording it keeps the whole pass linear.
+ */
+function scanTagEnd(html: string, start: number, knownLiteral: Set<number>): number {
+  let quote: '"' | "'" | null = null;
+  const passedUnquoted: number[] = [];
+  for (let i = start + 1; i < html.length; i++) {
+    const c = html[i];
+    if (quote !== null) {
+      if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === '>') return i + 1;
+    else if (c === '<') passedUnquoted.push(i);
+  }
+  for (const p of passedUnquoted) knownLiteral.add(p);
+  return -1;
+}
+
+/**
+ * Index just past the `</name␣*>` that closes a container opened before
+ * `from`, or -1. `noClose` memoizes a search that reached end-of-input — every
+ * later search starts further right, so it would fail too.
+ */
+function containerCloseEnd(lower: string, name: string, from: number, noClose: Set<string>): number {
+  if (noClose.has(name)) return -1;
+  const needle = '</' + name;
+  let idx = lower.indexOf(needle, from);
+  while (idx !== -1) {
+    let k = idx + needle.length;
+    while (k < lower.length && /\s/.test(lower[k])) k++;
+    if (lower[k] === '>') return k + 1;
+    idx = lower.indexOf(needle, idx + 1);
+  }
+  noClose.add(name);
+  return -1;
+}
 
 export function htmlToEmailText(html: string): string {
-  let s = html.replace(/<!--[\s\S]*?-->/g, '');
-  s = s.replace(CONTAINER_TAG_RE, '');
-  s = s.replace(BR_TAG_RE, '\n');
-  s = s.replace(BLOCK_TAG_RE, '\n');
-  s = s.replace(ANY_TAG_RE, '');
+  const lower = html.toLowerCase();
+  const lastGt = html.lastIndexOf('>');
+  const knownLiteral = new Set<number>();
+  const noContainerClose = new Set<string>();
+  let commentSearchExhausted = false;
+  let s = '';
+  let textStart = 0;
+  let i = 0;
+  while (i < html.length) {
+    if (html[i] !== '<') {
+      i++;
+      continue;
+    }
+    // No `>` remains, or a previous failing scan proved this `<` unterminated:
+    // it is literal text (stays in the pending text run).
+    if (i > lastGt || knownLiteral.has(i)) {
+      i++;
+      continue;
+    }
+    if (!commentSearchExhausted && html.startsWith('<!--', i)) {
+      const close = html.indexOf('-->', i + 4);
+      if (close !== -1) {
+        s += html.slice(textStart, i);
+        textStart = i = close + 3;
+        continue;
+      }
+      commentSearchExhausted = true; // no `-->` this far right, nor further — generic tag scan below
+    }
+    const end = scanTagEnd(html, i, knownLiteral);
+    if (end === -1) {
+      i++; // unterminated tag: the `<` is literal text
+      continue;
+    }
+    s += html.slice(textStart, i);
+    let p = i + 1;
+    const closing = html[p] === '/';
+    if (closing) p++;
+    let q = p;
+    while (q < end - 1 && !/[\s/>]/.test(html[q])) q++;
+    const name = lower.slice(p, q);
+    if (!closing && CONTAINER_TAGS.has(name) && (q === end - 1 || /\s/.test(html[q]))) {
+      // `<style>` / `<style attrs>`: drop the whole container through the
+      // matching `</style␣*>`; with no close, only the open tag is removed.
+      const closeEnd = containerCloseEnd(lower, name, end, noContainerClose);
+      textStart = i = closeEnd !== -1 ? closeEnd : end;
+      continue;
+    }
+    if ((name === 'br' && !closing) || BLOCK_TAGS.has(name)) s += '\n';
+    textStart = i = end;
+  }
+  s += html.slice(textStart);
   s = decodeXmlEntities(s.replace(/&nbsp;/gi, ' '));
   const out: string[] = [];
   for (const raw of s.split('\n')) {

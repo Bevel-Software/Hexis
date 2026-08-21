@@ -14,8 +14,8 @@ import { extractOds } from '../extract-ods.js';
 import { DocExtractService } from '../doc-extract.service.js';
 import { gitBlobSha } from '../extraction-cache.js';
 import { fileExtension } from '../doc-extract.types.js';
-import { MAX_ODF_NS_ALIASES, normalizeOdfPrefixes } from '../odf-text.js';
-import { xmlAttrValue, xmlAttrValueByLocalName } from '../ooxml-text.js';
+import { MAX_ODF_NS_ALIASES, normalizeOdfPrefixes, odfParagraphBlocks } from '../odf-text.js';
+import { decodeXmlEntities, xmlAttrValue, xmlAttrValueByLocalName } from '../ooxml-text.js';
 import { notesTargetFromRels } from '../extract-pptx.js';
 
 /**
@@ -946,6 +946,145 @@ describe('xmlAttrValue tokenizer', () => {
   it('stops safely on a malformed tail (unterminated quote, unquoted value)', () => {
     expect(xmlAttrValue('<a b="ok" c="unterminated', 'b')).toBe('ok');
     expect(xmlAttrValue('<a b=unquoted c="x"/>', 'c')).toBeUndefined();
+  });
+});
+
+// ── crafted ODF: unmatched openers must not rescan the document ────────────
+
+describe('ODF element scanning stays linear on crafted content.xml', () => {
+  /**
+   * The shape that used to pin the extractor: a wall of OPENERS whose close
+   * tag never comes. Each one made the old
+   * `<text:p…(?:\/>|>([\s\S]*?)<\/text:p>)` regex re-scan everything to the
+   * right, so cost grew as openers x bytes — 464 KB measured at 2.3 s and
+   * QUADRUPLING per doubling, i.e. hours at the 50 MB `MAX_DOC_PART_BYTES`
+   * cap, from an upload that zips down to a few kilobytes.
+   *
+   * The bound is deliberately generous (seconds): it is here to catch a
+   * return of the quadratic, not to police CI's scheduler. The scanner does
+   * these in single-digit milliseconds; the old regex needed ~30 s.
+   */
+  const GENEROUS_MS = 5_000;
+
+  it('an odt of 40k unmatched <text:p> openers extracts its real paragraph, fast', () => {
+    const bytes = odtBytes('<text:p>Kept</text:p>' + '<text:p text:style-name="s">x'.repeat(40_000));
+    const t0 = performance.now();
+    const res = extractOdt(bytes);
+    const ms = performance.now() - t0;
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('Kept');
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
+  it('an odp of 40k unmatched <draw:page> openers keeps its real slide, fast', () => {
+    const bytes = odfBytes(
+      'application/vnd.oasis.opendocument.presentation',
+      '<office:presentation>' +
+        odpPage(['Real slide']) +
+        '<draw:page draw:name="a">'.repeat(40_000) +
+        '</office:presentation>',
+    );
+    const t0 = performance.now();
+    const res = extractOdp(bytes);
+    const ms = performance.now() - t0;
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('[slide 1]\nReal slide');
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
+  it('an ods of 20k unmatched row/cell openers keeps its real row, fast', () => {
+    const bytes = odsBytes(
+      '<table:table table:name="Q">' +
+        `<table:table-row>${odsCell('alive')}</table:table-row>` +
+        '<table:table-row><table:table-cell>'.repeat(20_000) +
+        '</table:table>',
+    );
+    const t0 = performance.now();
+    const res = extractOds(bytes);
+    const ms = performance.now() - t0;
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['[sheet: Q]', 'alive']);
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
+  it('an UNTERMINATED attribute quote ends the scan instead of restarting it per opener', () => {
+    // The other half of the old blow-up: the lazy attribute region could never
+    // pass an unclosed quote, so every opener paid a full scan to find that out.
+    const bytes = odtBytes(
+      '<text:p>Kept</text:p>' + '<text:p text:style-name="never closed'.repeat(40_000),
+    );
+    const t0 = performance.now();
+    const res = extractOdt(bytes);
+    const ms = performance.now() - t0;
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('Kept');
+    expect(ms).toBeLessThan(GENEROUS_MS);
+  });
+
+  it('still reads a self-closing paragraph, a quoted /> and a quoted > the same way the regex did', () => {
+    expect(odfParagraphBlocks('<text:p/>')).toEqual(['']);
+    expect(odfParagraphBlocks('<text:p text:style-name="s"/>')).toEqual(['']);
+    expect(odfParagraphBlocks('<text:p n="a/>b">body</text:p>')).toEqual(['body']);
+    expect(odfParagraphBlocks("<text:p n='a>b'>body</text:p>")).toEqual(['body']);
+    // A heading and a paragraph interleave in document order; `<text:page-number>`
+    // is not a paragraph.
+    expect(odfParagraphBlocks('<text:h>H</text:h><text:page-number>9</text:page-number><text:p>P</text:p>')).toEqual([
+      'H',
+      'P',
+    ]);
+    // An opener with no close tag anywhere contributes nothing.
+    expect(odfParagraphBlocks('<text:p>dangling')).toEqual([]);
+  });
+});
+
+// ── numeric character references ───────────────────────────────────────────
+
+describe('decodeXmlEntities — numeric character references', () => {
+  it('decodes well-formed decimal and hex references', () => {
+    expect(decodeXmlEntities('&#65;&#x41;&#x1F600;')).toBe('AA\u{1F600}');
+    expect(decodeXmlEntities('&amp;&lt;&gt;&quot;&apos;')).toBe('&<>"\'');
+  });
+
+  it('leaves a MALFORMED reference literal instead of inventing a character', () => {
+    // `&#12A;` is not a reference at all. The old pattern accepted hex digits
+    // after a bare `#`, then parsed them as DECIMAL — parseInt('12A', 10)
+    // stops at the 'A' and yields 12, so the text silently became U+000C.
+    expect(decodeXmlEntities('&#12A;')).toBe('&#12A;');
+    expect(decodeXmlEntities('price &#12A; each')).toBe('price &#12A; each');
+    expect(decodeXmlEntities('&#;')).toBe('&#;');
+    expect(decodeXmlEntities('&#xZZ;')).toBe('&#xZZ;');
+  });
+
+  it('follows XML, not HTML, on the hex marker: `&#X41;` is not a reference', () => {
+    // XML 1.0 §4.1 spells the marker lowercase `x` only; HTML5 also accepts
+    // `X`. This decoder serves XML parts (and an email body strip that leans
+    // on it), so the strict reading wins and a capital X stays literal rather
+    // than being read as an unrelated decimal.
+    expect(decodeXmlEntities('&#X41;')).toBe('&#X41;');
+  });
+
+  it('leaves an out-of-range code point literal rather than throwing', () => {
+    expect(decodeXmlEntities('&#1114112;')).toBe('&#1114112;'); // 0x110000
+    expect(decodeXmlEntities('&#x110000;')).toBe('&#x110000;');
+  });
+});
+
+// ── duplicate numeric slide parts ──────────────────────────────────────────
+
+describe('extractPptx — two part names parsing to the SAME slide number', () => {
+  it('keeps ONE slide per number, choosing the first in ascending part-name order', () => {
+    // A producer can ship both `slide1.xml` and `slide01.xml`. Zip entry order
+    // is not a contract, so the winner is picked by part NAME — the same rule
+    // the browser twin (`pptxOutline.ts`) applies, so the viewer and an
+    // agent's `read_file` describe the same deck.
+    const zip = new AdmZip();
+    zip.addFile('ppt/slides/slide1.xml', Buffer.from(slideXml(['canonical one'])));
+    zip.addFile('ppt/slides/slide01.xml', Buffer.from(slideXml(['zero-padded twin'])));
+    zip.addFile('ppt/slides/slide2.xml', Buffer.from(slideXml(['two'])));
+    const res = extractPptx(zip.toBuffer());
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['[slide 1]', 'zero-padded twin', '[slide 2]', 'two']);
+    expect(res.summary).toContain('2 slides');
   });
 });
 

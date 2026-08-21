@@ -88,12 +88,24 @@ function readEntryBounded(entry: AdmZip.IZipEntry, budget: ReadBudget): string {
   return entry.getData().toString('utf8');
 }
 
-/** Entries matching `re` (capture 1 = number), decoded as UTF-8, keyed by number. */
+/**
+ * Entries matching `re` (capture 1 = number), decoded as UTF-8, keyed by
+ * number. Two part names can parse to the SAME number (`slide1.xml` and
+ * `slide01.xml`); the winner is the FIRST in ascending part-name order —
+ * deterministic regardless of zip entry order, and the same policy as the
+ * browser twin (`pptxOutline.ts`), so viewer and `read_file` agree. Losing
+ * duplicates are never inflated (no budget charge).
+ */
 function collectNumbered(zip: AdmZip, re: RegExp, budget: ReadBudget): Map<number, string> {
-  const out = new Map<number, string>();
+  const matched: Array<[number, string, AdmZip.IZipEntry]> = [];
   for (const entry of zip.getEntries()) {
     const m = re.exec(entry.entryName);
-    if (m) out.set(parseInt(m[1], 10), readEntryBounded(entry, budget));
+    if (m) matched.push([parseInt(m[1], 10), entry.entryName, entry]);
+  }
+  matched.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+  const out = new Map<number, string>();
+  for (const [n, , entry] of matched) {
+    if (!out.has(n)) out.set(n, readEntryBounded(entry, budget));
   }
   return out;
 }

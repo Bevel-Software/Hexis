@@ -216,10 +216,18 @@ export function toCallToolResult(value: unknown): CallToolResult {
  * output when it defines one, enumerable own properties otherwise — because
  * that is exactly what `JSON.stringify` will emit downstream: when that shape
  * holds an image the object is rebuilt as a plain sanitized copy, and when it
- * does not the original reference is preserved untouched (Date, RegExp, Map
- * and friends are never mangled). Best-effort by design: chain code that
- * EXTRACTS the base64 string itself escapes the walk, and then the ordinary
- * max_output_size spill bounds the damage.
+ * does not the original reference is preserved untouched (RegExp, Map, Date
+ * and friends are never mangled).
+ *
+ * The one thing never preserved by reference is a USER `toJSON`. The scrubbed
+ * result is stringified into the transcript AFTER this returns, so a hook left
+ * live in it fires a second time there, unscrubbed: an impure one — clean when
+ * probed, an image payload on the next call — would slip base64 straight past
+ * the walk. Every object carrying one is therefore rebuilt from the single
+ * view this scrub cached for it, and nothing reachable in the returned value
+ * carries a hook the walk did not already resolve. Best-effort by design:
+ * chain code that EXTRACTS the base64 string itself escapes the walk, and then
+ * the ordinary max_output_size spill bounds the damage.
  */
 export function omitImagePayloads(value: unknown): unknown {
   const omittedNote = (what: string): { image_omitted: true; note: string } => ({
@@ -238,22 +246,67 @@ export function omitImagePayloads(value: unknown): unknown {
     return proto === Object.prototype || proto === null;
   };
 
-  const hasToJson = (v: object): v is { toJSON(): unknown } =>
-    typeof (v as { toJSON?: unknown }).toJSON === 'function';
+  // The `toJSON` a value carries, or undefined. Read defensively: this runs on
+  // EVERY object the walks touch, and the property can be an accessor that
+  // throws. Answering "no hook" there is safe — JSON.stringify reads `toJSON`
+  // the same way and would throw too, so safeJsonText degrades and nothing
+  // reaches the transcript unscrubbed.
+  type JsonHook = (this: unknown, ...args: unknown[]) => unknown;
+  const toJsonHook = (v: object): JsonHook | undefined => {
+    try {
+      const hook: unknown = (v as { toJSON?: unknown }).toJSON;
+      return typeof hook === 'function' ? (hook as JsonHook) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  // The ONE hook trusted to fire again after the scrub, so an ordinary `Date`
+  // keeps passing through by reference instead of collapsing to its ISO
+  // string. `Date.prototype.toJSON` returns null or the result of invoking the
+  // object's own `toISOString`, so when BOTH are the built-ins its result can
+  // only ever be null or a string — there is no object for an image to hide
+  // in, and no second call can differ in kind. (A non-Date receiver makes the
+  // built-in throw, which is likewise harmless.) Every other `toJSON` is user
+  // code and gets no such benefit of the doubt.
+  const isBuiltinDateHook = (v: object, hook: JsonHook): boolean => {
+    if (hook !== (Date.prototype.toJSON as unknown as JsonHook)) return false;
+    try {
+      return (v as { toISOString?: unknown }).toISOString === Date.prototype.toISOString;
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * The USER `toJSON` an object would be serialized through, or undefined.
+   *
+   * A user hook must never survive into the returned structure: the scrubbed
+   * result is stringified into the transcript AFTERWARDS, and a hook left live
+   * fires a SECOND time there — an impure one (clean when probed, an image
+   * payload on the next call) would hand the transcript base64 the scrub never
+   * saw. So every object carrying one is rebuilt from the single cached view
+   * below, and the rebuilt copy is a plain array/record with no hook attached.
+   */
+  const userToJson = (v: object): JsonHook | undefined => {
+    const hook = toJsonHook(v);
+    return hook !== undefined && !isBuiltinDateHook(v, hook) ? hook : undefined;
+  };
 
   // A value's JSON view: what JSON.stringify would serialize for it — the
   // toJSON() result when it defines one (a throwing toJSON falls back to the
   // value itself, matching safeJsonText's degraded path), the value otherwise.
   // Cached per object: toJSON is a USER hook, so it must fire at most once per
-  // object per scrub — not once in the probe and again in the rebuild — and
-  // both walks must observe the SAME view even if the hook is impure.
+  // object per scrub, and the rebuild must emit exactly the view that was
+  // inspected even if the hook is impure.
   const viewCache = new WeakMap<object, unknown>();
   const jsonView = (v: object): unknown => {
     if (viewCache.has(v)) return viewCache.get(v);
     let view: unknown = v;
-    if (hasToJson(v)) {
+    const hook = userToJson(v);
+    if (hook !== undefined) {
       try {
-        view = v.toJSON();
+        view = Reflect.apply(hook, v, []);
       } catch {
         /* keep the value itself */
       }
@@ -262,17 +315,24 @@ export function omitImagePayloads(value: unknown): unknown {
     return view;
   };
 
-  // Does the JSON shape reachable from `root` contain an image sentinel or
-  // spec-shaped image block? Iterative and cycle-safe (a visited set suffices
-  // for a boolean probe); non-plain objects are entered through their JSON
-  // view, exactly like the rebuild walk below. Verdicts are memoized: a clean
-  // probe proves every object it visited clean too (each one's reachable shape
-  // is a subset of what was just explored), so a nested non-plain object is
-  // probed once, not re-walked by every enclosing probe. A hit only proves the
-  // ROOT dirty — the image may sit outside an inner object's own subtree — so
-  // only the root's verdict is recorded then.
+  // Must the subtree reachable from `root` be rebuilt rather than preserved by
+  // reference? Two things force a rebuild, and the probe answers them in ONE
+  // walk because the only caller needs both: an image sentinel / spec-shaped
+  // image block anywhere in the shape, and any object carrying a user `toJSON`
+  // (which must not stay live in the output — see `userToJson`). A hook is
+  // reason enough on its own, so the probe never has to CALL one: it stops at
+  // the bearer, and an object without a hook IS its own JSON view.
+  //
+  // Iterative and cycle-safe (a visited set suffices for a boolean probe).
+  // Verdicts are memoized, but only the NEGATIVE one generalizes: a walk that
+  // finishes clean proves every object it visited clean too, since each one's
+  // reachable shape is a subset of what was just explored — so a nested object
+  // is probed once, not re-walked by every enclosing probe. A hit stops the
+  // walk early, which leaves the visited set half-explored and proves nothing
+  // about those objects (the image or hook may sit outside an inner object's
+  // own subtree), so only the root's verdict is recorded then.
   const probeCache = new WeakMap<object, boolean>();
-  const subtreeHasImage = (root: object): boolean => {
+  const subtreeNeedsRebuild = (root: object): boolean => {
     const known = probeCache.get(root);
     if (known !== undefined) return known;
     const visited = new Set<object>();
@@ -293,16 +353,13 @@ export function omitImagePayloads(value: unknown): unknown {
       }
       visited.add(v);
       if (cached === false) continue;
+      if (userToJson(v) !== undefined) {
+        found = true;
+        break;
+      }
       if (Array.isArray(v)) {
         for (const entry of v) stack.push(entry);
         continue;
-      }
-      if (!isPlainRecord(v)) {
-        const view = jsonView(v);
-        if (view !== v) {
-          stack.push(view);
-          continue;
-        }
       }
       for (const key of Object.keys(v)) stack.push((v as Record<string, unknown>)[key]);
     }
@@ -343,6 +400,41 @@ export function omitImagePayloads(value: unknown): unknown {
     if (isMcpImageResult(v)) return { leaf: omittedNote(v.note ?? `an image (${v.mimeType})`) };
     if (isMcpImageBlockObject(v)) return { leaf: omittedNote(`an image (${v.mimeType})`) };
     if (active.has(v)) return { leaf: '[Circular]' };
+    // A user `toJSON` is handled FIRST — before the array/plain-record split,
+    // exactly as JSON.stringify applies it before looking at the value's
+    // shape. Such an object is ALWAYS rebuilt from its one cached view, never
+    // preserved by reference and never rebuilt from its own keys: leaving the
+    // hook live (or copying it across as a `toJSON` property of a rebuilt
+    // record) would let it fire again during transcript serialization and
+    // return a payload this scrub never inspected.
+    const hook = userToJson(v);
+    if (hook !== undefined) {
+      const view = jsonView(v);
+      // The view can BE the image shape — a toJSON() returning a sentinel or
+      // image block directly. Scrub it here: falling through would build a
+      // record frame from the view and copy its base64 `data` field, key by
+      // key, straight into the rebuilt result.
+      if (isMcpImageResult(view)) return { leaf: omittedNote(view.note ?? `an image (${view.mimeType})`) };
+      if (isMcpImageBlockObject(view)) return { leaf: omittedNote(`an image (${view.mimeType})`) };
+      if (view === null || typeof view !== 'object') return { leaf: view };
+      if (active.has(view)) return { leaf: '[Circular]' };
+      active.add(v);
+      const release: object[] = view === (v as unknown) ? [v] : [v, view];
+      if (view !== (v as unknown)) active.add(view);
+      if (Array.isArray(view)) {
+        return { frame: { kind: 'array', src: view, out: new Array<unknown>(view.length), i: 0, release } };
+      }
+      return {
+        frame: {
+          kind: 'record',
+          src: view as Record<string, unknown>,
+          out: {},
+          keys: Object.keys(view),
+          i: 0,
+          release,
+        },
+      };
+    }
     if (Array.isArray(v)) {
       active.add(v);
       return { frame: { kind: 'array', src: v, out: new Array<unknown>(v.length), i: 0, release: [v] } };
@@ -351,39 +443,22 @@ export function omitImagePayloads(value: unknown): unknown {
       active.add(v);
       return { frame: { kind: 'record', src: v, out: {}, keys: Object.keys(v), i: 0, release: [v] } };
     }
-    // Non-plain object. Untouched (by reference) unless its JSON shape — the
-    // thing JSON.stringify will actually emit for it — smuggles an image; only
-    // then is a plain sanitized copy rebuilt from that shape, toJSON applied
-    // first when the object defines one.
-    if (!subtreeHasImage(v)) return { leaf: v };
-    const view = jsonView(v);
-    // The view can BE the image shape — a toJSON() returning a sentinel or
-    // image block directly. Scrub it here: falling through would build a
-    // record frame from the view and copy its base64 `data` field, key by key,
-    // straight into the rebuilt result.
-    if (isMcpImageResult(view)) return { leaf: omittedNote(view.note ?? `an image (${view.mimeType})`) };
-    if (isMcpImageBlockObject(view)) return { leaf: omittedNote(`an image (${view.mimeType})`) };
-    if (view === null || typeof view !== 'object') {
-      // Unreachable in practice (a primitive view cannot hold the image that
-      // subtreeHasImage found), kept total for safety.
-      return { leaf: view };
-    }
+    // Non-plain object with no hook of its own: it IS its own JSON view, so it
+    // passes through untouched (by reference) unless the shape below it needs
+    // rebuilding — an image to scrub, or a nested object whose user `toJSON`
+    // must not stay live in the result. Only then is a plain sanitized copy
+    // built from its enumerable own properties, exactly what JSON.stringify
+    // would have emitted.
+    if (!subtreeNeedsRebuild(v)) return { leaf: v };
     active.add(v);
-    if (Array.isArray(view)) {
-      const release = view === (v as unknown) ? [v] : [v, view];
-      if (view !== (v as unknown)) active.add(view);
-      return { frame: { kind: 'array', src: view, out: new Array<unknown>(view.length), i: 0, release } };
-    }
-    const release = view === v ? [v] : [v, view];
-    if (view !== v) active.add(view);
     return {
       frame: {
         kind: 'record',
-        src: view as Record<string, unknown>,
+        src: v as Record<string, unknown>,
         out: {},
-        keys: Object.keys(view),
+        keys: Object.keys(v),
         i: 0,
-        release,
+        release: [v],
       },
     };
   };
