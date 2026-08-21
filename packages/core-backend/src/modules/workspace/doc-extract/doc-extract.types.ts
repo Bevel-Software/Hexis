@@ -1,8 +1,9 @@
 /**
  * Server-side document text extraction — shared types.
  *
- * The extractors turn an office document (`.docx` / `.pptx` / `.xlsx`) or a
- * PDF into plain text an agent can read and grep. They are HONEST about being
+ * The extractors turn an office document (`.docx` / `.pptx` / `.xlsx`), an
+ * OpenDocument file (`.odt` / `.odp` / `.ods`) or a PDF into plain text an
+ * agent can read and grep. They are HONEST about being
  * lossy: every successful extraction carries a one-line `summary` the consumer
  * turns into a marker header (`[extracted text of <path> — <summary>]`) so the
  * reader knows it is looking at extracted text, not the file's bytes.
@@ -38,7 +39,7 @@ export function extractionMarker(path: string, summary: string): string {
   return `[extracted text of ${path} — ${summary}]`;
 }
 
-const SUPPORTED_EXTENSIONS = new Set(['.docx', '.pptx', '.xlsx', '.pdf']);
+const SUPPORTED_EXTENSIONS = new Set(['.docx', '.pptx', '.xlsx', '.pdf', '.odt', '.odp', '.ods']);
 const LEGACY_EXTENSIONS = new Set(['.doc', '.ppt', '.xls']);
 
 /** Lowercased extension of `path` including the dot, or '' when there is none. */
@@ -48,7 +49,7 @@ export function fileExtension(path: string): string {
   return dot > 0 ? name.slice(dot).toLowerCase() : '';
 }
 
-/** Is this a document type the extractor supports (.docx/.pptx/.xlsx/.pdf)? */
+/** Is this a document type the extractor supports (.docx/.pptx/.xlsx/.pdf and .odt/.odp/.ods)? */
 export function isSupportedDocument(path: string): boolean {
   return SUPPORTED_EXTENSIONS.has(fileExtension(path));
 }

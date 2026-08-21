@@ -3,6 +3,9 @@ import { extractDocx } from './extract-docx.js';
 import { extractPptx } from './extract-pptx.js';
 import { extractXlsx } from './extract-xlsx.js';
 import { extractPdf } from './extract-pdf.js';
+import { extractOdt } from './extract-odt.js';
+import { extractOdp } from './extract-odp.js';
+import { extractOds } from './extract-ods.js';
 import { DocExtractionCache, gitBlobSha } from './extraction-cache.js';
 
 /** An extraction ready for a consumer: the honest marker header + the text. */
@@ -68,6 +71,12 @@ async function extractByType(path: string, bytes: Buffer): Promise<ExtractResult
       return extractXlsx(bytes);
     case '.pdf':
       return extractPdf(bytes);
+    case '.odt':
+      return extractOdt(bytes);
+    case '.odp':
+      return extractOdp(bytes);
+    case '.ods':
+      return extractOds(bytes);
     default:
       // Callers gate on `isSupportedDocument` first; this is the honest
       // answer if one ever doesn't.

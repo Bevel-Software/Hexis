@@ -403,7 +403,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'read_file',
     description:
-      'Read a workspace file as text. Returns `{ path, content }`. Images (.png/.jpg/.jpeg/.gif/.webp) return the IMAGE ITSELF as native MCP image content (plus a one-line text note naming the file), so you can look at the picture — up to 3.5 MB of raw image data; a larger image gets an honest refusal asking for a locally downscaled copy or a smaller export (`.svg` is text and reads as text). Images come back only on a DIRECT call: inside `call_tool_chain` an image read yields an `{ image_omitted, note }` stub instead. Office documents (.docx/.pptx/.xlsx) and PDFs return their EXTRACTED text under an honest `[extracted text of …]` header, with `[slide N]`/`[sheet: Name]`/`[page N]` markers — the extraction is READ-ONLY (layout/images omitted; such files cannot be edited as text, only replaced by uploading a new version). Other binary files return a one-line description instead of raw bytes. Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref; ignored for an image) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. A spill ref is workspace-independent: `branch` is ignored for it.' +
+      'Read a workspace file as text. Returns `{ path, content }`. Images (.png/.jpg/.jpeg/.gif/.webp) return the IMAGE ITSELF as native MCP image content (plus a one-line text note naming the file), so you can look at the picture — up to 3.5 MB of raw image data; a larger image gets an honest refusal asking for a locally downscaled copy or a smaller export (`.svg` is text and reads as text). Images come back only on a DIRECT call: inside `call_tool_chain` an image read yields an `{ image_omitted, note }` stub instead. Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods) and PDFs return their EXTRACTED text under an honest `[extracted text of …]` header, with `[slide N]`/`[sheet: Name]`/`[page N]` markers — the extraction is READ-ONLY (layout/images omitted; such files cannot be edited as text, only replaced by uploading a new version). Other binary files return a one-line description instead of raw bytes. Optional `offset`/`limit` slice the content (characters for a file, bytes for a `__tool_chain_spill__/…` ref; ignored for an image) — use them to page through large files or a `call_tool_chain` spill rather than reading multi-MB in full. A spill ref is workspace-independent: `branch` is ignored for it.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -548,7 +548,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'grep',
     description:
-      'Regex content search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. Searches INSIDE office documents (.docx/.pptx/.xlsx) and PDFs via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).' +
+      'Regex content search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods) and PDFs via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -627,7 +627,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'write_file',
     description:
-      'Write (create or overwrite) a workspace file. The change is committed + pushed as you. Returns `{ path, bytes }`. Refuses office documents/PDFs (.docx/.pptx/.xlsx/.pdf) — their reads are text EXTRACTIONS that cannot round-trip; replace such a file by uploading a new version instead.' +
+      'Write (create or overwrite) a workspace file. The change is committed + pushed as you. Returns `{ path, bytes }`. Refuses Office/OpenDocument files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf) — their reads are text EXTRACTIONS that cannot round-trip; replace such a file by uploading a new version instead.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -666,8 +666,8 @@ export function registerWorkspaceTools(
       'Batch-write many files in ONE commit — far faster than calling write_file once per file when ' +
       'creating many files at once (e.g. seeding a knowledge base). Each entry is `{ path, content }`; all ' +
       'are created/overwritten and committed + pushed together as you. Prefer this over many write_file ' +
-      'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Refuses office ' +
-      'documents/PDFs (.docx/.pptx/.xlsx/.pdf) — their reads are text EXTRACTIONS that cannot round-trip. Returns `{ count }`.' +
+      'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Refuses Office/OpenDocument ' +
+      'files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf) — their reads are text EXTRACTIONS that cannot round-trip. Returns `{ count }`.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -718,7 +718,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'edit_file',
     description:
-      'Replace an exact string in a workspace file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you. Refuses office documents/PDFs (.docx/.pptx/.xlsx/.pdf) — their reads are text EXTRACTIONS that cannot round-trip; replace such a file by uploading a new version instead.' +
+      'Replace an exact string in a workspace file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you. Refuses Office/OpenDocument files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf) — their reads are text EXTRACTIONS that cannot round-trip; replace such a file by uploading a new version instead.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',

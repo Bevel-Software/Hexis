@@ -484,6 +484,45 @@ describe('office documents and PDFs', () => {
     return Buffer.from(out, 'latin1');
   };
 
+  /** Minimal ODF package: a zip with a `content.xml` carrying `body` under `<office:body>`. */
+  const odf = (body: string): Buffer => {
+    const zip = new AdmZip();
+    zip.addFile(
+      'content.xml',
+      Buffer.from(
+        '<?xml version="1.0"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" ' +
+          'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" ' +
+          'xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0">' +
+          `<office:body>${body}</office:body></office:document-content>`,
+      ),
+    );
+    return zip.toBuffer();
+  };
+
+  const odt = (...paragraphs: string[]): Buffer =>
+    odf(`<office:text>${paragraphs.map((p) => `<text:p>${p}</text:p>`).join('')}</office:text>`);
+
+  const odp = (slides: string[][]): Buffer =>
+    odf(
+      '<office:presentation>' +
+        slides
+          .map(
+            (paragraphs) =>
+              `<draw:page><draw:frame><draw:text-box>${paragraphs.map((p) => `<text:p>${p}</text:p>`).join('')}</draw:text-box></draw:frame></draw:page>`,
+          )
+          .join('') +
+        '</office:presentation>',
+    );
+
+  const ods = (name: string, rows: string[][]): Buffer =>
+    odf(
+      `<office:spreadsheet><table:table table:name="${name}">` +
+        rows
+          .map((cells) => `<table:table-row>${cells.map((c) => `<table:table-cell><text:p>${c}</text:p></table:table-cell>`).join('')}</table:table-row>`)
+          .join('') +
+        '</table:table></office:spreadsheet>',
+    );
+
   const readContent = async (base: string, path: string, extra: Record<string, unknown> = {}): Promise<string> => {
     const res = (await (await post(`${base}/api/agent/tools/read_file`, { path, ...extra })).json()) as { content: string };
     return res.content;
@@ -554,6 +593,49 @@ describe('office documents and PDFs', () => {
     expect(second.note).toBeUndefined();
   });
 
+  it('read_file returns marker + extracted text for the three OpenDocument formats', async () => {
+    const base = await start();
+    await fs.writeFile('memo.odt', odt('Hello from Writer', 'Second paragraph'));
+    const odtContent = await readContent(base, 'memo.odt');
+    expect(odtContent.split('\n')).toEqual([
+      '[extracted text of memo.odt — 2 paragraphs; layout, images and formatting omitted]',
+      'Hello from Writer',
+      'Second paragraph',
+    ]);
+
+    await fs.writeFile('deck.odp', odp([['Impress intro'], ['Second page']]));
+    const odpContent = await readContent(base, 'deck.odp');
+    expect(odpContent).toMatch(/^\[extracted text of deck\.odp — 2 slides;/);
+    expect(odpContent).toContain('[slide 1]\nImpress intro\n[slide 2]\nSecond page');
+
+    await fs.writeFile('numbers.ods', ods('Inventory', [['Name', 'Qty'], ['Widget', '3']]));
+    const odsContent = await readContent(base, 'numbers.ods');
+    expect(odsContent).toMatch(/^\[extracted text of numbers\.ods — 1 sheet, rows as tab-separated values;/);
+    expect(odsContent).toContain('[sheet: Inventory]\nName\tQty\nWidget\t3');
+  });
+
+  it('grep finds a term inside an odp, with the [slide N] marker line locating it', async () => {
+    const base = await start();
+    await fs.writeFile('deck.odp', odp([['Intro'], ['Roadmap 2027', 'Ship OpenDocument']]));
+    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'Roadmap' })).json()) as {
+      matches: { path: string; line: number; text: string }[];
+    };
+    // Extraction: marker line 1, [slide 1] 2, Intro 3, [slide 2] 4, Roadmap 5.
+    expect(res.matches).toContainEqual(expect.objectContaining({ path: 'deck.odp', text: 'Roadmap 2027', line: 5 }));
+    const markers = (await (await post(`${base}/api/agent/tools/grep`, { pattern: '\\[slide 2\\]' })).json()) as { matches: { path: string }[] };
+    expect(markers.matches).toContainEqual(expect.objectContaining({ path: 'deck.odp' }));
+  });
+
+  it('read_file answers a corrupt odt zip with an honest could-not-parse message (no 500)', async () => {
+    const base = await start();
+    await fs.writeFile('broken.odt', Buffer.from('not really a zip'));
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'broken.odt' });
+    expect(res.status).toBe(200);
+    const { content } = (await res.json()) as { content: string };
+    expect(content).toContain('could not be parsed as a .odt');
+    expect(content).toContain('uploading a new version');
+  });
+
   it('read_file answers a corrupt docx with an honest could-not-parse message (no 500)', async () => {
     const base = await start();
     await fs.writeFile('broken.docx', Buffer.from('not really a zip'));
@@ -589,8 +671,12 @@ describe('office documents and PDFs', () => {
     await fs.writeFile('deck.pptx', pptx([['Original']]));
     for (const [tool, body] of [
       ['write_file', { path: 'new.docx', content: 'plain text' }],
+      ['write_file', { path: 'new.odt', content: 'plain text' }],
+      ['write_file', { path: 'slides.odp', content: 'plain text' }],
       ['edit_file', { path: 'deck.pptx', old_string: 'Original', new_string: 'Changed' }],
+      ['edit_file', { path: 'numbers.ods', old_string: 'a', new_string: 'b' }],
       ['write_files', { files: [{ path: 'ok.md', content: 'fine' }, { path: 'sheet.xlsx', content: 'nope' }] }],
+      ['write_files', { files: [{ path: 'ok.md', content: 'fine' }, { path: 'sheet.ods', content: 'nope' }] }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
       expect(res.status, tool).toBe(400);

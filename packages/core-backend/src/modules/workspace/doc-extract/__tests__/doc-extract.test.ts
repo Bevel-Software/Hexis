@@ -8,6 +8,9 @@ import { extractDocx } from '../extract-docx.js';
 import { extractPptx } from '../extract-pptx.js';
 import { extractXlsx } from '../extract-xlsx.js';
 import { extractPdf } from '../extract-pdf.js';
+import { extractOdt } from '../extract-odt.js';
+import { extractOdp } from '../extract-odp.js';
+import { extractOds } from '../extract-ods.js';
 import { DocExtractService } from '../doc-extract.service.js';
 import { gitBlobSha } from '../extraction-cache.js';
 import { fileExtension, isLegacyDocument, isSupportedDocument } from '../doc-extract.types.js';
@@ -89,11 +92,51 @@ export function pdfBytes(text: string): Buffer {
   return Buffer.from(pdf, 'latin1');
 }
 
+// ── ODF fixture builders ───────────────────────────────────────────────────
+
+const ODF_NS =
+  'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" ' +
+  'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" ' +
+  'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" ' +
+  'xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" ' +
+  'xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0"';
+
+function odfBytes(mimetype: string, bodyXml: string): Buffer {
+  const zip = new AdmZip();
+  zip.addFile('mimetype', Buffer.from(mimetype));
+  zip.addFile(
+    'content.xml',
+    Buffer.from(`<?xml version="1.0"?><office:document-content ${ODF_NS}><office:body>${bodyXml}</office:body></office:document-content>`),
+  );
+  return zip.toBuffer();
+}
+
+const odtBytes = (textXml: string): Buffer =>
+  odfBytes('application/vnd.oasis.opendocument.text', `<office:text>${textXml}</office:text>`);
+
+/** One odp slide: frame paragraphs + optional notes paragraphs. */
+const odpPage = (paragraphs: string[], notes: string[] = []): string =>
+  '<draw:page draw:name="page">' +
+  `<draw:frame><draw:text-box>${paragraphs.map((p) => `<text:p>${p}</text:p>`).join('')}</draw:text-box></draw:frame>` +
+  (notes.length > 0
+    ? `<presentation:notes><draw:frame><draw:text-box>${notes.map((p) => `<text:p>${p}</text:p>`).join('')}</draw:text-box></draw:frame></presentation:notes>`
+    : '') +
+  '</draw:page>';
+
+const odpBytes = (...pages: string[]): Buffer =>
+  odfBytes('application/vnd.oasis.opendocument.presentation', `<office:presentation>${pages.join('')}</office:presentation>`);
+
+const odsBytes = (...tables: string[]): Buffer =>
+  odfBytes('application/vnd.oasis.opendocument.spreadsheet', `<office:spreadsheet>${tables.join('')}</office:spreadsheet>`);
+
+const odsCell = (text: string, repeat?: number): string =>
+  `<table:table-cell${repeat ? ` table:number-columns-repeated="${repeat}"` : ''}>${text === '' ? '' : `<text:p>${text}</text:p>`}</table:table-cell>`;
+
 // ── extension classification ───────────────────────────────────────────────
 
 describe('document type classification', () => {
-  it('recognises the four supported types, case-insensitively', () => {
-    for (const p of ['a.docx', 'Plugins/GTM/Deck.PPTX', 'x/y.xlsx', 'r.pdf']) {
+  it('recognises the seven supported types, case-insensitively', () => {
+    for (const p of ['a.docx', 'Plugins/GTM/Deck.PPTX', 'x/y.xlsx', 'r.pdf', 'n.odt', 'd.ODP', 'b/s.ods']) {
       expect(isSupportedDocument(p), p).toBe(true);
     }
   });
@@ -254,6 +297,195 @@ describe('extractPdf', () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.message).toContain('could not be parsed as a PDF');
+  });
+});
+
+// ── odt ────────────────────────────────────────────────────────────────────
+
+describe('extractOdt', () => {
+  it('joins spans with NO separator; headings and paragraphs are lines in document order', () => {
+    const res = extractOdt(
+      odtBytes(
+        '<text:h text:outline-level="1">Ti<text:span text:style-name="T1">tle</text:span></text:h>' +
+          '<text:p>Hel<text:span text:style-name="T2">lo world</text:span></text:p>',
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['Title', 'Hello world']);
+    expect(res.summary).toBe('2 paragraphs; layout, images and formatting omitted');
+  });
+
+  it('renders <text:tab/>, <text:line-break/> and <text:s text:c="N"/> as real characters', () => {
+    const res = extractOdt(odtBytes('<text:p>a<text:tab/>b<text:line-break/>c<text:s text:c="3"/>d<text:s/>e</text:p>'));
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('a\tb\nc   d e');
+  });
+
+  it('decodes named and numeric XML entities', () => {
+    const res = extractOdt(odtBytes('<text:p>&amp; &lt;tag&gt; &quot;q&quot; &apos;a&apos; &#65;&#x42;</text:p>'));
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('& <tag> "q" \'a\' AB');
+  });
+
+  it('returns a typed failure for bytes that are not a zip', () => {
+    const res = extractOdt(Buffer.from('this is not an odt at all'));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('could not be parsed as a .odt');
+  });
+
+  it('returns a typed failure for a zip without content.xml', () => {
+    const zip = new AdmZip();
+    zip.addFile('hello.txt', Buffer.from('hi'));
+    const res = extractOdt(zip.toBuffer());
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('no content.xml');
+  });
+});
+
+// ── odp ────────────────────────────────────────────────────────────────────
+
+describe('extractOdp', () => {
+  it('numbers slides by DOCUMENT order of <draw:page>, with notes under [slide N notes]', () => {
+    const res = extractOdp(
+      odpBytes(
+        odpPage(['Road', 'map 2026'], ['Remember the demo']),
+        odpPage(['Second slide']),
+        odpPage(['Third slide']),
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual([
+      '[slide 1]',
+      'Road',
+      'map 2026',
+      '[slide 1 notes]',
+      'Remember the demo',
+      '[slide 2]',
+      'Second slide',
+      '[slide 3]',
+      'Third slide',
+    ]);
+    expect(res.summary).toBe('3 slides + notes; layout, images and formatting omitted');
+  });
+
+  it('omits the notes marker (and "+ notes") when no slide has note text', () => {
+    const res = extractOdp(odpBytes(odpPage(['Only slide'])));
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text).toBe('[slide 1]\nOnly slide');
+    expect(res.summary).toContain('1 slide;');
+  });
+
+  it('returns a typed failure for a zip whose content.xml has no draw:page', () => {
+    const res = extractOdp(odtBytes('<text:p>not a presentation</text:p>'));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('could not be parsed as a .odp');
+  });
+
+  it('returns a typed failure for bytes that are not a zip', () => {
+    const res = extractOdp(Buffer.from('junk'));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('could not be parsed as a .odp');
+  });
+});
+
+// ── ods ────────────────────────────────────────────────────────────────────
+
+describe('extractOds', () => {
+  const row = (...cells: string[]): string => `<table:table-row>${cells.join('')}</table:table-row>`;
+  const table = (name: string, ...rows: string[]): string =>
+    `<table:table table:name="${name}">${rows.join('')}</table:table>`;
+
+  it('emits [sheet: Name] markers and rows as tab-separated cell text', () => {
+    const res = extractOds(
+      odsBytes(
+        table('Inventory', row(odsCell('Name'), odsCell('Qty')), row(odsCell('Widget'), odsCell('3'))),
+        table('Empty'),
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    const lines = res.text.split('\n');
+    expect(lines[0]).toBe('[sheet: Inventory]');
+    expect(lines[1]).toBe('Name\tQty');
+    expect(lines[2]).toBe('Widget\t3');
+    expect(lines).toContain('[sheet: Empty]');
+    expect(res.summary).toContain('2 sheets');
+  });
+
+  it('expands column/row repeats for real data', () => {
+    const res = extractOds(
+      odsBytes(
+        table(
+          'S',
+          row(odsCell('x', 3), odsCell('end')),
+          `<table:table-row table:number-rows-repeated="2">${odsCell('dup')}</table:table-row>`,
+        ),
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['[sheet: S]', 'x\tx\tx\tend', 'dup', 'dup']);
+  });
+
+  it('TRIMS trailing empty cells/rows before applying their repeats — million-wide grid padding costs nothing', () => {
+    const res = extractOds(
+      odsBytes(
+        table(
+          'Padded',
+          row(odsCell('a'), odsCell('', 1_000_000)),
+          `<table:table-row table:number-rows-repeated="1048576">${odsCell('', 1_000_000)}</table:table-row>`,
+        ),
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    // No truncation note: the padding was trimmed, not truncated.
+    expect(res.text.split('\n')).toEqual(['[sheet: Padded]', 'a']);
+  });
+
+  it('caps NON-empty repeats at 200 columns / 10k rows and says so under the sheet marker', () => {
+    const res = extractOds(
+      odsBytes(
+        table(
+          'Big',
+          row(odsCell('w', 300)),
+          `<table:table-row table:number-rows-repeated="20000">${odsCell('r')}</table:table-row>`,
+        ),
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    const lines = res.text.split('\n');
+    expect(lines[1]).toBe('[sheet truncated to the first 10000 rows and first 200 columns]');
+    expect(lines[2]).toBe(Array(200).fill('w').join('\t'));
+    expect(lines).toHaveLength(2 + 10_000);
+  });
+
+  it('decodes entities in cell text and the sheet name; covered cells render empty', () => {
+    const res = extractOds(
+      odsBytes(
+        table(
+          'P&amp;L',
+          row(odsCell('A&amp;B'), '<table:covered-table-cell/>', odsCell('C')),
+        ),
+      ),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(res.text.split('\n')).toEqual(['[sheet: P&L]', 'A&B\t\tC']);
+  });
+
+  it('returns a typed failure for bytes that are not a zip', () => {
+    const res = extractOds(Buffer.from('nope'));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('could not be parsed as a .ods');
+  });
+
+  it('returns a typed failure for a content.xml without table:table', () => {
+    const res = extractOds(odtBytes('<text:p>a text document</text:p>'));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('no table:table');
   });
 });
 
