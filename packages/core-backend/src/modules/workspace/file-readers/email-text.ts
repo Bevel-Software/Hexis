@@ -208,16 +208,29 @@ function looseStripFrom(html: string, lower: string, from: number, noClose: Set<
     const closing = html[p] === '/';
     if (closing) p++;
     const markup = !closing && (html[p] === '!' || html[p] === '?');
+    // A `<` inside the name region means this span is no tag — and it is where
+    // the next candidate begins. Noting it keeps the walk MONOTONE: without
+    // that, `<<<<…` before one far `>` scanned the whole name region again for
+    // every `<`, and the fallback added to bound one quadratic was quadratic
+    // itself. Nothing between `lt` and the nested `<` is a candidate, so
+    // resuming there sees exactly what a character-by-character walk would.
     let q = p;
-    while (q < gt && !/[\s/>]/.test(html[q])) q++;
-    const name = lower.slice(p, q);
+    let nested = -1;
+    while (q < gt && !/[\s/>]/.test(html[q])) {
+      if (html[q] === '<') {
+        nested = q;
+        break;
+      }
+      q++;
+    }
+    const name = nested === -1 ? lower.slice(p, q) : '';
     if (!markup && !TAG_NAME.test(name)) {
       // Names no element, so the `<` is body text — and the scan resumes at
-      // the NEXT character rather than past the whole span. Consuming to the
+      // the next candidate rather than past the whole span. Consuming to the
       // `>` swallowed whatever the span contained, and `< <script>evil()`
       // ends its span at the script tag's own `>`: the container was never
       // seen and its code was shown to the reader as text.
-      i = lt + 1;
+      i = nested === -1 ? lt + 1 : nested;
       continue;
     }
     out += html.slice(textStart, lt);

@@ -341,8 +341,8 @@ function markupSectionEnd(xml: string, lt: number): number {
  * the whole index costs one pass; a part with no sections leaves it empty and
  * every later lookup is a no-op.
  */
-function sectionSpans(xml: string): Array<[number, number]> {
-  const spans: Array<[number, number]> = [];
+function sectionSpans(xml: string): number[] | null {
+  const spans: number[] = [];
   const next = MARKUP_SECTIONS.map(([open]) => xml.indexOf(open));
   for (;;) {
     let k = -1;
@@ -350,9 +350,10 @@ function sectionSpans(xml: string): Array<[number, number]> {
       if (next[j] !== -1 && (k === -1 || next[j] < next[k])) k = j;
     }
     if (k === -1) return spans;
+    if (spans.length >= MAX_SECTIONS * 2) return null;
     const end = markupSectionEnd(xml, next[k]);
     const stop = end === -1 ? xml.length : end;
-    spans.push([next[k], stop]);
+    spans.push(next[k], stop);
     // A section opener found INSIDE the span just taken (a `<!--` within a
     // CDATA, say) is not one — re-find each from past the span.
     for (let j = 0; j < next.length; j++) {
@@ -361,17 +362,32 @@ function sectionSpans(xml: string): Array<[number, number]> {
   }
 }
 
-/** Does a section cover `at`? Binary search over the sorted, disjoint spans. */
-function sectionCovering(spans: ReadonlyArray<[number, number]>, at: number): [number, number] | undefined {
+/**
+ * How many sections the index will hold before the part is given up on.
+ *
+ * `<!---->` is seven bytes, so a 50 MB part can spell SEVEN MILLION valid
+ * comments. A pair of numbers each is 1.6 MB at this bound and stays flat —
+ * the earlier `[start, end]` per section allocated an object apiece and would
+ * have run the process out of memory long before extraction finished. Word
+ * and PowerPoint emit no XML comments at all, so no document a producer wrote
+ * comes near this.
+ */
+const MAX_SECTIONS = 100_000;
+
+/**
+ * The end of the section covering `at`, or -1 — binary search over the flat
+ * `[start0, end0, start1, end1, …]` pairs, which are sorted and disjoint.
+ */
+function sectionEndCovering(spans: readonly number[], at: number): number {
   let lo = 0;
-  let hi = spans.length - 1;
+  let hi = (spans.length >> 1) - 1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    if (at < spans[mid][0]) hi = mid - 1;
-    else if (at >= spans[mid][1]) lo = mid + 1;
-    else return spans[mid];
+    if (at < spans[mid * 2]) hi = mid - 1;
+    else if (at >= spans[mid * 2 + 1]) lo = mid + 1;
+    else return spans[mid * 2 + 1];
   }
-  return undefined;
+  return -1;
 }
 
 /**
@@ -389,19 +405,14 @@ function sectionCovering(spans: ReadonlyArray<[number, number]>, at: number): [n
  * in the part this is one `indexOf` and one lookup against an empty index —
  * exactly what the plain search cost before sections were understood at all.
  */
-function closeOutsideSections(
-  xml: string,
-  close: string,
-  from: number,
-  spans: ReadonlyArray<[number, number]>,
-): number {
+function closeOutsideSections(xml: string, close: string, from: number, spans: readonly number[]): number {
   let at = from;
   for (;;) {
     const closeAt = xml.indexOf(close, at);
     if (closeAt === -1) return -1;
-    const shadow = spans.length === 0 ? undefined : sectionCovering(spans, closeAt);
-    if (shadow === undefined) return closeAt;
-    at = shadow[1];
+    const shadowEnd = spans.length === 0 ? -1 : sectionEndCovering(spans, closeAt);
+    if (shadowEnd === -1) return closeAt;
+    at = shadowEnd;
   }
 }
 
@@ -412,8 +423,12 @@ export function xmlElementBlocks(xml: string, names: readonly string[]): XmlElem
   // document order, so a name that has no usable close from HERE has none from
   // any later opener either — without this, each one would re-walk the tail.
   const noUsableClose = new Set<string>();
-  // One pass, reused by every close search below — see `sectionSpans`.
+  // One pass, reused by every close search below — see `sectionSpans`. A part
+  // with more sections than the index will hold is given up on: without a
+  // trustworthy index this walk cannot tell a live close tag from a commented
+  // one, and guessing either way misreads the document (see MAX_SECTIONS).
   const spans = sectionSpans(xml);
+  if (spans === null) return [];
   const lastClose = new Map<string, number>();
   const lastCloseIndex = (name: string): number => {
     let known = lastClose.get(name);

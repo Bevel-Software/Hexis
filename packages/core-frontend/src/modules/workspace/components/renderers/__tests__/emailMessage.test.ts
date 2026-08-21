@@ -378,6 +378,20 @@ describe('email text helpers', () => {
     expect(out).toContain('after');
   });
 
+  it('the fallback stays linear on a wall of delimiter-free `<` before one far `>`', () => {
+    // `<` is not whitespace, `/` or `>`, so the name scan ran clean through it
+    // — every one of these rescanned the same tail, and the fallback added to
+    // bound a quadratic was quadratic itself, in the reader's tab. A `<` met
+    // in the name region is where the next candidate starts; resume THERE.
+    const wall = '<b ' + '<'.repeat(100_001) + '>';
+    const body = `${wall}${'<'.repeat(60_000)}x>tail`;
+    const t0 = performance.now();
+    const out = htmlToEmailText(body);
+    const ms = performance.now() - t0;
+    expect(out).toContain('tail');
+    expect(ms).toBeLessThan(5_000);
+  });
+
   it('the fallback does not let `<script/x>` open a container', () => {
     // `/` ends a name only as the `/` of a `/>`, so this names no container —
     // treating it as one hid real message text up to the next `</script>`.

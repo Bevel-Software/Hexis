@@ -1517,6 +1517,22 @@ describe('ooxml-text — the docx/pptx walks are linear and quote-aware', () => 
     expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
+  it('gives a part up rather than indexing unbounded sections', () => {
+    // `<!---->` is seven bytes, so a 50 MB part spells seven million valid
+    // comments. Indexing each as its own array object ran the heap out before
+    // extraction finished; the index is flat pairs now, and bounded.
+    const xml = '<w:p>first</w:p>' + '<!---->'.repeat(100_001);
+    const t0 = performance.now();
+    const blocks = xmlElementBlocks(xml, ['w:p']);
+    const ms = performance.now() - t0;
+    expect(blocks).toEqual([]);
+    expect(ms).toBeLessThan(GENEROUS_MS);
+    // Just under the bound the part still reads normally.
+    expect(xmlElementBlocks('<w:p>kept</w:p>' + '<!---->'.repeat(10), ['w:p'])).toEqual([
+      { name: 'w:p', attrs: '', body: 'kept' },
+    ]);
+  });
+
   it('stays linear when every close tag is shadowed by a section', () => {
     // The `lastIndexOf` guard says a close EXISTS, so without the per-name memo
     // each of these openers would walk the whole tail looking for a close that
