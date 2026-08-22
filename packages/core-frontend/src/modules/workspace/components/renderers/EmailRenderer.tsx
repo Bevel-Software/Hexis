@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Copy, ExternalLink, Mail, Paperclip } from 'lucide-react';
+import { Check, Copy, ExternalLink, Mail, Paperclip } from 'lucide-react';
 import { useWorkspace } from '../../state/workspace.context';
 import { authFetch } from '../../../../lib/api';
+import { copyToClipboard } from '../../../../lib/clipboard';
 import { DownloadFileButton } from './DownloadFileButton';
 import { MAX_EMAIL_BYTES, attachmentLine, type EmailMessageView } from './emailMessage';
 import { buildEmailBody, type EmailLink } from './emailBody';
@@ -130,8 +131,10 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
       <div className="mb-4 flex items-center gap-3 rounded-sm bg-sunken px-3 py-2">
         <Mail size={15} className="shrink-0 text-ink-faint" aria-hidden />
         <p className="min-w-0 flex-1 text-detail text-ink-muted">
-          Text view of the email — formatting, inline images and attachment contents are not
-          shown. Download the file to open it in a mail client.
+          {rendered !== null
+            ? 'The sender’s formatting, shown without remote content: images hosted elsewhere are not loaded, and links open only after you confirm the address. Attachment contents are not shown.'
+            : 'Text view of the email — formatting, inline images and attachment contents are not shown.'}{' '}
+          Download the file to open it in a mail client.
         </p>
         <DownloadFileButton filePath={filePath} size="sm" />
       </div>
@@ -167,11 +170,23 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
             title="Message body"
             className="h-[32rem] w-full rounded-xs border border-line bg-white"
           />
-          {rendered.blockedRemoteImages > 0 && (
+          {(rendered.blockedRemoteImages > 0 || rendered.unavailableInlineImages > 0) && (
             <p className="mt-2 text-detail text-ink-faint">
-              {rendered.blockedRemoteImages} remote image
-              {rendered.blockedRemoteImages === 1 ? '' : 's'} not loaded — fetching one would tell
-              the sender you opened this message.
+              {rendered.blockedRemoteImages > 0 && (
+                <>
+                  {rendered.blockedRemoteImages} remote image
+                  {rendered.blockedRemoteImages === 1 ? '' : 's'} not loaded — fetching one would
+                  tell the sender you opened this message.
+                </>
+              )}
+              {rendered.blockedRemoteImages > 0 && rendered.unavailableInlineImages > 0 && ' '}
+              {rendered.unavailableInlineImages > 0 && (
+                <>
+                  {rendered.unavailableInlineImages} embedded image
+                  {rendered.unavailableInlineImages === 1 ? '' : 's'} could not be shown — the part
+                  is missing from the file or too large to inline.
+                </>
+              )}
             </p>
           )}
           {rendered.links.length > 0 && <EmailLinks links={rendered.links} />}
@@ -206,6 +221,36 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
 
 
 /**
+ * A copy button that says whether the copy LANDED.
+ *
+ * `navigator.clipboard` is absent outside a secure context and rejects when
+ * the document is not focused — ordinary conditions, not exceptions. A button
+ * that silently did nothing (or left an unhandled rejection) would leave the
+ * reader believing they hold an address they do not.
+ */
+function CopyLinkButton({ url }: { url: string }): React.ReactElement {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  return (
+    <button
+      type="button"
+      className="flex shrink-0 items-center gap-1 text-ink-faint hover:text-ink"
+      title={state === 'failed' ? 'Could not copy — select the address instead' : 'Copy this address'}
+      onClick={() => {
+        void copyToClipboard(url).then((ok) => {
+          setState(ok ? 'copied' : 'failed');
+          window.setTimeout(() => setState('idle'), 2000);
+        });
+      }}
+    >
+      {state === 'copied' ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
+      {state !== 'idle' && (
+        <span className="text-meta">{state === 'copied' ? 'Copied' : 'Copy failed'}</span>
+      )}
+    </button>
+  );
+}
+
+/**
  * The message's links, in TRUSTED UI outside the sandbox.
  *
  * A click inside a script-free frame cannot be intercepted, so an anchor left
@@ -231,14 +276,7 @@ function EmailLinks({ links }: { links: readonly EmailLink[] }): React.ReactElem
               {link.text !== '' && <span className="text-ink">{link.text} — </span>}
               <span className="break-all text-ink-faint">{link.url}</span>
             </span>
-            <button
-              type="button"
-              className="shrink-0 text-ink-faint hover:text-ink"
-              title="Copy this address"
-              onClick={() => void navigator.clipboard?.writeText(link.url)}
-            >
-              <Copy size={12} aria-hidden />
-            </button>
+            <CopyLinkButton url={link.url} />
             <button
               type="button"
               className="shrink-0 text-ink-faint hover:text-ink"

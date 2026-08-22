@@ -1,23 +1,7 @@
-/**
- * Copy text, and say whether it landed.
- *
- * `navigator.clipboard` is undefined outside a secure context (plain-HTTP
- * staging, some embedded webviews), and `writeText` rejects when the document
- * isn't focused. Both are ordinary conditions here, not exceptions — the
- * Library's copy buttons hand over an agent prompt the user can also just
- * select, so a failure has a real answer ("select the text instead") and must
- * never surface as a success toast.
- */
-export async function copyToClipboard(text: string): Promise<boolean> {
-  const clipboard = navigator.clipboard;
-  if (!clipboard?.writeText) return false;
-  try {
-    await clipboard.writeText(text);
-    return true;
-  } catch {
-    return false;
-  }
-}
+// The implementation moved to `lib/clipboard.ts` when the email viewer needed
+// it too; re-exported here so the Library keeps importing its copy helper and
+// its toast strings from one place.
+export { copyToClipboard } from '../../../lib/clipboard';
 
 /** What a copy button tells the user, either way. */
 export const COPIED_TOAST = 'Prompt copied.';

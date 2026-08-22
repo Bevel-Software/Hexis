@@ -2,10 +2,11 @@ import PostalMime from 'postal-mime';
 import type { Address, Email } from 'postal-mime';
 import {
   MAX_EMAIL_BYTES,
-  MAX_INLINE_IMAGE_TOTAL_BYTES,
   htmlToEmailText,
+  inlineBudgeted,
   isInlineImagePart,
   isoDate,
+  referencedContentIds,
   type EmailAttachmentView,
   type EmailMessageView,
 } from './emailMessage';
@@ -71,23 +72,9 @@ export async function parseEmlMessage(bytes: ArrayBuffer): Promise<EmailMessageV
           bytes: isInlineImagePart(a.mimeType, contentId, bytes.byteLength) ? bytes : undefined,
         };
       }),
+      referencedContentIds(html),
     ),
   };
-}
-
-/**
- * Drop retained bytes past the aggregate inline budget: one message may carry
- * many small images, and the per-part bound alone does not cap their sum. The
- * parts stay listed — only the bytes go, and the picture simply does not draw.
- */
-function inlineBudgeted(parts: EmailAttachmentView[]): EmailAttachmentView[] {
-  let held = 0;
-  return parts.map((part) => {
-    if (part.bytes === undefined) return part;
-    if (held + part.bytes.byteLength > MAX_INLINE_IMAGE_TOTAL_BYTES) return { ...part, bytes: undefined };
-    held += part.bytes.byteLength;
-    return part;
-  });
 }
 
 /** `Name <addr>, addr2, Group: member, member` — groups flattened inline. */

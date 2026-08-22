@@ -1,11 +1,12 @@
 import * as XLSX from 'xlsx';
 import {
   MAX_EMAIL_BYTES,
-  MAX_INLINE_IMAGE_TOTAL_BYTES,
   htmlToEmailText,
+  inlineBudgeted,
   isInlineImagePart,
   isoDate,
   mailboxText,
+  referencedContentIds,
   type EmailAttachmentView,
   type EmailBodySource,
   type EmailMessageView,
@@ -37,21 +38,6 @@ import {
  * verbatim by the caller — for non-CFB bytes and CFB files with no MAPI
  * streams at all.
  */
-/**
- * Drop retained bytes past the aggregate inline budget — one message may carry
- * many small images, and the per-part bound alone does not cap their sum. The
- * parts stay listed; only the bytes go.
- */
-function inlineBudgeted(parts: EmailAttachmentView[]): EmailAttachmentView[] {
-  let held = 0;
-  return parts.map((part) => {
-    if (part.bytes === undefined) return part;
-    if (held + part.bytes.byteLength > MAX_INLINE_IMAGE_TOTAL_BYTES) return { ...part, bytes: undefined };
-    held += part.bytes.byteLength;
-    return part;
-  });
-}
-
 export function parseMsgMessage(bytes: ArrayBuffer): EmailMessageView {
   if (bytes.byteLength > MAX_EMAIL_BYTES) {
     throw new Error(
@@ -126,6 +112,7 @@ export function parseMsgMessage(bytes: ArrayBuffer): EmailMessageView {
             content && isInlineImagePart(mimeType, contentId, content.byteLength) ? content : undefined,
         };
       }),
+      referencedContentIds(html),
     ),
   };
 }

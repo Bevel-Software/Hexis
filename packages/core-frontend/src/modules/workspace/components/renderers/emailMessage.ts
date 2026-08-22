@@ -50,6 +50,46 @@ export function isInlineImagePart(mimeType: string | undefined, contentId: strin
   );
 }
 
+/** The Content-IDs an HTML body actually references as `cid:…`, lowercased. */
+export function referencedContentIds(html: string | undefined): Set<string> {
+  const out = new Set<string>();
+  if (html === undefined) return out;
+  for (const m of html.matchAll(/["'(]s*cid:([^"')s>]+)/gi)) {
+    out.add(m[1].replace(/^<|>$/g, '').toLowerCase());
+  }
+  return out;
+}
+
+/**
+ * Drop retained bytes past the aggregate inline budget. Shared by both parsers
+ * so the rule cannot drift between `.eml` and `.msg`.
+ *
+ * Parts the body REFERENCES are considered first, whatever their order in the
+ * file: a message may carry inline images it never shows, and spending the
+ * budget on those in document order left the picture the reader was actually
+ * meant to see undrawn while an unreferenced one sat in memory.
+ */
+export function inlineBudgeted(
+  parts: EmailAttachmentView[],
+  referenced: Set<string>,
+): EmailAttachmentView[] {
+  const order = parts
+    .map((part, index) => ({ index, shown: referenced.has((part.contentId ?? '').toLowerCase()) }))
+    .sort((a, b) => Number(b.shown) - Number(a.shown) || a.index - b.index);
+  const keep = new Set<number>();
+  let held = 0;
+  for (const { index } of order) {
+    const bytes = parts[index].bytes;
+    if (bytes === undefined) continue;
+    if (held + bytes.byteLength > MAX_INLINE_IMAGE_TOTAL_BYTES) continue;
+    held += bytes.byteLength;
+    keep.add(index);
+  }
+  return parts.map((part, index) =>
+    part.bytes !== undefined && !keep.has(index) ? { ...part, bytes: undefined } : part,
+  );
+}
+
 /** Where the body text came from — drives the honest notes in the viewer. */
 export type EmailBodySource = 'text' | 'html' | 'rtf-only' | 'none';
 

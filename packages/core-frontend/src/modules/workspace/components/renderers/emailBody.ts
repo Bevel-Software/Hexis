@@ -43,8 +43,15 @@ export interface EmailBodyDocument {
   srcDoc: string;
   /** Every link the body carried, in document order. */
   links: EmailLink[];
-  /** How many images were dropped for pointing somewhere remote. */
+  /** How many images were dropped for pointing somewhere REMOTE. */
   blockedRemoteImages: number;
+  /**
+   * How many images the sender EMBEDDED but this viewer could not draw — the
+   * part was missing from the file, or past the inline budget. Counted apart
+   * from remote ones because the honest sentence differs: nothing was withheld
+   * to protect the reader, the picture simply is not available.
+   */
+  unavailableInlineImages: number;
 }
 
 /** Schemes a link may name. Anything else is not shown as a link at all. */
@@ -85,6 +92,7 @@ export function buildEmailBody(html: string, attachments: readonly EmailAttachme
 
   // Images: the sender's own parts become data: URIs, everything remote goes.
   let blockedRemoteImages = 0;
+  let unavailableInlineImages = 0;
   for (const img of Array.from(doc.querySelectorAll('img'))) {
     const src = img.getAttribute('src') ?? '';
     const cid = contentIdOf(src);
@@ -94,7 +102,13 @@ export function buildEmailBody(html: string, attachments: readonly EmailAttachme
         img.setAttribute('src', uri);
         continue;
       }
-    } else if (src.trim().toLowerCase().startsWith('data:image/')) {
+      // Named a part this message does not carry, or one whose bytes the
+      // inline budget declined to hold.
+      img.remove();
+      unavailableInlineImages += 1;
+      continue;
+    }
+    if (src.trim().toLowerCase().startsWith('data:image/')) {
       continue; // already inline
     }
     img.remove();
@@ -141,9 +155,14 @@ export function buildEmailBody(html: string, attachments: readonly EmailAttachme
       title: 'Message',
       libModuleSources: [],
       includeRuntime: false,
-      bodyHtml: sanitizeAgentHtml(doc.body.innerHTML),
+      // The WHOLE document, not `body.innerHTML`: mail routinely puts its CSS
+      // in `<head><style>`, and the sanitizer hoists that into the body before
+      // serializing. Passing the body alone silently dropped the styling of
+      // every message written the ordinary way.
+      bodyHtml: sanitizeAgentHtml(doc.documentElement.outerHTML),
     }),
     links,
     blockedRemoteImages,
+    unavailableInlineImages,
   };
 }

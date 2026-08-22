@@ -109,7 +109,7 @@ describe('EmailRenderer', () => {
     expect(screen.getByText('report.pdf (application/pdf, 8 bytes)')).toBeInTheDocument();
     expect(screen.getByText(/listed by name only/)).toBeInTheDocument();
     // The honest strip + the way to the real thing.
-    expect(screen.getByText(/Text view of the email/)).toBeInTheDocument();
+    expect(screen.getByText(/shown without remote content/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
   });
 

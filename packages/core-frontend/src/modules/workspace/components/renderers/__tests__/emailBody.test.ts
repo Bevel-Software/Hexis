@@ -35,9 +35,15 @@ describe('a rendered email body', () => {
   });
 
   it('drops a cid: image whose bytes were not retained, rather than fetching anything', () => {
-    const { srcDoc, blockedRemoteImages } = buildEmailBody('<img src="cid:missing@x">', []);
+    const { srcDoc, blockedRemoteImages, unavailableInlineImages } = buildEmailBody(
+      '<img src="cid:missing@x">',
+      [],
+    );
     expect(srcDoc).not.toContain('cid:');
-    expect(blockedRemoteImages).toBe(1);
+    // Not "blocked": nothing was withheld to protect the reader — the part is
+    // simply not in the file, and the notice says so in different words.
+    expect(blockedRemoteImages).toBe(0);
+    expect(unavailableInlineImages).toBe(1);
   });
 
   it('carries no script, however the sender spelled it', () => {
@@ -86,5 +92,26 @@ describe('a rendered email body', () => {
     );
     expect(srcDoc).not.toContain('evil.example');
     expect(srcDoc).not.toContain('<input');
+  });
+});
+
+describe('what the rendering keeps and what it admits to dropping', () => {
+  it('keeps CSS the sender put in <head>, where mail routinely puts it', () => {
+    const { srcDoc } = buildEmailBody(
+      '<html><head><style>.brand{color:#0a7}</style></head><body><p class="brand">Hi</p></body></html>',
+      [],
+    );
+    expect(srcDoc).toContain('.brand');
+  });
+
+  it('counts an embedded image it could not draw APART from a remote one', () => {
+    const { blockedRemoteImages, unavailableInlineImages } = buildEmailBody(
+      '<img src="cid:missing@x"><img src="https://tracker.example/p.gif">',
+      [],
+    );
+    // Different sentences: one was withheld to protect the reader, the other
+    // simply is not in the file.
+    expect(unavailableInlineImages).toBe(1);
+    expect(blockedRemoteImages).toBe(1);
   });
 });

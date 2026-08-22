@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import * as XLSX from 'xlsx';
-import { attachmentLine, mailboxText } from '../emailMessage';
+import { attachmentLine, inlineBudgeted, mailboxText, referencedContentIds, type EmailAttachmentView } from '../emailMessage';
 import { parseEmlMessage } from '../emlMessage';
 import { parseMsgMessage } from '../msgMessage';
 
@@ -350,5 +350,29 @@ describe('email helpers', () => {
     // It may import a parser; what it must NOT drag in is the presentation code.
     expect(read('../xmlReading.ts')).not.toContain('jszip');
     expect(read('../xmlReading.ts')).not.toContain("'./pptxOutline'");
+  });
+});
+
+describe('the inline-image budget', () => {
+  const part = (id: string, size: number): EmailAttachmentView => ({
+    name: `${id}.png`,
+    mimeType: 'image/png',
+    sizeBytes: size,
+    contentId: id,
+    bytes: new Uint8Array(size),
+  });
+
+  it('spends the budget on the images the BODY shows, not on the ones that come first', () => {
+    // 10 MB of unreferenced parts ahead of the one the message actually
+    // displays: in document order they ate the budget and the shown picture
+    // was the one that went undrawn.
+    const parts = [part('unused-a', 6_000_000), part('unused-b', 6_000_000), part('shown', 1_000)];
+    const out = inlineBudgeted(parts, referencedContentIds('<img src="cid:shown">'));
+    expect(out.find((p) => p.contentId === 'shown')?.bytes).toBeDefined();
+  });
+
+  it('reads the cid: references an HTML body makes, however they are quoted', () => {
+    const ids = referencedContentIds(`<img src="cid:A@x"><img src='cid:b@y'><td background="cid:<C@z>">`);
+    expect([...ids].sort()).toEqual(['a@x', 'b@y', 'c@z']);
   });
 });
