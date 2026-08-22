@@ -2,7 +2,15 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import * as XLSX from 'xlsx';
-import { attachmentLine, inlineBudgeted, mailboxText, referencedContentIds, type EmailAttachmentView } from '../emailMessage';
+import {
+  MAX_INLINE_IMAGE_BYTES,
+  MAX_INLINE_IMAGE_TOTAL_BYTES,
+  attachmentLine,
+  inlineBudgeted,
+  mailboxText,
+  referencedContentIds,
+  type EmailAttachmentView,
+} from '../emailMessage';
 import { parseEmlMessage } from '../emlMessage';
 import { parseMsgMessage } from '../msgMessage';
 
@@ -363,12 +371,30 @@ describe('the inline-image budget', () => {
   });
 
   it('spends the budget on the images the BODY shows, not on the ones that come first', () => {
-    // 10 MB of unreferenced parts ahead of the one the message actually
-    // displays: in document order they ate the budget and the shown picture
-    // was the one that went undrawn.
-    const parts = [part('unused-a', 6_000_000), part('unused-b', 6_000_000), part('shown', 1_000)];
+    // Four unreferenced parts at the per-part maximum come to EXACTLY the
+    // aggregate budget, so in document order there is nothing left for the
+    // small image the body actually displays and it is the one that goes
+    // undrawn. The sizes are the whole test: pick them so the budget is not
+    // reached (as this test first did) and it passes either way, pinning
+    // nothing — which is how the broken regex under it went unnoticed.
+    const four = MAX_INLINE_IMAGE_TOTAL_BYTES / MAX_INLINE_IMAGE_BYTES;
+    const parts = [
+      ...Array.from({ length: four }, (_, i) => part(`unused-${i}`, MAX_INLINE_IMAGE_BYTES)),
+      part('shown', 1_000),
+    ];
     const out = inlineBudgeted(parts, referencedContentIds('<img src="cid:shown">'));
     expect(out.find((p) => p.contentId === 'shown')?.bytes).toBeDefined();
+    // …and the budget still BINDS: one unreferenced part lost its bytes to
+    // make room, rather than everything being kept.
+    expect(out.filter((p) => p.bytes !== undefined).length).toBe(four);
+  });
+
+  it('reads a cid: whose id contains an s — the letter is not a delimiter', () => {
+    // Written with an unescaped `s`, the class excluded the LETTER s: an id
+    // like `photos@x` truncated to `photo` and `shown` matched nothing at all,
+    // which silently turned the priority sort back into document order.
+    expect([...referencedContentIds('<img src="cid:photos@x">')]).toEqual(['photos@x']);
+    expect([...referencedContentIds('<img src="cid:shown">')]).toEqual(['shown']);
   });
 
   it('reads the cid: references an HTML body makes, however they are quoted', () => {

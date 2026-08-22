@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Copy, ExternalLink, Mail, Paperclip } from 'lucide-react';
 import { useWorkspace } from '../../state/workspace.context';
 import { authFetch } from '../../../../lib/api';
@@ -230,6 +230,12 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
  */
 function CopyLinkButton({ url }: { url: string }): React.ReactElement {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  // One timer, cancelled before another is scheduled: two clicks inside the
+  // reset window let the FIRST timer clear the second click's answer, so the
+  // button stopped reporting the copy the reader had just made. Cleared on
+  // unmount too, so a late reset cannot land on a gone component.
+  const resetAt = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(resetAt.current), []);
   return (
     <button
       type="button"
@@ -238,7 +244,8 @@ function CopyLinkButton({ url }: { url: string }): React.ReactElement {
       onClick={() => {
         void copyToClipboard(url).then((ok) => {
           setState(ok ? 'copied' : 'failed');
-          window.setTimeout(() => setState('idle'), 2000);
+          window.clearTimeout(resetAt.current);
+          resetAt.current = window.setTimeout(() => setState('idle'), 2000);
         });
       }}
     >

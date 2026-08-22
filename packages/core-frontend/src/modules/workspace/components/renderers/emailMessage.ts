@@ -54,7 +54,12 @@ export function isInlineImagePart(mimeType: string | undefined, contentId: strin
 export function referencedContentIds(html: string | undefined): Set<string> {
   const out = new Set<string>();
   if (html === undefined) return out;
-  for (const m of html.matchAll(/["'(]s*cid:([^"')s>]+)/gi)) {
+  // The delimiter before `cid:` is a quote or `(` (url(...)), then optional
+  // whitespace. Both escapes matter: written unescaped, `\s` is a literal `s`
+  // — the class stops excluding whitespace and starts excluding the LETTER,
+  // truncating `photos@x` to `photo` and failing outright on an id that starts
+  // with one.
+  for (const m of html.matchAll(/["'(]\s*cid:([^"')\s>]+)/gi)) {
     out.add(m[1].replace(/^<|>$/g, '').toLowerCase());
   }
   return out;

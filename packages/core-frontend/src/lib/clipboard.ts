@@ -11,7 +11,10 @@
  * buttons and the email viewer's link list.
  */
 export async function copyToClipboard(text: string): Promise<boolean> {
-  const clipboard = navigator.clipboard;
+  // `navigator` itself is undefined off the browser (SSR, a test runner with
+  // no DOM): reading through it would THROW rather than answer false, which is
+  // the one thing this function promises not to do.
+  const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard;
   if (!clipboard?.writeText) return false;
   try {
     await clipboard.writeText(text);
