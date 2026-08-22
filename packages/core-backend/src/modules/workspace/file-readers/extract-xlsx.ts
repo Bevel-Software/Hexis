@@ -56,7 +56,10 @@ export function extractXlsx(bytes: Buffer): ExtractResult {
 
   const lines: string[] = [];
   for (const name of wb.SheetNames) {
-    lines.push(`[sheet: ${name}]`);
+    // Control separators become spaces — the same rule as the ods extractor:
+    // a crafted workbook's sheet name holding a tab or newline would split
+    // the `[sheet: …]` marker's own line and break grep line numbers.
+    lines.push(`[sheet: ${name.replace(/[\t\n\r]+/g, ' ')}]`);
     const ws = wb.Sheets[name];
     const ref = ws?.['!ref'];
     if (!ws || !ref) continue; // empty sheet — marker only

@@ -10,6 +10,7 @@ const apiMock = vi.hoisted(() => ({ authFetch: vi.fn() }));
 vi.mock('../../../../../lib/api', () => ({ authFetch: apiMock.authFetch }));
 
 import { EmailRenderer } from '../EmailRenderer';
+import { MAX_EMAIL_BYTES } from '../emailMessage';
 
 /**
  * The viewer over real message bytes (hand-written MIME; a real CFB container
@@ -147,5 +148,24 @@ describe('EmailRenderer', () => {
     renderEmail('Inbox/offer.eml');
 
     expect(await screen.findByText(/Failed to load email \(HTTP 403\)/)).toBeInTheDocument();
+  });
+
+  it('rejects an oversized declared Content-Length and ABORTS the transfer', async () => {
+    // Returning without aborting would leave the connection streaming a body
+    // nobody will read for as long as the view stays mounted.
+    let signal: AbortSignal | undefined;
+    apiMock.authFetch.mockImplementation(async (_url: string, init?: { signal?: AbortSignal }) => {
+      signal = init?.signal;
+      return {
+        ok: true,
+        headers: { get: (name: string) => (name === 'content-length' ? String(MAX_EMAIL_BYTES + 1) : null) },
+        arrayBuffer: async () => EML_BYTES,
+      };
+    });
+
+    renderEmail('Inbox/huge.eml');
+
+    expect(await screen.findByText('This email is too large to display.')).toBeInTheDocument();
+    expect(signal?.aborted).toBe(true);
   });
 });

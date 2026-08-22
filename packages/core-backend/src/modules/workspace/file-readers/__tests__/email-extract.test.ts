@@ -214,6 +214,35 @@ describe('extractEml', () => {
     expect(res.text).toBe('only a body');
   });
 
+  it('lists an attachment whose filename is whitespace-only as "unnamed attachment"', async () => {
+    // postal-mime maps a MISSING filename to null (defaulted at the model),
+    // but `filename="   "` comes through verbatim — unfixed, the attachment
+    // line printed the whitespace and read as blank.
+    const res = await extractEml(
+      emlBytes([
+        'From: ada@example.com',
+        'Subject: nameless',
+        'MIME-Version: 1.0',
+        'Content-Type: multipart/mixed; boundary="b1"',
+        '',
+        '--b1',
+        'Content-Type: text/plain; charset=utf-8',
+        '',
+        'see attached',
+        '--b1',
+        'Content-Type: text/csv',
+        'Content-Disposition: attachment; filename="   "',
+        '',
+        'a,b',
+        '--b1--',
+        '',
+      ]),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.text).toContain('[attachments]\nunnamed attachment (text/csv');
+  });
+
   it('answers bytes with no email headers at all with the typed could-not-be-parsed failure', async () => {
     const res = await extractEml(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0x01, 0x02, 0x00, 0xff, 0xfe]));
     expect(res).toEqual({ ok: false, message: 'could not be parsed as a .eml (no email headers found)' });
@@ -313,6 +342,20 @@ describe('extractMsg', () => {
     expect(res.text).toContain('[to] Bob <bob@example.com>');
     expect(res.text).toContain('[cc] Dan <dan@example.com>');
     expect(res.text).toContain('[bcc] Eve <eve@example.com>');
+  });
+
+  it('lists an attachment whose MAPI display name stream is EMPTY as "unnamed attachment"', () => {
+    // msgreader hands an empty `__substg1.0_3707001F` stream through as '',
+    // which the `?? 'unnamed attachment'` default at the model never catches.
+    const res = extractMsg(
+      msgBytes({
+        strings: { '0037': 'nameless' },
+        attachments: [{ name: '', mime: 'application/pdf', content: Buffer.from('DATA') }],
+      }),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.text).toContain('[attachments]\nunnamed attachment (application/pdf, 4 bytes)');
   });
 
   it('answers garbage bytes with the typed could-not-be-parsed failure (msgreader reports, never throws)', () => {

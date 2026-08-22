@@ -86,6 +86,24 @@ describe('PptxRenderer', () => {
     expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
   });
 
+  it('rejects an over-cap declared Content-Length AND cancels the body — the transfer must stop', async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    apiMock.authFetch.mockResolvedValue({
+      ok: true,
+      headers: { get: (name: string) => (name === 'content-length' ? String(201 * 1024 * 1024) : null) },
+      body: { cancel },
+    });
+
+    renderPptx();
+
+    expect(
+      await screen.findByText(/This presentation is too large to preview/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
+    // The guard is only real if it ends the transfer, not just the render.
+    expect(cancel).toHaveBeenCalled();
+  });
+
   it('reports a transport failure as a load error', async () => {
     apiMock.authFetch.mockResolvedValue({ ok: false, status: 403 });
 

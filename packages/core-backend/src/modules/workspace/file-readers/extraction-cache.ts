@@ -71,6 +71,9 @@ export class DocExtractionCache {
   /** Total size the last scan found (after eviction); undefined before the first scan, so the first write scans. */
   private totalAtLastScan: number | undefined;
 
+  /** The prune in flight, so concurrent puts share ONE scan instead of racing their own. */
+  private pruning: Promise<void> | undefined;
+
   /** Store an extraction under `sha`; prunes towards the size bound. Never throws. */
   async put(sha: string, doc: ExtractedDoc): Promise<void> {
     try {
@@ -82,7 +85,10 @@ export class DocExtractionCache {
         this.totalAtLastScan === undefined ||
         this.totalAtLastScan + this.writtenSinceScan > this.maxTotalBytes
       ) {
-        await this.prune();
+        this.pruning ??= this.prune().finally(() => {
+          this.pruning = undefined;
+        });
+        await this.pruning;
       }
     } catch {
       // cache write failed — the extraction still returns; next read re-extracts
@@ -104,6 +110,12 @@ export class DocExtractionCache {
 
   /** Delete oldest-mtime entries until the total size fits the bound. */
   private async prune(): Promise<void> {
+    // Snapshot FIRST: a write counted before the scan starts is on disk when
+    // `readdir` runs, so the scan settles exactly those bytes. A put that
+    // lands DURING the scan keeps its count (resetting to zero discarded it,
+    // and a later put then trusted a total the scan never saw), so the next
+    // put still prunes instead of leaving the cache above the bound.
+    const scanned = this.writtenSinceScan;
     const entries: Array<{ p: string; size: number; mtime: number }> = [];
     let total = 0;
     for (const name of await fs.readdir(this.root)) {
@@ -125,6 +137,6 @@ export class DocExtractionCache {
       }
     }
     this.totalAtLastScan = total;
-    this.writtenSinceScan = 0;
+    this.writtenSinceScan -= scanned;
   }
 }

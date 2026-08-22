@@ -178,11 +178,6 @@ function safeJsonText(value: unknown): string {
  * as the image it is, and the fallback stringified the whole thing, base64 and
  * all, into the transcript.
  */
-/** A JSON scalar: what a hop's note decodes to when it was not an object. */
-function isJsonScalar(value: unknown): value is string | number | boolean | null {
-  return value === null || ['string', 'number', 'boolean'].includes(typeof value);
-}
-
 function noteText(value: unknown): string | undefined {
   if (value === null || ['number', 'boolean'].includes(typeof value)) return String(value);
   if (typeof value === 'string') return value;
@@ -221,33 +216,20 @@ export function toCallToolResult(value: unknown): CallToolResult {
   // The same image result AFTER a remote MCP hop. The local stdio server
   // (hexis-mcp) reaches the deployment's MCP endpoint through @utcp/mcp, whose
   // `_processMcpToolResult` unwraps a CallToolResult's `content` array: text
-  // blocks are JSON-parsed (our prose note comes back as a bare string), other
-  // blocks pass through verbatim, and a single-entry list collapses to the
-  // entry itself. So the hosted proxy's `[image, text]` result arrives here as
-  // `[imageBlock, "note"]` — or, noteless, as the bare image block. Recognize
-  // both and reassemble the spec-shaped result instead of JSON-stringifying
-  // megabytes of base64 into a text block. A caller's ordinary data is safe:
-  // only arrays made EXCLUSIVELY of image blocks and strings (with at least
-  // one image block) qualify, and such a value already denotes image content.
+  // blocks are JSON-parsed (our prose note comes back as a bare string; a note
+  // that was JSON to begin with comes back as the value it denotes — see
+  // `noteText`), other blocks pass through verbatim, and a single-entry list
+  // collapses to the entry itself. So the hosted proxy's `[image, text]`
+  // result arrives here as `[imageBlock, note]` — or, noteless, as the bare
+  // image block. Recognize both and reassemble the spec-shaped result instead
+  // of JSON-stringifying megabytes of base64 into a text block. ONLY those
+  // exact hop shapes qualify — a lone image block, or one image block plus
+  // one note — so a caller's ordinary array that merely holds an image-shaped
+  // object beside its own data still takes the stringify path below and keeps
+  // its structure.
   if (isMcpImageBlockObject(value)) {
     return { content: [value] };
   }
-  if (
-    Array.isArray(value) &&
-    value.some(isMcpImageBlockObject) &&
-    value.every((e) => isMcpImageBlockObject(e) || isJsonScalar(e))
-  ) {
-    return {
-      content: value.map((e) =>
-        isMcpImageBlockObject(e) ? e : { type: 'text' as const, text: String(e) },
-      ),
-    };
-  }
-  // The same hop, with a note that was JSON to begin with: `@utcp/mcp` parses
-  // the text block, so an object or array note arrives as the value it denotes
-  // rather than as text. ONLY the exact hop shape qualifies — one image block
-  // and one note — so a caller's ordinary array holding an image block beside
-  // its own data still takes the stringify path below and keeps its structure.
   if (
     Array.isArray(value) &&
     value.length === 2 &&

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
@@ -12,7 +12,7 @@ import { extractOdt } from '../extract-odt.js';
 import { extractOdp } from '../extract-odp.js';
 import { extractOds } from '../extract-ods.js';
 import { DocExtractService, EXTRACTION_SCHEMA } from '../doc-extract.service.js';
-import { gitBlobSha } from '../extraction-cache.js';
+import { DocExtractionCache, gitBlobSha } from '../extraction-cache.js';
 import { fileExtension } from '../doc-extract.types.js';
 import { MAX_ODF_NS_ALIASES, normalizeOdfPrefixes, odfParagraphBlocks } from '../odf-text.js';
 import { decodeXmlEntities, xmlAttrValue, xmlAttrValueByLocalName } from '../ooxml-text.js';
@@ -79,7 +79,11 @@ function xlsxBytes(sheets: Record<string, unknown[][]>): Buffer {
 
 /** A minimal but VALID one-page PDF whose text layer is `text` ('' = no text layer). */
 export function pdfBytes(text: string): Buffer {
-  const stream = text === '' ? '' : `BT /F1 12 Tf 72 720 Td (${text}) Tj ET`;
+  return pdfWithContentStream(text === '' ? '' : `BT /F1 12 Tf 72 720 Td (${text}) Tj ET`);
+}
+
+/** The same one-page shell, but the test dictates the page's raw content stream. */
+function pdfWithContentStream(stream: string): Buffer {
   const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
@@ -282,6 +286,17 @@ describe('extractXlsx', () => {
     if (res.ok) return;
     expect(res.message).toContain('not a zip archive');
   });
+
+  it('a sheet name holding a tab or newline cannot split the [sheet: …] marker line', () => {
+    // Excel's own UI forbids these, but the name is an XML attribute in a
+    // crafted workbook — SheetJS round-trips `&#10;` intact. Same rule as the
+    // ods extractor: control separators become spaces so grep line numbers hold.
+    const res = extractXlsx(xlsxBytes({ 'bad\nname\ttab': [['x']] }));
+    if (!res.ok) throw new Error(res.message);
+    const lines = res.text.split('\n');
+    expect(lines[0]).toBe('[sheet: bad name tab]');
+    expect(lines[1]).toBe('x');
+  });
 });
 
 // ── pdf ────────────────────────────────────────────────────────────────────
@@ -306,6 +321,23 @@ describe('extractPdf', () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.message).toContain('could not be parsed as a PDF');
+  });
+
+  it('joins same-line items with spaces and breaks lines on a Y jump (items arrive streamed)', async () => {
+    // Three separate show-text ops: two on one baseline, one 40pt lower. The
+    // extractor consumes them through `streamTextContent` now, so this guards
+    // the item walk (space joins, Y-jump line breaks) across chunk boundaries.
+    const res = await extractPdf(
+      pdfWithContentStream('BT /F1 12 Tf 72 720 Td (Alpha) Tj 60 0 Td (beta) Tj -60 -40 Td (Gamma) Tj ET'),
+    );
+    if (!res.ok) throw new Error(res.message);
+    const lines = res.text.split('\n');
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toBe('[page 1]');
+    // pdf.js may model the gap as its own whitespace item — spacing WIDTH is
+    // its call, but the items must land on one line, space-separated.
+    expect(lines[1]).toMatch(/^Alpha +beta$/);
+    expect(lines[2]).toBe('Gamma');
   });
 });
 
@@ -470,6 +502,23 @@ describe('extractOds', () => {
     expect(lines).toHaveLength(2 + 10_000);
   });
 
+  it('the row cap STOPS the scan — 60k explicit rows extract their first 10k, fast', () => {
+    // Explicit (non-repeated) rows used to be materialized wholesale before
+    // the cap was consulted, so the cap bounded output but neither memory nor
+    // scan work. The walk now hands rows over as they parse and stops at the
+    // cap. The bound is generous — here to catch a return of the
+    // materialize-everything shape, not to police CI's scheduler.
+    const bytes = odsBytes(`<table:table table:name="Long">${row(odsCell('r')).repeat(60_000)}</table:table>`);
+    const t0 = performance.now();
+    const res = extractOds(bytes);
+    const ms = performance.now() - t0;
+    if (!res.ok) throw new Error(res.message);
+    const lines = res.text.split('\n');
+    expect(lines[1]).toBe('[sheet truncated to the first 10000 rows]');
+    expect(lines).toHaveLength(2 + 10_000);
+    expect(ms).toBeLessThan(5_000);
+  });
+
   it('decodes entities in cell text and the sheet name; covered cells render empty', () => {
     const res = extractOds(
       odsBytes(
@@ -604,6 +653,42 @@ describe('DocExtractService cache', () => {
     // getCached honours the same format-qualified key.
     const cachedOds = await service.getCached('doc.ods', bytes);
     expect(cachedOds?.text.split('\n')[0]).toBe('[sheet: Grid]');
+  });
+});
+
+// ── cache size bounding ────────────────────────────────────────────────────
+
+describe('DocExtractionCache pruning', () => {
+  let root = '';
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'extract-cache-'));
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const dirTotalBytes = async (): Promise<number> => {
+    let total = 0;
+    for (const name of await readdir(root)) total += (await stat(join(root, name))).size;
+    return total;
+  };
+
+  it('prunes towards the byte bound as sequential puts pass it', async () => {
+    const cache = new DocExtractionCache(root, 300);
+    for (let i = 0; i < 10; i++) await cache.put(`seq${i}`, { summary: 's', text: 'x'.repeat(80) });
+    expect(await dirTotalBytes()).toBeLessThanOrEqual(300);
+  });
+
+  it('keeps writes that race a prune ACCOUNTED — the next put still prunes to the bound', async () => {
+    // Concurrent puts can land while a prune's scan runs; resetting the
+    // written-bytes counter to zero after the scan discarded them, so later
+    // puts trusted a total the scan never saw and skipped pruning entirely.
+    const cache = new DocExtractionCache(root, 300);
+    await Promise.all(
+      Array.from({ length: 12 }, (_, i) => cache.put(`race${i}`, { summary: 's', text: 'y'.repeat(80) })),
+    );
+    await cache.put('after-the-race', { summary: 's', text: 'z'.repeat(80) });
+    expect(await dirTotalBytes()).toBeLessThanOrEqual(300);
   });
 });
 

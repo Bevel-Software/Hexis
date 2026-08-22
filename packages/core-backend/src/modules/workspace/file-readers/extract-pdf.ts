@@ -37,9 +37,12 @@ const MAX_PDF_TEXT_CHARS = 20 * 1024 * 1024; // 20M chars of extracted text
 const MAX_PDF_PAGES = 10_000;
 
 /**
- * How many text items one PAGE may hold. `getTextContent` has no streaming
- * form: it returns the entire page's items at once, so the per-character
- * budget cannot fire until pdf.js has already built the whole array.
+ * How many text items one PAGE may hold. Items arrive through
+ * `streamTextContent` in small chunks (~100 items each), so this bound — like
+ * the character budget — fires while the page is still streaming, not after
+ * it has materialized. It exists because item COUNT is its own cost: each
+ * item is a retained heap object, and a page of empty-string items would
+ * never trip the character budget.
  */
 const MAX_PDF_ITEMS_PER_PAGE = 200_000;
 
@@ -84,49 +87,59 @@ export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
       textChars += n.toString().length + 8;
       if (textChars > MAX_PDF_TEXT_CHARS) return overBudget();
       const page = await doc.getPage(n);
-      const { items } = await page.getTextContent();
-      // `getTextContent` materializes the WHOLE page before returning, so a
-      // single crafted page can outrun the budget between two checks. pdf.js
-      // offers no streaming item API here, so the page's own item count is the
-      // bound: past it the page is not walked at all.
-      if (items.length > MAX_PDF_ITEMS_PER_PAGE) {
-        page.cleanup();
-        return {
-          ok: false,
-          message: `could not be extracted as a PDF (page ${n} holds ${items.length} text items — over the ${MAX_PDF_ITEMS_PER_PAGE}-item extraction limit)`,
-        };
-      }
+      // `streamTextContent` delivers the page's items in small chunks (~100
+      // items each, `getTextContent` is just this stream materialized), so
+      // both budgets fire WHILE the page streams: a crafted single page can
+      // no longer build its whole item array before a bound trips. Once one
+      // does, the reader is cancelled and pdf.js stops producing.
+      const reader = (
+        page.streamTextContent() as ReadableStream<Awaited<ReturnType<typeof page.getTextContent>>>
+      ).getReader();
+      let pageItems = 0;
       let line = '';
       let lastY: number | undefined;
       const flush = (): void => {
         if (line.trim() !== '') {
           lines.push(line);
           anyText = true;
+          // The '\n' the final join emits for this line is retained text too.
+          textChars += 1;
         }
         line = '';
       };
-      for (const item of items) {
-        if (!('str' in item)) continue; // marked-content item — no text
-        const y = item.transform?.[5];
-        // Y-position jump = new visual line (1pt tolerance for kerning wobble).
-        if (typeof y === 'number') {
-          if (lastY !== undefined && Math.abs(y - lastY) > 1) flush();
-          lastY = y;
+      for (;;) {
+        const { done, value: chunk } = await reader.read();
+        if (done) break;
+        pageItems += chunk.items.length;
+        if (pageItems > MAX_PDF_ITEMS_PER_PAGE) {
+          await reader.cancel().catch(() => undefined);
+          page.cleanup();
+          return {
+            ok: false,
+            message: `could not be extracted as a PDF (page ${n} holds more than ${MAX_PDF_ITEMS_PER_PAGE} text items — over the extraction limit)`,
+          };
         }
-        if (item.str !== '') {
-          // COUNTED before it is kept: the bound exists to stop the decoded
-          // text from accumulating, so it must fire mid-page, not after —
-          // and counting nothing (as this once did) fired never.
-          textChars += item.str.length;
-          if (textChars > MAX_PDF_TEXT_CHARS) {
-            return {
-              ok: false,
-              message: `could not be extracted as a PDF (its text decodes to over ${MAX_PDF_TEXT_CHARS} characters — over the extraction limit)`,
-            };
+        for (const item of chunk.items) {
+          if (!('str' in item)) continue; // marked-content item — no text
+          const y = item.transform?.[5];
+          // Y-position jump = new visual line (1pt tolerance for kerning wobble).
+          if (typeof y === 'number') {
+            if (lastY !== undefined && Math.abs(y - lastY) > 1) flush();
+            lastY = y;
           }
-          line += (line === '' ? '' : ' ') + item.str;
+          if (item.str !== '') {
+            // COUNTED before it is kept — the join space included: the bound
+            // exists to stop the decoded text from accumulating, so it must
+            // fire mid-page and cover every character the result will hold.
+            textChars += item.str.length + (line === '' ? 0 : 1);
+            if (textChars > MAX_PDF_TEXT_CHARS) {
+              await reader.cancel().catch(() => undefined);
+              return overBudget();
+            }
+            line += (line === '' ? '' : ' ') + item.str;
+          }
+          if (item.hasEOL) flush();
         }
-        if (item.hasEOL) flush();
       }
       flush();
       page.cleanup();
@@ -146,7 +159,13 @@ type PdfJs = typeof import('pdfjs-dist/legacy/build/pdf.mjs');
 let pdfjsPromise: Promise<PdfJs> | undefined;
 
 async function openPdf(bytes: Buffer) {
-  pdfjsPromise ??= import('pdfjs-dist/legacy/build/pdf.mjs');
+  pdfjsPromise ??= import('pdfjs-dist/legacy/build/pdf.mjs').catch((err: unknown) => {
+    // A FAILED load must not be memoized: left in place, the rejected promise
+    // would answer every later read and disable PDF extraction for the whole
+    // process. Reset so the next read retries the import.
+    pdfjsPromise = undefined;
+    throw err;
+  });
   const { getDocument } = await pdfjsPromise;
   return getDocument({
     // Copy into a fresh Uint8Array: pdf.js TRANSFERS the buffer it is given

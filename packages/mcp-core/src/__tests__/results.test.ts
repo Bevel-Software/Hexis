@@ -164,6 +164,17 @@ describe('toCallToolResult — image results', () => {
       content: [{ type: 'text', text: JSON.stringify(value) }],
     });
   });
+
+  it('leaves ordinary data mixing an image-shaped object with scalars on the stringify path', () => {
+    // The hop never produces this: its array form is exactly [imageBlock,
+    // note]. A caller's own array of scalars that happens to hold an
+    // image-shaped object used to be reinterpreted as MCP content, which
+    // destroyed the array's structure.
+    const value = ['a', { type: 'image', data: B64, mimeType: 'image/png' }, 1, true];
+    expect(toCallToolResult(value)).toEqual({
+      content: [{ type: 'text', text: JSON.stringify(value) }],
+    });
+  });
 });
 
 describe('omitImagePayloads', () => {

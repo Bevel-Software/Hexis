@@ -274,6 +274,39 @@ describe('extractPptxOutline', () => {
       { number: 3, paragraphs: ['third'], notes: [] },
     ]);
   });
+  const SLIDE_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide';
+
+  it('follows a REORDERED sldIdLst — the prefixed r:id resolves, and numbers are positions', async () => {
+    // Reordering slides in PowerPoint rewrites `<p:sldIdLst>` and leaves the
+    // part names alone, so `slide3.xml` here is the deck's FIRST slide. Each
+    // `<p:sldId>` carries its own bare numeric `id` BEFORE the relationship
+    // reference `r:id`, exactly as PowerPoint writes them — so the PREFIXED
+    // attribute must be the one resolved through the rels (the backend twin's
+    // `prefixedAttrByLocalName` rule). Plain local-name matching answered
+    // with the bare id, resolved nothing, and fell back to filename order.
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(para('was first')),
+      'ppt/slides/slide2.xml': slideXml(para('was second')),
+      'ppt/slides/slide3.xml': slideXml(para('was third')),
+      'ppt/presentation.xml':
+        '<?xml version="1.0"?><p:presentation xmlns:p="urn:p" xmlns:r="urn:r"><p:sldIdLst>' +
+        '<p:sldId id="258" r:id="rId3"/>' +
+        '<p:sldId id="256" r:id="rId1"/>' +
+        '<p:sldId id="257" r:id="rId2"/>' +
+        '</p:sldIdLst></p:presentation>',
+      'ppt/_rels/presentation.xml.rels':
+        `<?xml version="1.0"?><Relationships ${RELS_NS}>` +
+        `<Relationship Id="rId1" Type="${SLIDE_TYPE}" Target="slides/slide1.xml"/>` +
+        `<Relationship Id="rId2" Type="${SLIDE_TYPE}" Target="slides/slide2.xml"/>` +
+        `<Relationship Id="rId3" Type="${SLIDE_TYPE}" Target="slides/slide3.xml"/>` +
+        '</Relationships>',
+    });
+    const slides = await extractPptxOutline(bytes);
+    // Numbers are POSITIONS in the list, and the text follows the list.
+    expect(slides.map((s) => s.number)).toEqual([1, 2, 3]);
+    expect(slides.map((s) => s.paragraphs[0])).toEqual(['was third', 'was first', 'was second']);
+  });
+
   /**
    * The viewer carried the SAME quadratic the backend extractors did: the
    * `<a:p(?:\s[^>]*)?>([\s\S]*?)</a:p>` pattern re-scanned the rest of the
@@ -281,7 +314,14 @@ describe('extractPptxOutline', () => {
    * openers x bytes (measured on the backend twin: 391 KB took 19.4 s and
    * quadrupled per doubling). A deck is opened in the user's own tab, which
    * cannot be closed while the main thread is pinned.
+   *
+   * The bound is deliberately generous (seconds, against parses measured in
+   * tens of milliseconds): it exists to catch a RETURN of a quadratic —
+   * 20 s and up on these fixtures — not to police CI's scheduler, the same
+   * convention as the backend suite's GENEROUS_MS (`doc-extract.test.ts`).
    */
+  const GENEROUS_MS = 5_000;
+
   it('a slide of 40k unmatched <a:p> openers still yields its real text, fast', async () => {
     const bytes = await zipBytes({
       'ppt/slides/slide1.xml': slideXml(para('Alive') + '<a:p algn="ctr">'.repeat(40_000)),
@@ -290,7 +330,7 @@ describe('extractPptxOutline', () => {
     const slides = await extractPptxOutline(bytes);
     const ms = performance.now() - t0;
     expect(slides[0].paragraphs).toEqual(['Alive']);
-    expect(ms).toBeLessThan(5_000);
+    expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
   // Every opener's attribute scan here reaches the `>` of the `</p:spTree>`
@@ -306,7 +346,7 @@ describe('extractPptxOutline', () => {
     const slides = await extractPptxOutline(bytes);
     const ms = performance.now() - t0;
     expect(slides[0].paragraphs).toEqual(['Alive']);
-    expect(ms).toBeLessThan(5_000);
+    expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
   it('reads a comment as text, so a commented paragraph neither outlines nor fills the memo', async () => {
@@ -324,7 +364,7 @@ describe('extractPptxOutline', () => {
     const slides = await extractPptxOutline(bytes);
     const ms = performance.now() - t0;
     expect(slides[0].paragraphs).toEqual(['Alive']);
-    expect(ms).toBeLessThan(5_000);
+    expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
   it('stays linear on an ORDINARY deck — the one with no sections at all', async () => {
@@ -339,7 +379,7 @@ describe('extractPptxOutline', () => {
     const slides = await extractPptxOutline(bytes);
     const ms = performance.now() - t0;
     expect(slides[0].paragraphs).toHaveLength(20_000);
-    expect(ms).toBeLessThan(5_000);
+    expect(ms).toBeLessThan(GENEROUS_MS);
   });
 
   it('a `</a:p>` inside a comment does not end the paragraph that holds it', async () => {
@@ -378,40 +418,31 @@ describe('extractPptxOutline', () => {
     const slides = await extractPptxOutline(bytes);
     expect(slides[0].paragraphs).toEqual(['kept']);
   });
-});
-
-describe('entities and markup sections, through the outline', () => {
-  const outlineOf = async (slideBody: string): Promise<string[]> => {
-    const bytes = await zipBytes({ 'ppt/slides/slide1.xml': slideXml(slideBody) });
-    return (await extractPptxOutline(bytes))[0].paragraphs;
-  };
-
-  it('decodes the named and well-formed numeric references', async () => {
-    expect(await outlineOf(para('a &amp; b &lt;c&gt; &quot;d&quot; &apos;e&apos;'))).toEqual([
-      `a & b <c> "d" 'e'`,
-    ]);
-    expect(await outlineOf(para('&#65;&#x41;'))).toEqual(['AA']);
-  });
 
   it('leaves a malformed or out-of-range reference literal', async () => {
     // `&#12A;` must not decode as `&#12` with the `A` shrugged off — that
     // invented a U+000C nobody wrote.
-    expect(await outlineOf(para('x&#12A;y'))).toEqual(['x&#12A;y']);
-    expect(await outlineOf(para('x&nosuch;y'))).toEqual(['x&nosuch;y']);
     // A reference PAST the last code point is the one case that does not stay
     // literal: XML calls it an invalid character reference. The parser yields a
     // replacement character, which the viewer drops — the backend keeps the
     // reference literal, and a character XML cannot contain is the one thing
     // neither side should render as content.
-    expect(await outlineOf(para('x&#1114112;y'))).toEqual(['xy']);
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(
+        para('x&#12A;y'),
+        para('x&nosuch;y'),
+        para('x&#1114112;y'),
+      ),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].paragraphs).toEqual(['x&#12A;y', 'x&nosuch;y', 'xy']);
   });
 
-  it('reads a commented-out or CDATA-wrapped paragraph as text, not as markup', async () => {
-    expect(await outlineOf(`<!-- ${para('ghost')} -->${para('real')}`)).toEqual(['real']);
-    expect(await outlineOf(`<![CDATA[${para('ghost')}]]>${para('real')}`)).toEqual(['real']);
-    // A close tag inside a comment does not end the paragraph holding it.
-    expect(
-      await outlineOf('<a:p><a:r><a:t>a</a:t></a:r><!-- </a:p> --><a:r><a:t>b</a:t></a:r></a:p>'),
-    ).toEqual(['ab']);
+  it('reads a CDATA-wrapped paragraph as text, not as markup — like a commented one', async () => {
+    const bytes = await zipBytes({
+      'ppt/slides/slide1.xml': slideXml(`<![CDATA[${para('ghost')}]]>${para('real')}`),
+    });
+    const slides = await extractPptxOutline(bytes);
+    expect(slides[0].paragraphs).toEqual(['real']);
   });
 });

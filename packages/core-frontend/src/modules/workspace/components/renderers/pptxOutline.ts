@@ -3,6 +3,7 @@ import {
   attrByLocalName,
   elementText,
   localElementBlocks,
+  prefixedAttrByLocalName,
   relationshipTarget,
 } from './xmlReading';
 
@@ -211,8 +212,11 @@ async function presentationOrder(zip: JSZip, budget: ReadBudget): Promise<string
   const rels = zip.file('ppt/_rels/presentation.xml.rels');
   if (!pres || !rels) return undefined;
   try {
+    // The PREFIXED id: `<p:sldId>` carries its own bare numeric `id` before
+    // the relationship reference `r:id`, so plain local-name matching read
+    // the wrong one, resolved no target, and fell back to filename order.
     const ids = localElementBlocks(await readEntryBounded(pres, budget), ['sldId'])
-      .map((e) => attrByLocalName(e.attributes, 'id'))
+      .map((e) => prefixedAttrByLocalName(e.attributes, 'id'))
       .filter((v): v is string => v !== undefined);
     if (ids.length === 0) return undefined;
     const relsXml = await readEntryBounded(rels, budget);

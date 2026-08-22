@@ -140,10 +140,14 @@ export function htmlToEmailText(html: string): string {
  * CR/LF in the metadata are shown as escapes rather than obeyed, so each
  * attachment stays on ONE line and grep line numbers hold. */
 function attachmentLine(a: EmailAttachment): string {
+  // The extractors default a MISSING name, but an EMPTY (or whitespace-only)
+  // one reaches here as ''; without the same fallback the section printed a
+  // blank line — or one starting with the parenthesis — for that attachment.
+  const name = a.name.trim() === '' ? 'unnamed attachment' : a.name;
   const details = [a.mimeType, a.sizeBytes !== undefined ? `${a.sizeBytes} bytes` : undefined]
     .filter((d): d is string => d !== undefined && d !== '')
     .join(', ');
-  const line = details === '' ? a.name : `${a.name} (${details})`;
+  const line = details === '' ? name : `${name} (${details})`;
   return line.replace(/[\r\n]/g, (c) => (c === '\r' ? '\\r' : '\\n'));
 }
 

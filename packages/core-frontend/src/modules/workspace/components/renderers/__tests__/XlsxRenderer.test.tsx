@@ -160,6 +160,34 @@ describe('XlsxRenderer truncation', () => {
     }
   });
 
+  it('abandons an UNDECLARED oversized body at the byte cap instead of buffering it whole', async () => {
+    // No Content-Length, a body that streams past 25 MB: the capped reader
+    // must cancel mid-stream — buffering first (arrayBuffer) would allocate
+    // the entire oversized workbook in the tab before the check rejects it.
+    const chunk = new Uint8Array(1024 * 1024); // 1 MB per read
+    let bodyCancelled = false;
+    apiMock.authFetch.mockResolvedValue({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: async () =>
+            bodyCancelled ? { done: true, value: undefined } : { done: false, value: chunk },
+          cancel: async () => {
+            bodyCancelled = true;
+          },
+        }),
+      },
+      arrayBuffer: async () => {
+        throw new Error('must not buffer the whole body');
+      },
+    });
+
+    renderXlsx();
+
+    expect(await screen.findByText(/too large to preview/)).toBeInTheDocument();
+    expect(bodyCancelled).toBe(true);
+  });
+
   it('offers Download beside the grid', async () => {
     apiMock.authFetch.mockResolvedValue({
       ok: true,

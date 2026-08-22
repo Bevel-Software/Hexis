@@ -52,7 +52,12 @@ const MAX_LINES_PER_SLIDE = 500;
  * the moment it crosses the cap, never held whole first.
  */
 async function readArchiveBounded(res: Response): Promise<ArrayBuffer | Uint8Array | null> {
-  if (Number(res.headers?.get('content-length')) > MAX_ARCHIVE_BYTES) return null;
+  if (Number(res.headers?.get('content-length')) > MAX_ARCHIVE_BYTES) {
+    // Cancel the body too: returning alone left the browser receiving and
+    // buffering the whole oversized file behind the rejection.
+    await res.body?.cancel();
+    return null;
+  }
   if (!res.body) {
     // No stream on this response (test double) — buffer, then bound.
     const buf = await res.arrayBuffer();

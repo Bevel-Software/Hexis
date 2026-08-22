@@ -1,5 +1,11 @@
 import type { ExtractResult } from './doc-extract.types.js';
-import { attrByLocalName, decodeXmlEntities, localElementBlocks, localName } from './ooxml-text.js';
+import {
+  attrByLocalName,
+  decodeXmlEntities,
+  localElementBlocks,
+  localName,
+  walkLocalElementBlocks,
+} from './ooxml-text.js';
 import {
   odfParagraphBlocks,
   odfParagraphText,
@@ -85,22 +91,25 @@ function tableBlocks(xml: string): Array<{ name: string; xml: string }> {
  * `truncated` lists what the caps cut (mirrors the xlsx extractor's note).
  */
 function expandRows(tableXml: string): { rows: string[][]; truncated: string[] } {
-  // The shared quote-aware scanner: a self-closing row WITH attributes is
-  // still a row, a `/>` inside a quoted attribute value is not a delimiter,
-  // and an UNCLOSED row costs one scan of the sheet rather than one per opener
-  // (see `xmlElementBlocks`).
+  // The shared quote-aware scanner as a WALK, not an array: materializing
+  // every row block before consulting the cap let a sheet of >10k explicit
+  // rows allocate them all first. Each row lands here as it parses, and the
+  // visitor's `true` stops the scan at the cap — a self-closing row WITH
+  // attributes is still a row, a `/>` inside a quoted attribute value is not
+  // a delimiter, and an UNCLOSED row costs one scan of the sheet rather than
+  // one per opener (see `xmlElementBlocks`).
   const rows: string[][] = [];
   let pendingEmpty = 0;
   let rowsTruncated = false;
   let colsTruncated = false;
-  for (const row of localElementBlocks(tableXml, ['table-row'])) {
+  walkLocalElementBlocks(tableXml, ['table-row'], (row) => {
     const repeat = repeatCount(attrByLocalName(row.attributes, 'number-rows-repeated'));
     const cells = expandCells(row.body ?? '');
     if (cells.cells.length === 0) {
       // Empty rows are interior padding until a non-empty row proves it —
       // trailing ones are dropped with their repeats (grid padding, not data).
       pendingEmpty += repeat;
-      continue;
+      return false;
     }
     if (cells.truncated) colsTruncated = true;
     for (; pendingEmpty > 0 && rows.length < MAX_ROWS_PER_SHEET; pendingEmpty--) rows.push([]);
@@ -109,9 +118,10 @@ function expandRows(tableXml: string): { rows: string[][]; truncated: string[] }
     if (pendingEmpty > 0 || i < repeat) {
       // The cap cut real content (a sheet that merely FILLS it is not truncated).
       rowsTruncated = true;
-      break;
+      return true;
     }
-  }
+    return false;
+  });
   const truncated: string[] = [];
   if (rowsTruncated) truncated.push(`first ${MAX_ROWS_PER_SHEET} rows`);
   if (colsTruncated) truncated.push(`first ${MAX_COLS_PER_SHEET} columns`);
@@ -125,11 +135,12 @@ function expandRows(tableXml: string): { rows: string[][]; truncated: string[] }
  * expands) and the parse stops at the column cap.
  */
 function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
-  // Same quote-aware scanner as the row walk above.
+  // Same walking scanner as the rows above — a row spelling a million
+  // explicit cells stops parsing at the column cap too.
   const cells: string[] = [];
   let pendingEmpty = 0;
   let truncated = false;
-  for (const cell of localElementBlocks(rowXml, ['table-cell', 'covered-table-cell'])) {
+  walkLocalElementBlocks(rowXml, ['table-cell', 'covered-table-cell'], (cell) => {
     const repeat = repeatCount(attrByLocalName(cell.attributes, 'number-columns-repeated'));
     // Covered cells carry no own text anyway. Element-produced newlines/tabs
     // INSIDE a cell (<text:line-break/>, <text:tab/>) become single spaces:
@@ -146,7 +157,7 @@ function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
           .replace(/[\t\n\r]+/g, ' ');
     if (text === '') {
       pendingEmpty += repeat;
-      continue;
+      return false;
     }
     for (; pendingEmpty > 0 && cells.length < MAX_COLS_PER_SHEET; pendingEmpty--) cells.push('');
     let i = 0;
@@ -154,9 +165,10 @@ function expandCells(rowXml: string): { cells: string[]; truncated: boolean } {
     if (pendingEmpty > 0 || i < repeat) {
       // The cap cut real content (a row that merely FILLS it is not truncated).
       truncated = true;
-      break;
+      return true;
     }
-  }
+    return false;
+  });
   return { cells, truncated };
 }
 

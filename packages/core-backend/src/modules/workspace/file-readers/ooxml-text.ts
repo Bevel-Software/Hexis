@@ -218,6 +218,9 @@ export const MAX_ELEMENT_DEPTH = 1_000;
  */
 export const TOO_DEEP = Symbol('too deep');
 
+/** Thrown to stop the scan when a `visit` callback returns true; never escapes. */
+const STOP_SCAN = Symbol('stop scan');
+
 /** The match currently being collected by {@link xmlElementBlocks}. */
 interface OpenMatch {
   name: string;
@@ -287,6 +290,23 @@ export function localElementBlocks(xml: string, localNames: readonly string[]): 
 }
 
 /**
+ * {@link localElementBlocks} as a WALK: `visit` receives each element as its
+ * close tag is reached, and returning true STOPS the scan — the input past
+ * that element is never parsed and no block is materialized beyond it. For
+ * callers with a cap (the ods row walk): collecting every block into an array
+ * before consulting the cap let an accepted document allocate its whole
+ * expansion first.
+ */
+export function walkLocalElementBlocks(
+  xml: string,
+  localNames: readonly string[],
+  visit: (block: XmlElementBlock) => boolean | void,
+): void {
+  const wanted = new Set(localNames);
+  xmlElementBlocks(xml, wanted, (name) => wanted.has(localName(name)), visit);
+}
+
+/**
  * `xml` with every element named by `localNames` (matched on its LOCAL name)
  * removed WHOLE — open tag through matching close tag — by the parsed block
  * boundaries. The structural counterpart to string replacement, which deleted
@@ -312,10 +332,22 @@ export function xmlElementBlocks(
   names: Iterable<string>,
   /** Overrides name matching — {@link localElementBlocks} matches local names with it. */
   matches?: (name: string) => boolean,
+  /**
+   * Streaming hook — see {@link walkLocalElementBlocks}. When given, each
+   * block is handed to it INSTEAD of being accumulated (the return value is
+   * then an empty array), and returning true stops the scan.
+   */
+  visit?: (block: XmlElementBlock) => boolean | void,
 ): XmlElementBlock[] {
   const wanted = new Set(names);
   const isWanted = matches ?? ((name: string): boolean => wanted.has(name));
   const out: XmlElementBlock[] = [];
+  /** Hand a completed block over; true means the visitor asked to stop. */
+  const emit = (block: XmlElementBlock): boolean => {
+    if (visit !== undefined) return visit(block) === true;
+    out.push(block);
+    return false;
+  };
   let depth = 0;
   let open: OpenMatch | null = null;
   const parser: Parser = new Parser(
@@ -333,7 +365,7 @@ export function xmlElementBlocks(
           // open tag; anything else — including the close the parser implies
           // for an element left open at end of input — ends further on.
           const selfClosing = parser.endIndex === open.tagEnd;
-          out.push({
+          const stop = emit({
             name,
             attributes: open.attributes,
             body: selfClosing ? undefined : xml.slice(open.tagEnd + 1, parser.startIndex),
@@ -341,6 +373,7 @@ export function xmlElementBlocks(
             end: parser.endIndex + 1,
           });
           open = null;
+          if (stop) throw STOP_SCAN;
         }
         depth--;
       },
@@ -351,14 +384,16 @@ export function xmlElementBlocks(
     parser.write(xml);
     parser.end();
   } catch (err) {
-    if (err !== TOO_DEEP) throw err;
-    // The element still open keeps the body it had reached — the text before
-    // the crafted tail is real and there is no reason to discard it. (Read
-    // through an alias: the assignments happen inside the parser's callbacks,
-    // which control-flow analysis cannot see from here.)
+    if (err !== TOO_DEEP && err !== STOP_SCAN) throw err;
+    // On the depth bound, the element still open keeps the body it had
+    // reached — the text before the crafted tail is real and there is no
+    // reason to discard it. (Read through an alias: the assignments happen
+    // inside the parser's callbacks, which control-flow analysis cannot see
+    // from here.) A STOP is the visitor's own choice mid-document, so nothing
+    // is pending by construction (the throw follows a completed block).
     const pending = open as OpenMatch | null;
-    if (pending !== null) {
-      out.push({
+    if (err === TOO_DEEP && pending !== null) {
+      emit({
         name: pending.name,
         attributes: pending.attributes,
         body: xml.slice(pending.tagEnd + 1, parser.startIndex),

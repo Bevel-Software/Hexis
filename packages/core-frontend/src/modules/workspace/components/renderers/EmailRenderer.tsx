@@ -94,6 +94,10 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
         // Content-Length can be absent or understate the body.
         const declared = Number(res.headers?.get('content-length') ?? '');
         if (Number.isFinite(declared) && declared > MAX_EMAIL_BYTES) {
+          // End the transfer, not just this effect: returning with the body
+          // unread leaves the connection streaming a message nobody will
+          // look at for as long as the view stays mounted.
+          controller.abort();
           setError('This email is too large to display.');
           return;
         }
