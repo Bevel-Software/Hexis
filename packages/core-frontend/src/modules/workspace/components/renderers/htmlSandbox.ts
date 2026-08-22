@@ -281,6 +281,13 @@ interface BuildSandboxedHtmlOptions {
   title: string;
   /** knowledge-base JS library files, in dependency order. */
   libModuleSources: string[];
+  /**
+   * Emit the runtime (library + nav bridge)? The EMAIL viewer passes false:
+   * its frame is mounted `sandbox=""`, so a script could never run, and
+   * shipping one anyway leaves dead code in a document whose whole claim is
+   * that it executes nothing.
+   */
+  includeRuntime?: boolean;
   /** Sanitized agent HTML, body content only. */
   bodyHtml: string;
 }
@@ -323,9 +330,9 @@ export function buildSandboxedHtml(opts: BuildSandboxedHtmlOptions): string {
 <title>${safeTitle}</title>
 </head>
 <body>
-<script type="module">
+${opts.includeRuntime === false ? '' : `<script type="module">
 ${inlineLib}
-</script>
+</script>`}
 ${opts.bodyHtml}
 </body>
 </html>`;

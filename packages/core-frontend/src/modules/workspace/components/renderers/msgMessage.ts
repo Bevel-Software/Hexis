@@ -1,7 +1,9 @@
 import * as XLSX from 'xlsx';
 import {
   MAX_EMAIL_BYTES,
+  MAX_INLINE_IMAGE_TOTAL_BYTES,
   htmlToEmailText,
+  isInlineImagePart,
   isoDate,
   mailboxText,
   type EmailAttachmentView,
@@ -35,6 +37,21 @@ import {
  * verbatim by the caller — for non-CFB bytes and CFB files with no MAPI
  * streams at all.
  */
+/**
+ * Drop retained bytes past the aggregate inline budget — one message may carry
+ * many small images, and the per-part bound alone does not cap their sum. The
+ * parts stay listed; only the bytes go.
+ */
+function inlineBudgeted(parts: EmailAttachmentView[]): EmailAttachmentView[] {
+  let held = 0;
+  return parts.map((part) => {
+    if (part.bytes === undefined) return part;
+    if (held + part.bytes.byteLength > MAX_INLINE_IMAGE_TOTAL_BYTES) return { ...part, bytes: undefined };
+    held += part.bytes.byteLength;
+    return part;
+  });
+}
+
 export function parseMsgMessage(bytes: ArrayBuffer): EmailMessageView {
   if (bytes.byteLength > MAX_EMAIL_BYTES) {
     throw new Error(
@@ -88,16 +105,26 @@ export function parseMsgMessage(bytes: ArrayBuffer): EmailMessageView {
     subject: stringProp(streams, '', '0037'),
     date: messageDate(streams.get('__properties_version1.0')),
     body,
+    bodyHtml: html,
     bodySource,
-    attachments: storageDirs(streams, '__attach_version1.0_#').map(
-      (dir): EmailAttachmentView => ({
-        name:
-          stringProp(streams, dir, '3707') ??
-          stringProp(streams, dir, '3704') ??
-          stringProp(streams, dir, '3001') ??
-          'unnamed attachment',
-        mimeType: stringProp(streams, dir, '370E'),
-        sizeBytes: streams.get(`${dir}__substg1.0_37010102`)?.byteLength,
+    attachments: inlineBudgeted(
+      storageDirs(streams, '__attach_version1.0_#').map((dir): EmailAttachmentView => {
+        const content = streams.get(`${dir}__substg1.0_37010102`);
+        const mimeType = stringProp(streams, dir, '370E');
+        // PidTagAttachContentId (0x3712) — what an HTML body's `cid:` names.
+        const contentId = stringProp(streams, dir, '3712')?.replace(/^<|>$/g, '');
+        return {
+          name:
+            stringProp(streams, dir, '3707') ??
+            stringProp(streams, dir, '3704') ??
+            stringProp(streams, dir, '3001') ??
+            'unnamed attachment',
+          mimeType,
+          sizeBytes: content?.byteLength,
+          contentId,
+          bytes:
+            content && isInlineImagePart(mimeType, contentId, content.byteLength) ? content : undefined,
+        };
       }),
     ),
   };

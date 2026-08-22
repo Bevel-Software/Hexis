@@ -2,7 +2,9 @@ import PostalMime from 'postal-mime';
 import type { Address, Email } from 'postal-mime';
 import {
   MAX_EMAIL_BYTES,
+  MAX_INLINE_IMAGE_TOTAL_BYTES,
   htmlToEmailText,
+  isInlineImagePart,
   isoDate,
   type EmailAttachmentView,
   type EmailMessageView,
@@ -53,16 +55,39 @@ export async function parseEmlMessage(bytes: ArrayBuffer): Promise<EmailMessageV
     subject: email.subject,
     date: email.date !== undefined ? isoDate(email.date) : undefined,
     body: body.replace(/\s+$/, ''),
+    bodyHtml: html,
     bodySource: text !== undefined ? 'text' : html !== undefined ? 'html' : 'none',
-    attachments: email.attachments.map(
-      (a): EmailAttachmentView => ({
-        name: a.filename ?? 'unnamed attachment',
-        mimeType: a.mimeType,
-        sizeBytes:
-          typeof a.content === 'string' ? new TextEncoder().encode(a.content).byteLength : a.content.byteLength,
+    attachments: inlineBudgeted(
+      email.attachments.map((a): EmailAttachmentView => {
+        const bytes =
+          typeof a.content === 'string' ? new TextEncoder().encode(a.content) : new Uint8Array(a.content);
+        // postal-mime keeps the angle brackets: `<abc@host>`.
+        const contentId = a.contentId?.replace(/^<|>$/g, '');
+        return {
+          name: a.filename ?? 'unnamed attachment',
+          mimeType: a.mimeType,
+          sizeBytes: bytes.byteLength,
+          contentId,
+          bytes: isInlineImagePart(a.mimeType, contentId, bytes.byteLength) ? bytes : undefined,
+        };
       }),
     ),
   };
+}
+
+/**
+ * Drop retained bytes past the aggregate inline budget: one message may carry
+ * many small images, and the per-part bound alone does not cap their sum. The
+ * parts stay listed — only the bytes go, and the picture simply does not draw.
+ */
+function inlineBudgeted(parts: EmailAttachmentView[]): EmailAttachmentView[] {
+  let held = 0;
+  return parts.map((part) => {
+    if (part.bytes === undefined) return part;
+    if (held + part.bytes.byteLength > MAX_INLINE_IMAGE_TOTAL_BYTES) return { ...part, bytes: undefined };
+    held += part.bytes.byteLength;
+    return part;
+  });
 }
 
 /** `Name <addr>, addr2, Group: member, member` — groups flattened inline. */

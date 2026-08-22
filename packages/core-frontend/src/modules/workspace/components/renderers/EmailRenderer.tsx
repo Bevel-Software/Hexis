@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
-import { Mail, Paperclip } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Copy, ExternalLink, Mail, Paperclip } from 'lucide-react';
 import { useWorkspace } from '../../state/workspace.context';
 import { authFetch } from '../../../../lib/api';
 import { DownloadFileButton } from './DownloadFileButton';
 import { MAX_EMAIL_BYTES, attachmentLine, type EmailMessageView } from './emailMessage';
+import { buildEmailBody, type EmailLink } from './emailBody';
 import { readBodyCapped } from './readBodyCapped';
 import type { FileRendererProps } from './types';
 
@@ -13,11 +14,19 @@ import type { FileRendererProps } from './types';
  * backend's extractors tell agents through `read_file`, so human and agent
  * conversations about one message point at the same thing.
  *
- * Nothing from the message is ever interpreted as HTML: an HTML-only body is
- * stripped to text by the parser and rendered as React text nodes, and the
- * up-front note says formatting is omitted. Attachments are names, not
- * downloads — v1 does not unpack them; the original file (with everything in
- * it) is one Download away.
+ * A message that carries HTML is RENDERED, the way a mail client renders it —
+ * inside a frame mounted `sandbox=""` (no scripts, ever) whose policy permits
+ * `img-src data:` and nothing else. Two consequences are the point of the
+ * design: no script in a stranger's mail can run, and no remote fetch can
+ * happen, so a tracking pixel cannot report that this message was opened.
+ * Images the sender EMBEDDED still appear — they travel inside the file, and
+ * are inlined as data: URIs. Links are made inert and listed below the body
+ * with their full address, because a click inside a script-free frame cannot
+ * be intercepted and a live anchor would open its destination unseen.
+ *
+ * A message with no HTML part falls back to the plain text, as before.
+ * Attachments are names, not downloads — v1 does not unpack them; the original
+ * file (with everything in it) is one Download away.
  *
  * Parsing is client-side, per format, behind its own dynamic import so the
  * `.eml` path never pays for the CFB machinery: postal-mime for `.eml`
@@ -30,6 +39,12 @@ import type { FileRendererProps } from './types';
 export function EmailRenderer({ filePath }: FileRendererProps) {
   const { workspaceId } = useWorkspace();
   const [view, setView] = useState<EmailMessageView | null>(null);
+  // The sender's own markup, made safe to show. Rebuilt only when the message
+  // changes — the sanitize + inline pass walks the whole body.
+  const rendered = useMemo(
+    () => (view?.bodyHtml !== undefined ? buildEmailBody(view.bodyHtml, view.attachments) : null),
+    [view],
+  );
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -139,6 +154,28 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
           The message body is stored as RTF only — there is no plain-text part to show. Download
           the file to read it in a mail client.
         </p>
+      ) : rendered !== null ? (
+        <>
+          <iframe
+            // `sandbox=""` — NOT allow-scripts. Nothing in a stranger's message
+            // executes, and the document's CSP allows `img-src data:` only, so no
+            // remote fetch can happen: a tracking pixel cannot report that this
+            // message was opened. Images the sender EMBEDDED are inlined as data:
+            // URIs and do render.
+            sandbox=""
+            srcDoc={rendered.srcDoc}
+            title="Message body"
+            className="h-[32rem] w-full rounded-xs border border-line bg-white"
+          />
+          {rendered.blockedRemoteImages > 0 && (
+            <p className="mt-2 text-detail text-ink-faint">
+              {rendered.blockedRemoteImages} remote image
+              {rendered.blockedRemoteImages === 1 ? '' : 's'} not loaded — fetching one would tell
+              the sender you opened this message.
+            </p>
+          )}
+          {rendered.links.length > 0 && <EmailLinks links={rendered.links} />}
+        </>
       ) : view.body === '' ? (
         <p className="text-detail italic text-ink-faint">No message body.</p>
       ) : (
@@ -163,6 +200,65 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
           </p>
         </div>
       )}
+    </div>
+  );
+}
+
+
+/**
+ * The message's links, in TRUSTED UI outside the sandbox.
+ *
+ * A click inside a script-free frame cannot be intercepted, so an anchor left
+ * live would open its destination with no chance to show the reader where it
+ * goes. The body renders them inert and numbered instead, and they are listed
+ * here with the whole address visible: copy it, or open it deliberately. A
+ * phishing link is never one stray click away, and nothing in the frame can
+ * reach `window.opener` or leak a referrer, because nothing in the frame
+ * navigates at all.
+ */
+function EmailLinks({ links }: { links: readonly EmailLink[] }): React.ReactElement {
+  return (
+    <div className="mt-4 border-t border-line pt-3">
+      <div className="mb-1 flex items-center gap-1.5 text-meta font-medium uppercase tracking-wide text-ink-faint">
+        <ExternalLink size={12} aria-hidden />
+        Links
+      </div>
+      <ul className="space-y-1">
+        {links.map((link) => (
+          <li key={link.index} className="flex items-start gap-2 text-detail">
+            <span className="shrink-0 text-ink-faint">[{link.index}]</span>
+            <span className="min-w-0 flex-1">
+              {link.text !== '' && <span className="text-ink">{link.text} — </span>}
+              <span className="break-all text-ink-faint">{link.url}</span>
+            </span>
+            <button
+              type="button"
+              className="shrink-0 text-ink-faint hover:text-ink"
+              title="Copy this address"
+              onClick={() => void navigator.clipboard?.writeText(link.url)}
+            >
+              <Copy size={12} aria-hidden />
+            </button>
+            <button
+              type="button"
+              className="shrink-0 text-ink-faint hover:text-ink"
+              title="Open in a new tab"
+              onClick={() => {
+                // Asked before anything opens, with the address in the prompt:
+                // the reader decides against the REAL destination, not against
+                // whatever text the sender chose to show.
+                if (window.confirm(`Open this link?
+
+${link.url}`)) {
+                  window.open(link.url, '_blank', 'noopener,noreferrer');
+                }
+              }}
+            >
+              <ExternalLink size={12} aria-hidden />
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
