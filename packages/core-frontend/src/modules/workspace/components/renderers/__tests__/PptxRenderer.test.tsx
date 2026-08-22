@@ -86,12 +86,21 @@ describe('PptxRenderer', () => {
     expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
   });
 
-  it('rejects an over-cap declared Content-Length AND cancels the body — the transfer must stop', async () => {
-    const cancel = vi.fn().mockResolvedValue(undefined);
-    apiMock.authFetch.mockResolvedValue({
-      ok: true,
-      headers: { get: (name: string) => (name === 'content-length' ? String(201 * 1024 * 1024) : null) },
-      body: { cancel },
+  it('rejects an over-cap declared Content-Length AND ends the transfer — even when the body has already errored', async () => {
+    // `body.cancel()` REJECTS on a stream that has already errored, and a
+    // rejection here used to escape the guard into the generic parse-error
+    // path — the reader must leave by the oversized door regardless.
+    let signal: AbortSignal | undefined;
+    apiMock.authFetch.mockImplementation(async (_url: string, init?: { signal?: AbortSignal }) => {
+      signal = init?.signal;
+      return {
+        ok: true,
+        headers: {
+          get: (name: string) =>
+            name === 'content-length' ? String(201 * 1024 * 1024) : null,
+        },
+        body: { cancel: () => Promise.reject(new Error('stream already errored')) },
+      };
     });
 
     renderPptx();
@@ -101,7 +110,7 @@ describe('PptxRenderer', () => {
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
     // The guard is only real if it ends the transfer, not just the render.
-    expect(cancel).toHaveBeenCalled();
+    expect(signal?.aborted).toBe(true);
   });
 
   it('reports a transport failure as a load error', async () => {

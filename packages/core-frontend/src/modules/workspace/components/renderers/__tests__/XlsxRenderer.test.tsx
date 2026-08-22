@@ -188,6 +188,49 @@ describe('XlsxRenderer truncation', () => {
     expect(bodyCancelled).toBe(true);
   });
 
+  it('rejects an over-cap declared Content-Length and ABORTS the transfer', async () => {
+    // The header check is only an early exit if it also ENDS the download:
+    // returning alone left the browser receiving the whole oversized workbook
+    // behind the rejection.
+    let signal: AbortSignal | undefined;
+    apiMock.authFetch.mockImplementation(async (_url: string, init?: { signal?: AbortSignal }) => {
+      signal = init?.signal;
+      return {
+        ok: true,
+        headers: {
+          get: (name: string) =>
+            name === 'content-length' ? String(26 * 1024 * 1024) : null,
+        },
+        arrayBuffer: async () => {
+          throw new Error('must not buffer a declared-oversized body');
+        },
+      };
+    });
+
+    renderXlsx();
+
+    expect(await screen.findByText(/too large to preview/)).toBeInTheDocument();
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it('aborts an in-flight workbook fetch when the viewer goes away', async () => {
+    // Switching files or closing the pane must end the transfer, not just
+    // suppress the render — a 24 MB workbook nobody is waiting for kept
+    // downloading for as long as the request lived.
+    let signal: AbortSignal | undefined;
+    apiMock.authFetch.mockImplementation(
+      (_url: string, init?: { signal?: AbortSignal }) =>
+        new Promise(() => {
+          signal = init?.signal;
+        }),
+    );
+
+    const { unmount } = renderXlsx();
+    unmount();
+
+    expect(signal?.aborted).toBe(true);
+  });
+
   it('offers Download beside the grid', async () => {
     apiMock.authFetch.mockResolvedValue({
       ok: true,

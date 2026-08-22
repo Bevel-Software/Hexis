@@ -4,6 +4,7 @@ import { useWorkspace } from '../../state/workspace.context';
 import { authFetch } from '../../../../lib/api';
 import { DownloadFileButton } from './DownloadFileButton';
 import { extractPptxOutline, type PptxSlide } from './pptxOutline';
+import { readBodyCapped } from './readBodyCapped';
 import type { FileRendererProps } from './types';
 
 /**
@@ -45,46 +46,6 @@ const MAX_ARCHIVE_BYTES = 200 * 1024 * 1024;
  */
 const MAX_LINES_PER_SLIDE = 500;
 
-/**
- * `res`'s bytes, or null once they exceed {@link MAX_ARCHIVE_BYTES}. A
- * declared Content-Length over the cap is rejected before anything is
- * buffered; a chunked/undeclared body is counted as it streams and abandoned
- * the moment it crosses the cap, never held whole first.
- */
-async function readArchiveBounded(res: Response): Promise<ArrayBuffer | Uint8Array | null> {
-  if (Number(res.headers?.get('content-length')) > MAX_ARCHIVE_BYTES) {
-    // Cancel the body too: returning alone left the browser receiving and
-    // buffering the whole oversized file behind the rejection.
-    await res.body?.cancel();
-    return null;
-  }
-  if (!res.body) {
-    // No stream on this response (test double) — buffer, then bound.
-    const buf = await res.arrayBuffer();
-    return buf.byteLength > MAX_ARCHIVE_BYTES ? null : buf;
-  }
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.length;
-    if (total > MAX_ARCHIVE_BYTES) {
-      await reader.cancel(); // stop the transfer — nothing further is wanted
-      return null;
-    }
-    chunks.push(value);
-  }
-  const all = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    all.set(c, off);
-    off += c.length;
-  }
-  return all;
-}
-
 export function PptxRenderer({ filePath }: FileRendererProps) {
   const { workspaceId } = useWorkspace();
   const [slides, setSlides] = useState<PptxSlide[] | null>(null);
@@ -111,7 +72,11 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
           setError(`Failed to load presentation (HTTP ${res.status})`);
           return;
         }
-        const buffer = await readArchiveBounded(res);
+        // The parser's decompression caps only run once the whole response is
+        // in memory, so the transfer is bounded first: an over-cap
+        // Content-Length is refused (and the request aborted) without a byte
+        // buffered, an undeclared body abandoned the moment it crosses the cap.
+        const buffer = await readBodyCapped(res, MAX_ARCHIVE_BYTES, abort);
         if (cancelled) return;
         if (buffer === null) {
           setError('This presentation is too large to preview — download it to view the slides.');

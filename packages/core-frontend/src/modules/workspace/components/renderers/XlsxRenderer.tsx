@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import { useWorkspace } from '../../state/workspace.context';
 import { authFetch } from '../../../../lib/api';
 import { DownloadFileButton } from './DownloadFileButton';
+import { readBodyCapped } from './readBodyCapped';
 import type { FileRendererProps } from './types';
 
 /**
@@ -73,42 +74,6 @@ function zipDeclaredSize(buffer: ArrayBuffer): number | null {
   return total;
 }
 
-/**
- * Buffer a response body while refusing to hold more than `maxBytes`: the
- * moment the received total crosses the cap the read stops, the connection is
- * cancelled, and `null` comes back. Content-Length alone cannot enforce the
- * cap — it can be absent (chunked) or understate the body. Falls back to
- * `arrayBuffer()` (capped after the fact) where the body is not streamable,
- * e.g. the test DOM's mocked responses.
- */
-async function readBodyCapped(res: Response, maxBytes: number): Promise<ArrayBuffer | null> {
-  const body = res.body;
-  if (!body) {
-    const buffer = await res.arrayBuffer();
-    return buffer.byteLength > maxBytes ? null : buffer;
-  }
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    received += value.byteLength;
-    if (received > maxBytes) {
-      reader.cancel().catch(() => {});
-      return null;
-    }
-    chunks.push(value);
-  }
-  const merged = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return merged.buffer;
-}
-
 interface SheetView {
   name: string;
   rows: string[][];
@@ -142,10 +107,14 @@ export function XlsxRenderer({ filePath }: FileRendererProps) {
     if (!workspaceId) return;
 
     let cancelled = false;
+    // Cleanup ABORTS, not just flags: flipping `cancelled` alone left an
+    // abandoned viewer downloading and buffering the whole workbook.
+    const controller = new AbortController();
     (async () => {
       try {
         const res = await authFetch(
           `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}`,
+          { signal: controller.signal },
         );
         if (cancelled) return;
         if (!res.ok) {
@@ -155,15 +124,12 @@ export function XlsxRenderer({ filePath }: FileRendererProps) {
         // SheetJS parses EVERY cell of every sheet before this component can
         // apply its row and column caps, so those caps bound what is DISPLAYED,
         // never what is parsed. The byte bound is what keeps a dense workbook
-        // from freezing the tab, and it has to come before the buffer: the
-        // header check is the cheap early exit, the capped read below the
-        // enforcement — Content-Length can be absent or understate the body.
-        const declared = Number(res.headers?.get('content-length') ?? '');
-        if (Number.isFinite(declared) && declared > MAX_WORKBOOK_BYTES) {
-          setError('This spreadsheet is too large to preview. Download it to open in a spreadsheet app.');
-          return;
-        }
-        const buffer = await readBodyCapped(res, MAX_WORKBOOK_BYTES);
+        // from freezing the tab, and it has to come before the buffer:
+        // `readBodyCapped` refuses an over-cap Content-Length without reading a
+        // byte (and aborts the request, so an oversized workbook stops arriving
+        // instead of streaming on behind the error) and abandons an undeclared
+        // or understated body the moment it crosses the cap.
+        const buffer = await readBodyCapped(res, MAX_WORKBOOK_BYTES, controller);
         if (cancelled) return;
         if (buffer === null) {
           setError('This spreadsheet is too large to preview. Download it to open in a spreadsheet app.');
@@ -196,6 +162,7 @@ export function XlsxRenderer({ filePath }: FileRendererProps) {
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [workspaceId, filePath]);
 
