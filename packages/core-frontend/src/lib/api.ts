@@ -19,10 +19,20 @@ function signalUnreachable(): void {
 
 /**
  * Whether a rejection is a caller aborting its own request rather than a
- * transport failure. Checked by `name` instead of `instanceof DOMException`,
- * which does not hold across realms.
+ * transport failure.
+ *
+ * The signal is asked first because it is the only reliable witness:
+ * `abort(reason)` rejects the fetch with THAT reason, which can be any value
+ * and carries no marking of its own. The rejection is consulted only as a
+ * fallback, for an abort whose signal never reached us; there it is matched by
+ * `name` rather than `instanceof DOMException`, which does not hold across
+ * realms.
  */
-function isAbortError(err: unknown): boolean {
+function wasAborted(input: RequestInfo | URL, init: RequestInit | undefined, err: unknown): boolean {
+  if (init?.signal?.aborted) return true;
+  if (typeof input === 'object' && 'signal' in input && (input as Request).signal?.aborted) {
+    return true;
+  }
   return typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'AbortError';
 }
 
@@ -55,7 +65,7 @@ export async function authFetch(input: RequestInfo | URL, init?: RequestInit): P
     // binary viewers abort in flight on unmount and on every file switch.
     // Signalling here would probe /api/health on ordinary navigation and
     // could raise the maintenance overlay when a probe transiently fails.
-    if (!isAbortError(err)) signalUnreachable();
+    if (!wasAborted(input, init, err)) signalUnreachable();
     throw err;
   }
 

@@ -42,6 +42,29 @@ describe('authFetch transport-failure signalling', () => {
     expect(watcher.seen()).toBe(0);
   });
 
+  it('does NOT signal unreachable when the abort carried a custom reason', async () => {
+    // `abort(reason)` rejects the fetch with THAT value rather than an
+    // AbortError, so the rejection alone cannot identify the abort.
+    const controller = new AbortController();
+    controller.abort('viewer closed');
+    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce('viewer closed');
+
+    await expect(
+      authFetch('/api/workspace/file', { signal: controller.signal }),
+    ).rejects.toBe('viewer closed');
+    expect(watcher.seen()).toBe(0);
+  });
+
+  it('does NOT signal unreachable when the aborted signal rode on a Request', async () => {
+    const controller = new AbortController();
+    controller.abort('viewer closed');
+    const request = { signal: controller.signal } as unknown as Request;
+    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce('viewer closed');
+
+    await expect(authFetch(request)).rejects.toBe('viewer closed');
+    expect(watcher.seen()).toBe(0);
+  });
+
   it('still signals unreachable when the connection genuinely fails', async () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new TypeError('Failed to fetch'));
 
