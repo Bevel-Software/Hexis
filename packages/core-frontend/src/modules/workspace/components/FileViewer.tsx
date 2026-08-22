@@ -36,7 +36,8 @@ import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequ
 import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { suggestedPages } from '../utils/fileTree';
-import { getFileRenderer, getRendererLayout } from './renderers';
+import { getFileRenderer, getRendererLayout, isViewOnlyFile } from './renderers';
+import { CanDownloadContext } from './renderers/DownloadFileButton';
 import type { RendererSaveState } from './renderers';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
@@ -901,6 +902,12 @@ export function FileViewer() {
   const shellVariant =
     activeTab === 'content' ? getRendererLayout(openFilePath) : 'full-bleed';
 
+  // No-preview routes (legacy Office, ODF) have no editing surface at all —
+  // offering Edit/Propose there would acquire a lock for a mode the renderer
+  // ignores, and imply text can be saved over a binary document. Suppresses
+  // BOTH write-action homes (the pane bar and the header) below.
+  const viewOnly = isViewOnlyFile(openFilePath);
+
   // What the pane card's bar names — extension kept, unlike the `<h1>` above,
   // because the bar is the technical label (`SKILL.md`, `How to get
   // started.md`) exactly as the skill page's file bar renders it.
@@ -920,8 +927,11 @@ export function FileViewer() {
 
   const rendererElement = (
     // The renderer is a dynamic per-extension lookup resolved in a useMemo
-    // above — not a component created during render.
+    // above — not a component created during render. The provider hands the
+    // open file's `download:` verdict to any DownloadFileButton inside the
+    // renderer without widening the renderer contract.
     // eslint-disable-next-line react-hooks/static-components
+    <CanDownloadContext.Provider value={access.canDownload}>
     <Renderer
       // **Why we key on `openFileSavedContent` (read-only mode only).**
       // When a teammate's save lands, the workspace state updates the
@@ -977,6 +987,7 @@ export function FileViewer() {
       onSaveStateChange={setManualSaveState}
       readOnly={isReviewingPending || !(editMode || proposeMode)}
     />
+    </CanDownloadContext.Provider>
   );
 
   // The pane bar's write action — the labelled button at the frame's top
@@ -986,7 +997,7 @@ export function FileViewer() {
   // rule). While a mode is OPEN it shows the way out instead. The header's
   // own cluster is suppressed for prose files (`writeActionInPane`).
   const lockedBy = fileLock.externalLock?.holderName ?? null;
-  const paneActions = isReviewingPending ? null : proposeMode ? (
+  const paneActions = isReviewingPending || viewOnly ? null : proposeMode ? (
     <>
       <Button variant="quiet" size="tiny" onClick={handleDiscardProposal} disabled={proposalBusy}>
         Discard
@@ -1076,7 +1087,9 @@ export function FileViewer() {
         onPropose={handleEnterPropose}
         onSendProposal={() => void handleSendProposal()}
         onDiscardProposal={handleDiscardProposal}
-        writeActionInPane={shellVariant === 'prose'}
+        // `viewOnly` rides the same flag: it tells the header "the write
+        // action is not yours to render" — and the pane bar renders none.
+        writeActionInPane={shellVariant === 'prose' || viewOnly}
         lockedBy={fileLock.externalLock?.holderName ?? null}
         historyAvailable={historyAvailable}
         isDirty={isManualDirty}

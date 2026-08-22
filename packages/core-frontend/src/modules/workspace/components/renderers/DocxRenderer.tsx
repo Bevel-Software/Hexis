@@ -9,6 +9,7 @@ import mammoth from 'mammoth/mammoth.browser.js';
 import { useWorkspace } from '../../state/workspace.context';
 import { authFetch } from '../../../../lib/api';
 import { sanitizeDocxHtml } from './sanitizeDocxHtml';
+import { DownloadFileButton } from './DownloadFileButton';
 import type { FileRendererProps } from './types';
 
 /**
@@ -69,8 +70,10 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
 
   if (error) {
     return (
-      <div className="flex items-center justify-center min-h-40 text-danger text-sm">
-        {error}
+      <div className="flex min-h-40 flex-col items-center justify-center gap-3 text-center">
+        <p className="text-sm text-danger">{error}</p>
+        {/* The conversion failed; the bytes may still open fine in Word. */}
+        <DownloadFileButton filePath={filePath} />
       </div>
     );
   }
@@ -87,6 +90,12 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
     // No scroller of its own: a Word document is a document, so it sits in
     // `KbDocumentShell`'s prose column and the column scrolls.
     <div className="min-w-0">
+      {/* The conversion is an approximation (headers/footers, tracked
+          changes and most layout are dropped) — the original stays one
+          click away. */}
+      <div className="mb-3 flex justify-end">
+        <DownloadFileButton filePath={filePath} />
+      </div>
       <div
         className="prose prose-sm max-w-none"
         dangerouslySetInnerHTML={{ __html: html }}

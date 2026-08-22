@@ -71,6 +71,13 @@ export class CoreConfig {
    * never committed, best-effort GC'd on write.
    */
   readonly spillRoot: string;
+  /**
+   * Sibling-to-`workspacesRoot` location for the document-extraction cache —
+   * text extracted from office documents/PDFs (`read_file`/`grep`), keyed by
+   * git blob sha. Derived data only: safe to delete at any time, never
+   * committed, size-bounded by the cache itself.
+   */
+  readonly docExtractCacheRoot: string;
   readonly jwtSecret: string;
   /**
    * The deployment's owner. REQUIRED — three separate jobs rest on it, and a
@@ -244,6 +251,8 @@ export class CoreConfig {
     this.workspacesRoot = process.env.WORKSPACES_ROOT || path.resolve(process.cwd(), 'workspaces');
     this.backupsRoot = process.env.BACKUPS_ROOT || path.resolve(this.workspacesRoot, '..', 'backups');
     this.spillRoot = process.env.SPILL_ROOT || path.resolve(this.workspacesRoot, '..', 'tool-chain-spills');
+    this.docExtractCacheRoot =
+      process.env.DOC_EXTRACT_CACHE_ROOT || path.resolve(this.workspacesRoot, '..', 'doc-extract-cache');
     // Required, and checked BEFORE the auth routes it signs for are ever
     // mounted. Empty, the first login attempt fails deep inside the JWT library
     // with a message about a missing key — a boot error naming the variable is

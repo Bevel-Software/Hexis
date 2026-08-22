@@ -551,6 +551,23 @@ describe('FileViewer', () => {
     expect(accessMock.fetchFileAccess).not.toHaveBeenCalled();
   });
 
+  // View-only routes (legacy Office, ODF) render a no-preview note — there is
+  // no editing surface behind an Edit click, so neither Edit nor Propose may
+  // be offered, even on a draft branch where editing is otherwise free.
+  it('offers no Edit or Propose on a legacy .doc — the no-preview note has no editing surface', async () => {
+    render(<ViewerHarness initialContent="" filePath="knowledge-base/old/memo.doc" />);
+    expect(await screen.findByText(/legacy Word format/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Propose changes' })).not.toBeInTheDocument();
+  });
+
+  it('offers no Edit or Propose on an OpenDocument file — same view-only route, ODF-honest copy', async () => {
+    render(<ViewerHarness initialContent="" filePath="knowledge-base/docs/spec.odt" />);
+    expect(await screen.findByText(/No preview for OpenDocument files yet/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Propose changes' })).not.toBeInTheDocument();
+  });
+
   // Bug B regression: the hook must strip the kbDirName prefix before
   // querying the backend, otherwise deeper access.md grants silently miss
   // and the editor falsely shows read-only. Exercised on a protected

@@ -28,6 +28,7 @@ function parseDomainList(raw: string): string[] {
     .filter((d) => d.length > 0);
 }
 import { SpillStore } from '../modules/workspace/spill-store.js';
+import { DocExtractService } from '../modules/workspace/file-readers/doc-extract.service.js';
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
@@ -114,6 +115,7 @@ export interface CoreServices {
    */
   kbStartupRunner: KbStartupRunner;
   spillStore: SpillStore;
+  docExtractService: DocExtractService;
   accessControl: AccessControlService;
   creatorAccess: CreatorAccessService;
   sessionOntologyService: SessionOntologyService;
@@ -289,6 +291,9 @@ export async function createCoreServices(
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
   const spillStore = new SpillStore(config.spillRoot);
+  // Office-document/PDF text extraction for `read_file`/`grep`, cached by
+  // content hash beside the workspaces root (see `DocExtractionCache`).
+  const docExtractService = new DocExtractService(config.docExtractCacheRoot);
   // The deployment owner counts as Admin for the two hardcoded `write`
   // rescues (`roles.yaml` and any `access.md`) — the SAME list
   // `AdminAccessService` below is given, so the admin surfaces and the write
@@ -799,6 +804,7 @@ export async function createCoreServices(
     settings,
     kbDirName,
     spillStore,
+    docExtractService,
     accessControl,
     creatorAccess,
     sessionOntologyService,

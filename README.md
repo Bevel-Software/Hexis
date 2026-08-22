@@ -241,7 +241,7 @@ by environment instead of the setup screen.
 
 ## Local development (run from source)
 
-You need: **Node 22** (`.nvmrc`; the engine range is `>=22 <23`),
+You need: **Node 22.13 or newer** (`.nvmrc`; the engine range is `>=22.13 <23`),
 **pnpm 10**, **git ≥ 2.41**, and a Postgres 17 (the bundled one is fine):
 
 ```sh

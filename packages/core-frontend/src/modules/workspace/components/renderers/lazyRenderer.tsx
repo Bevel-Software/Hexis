@@ -32,7 +32,7 @@ export function lazyRenderer(
   // again. Only a new lazy component can actually re-run the import.
   const first = lazy(loader);
 
-  return function LazyRenderer(props: FileRendererProps) {
+  function LazyRenderer(props: FileRendererProps) {
     const [attempt, setAttempt] = useState(0);
 
     // Attempt 0 reuses the shared component so the common path is unchanged:
@@ -55,5 +55,12 @@ export function lazyRenderer(
         </Suspense>
       </ChunkErrorBoundary>
     );
-  };
+  }
+
+  // Names the wrapper after what it loads. Every wrapper is otherwise the
+  // same anonymous `LazyRenderer`, and the selection tests (and React
+  // DevTools) need to tell "the PDF viewer" from "the spreadsheet viewer"
+  // WITHOUT importing the heavy chunks they exist to defer.
+  LazyRenderer.displayName = `LazyRenderer(${label})`;
+  return LazyRenderer;
 }

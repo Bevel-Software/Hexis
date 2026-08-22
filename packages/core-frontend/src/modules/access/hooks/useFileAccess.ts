@@ -11,6 +11,8 @@ export interface FileAccessState {
    * — the backend is the authoritative gate at commit time anyway.
    */
   canWrite: boolean | null;
+  /** Same contract as `canWrite`, for the per-path `download:` verb. */
+  canDownload: boolean | null;
   eligible: AccessEligible;
   /**
    * The node's owners — who to contact about it. Populated only when the
@@ -62,6 +64,7 @@ export function useFileAccess(
   const { workspaceId, kbDirName } = useWorkspace();
   const [state, setState] = useState<FileAccessState>({
     canWrite: null,
+    canDownload: null,
     eligible: EMPTY_ELIGIBLE,
     owners: EMPTY_ELIGIBLE,
     loading: false,
@@ -70,7 +73,7 @@ export function useFileAccess(
 
   useEffect(() => {
     if (!workspacePath || !kbDirName || !workspaceId) {
-      setState({ canWrite: null, eligible: EMPTY_ELIGIBLE, owners: EMPTY_ELIGIBLE, loading: false, error: null });
+      setState({ canWrite: null, canDownload: null, eligible: EMPTY_ELIGIBLE, owners: EMPTY_ELIGIBLE, loading: false, error: null });
       return;
     }
     // Files outside the KB repo dir are the user's own workspace — never
@@ -78,7 +81,12 @@ export function useFileAccess(
     // access tree can't lock users out of their own scratch files.
     const prefix = `${kbDirName}/`;
     if (!workspacePath.startsWith(prefix)) {
-      setState({ canWrite: true, eligible: EMPTY_ELIGIBLE, owners: EMPTY_ELIGIBLE, loading: false, error: null });
+      // `canDownload: null` — NOT true. The write short-circuits are this
+      // hook's own policy, and they match the backend's write gates; the raw
+      // endpoint gates EVERY download regardless of branch or path, so
+      // claiming permission here would promise something it can still refuse.
+      // Null keeps the button clickable and the backend authoritative.
+      setState({ canWrite: true, canDownload: null, eligible: EMPTY_ELIGIBLE, owners: EMPTY_ELIGIBLE, loading: false, error: null });
       return;
     }
     // Drafts are free-for-all (mirrors the backend's branch-protected gates
@@ -87,16 +95,24 @@ export function useFileAccess(
     // draft. `branch === null` is the bootstrap window before status loads;
     // return canWrite=null so callers stay optimistic until we know.
     if (branch === null) {
-      setState({ canWrite: null, eligible: EMPTY_ELIGIBLE, owners: EMPTY_ELIGIBLE, loading: false, error: null });
+      setState({ canWrite: null, canDownload: null, eligible: EMPTY_ELIGIBLE, owners: EMPTY_ELIGIBLE, loading: false, error: null });
       return;
     }
     if (!isProtectedBranch(branch)) {
-      setState({ canWrite: true, eligible: EMPTY_ELIGIBLE, owners: EMPTY_ELIGIBLE, loading: false, error: null });
+      // `canDownload: null` — NOT true. The write short-circuits are this
+      // hook's own policy, and they match the backend's write gates; the raw
+      // endpoint gates EVERY download regardless of branch or path, so
+      // claiming permission here would promise something it can still refuse.
+      // Null keeps the button clickable and the backend authoritative.
+      setState({ canWrite: true, canDownload: null, eligible: EMPTY_ELIGIBLE, owners: EMPTY_ELIGIBLE, loading: false, error: null });
       return;
     }
 
     let cancelled = false;
-    setState((s) => ({ ...s, loading: true, error: null }));
+    // Reset the verdicts to null (= optimistic/unknown) for the NEW lookup —
+    // carrying the previous file's canWrite/canDownload across a file switch
+    // would briefly show the old file's permissions on the new file.
+    setState((s) => ({ ...s, canWrite: null, canDownload: null, loading: true, error: null }));
     // Strip kbDirName/ so the backend resolver receives the repo-relative
     // path it expects (`Knowledge/Foo.md`, not `knowledge-base/…`).
     const repoRelative = workspacePath.slice(prefix.length);
@@ -105,6 +121,7 @@ export function useFileAccess(
         if (cancelled) return;
         setState({
           canWrite: res.canWrite,
+          canDownload: res.canDownload,
           eligible: res.eligible,
           owners: res.owners,
           loading: false,
@@ -119,6 +136,7 @@ export function useFileAccess(
         // truly don't have access.
         setState({
           canWrite: true,
+          canDownload: true,
           eligible: EMPTY_ELIGIBLE,
           owners: EMPTY_ELIGIBLE,
           loading: false,

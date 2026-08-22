@@ -330,7 +330,7 @@ export async function createCoreServer(
     hooks: core.workflowService.hooks,
   };
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th);
-  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink);
+  registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink);
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService);
   registerToolManualsTools(core.toolRegistry, toolsRouter, ta, th, core.toolManualService, {
     accessControl: core.accessControl,

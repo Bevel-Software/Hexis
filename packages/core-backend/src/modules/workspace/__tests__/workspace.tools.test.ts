@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import AdmZip from 'adm-zip';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
@@ -15,6 +16,7 @@ import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { SpillStore } from '../spill-store.js';
+import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 
@@ -45,6 +47,8 @@ function denyReads(denied: Set<string>): IAccessControl {
 
 let httpServer: HttpServer | undefined;
 let tempDir = '';
+/** Fresh per-start doc-extraction cache root (OUTSIDE the workspace, like production). */
+let docCacheDir = '';
 let fs: LocalFilesystem;
 /**
  * Every branch / workspaceId `execute_command`'s handler resolves a workspace
@@ -62,12 +66,15 @@ let writePolicy: RoutineWritePolicyService;
  * branch-less `execute_command` falls back to the session's own workspace.
  */
 let focusedBranch: string | undefined;
+/** The registry the tools were mounted into, so a test can inspect their defs. */
+let toolRegistry: ToolRegistry;
 
 async function start(
   scope: 'read' | 'write' = 'write',
   access: IAccessControl = allowAll,
 ): Promise<string> {
   tempDir = await mkdtemp(join(tmpdir(), 'ws-tools-'));
+  docCacheDir = await mkdtemp(join(tmpdir(), 'ws-doc-cache-'));
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
   await fs.writeFile('a.md', 'hello\nworld\n');
   workspacePathCalls = [];
@@ -75,6 +82,7 @@ async function start(
   focusedBranch = undefined;
 
   const registry = new ToolRegistry();
+  toolRegistry = registry;
   const resolve = async (auth: ToolAuth, signal: AbortSignal, sessionId?: string): Promise<ToolContext> => ({
     user: { id: 'u', email: 'e@x', name: 'N' },
     scope: auth.scope,
@@ -106,7 +114,7 @@ async function start(
   const app = express();
   app.use(express.json());
   const router = express.Router();
-  registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), access, KB_DIR, {
+  registerWorkspaceTools(registry, router, fakeAuth, toolHandler, new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(docCacheDir), access, KB_DIR, {
     service: {} as never,
     enabled: false, // these tests predate and don't exercise the ontology boundary
     kbDirName: KB_DIR,
@@ -132,6 +140,10 @@ afterEach(async () => {
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = '';
+  }
+  if (docCacheDir) {
+    await rm(docCacheDir, { recursive: true, force: true });
+    docCacheDir = '';
   }
 });
 
@@ -417,6 +429,491 @@ describe('read-permission gating', () => {
 });
 
 /**
+ * Document reading: read_file/grep consume the doc-extract service for office
+ * documents and PDFs; the agent text-editing tools refuse them. Fixtures are
+ * REAL files built in-test (a docx is just a zip with word/document.xml).
+ */
+describe('office documents and PDFs', () => {
+  const docx = (...paragraphs: string[]): Buffer => {
+    const zip = new AdmZip();
+    zip.addFile('[Content_Types].xml', Buffer.from('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'));
+    zip.addFile(
+      'word/document.xml',
+      Buffer.from(
+        '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+          paragraphs.map((p) => `<w:p><w:r><w:t>${p}</w:t></w:r></w:p>`).join('') +
+          '</w:body></w:document>',
+      ),
+    );
+    return zip.toBuffer();
+  };
+
+  const pptx = (slides: string[][]): Buffer => {
+    const zip = new AdmZip();
+    zip.addFile('[Content_Types].xml', Buffer.from('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'));
+    slides.forEach((paragraphs, i) => {
+      zip.addFile(
+        `ppt/slides/slide${i + 1}.xml`,
+        Buffer.from(
+          '<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:txBody>' +
+            paragraphs.map((p) => `<a:p><a:r><a:t>${p}</a:t></a:r></a:p>`).join('') +
+            '</p:txBody></p:sld>',
+        ),
+      );
+    });
+    return zip.toBuffer();
+  };
+
+  /** Minimal valid one-page PDF with `text` as its text layer. */
+  const pdf = (text: string): Buffer => {
+    const stream = `BT /F1 12 Tf 72 720 Td (${text}) Tj ET`;
+    const objects = [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+      `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    ];
+    let out = '%PDF-1.4\n';
+    const offsets: number[] = [];
+    for (let i = 0; i < objects.length; i++) {
+      offsets.push(out.length);
+      out += `${i + 1} 0 obj\n${objects[i]}\nendobj\n`;
+    }
+    const xrefStart = out.length;
+    out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    for (const off of offsets) out += `${String(off).padStart(10, '0')} 00000 n \n`;
+    out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
+    return Buffer.from(out, 'latin1');
+  };
+
+  /** Minimal ODF package: a zip with a `content.xml` carrying `body` under `<office:body>`. */
+  const odf = (body: string): Buffer => {
+    const zip = new AdmZip();
+    zip.addFile(
+      'content.xml',
+      Buffer.from(
+        '<?xml version="1.0"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" ' +
+          'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" ' +
+          'xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0">' +
+          `<office:body>${body}</office:body></office:document-content>`,
+      ),
+    );
+    return zip.toBuffer();
+  };
+
+  const odt = (...paragraphs: string[]): Buffer =>
+    odf(`<office:text>${paragraphs.map((p) => `<text:p>${p}</text:p>`).join('')}</office:text>`);
+
+  const odp = (slides: string[][]): Buffer =>
+    odf(
+      '<office:presentation>' +
+        slides
+          .map(
+            (paragraphs) =>
+              `<draw:page><draw:frame><draw:text-box>${paragraphs.map((p) => `<text:p>${p}</text:p>`).join('')}</draw:text-box></draw:frame></draw:page>`,
+          )
+          .join('') +
+        '</office:presentation>',
+    );
+
+  const ods = (name: string, rows: string[][]): Buffer =>
+    odf(
+      `<office:spreadsheet><table:table table:name="${name}">` +
+        rows
+          .map((cells) => `<table:table-row>${cells.map((c) => `<table:table-cell><text:p>${c}</text:p></table:table-cell>`).join('')}</table:table-row>`)
+          .join('') +
+        '</table:table></office:spreadsheet>',
+    );
+
+  const readContent = async (base: string, path: string, extra: Record<string, unknown> = {}): Promise<string> => {
+    const res = (await (await post(`${base}/api/agent/tools/read_file`, { path, ...extra })).json()) as { content: string };
+    return res.content;
+  };
+
+  it('read_file returns marker + extracted text for a docx', async () => {
+    const base = await start();
+    await fs.writeFile('report.docx', docx('Hello from Word', 'Second paragraph'));
+    const content = await readContent(base, 'report.docx');
+    const lines = content.split('\n');
+    expect(lines[0]).toMatch(/^\[extracted text of report\.docx — 2 paragraphs;/);
+    expect(lines[0]).toContain('layout, images and formatting omitted');
+    expect(lines.slice(1)).toEqual(['Hello from Word', 'Second paragraph']);
+  });
+
+  it('read_file slices offset/limit AFTER assembling marker + text (unchanged semantics)', async () => {
+    const base = await start();
+    await fs.writeFile('report.docx', docx('Sliceable content here'));
+    const full = await readContent(base, 'report.docx');
+    const sliced = await readContent(base, 'report.docx', { offset: 5, limit: 12 });
+    expect(sliced).toBe(full.slice(5, 17));
+  });
+
+  it('read_file returns [page N] text for a PDF', async () => {
+    const base = await start();
+    await fs.writeFile('paper.pdf', pdf('Findings inside a PDF'));
+    const content = await readContent(base, 'paper.pdf');
+    expect(content).toMatch(/^\[extracted text of paper\.pdf — 1 page;/);
+    expect(content).toContain('[page 1]\nFindings inside a PDF');
+  });
+
+  it('grep finds a term inside a pptx, with the [slide N] marker line locating it', async () => {
+    const base = await start();
+    await fs.writeFile('deck.pptx', pptx([['Intro'], ['Roadmap 2026', 'Ship documents']]));
+    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'Roadmap' })).json()) as {
+      matches: { path: string; line: number; text: string }[];
+      note?: string;
+    };
+    expect(res.matches).toContainEqual(expect.objectContaining({ path: 'deck.pptx', text: 'Roadmap 2026' }));
+    // The extraction reads: marker line 1, [slide 1] line 2, Intro line 3,
+    // [slide 2] line 4, Roadmap line 5 — grep reports the extraction's numbers.
+    expect(res.matches.find((m) => m.text === 'Roadmap 2026')?.line).toBe(5);
+    // The structure markers themselves are searchable.
+    const markers = (await (await post(`${base}/api/agent/tools/grep`, { pattern: '\\[slide 2\\]' })).json()) as { matches: { path: string }[] };
+    expect(markers.matches).toContainEqual(expect.objectContaining({ path: 'deck.pptx' }));
+    expect(res.note).toBeUndefined();
+  });
+
+  it('grep extracts at most 20 uncached documents per call and notes the skipped rest; a re-run covers them', async () => {
+    const base = await start();
+    for (let i = 0; i < 22; i++) {
+      // Distinct content per file — identical bytes would share one cache entry
+      // and the walk would extract only once.
+      await fs.writeFile(`docs/f${String(i).padStart(2, '0')}.docx`, docx(`needle-${i} unique body ${i}`));
+    }
+    const first = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle-' })).json()) as {
+      matches: unknown[];
+      note?: string;
+    };
+    expect(first.matches).toHaveLength(20);
+    expect(first.note).toContain('2 document(s) (office/PDF/email files) were not searched');
+    // Second run: 20 are cached (free), budget covers the remaining 2.
+    const second = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle-' })).json()) as {
+      matches: unknown[];
+      note?: string;
+    };
+    expect(second.matches).toHaveLength(22);
+    expect(second.note).toBeUndefined();
+  });
+
+  it('read_file returns marker + extracted text for the three OpenDocument formats', async () => {
+    const base = await start();
+    await fs.writeFile('memo.odt', odt('Hello from Writer', 'Second paragraph'));
+    const odtContent = await readContent(base, 'memo.odt');
+    expect(odtContent.split('\n')).toEqual([
+      '[extracted text of memo.odt — 2 paragraphs; layout, images and formatting omitted]',
+      'Hello from Writer',
+      'Second paragraph',
+    ]);
+
+    await fs.writeFile('deck.odp', odp([['Impress intro'], ['Second page']]));
+    const odpContent = await readContent(base, 'deck.odp');
+    expect(odpContent).toMatch(/^\[extracted text of deck\.odp — 2 slides;/);
+    expect(odpContent).toContain('[slide 1]\nImpress intro\n[slide 2]\nSecond page');
+
+    await fs.writeFile('numbers.ods', ods('Inventory', [['Name', 'Qty'], ['Widget', '3']]));
+    const odsContent = await readContent(base, 'numbers.ods');
+    expect(odsContent).toMatch(/^\[extracted text of numbers\.ods — 1 sheet, rows as tab-separated values;/);
+    expect(odsContent).toContain('[sheet: Inventory]\nName\tQty\nWidget\t3');
+  });
+
+  it('grep finds a term inside an odp, with the [slide N] marker line locating it', async () => {
+    const base = await start();
+    await fs.writeFile('deck.odp', odp([['Intro'], ['Roadmap 2027', 'Ship OpenDocument']]));
+    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'Roadmap' })).json()) as {
+      matches: { path: string; line: number; text: string }[];
+    };
+    // Extraction: marker line 1, [slide 1] 2, Intro 3, [slide 2] 4, Roadmap 5.
+    expect(res.matches).toContainEqual(expect.objectContaining({ path: 'deck.odp', text: 'Roadmap 2027', line: 5 }));
+    const markers = (await (await post(`${base}/api/agent/tools/grep`, { pattern: '\\[slide 2\\]' })).json()) as { matches: { path: string }[] };
+    expect(markers.matches).toContainEqual(expect.objectContaining({ path: 'deck.odp' }));
+  });
+
+  it('read_file answers a corrupt odt zip with an honest could-not-parse message (no 500)', async () => {
+    const base = await start();
+    await fs.writeFile('broken.odt', Buffer.from('not really a zip'));
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'broken.odt' });
+    expect(res.status).toBe(200);
+    const { content } = (await res.json()) as { content: string };
+    expect(content).toContain('could not be parsed as a .odt');
+    expect(content).toContain('uploading a new version');
+  });
+
+  // Hand-written MIME — the email fixtures need no builder library.
+  const eml = (subject: string, body: string): Buffer =>
+    Buffer.from(
+      [
+        'From: Ada Lovelace <ada@example.com>',
+        'To: bob@example.com',
+        `Subject: ${subject}`,
+        'Date: Mon, 5 Jan 2026 10:00:00 +0000',
+        'Content-Type: text/plain; charset=utf-8',
+        '',
+        body,
+      ].join('\r\n'),
+    );
+
+  it('read_file returns marker + [from]/[subject] header block + body for a .eml email', async () => {
+    const base = await start();
+    await fs.writeFile('Inbox/offer.eml', eml('Quarterly numbers', 'Please see the summary.'));
+    const content = await readContent(base, 'Inbox/offer.eml');
+    expect(content.split('\n')).toEqual([
+      '[extracted text of Inbox/offer.eml — email message; formatting and full headers omitted]',
+      '[from] Ada Lovelace <ada@example.com>',
+      '[to] bob@example.com',
+      '[subject] Quarterly numbers',
+      '[date] 2026-01-05T10:00:00.000Z',
+      '',
+      'Please see the summary.',
+    ]);
+  });
+
+  it('grep finds a term inside a .eml, with the [subject] header line itself searchable', async () => {
+    const base = await start();
+    await fs.writeFile('Inbox/offer.eml', eml('Quarterly numbers', 'The needle-2026 is in the body.'));
+    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle-2026' })).json()) as {
+      matches: { path: string; line: number; text: string }[];
+    };
+    // Extraction: marker 1, [from] 2, [to] 3, [subject] 4, [date] 5, blank 6, body 7.
+    expect(res.matches).toContainEqual(
+      expect.objectContaining({ path: 'Inbox/offer.eml', text: 'The needle-2026 is in the body.', line: 7 }),
+    );
+    const header = (await (await post(`${base}/api/agent/tools/grep`, { pattern: '\\[subject\\] Quarterly' })).json()) as {
+      matches: { path: string; line: number }[];
+    };
+    expect(header.matches).toContainEqual(expect.objectContaining({ path: 'Inbox/offer.eml', line: 4 }));
+  });
+
+  it('write_file / edit_file refuse email files with the snapshot explanation', async () => {
+    const base = await start();
+    await fs.writeFile('Inbox/offer.eml', eml('original', 'original body'));
+    for (const [tool, body] of [
+      ['write_file', { path: 'Inbox/offer.eml', content: 'rewritten' }],
+      ['write_file', { path: 'Inbox/new-thread.msg', content: 'plain text' }],
+      ['edit_file', { path: 'Inbox/offer.eml', old_string: 'original', new_string: 'changed' }],
+    ] as const) {
+      const res = await post(`${base}/api/agent/tools/${tool}`, body);
+      expect(res.status, tool).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error, tool).toContain('email file');
+      expect(error, tool).toContain('snapshot');
+      expect(error, tool).toContain('uploading a new version');
+    }
+    // The email is untouched: reading it still extracts the original text.
+    expect(await readContent(base, 'Inbox/offer.eml')).toContain('original body');
+  });
+
+  it('read_file answers a corrupt .msg with an honest could-not-parse message (no 500)', async () => {
+    const base = await start();
+    await fs.writeFile('Inbox/broken.msg', Buffer.from('not a CFB container'));
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'Inbox/broken.msg' });
+    expect(res.status).toBe(200);
+    const { content } = (await res.json()) as { content: string };
+    expect(content).toContain('could not be parsed as a .msg');
+    expect(content).toContain('uploading a new version');
+  });
+
+  it('read_file answers a corrupt docx with an honest could-not-parse message (no 500)', async () => {
+    const base = await start();
+    await fs.writeFile('broken.docx', Buffer.from('not really a zip'));
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'broken.docx' });
+    expect(res.status).toBe(200);
+    const { content } = (await res.json()) as { content: string };
+    expect(content).toContain('could not be parsed as a .docx');
+    expect(content).toContain('uploading a new version');
+  });
+
+  it('read_file answers a legacy .doc with the convert-to-modern hint', async () => {
+    const base = await start();
+    await fs.writeFile('old.doc', Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0x00, 0x01, 0x02]));
+    const content = await readContent(base, 'old.doc');
+    expect(content).toContain('legacy office format');
+    expect(content).toContain('.docx');
+  });
+
+  it('edit_file / write_file refuse a legacy .doc with the convert-or-replace message — a binary the reader cannot extract must never be text-overwritten', async () => {
+    const base = await start();
+    await fs.writeFile('old.doc', Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0x00, 0x01, 0x02]));
+    for (const [tool, body] of [
+      ['edit_file', { path: 'old.doc', old_string: 'a', new_string: 'b' }],
+      ['write_file', { path: 'old.doc', content: 'plain text' }],
+    ] as const) {
+      const res = await post(`${base}/api/agent/tools/${tool}`, body);
+      expect(res.status, tool).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error, tool).toContain('legacy binary office format');
+      expect(error, tool).toContain('.docx');
+      expect(error, tool).toContain('uploading a new version');
+    }
+  });
+
+  it('write_file / edit_file refuse to overwrite BINARY content under any extension', async () => {
+    // read_file answers a NUL-bearing file with a notice instead of its bytes.
+    // A write gate that only asked about the EXTENSION let an agent overwrite
+    // exactly those bytes — destroying a file it was never allowed to see.
+    const base = await start();
+    await fs.writeFile('blob.dat', Buffer.from([0x00, 0x01, 0x02, 0x03, 0xff]));
+    for (const [tool, body] of [
+      ['write_file', { path: 'blob.dat', content: 'plain text' }],
+      ['edit_file', { path: 'blob.dat', old_string: 'a', new_string: 'b' }],
+    ] as const) {
+      const res = await post(`${base}/api/agent/tools/${tool}`, body);
+      expect(res.status, tool).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error, tool).toContain('binary content');
+      expect(error, tool).toContain('uploading a new version');
+    }
+    // …and a TEXT file under the same fallback reader still writes normally.
+    const ok = await post(`${base}/api/agent/tools/write_file`, { path: 'notes.dat', content: 'hello' });
+    expect(ok.status).toBe(200);
+  });
+
+  it('read_file answers other binary files with a one-line notice (zip names the unzip tool)', async () => {
+    const base = await start();
+    // .mp3, not an image: images return native MCP image content (see below).
+    await fs.writeFile('song.mp3', Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]));
+    const mp3 = await readContent(base, 'song.mp3');
+    expect(mp3).toBe('[song.mp3 is a binary file (audio/mpeg, 9 bytes) — not readable as text.]');
+    await fs.writeFile('bundle.zip', Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00]));
+    const zip = await readContent(base, 'bundle.zip');
+    expect(zip).toContain('application/zip');
+    expect(zip).toContain('unzip tool');
+  });
+
+  it('write_file / edit_file / write_files refuse document extensions with the round-trip explanation', async () => {
+    const base = await start();
+    await fs.writeFile('deck.pptx', pptx([['Original']]));
+    for (const [tool, body] of [
+      ['write_file', { path: 'new.docx', content: 'plain text' }],
+      ['write_file', { path: 'new.odt', content: 'plain text' }],
+      ['write_file', { path: 'slides.odp', content: 'plain text' }],
+      ['edit_file', { path: 'deck.pptx', old_string: 'Original', new_string: 'Changed' }],
+      ['edit_file', { path: 'numbers.ods', old_string: 'a', new_string: 'b' }],
+      ['write_files', { files: [{ path: 'ok.md', content: 'fine' }, { path: 'sheet.xlsx', content: 'nope' }] }],
+      ['write_files', { files: [{ path: 'ok.md', content: 'fine' }, { path: 'sheet.ods', content: 'nope' }] }],
+    ] as const) {
+      const res = await post(`${base}/api/agent/tools/${tool}`, body);
+      expect(res.status, tool).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error, tool).toContain('EXTRACTED text');
+      expect(error, tool).toContain('uploading a new version');
+    }
+    // The batch was refused atomically — the innocent .md was not written either.
+    expect((await post(`${base}/api/agent/tools/read_file`, { path: 'ok.md' })).status).not.toBe(200);
+    // And the pptx is untouched: reading it still extracts the original text.
+    expect(await readContent(base, 'deck.pptx')).toContain('Original');
+  });
+
+  it('the write tools DESCRIBE every refused family — modern, legacy binary, and the upload path — so agents learn before the call', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const name of ['write_file', 'write_files', 'edit_file']) {
+      const def = tools.find((t) => t.name === name);
+      expect(def, name).toBeDefined();
+      // Modern extractable formats…
+      expect(def!.description, name).toContain('.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf');
+      // …email files (extractions too, so the same refusal applies)…
+      expect(def!.description, name).toContain('.eml/.msg');
+      // …the legacy binary family the refusal also covers…
+      expect(def!.description, name).toContain('.doc/.ppt/.xls');
+      // …and the replace-by-upload way out.
+      expect(def!.description, name).toContain('uploading a new version');
+    }
+  });
+});
+
+/**
+ * Image reads: `read_file` on an image returns the `McpImageResult` sentinel
+ * (base64 + mimeType + self-describing note) that the MCP result shaping turns
+ * into a native image content block — never raw bytes and never the binary
+ * notice. Real fixtures: a genuine 1×1 PNG and 1×1 GIF.
+ */
+describe('images', () => {
+  /** A real, complete 1×1 transparent PNG. */
+  const PNG_1X1 = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  /** A real, complete 1×1 GIF89a. */
+  const GIF_1X1 = Buffer.from('R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==', 'base64');
+
+  interface ImageSentinel {
+    kind: string;
+    data: string;
+    mimeType: string;
+    note: string;
+  }
+
+  it('read_file on a png returns the image sentinel with base64, mimeType and a note naming path + dimensions + size', async () => {
+    const base = await start();
+    await fs.writeFile('logo.png', PNG_1X1);
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'logo.png' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ImageSentinel;
+    expect(body.kind).toBe('bevel/mcp-image@v1');
+    expect(body.mimeType).toBe('image/png');
+    expect(body.data).toBe(PNG_1X1.toString('base64'));
+    expect(body.note).toContain('logo.png');
+    expect(body.note).toContain('image/png');
+    expect(body.note).toContain(`${PNG_1X1.length} bytes`);
+    expect(body.note).toContain('1×1 px');
+  });
+
+  it('read_file passes a gif through whole under the same cap (first frame is the client’s concern)', async () => {
+    const base = await start();
+    await fs.writeFile('anim.gif', GIF_1X1);
+    const body = (await (await post(`${base}/api/agent/tools/read_file`, { path: 'anim.gif' })).json()) as ImageSentinel;
+    expect(body.kind).toBe('bevel/mcp-image@v1');
+    expect(body.mimeType).toBe('image/gif');
+    expect(body.data).toBe(GIF_1X1.toString('base64'));
+    expect(body.note).toContain('1×1 px');
+  });
+
+  it('read_file maps .jpg/.jpeg to image/jpeg (dimensions omitted when the header has none to give)', async () => {
+    const base = await start();
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]); // SOI + EOI, no frame header
+    await fs.writeFile('photo.jpg', bytes);
+    const body = (await (await post(`${base}/api/agent/tools/read_file`, { path: 'photo.jpg' })).json()) as ImageSentinel;
+    expect(body.mimeType).toBe('image/jpeg');
+    expect(body.data).toBe(bytes.toString('base64'));
+    expect(body.note).toBe(`[image: photo.jpg — image/jpeg, ${bytes.length} bytes]`);
+  });
+
+  it('read_file refuses an image over 3.5 MiB raw with the downscale message, not a sentinel', async () => {
+    const base = await start();
+    // 3,670,016 is the cap; one byte over must refuse. PNG magic + zero fill.
+    const big = Buffer.alloc(3_670_017);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(big);
+    await fs.writeFile('huge.png', big);
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: 'huge.png' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { path: string; content: string };
+    expect(body.path).toBe('huge.png');
+    expect(body.content).toContain('too large to return over MCP');
+    expect(body.content).toContain('3670016 bytes');
+    expect(body.content).toContain('Downscale');
+    expect(body.content).not.toContain(big.toString('base64').slice(0, 40));
+  });
+
+  it('read_file keeps .svg on the TEXT path — it is markup, not an image block', async () => {
+    const base = await start();
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>';
+    await fs.writeFile('icon.svg', svg);
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: 'icon.svg' })).json()).toEqual({
+      path: 'icon.svg',
+      content: svg,
+    });
+  });
+
+  it('read_file on an image still honors the read gate (403 before any bytes are returned)', async () => {
+    const base = await start('write', denyReads(new Set(['Knowledge/Secret.png'])));
+    await fs.writeFile(`${KB_DIR}/Knowledge/Secret.png`, PNG_1X1);
+    const res = await post(`${base}/api/agent/tools/read_file`, { path: `${KB_DIR}/Knowledge/Secret.png` });
+    expect(res.status).toBe(403);
+  });
+});
+
+/**
  * start_session must mint a REAL chat thread and return its id (not a bare
  * random UUID), so the same id works for KB reads AND for `ask` (whose
  * sessionId IS a chat thread). This is what unifies the ontology boundary
@@ -458,7 +955,7 @@ describe('start_session', () => {
     const router = express.Router();
     registerWorkspaceTools(
       registry, router, auth, toolHandler,
-      new SpillStore(join(tmpdir(), 'bevel-test-spills')), allowAll, KB_DIR,
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, KB_DIR,
       { service: {} as never, enabled: false, kbDirName: KB_DIR, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
       new RoutineWritePolicyService(),
       fakeSessionSink,
@@ -522,6 +1019,7 @@ describe('branch is a required parameter in the tool contract', () => {
       noopAuth,
       toolHandler,
       new SpillStore(join(tmpdir(), 'bevel-test-spills')),
+      new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')),
       allowAll,
       KB_DIR,
       { service: {} as never, enabled: false, kbDirName: KB_DIR, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },

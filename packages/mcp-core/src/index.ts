@@ -38,6 +38,11 @@ export {
   renderProgress,
   toolError,
   needsAuthorizationResult,
+  MCP_IMAGE_RESULT_KIND,
+  type McpImageResult,
+  mcpImageResult,
+  isMcpImageResult,
+  omitImagePayloads,
 } from './results.js';
 
 export {

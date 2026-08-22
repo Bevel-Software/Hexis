@@ -31,7 +31,7 @@ import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequ
 import { PR_STALE_EVENT } from '../../../core/events';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useFileNav } from '../routing/kb-routes';
-import { authFetch } from '../../../lib/api';
+import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
 import { MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
 import { useDismissableMenu } from '../../../shared/components';
@@ -453,21 +453,13 @@ function FileTreeNode({
       : `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(entry.relativePath)}&download=1`;
     const savedAs = isFolder ? `${entry.name}.zip` : entry.name;
     try {
-      const res = await authFetch(url);
-      if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        alert(`Failed to download ${entry.name} (HTTP ${res.status})${body ? `: ${body}` : ''}`);
+      const outcome = await downloadViaBlob(url, savedAs);
+      if (!outcome.ok) {
+        alert(
+          `Failed to download ${entry.name} (HTTP ${outcome.status})${outcome.body ? `: ${outcome.body}` : ''}`,
+        );
         return;
       }
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = savedAs;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(blobUrl);
     } catch (err) {
       console.error('Failed to download:', err);
       const msg = err instanceof Error ? err.message : String(err);

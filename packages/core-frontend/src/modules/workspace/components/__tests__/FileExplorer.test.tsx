@@ -403,7 +403,9 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
     expect(url).toContain('path=brief.md');
     expect(url).toContain('download=1');
     expect(createObjectURL).toHaveBeenCalled();
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:fake-url');
+    // The revoke is DEFERRED a tick (setTimeout 0) so the click's download
+    // starts before the blob URL dies — hence waitFor, not a sync assert.
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith('blob:fake-url'));
   });
 
   it('calls /folder/zip?download=1 and triggers a <folder>.zip save when clicking Download as zip on a folder', async () => {

@@ -1,6 +1,6 @@
 {
   "name": "@bevel-software/platform-core-backend",
-  "version": "0.11.2",
+  "version": "0.12.0",
   "description": "Open-source core backend of the Bevel platform: git-backed knowledge workspace, workflow (branches/change requests/locks/SSE), skills, tools, secrets vault, access control and the remote MCP surface.",
   "type": "module",
   "main": "./dist/index.js",
@@ -26,7 +26,7 @@
     "THIRD-PARTY-NOTICES.md"
   ],
   "engines": {
-    "node": ">=22 <23"
+    "node": ">=22.13 <23"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -38,6 +38,7 @@
   "dependencies": {
     "@bevel-software/platform-mcp-core": "workspace:*",
     "@bevel-software/platform-shared": "workspace:*",
+    "@kenjiuno/msgreader": "^1.28.0",
     "@mastra/core": "1.35.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@utcp/code-mode": "^1.2.12",
@@ -50,9 +51,13 @@
     "dotenv": "^16.4.0",
     "drizzle-orm": "^0.45.2",
     "express": "^5.1.0",
+    "htmlparser2": "^12.0.0",
     "ignore": "^7.0.5",
     "jsonwebtoken": "^9.0.3",
+    "pdfjs-dist": "^5.4.624",
     "pg": "^8.20.0",
+    "postal-mime": "^3.0.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "yaml": "^2.9.0",
     "zod": "^3.24.0"
   },

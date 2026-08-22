@@ -15,7 +15,7 @@
     "ds:baseline": "node scripts/design-system-ratchet.mjs --update"
   },
   "engines": {
-    "node": ">=22 <23"
+    "node": ">=22.13 <23"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.1",
