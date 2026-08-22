@@ -96,15 +96,20 @@ describe('EmailRenderer', () => {
     expect(screen.getByText('Subject')).toBeInTheDocument();
     expect(screen.getByText('Quarterly numbers')).toBeInTheDocument();
     expect(screen.getByText('2026-01-05T10:00:00.000Z')).toBeInTheDocument();
-    // The HTML body arrives as STRIPPED TEXT — tags gone, nothing injected.
-    expect(screen.getByText('Please see attached.')).toBeInTheDocument();
+    // CHANGED: a message carrying an HTML alternative now RENDERS it, the way a
+    // mail client does — in a frame that cannot run scripts or fetch anything.
+    const frame = screen.getByTitle('Message body') as HTMLIFrameElement;
+    expect(frame.getAttribute('sandbox')).toBe('');
+    expect(frame.srcdoc).toContain('Please see');
+    expect(frame.srcdoc).toContain("default-src 'none'");
+    expect(frame.srcdoc).toContain('img-src data:');
     expect(document.querySelector('b')).toBeNull();
     expect(document.querySelector('script')).toBeNull();
     // Attachments: named, and honestly not downloadable one by one.
     expect(screen.getByText('report.pdf (application/pdf, 8 bytes)')).toBeInTheDocument();
     expect(screen.getByText(/listed by name only/)).toBeInTheDocument();
     // The honest strip + the way to the real thing.
-    expect(screen.getByText(/Text view of the email/)).toBeInTheDocument();
+    expect(screen.getByText(/shown without remote content/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
   });
 

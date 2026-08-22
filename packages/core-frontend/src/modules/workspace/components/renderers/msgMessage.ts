@@ -2,8 +2,11 @@ import * as XLSX from 'xlsx';
 import {
   MAX_EMAIL_BYTES,
   htmlToEmailText,
+  inlineBudgeted,
+  isInlineImagePart,
   isoDate,
   mailboxText,
+  referencedContentIds,
   type EmailAttachmentView,
   type EmailBodySource,
   type EmailMessageView,
@@ -88,17 +91,28 @@ export function parseMsgMessage(bytes: ArrayBuffer): EmailMessageView {
     subject: stringProp(streams, '', '0037'),
     date: messageDate(streams.get('__properties_version1.0')),
     body,
+    bodyHtml: html,
     bodySource,
-    attachments: storageDirs(streams, '__attach_version1.0_#').map(
-      (dir): EmailAttachmentView => ({
-        name:
-          stringProp(streams, dir, '3707') ??
-          stringProp(streams, dir, '3704') ??
-          stringProp(streams, dir, '3001') ??
-          'unnamed attachment',
-        mimeType: stringProp(streams, dir, '370E'),
-        sizeBytes: streams.get(`${dir}__substg1.0_37010102`)?.byteLength,
+    attachments: inlineBudgeted(
+      storageDirs(streams, '__attach_version1.0_#').map((dir): EmailAttachmentView => {
+        const content = streams.get(`${dir}__substg1.0_37010102`);
+        const mimeType = stringProp(streams, dir, '370E');
+        // PidTagAttachContentId (0x3712) — what an HTML body's `cid:` names.
+        const contentId = stringProp(streams, dir, '3712')?.replace(/^<|>$/g, '');
+        return {
+          name:
+            stringProp(streams, dir, '3707') ??
+            stringProp(streams, dir, '3704') ??
+            stringProp(streams, dir, '3001') ??
+            'unnamed attachment',
+          mimeType,
+          sizeBytes: content?.byteLength,
+          contentId,
+          bytes:
+            content && isInlineImagePart(mimeType, contentId, content.byteLength) ? content : undefined,
+        };
       }),
+      referencedContentIds(html),
     ),
   };
 }

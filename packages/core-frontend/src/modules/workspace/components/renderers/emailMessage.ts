@@ -4,9 +4,12 @@ import { Parser } from 'htmlparser2';
  * The shared view model + text helpers for the email viewer (`EmailRenderer`),
  * the browser twin of the backend's `email-text.ts` — the same honest story
  * agents get through `read_file`: headers as labelled fields, the body as
- * PLAIN TEXT (the text part preferred, an HTML-only body stripped to text —
- * nothing from an email is ever rendered as HTML), attachments listed by
- * name. Parsers: `emlMessage.ts` (postal-mime) and `msgMessage.ts` (CFB via
+ * text (`body` — the text part preferred, an HTML body stripped to text) plus
+ * the sender's own HTML when there is one (`bodyHtml`), attachments listed by
+ * name. `body` is what an agent reads through `read_file`; the viewer renders
+ * `bodyHtml` in a sandbox that can neither run a script nor fetch a byte (see
+ * `emailBody.ts`), so a human sees the message and an agent reads the same
+ * message, without either being handed live markup. Parsers: `emlMessage.ts` (postal-mime) and `msgMessage.ts` (CFB via
  * SheetJS) fill this model; the renderer never sees a format.
  */
 
@@ -14,6 +17,82 @@ export interface EmailAttachmentView {
   name: string;
   mimeType?: string;
   sizeBytes?: number;
+  /**
+   * The attachment's Content-ID with its angle brackets removed, when the
+   * message gave it one. An HTML body references such a part as `cid:<id>`,
+   * which is how a sender embeds a picture IN the message rather than linking
+   * to one on their server.
+   */
+  contentId?: string;
+  /**
+   * Raw bytes — retained ONLY for a part small enough to inline and referenced
+   * by Content-ID, because that is the only thing the viewer renders from
+   * bytes. An ordinary 40 MB attachment is described, never held.
+   */
+  bytes?: Uint8Array;
+}
+
+/** Bounds on what may be held in memory for inline rendering. */
+export const MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024;
+export const MAX_INLINE_IMAGE_TOTAL_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Should this part's bytes be kept for inline rendering? Only a Content-ID'd
+ * image within bounds: everything else is listed by name and nothing more.
+ */
+export function isInlineImagePart(mimeType: string | undefined, contentId: string | undefined, size: number): boolean {
+  return (
+    contentId !== undefined &&
+    contentId !== '' &&
+    (mimeType ?? '').toLowerCase().startsWith('image/') &&
+    size > 0 &&
+    size <= MAX_INLINE_IMAGE_BYTES
+  );
+}
+
+/** The Content-IDs an HTML body actually references as `cid:…`, lowercased. */
+export function referencedContentIds(html: string | undefined): Set<string> {
+  const out = new Set<string>();
+  if (html === undefined) return out;
+  // The delimiter before `cid:` is a quote or `(` (url(...)), then optional
+  // whitespace. Both escapes matter: written unescaped, `\s` is a literal `s`
+  // — the class stops excluding whitespace and starts excluding the LETTER,
+  // truncating `photos@x` to `photo` and failing outright on an id that starts
+  // with one.
+  for (const m of html.matchAll(/["'(]\s*cid:([^"')\s>]+)/gi)) {
+    out.add(m[1].replace(/^<|>$/g, '').toLowerCase());
+  }
+  return out;
+}
+
+/**
+ * Drop retained bytes past the aggregate inline budget. Shared by both parsers
+ * so the rule cannot drift between `.eml` and `.msg`.
+ *
+ * Parts the body REFERENCES are considered first, whatever their order in the
+ * file: a message may carry inline images it never shows, and spending the
+ * budget on those in document order left the picture the reader was actually
+ * meant to see undrawn while an unreferenced one sat in memory.
+ */
+export function inlineBudgeted(
+  parts: EmailAttachmentView[],
+  referenced: Set<string>,
+): EmailAttachmentView[] {
+  const order = parts
+    .map((part, index) => ({ index, shown: referenced.has((part.contentId ?? '').toLowerCase()) }))
+    .sort((a, b) => Number(b.shown) - Number(a.shown) || a.index - b.index);
+  const keep = new Set<number>();
+  let held = 0;
+  for (const { index } of order) {
+    const bytes = parts[index].bytes;
+    if (bytes === undefined) continue;
+    if (held + bytes.byteLength > MAX_INLINE_IMAGE_TOTAL_BYTES) continue;
+    held += bytes.byteLength;
+    keep.add(index);
+  }
+  return parts.map((part, index) =>
+    part.bytes !== undefined && !keep.has(index) ? { ...part, bytes: undefined } : part,
+  );
 }
 
 /** Where the body text came from — drives the honest notes in the viewer. */
@@ -29,6 +108,12 @@ export interface EmailMessageView {
   date?: string;
   /** Plain-text body ('' when there is none, or it exists only as RTF). */
   body: string;
+  /**
+   * The HTML body as the sender wrote it, when there is one. The viewer
+   * renders this in a sandbox; `body` remains the text an agent reads, so the
+   * two surfaces never disagree about what the message SAYS.
+   */
+  bodyHtml?: string;
   bodySource: EmailBodySource;
   attachments: EmailAttachmentView[];
 }

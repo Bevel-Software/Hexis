@@ -3,7 +3,10 @@ import type { Address, Email } from 'postal-mime';
 import {
   MAX_EMAIL_BYTES,
   htmlToEmailText,
+  inlineBudgeted,
+  isInlineImagePart,
   isoDate,
+  referencedContentIds,
   type EmailAttachmentView,
   type EmailMessageView,
 } from './emailMessage';
@@ -53,14 +56,23 @@ export async function parseEmlMessage(bytes: ArrayBuffer): Promise<EmailMessageV
     subject: email.subject,
     date: email.date !== undefined ? isoDate(email.date) : undefined,
     body: body.replace(/\s+$/, ''),
+    bodyHtml: html,
     bodySource: text !== undefined ? 'text' : html !== undefined ? 'html' : 'none',
-    attachments: email.attachments.map(
-      (a): EmailAttachmentView => ({
-        name: a.filename ?? 'unnamed attachment',
-        mimeType: a.mimeType,
-        sizeBytes:
-          typeof a.content === 'string' ? new TextEncoder().encode(a.content).byteLength : a.content.byteLength,
+    attachments: inlineBudgeted(
+      email.attachments.map((a): EmailAttachmentView => {
+        const bytes =
+          typeof a.content === 'string' ? new TextEncoder().encode(a.content) : new Uint8Array(a.content);
+        // postal-mime keeps the angle brackets: `<abc@host>`.
+        const contentId = a.contentId?.replace(/^<|>$/g, '');
+        return {
+          name: a.filename ?? 'unnamed attachment',
+          mimeType: a.mimeType,
+          sizeBytes: bytes.byteLength,
+          contentId,
+          bytes: isInlineImagePart(a.mimeType, contentId, bytes.byteLength) ? bytes : undefined,
+        };
       }),
+      referencedContentIds(html),
     ),
   };
 }
