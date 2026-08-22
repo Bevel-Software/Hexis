@@ -72,8 +72,11 @@ export async function readBodyCapped(
     if (sized !== null) {
       // Content-Length understated the body — a decoded transfer arrives
       // longer than the encoded length that was announced. What has landed so
-      // far becomes the first chunk and the rest accumulates behind it.
-      chunks.push(sized.subarray(0, offset));
+      // far becomes the first chunk and the rest accumulates behind it. Copied
+      // with `slice`, not viewed with `subarray`: a view would pin the whole
+      // preallocated buffer for as long as the chunk list lives, holding the
+      // declared length on top of the chunks and the merge it feeds.
+      chunks.push(sized.slice(0, offset));
       sized = null;
     }
     chunks.push(value);
