@@ -23,16 +23,20 @@ function signalUnreachable(): void {
  *
  * The signal is asked first because it is the only reliable witness:
  * `abort(reason)` rejects the fetch with THAT reason, which can be any value
- * and carries no marking of its own. The rejection is consulted only as a
- * fallback, for an abort whose signal never reached us; there it is matched by
- * `name` rather than `instanceof DOMException`, which does not hold across
- * realms.
+ * and carries no marking of its own. Only the signal the fetch actually ran on
+ * is asked — `init`'s wins where it has one, and a `Request` input's is used
+ * only otherwise — so a stale signal on a Request that `init` overrode cannot
+ * mask a real transport failure on the live one.
+ *
+ * The rejection is consulted as a fallback, for an abort whose signal never
+ * reached us; there it is matched by `name` rather than `instanceof
+ * DOMException`, which does not hold across realms.
  */
 function wasAborted(input: RequestInfo | URL, init: RequestInit | undefined, err: unknown): boolean {
-  if (init?.signal?.aborted) return true;
-  if (typeof input === 'object' && 'signal' in input && (input as Request).signal?.aborted) {
-    return true;
-  }
+  const requestSignal =
+    typeof input === 'object' && 'signal' in input ? (input as Request).signal : undefined;
+  const signal = init?.signal ?? requestSignal;
+  if (signal?.aborted) return true;
   return typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'AbortError';
 }
 

@@ -65,6 +65,20 @@ describe('authFetch transport-failure signalling', () => {
     expect(watcher.seen()).toBe(0);
   });
 
+  it('still signals unreachable when init overrides a Request that was already aborted', async () => {
+    // `fetch` uses init's signal and ignores the Request's when both are
+    // given, so a stale aborted signal on the Request must not mask a real
+    // transport failure on the live one.
+    const stale = new AbortController();
+    stale.abort();
+    const live = new AbortController();
+    const request = { signal: stale.signal } as unknown as Request;
+    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new TypeError('Failed to fetch'));
+
+    await expect(authFetch(request, { signal: live.signal })).rejects.toThrow('Failed to fetch');
+    expect(watcher.seen()).toBe(1);
+  });
+
   it('still signals unreachable when the connection genuinely fails', async () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new TypeError('Failed to fetch'));
 
