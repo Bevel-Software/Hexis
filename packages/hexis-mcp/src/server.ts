@@ -13,6 +13,10 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import '@utcp/http'; // side effect: registers the 'http' UTCP communication protocol
 import '@utcp/mcp'; // side effect: registers the 'mcp' protocol (the deployment + native MCP `.tool`s)
+// side effect: registers the 'cli' protocol. Unlike the hosted platform — which
+// registers the SERIALIZER only, so it can never run a shell command — this is
+// the runtime a shell `.tool` exists for, and here the executor is the point.
+import '@utcp/cli';
 import { UtcpClientConfigSerializer, type CallTemplate, type Tool as UtcpTool } from '@utcp/sdk';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
@@ -36,9 +40,15 @@ import {
   fetchAllManuals,
   fetchLocalOnlyManuals,
   resolveMcpUrl,
+  type LocalManualInfo,
 } from './deployment.js';
 import { materializePlugin, prepareStdioSpec, type StdioServerSpec } from './materialize.js';
 import { REMOTE_MANUAL_NAME, localManualTemplates, remoteManualTemplate } from './manuals.js';
+import {
+  bindLocalVariableResolver,
+  registerLocalVariableLoader,
+  localVariableLoaderConfig,
+} from './local-variables.js';
 import { closeRenewal } from './renewal.js';
 
 /** Reported on `initialize`; the version is stamped at build time by the package. */
@@ -51,22 +61,37 @@ const SERVER_NAME = 'hexis-mcp';
  * Bevel-hosted manuals — the inline `.tool` sub-manuals whose discovery URL has
  * `${API_URL}` as its origin — are seeded the deployment address and the
  * caller's key, by the same shared rule the hosted proxy uses, which refuses to
- * seed anything else. Every other placeholder falls through UTCP's last
- * resolution tier, `process.env`: a local-only tool's credentials come from the
- * MCP client config that launched this process, and nothing here can read the
- * deployment's Secrets Vault. That is a property, not a gap — a vault value
- * reaching a laptop would be a wider exposure than the tools it unlocks.
+ * seed anything else.
+ *
+ * Everything else falls through UTCP's later tiers, and there are now two.
+ * First the local-variable loader, which asks the deployment to resolve what a
+ * LOCAL manual's own `.tool` file declares — a tool that executes here needs
+ * its credentials here, and the alternative was every user hand-placing them
+ * on their own machine. It answers for local manuals only and never returns a
+ * value to a caller: what it resolves is substituted into a tool invocation and
+ * goes no further. Then `process.env`, unchanged, so an existing setup that
+ * provisions a local tool through the MCP client config keeps working.
+ *
+ * A remote manual's tools still execute on the deployment and resolve their
+ * credentials there. Nothing here can reach those — moving a server-side secret
+ * onto a laptop would be a wider exposure than the tools it unlocks.
  */
 async function buildClient(
   config: HexisMcpConfig,
   manuals: CallTemplate[],
+  localOnly: ReadonlyMap<string, LocalManualInfo>,
 ): Promise<CodeModeUtcpClient> {
   const variables = seedBevelHostedManualVars(
     manuals as unknown as { name?: unknown; url?: unknown }[],
     config.baseUrl,
     config.connectionKey,
   );
-  const clientConfig = new UtcpClientConfigSerializer().validateDict({ variables });
+  registerLocalVariableLoader();
+  bindLocalVariableResolver(config, localOnly);
+  const clientConfig = new UtcpClientConfigSerializer().validateDict({
+    variables,
+    load_variables_from: [localVariableLoaderConfig()],
+  });
   return CodeModeUtcpClient.create(process.cwd(), clientConfig);
 }
 
@@ -186,7 +211,7 @@ export function listedTools(tools: ProxiedTool[]): McpTool[] {
 async function prepareLocalManuals(
   config: HexisMcpConfig,
   templates: CallTemplate[],
-  localOnly: ReadonlyMap<string, string>,
+  localOnly: ReadonlyMap<string, LocalManualInfo>,
 ): Promise<CallTemplate[]> {
   const out: CallTemplate[] = [];
   const materialized = new Map<string, Awaited<ReturnType<typeof materializePlugin>>>();
@@ -201,7 +226,7 @@ async function prepareLocalManuals(
     }
     try {
       // `Plugins/<folder>/mcp.json` → the plugin to materialize.
-      const kbPath = localOnly.get(String(template.name)) ?? '';
+      const kbPath = localOnly.get(String(template.name))?.path ?? '';
       const folder = kbPath.split('/')[1];
       if (!folder) throw new Error(`cannot locate the plugin for "${String(template.name)}" (path "${kbPath}")`);
       let plugin = materialized.get(folder);
@@ -344,7 +369,7 @@ export async function createHexisMcpServer(
   const registeredKey = config.connectionKey;
   const remote = remoteManualTemplate(mcpUrl, registeredKey);
 
-  const client = await buildClient(config, [remote, ...local]);
+  const client = await buildClient(config, [remote, ...local], localOnly);
 
   // Declared BEFORE the fallible phase below, so the failure path can run the
   // very same teardown: from the moment the client exists, registrations spawn

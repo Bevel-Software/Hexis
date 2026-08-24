@@ -95,7 +95,7 @@ describe('a shell `.tool` in a workspace', () => {
   test('is listed to local consumers and withheld from remote ones', async () => {
     const svc = new ToolManualService(workspaceService, allowAll, KB_DIR);
     // `list_local_tools` names it, so the local server knows to materialize it.
-    expect(await svc.listLocalOnly('user@x.eu')).toEqual([{ name: 'git', path: 'Plugins/git.tool' }]);
+    expect(await svc.listLocalOnly('user@x.eu')).toEqual([{ slug: 'git', name: 'git', path: 'Plugins/git.tool' }]);
     // The hosted proxy's manual set excludes it entirely.
     expect((await svc.toManualCallTemplates('user@x.eu', { remoteOnly: true })).map((t) => t.name)).toEqual([]);
     expect((await svc.toManualCallTemplates('user@x.eu')).map((t) => t.name)).toEqual(['git']);

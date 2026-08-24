@@ -175,9 +175,9 @@ export class ToolManualService implements IToolManualService {
     };
   }
 
-  async listLocalOnly(userEmail: string): Promise<{ name: string; path: string }[]> {
+  async listLocalOnly(userEmail: string): Promise<{ slug: string; name: string; path: string }[]> {
     const manuals = await this.accessibleManuals(userEmail);
-    return manuals.filter((m) => m.remote === false).map((m) => ({ name: m.name, path: m.path }));
+    return manuals.filter((m) => m.remote === false).map((m) => ({ slug: m.slug, name: m.name, path: m.path }));
   }
 
   async userScopedKeysForManual(

@@ -224,8 +224,14 @@ export interface IToolManualService {
    * (the remote MCP proxy), LOCAL-ONLY manuals (`remote: false`) are excluded.
    */
   toManualCallTemplates(userEmail: string, opts?: { remoteOnly?: boolean }): Promise<CallTemplate[]>;
-  /** The `{ name, path }` of the caller's accessible LOCAL-ONLY (`remote: false`) manuals. */
-  listLocalOnly(userEmail: string): Promise<{ name: string; path: string }[]>;
+  /**
+   * The caller's accessible LOCAL-ONLY (`remote: false`) manuals.
+   *
+   * `slug` rides along with `name` and `path` because a local runtime needs
+   * both: `name` is the UTCP namespace its `${VAR}` refs are keyed by, and
+   * `slug` is what addresses the manual on the variable-resolution route.
+   */
+  listLocalOnly(userEmail: string): Promise<{ slug: string; name: string; path: string }[]>;
   /** The embedded UTCP manual for an inline `.tool` (served at `/api/tools/:slug/manual`). */
   resolveInlineManual(userEmail: string, slug: string): Promise<UtcpManualDict | null>;
   /** Validate a draft `.tool` file's content for the renderer preview. */
