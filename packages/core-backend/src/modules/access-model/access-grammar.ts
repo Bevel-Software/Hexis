@@ -138,8 +138,15 @@ export function isAccessMdPath(p: string): boolean {
  * the access-declarations scan and the shared `KbReferenceScanner` (which
  * must scan/rewrite the same set, or a rename strands a live `.tool`
  * frontmatter grant). `access.md` is covered by `.md`.
+ *
+ * `.tool`, `.pipeline` and `.agent` are whole-document YAML: the file IS one
+ * `---` fenced block, and its access verbs sit in it as ordinary keys beside
+ * the rest of the definition (`parseOwnAccessEntries` ignores every key that
+ * is not a verb). They are configuration rather than graph nodes — they live
+ * outside the typed ontologies — but they are exactly the files whose edits
+ * grant capability, so they need the same per-file governance as a node.
  */
-export const ACCESS_FRONTMATTER_EXTENSIONS = ['.md', '.tool'] as const;
+export const ACCESS_FRONTMATTER_EXTENSIONS = ['.md', '.tool', '.pipeline', '.agent'] as const;
 
 /** True when `p` is a file the resolver reads access frontmatter from. */
 export function hasAccessFrontmatterExtension(p: string): boolean {
