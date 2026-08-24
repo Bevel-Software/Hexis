@@ -11,6 +11,8 @@ import {
 } from './secrets-vault.contract.js';
 import type { IToolManualService, ToolManualSummary, ToolVariable } from '../tool-manuals/tool-manuals.contract.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
+import type { IAgentDefinitionService, AgentDefinitionSummary, AgentEnvVariable } from '../agent-defs/agent-defs.contract.js';
+import { agentVaultKey } from '../agent-defs/agent-defs.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
@@ -21,6 +23,12 @@ export interface SecretsVaultRoutesDeps {
   toolManualService: IToolManualService;
   /** Gates who may set a tool's ADMIN (shared) secrets — writers of the `.tool` file. */
   accessControl: IAccessControl;
+  /**
+   * Source of `.agent` files + their declared `from: vault` environment.
+   * Optional: a deployment without an execution layer simply has no `.agent`
+   * files, and the agent-secret routes are then not registered at all.
+   */
+  agentDefinitionService?: IAgentDefinitionService;
   /** HMAC secret for signing the OAuth `state` (reuse the connector state secret). */
   stateSecret: string;
   /** Public base URL of THIS backend — builds the OAuth redirect URI. */
@@ -69,7 +77,7 @@ export function isSafeReturnPath(returnTo: unknown): returnTo is string {
  * `req.userId` — secrets are private per user. Mounted behind the JWT middleware.
  */
 export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.Router {
-  const { secretsVault, toolManualService, accessControl } = deps;
+  const { secretsVault, toolManualService, accessControl, agentDefinitionService } = deps;
   const router = express.Router();
   // A FUNCTION, not a constant. Routers are constructed at boot, and on a
   // deployment configured through the setup screen the branch model does not
@@ -471,6 +479,122 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       mapError(err, res, 'delete admin var');
     }
   });
+
+  // ---- per-agent secrets --------------------------------------------------
+  //
+  // An `.agent` file declares `env:` entries the execution layer injects into a
+  // session PROCESS. The `from: vault` ones are secrets and are provisioned
+  // here, under `agent:<slug>:<VAR>` — namespaced by agent for exactly the
+  // reason tool variables are namespaced by manual: an `.agent` may resolve
+  // only what was provisioned FOR IT, so a newly-landed file naming someone
+  // else's credential comes up empty.
+  //
+  // Shared (admin) tier only. An `.agent` is run by an execution layer under
+  // its own service identity, not interactively by each user, so a per-user
+  // value would be a value nothing ever reads — and `resolve()` treats an
+  // unclassified key as `admin`, which is precisely the tier these land in.
+  if (agentDefinitionService) {
+    async function findAgentVar(
+      email: string,
+      slug: string,
+      varName: string,
+    ): Promise<{ agent: AgentDefinitionSummary; variable: AgentEnvVariable } | null> {
+      const agent = await agentDefinitionService!.getAccessible(email, slug);
+      if (!agent) return null;
+      const variable = agent.vaultVariables.find((v) => v.name === varName);
+      return variable ? { agent, variable } : null;
+    }
+
+    // The caller's accessible `.agent` files with their vault variables and
+    // config status. Values are never returned — only whether one is set.
+    router.get('/secrets/agents', async (req, res) => {
+      const userId = req.userId;
+      const email = req.userEmail;
+      if (!userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
+      try {
+        const pathFilter = typeof req.query.path === 'string' ? req.query.path : null;
+        let agents = await agentDefinitionService!.listAccessible(email);
+        if (pathFilter) agents = agents.filter((a) => a.path === pathFilter);
+        // Only agents that actually declare a secret belong on a secrets page.
+        agents = agents.filter((a) => a.vaultVariables.length > 0);
+
+        const status = await secretsVault.statusFor(
+          userId,
+          agents.flatMap((a) => a.vaultVariables.map((v) => agentVaultKey(a.slug, v.name))),
+        );
+        const statusByKey = new Map(status.map((st) => [st.key, st]));
+
+        res.json({
+          agents: await Promise.all(
+            agents.map(async (a) => ({
+              slug: a.slug,
+              name: a.name,
+              path: a.path,
+              description: a.description ?? null,
+              canWrite: await accessControl.canWrite(defaultWs(), email, a.path),
+              variables: a.vaultVariables.map((v) => {
+                const key = agentVaultKey(a.slug, v.name);
+                return {
+                  name: v.name,
+                  label: v.label ?? null,
+                  key,
+                  configured: statusByKey.get(key)?.adminConfigured ?? false,
+                };
+              }),
+            })),
+          ),
+        });
+      } catch (err) {
+        console.error('[secrets] list agents failed:', err);
+        res.status(500).json({ error: 'Internal error' });
+      }
+    });
+
+    // Set/replace one agent variable's shared value — requires WRITE on the
+    // `.agent` file, the same rule that governs a tool's shared secrets: the
+    // people who can change what an agent asks for are the people who can
+    // decide what it is given.
+    router.put('/secrets/agents/:slug/vars/:var', async (req, res) => {
+      const email = req.userEmail;
+      if (!req.userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
+      try {
+        const found = await findAgentVar(email, req.params.slug, req.params.var);
+        if (!found) return void res.status(404).json({ error: 'Agent or variable not found' });
+        if (!(await accessControl.canWrite(defaultWs(), email, found.agent.path))) {
+          return void res
+            .status(403)
+            .json({ error: "You need write access to this agent to set the secrets it's given." });
+        }
+        const body = req.body ?? {};
+        const secret = await secretsVault.putSharedStatic({
+          key: agentVaultKey(found.agent.slug, found.variable.name),
+          value: body.value,
+          label: body.label,
+        });
+        res.status(201).json({ secret });
+      } catch (err) {
+        mapError(err, res, 'set agent var');
+      }
+    });
+
+    router.delete('/secrets/agents/:slug/vars/:var', async (req, res) => {
+      const email = req.userEmail;
+      if (!req.userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
+      try {
+        const found = await findAgentVar(email, req.params.slug, req.params.var);
+        if (!found) return void res.status(404).json({ error: 'Agent or variable not found' });
+        if (!(await accessControl.canWrite(defaultWs(), email, found.agent.path))) {
+          return void res
+            .status(403)
+            .json({ error: 'You need write access to this agent to remove its secrets.' });
+        }
+        await secretsVault.removeShared(agentVaultKey(found.agent.slug, found.variable.name));
+        res.status(204).end();
+      } catch (err) {
+        mapError(err, res, 'delete agent var');
+      }
+    });
+  }
 
   router.delete('/secrets/tools/:slug/vars/:var/user', async (req, res) => {
     const userId = req.userId;

@@ -119,6 +119,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.30.0(zod@3.25.76)
+      '@utcp/cli':
+        specifier: ^1.1.1
+        version: 1.1.1
       '@utcp/code-mode':
         specifier: ^1.2.12
         version: 1.2.12(@utcp/sdk@1.1.2)(isolated-vm@6.1.2)
@@ -2004,6 +2007,9 @@ packages:
 
   '@upsetjs/venn.js@2.0.0':
     resolution: {integrity: sha512-WbBhLrooyePuQ1VZxrJjtLvTc4NVfpOyKx0sKqioq9bX1C1m7Jgykkn8gLrtwumBioXIqam8DLxp88Adbue6Hw==}
+
+  '@utcp/cli@1.1.1':
+    resolution: {integrity: sha512-otaArdHr16WgsWcDEi1ftvPcm5Pdytp04XBANXsXYSTb7ZMLBQjKcqJibPcP+ncXU6Qgm6FSnqVao3Sw+GqvXg==}
 
   '@utcp/code-mode@1.2.12':
     resolution: {integrity: sha512-LnqLrrQfIVVGl2s5poF72CiN217UDcqpGK12oteEg6kI4eYK53sCg66Y6fp59oq6TvJl22QMR5xmjHBY1KrahQ==}
@@ -4706,7 +4712,7 @@ packages:
         optional: true
 
   xlsx@https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz:
-    resolution: {integrity: sha512-oLDq3jw7AcLqKWH2AhCpVTZl8mf6X2YReP+Neh0SJUzV/BdZYjth94tG5toiMB1PPrYtxOCfaoUCkvtuH+3AJA==, tarball: https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz}
+    resolution: {tarball: https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz}
     version: 0.20.3
     engines: {node: '>=0.8'}
     hasBin: true
@@ -6281,6 +6287,10 @@ snapshots:
     optionalDependencies:
       d3-selection: 3.0.0
       d3-transition: 3.0.1(d3-selection@3.0.0)
+
+  '@utcp/cli@1.1.1':
+    dependencies:
+      '@utcp/sdk': 1.1.2
 
   '@utcp/code-mode@1.2.12(@utcp/sdk@1.1.2)(isolated-vm@6.1.2)':
     dependencies:

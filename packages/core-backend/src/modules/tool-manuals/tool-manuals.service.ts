@@ -3,6 +3,9 @@ import fs from 'node:fs/promises';
 import { parse as parseYaml } from 'yaml';
 import '@utcp/http'; // side effect: register the 'http' call-template type (http + inline sub-manuals)
 import '@utcp/mcp'; // side effect: register the 'mcp' call-template type (mcp `.tool` sources)
+// side effect: register the 'cli' call-template type for PARSING ONLY — the
+// executor is removed again, so this process cannot dispatch a shell command.
+import { containsCliCallTemplate } from './utcp-cli-parse-only.js';
 import {
   UtcpManualSerializer,
   CallTemplateSerializer,
@@ -713,6 +716,23 @@ export function normalizeToolManual(
   if (variables.length) descriptor.variables = variables;
 
   descriptor.remote = normalizeRemote(obj.remote);
+
+  // A `.tool` that shells out is LOCAL, always. The hosted platform parses and
+  // lists these so the local MCP server can find them, but it must never be the
+  // thing that runs them — a `.tool` is knowledge-base content, and agents write
+  // to the knowledge base. A declared `remote: true` beside a shell command is
+  // therefore a refusal rather than a warning: silently correcting it would let
+  // an author believe they had published a remote tool, and would leave the
+  // catalog disagreeing with the file about what the platform will do.
+  if (containsCliCallTemplate(obj)) {
+    if (obj.remote === true) {
+      throw new Error(
+        `\`.tool\` "${name}" declares \`remote: true\` but contains a \`cli\` call template — ` +
+          'shell tools execute only in a local runtime (drop `remote: true`, or the `cli` template).',
+      );
+    }
+    descriptor.remote = false;
+  }
 
   if (type === 'inline') {
     const tools = Array.isArray(obj.tools) ? obj.tools : undefined;
