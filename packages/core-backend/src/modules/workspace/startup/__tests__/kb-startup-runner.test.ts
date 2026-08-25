@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { KbStartupRunner } from '../kb-startup-runner.js';
+import { WorkspaceService } from '../../workspace.service.js';
 import { redactSecret } from '../kb-git.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
@@ -539,6 +540,60 @@ describe('KbStartupRunner credentials', () => {
     // errors with "cannot overwrite multiple values".
     const all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
     expect(all.split('\n')).toHaveLength(1);
+  });
+
+  it('adopting an existing clone collapses an accumulated helper back to one value', async () => {
+    // The boot-time assertion above sees a FRESH clone, which only ever has
+    // one value by construction. The collapse guarantee lives in the adoption
+    // path (`--replace-all`), so drift a second value in out of band and let
+    // WorkspaceService adopt the clone — that is the code the guarantee is
+    // about.
+    process.env.GITHUB_TOKEN = 'ghp_boot';
+    await populatedUpstream();
+    const repo = await materializeDefaultBranchClone();
+    await git(repo, ['config', '--add', 'credential.helper', '!f() { echo bogus; }; f']);
+
+    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', () => 'x-access-token');
+    await ws.getOrCreateForBranch(DEFAULT_BRANCH);
+
+    const all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
+    expect(all.split('\n')).toHaveLength(1);
+    expect(all).toContain('password=$GITHUB_TOKEN');
+    expect(all).not.toContain('bogus');
+  });
+
+  it('adopting a clone after the token was removed unsets the stale helper', async () => {
+    // A deployment that lost its token must not keep a clone-local helper
+    // answering with an empty password — it would shadow whatever fallback
+    // auth the operator switched to.
+    process.env.GITHUB_TOKEN = 'ghp_boot';
+    await populatedUpstream();
+    const repo = await materializeDefaultBranchClone(); // stamped
+    delete process.env.GITHUB_TOKEN;
+
+    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', () => 'x-access-token');
+    await ws.getOrCreateForBranch(DEFAULT_BRANCH);
+
+    await expect(git(repo, ['config', '--local', '--get', 'credential.helper']))
+      .rejects.toMatchObject({ code: 1 });
+  });
+
+  it('a token added after the branch is cached reaches the clone without a restart', async () => {
+    // The rotation gap: the setup screen can supply a token AFTER a branch
+    // was first opened, and the cached fast path returns before the adoption
+    // re-stamp. The fingerprint check must catch the change there.
+    delete process.env.GITHUB_TOKEN;
+    await populatedUpstream();
+    const repo = await materializeDefaultBranchClone(); // no helper
+
+    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', () => 'x-access-token');
+    await ws.getOrCreateForBranch(DEFAULT_BRANCH); // adopt, tokenless
+    process.env.GITHUB_TOKEN = 'ghp_late';
+    await ws.getOrCreateForBranch(DEFAULT_BRANCH); // cached fast path
+
+    const helper = (await git(repo, ['config', '--local', '--get', 'credential.helper'])).trim();
+    expect(helper).toContain('password=$GITHUB_TOKEN');
+    expect(helper).not.toContain('ghp_late');
   });
 
   it('clones without a helper when the deployment has no token — an open remote still boots', async () => {

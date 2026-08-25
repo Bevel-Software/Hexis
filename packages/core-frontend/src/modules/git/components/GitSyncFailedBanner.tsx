@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import { CloudOff } from 'lucide-react';
 import { useEventBusSubscription } from '../../workflow/hooks/useEventBusSubscription';
+import { canonicalizeWorkspaceId } from '../../workflow/state/event-bus.context';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 
 /**
@@ -29,7 +30,21 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 export function GitSyncFailedBanner() {
   const workspace = useWorkspace();
   const workspaceId = workspace.workspaceId;
-  const [failure, setFailure] = useState<{ branch: string; reason: string } | null>(null);
+  // Local state (`workspace.id`) is URL-encoded (`user%2Ffeat`); event ids
+  // arrive URL-decoded (`user/feat`, Express auto-decodes `req.params.id`).
+  // Comparing them raw drops every event on a slashed feature branch — the
+  // exact silent-failure symptom this banner exists to surface — so both
+  // sides are canonicalised, the same way every other SSE consumer does.
+  const canonId = workspaceId ? canonicalizeWorkspaceId(workspaceId) : null;
+  // The failure remembers WHICH workspace it belongs to. FileViewer is
+  // mounted at a catch-all route and is NOT keyed by workspace, so this
+  // component survives a branch switch — without the ownership check below, a
+  // failure from the branch just left would keep painting over the new one,
+  // and no `git-sync-recovered` would ever arrive to clear it (the backend
+  // only emits that on a real push transition of the OTHER workspace).
+  const [failure, setFailure] = useState<{ forId: string; branch: string; reason: string } | null>(
+    null,
+  );
 
   useEventBusSubscription(
     'git-sync-failed',
@@ -38,10 +53,10 @@ export function GitSyncFailedBanner() {
         // The bus already filters to the focused workspace, but a focus change
         // races with in-flight events — checking here keeps another branch's
         // failure from painting a banner over this one.
-        if (!workspaceId || e.workspaceId !== workspaceId) return;
-        setFailure({ branch: e.branch, reason: e.reason });
+        if (!canonId || canonicalizeWorkspaceId(e.workspaceId) !== canonId) return;
+        setFailure({ forId: canonId, branch: e.branch, reason: e.reason });
       },
-      [workspaceId],
+      [canonId],
     ),
   );
 
@@ -49,14 +64,19 @@ export function GitSyncFailedBanner() {
     'git-sync-recovered',
     useCallback(
       (e) => {
-        if (!workspaceId || e.workspaceId !== workspaceId) return;
+        if (!canonId || canonicalizeWorkspaceId(e.workspaceId) !== canonId) return;
         setFailure(null);
       },
-      [workspaceId],
+      [canonId],
     ),
   );
 
-  if (!failure) return null;
+  // Ownership gate rather than an effect-driven reset: a stale entry simply
+  // stops rendering when the focus moves elsewhere, and (unlike wiping it)
+  // still shows if the user returns to the failed branch — where the
+  // condition is real until a recovery event or a successful push says
+  // otherwise.
+  if (!failure || failure.forId !== canonId) return null;
 
   return (
     <div

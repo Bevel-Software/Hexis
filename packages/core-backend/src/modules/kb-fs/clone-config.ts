@@ -123,16 +123,27 @@ export function cloneCredentialArgs(gitUsername: string): string[] {
 }
 
 /**
- * `git` argument lists that stamp the credential helper onto a clone that
- * ALREADY exists — the repair path for clones on disk that were created
- * without one (see `cloneCredentialArgs`), applied wherever
- * `cloneTrackingConfigArgs` is. `--replace-all` collapses any accumulated
- * values, so re-stamping is idempotent and a stale helper cannot survive.
+ * `git` argument lists that bring a clone's credential helper into line with
+ * the deployment's current config — the repair path for clones on disk (see
+ * `cloneCredentialArgs`), applied wherever `cloneTrackingConfigArgs` is.
+ *
+ *   - Token configured → `--replace-all` the helper. Collapses any accumulated
+ *     values, so re-stamping is idempotent and a stale helper (e.g. an old
+ *     username after a provider switch) cannot survive.
+ *   - No token → `--unset-all` the helper. A deployment that LOST its token
+ *     must not keep a clone-local helper that answers with an empty
+ *     `$GITHUB_TOKEN` and thereby shadows whatever other credential source
+ *     (a system helper, a token in the remote URL) the operator fell back to.
+ *     `--unset-all` on a key that isn't there exits non-zero; the caller runs
+ *     these tolerantly (see `normalizeCloneConfig`), so a clone that never had
+ *     a helper is a harmless no-op.
  *
  * Returns the arguments rather than running them, for the same reason
  * `cloneTrackingConfigArgs` does.
  */
 export function cloneCredentialConfigArgs(gitUsername: string): string[][] {
   const helper = credentialHelperValue(gitUsername);
-  return helper ? [['config', '--replace-all', 'credential.helper', helper]] : [];
+  return helper
+    ? [['config', '--replace-all', 'credential.helper', helper]]
+    : [['config', '--unset-all', 'credential.helper']];
 }

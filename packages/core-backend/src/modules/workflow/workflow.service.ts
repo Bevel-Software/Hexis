@@ -49,7 +49,7 @@ import type { GitService } from './git/git.service.js';
 import type { PullRequestService } from './git/pull-request.service.js';
 import type { IReviewWorkflowService } from './review-workflow/review-workflow.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { FileLockService } from './file-lock.service.js';
 import { PendingCommitsService } from './pending-commits.service.js';
@@ -356,7 +356,7 @@ export class WorkflowService implements IWorkflowService {
   // to discard.
 
   shareCurrentBranch(workspaceId: string, user: AuthUser): Promise<void> {
-    return this.git.push(workspaceId, user);
+    return this.trackedPush(workspaceId, user);
   }
 
   refreshRemotes(workspaceId: string): Promise<void> {
@@ -697,6 +697,7 @@ export class WorkflowService implements IWorkflowService {
         const detail = err instanceof Error ? err.message : String(err);
         const looksLikeNonFastForward = /non-fast-forward|rejected|fetch first|updates were rejected/i.test(detail);
         let recovered = false;
+        let recoveryError: unknown = null;
         if (looksLikeNonFastForward) {
           try {
             await this.git.pull(workspaceId);
@@ -704,6 +705,7 @@ export class WorkflowService implements IWorkflowService {
             recovered = true;
             this.noteGitSyncOk(workspaceId, branch);
           } catch (recoveryErr) {
+            recoveryError = recoveryErr;
             console.warn(
               '[workflow] autosave cooperative recovery (pull-rebase) failed; leaving the unpushed commit for the next save / releaseLock to surface:',
               recoveryErr instanceof Error ? recoveryErr.message : recoveryErr,
@@ -716,8 +718,9 @@ export class WorkflowService implements IWorkflowService {
           // release push. But "expected to clear itself" was doing too much
           // work: an auth failure never clears, and swallowing it into a log
           // line is what let a broken deployment look healthy for two days.
-          // The commit stays local either way; now it says so.
-          this.noteGitSyncFailed(workspaceId, branch, err);
+          // The commit stays local either way; now it says so. Report the
+          // recovery error when recovery ran — it reflects the current state.
+          this.noteGitSyncFailed(workspaceId, branch, recoveryError ?? err);
           console.warn(
             '[workflow] push after autosave commit failed (commit landed locally):',
             detail,
@@ -948,6 +951,37 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
+   * A bare push wrapped in the sync tracker: a failure raises the banner, a
+   * success clears it. For the workflow paths that push directly — sharing a
+   * branch, publishing a CR's source, update-from-base, the decline revert,
+   * the roles.yaml restore — rather than through `pushWithRecovery`'s
+   * cooperative ladder. Behaviour is otherwise unchanged: the error still
+   * propagates to the caller exactly as the bare push's did. Without this,
+   * those pushes could fail invisibly (no banner) and, worse, a successful
+   * share could not CLEAR a banner an earlier save had raised.
+   *
+   * The branch is derived from the workspace id (they are the same string,
+   * URL-encoding aside) so call sites cannot pass a mismatched pair.
+   */
+  private async trackedPush(
+    workspaceId: string,
+    user: AuthUser,
+    opts?: { systemAuthorized?: boolean },
+  ): Promise<void> {
+    const branch = branchForWorkspaceId(workspaceId);
+    try {
+      // Preserve the exact call shape of the bare pushes this replaces — an
+      // explicit `undefined` third argument is a different call signature to
+      // every spy that asserts on it.
+      await (opts ? this.git.push(workspaceId, user, opts) : this.git.push(workspaceId, user));
+      this.noteGitSyncOk(workspaceId, branch);
+    } catch (err) {
+      this.noteGitSyncFailed(workspaceId, branch, err);
+      throw err;
+    }
+  }
+
+  /**
    * Shared implementation of "push, and on non-fast-forward try a
    * cooperative pull-rebase + retry, then hand off to the agent if that
    * still fails." The full rationale lives at the call site in
@@ -968,6 +1002,7 @@ export class WorkflowService implements IWorkflowService {
       const looksLikeNonFastForward = /non-fast-forward|rejected|fetch first|updates were rejected/i.test(firstDetail);
       let recovered = false;
       let recoveryDetail = '(cooperative path not attempted)';
+      let recoveryError: unknown = null;
       if (looksLikeNonFastForward) {
         try {
           await this.git.pull(workspaceId);
@@ -978,6 +1013,7 @@ export class WorkflowService implements IWorkflowService {
             `[workflow] non-fast-forward push recovered via pull --rebase for workspace=${workspaceId} branch=${branch} path=${targetPath}`,
           );
         } catch (recoveryErr) {
+          recoveryError = recoveryErr;
           recoveryDetail = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr);
           console.warn(
             `[workflow] cooperative recovery (pull-rebase) failed for workspace=${workspaceId} user=${user.id}; handing off to agent:`,
@@ -990,7 +1026,10 @@ export class WorkflowService implements IWorkflowService {
         // is still mounted and listening — the release fired as an editor
         // unmounts has nowhere to surface it — whereas the event reaches every
         // session on the branch regardless of what triggered the push.
-        this.noteGitSyncFailed(workspaceId, branch, firstPushErr);
+        // When recovery RAN, its error is the current state of the world (the
+        // first rejection may be a stale non-fast-forward the pull already
+        // cured); when it was skipped, the first error is all there is.
+        this.noteGitSyncFailed(workspaceId, branch, recoveryError ?? firstPushErr);
         console.warn(
           `[workflow] push failed for workspace=${workspaceId} user=${user.id}; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
           firstDetail,
@@ -1272,7 +1311,7 @@ export class WorkflowService implements IWorkflowService {
     // Push the source — `gh pr create` against an unpushed branch returns
     // "head branch does not exist on remote". Push *after* the auto-merge
     // so the remote sees the merge commit too.
-    await this.git.push(workspaceId, user);
+    await this.trackedPush(workspaceId, user);
 
     const workspacePath = await this.workspaceService.getWorkspacePath(workspaceId);
     const cwd = path.join(workspacePath, this.kbDirName);
@@ -1425,7 +1464,7 @@ export class WorkflowService implements IWorkflowService {
     // If a new merge commit landed, push so the CR picks it up. When
     // already up to date there's nothing to share — short-circuit the push.
     if (!outcome.alreadyUpToDate) {
-      await this.git.push(workspaceId, user);
+      await this.trackedPush(workspaceId, user);
     }
     this.prs.invalidateDetailCache(number);
     const refreshed = await this.prs.getPrDetail(number, {
@@ -1614,7 +1653,7 @@ export class WorkflowService implements IWorkflowService {
         `Revert ${repoRelPath} (declined in change request #${number})`,
         true, // skipValidator — this restores an already-validated base version
       );
-      await this.git.push(ws.id, user);
+      await this.trackedPush(ws.id, user);
     } finally {
       // Committed inline — drop the lock row directly rather than enqueueing
       // a duplicate commit through releaseLock.
@@ -2163,7 +2202,7 @@ export class WorkflowService implements IWorkflowService {
             'roles.yaml restore produced no commit while origin still diverges from base — source workspace out of sync; refusing to merge',
           );
         }
-        await this.git.push(ws.id, user);
+        await this.trackedPush(ws.id, user);
         this.accessControl.invalidate(ws.id);
         return true;
       } finally {

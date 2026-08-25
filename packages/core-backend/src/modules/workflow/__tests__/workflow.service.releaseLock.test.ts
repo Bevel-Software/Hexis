@@ -625,20 +625,32 @@ describe('WorkflowService — git-sync visibility events', () => {
     ]);
   });
 
-  it('tracks workspaces independently — one broken branch does not clear another', async () => {
-    const svc = makeFacade(
-      makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' }),
-      makeFileLocks(USER.id),
-      makePending(),
-      events,
-    );
+  it('tracks workspaces independently — one recovering neither clears nor suppresses another', async () => {
+    const failingGit = () => makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' });
+    const svc = makeFacade(failingGit(), makeFileLocks(USER.id), makePending(), events);
 
+    // Both workspaces broken.
     await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER).catch(() => undefined);
     await svc.runPendingCommit('ws-2', 'feat/y', 'bar.md', USER).catch(() => undefined);
 
-    expect(emitSpy.mock.calls.map((c) => (c[0] as { workspaceId: string }).workspaceId)).toEqual([
-      'ws-1',
-      'ws-2',
+    // ws-1 recovers; ws-2 is still broken and must (a) not be cleared by
+    // ws-1's recovery and (b) still announce its own next failure.
+    Object.assign(svc as unknown as Record<string, unknown>, { git: makeGit() });
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+    Object.assign(svc as unknown as Record<string, unknown>, { git: failingGit() });
+    await svc.runPendingCommit('ws-2', 'feat/y', 'bar.md', USER).catch(() => undefined);
+
+    expect(
+      emitSpy.mock.calls.map((c) => [
+        (c[0] as { kind: string }).kind,
+        (c[0] as { workspaceId: string }).workspaceId,
+      ]),
+    ).toEqual([
+      ['git-sync-failed', 'ws-1'],
+      ['git-sync-failed', 'ws-2'],
+      ['git-sync-recovered', 'ws-1'],
+      ['file-changed', 'ws-1'],
+      ['git-sync-failed', 'ws-2'],
     ]);
   });
 });

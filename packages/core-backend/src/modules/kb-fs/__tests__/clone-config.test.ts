@@ -34,11 +34,19 @@ describe('credential config', () => {
     expect(helper).not.toContain('ghp_supersecret');
   });
 
-  it('emits nothing at all when the deployment has no token — an unauthenticated clone stays valid', () => {
+  it('with no token: clones get no helper, and existing clones get theirs UNSET', () => {
     delete process.env.GITHUB_TOKEN;
     expect(credentialHelperValue('x-access-token')).toBeNull();
+    // A fresh clone simply carries nothing…
     expect(cloneCredentialArgs('x-access-token')).toEqual([]);
-    expect(cloneCredentialConfigArgs('x-access-token')).toEqual([]);
+    // …but an adopted clone may carry a helper from when a token WAS
+    // configured, and that stale helper (answering with an empty password)
+    // would shadow whatever auth the operator fell back to — so the repair
+    // path removes it. Callers run this tolerantly: unset of a missing key
+    // exits non-zero and is the expected no-op.
+    expect(cloneCredentialConfigArgs('x-access-token')).toEqual([
+      ['config', '--unset-all', 'credential.helper'],
+    ]);
   });
 
   it('passes the clone form as --config, which git only honours AFTER the subcommand', () => {

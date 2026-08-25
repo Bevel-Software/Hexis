@@ -41,14 +41,22 @@ function makeBus() {
 
 function renderBanner(workspace: Partial<WorkspaceContextValue> = {}) {
   const bus = makeBus();
-  render(
+  const view = render(
     <EventBusContext.Provider value={bus.ctx}>
       <WorkspaceContext.Provider value={makeWorkspaceFixture(workspace)}>
         <GitSyncFailedBanner />
       </WorkspaceContext.Provider>
     </EventBusContext.Provider>,
   );
-  return bus;
+  const rerender = (next: Partial<WorkspaceContextValue>) =>
+    view.rerender(
+      <EventBusContext.Provider value={bus.ctx}>
+        <WorkspaceContext.Provider value={makeWorkspaceFixture(next)}>
+          <GitSyncFailedBanner />
+        </WorkspaceContext.Provider>
+      </EventBusContext.Provider>,
+    );
+  return { ...bus, rerender };
 }
 
 const FAILED = {
@@ -105,6 +113,40 @@ describe('GitSyncFailedBanner', () => {
     bus.emit(FAILED);
     bus.emit({ kind: 'git-sync-recovered', workspaceId: 'ws-2', branch: 'feat/other' });
     expect(screen.queryByRole('alert')).not.toBeNull();
+  });
+
+  it('matches a slashed feature branch across the encode/decode split', () => {
+    // Local `workspace.id` is URL-encoded; the SSE event id is URL-decoded.
+    // A raw `===` drops every event on a `<user>/<branch>` workspace — which
+    // is every feature branch — so the banner would never show, silently
+    // recreating the invisible-failure bug this whole feature fixes.
+    const bus = renderBanner({ workspaceId: 'razvan-radulescu%2Ffeat' });
+    bus.emit({
+      kind: 'git-sync-failed',
+      workspaceId: 'razvan-radulescu/feat', // decoded, as the backend emits it
+      branch: 'razvan-radulescu/feat',
+      reason: 'git push failed: fatal: Authentication failed',
+    });
+    expect(screen.getByRole('alert').textContent).toContain('Authentication failed');
+
+    bus.emit({
+      kind: 'git-sync-recovered',
+      workspaceId: 'razvan-radulescu/feat',
+      branch: 'razvan-radulescu/feat',
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('clears a stale banner when the focused workspace changes', () => {
+    // FileViewer is not keyed by workspace, so this component survives a branch
+    // switch. A failure from the branch just left must not paint over the new
+    // one — and no recovered event would ever arrive for it.
+    const bus = renderBanner({ workspaceId: 'ws-1' });
+    bus.emit(FAILED);
+    expect(screen.queryByRole('alert')).not.toBeNull();
+
+    act(() => bus.rerender({ workspaceId: 'ws-2' }));
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('stays up across repeated failures, showing the latest reason', () => {

@@ -293,6 +293,11 @@ export class WorkspaceService implements IWorkspaceService {
     // back a half-cloned workspace.
     if (this.branchDirs.has(branch)) {
       await this.awaitBootstrapOrEvict(branch);
+      // A token or username set/changed through the setup screen after this
+      // branch was first opened has to reach the already-cached clone, or its
+      // pushes keep failing — the fast path is exactly where that rotation is
+      // otherwise missed.
+      await this.refreshCredentialHelperIfStale(branch, repoDir);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     }
 
@@ -306,6 +311,7 @@ export class WorkspaceService implements IWorkspaceService {
     // single-flight wait the cached fast path already uses.
     await this.awaitBootstrapOrEvict(branch);
     if (this.branchDirs.has(branch)) {
+      await this.refreshCredentialHelperIfStale(branch, repoDir);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     }
 
@@ -422,10 +428,7 @@ export class WorkspaceService implements IWorkspaceService {
    */
   private async normalizeCloneConfig(repoDir: string, branch: string): Promise<void> {
     try {
-      for (const args of [
-        ...cloneTrackingConfigArgs(branch),
-        ...cloneCredentialConfigArgs(this.gitUsername()),
-      ]) {
+      for (const args of cloneTrackingConfigArgs(branch)) {
         await execFileAsync('git', ['-C', repoDir, ...args]);
       }
     } catch (err) {
@@ -436,6 +439,64 @@ export class WorkspaceService implements IWorkspaceService {
         redactError(err),
       );
     }
+    await this.stampCredentialHelper(repoDir, branch);
+  }
+
+  /**
+   * Fingerprint of the credential state a clone's helper is derived from: the
+   * username (baked into the helper literal) and whether a token exists at all
+   * (the helper is present-or-absent on that). The token VALUE is deliberately
+   * excluded — the helper reads `$GITHUB_TOKEN` at call time, so rotating the
+   * token needs no re-stamp; only a username change or a token appearing /
+   * disappearing does.
+   */
+  private credentialFingerprint(): string {
+    return `${this.gitUsername()}::${process.env.GITHUB_TOKEN ? '1' : '0'}`;
+  }
+
+  /** Last credential fingerprint stamped into each branch's clone, this process. */
+  private readonly stampedCredentialFingerprint = new Map<string, string>();
+
+  /**
+   * Bring `repoDir`'s credential helper into line with the current deployment
+   * config (stamp when a token is set, unset when none is), and record the
+   * fingerprint so the cached fast path can skip a no-op re-stamp. Runs the
+   * config args tolerantly and one at a time: `--unset-all` on a clone that
+   * never had a helper exits non-zero, and that must neither abort the rest
+   * nor read as a failure.
+   */
+  private async stampCredentialHelper(repoDir: string, branch: string): Promise<void> {
+    for (const args of cloneCredentialConfigArgs(this.gitUsername())) {
+      try {
+        await execFileAsync('git', ['-C', repoDir, ...args]);
+      } catch (err) {
+        // `--unset-all` of a missing key (exit 5) is the expected no-op for a
+        // tokenless clone; anything else is worth a line but still not fatal —
+        // the git layer self-heals credentials on the next push path too.
+        const code = (err as { code?: number } | null)?.code;
+        if (!(args.includes('--unset-all') && code === 5)) {
+          console.warn(
+            `[workspace] could not stamp the credential helper of the "${branch}" clone:`,
+            redactError(err),
+          );
+        }
+      }
+    }
+    this.stampedCredentialFingerprint.set(branch, this.credentialFingerprint());
+  }
+
+  /**
+   * Re-stamp a cached clone's credential helper when the deployment's
+   * credential config changed since we last stamped it — the rotation case the
+   * disk-adoption path in `getOrCreateForBranch` never reaches, because the
+   * fast path returns before it. Without this, a token added (or a username
+   * changed) through the setup screen after a branch was first opened would
+   * never reach that branch's clone until a process restart, and its pushes
+   * would keep failing exactly as in the original incident.
+   */
+  private async refreshCredentialHelperIfStale(branch: string, repoDir: string): Promise<void> {
+    if (this.stampedCredentialFingerprint.get(branch) === this.credentialFingerprint()) return;
+    await this.stampCredentialHelper(repoDir, branch);
   }
 
   private async cloneProcessMapForBranch(workspaceDir: string, branch: string): Promise<void> {
