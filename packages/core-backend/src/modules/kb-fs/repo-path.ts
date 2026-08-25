@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { WorkflowValidationError } from '../../shared/domain-errors.js';
 
 /**
@@ -11,9 +12,21 @@ import { WorkflowValidationError } from '../../shared/domain-errors.js';
  * location, beside the clone, that nothing commits and nothing pushes.
  */
 
-/** True when `wsPath` is the repository folder or lies under it. */
+/**
+ * True when `wsPath` is the repository folder or lies under it.
+ *
+ * Judged segment by segment, not by string prefix: `knowledge-base/../x.md`
+ * starts with the folder yet resolves beside it, and the filesystem's own
+ * containment is against the WORKSPACE dir, so it would accept that path.
+ * `.` and `..` segments (and empty ones from `//`) are therefore refused
+ * outright, which also matches what the commit layer accepts. A single
+ * trailing slash on a directory path is tolerated.
+ */
 export function isInsideRepo(wsPath: string, kbDirName: string): boolean {
-  return wsPath === kbDirName || wsPath.startsWith(`${kbDirName}/`);
+  if (typeof wsPath !== 'string') return false;
+  const segments = wsPath.replace(/\/$/, '').split('/');
+  if (segments[0] !== kbDirName) return false;
+  return segments.every((segment) => segment !== '' && segment !== '.' && segment !== '..');
 }
 
 /**
@@ -24,10 +37,15 @@ export function isInsideRepo(wsPath: string, kbDirName: string): boolean {
  */
 export function assertInsideRepo(wsPath: string, kbDirName: string): void {
   if (isInsideRepo(wsPath, kbDirName)) return;
-  const stripped = wsPath.replace(/^(\.\/|\/)+/, '');
-  const corrected = isInsideRepo(stripped, kbDirName) ? stripped : `${kbDirName}/${stripped}`;
+  // The suggestion collapses what made the path wrong: leading `./` or `/`,
+  // and any `..` climbing back out, so the agent gets a path it can use.
+  const normalized = path.posix
+    .normalize(String(wsPath).replace(/^(\.\/|\/)+/, ''))
+    .replace(/^(\.\.\/)+/, '')
+    .replace(/^\.$/, '');
+  const corrected = isInsideRepo(normalized, kbDirName) ? normalized : `${kbDirName}/${normalized}`;
   throw new WorkflowValidationError(
-    `"${wsPath}" is outside the knowledge base repository: paths are workspace-relative and must start with "${kbDirName}/". ` +
+    `"${wsPath}" is outside the knowledge base repository: paths are workspace-relative, must start with "${kbDirName}/" and may not contain "." or ".." segments. ` +
       `Use "${corrected}" instead. A file written without that prefix lands beside the repository, where it is never committed or pushed.`,
     { kind: 'path-outside-repo', path: wsPath, kbDirName },
   );

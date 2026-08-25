@@ -251,6 +251,9 @@ export function registerWorkflowTools(
       // protocol, bypassing the locking filesystem's own guard. A path without
       // the clone-folder prefix names a file git can never see: refuse it
       // before a lock is taken, with the same corrected-path message.
+      if (typeof path !== 'string' || path.length === 0) {
+        throw new ToolError('`path` is required and must be a non-empty string.', 400);
+      }
       assertInsideRepo(path, kbDirName);
       const workspaceId = workspaceIdForBranch(branch);
       const acquired = await ctx.workflowService.acquireLock(workspaceId, branch, path, ctx.user);

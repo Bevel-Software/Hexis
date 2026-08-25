@@ -23,6 +23,21 @@ describe('isInsideRepo', () => {
     expect(isInsideRepo('knowledge-base.bak', KB)).toBe(false);
   });
 
+  it('refuses traversal that starts under the prefix and climbs back out', () => {
+    // `knowledge-base/../stray.md` starts with the clone folder but resolves
+    // beside it: the containment check is against the WORKSPACE dir, so the
+    // filesystem would accept it and the bytes would land outside git.
+    expect(isInsideRepo('knowledge-base/../stray.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/KnowledgeBase/../../stray.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/./x.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base//x.md', KB)).toBe(false);
+  });
+
+  it('tolerates a trailing slash on a directory path', () => {
+    expect(isInsideRepo('knowledge-base/', KB)).toBe(true);
+    expect(isInsideRepo('knowledge-base/KnowledgeBase/Projects/', KB)).toBe(true);
+  });
+
   it('refuses dressed-up forms of the prefix that the commit layer would reject anyway', () => {
     expect(isInsideRepo('./knowledge-base/x.md', KB)).toBe(false);
     expect(isInsideRepo('/knowledge-base/x.md', KB)).toBe(false);
@@ -55,5 +70,10 @@ describe('assertInsideRepo', () => {
       path: 'KnowledgeBase/Reviews/PR-12.html',
       kbDirName: KB,
     });
+  });
+
+  it('suggests the path with the traversal collapsed, back under the prefix', () => {
+    expect(() => assertInsideRepo('knowledge-base/../stray.md', KB)).toThrow('"knowledge-base/stray.md"');
+    expect(() => assertInsideRepo('knowledge-base/../../escape.md', KB)).toThrow('"knowledge-base/escape.md"');
   });
 });

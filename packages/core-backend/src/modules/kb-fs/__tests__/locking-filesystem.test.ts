@@ -189,13 +189,20 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
       { basePath: root, contained: true },
       { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
     );
-    // Path traversal — Mastra's `contained: true` rejects this with a
-    // PermissionError. The lock must still go away so the next caller
-    // can edit a different file, but releaseLock (which would commit +
-    // push whatever partial state is on disk) must NOT fire — instead
-    // we use the no-commit variant so partial writes don't silently
-    // persist as committed changes.
-    await expect(fsLayer.writeFile('knowledge-base/../../escape.md', 'x')).rejects.toThrow();
+    // The underlying write dies (disk full, permissions, whatever). The lock
+    // must still go away so the next caller can edit a different file, but
+    // releaseLock (which would commit + push whatever partial state is on
+    // disk) must NOT fire — instead we use the no-commit variant so partial
+    // writes don't silently persist as committed changes.
+    const spy = vi
+      .spyOn(LocalFilesystem.prototype, 'writeFile')
+      .mockRejectedValue(new Error('disk exploded'));
+    try {
+      await expect(fsLayer.writeFile('knowledge-base/Boom.md', 'x')).rejects.toThrow('disk exploded');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(workflow.acquireLock).toHaveBeenCalled();
     expect(workflow.releaseLockNoCommit).toHaveBeenCalled();
     expect(workflow.releaseLock).not.toHaveBeenCalled();
   });
@@ -903,6 +910,19 @@ describe('LockingFilesystem refuses to create anything outside the repository fo
       creatorAccess,
       validateWrite,
     );
+  });
+
+  it('a `..` under the prefix is refused before the lock: the bytes would land beside the clone', async () => {
+    // Containment is checked against the WORKSPACE dir, so the underlying
+    // filesystem would happily resolve `knowledge-base/../stray.md` to a file
+    // next to the clone. The prefix alone is not proof of being inside.
+    const workflow = makeWorkflow();
+    const { fsLayer, creatorAccess, validateWrite } = layer(workflow);
+    await expect(fsLayer.writeFile('knowledge-base/../stray.md', 'x')).rejects.toBeInstanceOf(WorkflowValidationError);
+    expect(workflow.acquireLock).not.toHaveBeenCalled();
+    expect(creatorAccess.planForCreate).not.toHaveBeenCalled();
+    expect(validateWrite).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(root, 'stray.md'))).rejects.toBeDefined();
   });
 
   it('the folder is matched as a whole segment: `knowledge-based/x.md` is outside too', async () => {

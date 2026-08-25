@@ -245,6 +245,23 @@ async function synthesizeUntrackedSideDiff(
   }
 }
 
+/**
+ * `stat` for the stray check: false only when nothing can be there (ENOENT,
+ * or ENOTDIR when a parent segment is a file). Permission and I/O failures
+ * propagate: treating them as "absent" would let an unreadable stray pass as
+ * committed.
+ */
+async function existsForCommitCheck(absolutePath: string): Promise<boolean> {
+  try {
+    await fs.stat(absolutePath);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+    throw err;
+  }
+}
+
 export class GitService implements IGitService {
   // Per-workspace fetch state, kept OUTSIDE the workspace mutex on purpose.
   // `git fetch` only writes `refs/remotes/origin/*` and packs new objects —
@@ -930,7 +947,7 @@ export class GitService implements IGitService {
         'status', '--porcelain=v1', '--', repoRelativePath,
       ]);
       if (!scoped.trim()) {
-        await this.assertNoBytesBesideRepo(workspaceId, relativePath, repoRelativePath);
+        await this.assertNoBytesBesideRepo(workspaceId, cwd, relativePath, repoRelativePath);
         return null;
       }
 
@@ -2396,24 +2413,25 @@ export class GitService implements IGitService {
    * that silently never landed. Throw instead; the pending-commits ladder
    * escalates the row to a needs-attention notice rather than dropping it.
    *
-   * Only a path that carried no prefix can be a stray (a prefixed one resolves
-   * inside the clone by construction), and only when something is actually on
-   * disk at the workspace-relative location. A repo-relative path some
-   * internal callers pass directly (`Knowledge/A.md`) has nothing at
-   * `<workspace>/Knowledge/A.md` and keeps its null.
+   * The stray has to be PROVABLE, because some callers pass repo-relative
+   * paths on purpose (the decline-revert flow, the merge-time `roles.yaml`
+   * preservation): bytes at the workspace-relative location AND nothing at
+   * the same repo-relative location inside the clone. A clean, committed
+   * `roles.yaml` keeps its null even if something of that name sits beside the
+   * clone, so an unrelated stray cannot abort a merge. Only ENOENT (or a
+   * parent that is not a directory) means "absent"; any other stat failure
+   * surfaces, so an unreadable stray is never reported as committed.
    */
   private async assertNoBytesBesideRepo(
     workspaceId: string,
+    repoDir: string,
     relativePath: string,
     repoRelativePath: string,
   ): Promise<void> {
     if (relativePath !== repoRelativePath) return;
     const workspaceDir = await this.workspaceService.getWorkspacePath(workspaceId);
-    try {
-      await fs.stat(path.join(workspaceDir, relativePath));
-    } catch {
-      return;
-    }
+    if (!(await existsForCommitCheck(path.join(workspaceDir, relativePath)))) return;
+    if (await existsForCommitCheck(path.join(repoDir, repoRelativePath))) return;
     assertInsideRepo(relativePath, this.kbDirName);
   }
 

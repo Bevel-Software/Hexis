@@ -219,6 +219,15 @@ describe('save_file and the repository folder', () => {
     expect(calls.some((c) => c[0] === 'acquireLock')).toBe(false);
   });
 
+  it('answers a missing path with a 400, not a crash', async () => {
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/save_file`, writeTok(), { branch: WS });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/path/i);
+    expect(calls.some((c) => c[0] === 'acquireLock')).toBe(false);
+  });
+
   it('schedules a prefixed path as before', async () => {
     const base = await start();
     const res = await post(`${base}/api/agent/tools/save_file`, writeTok(), {

@@ -119,6 +119,35 @@ describe('GitService.commitFile with bytes beside the repository', () => {
     expect(await svc.commitFile(workspaceId, USER, 'Knowledge/A.md')).toBeNull();
   });
 
+  it('still returns null for a repo-relative path when the clone has that file too, even with a same-named file at the workspace root', async () => {
+    // Not provably stray: the clone holds `Knowledge/A.md` and it is clean, so
+    // a repo-relative caller's no-op stays honest whatever else sits beside
+    // the clone under the same name.
+    const { workspaceDir } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), KB);
+    await fs.mkdir(path.join(workspaceDir, 'Knowledge'), { recursive: true });
+    await fs.writeFile(path.join(workspaceDir, 'Knowledge/A.md'), 'a copy beside the clone\n');
+    expect(await svc.commitFile(workspaceId, USER, 'Knowledge/A.md')).toBeNull();
+  });
+
+  it('does not mistake an unreadable stray for an absent one', async () => {
+    // Only ENOENT means "nothing there". Any other stat failure must surface,
+    // or a stray the process cannot read is silently reported as committed.
+    if (process.getuid?.() === 0) return; // root ignores mode bits; nothing to prove here
+    const { workspaceDir } = await seedWorkspace(root, workspaceId);
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), KB);
+    const strayDir = path.join(workspaceDir, 'KnowledgeBase');
+    await fs.mkdir(strayDir, { recursive: true });
+    await fs.writeFile(path.join(strayDir, 'PR-12.html'), 'x');
+    await fs.chmod(strayDir, 0o000);
+    try {
+      const attempt = svc.commitFile(workspaceId, USER, 'KnowledgeBase/PR-12.html');
+      await expect(attempt).rejects.toMatchObject({ code: 'EACCES' });
+    } finally {
+      await fs.chmod(strayDir, 0o755);
+    }
+  });
+
   it('still commits a prefixed path inside the clone', async () => {
     const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
     const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), KB);
