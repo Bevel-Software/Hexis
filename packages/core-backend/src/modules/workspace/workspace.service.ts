@@ -466,15 +466,17 @@ export class WorkspaceService implements IWorkspaceService {
    * nor read as a failure.
    */
   private async stampCredentialHelper(repoDir: string, branch: string): Promise<void> {
+    let stamped = true;
     for (const args of cloneCredentialConfigArgs(this.gitUsername())) {
       try {
         await execFileAsync('git', ['-C', repoDir, ...args]);
       } catch (err) {
-        // `--unset-all` of a missing key (exit 5) is the expected no-op for a
-        // tokenless clone; anything else is worth a line but still not fatal —
-        // the git layer self-heals credentials on the next push path too.
+        // `--unset-all` with no matching value (exit 5) is the expected no-op
+        // for a clone that never carried an app helper; anything else is a
+        // real failure.
         const code = (err as { code?: number } | null)?.code;
         if (!(args.includes('--unset-all') && code === 5)) {
+          stamped = false;
           console.warn(
             `[workspace] could not stamp the credential helper of the "${branch}" clone:`,
             redactError(err),
@@ -482,7 +484,15 @@ export class WorkspaceService implements IWorkspaceService {
         }
       }
     }
-    this.stampedCredentialFingerprint.set(branch, this.credentialFingerprint());
+    if (stamped) {
+      this.stampedCredentialFingerprint.set(branch, this.credentialFingerprint());
+    } else {
+      // Recording the fingerprint after a FAILED write would make every later
+      // cached open skip the retry as "already up to date" — the clone would
+      // keep pushing with stale or missing credentials until a restart.
+      // Dropping the entry keeps the fast path retrying until a stamp lands.
+      this.stampedCredentialFingerprint.delete(branch);
+    }
   }
 
   /**

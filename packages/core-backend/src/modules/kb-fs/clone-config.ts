@@ -125,25 +125,35 @@ export function cloneCredentialArgs(gitUsername: string): string[] {
 /**
  * `git` argument lists that bring a clone's credential helper into line with
  * the deployment's current config — the repair path for clones on disk (see
- * `cloneCredentialArgs`), applied wherever `cloneTrackingConfigArgs` is.
- *
- *   - Token configured → `--replace-all` the helper. Collapses any accumulated
- *     values, so re-stamping is idempotent and a stale helper (e.g. an old
- *     username after a provider switch) cannot survive.
- *   - No token → `--unset-all` the helper. A deployment that LOST its token
- *     must not keep a clone-local helper that answers with an empty
- *     `$GITHUB_TOKEN` and thereby shadows whatever other credential source
- *     (a system helper, a token in the remote URL) the operator fell back to.
- *     `--unset-all` on a key that isn't there exits non-zero; the caller runs
- *     these tolerantly (see `normalizeCloneConfig`), so a clone that never had
- *     a helper is a harmless no-op.
- *
- * Returns the arguments rather than running them, for the same reason
- * `cloneTrackingConfigArgs` does.
+ * `cloneCredentialArgs`), applied wherever `cloneTrackingConfigArgs` is:
+ * `--replace-all` when a token is configured (idempotent re-stamp, stale
+ * values collapse), `--unset-all` when the deployment lost its token (a
+ * leftover helper answering with an empty password must not shadow whatever
+ * auth the operator fell back to; unset of a missing value exits non-zero
+ * and callers tolerate it — see `stampCredentialHelper`). Both operations
+ * are scoped by the value pattern below so only app-owned helpers are
+ * touched. Returns the arguments rather than running them, for the same
+ * reason `cloneTrackingConfigArgs` does.
  */
+/**
+ * Value pattern (a POSIX ERE, as `git config`'s optional value-pattern
+ * argument expects) that matches ONLY helpers this application stamped —
+ * every one of ours reads `password=$GITHUB_TOKEN`, and no operator-authored
+ * helper has a reason to contain that literal. Scoping both the replace and
+ * the unset to it means an operator's own clone-local helper (`store`,
+ * `cache`, something custom) is never collapsed away or deleted by our
+ * stamping: git chains all configured helpers in order, so ours and theirs
+ * coexist.
+ */
+const APP_HELPER_VALUE_PATTERN = 'password=\\$GITHUB_TOKEN';
+
 export function cloneCredentialConfigArgs(gitUsername: string): string[][] {
   const helper = credentialHelperValue(gitUsername);
+  // `--replace-all key value pattern` replaces every line MATCHING the
+  // pattern with the one value (adding it when none match) and leaves
+  // non-matching values — operator helpers — untouched. Same scoping on the
+  // unset: only app-stamped values are removed when the token goes away.
   return helper
-    ? [['config', '--replace-all', 'credential.helper', helper]]
-    : [['config', '--unset-all', 'credential.helper']];
+    ? [['config', '--replace-all', 'credential.helper', helper, APP_HELPER_VALUE_PATTERN]]
+    : [['config', '--unset-all', 'credential.helper', APP_HELPER_VALUE_PATTERN]];
 }

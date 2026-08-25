@@ -551,15 +551,42 @@ describe('KbStartupRunner credentials', () => {
     process.env.GITHUB_TOKEN = 'ghp_boot';
     await populatedUpstream();
     const repo = await materializeDefaultBranchClone();
-    await git(repo, ['config', '--add', 'credential.helper', '!f() { echo bogus; }; f']);
+    // App-shaped drift: a second stamp of OURS with a stale username — the
+    // realistic accumulation (an operator's own helper is a different case,
+    // covered below, and must NOT be collapsed).
+    await git(repo, ['config', '--add', 'credential.helper',
+      '!f() { echo "username=stale-user"; echo "password=$GITHUB_TOKEN"; }; f']);
 
     const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', () => 'x-access-token');
     await ws.getOrCreateForBranch(DEFAULT_BRANCH);
 
     const all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
     expect(all.split('\n')).toHaveLength(1);
+    expect(all).toContain('username=x-access-token');
+    expect(all).not.toContain('stale-user');
+  });
+
+  it('an operator-configured helper survives both the stamp and the token-removal unset', async () => {
+    // git chains every configured helper, so an operator's clone-local
+    // `cache`/`store`/custom helper coexists with ours — and losing it on a
+    // token change would break the very fallback auth they set up.
+    process.env.GITHUB_TOKEN = 'ghp_boot';
+    await populatedUpstream();
+    const repo = await materializeDefaultBranchClone();
+    await git(repo, ['config', '--add', 'credential.helper', 'cache --timeout=300']);
+
+    const ws = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', () => 'x-access-token');
+    await ws.getOrCreateForBranch(DEFAULT_BRANCH); // stamp with token
+    let all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
+    expect(all).toContain('cache --timeout=300');
     expect(all).toContain('password=$GITHUB_TOKEN');
-    expect(all).not.toContain('bogus');
+
+    delete process.env.GITHUB_TOKEN;
+    const ws2 = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', () => 'x-access-token');
+    await ws2.getOrCreateForBranch(DEFAULT_BRANCH); // unset OUR helper only
+    all = (await git(repo, ['config', '--local', '--get-all', 'credential.helper'])).trim();
+    expect(all).toContain('cache --timeout=300');
+    expect(all).not.toContain('password=$GITHUB_TOKEN');
   });
 
   it('adopting a clone after the token was removed unsets the stale helper', async () => {

@@ -137,6 +137,26 @@ describe('GitSyncFailedBanner', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
+  it('keeps each branch’s failure separately — returning to a broken branch still shows it', () => {
+    // A single retained record let branch B's failure overwrite branch A's;
+    // switching back to A then showed nothing despite A being unresolved.
+    const bus = renderBanner({ workspaceId: 'ws-1' });
+    bus.emit(FAILED); // ws-1 fails
+
+    act(() => bus.rerender({ workspaceId: 'ws-2' }));
+    bus.emit({ ...FAILED, workspaceId: 'ws-2', branch: 'feat/y', reason: 'ws-2 broke too' });
+    expect(screen.getByRole('alert').textContent).toContain('ws-2 broke too');
+
+    act(() => bus.rerender({ workspaceId: 'ws-1' }));
+    expect(screen.getByRole('alert').textContent).toContain('feat/x');
+
+    // ws-1 recovering clears only ws-1's record.
+    bus.emit({ kind: 'git-sync-recovered', workspaceId: 'ws-1', branch: 'feat/x' });
+    expect(screen.queryByRole('alert')).toBeNull();
+    act(() => bus.rerender({ workspaceId: 'ws-2' }));
+    expect(screen.getByRole('alert').textContent).toContain('ws-2 broke too');
+  });
+
   it('clears a stale banner when the focused workspace changes', () => {
     // FileViewer is not keyed by workspace, so this component survives a branch
     // switch. A failure from the branch just left must not paint over the new

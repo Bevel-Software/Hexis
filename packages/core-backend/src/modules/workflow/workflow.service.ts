@@ -925,9 +925,16 @@ export class WorkflowService implements IWorkflowService {
    * failing — see `gitSyncFailing`.
    */
   private noteGitSyncOk(workspaceId: string, branch: string): void {
-    if (!this.gitSyncFailing.delete(workspaceId)) return;
-    console.log(`[workflow] git sync recovered for workspace=${workspaceId} branch=${branch}`);
-    this.events?.emit({ kind: 'git-sync-recovered', workspaceId, branch });
+    // Callers hand this both spellings of a workspace id — HTTP routes pass
+    // the Express-decoded `user/feat`, internal callers (the pending-commits
+    // worker, the agent filesystem) the encoded `user%2Ffeat`. Keyed raw, a
+    // failure recorded by one caller could never be cleared by the other's
+    // success, and the banner would stick. Canonicalize the key AND the
+    // emitted id so every consumer sees one spelling.
+    const id = branchForWorkspaceId(workspaceId);
+    if (!this.gitSyncFailing.delete(id)) return;
+    console.log(`[workflow] git sync recovered for workspace=${id} branch=${branch}`);
+    this.events?.emit({ kind: 'git-sync-recovered', workspaceId: id, branch });
   }
 
   /**
@@ -939,10 +946,12 @@ export class WorkflowService implements IWorkflowService {
    * than the deployment looking healthy while nothing reaches the remote.
    */
   private noteGitSyncFailed(workspaceId: string, branch: string, err: unknown): void {
-    this.gitSyncFailing.add(workspaceId);
+    // Same canonicalization as `noteGitSyncOk` — the pair must agree on keys.
+    const id = branchForWorkspaceId(workspaceId);
+    this.gitSyncFailing.add(id);
     this.events?.emit({
       kind: 'git-sync-failed',
-      workspaceId,
+      workspaceId: id,
       branch,
       // Git stderr can quote a credentialed URL; the banner is user-facing and
       // the string also lands in client logs, so sanitize before it leaves.

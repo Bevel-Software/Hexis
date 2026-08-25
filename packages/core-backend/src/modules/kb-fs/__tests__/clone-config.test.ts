@@ -45,7 +45,7 @@ describe('credential config', () => {
     // path removes it. Callers run this tolerantly: unset of a missing key
     // exits non-zero and is the expected no-op.
     expect(cloneCredentialConfigArgs('x-access-token')).toEqual([
-      ['config', '--unset-all', 'credential.helper'],
+      ['config', '--unset-all', 'credential.helper', 'password=\\$GITHUB_TOKEN'],
     ]);
   });
 
@@ -59,10 +59,13 @@ describe('credential config', () => {
     ]);
   });
 
-  it('replaces rather than appends when re-stamping an existing clone', () => {
+  it('replaces rather than appends when re-stamping — scoped to app-owned values only', () => {
     process.env.GITHUB_TOKEN = 'ghp_x';
+    // The trailing value-pattern is what keeps an operator's own clone-local
+    // helper (store/cache/custom) out of reach of both the replace and the
+    // unset — git only touches values matching it.
     expect(cloneCredentialConfigArgs('x-access-token')).toEqual([
-      ['config', '--replace-all', 'credential.helper', credentialHelperValue('x-access-token')],
+      ['config', '--replace-all', 'credential.helper', credentialHelperValue('x-access-token'), 'password=\\$GITHUB_TOKEN'],
     ]);
   });
 

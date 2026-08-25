@@ -625,6 +625,32 @@ describe('WorkflowService — git-sync visibility events', () => {
     ]);
   });
 
+  it('clears a failure recorded under the encoded id when the decoded id recovers', async () => {
+    // HTTP routes hand the service Express-decoded ids (user/feat); internal
+    // callers hand the encoded form (user%2Ffeat). The tracker must treat
+    // them as one workspace, or a failure recorded by one caller can never
+    // be cleared by the other's success and the banner sticks forever.
+    const svc = makeFacade(
+      makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' }),
+      makeFileLocks(USER.id),
+      makePending(),
+      events,
+    );
+    await svc.runPendingCommit('user%2Ffeat', 'user/feat', 'foo.md', USER).catch(() => undefined);
+
+    Object.assign(svc as unknown as Record<string, unknown>, { git: makeGit() });
+    await svc.runPendingCommit('user/feat', 'user/feat', 'foo.md', USER);
+
+    const sync = emitSpy.mock.calls
+      .map((c) => c[0] as { kind: string; workspaceId: string })
+      .filter((e) => e.kind.startsWith('git-sync'));
+    // Both events carry the canonical (decoded) id, and the recovery fired.
+    expect(sync).toEqual([
+      expect.objectContaining({ kind: 'git-sync-failed', workspaceId: 'user/feat' }),
+      expect.objectContaining({ kind: 'git-sync-recovered', workspaceId: 'user/feat' }),
+    ]);
+  });
+
   it('tracks workspaces independently — one recovering neither clears nor suppresses another', async () => {
     const failingGit = () => makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' });
     const svc = makeFacade(failingGit(), makeFileLocks(USER.id), makePending(), events);

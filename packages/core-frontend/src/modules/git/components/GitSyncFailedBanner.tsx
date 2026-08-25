@@ -36,14 +36,20 @@ export function GitSyncFailedBanner() {
   // exact silent-failure symptom this banner exists to surface — so both
   // sides are canonicalised, the same way every other SSE consumer does.
   const canonId = workspaceId ? canonicalizeWorkspaceId(workspaceId) : null;
-  // The failure remembers WHICH workspace it belongs to. FileViewer is
-  // mounted at a catch-all route and is NOT keyed by workspace, so this
-  // component survives a branch switch — without the ownership check below, a
-  // failure from the branch just left would keep painting over the new one,
-  // and no `git-sync-recovered` would ever arrive to clear it (the backend
-  // only emits that on a real push transition of the OTHER workspace).
-  const [failure, setFailure] = useState<{ forId: string; branch: string; reason: string } | null>(
-    null,
+  // One record PER workspace, keyed by canonical id. FileViewer is mounted at
+  // a catch-all route and is NOT keyed by workspace, so this component
+  // survives every branch switch: a single record would let branch B's
+  // failure overwrite branch A's, hiding A's unresolved state on return. The
+  // render gate below shows only the focused workspace's record.
+  //
+  // Known limit, accepted deliberately: SSE events are focus-scoped, so a
+  // recovery that happens while the user is on another branch never arrives —
+  // a retained record can be stale on return until that branch's next push
+  // settles it (failures re-emit on every attempt, recoveries on the next
+  // transition). The alternative — clearing on switch — hides real, still-
+  // broken state, which is the exact failure mode this PR exists to fix.
+  const [failures, setFailures] = useState<ReadonlyMap<string, { branch: string; reason: string }>>(
+    new Map(),
   );
 
   useEventBusSubscription(
@@ -52,9 +58,11 @@ export function GitSyncFailedBanner() {
       (e) => {
         // The bus already filters to the focused workspace, but a focus change
         // races with in-flight events — checking here keeps another branch's
-        // failure from painting a banner over this one.
+        // failure from being recorded under this one's key.
         if (!canonId || canonicalizeWorkspaceId(e.workspaceId) !== canonId) return;
-        setFailure({ forId: canonId, branch: e.branch, reason: e.reason });
+        setFailures((prev) =>
+          new Map(prev).set(canonId, { branch: e.branch, reason: e.reason }),
+        );
       },
       [canonId],
     ),
@@ -65,18 +73,19 @@ export function GitSyncFailedBanner() {
     useCallback(
       (e) => {
         if (!canonId || canonicalizeWorkspaceId(e.workspaceId) !== canonId) return;
-        setFailure(null);
+        setFailures((prev) => {
+          if (!prev.has(canonId)) return prev;
+          const next = new Map(prev);
+          next.delete(canonId);
+          return next;
+        });
       },
       [canonId],
     ),
   );
 
-  // Ownership gate rather than an effect-driven reset: a stale entry simply
-  // stops rendering when the focus moves elsewhere, and (unlike wiping it)
-  // still shows if the user returns to the failed branch — where the
-  // condition is real until a recovery event or a successful push says
-  // otherwise.
-  if (!failure || failure.forId !== canonId) return null;
+  const failure = canonId ? failures.get(canonId) : undefined;
+  if (!failure) return null;
 
   return (
     <div
