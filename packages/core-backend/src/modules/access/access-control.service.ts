@@ -1731,7 +1731,15 @@ export class AccessControlService implements IAccessControl {
     let degraded = false;
     const read = async (relativePath: string): Promise<string | null> => {
       const outcome = await this.showAtRefOutcome(repoDir, commit, relativePath);
-      if (outcome.kind === 'error') degraded = true;
+      if (outcome.kind === 'error') {
+        degraded = true;
+        // The operational signal: one line per failed read, naming the commit
+        // and the path, so a run of these in the logs is visible before it
+        // becomes a pattern of wrong verdicts.
+        console.warn(
+          `[access@${label}@${commit.slice(0, 7)}] git read of ${relativePath} failed; this verdict treats it as absent and will not be cached`,
+        );
+      }
       return outcome.kind === 'text' ? outcome.text : null;
     };
 
@@ -1763,7 +1771,12 @@ export class AccessControlService implements IAccessControl {
 
     const accessFiles = new Map<string, AccessFile>();
     const listed = await this.listAccessFilesAtRef(repoDir, commit);
-    if (listed === 'error') degraded = true;
+    if (listed === 'error') {
+      degraded = true;
+      console.warn(
+        `[access@${tag}] listing access.md files failed; this verdict sees none of them and will not be cached`,
+      );
+    }
     for (const p of listed === 'error' ? [] : listed) {
       const text = await read(p);
       if (text === null) continue;

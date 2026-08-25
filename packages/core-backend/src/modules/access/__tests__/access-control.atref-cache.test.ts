@@ -221,9 +221,13 @@ describe('AccessControlService — at-ref model cache', () => {
     // build degrades the way it always did (the file counts as absent for
     // this call, so the verdict is the fail-open one)...
     injected.failNext = (argv) => argv.includes('show') && argv.some((a) => a.endsWith(':Team/access.md'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
     expect(injected.failNext).toBeNull();
     expect(lsTreeBuilds()).toBe(1);
+    // ...and says so in the logs, naming the read it lost.
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/Team\/access\.md failed; .*will not be cached/));
+    warn.mockRestore();
 
     // ...but it is NOT pinned: the next call rebuilds and answers correctly,
     // and that healthy build is the one that gets cached.
