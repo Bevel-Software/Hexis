@@ -26,6 +26,7 @@ export {
   fetchLocalOnlyManuals,
   fetchLocalToolVariables,
   type LocalManualInfo,
+  type LocalToolVariables,
 } from './deployment.js';
 export {
   HexisLocalVariableLoader,

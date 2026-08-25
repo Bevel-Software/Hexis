@@ -48,12 +48,27 @@ export function createDeclaredVariableRoutes(
 ): express.Router {
   const router = express.Router();
 
-  async function caller(req: Request): Promise<{ userId: string; email: string } | null> {
-    const userId = req.toolAuth?.userId;
-    if (!userId) return null;
+  /**
+   * Who is asking — and only if it is a MACHINE.
+   *
+   * `manualAuth` also accepts a browser session JWT, which is right for the
+   * rest of the agent surface: manual discovery is a read-only listing a
+   * signed-in user may legitimately fetch. It is wrong here. This route hands
+   * back secret VALUES, and the Secrets page is deliberately write-only —
+   * a field starts empty even when a value exists, and saving replaces rather
+   * than reveals. A session token that could read values back would undo that,
+   * and would do it for anyone who can merely READ a `.tool`.
+   *
+   * The caller that needs this is the local MCP server, which authenticates
+   * with a connection key or an internal token. A browser has no reason to ask
+   * at all, so a session is refused rather than scoped.
+   */
+  async function machineCaller(req: Request): Promise<{ userId: string; email: string } | null> {
+    const auth = req.toolAuth;
+    if (!auth?.userId || auth.source === 'session') return null;
     try {
-      const email = await resolveUserEmail(userId);
-      return email ? { userId, email } : null;
+      const email = await resolveUserEmail(auth.userId);
+      return email ? { userId: auth.userId, email } : null;
     } catch {
       return null;
     }
@@ -90,8 +105,14 @@ export function createDeclaredVariableRoutes(
    * sends nothing but the slug.
    */
   router.post('/agent/local-tools/:slug/variables', manualAuth, async (req, res) => {
-    const who = await caller(req);
-    if (!who) return void res.status(403).json({ error: 'Forbidden' });
+    const who = await machineCaller(req);
+    if (!who) {
+      return void res.status(403).json({
+        error:
+          'This endpoint releases secret values to a local runtime and is not reachable with a browser session. ' +
+          'Use a connection key.',
+      });
+    }
     const slug = String(req.params.slug);
     try {
       // `listAccessible` already applies the per-file read verdict, so an

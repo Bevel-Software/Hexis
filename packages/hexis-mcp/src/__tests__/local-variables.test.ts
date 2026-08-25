@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest';
+import { describe, expect, it, vi, afterEach } from 'vitest';
 import { CommunicationProtocol } from '@utcp/sdk';
 import '@utcp/cli';
 import {
@@ -72,7 +72,7 @@ describe('fetchLocalOnlyManuals', () => {
 describe('fetchLocalToolVariables', () => {
   it('names only the manual — never a variable', async () => {
     const calls = stubVariables({ git: { variables: { GITHUB_TOKEN: 'ghp_x' } } });
-    expect(await fetchLocalToolVariables(config, 'git')).toEqual({ GITHUB_TOKEN: 'ghp_x' });
+    expect(await fetchLocalToolVariables(config, 'git')).toEqual({ ok: true, values: { GITHUB_TOKEN: 'ghp_x' } });
     expect(calls).toEqual(['https://x.example/api/agent/local-tools/git/variables']);
   });
 
@@ -80,27 +80,34 @@ describe('fetchLocalToolVariables', () => {
     // An unset variable, an older deployment without the route, a network
     // blip: the tool should still be offered and fail with its own message.
     stubVariables({});
-    expect(await fetchLocalToolVariables(config, 'git')).toEqual({});
+    expect(await fetchLocalToolVariables(config, 'git')).toEqual({ ok: false, values: {} });
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
-    expect(await fetchLocalToolVariables(config, 'git')).toEqual({});
+    expect(await fetchLocalToolVariables(config, 'git')).toEqual({ ok: false, values: {} });
+  });
+
+  it('reports a malformed response as a failure rather than as an unset secret', async () => {
+    // Protocol drift and an unset secret look identical to a caller otherwise,
+    // and only one of them is fixed by visiting the Secrets page.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ unexpected: true }), { status: 200 })));
+    expect(await fetchLocalToolVariables(config, 'git')).toEqual({ ok: false, values: {} });
   });
 
   it('ignores non-string values', async () => {
     stubVariables({ git: { variables: { A: 'ok', B: 42, C: null } } });
-    expect(await fetchLocalToolVariables(config, 'git')).toEqual({ A: 'ok' });
+    expect(await fetchLocalToolVariables(config, 'git')).toEqual({ ok: true, values: { A: 'ok' } });
   });
 });
 
 describe('HexisLocalVariableLoader', () => {
-  let loader: HexisLocalVariableLoader;
-
-  beforeEach(() => {
-    loader = new HexisLocalVariableLoader();
-  });
+  /** Bind, then build a loader that reads THAT binding. */
+  const bind = (
+    local: Map<string, LocalManualInfo>,
+    now: () => number = Date.now,
+  ): HexisLocalVariableLoader => new HexisLocalVariableLoader(bindLocalVariableResolver(config, local, now));
 
   it('resolves a local manual variable from its namespaced key', async () => {
     stubVariables({ git: { variables: { GITHUB_TOKEN: 'ghp_x' } } });
-    bindLocalVariableResolver(config, local({ git: { slug: 'git', path: 'p' } }));
+    const loader = bind(local({ git: { slug: 'git', path: 'p' } }));
     expect(await loader.get('git_GITHUB_TOKEN')).toBe('ghp_x');
   });
 
@@ -108,7 +115,7 @@ describe('HexisLocalVariableLoader', () => {
     // A remote manual's tools execute on the deployment and resolve their
     // credentials there — this loader must never be a route to those.
     const calls = stubVariables({ git: { variables: { GITHUB_TOKEN: 'ghp_x' } } });
-    bindLocalVariableResolver(config, local({ git: { slug: 'git', path: 'p' } }));
+    const loader = bind(local({ git: { slug: 'git', path: 'p' } }));
     expect(await loader.get('hexis_SOMETHING')).toBeNull();
     expect(await loader.get('GITHUB_TOKEN')).toBeNull();
     expect(calls).toEqual([]);
@@ -116,7 +123,7 @@ describe('HexisLocalVariableLoader', () => {
 
   it('answers null for an undeclared variable of a local manual', async () => {
     stubVariables({ git: { variables: { GITHUB_TOKEN: 'ghp_x' } } });
-    bindLocalVariableResolver(config, local({ git: { slug: 'git', path: 'p' } }));
+    const loader = bind(local({ git: { slug: 'git', path: 'p' } }));
     // Falls through to `process.env`, which is UTCP's last tier.
     expect(await loader.get('git_OTHER')).toBeNull();
   });
@@ -128,10 +135,7 @@ describe('HexisLocalVariableLoader', () => {
       git: { variables: { TOKEN: 'git-token' } },
       deploy: { variables: { TOKEN: 'deploy-token' } },
     });
-    bindLocalVariableResolver(
-      config,
-      local({ git: { slug: 'git', path: 'p' }, deploy: { slug: 'deploy', path: 'q' } }),
-    );
+    const loader = bind(local({ git: { slug: 'git', path: 'p' }, deploy: { slug: 'deploy', path: 'q' } }));
     expect(await loader.get('git_TOKEN')).toBe('git-token');
     expect(await loader.get('deploy_TOKEN')).toBe('deploy-token');
   });
@@ -140,17 +144,14 @@ describe('HexisLocalVariableLoader', () => {
     // UTCP doubles underscores in a namespace, so `a_b` prefixes as `a__b_`
     // while `a` prefixes as `a_`. A first-underscore split would mis-attribute.
     stubVariables({ a: { variables: { _b_KEY: 'wrong' } }, ab: { variables: { KEY: 'right' } } });
-    bindLocalVariableResolver(
-      config,
-      local({ a: { slug: 'a', path: 'p' }, a_b: { slug: 'ab', path: 'q' } }),
-    );
+    const loader = bind(local({ a: { slug: 'a', path: 'p' }, a_b: { slug: 'ab', path: 'q' } }));
     expect(await loader.get('a__b_KEY')).toBe('right');
   });
 
   it('asks the deployment once per manual, not once per variable', async () => {
     let now = 0;
     const calls = stubVariables({ git: { variables: { A: '1', B: '2' } } });
-    bindLocalVariableResolver(config, local({ git: { slug: 'git', path: 'p' } }), () => now);
+    const loader = bind(local({ git: { slug: 'git', path: 'p' } }), () => now);
     // Concurrent asks during one tool call share a single request…
     expect(await Promise.all([loader.get('git_A'), loader.get('git_B')])).toEqual(['1', '2']);
     expect(calls).toHaveLength(1);
@@ -162,9 +163,47 @@ describe('HexisLocalVariableLoader', () => {
     expect(calls).toHaveLength(2);
   });
 
-  it('resolves nothing at all until it is bound', async () => {
+  it('resolves nothing at all for an unknown binding', async () => {
     const calls = stubVariables({ git: { variables: { A: '1' } } });
-    expect(await loader.get('git_A')).toBeNull();
+    expect(await new HexisLocalVariableLoader('never-bound').get('git_A')).toBeNull();
     expect(calls).toEqual([]);
+  });
+
+  it('keeps two bindings apart, so one server cannot retarget another', async () => {
+    // Two servers in one process — embedded callers, and the tests that build
+    // several. One process-wide binding meant the second to bind silently
+    // pointed the first server's tools at the wrong deployment.
+    stubVariables({ one: { variables: { TOKEN: 'from-one' } }, two: { variables: { TOKEN: 'from-two' } } });
+    const first = bind(local({ git: { slug: 'one', path: 'p' } }));
+    const second = bind(local({ git: { slug: 'two', path: 'p' } }));
+    expect(await first.get('git_TOKEN')).toBe('from-one');
+    expect(await second.get('git_TOKEN')).toBe('from-two');
+  });
+
+  it('resolves NEITHER of two manuals sharing a namespace', async () => {
+    // Namespacing maps non-word characters to `_` then doubles them, so `a-b`
+    // and `a_b` both give `a__b_`. Picking one would hand its vault value to
+    // the other — exactly the isolation this loader exists to provide — and
+    // which one would depend on map order.
+    stubVariables({ dash: { variables: { KEY: 'from-dash' } }, under: { variables: { KEY: 'from-under' } } });
+    const loader = bind(local({ 'a-b': { slug: 'dash', path: 'p' }, a_b: { slug: 'under', path: 'q' } }));
+    expect(await loader.get('a__b_KEY')).toBeNull();
+  });
+
+  it('retries after a failed resolution instead of caching the failure', async () => {
+    // A blip used to disable a tool's credentials for the whole TTL, with the
+    // tool silently running without them.
+    let attempt = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        attempt += 1;
+        if (attempt === 1) throw new Error('offline');
+        return new Response(JSON.stringify({ variables: { A: 'recovered' }, missing: [] }), { status: 200 });
+      }),
+    );
+    const loader = bind(local({ git: { slug: 'git', path: 'p' } }), () => 0);
+    expect(await loader.get('git_A')).toBeNull();
+    expect(await loader.get('git_A')).toBe('recovered');
   });
 });

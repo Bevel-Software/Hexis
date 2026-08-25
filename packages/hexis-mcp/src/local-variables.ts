@@ -55,29 +55,41 @@ interface ResolverState {
 }
 
 /**
- * Process-wide, for the same reason the platform's vault loader is: a loader is
- * rebuilt from a plain descriptor by the serializer registry, which has nothing
- * to bind it to. Set once, before any client is created.
+ * Bindings by id, NOT one process-wide binding.
+ *
+ * A loader is rebuilt from a plain descriptor by the serializer registry, which
+ * has nothing to bind it to — so the descriptor carries an id and the live
+ * state is looked up here. A single global would mean two servers in one
+ * process (embedded callers, and the tests that build several) sharing one
+ * deployment's configuration: the second `bind` would silently retarget the
+ * first server's tools, and one deployment's manuals would resolve against the
+ * other's vault.
  */
-let state: ResolverState | null = null;
+const bindings = new Map<string, ResolverState>();
+let nextBindingId = 0;
 
 /**
- * Point the loader at a deployment and the set of manuals that resolve through
- * it. Call before building the UTCP client; calling again replaces the binding
- * (and drops the cache, which is what a re-registration after a credential
- * renewal wants).
+ * Point a loader at a deployment and the set of manuals that resolve through
+ * it. Returns the id to put in the client config's loader descriptor.
+ *
+ * Call before building the UTCP client. Each call is a NEW binding with its own
+ * cache; re-binding after a credential renewal therefore drops the old cached
+ * values, which is what that case wants.
  */
 export function bindLocalVariableResolver(
   config: HexisMcpConfig,
   local: ReadonlyMap<string, LocalManualInfo>,
   now: () => number = Date.now,
-): void {
-  state = { config, local, cache: new Map(), inFlight: new Map(), now };
+): string {
+  const id = `binding-${nextBindingId++}`;
+  bindings.set(id, { config, local, cache: new Map(), inFlight: new Map(), now });
+  return id;
 }
 
-/** Drop every cached value — used by tests and by a re-bind. */
-export function resetLocalVariableResolver(): void {
-  state = null;
+/** Release one binding, or every binding when called with no id. */
+export function resetLocalVariableResolver(id?: string): void {
+  if (id === undefined) bindings.clear();
+  else bindings.delete(id);
 }
 
 /**
@@ -86,22 +98,53 @@ export function resetLocalVariableResolver(): void {
  * Matched on the LONGEST prefix so a manual `a` cannot shadow `a_b` when both
  * exist — the same rule the platform's scope resolver uses, and for the same
  * reason: a first-underscore split mis-parses every snake_case manual name.
+ *
+ * AMBIGUITY RESOLVES TO NOTHING. Namespacing maps every non-word character to
+ * `_` and then doubles it, so two different manual names can normalize to the
+ * same prefix (`a-b` and `a_b` both give `a__b_`). Picking either would hand
+ * one manual's vault value to the other — the exact isolation this loader
+ * exists to provide — and picking "whichever the map happened to hold first"
+ * would make which one silent and arbitrary. So a tie returns null, the key
+ * falls through to `process.env`, and the collision is reported once rather
+ * than resolved wrongly.
  */
 function ownerOf(
   effectiveKey: string,
   local: ReadonlyMap<string, LocalManualInfo>,
 ): { manual: string; info: LocalManualInfo; varName: string } | null {
   let best: { manual: string; info: LocalManualInfo; varName: string; len: number } | null = null;
+  let ambiguous: string[] = [];
   for (const [manual, info] of local) {
     const prefix = utcpNamespacePrefix(manual);
-    if (effectiveKey.startsWith(prefix) && (!best || prefix.length > best.len)) {
+    if (!effectiveKey.startsWith(prefix)) continue;
+    if (!best || prefix.length > best.len) {
       best = { manual, info, varName: effectiveKey.slice(prefix.length), len: prefix.length };
+      ambiguous = [manual];
+    } else if (prefix.length === best.len) {
+      ambiguous.push(manual);
     }
   }
-  return best ? { manual: best.manual, info: best.info, varName: best.varName } : null;
+  if (!best) return null;
+  if (ambiguous.length > 1) {
+    console.error(
+      `[hexis-mcp] refusing to resolve "${effectiveKey}": the manuals ${ambiguous
+        .map((m) => `"${m}"`)
+        .join(' and ')} share one variable namespace. Rename one — until then neither resolves.`,
+    );
+    return null;
+  }
+  return { manual: best.manual, info: best.info, varName: best.varName };
 }
 
-/** One manual's variables, cached, with concurrent asks sharing a single fetch. */
+/**
+ * One manual's variables, cached, with concurrent asks sharing a single fetch.
+ *
+ * A FAILED resolution is never cached. `fetchLocalToolVariables` degrades to an
+ * empty map on a network blip or a deployment that predates the route, and
+ * caching that would disable the manual's credentials for the whole TTL — with
+ * the tool silently running without them rather than retrying on the next
+ * substitution. So only a successful fetch is stored; a failure is retried.
+ */
 async function variablesFor(s: ResolverState, manual: string, info: LocalManualInfo): Promise<Record<string, string>> {
   const cached = s.cache.get(manual);
   if (cached && s.now() - cached.at < CACHE_TTL_MS) return cached.values;
@@ -112,9 +155,9 @@ async function variablesFor(s: ResolverState, manual: string, info: LocalManualI
   if (pending) return pending;
 
   const request = fetchLocalToolVariables(s.config, info.slug)
-    .then((values) => {
-      s.cache.set(manual, { at: s.now(), values });
-      return values;
+    .then((result) => {
+      if (result.ok) s.cache.set(manual, { at: s.now(), values: result.values });
+      return result.values;
     })
     .finally(() => s.inFlight.delete(manual));
   s.inFlight.set(manual, request);
@@ -123,8 +166,13 @@ async function variablesFor(s: ResolverState, manual: string, info: LocalManualI
 
 export class HexisLocalVariableLoader implements VariableLoader {
   readonly variable_loader_type = HEXIS_LOCAL_LOADER_TYPE;
+  readonly binding_id: string;
   // VariableLoader is an open shape; allow arbitrary extra props.
   [key: string]: unknown;
+
+  constructor(bindingId: string) {
+    this.binding_id = bindingId;
+  }
 
   /**
    * Resolve one UTCP-namespaced key, or null to fall through to `process.env`.
@@ -134,6 +182,7 @@ export class HexisLocalVariableLoader implements VariableLoader {
    * by which a server-side credential is pulled onto the machine.
    */
   async get(effectiveKey: string): Promise<string | null> {
+    const state = bindings.get(this.binding_id);
     if (!state) return null;
     const owner = ownerOf(effectiveKey, state.local);
     if (!owner) return null;
@@ -149,12 +198,15 @@ export class HexisLocalVariableLoader implements VariableLoader {
 }
 
 class HexisLocalVariableLoaderSerializer extends Serializer<VariableLoader> {
-  toDict(): Record<string, unknown> {
-    return { variable_loader_type: HEXIS_LOCAL_LOADER_TYPE };
+  toDict(obj: VariableLoader): Record<string, unknown> {
+    return {
+      variable_loader_type: HEXIS_LOCAL_LOADER_TYPE,
+      binding_id: (obj as HexisLocalVariableLoader).binding_id ?? '',
+    };
   }
 
-  validateDict(): VariableLoader {
-    return new HexisLocalVariableLoader();
+  validateDict(obj: Record<string, unknown>): VariableLoader {
+    return new HexisLocalVariableLoader(typeof obj.binding_id === 'string' ? obj.binding_id : '');
   }
 }
 
@@ -172,6 +224,6 @@ export function registerLocalVariableLoader(): void {
 }
 
 /** The descriptor to put in a client config's `load_variables_from`. */
-export function localVariableLoaderConfig(): Record<string, unknown> {
-  return { variable_loader_type: HEXIS_LOCAL_LOADER_TYPE };
+export function localVariableLoaderConfig(bindingId: string): Record<string, unknown> {
+  return { variable_loader_type: HEXIS_LOCAL_LOADER_TYPE, binding_id: bindingId };
 }

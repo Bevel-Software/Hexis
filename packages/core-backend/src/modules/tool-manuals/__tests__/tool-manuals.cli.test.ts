@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CommunicationProtocol } from '@utcp/sdk';
+import { CallTemplateSerializer, CommunicationProtocol, UtcpClient } from '@utcp/sdk';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { ToolManualService, normalizeToolManual } from '../tool-manuals.service.js';
 import { canExecuteCliTemplates, containsCliCallTemplate } from '../utcp-cli-parse-only.js';
@@ -40,12 +40,38 @@ Notes after the fence are ignored by the parser.
 `;
 
 describe('cli `.tool` manuals — parsed and listed, never executed', () => {
-  test('the hosted process registers no cli executor', () => {
-    // The serializer must be present (files parse) and the protocol absent
-    // (nothing can dispatch). Asserted directly on the SDK registry, because
-    // this is the backstop under the `remote: false` forcing below.
+  test('the hosted process cannot DISPATCH a cli template', async () => {
+    // The claim worth pinning is not "the map lacks a key" — it is that a cli
+    // template actually fails to dispatch. A registry assertion alone would
+    // still pass if some other module re-registered the protocol at runtime, or
+    // if dispatch consulted a different map; this exercises the path a
+    // dispatching caller takes.
     expect(canExecuteCliTemplates()).toBe(false);
-    expect(CommunicationProtocol.communicationProtocols.cli).toBeUndefined();
+
+    const template = new CallTemplateSerializer().validateDict({
+      name: 'git',
+      call_template_type: 'cli',
+      commands: [{ command: 'git status', append_to_final_output: true }],
+    });
+    const protocol = CommunicationProtocol.communicationProtocols[template.call_template_type];
+    expect(protocol).toBeUndefined();
+
+    // And a client built in this process refuses it rather than shelling out.
+    const client = await UtcpClient.create(process.cwd(), { variables: {} } as never);
+    await expect(client.registerManual(template)).rejects.toThrow();
+  });
+
+  test('the serializer IS registered, or these files would not parse at all', () => {
+    // The other half of the split: the platform must understand a cli template
+    // well enough to validate and serve it, which is why the package is
+    // imported at all.
+    expect(() =>
+      new CallTemplateSerializer().validateDict({
+        name: 'git',
+        call_template_type: 'cli',
+        commands: [{ command: 'git status' }],
+      }),
+    ).not.toThrow();
     expect(CommunicationProtocol.communicationProtocols.http).toBeDefined();
   });
 

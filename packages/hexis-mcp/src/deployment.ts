@@ -243,6 +243,17 @@ export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map
   return manuals;
 }
 
+/** What a resolution attempt produced, and whether it actually succeeded. */
+export interface LocalToolVariables {
+  /**
+   * Whether the deployment answered. FALSE for a network blip, a refusal, or a
+   * deployment predating the route — distinct from "answered, nothing set",
+   * because only a real answer is worth caching.
+   */
+  ok: boolean;
+  values: Record<string, string>;
+}
+
 /**
  * The variables one LOCAL manual declares, resolved by the deployment.
  *
@@ -252,16 +263,16 @@ export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map
  * scoped to one manual's namespace and goes straight into that manual's tool
  * invocations — see `localVariableLoader`.
  *
- * A failure here is NOT fatal. A manual may declare variables that are simply
- * unset, the deployment may be an older build without the route, and either way
- * the tool should still be offered and fail with its own error message rather
- * than being absent from the toolset. So the caller gets an empty map and a log
- * line.
+ * A failure is NOT fatal. A manual may declare variables that are simply unset,
+ * the deployment may be an older build without the route, and either way the
+ * tool should still be offered and fail with its own error message rather than
+ * being absent from the toolset. So the caller gets `ok: false` and an empty
+ * map — and, because it is `ok: false`, the caller knows not to cache it.
  */
 export async function fetchLocalToolVariables(
   config: HexisMcpConfig,
   slug: string,
-): Promise<Record<string, string>> {
+): Promise<LocalToolVariables> {
   try {
     const body = (await getJson(
       `${config.baseUrl}/api/agent/local-tools/${encodeURIComponent(slug)}/variables`,
@@ -277,7 +288,16 @@ export async function fetchLocalToolVariables(
       },
     )) as { variables?: unknown; missing?: unknown };
     const vars = body?.variables;
-    if (!vars || typeof vars !== 'object' || Array.isArray(vars)) return {};
+    if (!vars || typeof vars !== 'object' || Array.isArray(vars)) {
+      // A 200 whose shape we do not recognise is protocol drift, not an unset
+      // secret. Saying so is the difference between an operator debugging their
+      // vault and an operator debugging a version mismatch.
+      console.error(
+        `[hexis-mcp] the deployment answered for local tool "${slug}" without a "variables" object — ` +
+          'its secrets will not resolve. Check that the deployment is new enough to serve this route.',
+      );
+      return { ok: false, values: {} };
+    }
     if (Array.isArray(body.missing) && body.missing.length > 0) {
       console.error(
         `[hexis-mcp] local tool "${slug}" has unset variables: ${body.missing.join(', ')} — ` +
@@ -288,13 +308,13 @@ export async function fetchLocalToolVariables(
     for (const [k, v] of Object.entries(vars as Record<string, unknown>)) {
       if (typeof v === 'string') out[k] = v;
     }
-    return out;
+    return { ok: true, values: out };
   } catch (err) {
     console.error(
       `[hexis-mcp] could not resolve variables for local tool "${slug}": ` +
         `${err instanceof Error ? err.message : String(err)}`,
     );
-    return {};
+    return { ok: false, values: {} };
   }
 }
 

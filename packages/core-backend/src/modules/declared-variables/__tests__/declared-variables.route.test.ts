@@ -42,10 +42,13 @@ interface Harness {
 
 async function mount(opts: {
   userId?: string;
+  /** How the caller authenticated. `session` is a browser; anything else is a machine. */
+  source?: 'session' | 'external' | 'internal';
   manuals?: ToolManualSummary[];
   secrets?: Record<string, string>;
 }): Promise<Harness> {
   const userId = opts.userId ?? 'user-1';
+  const source = opts.source ?? 'external';
   const secrets = opts.secrets ?? {};
   const resolve = vi.fn(async (_u: string, key: string) => secrets[key] ?? null);
 
@@ -61,7 +64,7 @@ async function mount(opts: {
       toolManualService,
       secretsVault,
       (req, _res, next) => {
-        if (userId) req.toolAuth = { userId } as typeof req.toolAuth;
+        if (userId) req.toolAuth = { userId, source, scope: 'write' } as typeof req.toolAuth;
         next();
       },
       async () => 'runner@x.eu',
@@ -121,5 +124,31 @@ describe('POST /agent/local-tools/:slug/variables', () => {
   it('403s an unauthenticated caller', async () => {
     const { base } = await mount({ userId: '', manuals: [GIT_TOOL] });
     expect((await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(403);
+  });
+
+  it('refuses a BROWSER SESSION, even one that can read the tool', async () => {
+    // `manualAuth` accepts a session JWT, which is right for manual discovery
+    // and wrong here: this route hands back secret VALUES, and the Secrets page
+    // is deliberately write-only — a field starts empty even when a value
+    // exists. A session that could read values back would undo that for anyone
+    // with mere READ access to a `.tool`.
+    const { base, resolve } = await mount({
+      source: 'session',
+      manuals: [GIT_TOOL],
+      secrets: { git_GITHUB_TOKEN: 'ghp_secret' },
+    });
+    const res = await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' });
+    expect(res.status).toBe(403);
+    expect(await res.text()).not.toContain('ghp_secret');
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it('allows the machine callers that need it', async () => {
+    for (const source of ['external', 'internal'] as const) {
+      const { base } = await mount({ source, manuals: [GIT_TOOL], secrets: { git_GITHUB_TOKEN: 'x' } });
+      expect((await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(200);
+      if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
+      httpServer = undefined;
+    }
   });
 });

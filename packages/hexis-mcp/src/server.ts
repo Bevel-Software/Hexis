@@ -87,10 +87,13 @@ async function buildClient(
     config.connectionKey,
   );
   registerLocalVariableLoader();
-  bindLocalVariableResolver(config, localOnly);
+  // A binding per client, not one per process: two servers in one process would
+  // otherwise share a deployment, and the second to bind would retarget the
+  // first's tools at the wrong vault.
+  const bindingId = bindLocalVariableResolver(config, localOnly);
   const clientConfig = new UtcpClientConfigSerializer().validateDict({
     variables,
-    load_variables_from: [localVariableLoaderConfig()],
+    load_variables_from: [localVariableLoaderConfig(bindingId)],
   });
   return CodeModeUtcpClient.create(process.cwd(), clientConfig);
 }
