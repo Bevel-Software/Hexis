@@ -248,23 +248,22 @@ describe('WorkflowService.commitFileWhileLocked', () => {
     ]);
   });
 
-  it('best-effort: still emits file-changed when non-fast-forward recovery itself fails', async () => {
+  it('best-effort: still emits file-changed when non-fast-forward recovery itself fails — and NO banner', async () => {
     // Pull rebase failed (conflicts) or retry-push got rejected again.
     // Autosave must NOT throw — the user is mid-edit and would see a
     // baffling error banner for something they didn't even trigger.
-    // The local commit landed; the next checkpoint or final release
-    // will retry the push.
+    // The local commit landed; the release push retries, and if THAT
+    // fails the banner comes from pushWithRecovery. A background
+    // autosave losing a routine two-editors race is not an outage, so
+    // no git-sync-failed here — that stays reserved for auth/host
+    // failures, which never clear themselves (previous test).
     const git = makeGit({ pushBehavior: 'nff', pullBehavior: 'fail' });
     const locks = makeFileLocks(USER.id);
     const svc = makeFacade(git, locks, events);
 
     const change = await svc.commitFileWhileLocked('ws-1', 'feat/x', 'foo.md', USER);
     expect(change).toEqual(CHANGE);
-    // Even though push never succeeded, file-changed still emits so the
-    // local commit is visible to other tabs of the same user — and the sync
-    // banner goes out with it, so the unshipped state is visible too.
     expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
-      'git-sync-failed',
       'file-changed',
     ]);
   });

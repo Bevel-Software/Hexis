@@ -466,8 +466,27 @@ export class WorkspaceService implements IWorkspaceService {
    * nor read as a failure.
    */
   private async stampCredentialHelper(repoDir: string, branch: string): Promise<void> {
+    let argLists: string[][];
+    try {
+      argLists = cloneCredentialConfigArgs(this.gitUsername());
+    } catch (err) {
+      // `credentialHelperValue` fails closed on a username outside its safe
+      // charset. Normally unreachable (CoreConfig and the settings service
+      // validate first), but if a fourth, unvalidated path ever appears the
+      // throw must not escape here: in the disk-adoption block it would land
+      // in a catch that reads every error as "not on disk" and kick off a
+      // re-clone that fails on the same validation — masking the real cause.
+      // Contain it as a loud non-stamp instead; `normalizeCloneConfig`'s
+      // never-throws contract stays true.
+      console.warn(
+        `[workspace] refusing to stamp the credential helper of the "${branch}" clone:`,
+        redactError(err),
+      );
+      this.stampedCredentialFingerprint.delete(branch);
+      return;
+    }
     let stamped = true;
-    for (const args of cloneCredentialConfigArgs(this.gitUsername())) {
+    for (const args of argLists) {
       try {
         await execFileAsync('git', ['-C', repoDir, ...args]);
       } catch (err) {

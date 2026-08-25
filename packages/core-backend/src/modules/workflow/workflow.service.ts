@@ -713,14 +713,20 @@ export class WorkflowService implements IWorkflowService {
           }
         }
         if (!recovered) {
-          // Still best-effort — we don't fail the autosave, and a
-          // non-fast-forward here is genuinely expected to clear itself on the
-          // release push. But "expected to clear itself" was doing too much
-          // work: an auth failure never clears, and swallowing it into a log
-          // line is what let a broken deployment look healthy for two days.
-          // The commit stays local either way; now it says so. Report the
-          // recovery error when recovery ran — it reflects the current state.
-          this.noteGitSyncFailed(workspaceId, branch, recoveryError ?? err);
+          // Still best-effort — we don't fail the autosave. What gets the
+          // BANNER is only the class that cannot clear itself: auth or host
+          // failures, which no later attempt fixes. A non-fast-forward here —
+          // recovery attempted or not — is the routine two-editors race the
+          // surrounding flow already handles: the release push retries it,
+          // and if THAT fails the user gets the typed agent hand-off plus the
+          // banner from `pushWithRecovery`. Bannering it from a background
+          // autosave would tell an author mid-keystroke that the deployment
+          // is broken over a race that usually settles on its own — while an
+          // auth failure swallowed into a log line is how a broken deployment
+          // once stacked 136 local commits before anyone found out.
+          if (!looksLikeNonFastForward) {
+            this.noteGitSyncFailed(workspaceId, branch, recoveryError ?? err);
+          }
           console.warn(
             '[workflow] push after autosave commit failed (commit landed locally):',
             detail,

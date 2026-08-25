@@ -101,7 +101,14 @@ export function credentialHelperValue(gitUsername: string): string | null {
   if (!/^[A-Za-z0-9._-]+$/.test(gitUsername)) {
     throw new Error(`git username must match [A-Za-z0-9._-]+; got "${gitUsername}"`);
   }
-  return `!f() { echo "username=${gitUsername}"; echo "password=$GITHUB_TOKEN"; }; f`;
+  // printf '%s' rather than echo: POSIX leaves echo's handling of backslash
+  // escapes implementation-defined (dash interprets \c as "stop output"), so
+  // a token containing a backslash sequence could be silently truncated on
+  // the way to git. printf %s passes the bytes through verbatim. The literal
+  // `password=$GITHUB_TOKEN` stays in the snippet, which is what
+  // APP_HELPER_VALUE_PATTERN keys on — echo-era helpers stamped by earlier
+  // builds still match it and get replaced on the next stamp.
+  return `!f() { printf '%s\\n' "username=${gitUsername}" "password=$GITHUB_TOKEN"; }; f`;
 }
 
 /**
