@@ -42,9 +42,9 @@
     "@bevel-software/platform-mcp-core": "workspace:*",
     "adm-zip": "^0.6.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@utcp/code-mode": "^1.2.12",
+    "@utcp/code-mode": "^1.2.13",
     "@utcp/http": "^1.1.11",
-    "@utcp/mcp": "^1.1.4",
+    "@utcp/mcp": "^1.1.5",
     "@utcp/sdk": "^1.1.1"
   },
   "devDependencies": {

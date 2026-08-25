@@ -9,7 +9,12 @@ import { BevelIgnoreStack } from './bevel-ignore.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
-import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../kb-fs/clone-config.js';
+import {
+  cloneCredentialArgs,
+  cloneCredentialConfigArgs,
+  cloneTrackingConfigArgs,
+  SAFE_IMPLICIT_FETCH_ARGS,
+} from '../kb-fs/clone-config.js';
 import type { IDiffService } from '../diff/diff.interface.js';
 
 /**
@@ -155,9 +160,13 @@ export class WorkspaceService implements IWorkspaceService {
     this.onWorkspaceCloned = listener;
   }
 
-  /** Build git clone args that inject credentials via -c headers so the token never appears in the repo URL. */
+  /**
+   * Build git clone args. Credentials go in as `clone --config`, which both
+   * authenticates this clone and leaves the helper in the new repo's config for
+   * every later push — and keeps the token itself out of the repo URL, out of
+   * argv, and out of `.git/config` (the helper reads it from the environment).
+   */
   private gitCloneArgs(targetDir: string, branch: string, referenceRepo?: string): string[] {
-    const token = process.env.GITHUB_TOKEN;
     // core.longpaths=true: KB has paths >260 chars; without this the clone silently drops those files on Windows.
     const args = ['clone', '-c', 'core.longpaths=true', '-b', branch];
     // Borrow the object database of an existing sibling clone. Every commit
@@ -171,14 +180,10 @@ export class WorkspaceService implements IWorkspaceService {
     if (referenceRepo) {
       args.push('--reference', referenceRepo, '--dissociate');
     }
-    if (token) {
-      // The helper script reads from GITHUB_TOKEN at runtime — the token value never appears in args.
-      // Username is provider-specific (GitHub `x-access-token`, GitLab `oauth2`, …); the token is
-      // always the Basic-auth password, which every major host accepts.
-      args.push(
-        '-c', `credential.helper=!f() { echo "username=${this.gitUsername()}"; echo "password=$GITHUB_TOKEN"; }; f`,
-      );
-    }
+    // Persisted into the new repo's config (`clone --config`), not just applied
+    // to this invocation — every later push from this clone depends on finding
+    // the helper there. See `cloneCredentialArgs`.
+    args.push(...cloneCredentialArgs(this.gitUsername()));
     args.push(this.kbRepoUrl(), targetDir);
     return args;
   }
@@ -288,6 +293,11 @@ export class WorkspaceService implements IWorkspaceService {
     // back a half-cloned workspace.
     if (this.branchDirs.has(branch)) {
       await this.awaitBootstrapOrEvict(branch);
+      // A token or username set/changed through the setup screen after this
+      // branch was first opened has to reach the already-cached clone, or its
+      // pushes keep failing — the fast path is exactly where that rotation is
+      // otherwise missed.
+      await this.refreshCredentialHelperIfStale(branch, repoDir);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     }
 
@@ -301,6 +311,7 @@ export class WorkspaceService implements IWorkspaceService {
     // single-flight wait the cached fast path already uses.
     await this.awaitBootstrapOrEvict(branch);
     if (this.branchDirs.has(branch)) {
+      await this.refreshCredentialHelperIfStale(branch, repoDir);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     }
 
@@ -313,7 +324,7 @@ export class WorkspaceService implements IWorkspaceService {
       // (duplicate fetch refspec / merge ref) is repaired before anything
       // pulls it. Once per branch per process — the cached paths above return
       // before reaching here.
-      await this.normalizeCloneTracking(repoDir, branch);
+      await this.normalizeCloneConfig(repoDir, branch);
       this.branchDirs.set(branch, workspaceDir);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     } catch {
@@ -396,17 +407,26 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
-   * Collapse the clone's tracking config to a single fetch refspec and a single
-   * upstream ref for `branch` (see `kb-fs/clone-config.ts`). A clone that
-   * accumulated a second `remote.origin.fetch` refspec or `branch.<b>.merge`
-   * value makes git refuse to refresh it — "Cannot rebase onto multiple
-   * branches" — which is how a post-merge pull of the target branch fails.
+   * Bring an adopted clone's config back to what a fresh clone would carry.
+   *
+   * Tracking: collapse it to a single fetch refspec and a single upstream ref
+   * for `branch` (see `kb-fs/clone-config.ts`). A clone that accumulated a
+   * second `remote.origin.fetch` refspec or `branch.<b>.merge` value makes git
+   * refuse to refresh it — "Cannot rebase onto multiple branches" — which is
+   * how a post-merge pull of the target branch fails.
+   *
+   * Credentials: re-stamp the helper. This is the repair for clones that never
+   * got one — anything created by a build whose clone authenticated only its
+   * own invocation, or by a deployment that had no token configured until
+   * after the clone existed. Without it those clones are permanently
+   * unpushable: nothing re-clones a directory that is already on disk, so no
+   * restart, re-pull or settings change would ever fix them.
    *
    * Never throws: it only ever touches `.git/config`, so a failure leaves the
    * workspace exactly as usable as it was, and the git layer self-heals the
-   * same keys before it pulls.
+   * tracking keys before it pulls.
    */
-  private async normalizeCloneTracking(repoDir: string, branch: string): Promise<void> {
+  private async normalizeCloneConfig(repoDir: string, branch: string): Promise<void> {
     try {
       for (const args of cloneTrackingConfigArgs(branch)) {
         await execFileAsync('git', ['-C', repoDir, ...args]);
@@ -415,10 +435,78 @@ export class WorkspaceService implements IWorkspaceService {
       // One line per branch, not per key: every key writes to the same
       // `.git/config`, so what fails for one fails for all.
       console.warn(
-        `[workspace] could not normalize the tracking config of the "${branch}" clone:`,
+        `[workspace] could not normalize the config of the "${branch}" clone:`,
         redactError(err),
       );
     }
+    await this.stampCredentialHelper(repoDir, branch);
+  }
+
+  /**
+   * Fingerprint of the credential state a clone's helper is derived from: the
+   * username (baked into the helper literal) and whether a token exists at all
+   * (the helper is present-or-absent on that). The token VALUE is deliberately
+   * excluded — the helper reads `$GITHUB_TOKEN` at call time, so rotating the
+   * token needs no re-stamp; only a username change or a token appearing /
+   * disappearing does.
+   */
+  private credentialFingerprint(): string {
+    return `${this.gitUsername()}::${process.env.GITHUB_TOKEN ? '1' : '0'}`;
+  }
+
+  /** Last credential fingerprint stamped into each branch's clone, this process. */
+  private readonly stampedCredentialFingerprint = new Map<string, string>();
+
+  /**
+   * Bring `repoDir`'s credential helper into line with the current deployment
+   * config (stamp when a token is set, unset when none is), and record the
+   * fingerprint so the cached fast path can skip a no-op re-stamp. Runs the
+   * config args tolerantly and one at a time: `--unset-all` on a clone that
+   * never had a helper exits non-zero, and that must neither abort the rest
+   * nor read as a failure.
+   */
+  private async stampCredentialHelper(repoDir: string, branch: string): Promise<void> {
+    let stamped = true;
+    for (const args of cloneCredentialConfigArgs(this.gitUsername())) {
+      try {
+        await execFileAsync('git', ['-C', repoDir, ...args]);
+      } catch (err) {
+        // `--unset-all` with no matching value (exit 5) is the expected no-op
+        // for a clone that never carried an app helper; anything else is a
+        // real failure.
+        const code = (err as { code?: number } | null)?.code;
+        if (!(args.includes('--unset-all') && code === 5)) {
+          stamped = false;
+          console.warn(
+            `[workspace] could not stamp the credential helper of the "${branch}" clone:`,
+            redactError(err),
+          );
+        }
+      }
+    }
+    if (stamped) {
+      this.stampedCredentialFingerprint.set(branch, this.credentialFingerprint());
+    } else {
+      // Recording the fingerprint after a FAILED write would make every later
+      // cached open skip the retry as "already up to date" — the clone would
+      // keep pushing with stale or missing credentials until a restart.
+      // Dropping the entry keeps the fast path retrying until a stamp lands.
+      this.stampedCredentialFingerprint.delete(branch);
+    }
+  }
+
+  /**
+   * Re-stamp a cached clone's credential helper when the deployment's
+   * credential config changed since we last stamped it — the rotation case the
+   * disk-adoption path in `getOrCreateForBranch` never reaches, because the
+   * fast path returns before it. Without this, a token added (or a username
+   * changed) through the setup screen after a branch was first opened would
+   * never reach that branch's clone until a process restart, and its pushes
+   * would keep failing exactly as in the original incident.
+   */
+  private async refreshCredentialHelperIfStale(branch: string, repoDir: string): Promise<void> {
+    if (this.stampedCredentialFingerprint.get(branch) === this.credentialFingerprint()) return;
+    await this.stampCredentialHelper(repoDir, branch);
   }
 
   private async cloneProcessMapForBranch(workspaceDir: string, branch: string): Promise<void> {
@@ -465,10 +553,10 @@ export class WorkspaceService implements IWorkspaceService {
       }
       if (alreadyCloned) {
         // We don't auto-pull because that could clobber another user's
-        // in-progress lock-held edits. The tracking config IS re-stamped —
-        // it never touches the working tree, and a drifted config is what
-        // breaks the next pull.
-        await this.normalizeCloneTracking(targetDir, branch);
+        // in-progress lock-held edits. The CONFIG is re-stamped though — it
+        // never touches the working tree, and a clone with drifted tracking
+        // or a missing credential helper is one that can't pull or push.
+        await this.normalizeCloneConfig(targetDir, branch);
         return;
       }
       // Half-built dir — wipe and re-clone.
@@ -492,7 +580,7 @@ export class WorkspaceService implements IWorkspaceService {
       // this branch. `git clone -b` already produces that shape; stamping it
       // explicitly means the shape is asserted rather than assumed, and the
       // same call is what repairs an existing clone that drifted.
-      await this.normalizeCloneTracking(targetDir, branch);
+      await this.normalizeCloneConfig(targetDir, branch);
       console.log(
         `[workspace] Cloned ${this.kbDirName} for branch "${branch}"` +
           (reference ? ' (referenced a sibling clone)' : ''),

@@ -220,7 +220,12 @@ describe('WorkflowService.commitFileWhileLocked', () => {
     const change = await svc.commitFileWhileLocked('ws-1', 'feat/x', 'foo.md', USER);
     expect(change).toEqual(CHANGE);
     expect(git.pull).not.toHaveBeenCalled();
+    // Best-effort no longer means invisible: the sync banner goes out ahead of
+    // file-changed, because "the push catches up later" is a hope, not a fact —
+    // an auth failure never catches up, and silently hoping is how a broken
+    // deployment stacked 136 local commits before anyone found out.
     expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'git-sync-failed',
       'file-changed',
     ]);
   });
@@ -256,8 +261,10 @@ describe('WorkflowService.commitFileWhileLocked', () => {
     const change = await svc.commitFileWhileLocked('ws-1', 'feat/x', 'foo.md', USER);
     expect(change).toEqual(CHANGE);
     // Even though push never succeeded, file-changed still emits so the
-    // local commit is visible to other tabs of the same user.
+    // local commit is visible to other tabs of the same user — and the sync
+    // banner goes out with it, so the unshipped state is visible too.
     expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'git-sync-failed',
       'file-changed',
     ]);
   });

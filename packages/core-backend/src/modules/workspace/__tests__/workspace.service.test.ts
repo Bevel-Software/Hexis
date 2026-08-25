@@ -454,7 +454,7 @@ describe('WorkspaceService.sweepOrphanedWorkspaces', () => {
 
   beforeEach(async () => {
     root = await mkTmpRoot();
-    // The fake `.git` in seedBranchWorkspace makes normalizeCloneTracking's
+    // The fake `.git` in seedBranchWorkspace makes normalizeCloneConfig's
     // git calls fail; that path only warns, which is noise here.
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });

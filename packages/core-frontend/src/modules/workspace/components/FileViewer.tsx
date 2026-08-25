@@ -12,6 +12,7 @@ import { LayoutContext } from '../../layout/state/layout.context';
 import { useParams } from 'react-router-dom';
 import { useCanonicalFileUrl, useFileNav } from '../routing/kb-routes';
 import { PullNeededBanner } from '../../git/components/PullNeededBanner';
+import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
 import { useFileAccess } from '../../access/hooks/useFileAccess';
 import { FileHistoryPanel } from '../../git/components/FileHistoryPanel';
 import { FileComparisonPanel } from '../../git/components/FileComparisonPanel';
@@ -836,6 +837,7 @@ export function FileViewer() {
     return (
       <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
         <PullNeededBanner />
+        <GitSyncFailedBanner />
         <EditorTabs />
         <div className="flex-1 flex items-center justify-center px-6">
           <div className="w-full max-w-md text-center">
@@ -1056,6 +1058,7 @@ export function FileViewer() {
   return (
     <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
       <PullNeededBanner />
+      <GitSyncFailedBanner />
       {/* No "you don't have permission to edit" banner, deliberately: for a
           reader the restriction is not news worth a stripe across every page —
           the Propose changes affordance already says what they CAN do, and the
