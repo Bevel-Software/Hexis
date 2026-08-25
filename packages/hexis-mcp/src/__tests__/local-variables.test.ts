@@ -180,6 +180,39 @@ describe('HexisLocalVariableLoader', () => {
     expect(await second.get('git_TOKEN')).toBe('from-two');
   });
 
+  it('releases a binding, so a host creating servers does not hoard secrets', async () => {
+    // A binding holds a deployment's config and its cached secret VALUES. A
+    // long-lived host that creates servers over time would otherwise keep both
+    // for the life of the process.
+    stubVariables({ git: { variables: { TOKEN: 'ghp_x' } } });
+    const id = bindLocalVariableResolver(config, local({ git: { slug: 'git', path: 'p' } }));
+    const loader = new HexisLocalVariableLoader(id);
+    expect(await loader.get('git_TOKEN')).toBe('ghp_x');
+    resetLocalVariableResolver(id);
+    expect(await loader.get('git_TOKEN')).toBeNull();
+  });
+
+  it('releasing one binding leaves the others alone', async () => {
+    stubVariables({ one: { variables: { TOKEN: 'from-one' } }, two: { variables: { TOKEN: 'from-two' } } });
+    const idA = bindLocalVariableResolver(config, local({ git: { slug: 'one', path: 'p' } }));
+    const idB = bindLocalVariableResolver(config, local({ git: { slug: 'two', path: 'p' } }));
+    resetLocalVariableResolver(idA);
+    expect(await new HexisLocalVariableLoader(idA).get('git_TOKEN')).toBeNull();
+    expect(await new HexisLocalVariableLoader(idB).get('git_TOKEN')).toBe('from-two');
+  });
+
+  it('reports a namespace collision once, not once per substitution', async () => {
+    // A tool call substitutes several variables and every call repeats them,
+    // so logging per lookup buries whatever else the server is saying.
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    stubVariables({ dash: { variables: { KEY: 'x' } }, under: { variables: { KEY: 'y' } } });
+    const loader = bind(local({ 'a-b': { slug: 'dash', path: 'p' }, a_b: { slug: 'under', path: 'q' } }));
+    await loader.get('a__b_KEY');
+    await loader.get('a__b_KEY');
+    await loader.get('a__b_OTHER');
+    expect(errors.mock.calls.filter((c) => String(c[0]).includes('share it'))).toHaveLength(1);
+  });
+
   it('resolves NEITHER of two manuals sharing a namespace', async () => {
     // Namespacing maps non-word characters to `_` then doubles them, so `a-b`
     // and `a_b` both give `a__b_`. Picking one would hand its vault value to

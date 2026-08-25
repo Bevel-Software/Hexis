@@ -48,6 +48,7 @@ import {
   bindLocalVariableResolver,
   registerLocalVariableLoader,
   localVariableLoaderConfig,
+  resetLocalVariableResolver,
 } from './local-variables.js';
 import { closeRenewal } from './renewal.js';
 
@@ -80,7 +81,7 @@ async function buildClient(
   config: HexisMcpConfig,
   manuals: CallTemplate[],
   localOnly: ReadonlyMap<string, LocalManualInfo>,
-): Promise<CodeModeUtcpClient> {
+): Promise<{ client: CodeModeUtcpClient; bindingId: string }> {
   const variables = seedBevelHostedManualVars(
     manuals as unknown as { name?: unknown; url?: unknown }[],
     config.baseUrl,
@@ -95,7 +96,10 @@ async function buildClient(
     variables,
     load_variables_from: [localVariableLoaderConfig(bindingId)],
   });
-  return CodeModeUtcpClient.create(process.cwd(), clientConfig);
+  // The id travels with the client so shutdown can release the binding — it
+  // holds this deployment's config and its cached secret VALUES, and a host
+  // that creates servers over time would otherwise accumulate both.
+  return { client: await CodeModeUtcpClient.create(process.cwd(), clientConfig), bindingId };
 }
 
 /**
@@ -372,7 +376,7 @@ export async function createHexisMcpServer(
   const registeredKey = config.connectionKey;
   const remote = remoteManualTemplate(mcpUrl, registeredKey);
 
-  const client = await buildClient(config, [remote, ...local], localOnly);
+  const { client, bindingId } = await buildClient(config, [remote, ...local], localOnly);
 
   // Declared BEFORE the fallible phase below, so the failure path can run the
   // very same teardown: from the moment the client exists, registrations spawn
@@ -403,6 +407,10 @@ export async function createHexisMcpServer(
     // @utcp/mcp's close tears down its sessions AND the stdio transports,
     // which is the only thing that reliably ends the spawned children.
     await client.close().catch(() => {});
+    // And the variable binding, which holds this deployment's cached secret
+    // values. Released here rather than left to the process, because this
+    // module explicitly supports several servers in one host.
+    resetLocalVariableResolver(bindingId);
   };
 
   try {

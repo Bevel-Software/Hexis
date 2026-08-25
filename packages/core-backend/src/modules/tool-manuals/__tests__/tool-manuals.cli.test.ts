@@ -59,7 +59,13 @@ describe('cli `.tool` manuals — parsed and listed, never executed', () => {
 
     // And a client built in this process refuses it rather than shelling out.
     const client = await UtcpClient.create(process.cwd(), { variables: {} } as never);
-    await expect(client.registerManual(template)).rejects.toThrow();
+    try {
+      await expect(client.registerManual(template)).rejects.toThrow();
+    } finally {
+      // Closing releases the client's communication protocols and their
+      // transports; left open they outlive the test for the whole run.
+      await client.close().catch(() => {});
+    }
   });
 
   test('the serializer IS registered, or these files would not parse at all', () => {
@@ -153,37 +159,69 @@ describe('manual namespaces are unique, not merely manual names', () => {
     canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
   } as unknown as IAccessControl;
 
+  const pluginsDir = () => join(root, wsId, KB_DIR, 'Plugins');
+
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'ns-'));
-    await mkdir(join(root, wsId, KB_DIR, 'Plugins'), { recursive: true });
+    await mkdir(pluginsDir(), { recursive: true });
   });
   afterEach(() => rm(root, { recursive: true, force: true }));
 
-  const write = (file: string, id: string) =>
-    writeFile(
-      join(root, wsId, KB_DIR, 'Plugins', file),
-      JSON.stringify({ id, type: 'inline', tools: [] }),
-    );
+  /** A `.tool` file. Its `id` grammar is `[a-z0-9_]` — it cannot carry a hyphen. */
+  const writeTool = (file: string, id: string) =>
+    writeFile(join(pluginsDir(), file), JSON.stringify({ id, type: 'inline', tools: [] }));
 
-  it('keeps manuals whose namespaces differ', async () => {
-    await write('a.tool', 'a_b');
-    await write('b.tool', 'a__b');
-    const names = (await new ToolManualService(workspaceService, allowAll, KB_DIR).listAllSummaries()).map((m) => m.name);
-    expect(names.sort()).toEqual(['a__b', 'a_b']);
+  /**
+   * An mcp.json server. THIS is the only path a hyphen can enter a manual name:
+   * its grammar allows `-`, so it is the only way to build a real collision.
+   */
+  async function writeMcpServer(folder: string, serverName: string): Promise<void> {
+    await mkdir(join(pluginsDir(), folder), { recursive: true });
+    await writeFile(
+      join(pluginsDir(), folder, 'mcp.json'),
+      JSON.stringify({ mcpServers: { [serverName]: { type: 'streamable-http', url: 'https://v.example/mcp' } } }),
+    );
+  }
+
+  const names = async (): Promise<string[]> =>
+    (await new ToolManualService(workspaceService, allowAll, KB_DIR).listAllSummaries()).map((m) => m.name).sort();
+
+  it('keeps two manuals whose namespaces genuinely differ', async () => {
+    // Underscore-doubling is injective, so `a_b` (a__b_) and `a__b` (a____b_)
+    // are distinct namespaces and both must survive.
+    await writeTool('a.tool', 'a_b');
+    await writeTool('b.tool', 'a__b');
+    expect(await names()).toEqual(['a__b', 'a_b']);
   });
 
-  it('refuses a second manual that resolves to the same namespace', async () => {
-    // Namespacing maps every non-word character to `_` then doubles it, so
-    // `a-b` and `a_b` are different names sharing the namespace `a__b_` — and
-    // with it, one set of vault keys. A `.tool` id cannot carry a hyphen, but
-    // an mcp.json server name can, so the pair is reachable. Refused rather
-    // than suffixed: suffixing would rebind a configured secret to a new file.
-    await write('a.tool', 'a_b');
-    const svc = new ToolManualService(workspaceService, allowAll, KB_DIR);
-    const kept = await svc.listAllSummaries();
-    expect(kept.map((m) => m.name)).toEqual(['a_b']);
-    // The namespaces of everything kept are distinct, which is the invariant
-    // secrets actually depend on.
+  it('drops the second of two manuals sharing one namespace', async () => {
+    // `a-b` and `a_b` are different NAMES with the same NAMESPACE `a__b_`, and
+    // therefore one set of vault keys — either able to resolve the other's
+    // secrets. Deduping by raw name let both through; this is the case that
+    // proves the check compares namespaces.
+    await writeMcpServer('Vendor', 'a-b');
+    await writeTool('a.tool', 'a_b');
+    const kept = await names();
+    expect(kept).toHaveLength(1);
+    // mcp.json descriptors are listed before `.tool` files, and the shared
+    // dedupe keeps the first occurrence, so the server is the survivor.
+    expect(kept).toEqual(['a-b']);
+  });
+
+  it('leaves both when the hyphenated name does NOT collide', async () => {
+    // Guards the fix from being over-broad: hyphens stay usable, which matters
+    // because MCP servers in the wild are routinely named with them.
+    await writeMcpServer('Vendor', 'sequential-thinking');
+    await writeTool('a.tool', 'a_b');
+    expect(await names()).toEqual(['a_b', 'sequential-thinking']);
+  });
+
+  it('keeps every surviving namespace distinct', async () => {
+    // The invariant secrets actually depend on, asserted directly.
+    await writeMcpServer('Vendor', 'a-b');
+    await writeTool('a.tool', 'a_b');
+    await writeTool('c.tool', 'other');
+    const kept = await new ToolManualService(workspaceService, allowAll, KB_DIR).listAllSummaries();
     const namespaces = kept.map((m) => utcpNamespacePrefix(m.name));
     expect(new Set(namespaces).size).toBe(namespaces.length);
   });

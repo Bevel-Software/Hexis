@@ -37,6 +37,11 @@ describe('parseGroupsFile — empty group sources', () => {
 });
 
 describe('the access-frontmatter extension set', () => {
+  // Registration is process-global and deliberately has no way to undo it, so
+  // these tests never assert that a REAL extension is absent — that would
+  // depend on no earlier test (in any order, in any file) having registered it.
+  // They use extensions nothing else will ever register instead, which makes
+  // every assertion here true regardless of what ran first.
   it('covers nodes and tool manuals out of the box', () => {
     // `.tool` is whole-document YAML with its verbs as ordinary keys inside;
     // `access.md` is covered by `.md`.
@@ -45,37 +50,45 @@ describe('the access-frontmatter extension set', () => {
     expect(hasAccessFrontmatterExtension('Plugins/E/access.md')).toBe(true);
   });
 
-  it('covers nothing else until an overlay registers it', () => {
-    // The grammar is core's; the file kinds are not necessarily. An overlay
-    // that ships its own whole-document configuration registers its extensions
-    // at boot — core knows about neither the files nor the feature.
-    expect(hasAccessFrontmatterExtension('Agents/delivery-coder.agent')).toBe(false);
-    expect(hasAccessFrontmatterExtension('Pipelines/Coding-Delivery.pipeline')).toBe(false);
-
-    registerAccessFrontmatterExtensions(['.pipeline', '.agent']);
-
-    expect(hasAccessFrontmatterExtension('Agents/delivery-coder.agent')).toBe(true);
-    expect(hasAccessFrontmatterExtension('Pipelines/Coding-Delivery.pipeline')).toBe(true);
-    // A near-miss must still miss: a backup is not a live grant.
-    expect(hasAccessFrontmatterExtension('Pipelines/X.pipeline.bak')).toBe(false);
+  it('covers nothing an overlay has not registered', () => {
+    // The grammar is core's; the file kinds are not necessarily.
+    expect(hasAccessFrontmatterExtension('Some/File.neverregistered')).toBe(false);
+    expect(hasAccessFrontmatterExtension('notes.txt')).toBe(false);
   });
 
-  it('is additive only, and idempotent', () => {
-    // Removing an extension would silently drop grants that are already
-    // enforced, so there is no way to remove one.
-    const before = accessFrontmatterExtensionList().length;
-    registerAccessFrontmatterExtensions(['.agent', '.agent', 'nodot']);
-    expect(accessFrontmatterExtensionList()).toHaveLength(before);
+  it('covers a file kind once an overlay registers it', () => {
+    expect(hasAccessFrontmatterExtension('Overlay/thing.testkind')).toBe(false);
+    registerAccessFrontmatterExtensions(['.testkind']);
+    expect(hasAccessFrontmatterExtension('Overlay/thing.testkind')).toBe(true);
+    // A near-miss must still miss: a backup is not a live grant.
+    expect(hasAccessFrontmatterExtension('Overlay/thing.testkind.bak')).toBe(false);
+  });
+
+  it('is additive and idempotent', () => {
+    // Removing an extension would silently drop grants already being enforced,
+    // so there is no way to remove one.
+    registerAccessFrontmatterExtensions(['.testidem']);
+    const after = accessFrontmatterExtensionList().length;
+    registerAccessFrontmatterExtensions(['.testidem', '.TESTIDEM']);
+    expect(accessFrontmatterExtensionList()).toHaveLength(after);
     expect(accessFrontmatterExtensionList()).toContain('.md');
     expect(accessFrontmatterExtensionList()).toContain('.tool');
+  });
+
+  it('throws on a malformed extension rather than skipping it', () => {
+    // A typo would otherwise leave capability-granting files ungoverned, at
+    // boot, with nothing to distinguish it from a successful registration.
+    expect(() => registerAccessFrontmatterExtensions(['pipeline'])).toThrow(/malformed/);
+    expect(() => registerAccessFrontmatterExtensions(['.two.dots'])).toThrow(/malformed/);
+    expect(() => registerAccessFrontmatterExtensions([''])).toThrow(/malformed/);
+    expect(hasAccessFrontmatterExtension('x.pipeline_typo_guard')).toBe(false);
   });
 
   it('reads verbs out of a registered file kind, ignoring its other keys', () => {
     // The point of per-file access on these: they are configuration rather than
     // graph nodes, but they are exactly the files whose edits grant capability.
-    // The verbs are ordinary keys sitting beside the rest of the definition,
-    // exactly as a `.tool` carries them beside `id:` and `tools:`.
-    registerAccessFrontmatterExtensions(['.pipeline']);
+    // The verbs are ordinary keys beside the rest of the definition, exactly as
+    // a `.tool` carries them beside `id:` and `tools:`.
     const pipeline = [
       '---',
       'name: Coding Delivery',

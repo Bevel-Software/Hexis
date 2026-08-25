@@ -86,10 +86,21 @@ export function bindLocalVariableResolver(
   return id;
 }
 
-/** Release one binding, or every binding when called with no id. */
+/**
+ * Release one binding, or every binding when called with no id.
+ *
+ * MUST be called when a server shuts down, and when its construction fails
+ * partway. A binding holds a deployment's configuration and its cached secret
+ * VALUES; a long-lived host that creates servers over time would otherwise
+ * accumulate them for the life of the process with no way to reclaim them.
+ */
 export function resetLocalVariableResolver(id?: string): void {
-  if (id === undefined) bindings.clear();
-  else bindings.delete(id);
+  if (id === undefined) {
+    bindings.clear();
+    reportedCollisions.clear();
+  } else {
+    bindings.delete(id);
+  }
 }
 
 /**
@@ -128,15 +139,26 @@ function ownerOf(
   }
   if (!best) return null;
   if (ambiguous.length > 1) {
-    console.error(
-      `[hexis-mcp] refusing to resolve "${effectiveKey}": the manuals ${ambiguous
-        .map((m) => `"${m}"`)
-        .join(' and ')} share one variable namespace. Rename one — until then neither resolves.`,
-    );
+    // Once per colliding namespace, not once per lookup. A single tool call
+    // substitutes several `${VAR}`s, and every call repeats them, so logging
+    // per lookup floods stderr with the same line and buries whatever else the
+    // server is trying to say.
+    const namespace = effectiveKey.slice(0, effectiveKey.length - best.varName.length);
+    if (!reportedCollisions.has(namespace)) {
+      reportedCollisions.add(namespace);
+      console.error(
+        `[hexis-mcp] refusing to resolve the namespace "${namespace}": the manuals ${ambiguous
+          .map((m) => `"${m}"`)
+          .join(' and ')} share it. Rename one — until then neither resolves.`,
+      );
+    }
     return null;
   }
   return { manual: best.manual, info: best.info, varName: best.varName };
 }
+
+/** Namespaces whose collision has already been reported, so it is said once. */
+const reportedCollisions = new Set<string>();
 
 /**
  * One manual's variables, cached, with concurrent asks sharing a single fetch.

@@ -171,7 +171,17 @@ const accessFrontmatterExtensions = new Set<string>(CORE_ACCESS_FRONTMATTER_EXTE
 export function registerAccessFrontmatterExtensions(extensions: readonly string[]): void {
   for (const ext of extensions) {
     const normalized = ext.trim().toLowerCase();
-    if (normalized.startsWith('.')) accessFrontmatterExtensions.add(normalized);
+    // THROW rather than skip. These registrations decide which files' edits
+    // carry enforced access grants, so a typo (`pipeline` for `.pipeline`)
+    // would leave exactly the capability-granting files ungoverned — and a
+    // silent skip makes a failed registration indistinguishable from a
+    // successful one, at boot, where nobody is looking.
+    if (!/^\.[a-z0-9]+$/.test(normalized)) {
+      throw new Error(
+        `access frontmatter extension "${ext}" is malformed — expected a leading dot, e.g. ".pipeline"`,
+      );
+    }
+    accessFrontmatterExtensions.add(normalized);
   }
 }
 
