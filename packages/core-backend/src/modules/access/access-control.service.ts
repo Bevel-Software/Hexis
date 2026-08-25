@@ -764,6 +764,15 @@ function ineligibleNamedEmailsResolved(
 // Service
 // ---------------------------------------------------------------------------
 
+/**
+ * An access model read at a git ref. `resolvedRef` is the COMMIT the model
+ * was built from (not the ref name that led there), so the per-file
+ * own-entries reads that follow a gate resolve against exactly that tree.
+ */
+type AtRefModel = { model: AccessModel; resolvedRef: string };
+/** One build's outcome: a model, no roles.yaml at the commit, or one that doesn't parse. */
+type AtRefBuild = AtRefModel | 'no-roles' | 'malformed';
+
 export class AccessControlService implements IAccessControl {
   /**
    * Per-workspace cache: `model` is the resolved access tree and `loadedAt`
@@ -793,6 +802,29 @@ export class AccessControlService implements IAccessControl {
   private static readonly OWN_ENTRIES_TTL_MS = 5 * 60_000;
 
   /**
+   * At-ref models keyed by workspace + the COMMIT the ref resolved to. The
+   * tree at a commit is immutable, so an entry can never go stale: a push
+   * that moves `origin/<base>` resolves to a new commit and simply misses.
+   * No TTL, and `invalidate()` leaves it alone, for the same reason.
+   *
+   * This is what makes the change-request gates affordable. One detail read
+   * plus one approval click runs six at-ref gates, and before this cache
+   * every one of them rebuilt the model from git: an `ls-tree -r` plus a
+   * `git show` per `access.md`, ~270ms each on a real knowledge base. Six
+   * builds per click was the lag behind the approve checkmark.
+   *
+   * Bounded FIFO, so a long-lived server holds the last few tips rather than
+   * one model per commit it ever gated against. `null` results (no usable
+   * roles.yaml at the commit) are deliberately NOT cached: `showAtRef` folds
+   * transient git failures into null, and pinning one of those to a commit
+   * would deny every approval until the base branch moved. Concurrent misses
+   * on the same commit share one build via `atRefInFlight`.
+   */
+  private readonly atRefCache = new Map<string, AtRefModel>();
+  private readonly atRefInFlight = new Map<string, Promise<AtRefBuild>>();
+  private static readonly AT_REF_CACHE_MAX = 64;
+
+  /**
    * Canonicalised deployment-owner emails (see `AccessModel.deploymentOwners`).
    * Held on the service rather than read per-model because it comes from the
    * environment, not from the knowledge base.
@@ -817,7 +849,9 @@ export class AccessControlService implements IAccessControl {
 
   /**
    * Drop a workspace's cached model + frontmatter memo. Call after operations
-   * that mutate the working tree — commit, push, pull, branch switch.
+   * that mutate the working tree — commit, push, pull, branch switch. The
+   * at-ref cache is untouched on purpose: its entries are keyed by commit,
+   * and nothing that happens in a working tree changes what a commit holds.
    */
   invalidate(workspaceId: string): void {
     this.cache.delete(workspaceId);
@@ -1569,11 +1603,14 @@ export class AccessControlService implements IAccessControl {
    * the gate becomes useful. NEVER fall back to the working tree here: a
    * working-tree fallback lets anyone with edit access to access.md grant
    * themselves approval rights.
+   *
+   * Cached per commit (see `atRefCache`): the ref is resolved to the commit
+   * it points at first, and that commit is both the cache key and the ref
+   * every read is pinned to. `resolvedRef` in the result is therefore a
+   * commit SHA, so the own-entries read callers do afterwards can never
+   * straddle a push that lands between the two.
    */
-  private async loadModelAtRef(
-    workspaceId: string,
-    ref: string,
-  ): Promise<{ model: AccessModel; resolvedRef: string } | null> {
+  private async loadModelAtRef(workspaceId: string, ref: string): Promise<AtRefModel | null> {
     const repoDir = await this.repoDir(workspaceId);
 
     // Refresh remote-tracking refs so a PR branch we've never personally
@@ -1581,47 +1618,107 @@ export class AccessControlService implements IAccessControl {
     // block the lookup if the ref already exists locally.
     await this.workspaceService.ensureRemotesFetched(workspaceId).catch(() => undefined);
 
-    let rolesYaml: string | null = null;
-    let resolvedRef: string | null = null;
+    // Same candidate order as before the cache existed: the first candidate
+    // that carries a roles.yaml wins, so a local branch without one still
+    // defers to `origin/<branch>`.
     for (const candidate of this.refCandidates(ref)) {
-      const text = await this.showAtRef(repoDir, candidate, 'roles.yaml');
-      if (text !== null) {
-        rolesYaml = text;
-        resolvedRef = candidate;
-        break;
+      const commit = await this.revParseCommit(repoDir, candidate);
+      if (!commit) continue;
+      const key = `${workspaceId}\0${commit}`;
+      const hit = this.atRefCache.get(key);
+      if (hit) return hit;
+      // Registered BEFORE the first await on the build path, so concurrent
+      // misses on one commit share a single build instead of all racing past
+      // an empty in-flight check together.
+      let pending = this.atRefInFlight.get(key);
+      if (!pending) {
+        pending = this.buildModelAtCommit(repoDir, commit, candidate)
+          .then((built) => {
+            if (typeof built !== 'string') this.rememberAtRef(key, built);
+            return built;
+          })
+          .finally(() => {
+            if (this.atRefInFlight.get(key) === pending) this.atRefInFlight.delete(key);
+          });
+        this.atRefInFlight.set(key, pending);
       }
+      const built = await pending;
+      if (built === 'no-roles') continue;
+      if (built === 'malformed') return null;
+      return built;
     }
-    if (!rolesYaml || !resolvedRef) return null;
+    return null;
+  }
 
+  /** The commit `ref` points at in this clone, or null when it doesn't resolve. */
+  private async revParseCommit(repoDir: string, ref: string): Promise<string | null> {
+    if (!ref || ref.startsWith('-')) return null;
+    try {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['-C', repoDir, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`],
+        { encoding: 'utf-8' },
+      );
+      const sha = stdout.trim();
+      return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private rememberAtRef(key: string, value: AtRefModel): void {
+    this.atRefCache.set(key, value);
+    if (this.atRefCache.size > AccessControlService.AT_REF_CACHE_MAX) {
+      const oldest = this.atRefCache.keys().next().value;
+      if (oldest !== undefined) this.atRefCache.delete(oldest);
+    }
+  }
+
+  /**
+   * The uncached build behind `loadModelAtRef`: the whole access tree read
+   * at `commit`. `label` is the candidate ref the commit came from, kept for
+   * log lines only; every git read here is pinned to the commit. `'no-roles'`
+   * means the commit carries no roles.yaml (the caller tries its next
+   * candidate); `'malformed'` means it does but it doesn't parse (the caller
+   * answers null, as it always has).
+   */
+  private async buildModelAtCommit(
+    repoDir: string,
+    commit: string,
+    label: string,
+  ): Promise<AtRefBuild> {
+    const rolesYaml = await this.showAtRef(repoDir, commit, 'roles.yaml');
+    if (rolesYaml === null) return 'no-roles';
     const rolesParsed = parseRolesYaml(rolesYaml);
-    if (!rolesParsed.ok) return null;
+    if (!rolesParsed.ok) return 'malformed';
+    const tag = `${label}@${commit.slice(0, 7)}`;
 
-    // Same group loading as the working-tree model, read AT THE REF — the
+    // Same group loading as the working-tree model, read AT THE COMMIT — the
     // whole point of file-materialized groups is that the merge/push gates
     // can evaluate them at the commit they gate. (`showAtRef` folds every git
     // failure into null/absent — at-ref reads cannot distinguish a missing
     // path from a repo error, so the broken-groups marker here fires only on
     // parse failures.)
     const activeGroups = await loadActiveGroups((filename) =>
-      this.showAtRef(repoDir, resolvedRef, filename),
+      this.showAtRef(repoDir, commit, filename),
     );
     if (!activeGroups.health.ok) {
       console.error(
-        `[access@${resolvedRef}] groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
+        `[access@${tag}] groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
       );
     }
-    for (const w of activeGroups.warnings) console.warn(`[access@${resolvedRef}] ${w}`);
+    for (const w of activeGroups.warnings) console.warn(`[access@${tag}] ${w}`);
     const mergeWarnings = mergeGroupsIntoRoles(
       rolesParsed.index,
       activeGroups.groups,
       activeGroups.sourceFile,
     );
-    for (const w of mergeWarnings) console.warn(`[access@${resolvedRef}] ${w}`);
+    for (const w of mergeWarnings) console.warn(`[access@${tag}] ${w}`);
 
     const accessFiles = new Map<string, AccessFile>();
-    const accessPaths = await this.listAccessFilesAtRef(repoDir, resolvedRef);
+    const accessPaths = await this.listAccessFilesAtRef(repoDir, commit);
     for (const p of accessPaths) {
-      const text = await this.showAtRef(repoDir, resolvedRef, p);
+      const text = await this.showAtRef(repoDir, commit, p);
       if (text === null) continue;
       const parsed = parseAccessFile(text, p);
       if (!parsed.ok) continue;
@@ -1652,7 +1749,7 @@ export class AccessControlService implements IAccessControl {
         // land — the lockout moved one step later, not removed.
         deploymentOwners: this.deploymentOwners,
       },
-      resolvedRef,
+      resolvedRef: commit,
     };
   }
 }
