@@ -770,8 +770,12 @@ function ineligibleNamedEmailsResolved(
  * own-entries reads that follow a gate resolve against exactly that tree.
  */
 type AtRefModel = { model: AccessModel; resolvedRef: string };
-/** One build's outcome: a model, no roles.yaml at the commit, or one that doesn't parse. */
-type AtRefBuild = AtRefModel | 'no-roles' | 'malformed';
+/**
+ * One build's outcome: a model (flagged `degraded` when any git read failed
+ * on the way, so it must not be cached), no roles.yaml at the commit, or one
+ * that doesn't parse.
+ */
+type AtRefBuild = (AtRefModel & { degraded: boolean }) | 'no-roles' | 'malformed';
 
 export class AccessControlService implements IAccessControl {
   /**
@@ -814,11 +818,13 @@ export class AccessControlService implements IAccessControl {
    * builds per click was the lag behind the approve checkmark.
    *
    * Bounded FIFO, so a long-lived server holds the last few tips rather than
-   * one model per commit it ever gated against. `null` results (no usable
-   * roles.yaml at the commit) are deliberately NOT cached: `showAtRef` folds
-   * transient git failures into null, and pinning one of those to a commit
-   * would deny every approval until the base branch moved. Concurrent misses
-   * on the same commit share one build via `atRefInFlight`.
+   * one model per commit it ever gated against. Two kinds of build are
+   * deliberately NOT cached: one that found no usable roles.yaml at the
+   * commit, and one that saw any git read fail on the way (`degraded`). Both
+   * are what a transient failure looks like, and pinning either to a commit
+   * would turn one hiccup into a wrong verdict, denying or granting, until
+   * the base branch moved. Concurrent misses on the same commit share one
+   * build via `atRefInFlight`.
    */
   private readonly atRefCache = new Map<string, AtRefModel>();
   private readonly atRefInFlight = new Map<string, Promise<AtRefBuild>>();
@@ -1549,18 +1555,46 @@ export class AccessControlService implements IAccessControl {
   /**
    * Read a file's content at a specific ref via `git show <ref>:<path>`.
    * Returns null when the file is absent on that ref (or the ref doesn't
-   * resolve).
+   * resolve) and also on any other git failure: the single-path gates that
+   * call this have always treated the two alike. The at-ref model build
+   * needs them told apart, so it reads through `showAtRefOutcome` instead.
    */
   private async showAtRef(repoDir: string, ref: string, relativePath: string): Promise<string | null> {
+    const outcome = await this.showAtRefOutcome(repoDir, ref, relativePath);
+    return outcome.kind === 'text' ? outcome.text : null;
+  }
+
+  /**
+   * `git show <ref>:<path>`, telling "not there" apart from "git failed".
+   * Absence is what git reports as `path '<p>' does not exist in '<ref>'`
+   * (or `exists on disk, but not in`), plus an unresolvable ref; anything
+   * else (an IO error, a corrupt object, a dying subprocess) is `error`.
+   * `LC_ALL=C` pins the messages this classifies to English.
+   */
+  private async showAtRefOutcome(
+    repoDir: string,
+    ref: string,
+    relativePath: string,
+  ): Promise<{ kind: 'text'; text: string } | { kind: 'absent' } | { kind: 'error' }> {
     try {
       const { stdout } = await execFileAsync(
         'git',
         ['-C', repoDir, 'show', `${ref}:${relativePath}`],
-        { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
+        {
+          encoding: 'utf-8',
+          maxBuffer: 16 * 1024 * 1024,
+          env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+        },
       );
-      return stdout;
-    } catch {
-      return null;
+      return { kind: 'text', text: stdout };
+    } catch (err) {
+      const stderr =
+        (err as { stderr?: string }).stderr ?? (err instanceof Error ? err.message : String(err));
+      return /does not exist in|exists on disk, but not in|invalid object name|unknown revision|bad revision/.test(
+        stderr,
+      )
+        ? { kind: 'absent' }
+        : { kind: 'error' };
     }
   }
 
@@ -1568,8 +1602,10 @@ export class AccessControlService implements IAccessControl {
    * List every `access.md` path that exists at any depth as of `ref`.
    * The access tree is structure-agnostic: any `access.md` participates
    * regardless of where it sits. Uses `git ls-tree -r --name-only`.
+   * `'error'` when git failed: a model built without its access files is
+   * not the model, and the caller must not cache it as one.
    */
-  private async listAccessFilesAtRef(repoDir: string, ref: string): Promise<string[]> {
+  private async listAccessFilesAtRef(repoDir: string, ref: string): Promise<string[] | 'error'> {
     try {
       const { stdout } = await execFileAsync(
         'git',
@@ -1584,7 +1620,7 @@ export class AccessControlService implements IAccessControl {
       }
       return out;
     } catch {
-      return [];
+      return 'error';
     }
   }
 
@@ -1634,7 +1670,7 @@ export class AccessControlService implements IAccessControl {
       if (!pending) {
         pending = this.buildModelAtCommit(repoDir, commit, candidate)
           .then((built) => {
-            if (typeof built !== 'string') this.rememberAtRef(key, built);
+            if (typeof built !== 'string' && !built.degraded) this.rememberAtRef(key, built);
             return built;
           })
           .finally(() => {
@@ -1687,7 +1723,19 @@ export class AccessControlService implements IAccessControl {
     commit: string,
     label: string,
   ): Promise<AtRefBuild> {
-    const rolesYaml = await this.showAtRef(repoDir, commit, 'roles.yaml');
+    // Every read below tells "absent" apart from "git failed". A failure
+    // degrades the build exactly as it always did (the file counts as absent
+    // for THIS call) but marks the result `degraded`, and a degraded model is
+    // never cached: pinning it would turn one transient failure into a wrong
+    // verdict, denying or granting, for the commit's whole lifetime.
+    let degraded = false;
+    const read = async (relativePath: string): Promise<string | null> => {
+      const outcome = await this.showAtRefOutcome(repoDir, commit, relativePath);
+      if (outcome.kind === 'error') degraded = true;
+      return outcome.kind === 'text' ? outcome.text : null;
+    };
+
+    const rolesYaml = await read('roles.yaml');
     if (rolesYaml === null) return 'no-roles';
     const rolesParsed = parseRolesYaml(rolesYaml);
     if (!rolesParsed.ok) return 'malformed';
@@ -1699,9 +1747,7 @@ export class AccessControlService implements IAccessControl {
     // failure into null/absent — at-ref reads cannot distinguish a missing
     // path from a repo error, so the broken-groups marker here fires only on
     // parse failures.)
-    const activeGroups = await loadActiveGroups((filename) =>
-      this.showAtRef(repoDir, commit, filename),
-    );
+    const activeGroups = await loadActiveGroups(read);
     if (!activeGroups.health.ok) {
       console.error(
         `[access@${tag}] groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
@@ -1716,9 +1762,10 @@ export class AccessControlService implements IAccessControl {
     for (const w of mergeWarnings) console.warn(`[access@${tag}] ${w}`);
 
     const accessFiles = new Map<string, AccessFile>();
-    const accessPaths = await this.listAccessFilesAtRef(repoDir, commit);
-    for (const p of accessPaths) {
-      const text = await this.showAtRef(repoDir, commit, p);
+    const listed = await this.listAccessFilesAtRef(repoDir, commit);
+    if (listed === 'error') degraded = true;
+    for (const p of listed === 'error' ? [] : listed) {
+      const text = await read(p);
       if (text === null) continue;
       const parsed = parseAccessFile(text, p);
       if (!parsed.ok) continue;
@@ -1750,6 +1797,7 @@ export class AccessControlService implements IAccessControl {
         deploymentOwners: this.deploymentOwners,
       },
       resolvedRef: commit,
+      degraded,
     };
   }
 }

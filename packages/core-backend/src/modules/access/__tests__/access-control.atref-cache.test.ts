@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -13,9 +13,14 @@ import { AccessControlService } from '../access-control.service.js';
  * spawn through `execFile`, by argv. The service builds its at-ref model
  * with exactly one `git ls-tree -r` per build, so counting `ls-tree` argv
  * entries counts model builds — measured at the process boundary, which is
- * the cost this cache exists to remove.
+ * the cost this cache exists to remove. `injected.failNext` makes ONE
+ * matching spawn fail the way a transient git error does, so the cache's
+ * behaviour under a failed read can be pinned without a flaky fixture.
  */
-const { spawnLog } = vi.hoisted(() => ({ spawnLog: [] as string[][] }));
+const { spawnLog, injected } = vi.hoisted(() => ({
+  spawnLog: [] as string[][],
+  injected: { failNext: null as null | ((argv: string[]) => boolean) },
+}));
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -31,7 +36,16 @@ vi.mock('node:child_process', async (importOriginal) => {
   // promisified path the service uses has to be wrapped too.
   Object.defineProperty(wrapped, p.custom, {
     value: (...args: unknown[]) => {
-      spawnLog.push((args[1] as string[]) ?? []);
+      const argv = (args[1] as string[]) ?? [];
+      spawnLog.push(argv);
+      if (injected.failNext?.(argv)) {
+        injected.failNext = null;
+        return Promise.reject(
+          Object.assign(new Error('simulated transient git failure'), {
+            stderr: 'fatal: unable to read object (simulated)',
+          }),
+        );
+      }
       return original[p.custom](...args);
     },
   });
@@ -45,6 +59,11 @@ function lsTreeBuilds(): number {
   return spawnLog.filter((argv) => argv.includes('ls-tree')).length;
 }
 
+function rolesReads(): number {
+  return spawnLog.filter((argv) => argv.includes('show') && argv.some((a) => a.endsWith(':roles.yaml')))
+    .length;
+}
+
 /**
  * The at-ref access model — `canWriteAtRef` / `canWriteBatchAtRef` /
  * `eligibleWritersForPathsAtRef`, the gates every change-request read and
@@ -52,11 +71,14 @@ function lsTreeBuilds(): number {
  * the ref resolves to. Building it costs one `ls-tree` plus one `git show`
  * per `access.md`, so it must be built ONCE per commit and shared by every
  * gate call that lands on that commit, while a push that moves the ref is
- * still seen on the very next call.
+ * still seen on the very next call, and a build that saw a git read fail
+ * is never pinned.
+ *
+ * Every test seeds its own bare origin, workspace clone, and second clone
+ * (`other`, standing in for another user's push), so each one holds alone.
  */
 describe('AccessControlService — at-ref model cache', () => {
   let root: string;
-  let workspaceDir: string;
   let repo: string;
   let other: string;
   let svc: AccessControlService;
@@ -69,33 +91,35 @@ describe('AccessControlService — at-ref model cache', () => {
     return stdout.trim();
   }
 
-  async function seed(dir: string): Promise<void> {
-    await fs.mkdir(path.join(dir, 'Team'), { recursive: true });
-    await fs.writeFile(path.join(dir, 'roles.yaml'), 'roles:\n  Admin:\n    - razvan@bevel.software\n');
-    await fs.writeFile(path.join(dir, 'access.md'), '---\nwrite:\n  - Admin\n---\n');
-    await fs.writeFile(path.join(dir, 'Team/access.md'), '---\nwrite:\n  - Admin\n---\n');
-    await fs.writeFile(path.join(dir, DOC), '# doc\n');
+  /** Commit + push a change to origin/main from the OTHER clone. */
+  async function pushFromOther(message: string, write: () => Promise<void>): Promise<void> {
+    await write();
+    await git(other, 'add', '-A');
+    await git(other, 'commit', '-qm', message);
+    await git(other, 'push', '-q', 'origin', 'HEAD');
   }
 
-  beforeAll(async () => {
+  beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-atref-cache-'));
-    workspaceDir = path.join(root, workspaceId);
+    const workspaceDir = path.join(root, workspaceId);
     repo = path.join(workspaceDir, PROCESS_MAP_DIR);
     const origin = path.join(root, 'origin.git');
     other = path.join(root, 'other');
 
     await execFileAsync('git', ['init', '--bare', '-b', 'main', origin]);
-    await fs.mkdir(repo, { recursive: true });
-    await seed(repo);
+    await fs.mkdir(path.join(repo, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'roles.yaml'), 'roles:\n  Admin:\n    - razvan@bevel.software\n');
+    await fs.writeFile(path.join(repo, 'access.md'), '---\nwrite:\n  - Admin\n---\n');
+    await fs.writeFile(path.join(repo, 'Team/access.md'), '---\nwrite:\n  - Admin\n---\n');
+    await fs.writeFile(path.join(repo, DOC), '# doc\n');
     await execFileAsync('git', ['init', '-b', 'main', repo]);
     await git(repo, 'config', 'user.email', 'test@example.com');
     await git(repo, 'config', 'user.name', 'Test');
     await git(repo, 'add', '-A');
-    await git(repo, 'commit', '-m', 'seed');
+    await git(repo, 'commit', '-qm', 'seed');
     await git(repo, 'remote', 'add', 'origin', origin);
-    await git(repo, 'push', '-u', 'origin', 'main');
+    await git(repo, 'push', '-q', '-u', 'origin', 'main');
 
-    // A second clone stands in for "another user pushed to the base branch".
     await execFileAsync('git', ['clone', '-q', origin, other]);
     await git(other, 'config', 'user.email', 'other@example.com');
     await git(other, 'config', 'user.name', 'Other');
@@ -109,28 +133,31 @@ describe('AccessControlService — at-ref model cache', () => {
       },
     } as unknown as WorkspaceService;
     svc = new AccessControlService(stub, PROCESS_MAP_DIR);
+    spawnLog.length = 0;
+    injected.failNext = null;
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
+    injected.failNext = null;
     await fs.rm(root, { recursive: true, force: true });
   });
 
   it('builds the model once for the six gate calls an approval click makes', async () => {
-    spawnLog.length = 0;
     // The approve route's exact sequence: detail (eligibility + viewer batch +
-    // roles.yaml bypass check), then the gate, then the response's detail.
-    const verdicts = await Promise.all([
+    // roles.yaml bypass check, concurrently), then the gate, then the
+    // response's detail.
+    const [eligible, batch, bypass] = await Promise.all([
       svc.eligibleWritersForPathsAtRef(workspaceId, 'origin/main', [DOC]),
       svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [DOC]),
       svc.canWriteAtRef(workspaceId, 'origin/main', admin, 'roles.yaml'),
-    ].map((p) => p));
+    ]);
     const gate = await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC);
     const again = await svc.eligibleWritersForPathsAtRef(workspaceId, 'origin/main', [DOC]);
     const batchAgain = await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [DOC]);
 
-    expect(verdicts[0]!.get(DOC)!.roles).toContain('Admin');
-    expect(verdicts[1]!.get(DOC)).toBe(true);
-    expect(verdicts[2]).toBe(true);
+    expect(eligible!.get(DOC)!.roles).toContain('Admin');
+    expect(batch!.get(DOC)).toBe(true);
+    expect(bypass).toBe(true);
     expect(gate).toBe(true);
     expect(again!.get(DOC)!.roles).toContain('Admin');
     expect(batchAgain!.get(DOC)).toBe(true);
@@ -139,39 +166,39 @@ describe('AccessControlService — at-ref model cache', () => {
   });
 
   it('sees a push that moves the base ref on the next call, and caches the new tip', async () => {
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    expect(lsTreeBuilds()).toBe(1);
+
     // Revoke razvan on origin/main from the other clone: roles.yaml is part
     // of the MODEL (not the per-file own-entries read), so a stale cache
     // would keep answering true.
-    await fs.writeFile(path.join(other, 'roles.yaml'), 'roles:\n  Admin:\n    - someone-else@bevel.software\n');
-    await git(other, 'commit', '-am', 'revoke razvan');
-    await git(other, 'push', '-q', 'origin', 'main');
+    await pushFromOther('revoke razvan', () =>
+      fs.writeFile(path.join(other, 'roles.yaml'), 'roles:\n  Admin:\n    - someone-else@bevel.software\n'),
+    );
 
-    spawnLog.length = 0;
     expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(false);
-    expect(lsTreeBuilds()).toBe(1);
+    expect(lsTreeBuilds()).toBe(2);
 
     // The new tip is cached like the old one was.
     expect(await svc.canWriteBatchAtRef(workspaceId, 'origin/main', admin, [DOC])).toEqual(
       new Map([[DOC, false]]),
     );
     expect(await svc.canWriteAtRef(workspaceId, 'origin/main', 'someone-else@bevel.software', DOC)).toBe(true);
-    expect(lsTreeBuilds()).toBe(1);
+    expect(lsTreeBuilds()).toBe(2);
   });
 
   it('keeps the short-ref fallthrough: a local branch without roles.yaml defers to origin/<branch>', async () => {
-    // `feature` on origin carries roles.yaml; the LOCAL `feature` has it
-    // deleted (not pushed). Asking for `feature` must fall through to
-    // `origin/feature` exactly as before the cache existed.
-    await git(repo, 'fetch', '-q', 'origin');
-    await git(repo, 'checkout', '-q', '-b', 'feature', 'origin/main');
-    // A commit of its own, so origin/feature is not the main tip the previous
-    // test already cached.
+    // `feature` on origin carries roles.yaml (and a commit of its own, so it
+    // is not the main tip); the LOCAL `feature` has roles.yaml deleted, not
+    // pushed. Asking for `feature` must fall through to `origin/feature`
+    // exactly as before the cache existed.
+    await git(repo, 'checkout', '-q', '-b', 'feature');
     await fs.writeFile(path.join(repo, 'Team/Other.md'), '# other\n');
     await git(repo, 'add', '-A');
-    await git(repo, 'commit', '-q', '-m', 'feature work');
+    await git(repo, 'commit', '-qm', 'feature work');
     await git(repo, 'push', '-q', '-u', 'origin', 'feature');
     await git(repo, 'rm', '-q', 'roles.yaml');
-    await git(repo, 'commit', '-q', '-m', 'drop roles locally');
+    await git(repo, 'commit', '-qm', 'drop roles locally');
 
     spawnLog.length = 0;
     const map = await svc.eligibleWritersForPathsAtRef(workspaceId, 'feature', [DOC]);
@@ -179,7 +206,45 @@ describe('AccessControlService — at-ref model cache', () => {
     expect(map!.get(DOC)!.roles).toContain('Admin');
     expect(lsTreeBuilds()).toBe(1);
     // ...and the fallthrough result is cached under origin/feature's commit.
-    expect(await svc.canWriteAtRef(workspaceId, 'feature', 'someone-else@bevel.software', DOC)).toBe(true);
+    expect(await svc.canWriteAtRef(workspaceId, 'feature', admin, DOC)).toBe(true);
     expect(lsTreeBuilds()).toBe(1);
+  });
+
+  it('never caches a build that saw a git read fail, so one hiccup cannot pin a wrong verdict', async () => {
+    // A nearer access.md that DENIES the admin: reading it is what stands
+    // between razvan and a write he must not have.
+    await pushFromOther('deny Admin in Team', () =>
+      fs.writeFile(path.join(other, 'Team/access.md'), '---\nwrite:\n  - deny Admin\n---\n'),
+    );
+
+    // Lose exactly that read, once, to a simulated transient failure. The
+    // build degrades the way it always did (the file counts as absent for
+    // this call, so the verdict is the fail-open one)...
+    injected.failNext = (argv) => argv.includes('show') && argv.some((a) => a.endsWith(':Team/access.md'));
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    expect(injected.failNext).toBeNull();
+    expect(lsTreeBuilds()).toBe(1);
+
+    // ...but it is NOT pinned: the next call rebuilds and answers correctly,
+    // and that healthy build is the one that gets cached.
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(false);
+    expect(lsTreeBuilds()).toBe(2);
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(false);
+    expect(lsTreeBuilds()).toBe(2);
+  });
+
+  it('does not cache a commit with no roles.yaml, and keeps answering null for it', async () => {
+    await git(other, 'checkout', '-qb', 'bare');
+    await git(other, 'rm', '-q', 'roles.yaml');
+    await git(other, 'commit', '-qm', 'no roles here');
+    await git(other, 'push', '-q', '-u', 'origin', 'bare');
+
+    spawnLog.length = 0;
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/bare', admin, DOC)).toBeNull();
+    expect(await svc.canWriteAtRef(workspaceId, 'origin/bare', admin, DOC)).toBeNull();
+    // Each call went back to git for roles.yaml (nothing was remembered),
+    // and neither ever got as far as walking the tree.
+    expect(rolesReads()).toBe(2);
+    expect(lsTreeBuilds()).toBe(0);
   });
 });
