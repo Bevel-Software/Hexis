@@ -44,6 +44,7 @@ import {
 import type { AuthUser, Change, IWorkflowService } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { FileChangeNotifier } from './file-change-notifier.js';
+import { assertInsideRepo } from './repo-path.js';
 import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
 
 /** How many times to retry a contended acquire before giving up. */
@@ -62,6 +63,16 @@ export interface LockingFilesystemContext {
   workspaceId: string;
   branch: string;
   user: AuthUser;
+  /**
+   * The clone folder at the workspace root (`knowledge-base`). The filesystem
+   * is rooted one level ABOVE the repository, so containment alone lets a
+   * repo-relative path (`KnowledgeBase/…`) land beside the clone, where git
+   * never sees it and the release commit quietly no-ops. Every op that
+   * creates or modifies bytes is refused unless its path starts with this
+   * folder; removals stay open so a stray the old behaviour left there can
+   * still be cleaned up.
+   */
+  kbDirName: string;
   /**
    * Optional pre-disk write validator. Invoked with the (workspace-relative
    * path, full content) of every WHOLE-FILE write BEFORE the bytes land. Throw
@@ -104,6 +115,7 @@ export class LockingFilesystem extends LocalFilesystem {
     content: FileContent,
     options?: WriteOptions,
   ): Promise<void> {
+    this.assertInsideRepo(inputPath);
     // Pre-disk gate (e.g. reject a roles.yaml edit that would lock out admins).
     // Runs OUTSIDE the lock so a refusal never acquires/holds one.
     this.lockContext.validateWrite?.(inputPath, content);
@@ -121,6 +133,7 @@ export class LockingFilesystem extends LocalFilesystem {
   }
 
   override async appendFile(inputPath: string, content: FileContent): Promise<void> {
+    this.assertInsideRepo(inputPath);
     return this.withLock(inputPath, () => super.appendFile(inputPath, content));
   }
 
@@ -129,12 +142,16 @@ export class LockingFilesystem extends LocalFilesystem {
   }
 
   override async copyFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
+    this.assertInsideRepo(dest);
     // Lock on `dest`. `src` is read-only from this op's perspective — copy
     // creates a new file at dest without disturbing src on disk.
     return this.withLock(dest, () => super.copyFile(src, dest, options));
   }
 
   override async moveFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
+    // Only the destination is gated: moving a stray INTO the repository is how
+    // a file the old behaviour left beside the clone gets rescued.
+    this.assertInsideRepo(dest);
     // A move mutates two paths: the source is deleted and the destination
     // is created. Only locking `dest` would let a concurrent writer hold
     // the source's lock and mutate it under us, and would also leave the
@@ -183,6 +200,9 @@ export class LockingFilesystem extends LocalFilesystem {
     deletes: string[] = [],
   ): Promise<Change | null> {
     const { workflow, workspaceId, branch, user } = this.lockContext;
+    // Fail the whole batch before any plan, validator or lock: one stray path
+    // must not let its siblings land while it silently misses git.
+    for (const w of writes) this.assertInsideRepo(w.path);
     // Creator read grants for the batch: transform new markdown files'
     // content in place, and fold any subtree access.md seeds into the SAME
     // atomic batch (deduped — several files landing in one new folder share
@@ -479,6 +499,7 @@ export class LockingFilesystem extends LocalFilesystem {
   }
 
   override async mkdir(inputPath: string, options?: { recursive?: boolean }): Promise<void> {
+    this.assertInsideRepo(inputPath);
     // Creator read grant: planned BEFORE the dir exists (the plan's
     // new-directory detection needs the pre-creation tree), seeded right
     // after — so the new folder's access.md names the acting user under
@@ -525,6 +546,15 @@ export class LockingFilesystem extends LocalFilesystem {
       'Recursive directory removal is not supported through the lock-aware filesystem. ' +
         'Delete files individually so each removal lands as its own change.',
     );
+  }
+
+  /**
+   * Refuse a path that would put bytes beside the repository instead of in
+   * it. Runs before any side effect (plan, validator, lock, disk) so a refusal
+   * leaves nothing behind. See `LockingFilesystemContext.kbDirName`.
+   */
+  private assertInsideRepo(inputPath: string): void {
+    assertInsideRepo(inputPath, this.lockContext.kbDirName);
   }
 
   /**

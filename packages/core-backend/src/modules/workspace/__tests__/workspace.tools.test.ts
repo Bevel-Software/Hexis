@@ -1065,3 +1065,48 @@ describe('branch is a required parameter in the tool contract', () => {
     }
   });
 });
+
+/**
+ * The tools are rooted at the WORKSPACE dir, one level above the git clone, so
+ * a path has to start with the clone folder to reach git at all. Every place an
+ * agent reads before choosing a path says so, in the `path` input itself rather
+ * than only in prose it may not read: the root listing (where the folder is
+ * discoverable) and each content-writing tool.
+ */
+describe('path inputs tell the agent about the repository folder', () => {
+  // `toolDef` wraps a tool's inputs under a single `body` property.
+  const inputDescription = (def: { inputs?: unknown } | undefined, ...keys: string[]): string => {
+    let node = (def?.inputs ?? {}) as Record<string, unknown>;
+    for (const key of ['body', ...keys]) {
+      node = ((node.properties as Record<string, unknown> | undefined)?.[key] ?? {}) as Record<string, unknown>;
+      if (key === 'files') node = (node.items ?? {}) as Record<string, unknown>;
+    }
+    return typeof node.description === 'string' ? node.description : '';
+  };
+
+  it('every content-writing tool says paths start with `knowledge-base/`, so a repo-relative path is never guessed', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    const byName = (name: string) => {
+      const def = tools.find((t) => t.name === name);
+      expect(def, name).toBeDefined();
+      return def;
+    };
+    for (const name of ['write_file', 'edit_file', 'mkdir', 'delete_file', 'unzip']) {
+      expect(inputDescription(byName(name), 'path'), name).toContain(`\`${KB_DIR}/\``);
+    }
+    expect(inputDescription(byName('write_files'), 'files', 'path'), 'write_files').toContain(`\`${KB_DIR}/\``);
+    for (const name of ['move_file', 'copy_file']) {
+      expect(inputDescription(byName(name), 'dest'), name).toContain(`\`${KB_DIR}/\``);
+    }
+  });
+
+  it('the root listing names the clone folder, so an agent that lists first learns the prefix', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    const list = tools.find((t) => t.name === 'list_files');
+    expect(list).toBeDefined();
+    expect(list!.description).toContain(`\`${KB_DIR}/\``);
+    expect(inputDescription(list, 'path')).toContain(`\`${KB_DIR}/\``);
+  });
+});

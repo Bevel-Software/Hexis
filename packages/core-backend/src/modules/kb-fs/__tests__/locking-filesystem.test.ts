@@ -5,7 +5,10 @@ import os from 'node:os';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { LockingFilesystem } from '../locking-filesystem.js';
-import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
+import { PushNeedsAgentResolutionError, WorkflowValidationError } from '../../../shared/domain-errors.js';
+
+/** The clone folder at the workspace root: every path the filesystem mutates lives under it. */
+const KB = 'knowledge-base';
 
 const USER: AuthUser = {
   id: 'user-1',
@@ -56,20 +59,20 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
     const workflow = makeWorkflow();
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
     );
-    await fsLayer.writeFile('Knowledge/Foo.md', 'hello\n');
+    await fsLayer.writeFile('knowledge-base/Knowledge/Foo.md', 'hello\n');
 
     expect(workflow.acquireLock).toHaveBeenCalledWith(
       'ws-feat',
       'feat',
-      'Knowledge/Foo.md',
+      'knowledge-base/Knowledge/Foo.md',
       USER,
     );
     expect(workflow.releaseLock).toHaveBeenCalledWith(
       'ws-feat',
       'feat',
-      'Knowledge/Foo.md',
+      'knowledge-base/Knowledge/Foo.md',
       USER,
     );
     // Acquire fires before release.
@@ -79,20 +82,21 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
       .invocationCallOrder[0];
     expect(acquireOrder).toBeLessThan(releaseOrder);
     // The bytes actually landed on disk.
-    expect(await fs.readFile(path.join(root, 'Knowledge/Foo.md'), 'utf-8')).toBe('hello\n');
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Knowledge/Foo.md'), 'utf-8')).toBe('hello\n');
   });
 
   it('deleteFile acquires + deletes + releases', async () => {
-    const filePath = path.join(root, 'a.md');
+    const filePath = path.join(root, 'knowledge-base/a.md');
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.writeFile(filePath, 'x', 'utf-8');
     const workflow = makeWorkflow();
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
     );
-    await fsLayer.deleteFile('a.md');
-    expect(workflow.acquireLock).toHaveBeenCalledWith('ws-feat', 'feat', 'a.md', USER);
-    expect(workflow.releaseLock).toHaveBeenCalledWith('ws-feat', 'feat', 'a.md', USER);
+    await fsLayer.deleteFile('knowledge-base/a.md');
+    expect(workflow.acquireLock).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/a.md', USER);
+    expect(workflow.releaseLock).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/a.md', USER);
     await expect(fs.access(filePath)).rejects.toBeDefined();
   });
 
@@ -100,49 +104,49 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
     const workflow = makeWorkflow();
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
     );
-    await fsLayer.mkdir('empty');
+    await fsLayer.mkdir('knowledge-base/empty');
     // .gitkeep got written through the lock path. The lock is on the
     // .gitkeep path (that's the file the commit attaches to).
     expect(workflow.acquireLock).toHaveBeenCalledWith(
       'ws-feat',
       'feat',
-      'empty/.gitkeep',
+      'knowledge-base/empty/.gitkeep',
       USER,
     );
     expect(workflow.releaseLock).toHaveBeenCalledWith(
       'ws-feat',
       'feat',
-      'empty/.gitkeep',
+      'knowledge-base/empty/.gitkeep',
       USER,
     );
-    expect(await fs.readFile(path.join(root, 'empty/.gitkeep'), 'utf-8')).toBe('');
+    expect(await fs.readFile(path.join(root, 'knowledge-base/empty/.gitkeep'), 'utf-8')).toBe('');
   });
 
   it('mkdir of an already-populated dir does NOT drop a .gitkeep', async () => {
-    await fs.mkdir(path.join(root, 'has-content'), { recursive: true });
-    await fs.writeFile(path.join(root, 'has-content/real.md'), 'hi', 'utf-8');
+    await fs.mkdir(path.join(root, 'knowledge-base/has-content'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/has-content/real.md'), 'hi', 'utf-8');
     const workflow = makeWorkflow();
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
     );
-    await fsLayer.mkdir('has-content', { recursive: true });
+    await fsLayer.mkdir('knowledge-base/has-content', { recursive: true });
     expect(workflow.acquireLock).not.toHaveBeenCalled();
     expect(workflow.releaseLock).not.toHaveBeenCalled();
     // The existing file is untouched.
-    expect(await fs.readFile(path.join(root, 'has-content/real.md'), 'utf-8')).toBe('hi');
+    expect(await fs.readFile(path.join(root, 'knowledge-base/has-content/real.md'), 'utf-8')).toBe('hi');
   });
 
   it('rmdir is refused with a clear error — one-change-per-file invariant', async () => {
-    await fs.mkdir(path.join(root, 'doomed'), { recursive: true });
+    await fs.mkdir(path.join(root, 'knowledge-base/doomed'), { recursive: true });
     const workflow = makeWorkflow();
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
     );
-    await expect(fsLayer.rmdir('doomed')).rejects.toThrow(
+    await expect(fsLayer.rmdir('knowledge-base/doomed')).rejects.toThrow(
       /Recursive directory removal is not supported/i,
     );
     expect(workflow.acquireLock).not.toHaveBeenCalled();
@@ -157,7 +161,7 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
         acquired: false,
         lock: {
           branch: 'feat',
-          path: 'Locked.md',
+          path: 'knowledge-base/Locked.md',
           holderUserId: 'bob',
           holderName: 'Bob',
           acquiredAt: '',
@@ -167,11 +171,11 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
       });
       const fsLayer = new LockingFilesystem(
         { basePath: root, contained: true },
-        { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER },
+        { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
       );
 
-      await expect(fsLayer.writeFile('Locked.md', 'x')).rejects.toThrow(
-        /Skipped editing "Locked\.md" — locked by Bob/,
+      await expect(fsLayer.writeFile('knowledge-base/Locked.md', 'x')).rejects.toThrow(
+        /Skipped editing "knowledge-base\/Locked\.md" — locked by Bob/,
       );
       expect(workflow.acquireLock).toHaveBeenCalledTimes(3);
       expect(workflow.releaseLock).not.toHaveBeenCalled();
@@ -183,7 +187,7 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
     const workflow = makeWorkflow();
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
     );
     // Path traversal — Mastra's `contained: true` rejects this with a
     // PermissionError. The lock must still go away so the next caller
@@ -191,7 +195,7 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
     // push whatever partial state is on disk) must NOT fire — instead
     // we use the no-commit variant so partial writes don't silently
     // persist as committed changes.
-    await expect(fsLayer.writeFile('../escape.md', 'x')).rejects.toThrow();
+    await expect(fsLayer.writeFile('knowledge-base/../../escape.md', 'x')).rejects.toThrow();
     expect(workflow.releaseLockNoCommit).toHaveBeenCalled();
     expect(workflow.releaseLock).not.toHaveBeenCalled();
   });
@@ -209,8 +213,8 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
   });
 
   it('locks writes AND deletes, applies both, emits ONE batched onFilesChanged', async () => {
-    await fs.mkdir(path.join(root, 'Tools'), { recursive: true });
-    await fs.writeFile(path.join(root, 'Tools/old.tool'), '{}');
+    await fs.mkdir(path.join(root, 'knowledge-base/Tools'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/Tools/old.tool'), '{}');
 
     const workflow = makeWorkflow();
     const emitted: unknown[] = [];
@@ -220,36 +224,36 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workflow,
         workspaceId: 'ws-feat',
         branch: 'feat',
-        user: USER,
+        user: USER, kbDirName: KB,
         fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
 
     const change = await fsLayer.writeFiles(
-      [{ path: 'Tools/new.tool', content: '{"type":"http","url":"https://x/m"}' }],
+      [{ path: 'knowledge-base/Tools/new.tool', content: '{"type":"http","url":"https://x/m"}' }],
       'batch',
-      ['Tools/old.tool'],
+      ['knowledge-base/Tools/old.tool'],
     );
 
     // Both paths locked; both mutations landed; commit returned.
-    expect(workflow.acquireLock).toHaveBeenCalledWith('ws-feat', 'feat', 'Tools/new.tool', USER);
-    expect(workflow.acquireLock).toHaveBeenCalledWith('ws-feat', 'feat', 'Tools/old.tool', USER);
-    expect(await fs.readFile(path.join(root, 'Tools/new.tool'), 'utf-8')).toContain('http');
-    await expect(fs.access(path.join(root, 'Tools/old.tool'))).rejects.toThrow();
+    expect(workflow.acquireLock).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/Tools/new.tool', USER);
+    expect(workflow.acquireLock).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/Tools/old.tool', USER);
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Tools/new.tool'), 'utf-8')).toContain('http');
+    await expect(fs.access(path.join(root, 'knowledge-base/Tools/old.tool'))).rejects.toThrow();
     expect(change).toEqual({});
     // ONE event carrying the whole batch (sorted), attributed to the user.
     expect(emitted).toHaveLength(1);
     expect(emitted[0]).toMatchObject({
       workspaceId: 'ws-feat',
       branch: 'feat',
-      paths: ['Tools/new.tool', 'Tools/old.tool'],
+      paths: ['knowledge-base/Tools/new.tool', 'knowledge-base/Tools/old.tool'],
       byUser: USER,
     });
   });
 
   it('a failing commit releases every lock WITHOUT committing and emits nothing', async () => {
-    await fs.mkdir(path.join(root, 'Tools'), { recursive: true });
-    await fs.writeFile(path.join(root, 'Tools/old.tool'), '{}');
+    await fs.mkdir(path.join(root, 'knowledge-base/Tools'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/Tools/old.tool'), '{}');
 
     const workflow = makeWorkflow();
     (workflow.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('push exploded'));
@@ -260,16 +264,16 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workflow,
         workspaceId: 'ws-feat',
         branch: 'feat',
-        user: USER,
+        user: USER, kbDirName: KB,
         fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
 
     await expect(
       fsLayer.writeFiles(
-        [{ path: 'Tools/new.tool', content: '{"type":"http","url":"https://x/m"}' }],
+        [{ path: 'knowledge-base/Tools/new.tool', content: '{"type":"http","url":"https://x/m"}' }],
         'batch',
-        ['Tools/old.tool'],
+        ['knowledge-base/Tools/old.tool'],
       ),
     ).rejects.toThrow('push exploded');
 
@@ -277,8 +281,8 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     // discards the uncommitted bytes (write reverted, delete restored) in the
     // real WorkflowService via git.discardPath. The committing release must
     // never run, and no change event fires for a failed batch.
-    expect(workflow.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', 'Tools/new.tool', USER);
-    expect(workflow.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', 'Tools/old.tool', USER);
+    expect(workflow.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/Tools/new.tool', USER);
+    expect(workflow.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/Tools/old.tool', USER);
     expect(workflow.releaseLock).not.toHaveBeenCalled();
     expect(emitted).toHaveLength(0);
   });
@@ -293,7 +297,7 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     // push ladder) and still propagate the error.
     const workflow = makeWorkflow();
     (workflow.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new PushNeedsAgentResolutionError('feat', 'A.md', 'non-fast-forward', 'rebase failed'),
+      new PushNeedsAgentResolutionError('feat', 'knowledge-base/A.md', 'non-fast-forward', 'rebase failed'),
     );
     const emitted: unknown[] = [];
     const fsLayer = new LockingFilesystem(
@@ -302,16 +306,16 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workflow,
         workspaceId: 'ws-feat',
         branch: 'feat',
-        user: USER,
+        user: USER, kbDirName: KB,
         fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
 
     await expect(
-      fsLayer.writeFiles([{ path: 'A.md', content: 'x' }], 'batch'),
+      fsLayer.writeFiles([{ path: 'knowledge-base/A.md', content: 'x' }], 'batch'),
     ).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
 
-    expect(workflow.releaseLock).toHaveBeenCalledWith('ws-feat', 'feat', 'A.md', USER);
+    expect(workflow.releaseLock).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/A.md', USER);
     expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
     expect(emitted).toHaveLength(0);
   });
@@ -326,11 +330,11 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workflow,
         workspaceId: 'ws-feat',
         branch: 'feat',
-        user: USER,
+        user: USER, kbDirName: KB,
         fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
-    await fsLayer.writeFiles([{ path: 'A.md', content: 'same' }], 'noop');
+    await fsLayer.writeFiles([{ path: 'knowledge-base/A.md', content: 'same' }], 'noop');
     expect(emitted).toHaveLength(0);
   });
 });
@@ -363,16 +367,16 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     });
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
     );
-    await fsLayer.writeFile('KnowledgeBase/new.md', '# New\n');
+    await fsLayer.writeFile('knowledge-base/KnowledgeBase/new.md', '# New\n');
     expect(creatorAccess.planForCreate).toHaveBeenCalledWith(
       'ws-feat',
       USER,
-      'KnowledgeBase/new.md',
+      'knowledge-base/KnowledgeBase/new.md',
       'file',
     );
-    expect(await fs.readFile(path.join(root, 'KnowledgeBase/new.md'), 'utf-8')).toBe(
+    expect(await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/new.md'), 'utf-8')).toBe(
       '---\nread: Alice <alice@example.com>\n---\n# New\n',
     );
   });
@@ -381,10 +385,10 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     const workflow = makeWorkflow();
     const creatorAccess = makeCreatorAccess();
     creatorAccess.planForCreate.mockImplementation(async (_w, _u, p: string) =>
-      p === 'KnowledgeBase/Mine/doc.md'
+      p === 'knowledge-base/KnowledgeBase/Mine/doc.md'
         ? {
             kind: 'seed-access-md',
-            wsRelPath: 'KnowledgeBase/Mine/access.md',
+            wsRelPath: 'knowledge-base/KnowledgeBase/Mine/access.md',
             apply: (current: string) =>
               current + '---\nread:\n  - Alice <alice@example.com>\n---\n',
           }
@@ -392,18 +396,18 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     );
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
     );
-    await fsLayer.writeFile('KnowledgeBase/Mine/doc.md', 'body');
+    await fsLayer.writeFile('knowledge-base/KnowledgeBase/Mine/doc.md', 'body');
     const locked = (workflow.acquireLock as ReturnType<typeof vi.fn>).mock.calls.map(
       (c) => c[2],
     );
-    expect(locked).toEqual(['KnowledgeBase/Mine/access.md', 'KnowledgeBase/Mine/doc.md']);
+    expect(locked).toEqual(['knowledge-base/KnowledgeBase/Mine/access.md', 'knowledge-base/KnowledgeBase/Mine/doc.md']);
     expect(
-      await fs.readFile(path.join(root, 'KnowledgeBase/Mine/access.md'), 'utf-8'),
+      await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/Mine/access.md'), 'utf-8'),
     ).toContain('Alice <alice@example.com>');
     // The file content is untouched — the grant lives in the seeded access.md.
-    expect(await fs.readFile(path.join(root, 'KnowledgeBase/Mine/doc.md'), 'utf-8')).toBe('body');
+    expect(await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/Mine/doc.md'), 'utf-8')).toBe('body');
     expect(creatorAccess.noteAccessFileWritten).toHaveBeenCalledWith('ws-feat');
   });
 
@@ -421,14 +425,14 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     );
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
     );
-    await fsLayer.mkdir('KnowledgeBase/Projects');
+    await fsLayer.mkdir('knowledge-base/KnowledgeBase/Projects');
     expect(
-      await fs.readFile(path.join(root, 'KnowledgeBase/Projects/access.md'), 'utf-8'),
+      await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/Projects/access.md'), 'utf-8'),
     ).toContain('Alice <alice@example.com>');
     await expect(
-      fs.access(path.join(root, 'KnowledgeBase/Projects/.gitkeep')),
+      fs.access(path.join(root, 'knowledge-base/KnowledgeBase/Projects/.gitkeep')),
     ).rejects.toBeDefined();
   });
 
@@ -437,32 +441,32 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     const creatorAccess = makeCreatorAccess();
     creatorAccess.planForCreate.mockResolvedValue({
       kind: 'seed-access-md',
-      wsRelPath: 'KnowledgeBase/Mine/access.md',
+      wsRelPath: 'knowledge-base/KnowledgeBase/Mine/access.md',
       apply: () => '---\nread:\n  - Alice <alice@example.com>\n---\n',
     });
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
     );
     await fsLayer.writeFiles(
       [
-        { path: 'KnowledgeBase/Mine/a.md', content: 'A' },
-        { path: 'KnowledgeBase/Mine/b.md', content: 'B' },
+        { path: 'knowledge-base/KnowledgeBase/Mine/a.md', content: 'A' },
+        { path: 'knowledge-base/KnowledgeBase/Mine/b.md', content: 'B' },
       ],
       'batch',
     );
     // One seed for the shared new folder, committed with the batch.
     expect(
-      await fs.readFile(path.join(root, 'KnowledgeBase/Mine/access.md'), 'utf-8'),
+      await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/Mine/access.md'), 'utf-8'),
     ).toContain('Alice <alice@example.com>');
     expect(workflow.commitChanges).toHaveBeenCalledTimes(1);
     const locked = (workflow.acquireLock as ReturnType<typeof vi.fn>).mock.calls.map(
       (c) => c[2],
     );
     expect(locked).toEqual([
-      'KnowledgeBase/Mine/a.md',
-      'KnowledgeBase/Mine/b.md',
-      'KnowledgeBase/Mine/access.md',
+      'knowledge-base/KnowledgeBase/Mine/a.md',
+      'knowledge-base/KnowledgeBase/Mine/b.md',
+      'knowledge-base/KnowledgeBase/Mine/access.md',
     ]);
     expect(creatorAccess.noteAccessFileWritten).toHaveBeenCalledWith('ws-feat');
   });
@@ -474,14 +478,14 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     // be dirty from ANOTHER save whose commit is still queued, and scoping the
     // batch to a merely-locked path would sweep those bytes in under this
     // batch's author/summary.
-    await fs.mkdir(path.join(root, 'KnowledgeBase/Mine'), { recursive: true });
+    await fs.mkdir(path.join(root, 'knowledge-base/KnowledgeBase/Mine'), { recursive: true });
     const seedContent = '---\nread:\n  - Alice <alice@example.com>\n---\n';
-    await fs.writeFile(path.join(root, 'KnowledgeBase/Mine/access.md'), seedContent);
+    await fs.writeFile(path.join(root, 'knowledge-base/KnowledgeBase/Mine/access.md'), seedContent);
     const workflow = makeWorkflow();
     const creatorAccess = makeCreatorAccess();
     creatorAccess.planForCreate.mockResolvedValue({
       kind: 'seed-access-md',
-      wsRelPath: 'KnowledgeBase/Mine/access.md',
+      wsRelPath: 'knowledge-base/KnowledgeBase/Mine/access.md',
       apply: (current: string) => current, // grant already present → no-op
     });
     const emitted: { paths: string[] }[] = [];
@@ -491,22 +495,22 @@ describe('LockingFilesystem — creator read grants on creation', () => {
         workflow,
         workspaceId: 'ws-feat',
         branch: 'feat',
-        user: USER,
+        user: USER, kbDirName: KB,
         creatorAccess,
         fileChanges: { emit: (c: { paths: string[] }) => emitted.push(c) } as never,
       },
     );
-    await fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
+    await fsLayer.writeFiles([{ path: 'knowledge-base/KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
 
     // The seed's lock cycle still ran (acquired + released)...
     const locked = (workflow.acquireLock as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2]);
-    expect(locked).toContain('KnowledgeBase/Mine/access.md');
+    expect(locked).toContain('knowledge-base/KnowledgeBase/Mine/access.md');
     // ...but the commit is scoped to the caller's path only.
     const commitPaths = (workflow.commitChanges as ReturnType<typeof vi.fn>).mock.calls[0][3];
-    expect(commitPaths).toEqual(['KnowledgeBase/Mine/doc.md']);
-    expect(emitted[0].paths).toEqual(['KnowledgeBase/Mine/doc.md']);
+    expect(commitPaths).toEqual(['knowledge-base/KnowledgeBase/Mine/doc.md']);
+    expect(emitted[0].paths).toEqual(['knowledge-base/KnowledgeBase/Mine/doc.md']);
     // The seeded file is untouched.
-    expect(await fs.readFile(path.join(root, 'KnowledgeBase/Mine/access.md'), 'utf-8')).toBe(
+    expect(await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/Mine/access.md'), 'utf-8')).toBe(
       seedContent,
     );
   });
@@ -523,34 +527,34 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     // resets its retry ladder — the prior save's bytes would publish under
     // the wrong name. The seed lock must release UNTOUCHED (drop the lock
     // row, leave disk and queue exactly as they are).
-    await fs.mkdir(path.join(root, 'KnowledgeBase/Mine'), { recursive: true });
+    await fs.mkdir(path.join(root, 'knowledge-base/KnowledgeBase/Mine'), { recursive: true });
     const priorSave = '---\nread:\n  - Alice <alice@example.com>\n---\nprior queued bytes\n';
-    await fs.writeFile(path.join(root, 'KnowledgeBase/Mine/access.md'), priorSave);
+    await fs.writeFile(path.join(root, 'knowledge-base/KnowledgeBase/Mine/access.md'), priorSave);
     const workflow = makeWorkflow();
     const creatorAccess = makeCreatorAccess();
     creatorAccess.planForCreate.mockResolvedValue({
       kind: 'seed-access-md',
-      wsRelPath: 'KnowledgeBase/Mine/access.md',
+      wsRelPath: 'knowledge-base/KnowledgeBase/Mine/access.md',
       apply: (current: string) => current, // grant already present → no-op
     });
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
     );
-    await fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
+    await fsLayer.writeFiles([{ path: 'knowledge-base/KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
 
     // The batch's OWN committed path releases no-commit (clean — discard no-ops)...
     expect(workflow.releaseLockNoCommit).toHaveBeenCalledWith(
-      'ws-feat', 'feat', 'KnowledgeBase/Mine/doc.md', USER,
+      'ws-feat', 'feat', 'knowledge-base/KnowledgeBase/Mine/doc.md', USER,
     );
     // ...but the merely-locked seed path releases UNTOUCHED — never the
     // enqueue, never the discard.
     expect(workflow.releaseLockUntouched).toHaveBeenCalledWith(
-      'ws-feat', 'feat', 'KnowledgeBase/Mine/access.md', USER,
+      'ws-feat', 'feat', 'knowledge-base/KnowledgeBase/Mine/access.md', USER,
     );
     expect(workflow.releaseLock).not.toHaveBeenCalled();
     expect(workflow.releaseLockNoCommit).not.toHaveBeenCalledWith(
-      'ws-feat', 'feat', 'KnowledgeBase/Mine/access.md', USER,
+      'ws-feat', 'feat', 'knowledge-base/KnowledgeBase/Mine/access.md', USER,
     );
   });
 
@@ -564,18 +568,18 @@ describe('LockingFilesystem — creator read grants on creation', () => {
       .mockResolvedValue({ acquired: false, lock: { holderUserId: 'bob', holderName: 'Bob' } });
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
     );
     await expect(
       fsLayer.writeFiles(
         [
-          { path: 'A.md', content: 'a' },
-          { path: 'B.md', content: 'b' },
+          { path: 'knowledge-base/A.md', content: 'a' },
+          { path: 'knowledge-base/B.md', content: 'b' },
         ],
         'batch',
       ),
     ).rejects.toThrow(/locked by Bob/);
-    expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'A.md', USER);
+    expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/A.md', USER);
     expect(workflow.releaseLock).not.toHaveBeenCalled();
     expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
   }, 10_000);
@@ -586,9 +590,9 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     // loop read the pre-image under this very lock, so it can put it back —
     // after which the path is byte-identical to before the batch and must
     // release untouched (a prior save's queued bytes, if any, survive).
-    await fs.mkdir(path.join(root, 'KnowledgeBase/Mine'), { recursive: true });
+    await fs.mkdir(path.join(root, 'knowledge-base/KnowledgeBase/Mine'), { recursive: true });
     const priorBytes = 'prior queued bytes\n';
-    const seedPath = 'KnowledgeBase/Mine/access.md';
+    const seedPath = 'knowledge-base/KnowledgeBase/Mine/access.md';
     await fs.writeFile(path.join(root, seedPath), priorBytes);
     const workflow = makeWorkflow();
     const creatorAccess = makeCreatorAccess();
@@ -599,7 +603,7 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     });
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
     );
     // Fail the SEED write once (simulating a mid-write death that left
     // partial bytes); every other write — including the restore — passes
@@ -617,7 +621,7 @@ describe('LockingFilesystem — creator read grants on creation', () => {
         return original.call(this as LocalFilesystem, p, c, o);
       });
     try {
-      await fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
+      await fsLayer.writeFiles([{ path: 'knowledge-base/KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
     } finally {
       spy.mockRestore();
     }
@@ -625,7 +629,7 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     expect(await fs.readFile(path.join(root, seedPath), 'utf-8')).toBe(priorBytes);
     // The failed seed stays OUT of the commit scope and releases untouched.
     const commitPaths = (workflow.commitChanges as ReturnType<typeof vi.fn>).mock.calls[0][3];
-    expect(commitPaths).toEqual(['KnowledgeBase/Mine/doc.md']);
+    expect(commitPaths).toEqual(['knowledge-base/KnowledgeBase/Mine/doc.md']);
     expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', seedPath, USER);
     expect(workflow.releaseLockNoCommit).not.toHaveBeenCalledWith(
       'ws-feat', 'feat', seedPath, USER,
@@ -640,9 +644,9 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     // on disk as if they were real; discarding to HEAD would destroy a prior
     // save's queued bytes. The right restore is the pre-image read under the
     // seed's own lock.
-    await fs.mkdir(path.join(root, 'KnowledgeBase/Mine'), { recursive: true });
+    await fs.mkdir(path.join(root, 'knowledge-base/KnowledgeBase/Mine'), { recursive: true });
     const priorBytes = 'prior queued bytes\n';
-    const seedPath = 'KnowledgeBase/Mine/access.md';
+    const seedPath = 'knowledge-base/KnowledgeBase/Mine/access.md';
     await fs.writeFile(path.join(root, seedPath), priorBytes);
     const workflow = makeWorkflow();
     (workflow.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(
@@ -656,10 +660,10 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     });
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
     );
     await expect(
-      fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch'),
+      fsLayer.writeFiles([{ path: 'knowledge-base/KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch'),
     ).rejects.toThrow('commit exploded');
     // The landed grant was rolled back to the pre-image, byte-identical…
     expect(await fs.readFile(path.join(root, seedPath), 'utf-8')).toBe(priorBytes);
@@ -667,7 +671,7 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     // batch's to discard), while the caller's own write releases via discard.
     expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', seedPath, USER);
     expect(workflow.releaseLockNoCommit).toHaveBeenCalledWith(
-      'ws-feat', 'feat', 'KnowledgeBase/Mine/doc.md', USER,
+      'ws-feat', 'feat', 'knowledge-base/KnowledgeBase/Mine/doc.md', USER,
     );
     expect(workflow.releaseLockNoCommit).not.toHaveBeenCalledWith(
       'ws-feat', 'feat', seedPath, USER,
@@ -679,8 +683,8 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     // pre-image restore failed, so the path holds known-partial bytes. The
     // release must reset it to HEAD (releaseLockNoCommit) — never enqueue the
     // corrupt bytes as a commit, never leave them for the next acquirer.
-    await fs.mkdir(path.join(root, 'KnowledgeBase/Mine'), { recursive: true });
-    const seedPath = 'KnowledgeBase/Mine/access.md';
+    await fs.mkdir(path.join(root, 'knowledge-base/KnowledgeBase/Mine'), { recursive: true });
+    const seedPath = 'knowledge-base/KnowledgeBase/Mine/access.md';
     await fs.writeFile(path.join(root, seedPath), 'prior\n');
     const workflow = makeWorkflow();
     const creatorAccess = makeCreatorAccess();
@@ -691,7 +695,7 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     });
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
     );
     const original = LocalFilesystem.prototype.writeFile;
     const spy = vi
@@ -701,7 +705,7 @@ describe('LockingFilesystem — creator read grants on creation', () => {
         return original.call(this as LocalFilesystem, p, c, o);
       });
     try {
-      await fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
+      await fsLayer.writeFiles([{ path: 'knowledge-base/KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
     } finally {
       spy.mockRestore();
     }
@@ -713,7 +717,7 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     );
     expect(workflow.releaseLock).not.toHaveBeenCalled();
     const commitPaths = (workflow.commitChanges as ReturnType<typeof vi.fn>).mock.calls[0][3];
-    expect(commitPaths).toEqual(['KnowledgeBase/Mine/doc.md']);
+    expect(commitPaths).toEqual(['knowledge-base/KnowledgeBase/Mine/doc.md']);
   });
 
   it('push-retry unwind: committed paths re-arm via releaseLock, a merely-locked seed stays untouched', async () => {
@@ -722,8 +726,8 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     // IS the push-retry vehicle), while the seed that never wrote must NOT be
     // swept into the same enqueue — its path may carry a prior save's queued
     // row that a fresh enqueue would re-attribute and reset.
-    await fs.mkdir(path.join(root, 'KnowledgeBase/Mine'), { recursive: true });
-    const seedPath = 'KnowledgeBase/Mine/access.md';
+    await fs.mkdir(path.join(root, 'knowledge-base/KnowledgeBase/Mine'), { recursive: true });
+    const seedPath = 'knowledge-base/KnowledgeBase/Mine/access.md';
     await fs.writeFile(path.join(root, seedPath), 'grant already present\n');
     const workflow = makeWorkflow();
     (workflow.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(
@@ -737,13 +741,13 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     });
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
     );
     await expect(
-      fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch'),
+      fsLayer.writeFiles([{ path: 'knowledge-base/KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch'),
     ).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
     expect(workflow.releaseLock).toHaveBeenCalledWith(
-      'ws-feat', 'feat', 'KnowledgeBase/Mine/doc.md', USER,
+      'ws-feat', 'feat', 'knowledge-base/KnowledgeBase/Mine/doc.md', USER,
     );
     expect(workflow.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', seedPath, USER);
     expect(workflow.releaseLock).not.toHaveBeenCalledWith('ws-feat', 'feat', seedPath, USER);
@@ -755,16 +759,16 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     const creatorAccess = makeCreatorAccess();
     creatorAccess.planForCreate.mockResolvedValue({
       kind: 'seed-access-md',
-      wsRelPath: 'KnowledgeBase/Mine/access.md',
+      wsRelPath: 'knowledge-base/KnowledgeBase/Mine/access.md',
       apply: () => '---\nread:\n  - Alice <alice@example.com>\n---\n',
     });
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
     );
-    await fsLayer.writeFiles([{ path: 'KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
+    await fsLayer.writeFiles([{ path: 'knowledge-base/KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
     const commitPaths = (workflow.commitChanges as ReturnType<typeof vi.fn>).mock.calls[0][3];
-    expect(commitPaths).toEqual(['KnowledgeBase/Mine/doc.md', 'KnowledgeBase/Mine/access.md']);
+    expect(commitPaths).toEqual(['knowledge-base/KnowledgeBase/Mine/doc.md', 'knowledge-base/KnowledgeBase/Mine/access.md']);
   });
 
   it('a planner failure never blocks the write', async () => {
@@ -773,9 +777,160 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     creatorAccess.planForCreate.mockRejectedValue(new Error('planner down'));
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, creatorAccess },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
     );
-    await fsLayer.writeFile('KnowledgeBase/new.md', 'x');
-    expect(await fs.readFile(path.join(root, 'KnowledgeBase/new.md'), 'utf-8')).toBe('x');
+    await fsLayer.writeFile('knowledge-base/KnowledgeBase/new.md', 'x');
+    expect(await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/new.md'), 'utf-8')).toBe('x');
+  });
+});
+
+describe('LockingFilesystem refuses to create anything outside the repository folder', () => {
+  // The bug this pins: the filesystem is rooted at the WORKSPACE dir, one level
+  // above the git clone, so a repo-relative path (`KnowledgeBase/…`, the shape
+  // every doc and URL shows) is "contained" and its bytes land BESIDE the
+  // repository. The release commit then finds nothing dirty and returns null,
+  // the tool reports success, and the explorer re-roots on the stray folder.
+  // The refusal has to fire before any side effect: no lock, no creator-grant
+  // plan, no validator call, no bytes on disk.
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const STRAY = 'KnowledgeBase/Reviews/PR-12.html';
+  const CORRECTED = 'knowledge-base/KnowledgeBase/Reviews/PR-12.html';
+
+  function makeCreatorAccess() {
+    return {
+      planForCreate: vi.fn().mockResolvedValue(null),
+      grantInExtractedFile: vi.fn().mockResolvedValue(null),
+      noteAccessFileWritten: vi.fn(),
+    };
+  }
+
+  function layer(workflow: IWorkflowService) {
+    const creatorAccess = makeCreatorAccess();
+    const validateWrite = vi.fn();
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess, validateWrite },
+    );
+    return { fsLayer, creatorAccess, validateWrite };
+  }
+
+  async function expectRefused(
+    op: Promise<unknown>,
+    workflow: IWorkflowService,
+    creatorAccess: ReturnType<typeof makeCreatorAccess>,
+    validateWrite: ReturnType<typeof vi.fn>,
+  ): Promise<void> {
+    await expect(op).rejects.toBeInstanceOf(WorkflowValidationError);
+    // The corrected path is spelled out, under the clone folder.
+    await expect(op).rejects.toThrow('"knowledge-base/KnowledgeBase/Reviews');
+    // Refused before any side effect.
+    expect(workflow.acquireLock).not.toHaveBeenCalled();
+    expect(workflow.releaseLock).not.toHaveBeenCalled();
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(workflow.commitChanges).not.toHaveBeenCalled();
+    expect(creatorAccess.planForCreate).not.toHaveBeenCalled();
+    expect(validateWrite).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(root, 'KnowledgeBase'))).rejects.toBeDefined();
+  }
+
+  it('writeFile', async () => {
+    const workflow = makeWorkflow();
+    const { fsLayer, creatorAccess, validateWrite } = layer(workflow);
+    await expectRefused(fsLayer.writeFile(STRAY, '<p>review</p>'), workflow, creatorAccess, validateWrite);
+  });
+
+  it('appendFile', async () => {
+    const workflow = makeWorkflow();
+    const { fsLayer, creatorAccess, validateWrite } = layer(workflow);
+    await expectRefused(fsLayer.appendFile('KnowledgeBase/Reviews/review.log', 'line\n'), workflow, creatorAccess, validateWrite);
+  });
+
+  it('writeFiles refuses the whole batch when one path is outside: nothing written, nothing locked', async () => {
+    const workflow = makeWorkflow();
+    const { fsLayer, creatorAccess, validateWrite } = layer(workflow);
+    await expectRefused(
+      fsLayer.writeFiles(
+        [
+          { path: 'knowledge-base/KnowledgeBase/ok.md', content: 'fine' },
+          { path: STRAY, content: '<p>review</p>' },
+        ],
+        'batch',
+      ),
+      workflow,
+      creatorAccess,
+      validateWrite,
+    );
+    await expect(fs.access(path.join(root, 'knowledge-base/KnowledgeBase/ok.md'))).rejects.toBeDefined();
+  });
+
+  it('mkdir', async () => {
+    const workflow = makeWorkflow();
+    const { fsLayer, creatorAccess, validateWrite } = layer(workflow);
+    await expectRefused(fsLayer.mkdir('KnowledgeBase/Reviews'), workflow, creatorAccess, validateWrite);
+  });
+
+  it('moveFile refuses a destination outside the repository and leaves the source in place', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base/KnowledgeBase'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/KnowledgeBase/PR-12.html'), 'x');
+    const workflow = makeWorkflow();
+    const { fsLayer, creatorAccess, validateWrite } = layer(workflow);
+    await expectRefused(
+      fsLayer.moveFile('knowledge-base/KnowledgeBase/PR-12.html', STRAY),
+      workflow,
+      creatorAccess,
+      validateWrite,
+    );
+    expect(await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/PR-12.html'), 'utf-8')).toBe('x');
+  });
+
+  it('copyFile refuses a destination outside the repository', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base/KnowledgeBase'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/KnowledgeBase/PR-12.html'), 'x');
+    const workflow = makeWorkflow();
+    const { fsLayer, creatorAccess, validateWrite } = layer(workflow);
+    await expectRefused(
+      fsLayer.copyFile('knowledge-base/KnowledgeBase/PR-12.html', STRAY),
+      workflow,
+      creatorAccess,
+      validateWrite,
+    );
+  });
+
+  it('the folder is matched as a whole segment: `knowledge-based/x.md` is outside too', async () => {
+    const workflow = makeWorkflow();
+    const { fsLayer } = layer(workflow);
+    await expect(fsLayer.writeFile('knowledge-based/x.md', 'x')).rejects.toBeInstanceOf(WorkflowValidationError);
+    expect(workflow.acquireLock).not.toHaveBeenCalled();
+  });
+
+  it('deleteFile still removes a file the old behaviour left beside the repository', async () => {
+    // Removal is deliberately not gated: an agent that discovers a stray it
+    // created before this guard existed must be able to clean it up.
+    await fs.mkdir(path.join(root, 'KnowledgeBase/Reviews'), { recursive: true });
+    await fs.writeFile(path.join(root, STRAY), 'stray');
+    const workflow = makeWorkflow();
+    const { fsLayer } = layer(workflow);
+    await fsLayer.deleteFile(STRAY);
+    await expect(fs.access(path.join(root, STRAY))).rejects.toBeDefined();
+  });
+
+  it('moveFile still rescues a stray INTO the repository', async () => {
+    await fs.mkdir(path.join(root, 'KnowledgeBase/Reviews'), { recursive: true });
+    await fs.writeFile(path.join(root, STRAY), 'stray');
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    const workflow = makeWorkflow();
+    const { fsLayer } = layer(workflow);
+    await fsLayer.moveFile(STRAY, CORRECTED);
+    expect(await fs.readFile(path.join(root, CORRECTED), 'utf-8')).toBe('stray');
+    await expect(fs.access(path.join(root, STRAY))).rejects.toBeDefined();
   });
 });
