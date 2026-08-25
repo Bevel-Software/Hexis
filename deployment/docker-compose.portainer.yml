@@ -37,7 +37,7 @@ services:
     init: true
     # Contain pid/thread leaks to the app instead of the host; normal
     # operation is ~24 tasks. See the root docker-compose.yml.
-    pids_limit: 2048
+    pids_limit: 4096
     ports:
       - "${APP_PORT:-3001}:3001"
     environment:

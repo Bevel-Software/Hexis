@@ -42,7 +42,7 @@ services:
     init: true
     # Contain pid/thread leaks to the app instead of the host; normal
     # operation is ~24 tasks. See the root docker-compose.yml.
-    pids_limit: 2048
+    pids_limit: 4096
     build:
       # Relative to the PROJECT DIRECTORY, not to this file: orchestrators
       # (Coolify) run compose with --project-directory set to the checkout
