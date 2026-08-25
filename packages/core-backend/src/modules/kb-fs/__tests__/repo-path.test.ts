@@ -33,6 +33,12 @@ describe('isInsideRepo', () => {
     expect(isInsideRepo('knowledge-base//x.md', KB)).toBe(false);
   });
 
+  it('refuses backslashes anywhere: on Windows they separate segments too, and the commit layer rejects them', () => {
+    expect(isInsideRepo('knowledge-base/foo\\..\\..\\outside.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base\\KnowledgeBase\\x.md', KB)).toBe(false);
+    expect(isInsideRepo('knowledge-base/KnowledgeBase/a\\b.md', KB)).toBe(false);
+  });
+
   it('tolerates a trailing slash on a directory path', () => {
     expect(isInsideRepo('knowledge-base/', KB)).toBe(true);
     expect(isInsideRepo('knowledge-base/KnowledgeBase/Projects/', KB)).toBe(true);
@@ -75,5 +81,23 @@ describe('assertInsideRepo', () => {
   it('suggests the path with the traversal collapsed, back under the prefix', () => {
     expect(() => assertInsideRepo('knowledge-base/../stray.md', KB)).toThrow('"knowledge-base/stray.md"');
     expect(() => assertInsideRepo('knowledge-base/../../escape.md', KB)).toThrow('"knowledge-base/escape.md"');
+  });
+
+  it('suggests a forward-slash path for a backslash one', () => {
+    expect(() => assertInsideRepo('knowledge-base/foo\\..\\..\\outside.md', KB)).toThrow('"knowledge-base/outside.md"');
+    expect(() => assertInsideRepo('KnowledgeBase\\Reviews\\PR-12.html', KB)).toThrow('"knowledge-base/KnowledgeBase/Reviews/PR-12.html"');
+  });
+
+  it('never suggests a path that still climbs: a bare `..` corrects to the repository folder', () => {
+    for (const p of ['..', '../', '../..', '../../', 'knowledge-base/..']) {
+      let message = '';
+      try {
+        assertInsideRepo(p, KB);
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message, p).toContain('Use "knowledge-base/" instead');
+      expect(message, p).not.toMatch(/Use "[^"]*\.\.[^"]*" instead/);
+    }
   });
 });
