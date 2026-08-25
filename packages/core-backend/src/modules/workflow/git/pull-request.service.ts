@@ -13,6 +13,7 @@ import type { Database } from '../../database/connection.js';
 import { changeRequests } from '../../database/schema.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import { WorkflowValidationError } from '../../../shared/domain-errors.js';
 import { hashEmail } from '../../../shared/hash-email.js';
 
@@ -276,7 +277,7 @@ export class PullRequestService implements IPullRequestService {
 
   async getPrDetail(
     prNumber: number,
-    opts: { fresh?: boolean; workspaceId?: string; viewerEmail?: string } = {},
+    opts: { fresh?: boolean; workspaceId?: string; viewerEmail?: string; patches?: boolean } = {},
   ): Promise<PullRequestDetail | null> {
     if (!Number.isInteger(prNumber) || prNumber <= 0) {
       throw new WorkflowValidationError('PR number must be a positive integer');
@@ -306,15 +307,16 @@ export class PullRequestService implements IPullRequestService {
       // The file list is pinned to the SHAs just resolved (`at`), so it and
       // the `headSha` approvals pin against describe the same commits even if
       // another fetch lands on this workspace in between, and the second
-      // fetch of the same two refs is gone. No patches: nothing reads
-      // `PullRequestFile.patch` (the dialog diffs file contents client-side),
-      // and generating them cost one git subprocess per changed file on every
-      // detail read — every poll, every approval click, every merge.
+      // fetch of the same two refs is gone. `patches: false` is for the
+      // internal detail an approve / withdraw / revert fetches to pin its
+      // work: those never read `files[].patch`, and generating it cost one git
+      // subprocess per changed file per click. The detail served to clients
+      // keeps its patches, so the published payload is unchanged.
       files = await this.gitService.changedFilesForPr(
         workspaceId,
         row.targetBranch,
         row.sourceBranch,
-        { at: { baseSha, headSha }, patchCap: 0 },
+        { at: { baseSha, headSha }, ...(opts.patches === false ? { patchCap: 0 } : {}) },
       );
     }
 
@@ -351,6 +353,10 @@ export class PullRequestService implements IPullRequestService {
               opts.viewerEmail,
             )
             .catch((err) => {
+              // An unreadable access tree fails the whole read (503): a detail
+              // with empty approvals would tell the merge gate "nothing to
+              // approve", and a reviewer nothing at all.
+              if (err instanceof AccessUnreadableError) throw err;
               console.warn(`[cr] getApprovalStates failed for #${prNumber}:`, err);
               return [] as FileApprovalState[];
             }),
@@ -411,7 +417,11 @@ export class PullRequestService implements IPullRequestService {
       viewerCanCancel,
     };
 
-    this.detailCache.set(cacheKey, { at: now, headSha: detail.headSha, value: detail });
+    // A patch-less detail is an internal read; it must not be served to the
+    // next client poll as if it were the full one.
+    if (opts.patches !== false) {
+      this.detailCache.set(cacheKey, { at: now, headSha: detail.headSha, value: detail });
+    }
     return detail;
   }
 

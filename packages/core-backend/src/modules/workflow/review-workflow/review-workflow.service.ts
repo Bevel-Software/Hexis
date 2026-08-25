@@ -12,6 +12,7 @@ import type {
 } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import { changeRequests, prComments, prFileApprovals, prMergeLog } from '../../database/schema.js';
+import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { isAccessMdPath } from '../../access-model/access-grammar.js';
 import type { GitService } from '../git/git.service.js';
@@ -374,6 +375,9 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
         );
         if (resolved) eligibilityByPath = resolved;
       } catch (err) {
+        // An unreadable tree is not "no eligible writers": that answer would
+        // drop every file out of the merge gate. Fail closed instead.
+        if (err instanceof AccessUnreadableError) throw err;
         console.warn(
           `[review-workflow] eligibleWritersForPathsAtRef failed for PR #${prNumber} (base=${baseBranch}):`,
           err,
@@ -390,6 +394,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           );
           if (batch) viewerCanApproveByPath = batch;
         } catch (err) {
+          if (err instanceof AccessUnreadableError) throw err;
           console.warn(
             `[review-workflow] canWriteBatchAtRef failed for PR #${prNumber} viewer=${viewerEmail}:`,
             err,

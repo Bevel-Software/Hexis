@@ -336,7 +336,8 @@ export interface IWorkflowService {
   getChangeRequest(number: number): Promise<ChangeRequest | null>;
   getChangeRequestDetail(
     number: number,
-    opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string },
+    /** `patches: false`: an internal, uncached read without per-file patches; see IPullRequestService.getPrDetail. */
+    opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string; patches?: boolean },
   ): Promise<ChangeRequestDetail | null>;
 
   /**

@@ -45,6 +45,25 @@ export class AccessDeniedError extends WorkflowDomainError {
  * or malformed at runtime — distinct from AccessDeniedError because the cause
  * is a config bug, not a permission decision.
  */
+/**
+ * Thrown when the access tree at a git ref could not be READ (a git
+ * subprocess failed on the way), as opposed to being absent or malformed.
+ * Nothing was decided: a verdict from a partially read tree could grant what
+ * a lost `access.md` would have denied, so the operation fails closed with a
+ * 503 and the caller retries. Distinct from AccessConfigError (the config is
+ * there and wrong) and AccessDeniedError (a real permission decision).
+ */
+export class AccessUnreadableError extends WorkflowDomainError {
+  constructor(ref: string, relativePath: string) {
+    super(
+      `Access rules at ${ref} could not be read (git failed on ${relativePath}); nothing was decided. Try again.`,
+      503,
+      { ref, path: relativePath },
+    );
+    this.name = 'AccessUnreadableError';
+  }
+}
+
 export class AccessConfigError extends WorkflowDomainError {
   readonly errors: string[];
 

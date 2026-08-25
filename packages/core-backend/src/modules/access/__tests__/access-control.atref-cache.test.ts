@@ -7,6 +7,7 @@ import os from 'node:os';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../access-control.service.js';
+import { AccessUnreadableError } from '../../access-model/access-errors.js';
 
 /**
  * Every git subprocess the service (and this file's own fixture helpers)
@@ -214,7 +215,7 @@ describe('AccessControlService — at-ref model cache', () => {
     expect(lsTreeBuilds()).toBe(1);
   });
 
-  it('never caches a build that saw a git read fail, so one hiccup cannot pin a wrong verdict', async () => {
+  it('refuses to decide from a build that lost a git read, and never caches it', async () => {
     // A nearer access.md that DENIES the admin: reading it is what stands
     // between razvan and a write he must not have.
     await pushFromOther('deny Admin in Team', () =>
@@ -222,18 +223,20 @@ describe('AccessControlService — at-ref model cache', () => {
     );
 
     // Lose exactly that read, once, to a simulated transient failure. The
-    // build degrades the way it always did (the file counts as absent for
-    // this call, so the verdict is the fail-open one)...
+    // gate must not answer from the partial tree (which would grant what the
+    // lost file denies): it fails closed with an AccessUnreadableError...
     injected.failNext = (argv) => argv.includes('show') && argv.some((a) => a.endsWith(':Team/access.md'));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(true);
+    await expect(svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).rejects.toBeInstanceOf(
+      AccessUnreadableError,
+    );
     expect(injected.failNext).toBeNull();
     expect(lsTreeBuilds()).toBe(1);
     // ...and says so in the logs, naming the read it lost.
-    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/Team\/access\.md failed; .*will not be cached/));
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/Team\/access\.md failed; refusing to decide/));
 
-    // ...but it is NOT pinned: the next call rebuilds and answers correctly,
-    // and that healthy build is the one that gets cached.
+    // Nothing was pinned: the next call rebuilds, answers correctly, and
+    // that healthy build is the one that gets cached.
     expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(false);
     expect(lsTreeBuilds()).toBe(2);
     expect(await svc.canWriteAtRef(workspaceId, 'origin/main', admin, DOC)).toBe(false);

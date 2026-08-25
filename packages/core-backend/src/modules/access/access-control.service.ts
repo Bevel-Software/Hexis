@@ -13,7 +13,7 @@ import type {
   GrantSources,
   ResolvedPrincipal,
 } from './access-control.interface.js';
-import { AccessConfigError } from '../access-model/access-errors.js';
+import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
 import {
   GROUPS_YAML,
   SYNCED_GROUPS_YAML,
@@ -771,11 +771,11 @@ function ineligibleNamedEmailsResolved(
  */
 type AtRefModel = { model: AccessModel; resolvedRef: string };
 /**
- * One build's outcome: a model (flagged `degraded` when any git read failed
- * on the way, so it must not be cached), no roles.yaml at the commit, or one
- * that doesn't parse.
+ * One build's outcome: a model, no roles.yaml at the commit, or one that
+ * doesn't parse. A git read failure is none of these: it throws
+ * AccessUnreadableError out of the build instead.
  */
-type AtRefBuild = (AtRefModel & { degraded: boolean }) | 'no-roles' | 'malformed';
+type AtRefBuild = AtRefModel | 'no-roles' | 'malformed';
 
 export class AccessControlService implements IAccessControl {
   /**
@@ -818,13 +818,13 @@ export class AccessControlService implements IAccessControl {
    * builds per click was the lag behind the approve checkmark.
    *
    * Bounded FIFO, so a long-lived server holds the last few tips rather than
-   * one model per commit it ever gated against. Two kinds of build are
-   * deliberately NOT cached: one that found no usable roles.yaml at the
-   * commit, and one that saw any git read fail on the way (`degraded`). Both
-   * are what a transient failure looks like, and pinning either to a commit
-   * would turn one hiccup into a wrong verdict, denying or granting, until
-   * the base branch moved. Concurrent misses on the same commit share one
-   * build via `atRefInFlight`.
+   * one model per commit it ever gated against. A build that found no usable
+   * roles.yaml is deliberately NOT cached, and a build that saw any git read
+   * fail never becomes a model at all: it throws AccessUnreadableError and the
+   * gate fails closed for that call. Both are what a transient failure looks
+   * like, and pinning either to a commit would turn one hiccup into a wrong
+   * verdict, denying or granting, until the base branch moved. Concurrent
+   * misses on the same commit share one build via `atRefInFlight`.
    */
   private readonly atRefCache = new Map<string, AtRefModel>();
   private readonly atRefInFlight = new Map<string, Promise<AtRefBuild>>();
@@ -1670,7 +1670,7 @@ export class AccessControlService implements IAccessControl {
       if (!pending) {
         pending = this.buildModelAtCommit(repoDir, commit, candidate)
           .then((built) => {
-            if (typeof built !== 'string' && !built.degraded) this.rememberAtRef(key, built);
+            if (typeof built !== 'string') this.rememberAtRef(key, built);
             return built;
           })
           .finally(() => {
@@ -1724,21 +1724,18 @@ export class AccessControlService implements IAccessControl {
     label: string,
   ): Promise<AtRefBuild> {
     // Every read below tells "absent" apart from "git failed". A failure
-    // degrades the build exactly as it always did (the file counts as absent
-    // for THIS call) but marks the result `degraded`, and a degraded model is
-    // never cached: pinning it would turn one transient failure into a wrong
-    // verdict, denying or granting, for the commit's whole lifetime.
-    let degraded = false;
+    // refuses the whole build: a model missing one access.md could grant what
+    // that file denies, so no verdict is answered from it, nothing is cached,
+    // and the caller fails closed (AccessUnreadableError, a 503) until a
+    // retry reads the tree in full.
+    const tag = `${label}@${commit.slice(0, 7)}`;
     const read = async (relativePath: string): Promise<string | null> => {
       const outcome = await this.showAtRefOutcome(repoDir, commit, relativePath);
       if (outcome.kind === 'error') {
-        degraded = true;
         // The operational signal: one line per failed read, naming the commit
-        // and the path, so a run of these in the logs is visible before it
-        // becomes a pattern of wrong verdicts.
-        console.warn(
-          `[access@${label}@${commit.slice(0, 7)}] git read of ${relativePath} failed; this verdict treats it as absent and will not be cached`,
-        );
+        // and the path, so a run of these is visible in the logs.
+        console.warn(`[access@${tag}] git read of ${relativePath} failed; refusing to decide from a partial tree`);
+        throw new AccessUnreadableError(label, relativePath);
       }
       return outcome.kind === 'text' ? outcome.text : null;
     };
@@ -1747,7 +1744,6 @@ export class AccessControlService implements IAccessControl {
     if (rolesYaml === null) return 'no-roles';
     const rolesParsed = parseRolesYaml(rolesYaml);
     if (!rolesParsed.ok) return 'malformed';
-    const tag = `${label}@${commit.slice(0, 7)}`;
 
     // Same group loading as the working-tree model, read AT THE COMMIT — the
     // whole point of file-materialized groups is that the merge/push gates
@@ -1772,12 +1768,10 @@ export class AccessControlService implements IAccessControl {
     const accessFiles = new Map<string, AccessFile>();
     const listed = await this.listAccessFilesAtRef(repoDir, commit);
     if (listed === 'error') {
-      degraded = true;
-      console.warn(
-        `[access@${tag}] listing access.md files failed; this verdict sees none of them and will not be cached`,
-      );
+      console.warn(`[access@${tag}] listing access.md files failed; refusing to decide from a partial tree`);
+      throw new AccessUnreadableError(label, 'access.md (ls-tree)');
     }
-    for (const p of listed === 'error' ? [] : listed) {
+    for (const p of listed) {
       const text = await read(p);
       if (text === null) continue;
       const parsed = parseAccessFile(text, p);
@@ -1810,7 +1804,6 @@ export class AccessControlService implements IAccessControl {
         deploymentOwners: this.deploymentOwners,
       },
       resolvedRef: commit,
-      degraded,
     };
   }
 }
