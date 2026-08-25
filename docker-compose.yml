@@ -38,6 +38,18 @@ services:
     # `deployment/docker-compose.build.yml` is for — a standalone file an
     # orchestrator can be pointed at directly.
     image: ghcr.io/bevel-software/hexis:${HEXIS_VERSION:-latest}
+    # Run node under a real init, so PID 1 reaps orphans.
+    #
+    # The app shells out constantly — every git operation, and the agent's shell
+    # tool, which spawns `sh -c "…"` and SIGKILLs the shell on timeout without
+    # touching the grandchild underneath it. Those orphans are reparented to
+    # PID 1, and node will not reap children it did not spawn: each one becomes
+    # a zombie that holds a task slot forever. A deployment whose git calls were
+    # failing in a loop reached ~4,500 tasks against the container's pid limit
+    # in two days — at which point nothing in the container could fork() any
+    # more, including a shell to diagnose it with. Memory looked fine
+    # throughout, because a zombie holds an exit status and nothing else.
+    init: true
     # NO host port is published here, deliberately. A reverse proxy (Coolify,
     # Traefik, nginx) reaches the container on this port over the compose
     # network, and publishing a FIXED host port alongside that breaks every

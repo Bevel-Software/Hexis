@@ -36,6 +36,10 @@ services:
     logging: *bounded-logging
 
   app:
+    # Run node under a real init so PID 1 reaps orphaned git/shell
+    # grandchildren; without it they accumulate as zombies until the
+    # container's pid limit is hit. See the root docker-compose.yml.
+    init: true
     build:
       # Relative to the PROJECT DIRECTORY, not to this file: orchestrators
       # (Coolify) run compose with --project-directory set to the checkout

@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { cloneCredentialArgs, credentialHelperValue } from '../../kb-fs/clone-config.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -36,18 +37,30 @@ export function redactSecret(text: string): string {
  */
 function credArgs(gitUsername: string): string[] {
   const args = ['-c', 'core.longpaths=true'];
-  if (process.env.GITHUB_TOKEN) {
-    args.push(
-      '-c',
-      `credential.helper=!f() { echo "username=${gitUsername}"; echo "password=$GITHUB_TOKEN"; }; f`,
-    );
-  }
+  const helper = credentialHelperValue(gitUsername);
+  if (helper) args.push('-c', `credential.helper=${helper}`);
   return args;
+}
+
+/**
+ * `credArgs` authenticates the invocation and nothing more — the `-c` pairs sit
+ * BEFORE the subcommand, so git applies them to this process and forgets them.
+ * That is right for every command here except `clone`, whose product is a
+ * repository other code pushes from later: the phase clones the default branch
+ * into `<workspacesRoot>/<id>/<kbDirName>`, exactly where `WorkspaceService`
+ * adopts it, and `GitService.push` then runs a bare `git push` expecting the
+ * clone to carry its own credentials. Persist them with `clone --config` (which
+ * only means "write into the new repo" after the subcommand) so it does.
+ */
+function withPersistedCloneConfig(gitUsername: string, args: string[]): string[] {
+  if (args[0] !== 'clone') return args;
+  return [args[0], ...cloneCredentialArgs(gitUsername), ...args.slice(1)];
 }
 
 export async function git(cwd: string, gitUsername: string, args: string[]): Promise<string> {
   try {
-    const { stdout } = await execFileAsync('git', [...credArgs(gitUsername), ...args], {
+    const argv = [...credArgs(gitUsername), ...withPersistedCloneConfig(gitUsername, args)];
+    const { stdout } = await execFileAsync('git', argv, {
       cwd,
       // A stalled remote must FAIL the phase, not hang the boot forever —
       // fail-closed (and KB_SAFE_BOOT's demotion) can only engage on an error

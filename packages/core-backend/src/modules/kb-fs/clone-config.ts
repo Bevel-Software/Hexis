@@ -1,6 +1,13 @@
 /**
- * The git configuration a per-branch workspace clone must have for its branch
- * to track exactly ONE upstream ref.
+ * The git configuration a per-branch workspace clone must carry: the tracking
+ * config that pins its branch to exactly ONE upstream ref, and the credential
+ * helper its remote operations authenticate with.
+ *
+ * Both are stamped at clone time AND re-stamped when an existing clone is
+ * adopted from disk, so a clone created by an older build — or by a path that
+ * only authenticated its own invocation — is repaired rather than left broken.
+ *
+ * On the tracking half:
  *
  * Why this exists: a clone's config is append-only from git's point of view,
  * and several things write to it:
@@ -68,4 +75,64 @@ export function cloneTrackingConfigArgs(branch: string): string[][] {
     ['config', '--replace-all', `branch.${branch}.remote`, 'origin'],
     ['config', '--replace-all', `branch.${branch}.merge`, `refs/heads/${branch}`],
   ];
+}
+
+/**
+ * The inline credential helper a workspace clone authenticates its remote
+ * operations with, or null when the deployment has no git token configured.
+ *
+ * The snippet reads `$GITHUB_TOKEN` at CALL time, so the secret itself never
+ * enters argv, the clone's `.git/config`, or any error message quoting either.
+ * `GITHUB_TOKEN` is the normalised name — `CoreConfig` collapses `GIT_TOKEN` /
+ * `GH_TOKEN` onto it at boot, and `DeploymentSettingsService.syncGitTokenEnv`
+ * publishes a token supplied through the setup screen to the same place — so
+ * this one name covers every way a token can arrive.
+ *
+ * The username is provider-specific (GitHub `x-access-token`, GitLab `oauth2`,
+ * Bitbucket `x-token-auth`); the token is always the Basic-auth password,
+ * which every major host accepts.
+ */
+export function credentialHelperValue(gitUsername: string): string | null {
+  if (!process.env.GITHUB_TOKEN) return null;
+  // Interpolated into a shell snippet that git will execute. `CoreConfig` and
+  // `DeploymentSettingsService` both reject a username outside this charset
+  // before it can get this far, so reaching the throw means an unvalidated
+  // fourth path appeared — fail closed rather than emit an injectable helper.
+  if (!/^[A-Za-z0-9._-]+$/.test(gitUsername)) {
+    throw new Error(`git username must match [A-Za-z0-9._-]+; got "${gitUsername}"`);
+  }
+  return `!f() { echo "username=${gitUsername}"; echo "password=$GITHUB_TOKEN"; }; f`;
+}
+
+/**
+ * `git clone` arguments that PERSIST the credential helper into the repository
+ * being created. Position is load-bearing: these belong AFTER the `clone`
+ * subcommand, where `--config` means "write this into the new repo's config".
+ * The same pair placed BEFORE it is git's per-invocation `-c`, which
+ * authenticates that one clone and leaves the resulting repo with no helper at
+ * all — so every later `git push` from that clone prompts for a username,
+ * finds no tty, and dies. That was a real outage: a self-hosted deployment
+ * cloned fine, committed fine, and silently pushed nothing for two days.
+ *
+ * Empty when no token is configured, matching the un-authenticated clone the
+ * rest of the layer already supports.
+ */
+export function cloneCredentialArgs(gitUsername: string): string[] {
+  const helper = credentialHelperValue(gitUsername);
+  return helper ? ['--config', `credential.helper=${helper}`] : [];
+}
+
+/**
+ * `git` argument lists that stamp the credential helper onto a clone that
+ * ALREADY exists — the repair path for clones on disk that were created
+ * without one (see `cloneCredentialArgs`), applied wherever
+ * `cloneTrackingConfigArgs` is. `--replace-all` collapses any accumulated
+ * values, so re-stamping is idempotent and a stale helper cannot survive.
+ *
+ * Returns the arguments rather than running them, for the same reason
+ * `cloneTrackingConfigArgs` does.
+ */
+export function cloneCredentialConfigArgs(gitUsername: string): string[][] {
+  const helper = credentialHelperValue(gitUsername);
+  return helper ? [['config', '--replace-all', 'credential.helper', helper]] : [];
 }
