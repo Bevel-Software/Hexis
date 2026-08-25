@@ -7,12 +7,12 @@ import type {
   PullRequestFile,
   PullRequestState,
   PullRequestSummary,
+  IGitService,
 } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import { changeRequests } from '../../database/schema.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { GitService } from './git.service.js';
 import { WorkflowValidationError } from '../../../shared/domain-errors.js';
 import { hashEmail } from '../../../shared/hash-email.js';
 
@@ -100,7 +100,7 @@ export class PullRequestService implements IPullRequestService {
     private readonly db: Database,
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
-    private readonly gitService: GitService,
+    private readonly gitService: IGitService,
   ) {}
 
   setDetailEnricher(enricher: PrDetailEnricher): void {
@@ -303,17 +303,18 @@ export class PullRequestService implements IPullRequestService {
       );
       baseSha = shas.baseSha;
       headSha = shas.headSha;
-      // `resolvePrShas` just fetched both refs, so the file list reads that
-      // same origin/* state instead of paying a second network round-trip
-      // for it. No patches: nothing reads `PullRequestFile.patch` (the
-      // dialog diffs file contents client-side), and generating them cost one
-      // git subprocess per changed file on every detail read — every poll,
-      // every approval click, every merge.
+      // The file list is pinned to the SHAs just resolved (`at`), so it and
+      // the `headSha` approvals pin against describe the same commits even if
+      // another fetch lands on this workspace in between, and the second
+      // fetch of the same two refs is gone. No patches: nothing reads
+      // `PullRequestFile.patch` (the dialog diffs file contents client-side),
+      // and generating them cost one git subprocess per changed file on every
+      // detail read — every poll, every approval click, every merge.
       files = await this.gitService.changedFilesForPr(
         workspaceId,
         row.targetBranch,
         row.sourceBranch,
-        { skipFetch: true, patchCap: 0 },
+        { at: { baseSha, headSha }, patchCap: 0 },
       );
     }
 

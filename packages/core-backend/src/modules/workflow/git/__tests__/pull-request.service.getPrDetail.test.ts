@@ -35,13 +35,15 @@ function makeDb(): Database {
 /**
  * A detail read is the hot path behind every change-request poll, every
  * approval click, and every merge. It resolves the SHAs first (that fetches
- * both refs), so the file list must reuse that fetch rather than fetch the
- * same two refs again, and it must not spend one git subprocess per changed
- * file on patches nothing reads.
+ * both refs), so the file list must be pinned to those same commits rather
+ * than fetch and resolve again, and it must not spend one git subprocess per
+ * changed file on patches nothing reads.
  */
 describe('PullRequestService.getPrDetail — git work per read', () => {
-  it('lists files without a second fetch and without patches', async () => {
-    const resolvePrShas = vi.fn(async () => ({ baseSha: 'b'.repeat(40), headSha: 'h'.repeat(40) }));
+  it('lists files pinned to the resolved SHAs, without patches', async () => {
+    const BASE = 'b'.repeat(40);
+    const HEAD = 'a'.repeat(40);
+    const resolvePrShas = vi.fn(async () => ({ baseSha: BASE, headSha: HEAD }));
     const changedFilesForPr = vi.fn(async () => []);
     const git = { resolvePrShas, changedFilesForPr } as unknown as GitService;
     const workspace = {
@@ -53,14 +55,15 @@ describe('PullRequestService.getPrDetail — git work per read', () => {
     const svc = new PullRequestService(makeDb(), workspace, access, git);
     const detail = await svc.getPrDetail(7, { fresh: true });
 
-    expect(detail?.headSha).toBe('h'.repeat(40));
+    expect(detail?.headSha).toBe(HEAD);
+    expect(detail?.baseSha).toBe(BASE);
     expect(resolvePrShas).toHaveBeenCalledTimes(1);
     expect(changedFilesForPr).toHaveBeenCalledTimes(1);
     expect(changedFilesForPr).toHaveBeenCalledWith(
       'ws-main',
       'current-company-state',
       'alice/feature',
-      { skipFetch: true, patchCap: 0 },
+      { at: { baseSha: BASE, headSha: HEAD }, patchCap: 0 },
     );
     // The SHAs (and their fetch) come first; the file list rides on it.
     expect(resolvePrShas.mock.invocationCallOrder[0]).toBeLessThan(

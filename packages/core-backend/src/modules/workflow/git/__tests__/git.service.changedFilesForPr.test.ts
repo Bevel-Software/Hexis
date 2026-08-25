@@ -132,12 +132,12 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
 
   /**
    * A change-request detail resolves the SHAs (which fetches both refs) and
-   * then lists the files: the second call must be able to reuse that fetch
-   * instead of paying a second network round-trip for the same two refs.
-   * `skipFetch` is that reuse, so it must read whatever `origin/*` the clone
-   * already holds, while the default keeps refreshing first.
+   * then lists the files. `at` pins that listing to the commits just
+   * resolved: no second fetch, and the file list describes exactly the head
+   * the approvals pin against even when a newer push has landed on origin in
+   * between. The default keeps refreshing first.
    */
-  it('skipFetch reads the clone as-is; the default refreshes origin/* first', async () => {
+  it('`at` pins the diff to the resolved commits; the default refreshes origin/* first', async () => {
     const { upstream, repo } = await seedWorkspace(root, workspaceId);
     // The branch is authored in ANOTHER clone, so this workspace only ever
     // knows it as origin/alice/feature — the production shape, where the
@@ -149,27 +149,28 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     await runGit(other, ['add', '-A']);
     await runGit(other, ['commit', '-m', 'feature work']);
     await runGit(other, ['push', '-u', 'origin', 'alice/feature']);
-    await runGit(repo, ['fetch', 'origin']);
-
-    // A second push this clone has NOT fetched.
-    await fs.writeFile(path.join(other, 'second.md'), 'more\n');
-    await runGit(other, ['add', '-A']);
-    await runGit(other, ['commit', '-m', 'more work']);
-    await runGit(other, ['push', 'origin', 'alice/feature']);
 
     const git = new GitService(
       stubWorkspaceService(workspaceId, repo),
       new WorkflowHooks(),
       'knowledge-base',
     );
+    // What the detail does first: resolve (and fetch) the two SHAs.
+    const pinned = await git.resolvePrShas(workspaceId, 'current-company-state', 'alice/feature');
 
-    const asIs = await git.changedFilesForPr(
+    // A second push lands on origin after the resolution.
+    await fs.writeFile(path.join(other, 'second.md'), 'more\n');
+    await runGit(other, ['add', '-A']);
+    await runGit(other, ['commit', '-m', 'more work']);
+    await runGit(other, ['push', 'origin', 'alice/feature']);
+
+    const atPinned = await git.changedFilesForPr(
       workspaceId,
       'current-company-state',
       'alice/feature',
-      { skipFetch: true },
+      { at: pinned },
     );
-    expect(asIs.map((f) => f.path)).toEqual(['added.md']);
+    expect(atPinned.map((f) => f.path)).toEqual(['added.md']);
 
     const refreshed = await git.changedFilesForPr(
       workspaceId,
@@ -177,6 +178,12 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
       'alice/feature',
     );
     expect(refreshed.map((f) => f.path).sort()).toEqual(['added.md', 'second.md']);
+
+    await expect(
+      git.changedFilesForPr(workspaceId, 'current-company-state', 'alice/feature', {
+        at: { baseSha: pinned.baseSha, headSha: 'origin/alice/feature' },
+      }),
+    ).rejects.toThrow(/invalid commit sha/);
   });
 
   /**
