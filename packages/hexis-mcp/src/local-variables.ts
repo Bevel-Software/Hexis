@@ -100,13 +100,15 @@ export function resetLocalVariableResolver(id?: string): void {
  * reason: a first-underscore split mis-parses every snake_case manual name.
  *
  * AMBIGUITY RESOLVES TO NOTHING. Namespacing maps every non-word character to
- * `_` and then doubles it, so two different manual names can normalize to the
- * same prefix (`a-b` and `a_b` both give `a__b_`). Picking either would hand
- * one manual's vault value to the other — the exact isolation this loader
- * exists to provide — and picking "whichever the map happened to hold first"
- * would make which one silent and arbitrary. So a tie returns null, the key
- * falls through to `process.env`, and the collision is reported once rather
- * than resolved wrongly.
+ * `_` and then doubles it, so two different names can share one prefix (`a-b`
+ * and `a_b` both give `a__b_`) — and with it, one set of vault keys.
+ *
+ * The deployment refuses such a pair at scan time, which is where it belongs.
+ * This check is here because this process cannot verify that it did: the manual
+ * list arrives over HTTP from a deployment whose version it does not control,
+ * and one that predates that fix would serve a colliding pair happily. Getting
+ * it wrong means handing one manual's secret to another, silently, so a tie
+ * returns null and falls through to `process.env` instead.
  */
 function ownerOf(
   effectiveKey: string,

@@ -559,10 +559,19 @@ export class ToolManualService implements IToolManualService {
     // silently rebind a configured secret to a different file. The winner is
     // deterministic (files scanned in sorted path order); the shared `dedupeById`
     // is the one dedup rule across tools and skills.
-    return dedupeById(parsed, (m) => m.name, (m, id) =>
+    // Deduped by NAMESPACE, not by name. The comment below has always said the
+    // id is the secret-variable namespace and must be unique — but the check
+    // compared raw names, and the two are not the same function. Namespacing
+    // maps every non-word character to `_` and then doubles it, so `a-b` and
+    // `a_b` are different names with the SAME namespace `a__b_`. A `.tool` id
+    // cannot contain a hyphen, but an mcp.json server name can, so the pair is
+    // reachable — and the consequence is that two manuals share one set of
+    // vault keys, with either able to resolve the other's secrets.
+    return dedupeById(parsed, (m) => utcpNamespacePrefix(m.name), (m, ns) =>
       console.warn(
-        `[tool-manuals] skipping "${m.path}": manual id "${id}" is already used by another ` +
-          '`.tool` — give it a unique `id` (the id is the secret-variable namespace and must be unique).',
+        `[tool-manuals] skipping "${m.path}": manual "${m.name}" resolves to the secret-variable ` +
+          `namespace "${ns}", which another manual already uses. Names differing only in \`-\` vs \`_\` ` +
+          'share one namespace — rename one of them.',
       ),
     );
   }

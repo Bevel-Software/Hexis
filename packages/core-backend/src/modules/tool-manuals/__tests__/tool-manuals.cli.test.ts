@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from 'vitest';
+import { describe, test, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +7,7 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { ToolManualService, normalizeToolManual } from '../tool-manuals.service.js';
 import { canExecuteCliTemplates, containsCliCallTemplate } from '../utcp-cli-parse-only.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { utcpNamespacePrefix } from '../../../shared/utcp-namespace.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 
@@ -136,5 +137,54 @@ describe('a shell `.tool` in a workspace', () => {
     const tools = (manual as { tools: { name: string; tool_call_template: { call_template_type: string } }[] }).tools;
     expect(tools.map((t) => t.name)).toEqual(['status']);
     expect(tools[0].tool_call_template.call_template_type).toBe('cli');
+  });
+});
+
+describe('manual namespaces are unique, not merely manual names', () => {
+  let root: string;
+
+  const workspaceService = {
+    getOrCreateForBranch: async () => ({ id: wsId }),
+    getWorkspacePath: async (id: string) => join(root, id),
+  } as unknown as WorkspaceService;
+
+  const allowAll = {
+    canRead: async () => true,
+    canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
+  } as unknown as IAccessControl;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'ns-'));
+    await mkdir(join(root, wsId, KB_DIR, 'Plugins'), { recursive: true });
+  });
+  afterEach(() => rm(root, { recursive: true, force: true }));
+
+  const write = (file: string, id: string) =>
+    writeFile(
+      join(root, wsId, KB_DIR, 'Plugins', file),
+      JSON.stringify({ id, type: 'inline', tools: [] }),
+    );
+
+  it('keeps manuals whose namespaces differ', async () => {
+    await write('a.tool', 'a_b');
+    await write('b.tool', 'a__b');
+    const names = (await new ToolManualService(workspaceService, allowAll, KB_DIR).listAllSummaries()).map((m) => m.name);
+    expect(names.sort()).toEqual(['a__b', 'a_b']);
+  });
+
+  it('refuses a second manual that resolves to the same namespace', async () => {
+    // Namespacing maps every non-word character to `_` then doubles it, so
+    // `a-b` and `a_b` are different names sharing the namespace `a__b_` — and
+    // with it, one set of vault keys. A `.tool` id cannot carry a hyphen, but
+    // an mcp.json server name can, so the pair is reachable. Refused rather
+    // than suffixed: suffixing would rebind a configured secret to a new file.
+    await write('a.tool', 'a_b');
+    const svc = new ToolManualService(workspaceService, allowAll, KB_DIR);
+    const kept = await svc.listAllSummaries();
+    expect(kept.map((m) => m.name)).toEqual(['a_b']);
+    // The namespaces of everything kept are distinct, which is the invariant
+    // secrets actually depend on.
+    const namespaces = kept.map((m) => utcpNamespacePrefix(m.name));
+    expect(new Set(namespaces).size).toBe(namespaces.length);
   });
 });
