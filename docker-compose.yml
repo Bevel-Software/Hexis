@@ -38,6 +38,11 @@ services:
     # `deployment/docker-compose.build.yml` is for — a standalone file an
     # orchestrator can be pointed at directly.
     image: ghcr.io/bevel-software/hexis:${HEXIS_VERSION:-latest}
+    # Run node under a real init, so PID 1 reaps orphans.
+    init: true
+    # Cap the container's task count so a pid/thread leak degrades the app
+    # instead of the host.
+    pids_limit: 4096
     # NO host port is published here, deliberately. A reverse proxy (Coolify,
     # Traefik, nginx) reaches the container on this port over the compose
     # network, and publishing a FIXED host port alongside that breaks every
