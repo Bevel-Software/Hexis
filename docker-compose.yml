@@ -44,12 +44,20 @@ services:
     # tool, which spawns `sh -c "…"` and SIGKILLs the shell on timeout without
     # touching the grandchild underneath it. Those orphans are reparented to
     # PID 1, and node will not reap children it did not spawn: each one becomes
-    # a zombie that holds a task slot forever. A deployment whose git calls were
-    # failing in a loop reached ~4,500 tasks against the container's pid limit
-    # in two days — at which point nothing in the container could fork() any
-    # more, including a shell to diagnose it with. Memory looked fine
-    # throughout, because a zombie holds an exit status and nothing else.
+    # a zombie that holds a task slot forever. Memory looks fine while they
+    # accumulate — a zombie holds an exit status and nothing else — so the
+    # first symptom is fork() failing, not a graph trending up.
     init: true
+    # Cap the container's task count so a pid/thread leak degrades the app
+    # instead of the host. One deployment's app process climbed to ~4,500
+    # tasks over two days and, with no cap here, exhausted a host-wide limit —
+    # at which point nothing on the BOX could fork(), including the shell
+    # needed to diagnose it. With the cap, the same bug stops at the app's own
+    # wall: the host stays operable and `docker exec` still works. Normal
+    # operation sits around 24 tasks plus a short-lived git subprocess per
+    # save — 2048 is two orders of magnitude of headroom, not a number the
+    # app can reach healthy.
+    pids_limit: 2048
     # NO host port is published here, deliberately. A reverse proxy (Coolify,
     # Traefik, nginx) reaches the container on this port over the compose
     # network, and publishing a FIXED host port alongside that breaks every
