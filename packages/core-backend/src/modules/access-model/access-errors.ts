@@ -41,11 +41,6 @@ export class AccessDeniedError extends WorkflowDomainError {
 }
 
 /**
- * Thrown when the access-control config (roles.yaml or access.md) is missing
- * or malformed at runtime — distinct from AccessDeniedError because the cause
- * is a config bug, not a permission decision.
- */
-/**
  * Thrown when the access tree at a git ref could not be READ (a git
  * subprocess failed on the way), as opposed to being absent or malformed.
  * Nothing was decided: a verdict from a partially read tree could grant what
@@ -64,6 +59,11 @@ export class AccessUnreadableError extends WorkflowDomainError {
   }
 }
 
+/**
+ * Thrown when the access-control config (roles.yaml or access.md) is missing
+ * or malformed at runtime — distinct from AccessDeniedError because the cause
+ * is a config bug, not a permission decision.
+ */
 export class AccessConfigError extends WorkflowDomainError {
   readonly errors: string[];
 
