@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { parseYamlSubset, hasAccessFrontmatterExtension, parseOwnAccessEntries } from '../access-grammar.js';
+import {
+  parseYamlSubset,
+  hasAccessFrontmatterExtension,
+  registerAccessFrontmatterExtensions,
+  accessFrontmatterExtensionList,
+  parseOwnAccessEntries,
+} from '../access-grammar.js';
 import { parseGroupsFile } from '../group-files.js';
 
 describe('parseYamlSubset — inline empty collections', () => {
@@ -30,20 +36,46 @@ describe('parseGroupsFile — empty group sources', () => {
   });
 });
 
-describe('ACCESS_FRONTMATTER_EXTENSIONS — config files carry their own access', () => {
-  it('covers nodes, tool manuals, and the AEL config files', () => {
-    for (const p of ['a/b.md', 'access.md', 'x.tool', 'Coding-Delivery.pipeline', 'delivery-coder.agent']) {
-      expect(hasAccessFrontmatterExtension(p)).toBe(true);
-    }
-    for (const p of ['notes.txt', 'page.html', 'x.pipeline.bak', 'agent.json']) {
-      expect(hasAccessFrontmatterExtension(p)).toBe(false);
-    }
+describe('the access-frontmatter extension set', () => {
+  it('covers nodes and tool manuals out of the box', () => {
+    // `.tool` is whole-document YAML with its verbs as ordinary keys inside;
+    // `access.md` is covered by `.md`.
+    expect(hasAccessFrontmatterExtension('Data/E/Knowledge/T.md')).toBe(true);
+    expect(hasAccessFrontmatterExtension('Plugins/E/tools/github.tool')).toBe(true);
+    expect(hasAccessFrontmatterExtension('Plugins/E/access.md')).toBe(true);
   });
 
-  it('reads verbs out of a whole-document YAML file, ignoring the definition around them', () => {
-    // A `.pipeline` is one `---` fenced YAML document: the access verbs are
-    // ordinary keys sitting beside `name:` and `do:`, exactly as a `.tool`
-    // carries them beside `id:` and `tools:`.
+  it('covers nothing else until an overlay registers it', () => {
+    // The grammar is core's; the file kinds are not necessarily. An overlay
+    // that ships its own whole-document configuration registers its extensions
+    // at boot — core knows about neither the files nor the feature.
+    expect(hasAccessFrontmatterExtension('Agents/delivery-coder.agent')).toBe(false);
+    expect(hasAccessFrontmatterExtension('Pipelines/Coding-Delivery.pipeline')).toBe(false);
+
+    registerAccessFrontmatterExtensions(['.pipeline', '.agent']);
+
+    expect(hasAccessFrontmatterExtension('Agents/delivery-coder.agent')).toBe(true);
+    expect(hasAccessFrontmatterExtension('Pipelines/Coding-Delivery.pipeline')).toBe(true);
+    // A near-miss must still miss: a backup is not a live grant.
+    expect(hasAccessFrontmatterExtension('Pipelines/X.pipeline.bak')).toBe(false);
+  });
+
+  it('is additive only, and idempotent', () => {
+    // Removing an extension would silently drop grants that are already
+    // enforced, so there is no way to remove one.
+    const before = accessFrontmatterExtensionList().length;
+    registerAccessFrontmatterExtensions(['.agent', '.agent', 'nodot']);
+    expect(accessFrontmatterExtensionList()).toHaveLength(before);
+    expect(accessFrontmatterExtensionList()).toContain('.md');
+    expect(accessFrontmatterExtensionList()).toContain('.tool');
+  });
+
+  it('reads verbs out of a registered file kind, ignoring its other keys', () => {
+    // The point of per-file access on these: they are configuration rather than
+    // graph nodes, but they are exactly the files whose edits grant capability.
+    // The verbs are ordinary keys sitting beside the rest of the definition,
+    // exactly as a `.tool` carries them beside `id:` and `tools:`.
+    registerAccessFrontmatterExtensions(['.pipeline']);
     const pipeline = [
       '---',
       'name: Coding Delivery',

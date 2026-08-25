@@ -6,7 +6,6 @@ import {
   validateBranchModel,
   PROTECTED_BRANCHES,
   PLUGINS_DIR,
-  AGENTS_DIR,
 } from '@bevel-software/platform-shared';
 import { CoreConfig } from '../core-config.js';
 import { getDb, type Database } from '../modules/database/connection.js';
@@ -40,7 +39,6 @@ import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
-import { AgentDefinitionService } from '../modules/agent-defs/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
 import { PluginIndexService, PluginProvisionService, JoinRequestsService } from '../modules/plugins/index.js';
 import {
@@ -125,7 +123,6 @@ export interface CoreServices {
   skillService: SkillService;
   pendingSkillsService: PendingSkillsService;
   toolManualService: ToolManualService;
-  agentDefinitionService: AgentDefinitionService;
   mcpServerEditService: McpServerEditService;
   pluginIndexService: PluginIndexService;
   pluginProvisionService: PluginProvisionService;
@@ -326,11 +323,6 @@ export async function createCoreServices(
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
   const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName);
-  // `.agent` files under `Agents/` — the identities an execution layer runs a
-  // pipeline step as. The platform reads only their declared `env:` block, so
-  // it can arbitrate which vault secrets each one is allowed to be handed; the
-  // execution layer reads the rest.
-  const agentDefinitionService = new AgentDefinitionService(workspaceService, accessControl, kbDirName);
   // Plugins: the folders under `Plugins/` that carry a
   // team's skills AND the tools they need. Enumerated for EVERY authenticated
   // caller — a plugin they cannot read still exists for them, as a locked one —
@@ -512,12 +504,7 @@ export async function createCoreServices(
       skillService.invalidate();
       pluginIndexService.invalidate();
     }
-    // `Agents/` is a sibling of `Plugins/`, not a child, so it needs its own
-    // check — an edited `.agent` changes which secrets that agent may be
-    // handed, and that must take effect on the next read rather than a TTL.
-    if (paths.some((p) => p.startsWith(`${kbDirName}/${AGENTS_DIR}/`))) {
-      agentDefinitionService.invalidate();
-    }
+
   });
 
   // Subscriber B — WRITE-time freshness for the same three caches. The
@@ -534,7 +521,6 @@ export async function createCoreServices(
     toolManualService.invalidate();
     skillService.invalidate();
     pluginIndexService.invalidate();
-    agentDefinitionService.invalidate();
   });
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the
@@ -827,7 +813,6 @@ export async function createCoreServices(
     skillService,
     pendingSkillsService,
     toolManualService,
-    agentDefinitionService,
     pluginIndexService,
     pluginProvisionService,
     joinRequestsService,

@@ -1,39 +1,30 @@
 import express, { type Request, type RequestHandler } from 'express';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
-import { agentVaultKey } from '../agent-defs/agent-defs.service.js';
-import type { IAgentDefinitionService } from '../agent-defs/agent-defs.contract.js';
 import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
 import type { ISecretsVaultService } from '../secrets-vault/secrets-vault.contract.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
 
 type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
 
 /**
- * The ONLY routes in the platform that return secret VALUES.
+ * The ONLY core route that returns secret VALUES.
  *
- * Everywhere else, a credential is resolved in-process at tool-call time and
+ * Everywhere else a credential is resolved in-process at tool-call time and
  * never crosses the wire — `resolve()` has one caller, the UTCP variable
- * loader. Two runtimes outside this process legitimately need values anyway:
+ * loader. One runtime outside this process legitimately needs values anyway:
+ * the LOCAL MCP server, which executes a `remote: false` `.tool` on the user's
+ * own machine and has to expand that manual's `${VAR}` refs there.
  *
- * - the LOCAL MCP server, which executes a `remote: false` `.tool` on the
- *   user's own machine and has to expand that manual's `${VAR}` refs there;
- * - the AGENTIC EXECUTION LAYER, which starts a session subprocess whose
- *   `.agent` declares environment the process itself needs (an app under test
- *   booting, a `.env` being written).
- *
- * One discipline governs both, and it is the reason these are two narrow routes
- * rather than one generic "resolve these keys" endpoint: **the caller never
- * names the variables**. It names a knowledge-base file; the server re-reads
- * that file from the DEFAULT branch and resolves exactly what the file
- * declares. The knowledge base is the allowlist, it is reviewable as a diff,
- * and no caller — however privileged its connection key — can widen it.
+ * The discipline that makes this safe, and the reason it is a narrow route
+ * rather than a generic "resolve these keys" endpoint: **the caller never names
+ * the variables**. It names a knowledge-base file; the server re-reads that
+ * file from the DEFAULT branch and resolves exactly what the file declares.
+ * The knowledge base is the allowlist, it is reviewable as a diff, and no
+ * caller — however privileged its connection key — can widen it.
  *
  * Three further constraints hold here:
  *
  * 1. **Read access is required.** A caller that cannot read the declaring file
- *    gets a 404, not an empty object: whether an `.agent` exists is itself
+ *    gets a 404, not an empty object: whether a manual exists is itself
  *    information.
  * 2. **Only local manuals.** A remote-capable `.tool`'s credentials are used
  *    server-side; handing them to a local caller would egress a secret that had
@@ -43,12 +34,15 @@ type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
  *    reconstruct who was handed what, and never the what itself.
  *
  * Responses are `no-store`: a secret must not sit in an intermediary cache.
+ *
+ * An overlay that ships its own kind of declaring file adds its own route in
+ * this same shape rather than widening this one. The allowlist has to be a file
+ * the server itself reads, and a route that understood several file kinds would
+ * be one refactor away from taking the list from the caller.
  */
 export function createDeclaredVariableRoutes(
   toolManualService: IToolManualService,
-  agentDefinitionService: IAgentDefinitionService,
   secretsVault: ISecretsVaultService,
-  accessControl: IAccessControl,
   manualAuth: RequestHandler,
   resolveUserEmail: ResolveUserEmail,
 ): express.Router {
@@ -125,70 +119,6 @@ export function createDeclaredVariableRoutes(
     } catch (err) {
       console.error('[declared-variables] local tool resolve failed:', err instanceof Error ? err.message : err);
       res.status(500).json({ error: 'Failed to resolve variables' });
-    }
-  });
-
-  /**
-   * The `from: vault` half of an `.agent`'s declared environment, for the
-   * execution layer to inject into a session process. `from: params` entries
-   * are the pipeline's business and never reach the platform.
-   *
-   * These values are visible to the agent by construction — there is no tool
-   * framing that hides an environment variable from the process that owns it —
-   * which is exactly why the execution layer must redact them from transcripts
-   * and logs, and why the allowlist is the reviewed `.agent` file rather than
-   * anything the caller sends.
-   */
-  router.post('/agent/agents/:slug/env', manualAuth, async (req, res) => {
-    const who = await caller(req);
-    if (!who) return void res.status(403).json({ error: 'Forbidden' });
-    const slug = String(req.params.slug);
-    try {
-      const agent = await agentDefinitionService.getAccessible(who.email, slug);
-      if (!agent) return void res.status(404).json({ error: 'Not found' });
-      const entries = agent.vaultVariables.map((v) => ({
-        name: v.name,
-        key: agentVaultKey(agent.slug, v.name),
-      }));
-      const { values, missing } = await resolveAll(who.userId, entries);
-      console.info(
-        `[declared-variables] agent "${agent.path}" env resolved for user=${who.userId}: ` +
-          `provided=[${Object.keys(values).join(',')}] missing=[${missing.join(',')}]`,
-      );
-      res.set('Cache-Control', 'no-store').json({ name: agent.name, env: values, missing });
-    } catch (err) {
-      console.error('[declared-variables] agent env resolve failed:', err instanceof Error ? err.message : err);
-      res.status(500).json({ error: 'Failed to resolve environment' });
-    }
-  });
-
-  /**
-   * The `.agent` files this caller may read, with their declared vault
-   * variables — no values. Lets the execution layer verify at startup that the
-   * agents its pipeline names exist and are readable, without asking for a
-   * single secret.
-   */
-  router.get('/agent/agents', manualAuth, async (req, res) => {
-    const who = await caller(req);
-    if (!who) return void res.status(403).json({ error: 'Forbidden' });
-    try {
-      const agents = await agentDefinitionService.listAccessible(who.email);
-      const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-      res.json({
-        agents: await Promise.all(
-          agents.map(async (a) => ({
-            slug: a.slug,
-            name: a.name,
-            path: a.path,
-            description: a.description ?? null,
-            vaultVariables: a.vaultVariables.map((v) => v.name),
-            canWrite: await accessControl.canWrite(wsId, who.email, a.path),
-          })),
-        ),
-      });
-    } catch (err) {
-      console.error('[declared-variables] agent list failed:', err instanceof Error ? err.message : err);
-      res.status(500).json({ error: 'Failed to list agents' });
     }
   });
 

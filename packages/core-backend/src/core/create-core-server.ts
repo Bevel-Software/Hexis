@@ -301,7 +301,6 @@ export async function createCoreServer(
   const secretsVaultRoutesDeps = {
     secretsVault: core.secretsVaultService,
     toolManualService: core.toolManualService,
-    agentDefinitionService: core.agentDefinitionService,
     accessControl: core.accessControl,
     stateSecret: core.config.jwtSecret,
     publicBackendUrl: core.config.publicBackendUrl,
@@ -369,17 +368,14 @@ export async function createCoreServer(
     async (userId) => (await core.authService.getUserById(userId))?.email,
     { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName },
   ));
-  // The only routes that return secret VALUES: a local `.tool`'s declared
-  // variables (for the local MCP server that will execute it) and an `.agent`'s
-  // `from: vault` environment (for the execution layer that will inject it).
-  // Both re-read the declaring knowledge-base file server-side, so the file is
-  // the allowlist and the caller cannot widen it. Same `manualAuth` as the rest
-  // of the agent surface.
+  // The only core route that returns secret VALUES: a local `.tool`'s declared
+  // variables, for the local MCP server that will execute it. It re-reads the
+  // declaring knowledge-base file server-side, so the file is the allowlist and
+  // the caller cannot widen it. Same `manualAuth` as the rest of the agent
+  // surface.
   toolsRouter.use(createDeclaredVariableRoutes(
     core.toolManualService,
-    core.agentDefinitionService,
     core.secretsVaultService,
-    core.accessControl,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
   ));

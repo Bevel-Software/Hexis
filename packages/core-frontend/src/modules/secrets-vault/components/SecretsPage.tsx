@@ -13,8 +13,6 @@ import {
 } from '../services/secrets.api';
 import { listToolSecrets, type ToolSecrets } from '../services/tool-secrets.api';
 import { ToolSecretsPanel } from './ToolSecretsPanel';
-import { listAgentSecrets, type AgentSecrets } from '../services/agent-secrets.api';
-import { AgentSecretsPanel } from './AgentSecretsPanel';
 
 /**
  * The Secrets page, routed standalone at `/secrets` (below the persistent
@@ -49,7 +47,6 @@ function readHashOutcome(): { kind: 'authorized' | 'error'; text: string } | nul
 
 export function SecretsPage() {
   const [tools, setTools] = useState<ToolSecrets[]>([]);
-  const [agents, setAgents] = useState<AgentSecrets[]>([]);
   const [secrets, setSecrets] = useState<SecretSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -61,10 +58,9 @@ export function SecretsPage() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [t, s, a] = await Promise.all([listToolSecrets(), listSecrets(), listAgentSecrets()]);
+      const [t, s] = await Promise.all([listToolSecrets(), listSecrets()]);
       setTools(t);
       setSecrets(s);
-      setAgents(a);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -172,39 +168,6 @@ export function SecretsPage() {
             </li>
           ))}
         </ul>
-      )}
-
-      {agents.length > 0 && (
-        <section className="mb-6">
-          <h2 className="mb-1 text-ui font-semibold text-ink">Agents</h2>
-          <p className="mb-2.5 text-ui text-ink-muted">
-            An agent&apos;s <code className="rounded-sm bg-sunken px-1 py-0.5 font-mono text-meta text-ink">.agent</code>{' '}
-            file declares the environment its sessions run with. These values are handed to the
-            process the agent runs in, so unlike a tool credential the agent can read them &mdash;
-            keep them to what the work actually needs.
-          </p>
-          <ul className="flex flex-col gap-2.5">
-            {agents.map((agent) => (
-              <li key={agent.slug}>
-                <Surface tone="surface" radius="xl" elevation="card" padded>
-                  <div className="mb-3 flex items-center gap-2.5">
-                    <span className="truncate text-ui font-semibold text-ink">{agent.name}</span>
-                    <span className="truncate text-meta text-ink-faint">{agent.path}</span>
-                    {agent.canWrite && (
-                      <Badge tone="outline" size="xs" className="ml-auto shrink-0">
-                        You can edit these secrets
-                      </Badge>
-                    )}
-                  </div>
-                  {agent.description && (
-                    <p className="mb-2 text-detail text-ink-muted">{agent.description}</p>
-                  )}
-                  <AgentSecretsPanel agent={agent} onChanged={() => void refresh()} />
-                </Surface>
-              </li>
-            ))}
-          </ul>
-        </section>
       )}
 
       <details>

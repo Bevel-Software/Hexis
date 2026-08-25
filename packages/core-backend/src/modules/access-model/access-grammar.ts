@@ -139,18 +139,54 @@ export function isAccessMdPath(p: string): boolean {
  * must scan/rewrite the same set, or a rename strands a live `.tool`
  * frontmatter grant). `access.md` is covered by `.md`.
  *
- * `.tool`, `.pipeline` and `.agent` are whole-document YAML: the file IS one
- * `---` fenced block, and its access verbs sit in it as ordinary keys beside
- * the rest of the definition (`parseOwnAccessEntries` ignores every key that
- * is not a verb). They are configuration rather than graph nodes — they live
- * outside the typed ontologies — but they are exactly the files whose edits
- * grant capability, so they need the same per-file governance as a node.
+ * `.tool` is whole-document YAML: the file IS one `---` fenced block, and its
+ * access verbs sit in it as ordinary keys beside the rest of the definition
+ * (`parseOwnAccessEntries` ignores every key that is not a verb). It is
+ * configuration rather than a graph node — it lives outside the typed
+ * ontologies — but it is exactly the kind of file whose edits grant
+ * capability, so it needs the same per-file governance as a node.
+ *
+ * This is the CORE set. An overlay that ships its own whole-document
+ * configuration files adds their extensions through
+ * {@link registerAccessFrontmatterExtensions} — the grammar is core's, the
+ * file kinds are not necessarily.
  */
-export const ACCESS_FRONTMATTER_EXTENSIONS = ['.md', '.tool', '.pipeline', '.agent'] as const;
+const CORE_ACCESS_FRONTMATTER_EXTENSIONS = ['.md', '.tool'] as const;
+
+const accessFrontmatterExtensions = new Set<string>(CORE_ACCESS_FRONTMATTER_EXTENSIONS);
+
+/**
+ * Extend the set of files whose own frontmatter carries access verbs.
+ *
+ * For overlays whose configuration files follow the same whole-document
+ * convention and, like a `.tool`, grant capability by being edited. Call once
+ * at boot, BEFORE any access resolution or reference scan — the declarations
+ * scan and the reference scanner must agree on the set, and a scanner that
+ * learned a new extension after a scan would leave a live grant unrewritten
+ * on the next rename.
+ *
+ * Idempotent, and additive only: an extension cannot be removed, because
+ * removing one would silently drop grants that are already enforced.
+ */
+export function registerAccessFrontmatterExtensions(extensions: readonly string[]): void {
+  for (const ext of extensions) {
+    const normalized = ext.trim().toLowerCase();
+    if (normalized.startsWith('.')) accessFrontmatterExtensions.add(normalized);
+  }
+}
+
+/** Every extension currently in the set, core's plus any an overlay registered. */
+export function accessFrontmatterExtensionList(): string[] {
+  return [...accessFrontmatterExtensions];
+}
 
 /** True when `p` is a file the resolver reads access frontmatter from. */
 export function hasAccessFrontmatterExtension(p: string): boolean {
-  return ACCESS_FRONTMATTER_EXTENSIONS.some((ext) => p.endsWith(ext));
+  const lower = p.toLowerCase();
+  for (const ext of accessFrontmatterExtensions) {
+    if (lower.endsWith(ext)) return true;
+  }
+  return false;
 }
 /**
  * The PRINCIPAL index — canonical name → member emails. Despite the name it
