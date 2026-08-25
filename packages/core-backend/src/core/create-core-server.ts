@@ -27,7 +27,6 @@ import {
   createSecretsVaultRoutes,
   createSecretsVaultPublicRoutes,
 } from '../modules/secrets-vault/index.js';
-import { registerHttpGetTool } from '../modules/http-get/http-get.tool.js';
 import { createDeclaredVariableRoutes } from '../modules/declared-variables/index.js';
 import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js';
 import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.js';
@@ -334,11 +333,6 @@ export async function createCoreServer(
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th);
   registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink);
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService);
-  // One governed outbound GET, for the code-mode chains that watch things (a
-  // gate waiting on a health endpoint). GET only, public hosts only, no caller
-  // headers — see the module for why each of those is fixed rather than
-  // configurable.
-  registerHttpGetTool(core.toolRegistry, toolsRouter, ta, th);
   registerToolManualsTools(core.toolRegistry, toolsRouter, ta, th, core.toolManualService, {
     accessControl: core.accessControl,
     // The vault satisfies the module's local VariableStatusPort — `list_tool_setup`
