@@ -101,6 +101,52 @@ export interface FsTreeChangedEvent {
   branch: string;
 }
 
+/**
+ * A commit landed locally but could not be pushed to the remote.
+ *
+ * Saving is deliberately not blocked on this: the commit is safe on the
+ * workspace volume and the next push may well carry it, so the write still
+ * reports success and the recovery paths (cooperative pull-rebase, the
+ * pending-commit queue's retries, the agent hand-off) keep running. What this
+ * event adds is VISIBILITY. Without it a deployment whose pushes are all
+ * failing — a bad token, an expired one, a revoked repo grant — looks
+ * completely healthy from the UI while commits pile up locally, which is
+ * exactly how one self-hosted install got 136 commits and two days deep
+ * before anyone noticed.
+ *
+ * `reason` is the sanitised git error, for the log-shaped detail line under
+ * the banner; anything credential-bearing is already masked out of it. The UI
+ * should point at the server logs rather than try to explain git to the user —
+ * every actionable cause here is an operator concern, not an author's.
+ *
+ * Workspace-scoped: everyone editing this branch has work sitting unpushed,
+ * not just whoever happened to trigger the failing push.
+ *
+ * Emitted on every failure rather than only on the first, so a session that
+ * connects mid-outage learns about it on the next save instead of waiting for
+ * a state it already missed. Clients treat repeats as idempotent.
+ */
+export interface GitSyncFailedEvent {
+  kind: 'git-sync-failed';
+  workspaceId: string;
+  branch: string;
+  /** Sanitised git error — safe to display, tokens already redacted. */
+  reason: string;
+}
+
+/**
+ * A push succeeded on a workspace whose previous push had failed — the
+ * counterpart to `git-sync-failed`, and the signal that clears its banner.
+ *
+ * Only emitted on that transition. A push runs on every save, so announcing
+ * each healthy one would put a broadcast on the hot path to say nothing.
+ */
+export interface GitSyncRecoveredEvent {
+  kind: 'git-sync-recovered';
+  workspaceId: string;
+  branch: string;
+}
+
 // ── User-scoped ──────────────────────────────────────────────────────────────
 
 /**
@@ -235,6 +281,8 @@ export type WorkflowEventPayload =
   | LockAcquiredEvent
   | LockReleasedEvent
   | FsTreeChangedEvent
+  | GitSyncFailedEvent
+  | GitSyncRecoveredEvent
   | BranchSwitchedEvent
   | AgentToolCallEvent
   | ChangeRequestOpenedEvent
@@ -255,7 +303,9 @@ export function isWorkspaceScoped(
     e.kind === 'file-changed' ||
     e.kind === 'lock-acquired' ||
     e.kind === 'lock-released' ||
-    e.kind === 'fs-tree-changed'
+    e.kind === 'fs-tree-changed' ||
+    e.kind === 'git-sync-failed' ||
+    e.kind === 'git-sync-recovered'
   );
 }
 

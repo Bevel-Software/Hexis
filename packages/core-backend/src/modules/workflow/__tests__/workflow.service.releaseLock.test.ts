@@ -452,7 +452,12 @@ describe('WorkflowService.runPendingCommit — worker entry point', () => {
     await expect(svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
       PushNeedsAgentResolutionError,
     );
-    expect(emitSpy).not.toHaveBeenCalled();
+    // `file-changed` still does NOT go out — other clients would refetch a
+    // SHA that isn't on origin yet. What DOES go out is the sync banner: the
+    // commit is sitting locally, and someone has to be able to see that.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'git-sync-failed',
+    ]);
   });
 
   it('recovers from non-fast-forward push via pull --rebase + retry, emits file-changed exactly once', async () => {
@@ -481,10 +486,12 @@ describe('WorkflowService.runPendingCommit — worker entry point', () => {
     );
     expect(git.pull).not.toHaveBeenCalled();
     expect(git.push).toHaveBeenCalledTimes(1);
-    // The commit landed locally but we do NOT emit file-changed — other
-    // clients would refetch a SHA that's not yet on origin. Recovery
-    // (or the next worker pass) emits it when the push actually lands.
-    expect(emitSpy).not.toHaveBeenCalled();
+    // `file-changed` still does NOT go out — other clients would refetch a
+    // SHA that isn't on origin yet. What DOES go out is the sync banner: the
+    // commit is sitting locally, and someone has to be able to see that.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'git-sync-failed',
+    ]);
   });
 
   it('throws PushNeedsAgentResolutionError when pull --rebase itself fails (textbook conflict case)', async () => {
@@ -500,7 +507,12 @@ describe('WorkflowService.runPendingCommit — worker entry point', () => {
     expect((err as PushNeedsAgentResolutionError).path).toBe('foo.md');
     expect(git.pull).toHaveBeenCalledTimes(1);
     expect(git.push).toHaveBeenCalledTimes(1);
-    expect(emitSpy).not.toHaveBeenCalled();
+    // `file-changed` still does NOT go out — other clients would refetch a
+    // SHA that isn't on origin yet. What DOES go out is the sync banner: the
+    // commit is sitting locally, and someone has to be able to see that.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'git-sync-failed',
+    ]);
   });
 
   it('throws PushNeedsAgentResolutionError when post-pull retry also fails (origin moved twice)', async () => {
@@ -512,7 +524,122 @@ describe('WorkflowService.runPendingCommit — worker entry point', () => {
     );
     expect(git.pull).toHaveBeenCalledTimes(1);
     expect(git.push).toHaveBeenCalledTimes(2);
-    expect(emitSpy).not.toHaveBeenCalled();
+    // `file-changed` still does NOT go out — other clients would refetch a
+    // SHA that isn't on origin yet. What DOES go out is the sync banner: the
+    // commit is sitting locally, and someone has to be able to see that.
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
+      'git-sync-failed',
+    ]);
+  });
+});
+
+describe('WorkflowService — git-sync visibility events', () => {
+  let events: WorkflowEventBus;
+  let emitSpy: MockInstance;
+
+  beforeEach(() => {
+    events = new WorkflowEventBus();
+    emitSpy = vi.spyOn(events, 'emit');
+  });
+
+  function kinds(): string[] {
+    return emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind);
+  }
+
+  it('stays silent while pushes succeed — the healthy path must not broadcast', async () => {
+    // A push runs on every save. If the healthy case announced itself, every
+    // keystroke-driven autosave would fan an event out to every session on
+    // the branch to say that nothing happened.
+    const svc = makeFacade(makeGit(), makeFileLocks(USER.id), makePending(), events);
+
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    expect(kinds()).toEqual(['file-changed', 'file-changed']);
+  });
+
+  it('carries the branch and a sanitised reason for the banner', async () => {
+    const svc = makeFacade(
+      makeGit({ pushBehavior: 'auth-fail' }),
+      makeFileLocks(USER.id),
+      makePending(),
+      events,
+    );
+
+    await expect(svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
+      PushNeedsAgentResolutionError,
+    );
+    expect(emitSpy.mock.calls[0][0]).toMatchObject({
+      kind: 'git-sync-failed',
+      workspaceId: 'ws-1',
+      branch: 'feat/x',
+    });
+    expect((emitSpy.mock.calls[0][0] as { reason: string }).reason).toContain(
+      'Authentication failed',
+    );
+  });
+
+  it('re-announces on every failure, so a session joining mid-outage still learns of it', async () => {
+    // The banner has no other way in: a client that connects after the first
+    // failure missed the only event that would have told it.
+    // `pushAfterPullBehavior` is what the shared mock serves from the second
+    // push onward, so failing it too is how one broken remote is simulated
+    // across repeated saves rather than just the first.
+    const svc = makeFacade(
+      makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' }),
+      makeFileLocks(USER.id),
+      makePending(),
+      events,
+    );
+
+    for (let i = 0; i < 2; i += 1) {
+      await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER).catch(() => undefined);
+    }
+
+    expect(kinds()).toEqual(['git-sync-failed', 'git-sync-failed']);
+  });
+
+  it('emits git-sync-recovered once when a push finally lands, then goes quiet again', async () => {
+    const failing = makeGit({ pushBehavior: 'auth-fail' });
+    const svc = makeFacade(failing, makeFileLocks(USER.id), makePending(), events);
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER).catch(() => undefined);
+    expect(kinds()).toEqual(['git-sync-failed']);
+
+    // Same service instance — the failing/healthy state is per-workspace and
+    // lives on it, so recovery has to be observed through the same object.
+    const healthy = makeGit();
+    const recovered = makeFacade(healthy, makeFileLocks(USER.id), makePending(), events);
+    Object.assign(svc as unknown as Record<string, unknown>, {
+      git: (recovered as unknown as { git: GitService }).git,
+    });
+
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER);
+
+    // Recovery announced exactly once; the second healthy push says nothing.
+    expect(kinds()).toEqual([
+      'git-sync-failed',
+      'git-sync-recovered',
+      'file-changed',
+      'file-changed',
+    ]);
+  });
+
+  it('tracks workspaces independently — one broken branch does not clear another', async () => {
+    const svc = makeFacade(
+      makeGit({ pushBehavior: 'auth-fail', pushAfterPullBehavior: 'fail' }),
+      makeFileLocks(USER.id),
+      makePending(),
+      events,
+    );
+
+    await svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER).catch(() => undefined);
+    await svc.runPendingCommit('ws-2', 'feat/y', 'bar.md', USER).catch(() => undefined);
+
+    expect(emitSpy.mock.calls.map((c) => (c[0] as { workspaceId: string }).workspaceId)).toEqual([
+      'ws-1',
+      'ws-2',
+    ]);
   });
 });
 

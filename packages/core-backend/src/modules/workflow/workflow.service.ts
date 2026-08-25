@@ -54,6 +54,7 @@ import type { IAccessControl } from '../access/access-control.interface.js';
 import { FileLockService } from './file-lock.service.js';
 import { PendingCommitsService } from './pending-commits.service.js';
 import type { WorkflowEventBus } from './event-bus.js';
+import { sanitizeError } from './sanitize-error.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
@@ -680,6 +681,7 @@ export class WorkflowService implements IWorkflowService {
     if (change) {
       try {
         await this.git.push(workspaceId, user);
+        this.noteGitSyncOk(workspaceId, branch);
       } catch (err) {
         // Non-fast-forward recovery on the autosave path: try the
         // cooperative `pull --rebase` + retry once. Autosave is
@@ -700,6 +702,7 @@ export class WorkflowService implements IWorkflowService {
             await this.git.pull(workspaceId);
             await this.git.push(workspaceId, user);
             recovered = true;
+            this.noteGitSyncOk(workspaceId, branch);
           } catch (recoveryErr) {
             console.warn(
               '[workflow] autosave cooperative recovery (pull-rebase) failed; leaving the unpushed commit for the next save / releaseLock to surface:',
@@ -708,6 +711,13 @@ export class WorkflowService implements IWorkflowService {
           }
         }
         if (!recovered) {
+          // Still best-effort — we don't fail the autosave, and a
+          // non-fast-forward here is genuinely expected to clear itself on the
+          // release push. But "expected to clear itself" was doing too much
+          // work: an auth failure never clears, and swallowing it into a log
+          // line is what let a broken deployment look healthy for two days.
+          // The commit stays local either way; now it says so.
+          this.noteGitSyncFailed(workspaceId, branch, err);
           console.warn(
             '[workflow] push after autosave commit failed (commit landed locally):',
             detail,
@@ -897,6 +907,47 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
+   * Workspaces whose last push failed. Purely so the recovery event fires on
+   * the transition back to healthy instead of on every subsequent save — a
+   * push runs on every write, and the healthy case must stay silent.
+   *
+   * Process-local and deliberately not persisted: a restart clears it, and the
+   * worst that costs is one redundant `git-sync-recovered` on a workspace that
+   * was already fine, which clients treat as a no-op.
+   */
+  private readonly gitSyncFailing = new Set<string>();
+
+  /**
+   * Announce that a push landed. Emits only when this workspace was previously
+   * failing — see `gitSyncFailing`.
+   */
+  private noteGitSyncOk(workspaceId: string, branch: string): void {
+    if (!this.gitSyncFailing.delete(workspaceId)) return;
+    console.log(`[workflow] git sync recovered for workspace=${workspaceId} branch=${branch}`);
+    this.events?.emit({ kind: 'git-sync-recovered', workspaceId, branch });
+  }
+
+  /**
+   * Announce that a commit is sitting locally because its push failed.
+   *
+   * This is the visibility half of the failure paths below; it never changes
+   * what they DO. The commit is already safe on disk and the retry / hand-off
+   * machinery is unaffected — all this adds is that someone finds out, rather
+   * than the deployment looking healthy while nothing reaches the remote.
+   */
+  private noteGitSyncFailed(workspaceId: string, branch: string, err: unknown): void {
+    this.gitSyncFailing.add(workspaceId);
+    this.events?.emit({
+      kind: 'git-sync-failed',
+      workspaceId,
+      branch,
+      // Git stderr can quote a credentialed URL; the banner is user-facing and
+      // the string also lands in client logs, so sanitize before it leaves.
+      reason: sanitizeError(err),
+    });
+  }
+
+  /**
    * Shared implementation of "push, and on non-fast-forward try a
    * cooperative pull-rebase + retry, then hand off to the agent if that
    * still fails." The full rationale lives at the call site in
@@ -911,6 +962,7 @@ export class WorkflowService implements IWorkflowService {
   ): Promise<void> {
     try {
       await this.git.push(workspaceId, user, opts);
+      this.noteGitSyncOk(workspaceId, branch);
     } catch (firstPushErr) {
       const firstDetail = firstPushErr instanceof Error ? firstPushErr.message : String(firstPushErr);
       const looksLikeNonFastForward = /non-fast-forward|rejected|fetch first|updates were rejected/i.test(firstDetail);
@@ -921,6 +973,7 @@ export class WorkflowService implements IWorkflowService {
           await this.git.pull(workspaceId);
           await this.git.push(workspaceId, user, opts);
           recovered = true;
+          this.noteGitSyncOk(workspaceId, branch);
           console.log(
             `[workflow] non-fast-forward push recovered via pull --rebase for workspace=${workspaceId} branch=${branch} path=${targetPath}`,
           );
@@ -933,6 +986,11 @@ export class WorkflowService implements IWorkflowService {
         }
       }
       if (!recovered) {
+        // Banner first, then the typed throw. The throw only reaches a UI that
+        // is still mounted and listening — the release fired as an editor
+        // unmounts has nowhere to surface it — whereas the event reaches every
+        // session on the branch regardless of what triggered the push.
+        this.noteGitSyncFailed(workspaceId, branch, firstPushErr);
         console.warn(
           `[workflow] push failed for workspace=${workspaceId} user=${user.id}; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
           firstDetail,
