@@ -1969,13 +1969,20 @@ export class GitService implements IGitService {
    * list, statuses, and +/- counts; per-file patches are generated for up to
    * `patchCap` files (default 400) — beyond that `patch` is left undefined,
    * exactly like the old API's binary/oversized files (the UI renders those with
-   * no inline diff). Patch generation is skipped for binary files.
+   * no inline diff). Patch generation is skipped for binary files; `patchCap: 0`
+   * skips it entirely, which is one git subprocess per changed file saved.
+   *
+   * `skipFetch` reads the clone's `origin/*` as it stands instead of fetching
+   * both refs first. For a caller that has JUST fetched them (`getPrDetail`
+   * resolves the SHAs first, and that fetches), the second fetch is a repeat
+   * network round-trip for the same two refs. Never pass it from a path that
+   * hasn't fetched: the diff would be computed against a stale head.
    */
   async changedFilesForPr(
     workspaceId: string,
     baseBranch: string,
     headBranch: string,
-    opts: { patchCap?: number } = {},
+    opts: { patchCap?: number; skipFetch?: boolean } = {},
   ): Promise<PullRequestFile[]> {
     assertValidBranchName(baseBranch);
     assertValidBranchName(headBranch);
@@ -1983,7 +1990,7 @@ export class GitService implements IGitService {
     // Fetch outside the mutex (network round-trip) so origin latency can't hold
     // the workspace lock; the lock guards only the local diff work below.
     const cwd = await this.repoDir(workspaceId);
-    await this.fetchPrRefs(cwd, baseBranch, headBranch);
+    if (!opts.skipFetch) await this.fetchPrRefs(cwd, baseBranch, headBranch);
     return this.mutex.run(workspaceId, async () => {
       const baseRef = await this.resolveBranchRef(cwd, baseBranch);
       const headRef = await this.resolveBranchRef(cwd, headBranch);

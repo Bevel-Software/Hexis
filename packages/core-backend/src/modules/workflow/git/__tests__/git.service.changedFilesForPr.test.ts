@@ -131,6 +131,55 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
   });
 
   /**
+   * A change-request detail resolves the SHAs (which fetches both refs) and
+   * then lists the files: the second call must be able to reuse that fetch
+   * instead of paying a second network round-trip for the same two refs.
+   * `skipFetch` is that reuse, so it must read whatever `origin/*` the clone
+   * already holds, while the default keeps refreshing first.
+   */
+  it('skipFetch reads the clone as-is; the default refreshes origin/* first', async () => {
+    const { upstream, repo } = await seedWorkspace(root, workspaceId);
+    // The branch is authored in ANOTHER clone, so this workspace only ever
+    // knows it as origin/alice/feature — the production shape, where the
+    // base-branch workspace answers for every request without a local copy.
+    const other = path.join(root, 'other');
+    await runGit(root, ['clone', upstream, other]);
+    await runGit(other, ['checkout', '-b', 'alice/feature']);
+    await fs.writeFile(path.join(other, 'added.md'), 'hello\n');
+    await runGit(other, ['add', '-A']);
+    await runGit(other, ['commit', '-m', 'feature work']);
+    await runGit(other, ['push', '-u', 'origin', 'alice/feature']);
+    await runGit(repo, ['fetch', 'origin']);
+
+    // A second push this clone has NOT fetched.
+    await fs.writeFile(path.join(other, 'second.md'), 'more\n');
+    await runGit(other, ['add', '-A']);
+    await runGit(other, ['commit', '-m', 'more work']);
+    await runGit(other, ['push', 'origin', 'alice/feature']);
+
+    const git = new GitService(
+      stubWorkspaceService(workspaceId, repo),
+      new WorkflowHooks(),
+      'knowledge-base',
+    );
+
+    const asIs = await git.changedFilesForPr(
+      workspaceId,
+      'current-company-state',
+      'alice/feature',
+      { skipFetch: true },
+    );
+    expect(asIs.map((f) => f.path)).toEqual(['added.md']);
+
+    const refreshed = await git.changedFilesForPr(
+      workspaceId,
+      'current-company-state',
+      'alice/feature',
+    );
+    expect(refreshed.map((f) => f.path).sort()).toEqual(['added.md', 'second.md']);
+  });
+
+  /**
    * roles.yaml can never change through a merge — `preserveBaseRolesYaml`
    * restores the base copy onto the source before every merge — so the review
    * surface must not list it as changed: the claim would be false, the empty

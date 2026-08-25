@@ -303,10 +303,17 @@ export class PullRequestService implements IPullRequestService {
       );
       baseSha = shas.baseSha;
       headSha = shas.headSha;
+      // `resolvePrShas` just fetched both refs, so the file list reads that
+      // same origin/* state instead of paying a second network round-trip
+      // for it. No patches: nothing reads `PullRequestFile.patch` (the
+      // dialog diffs file contents client-side), and generating them cost one
+      // git subprocess per changed file on every detail read — every poll,
+      // every approval click, every merge.
       files = await this.gitService.changedFilesForPr(
         workspaceId,
         row.targetBranch,
         row.sourceBranch,
+        { skipFetch: true, patchCap: 0 },
       );
     }
 
