@@ -139,6 +139,10 @@ describe('AccessControlService — at-ref model cache', () => {
 
   afterEach(async () => {
     injected.failNext = null;
+    // Spies are restored here, not at the end of the test that made them:
+    // a failing assertion would otherwise leave a console.warn mock in place
+    // for every test after it (this config sets no `restoreMocks`).
+    vi.restoreAllMocks();
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -227,7 +231,6 @@ describe('AccessControlService — at-ref model cache', () => {
     expect(lsTreeBuilds()).toBe(1);
     // ...and says so in the logs, naming the read it lost.
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/Team\/access\.md failed; .*will not be cached/));
-    warn.mockRestore();
 
     // ...but it is NOT pinned: the next call rebuilds and answers correctly,
     // and that healthy build is the one that gets cached.
