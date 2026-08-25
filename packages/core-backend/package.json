@@ -44,7 +44,7 @@
     "@utcp/code-mode": "^1.2.13",
     "@utcp/direct-call": "^1.1.1",
     "@utcp/http": "^1.1.7",
-    "@utcp/mcp": "^1.1.5",
+    "@utcp/mcp": "^1.1.6",
     "@utcp/sdk": "^1.1.1",
     "adm-zip": "^0.6.0",
     "cors": "^2.8.5",

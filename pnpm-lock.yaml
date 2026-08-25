@@ -129,8 +129,8 @@ importers:
         specifier: ^1.1.7
         version: 1.1.11
       '@utcp/mcp':
-        specifier: ^1.1.5
-        version: 1.1.5(@types/json-schema@7.0.15)(zod@3.25.76)
+        specifier: ^1.1.6
+        version: 1.1.6(@types/json-schema@7.0.15)(zod@3.25.76)
       '@utcp/sdk':
         specifier: ^1.1.1
         version: 1.1.2
@@ -335,8 +335,8 @@ importers:
         specifier: ^1.1.11
         version: 1.1.11
       '@utcp/mcp':
-        specifier: ^1.1.5
-        version: 1.1.5(@types/json-schema@7.0.15)(zod@4.4.3)
+        specifier: ^1.1.6
+        version: 1.1.6(@types/json-schema@7.0.15)(zod@4.4.3)
       '@utcp/sdk':
         specifier: ^1.1.1
         version: 1.1.2
@@ -369,8 +369,8 @@ importers:
         specifier: ^1.1.11
         version: 1.1.11
       '@utcp/mcp':
-        specifier: ^1.1.5
-        version: 1.1.5(@types/json-schema@7.0.15)(zod@4.4.3)
+        specifier: ^1.1.6
+        version: 1.1.6(@types/json-schema@7.0.15)(zod@4.4.3)
       '@utcp/sdk':
         specifier: ^1.1.1
         version: 1.1.2
@@ -2020,8 +2020,8 @@ packages:
   '@utcp/http@1.1.11':
     resolution: {integrity: sha512-d8gE1l4hulWO8EMxlVsVPQJb6gfl4OhVfrleobmldNO2E3ONMgg1PMgka2UDa69wWJHMXJWAEfREPe9n+0zbQQ==}
 
-  '@utcp/mcp@1.1.5':
-    resolution: {integrity: sha512-mhCl+DapBD5Q0gvWPhd7E9HQX5kG4kkRvIuBXvoZtLuj/pzV69dHF7OyUiKl7Ldhp80tZo12bgh+2s0dKwDE7Q==}
+  '@utcp/mcp@1.1.6':
+    resolution: {integrity: sha512-MQ6Wq05cmRsVC2V9t8QRlqg+N4MHEijv6M9m8DjYuoIVDOdrTZTuMqWCx8ew5JRA37ZBlzfLbzWqUii6/AaZ5Q==}
 
   '@utcp/sdk@1.1.2':
     resolution: {integrity: sha512-YOBhcOK5kbD27d3emuXNAb8gBb8nH2kr7BuqjrvmSGyUi9379jzusYeTuZDsAxyy5da9VZPnfC/cNCpTVkEtUw==}
@@ -6300,7 +6300,7 @@ snapshots:
       - debug
       - supports-color
 
-  '@utcp/mcp@1.1.5(@types/json-schema@7.0.15)(zod@3.25.76)':
+  '@utcp/mcp@1.1.6(@types/json-schema@7.0.15)(zod@3.25.76)':
     dependencies:
       '@apidevtools/json-schema-ref-parser': 15.5.1(@types/json-schema@7.0.15)
       '@modelcontextprotocol/sdk': 1.30.0(zod@3.25.76)
@@ -6313,7 +6313,7 @@ snapshots:
       - supports-color
       - zod
 
-  '@utcp/mcp@1.1.5(@types/json-schema@7.0.15)(zod@4.4.3)':
+  '@utcp/mcp@1.1.6(@types/json-schema@7.0.15)(zod@4.4.3)':
     dependencies:
       '@apidevtools/json-schema-ref-parser': 15.5.1(@types/json-schema@7.0.15)
       '@modelcontextprotocol/sdk': 1.30.0(zod@4.4.3)
