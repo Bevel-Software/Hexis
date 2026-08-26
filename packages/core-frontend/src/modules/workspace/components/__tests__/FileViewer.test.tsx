@@ -87,6 +87,15 @@ vi.mock('../../../change-requests/services/change-requests.api', () => ({
   readFileOnBranch: readBranchMock,
 }));
 
+// The empty state asks the branch's history where to start. Default it to
+// "no history to go on" so every existing case keeps exercising the tree-walk
+// fallback; the cases that are ABOUT recency set a return value.
+const recentPagesMock = vi.hoisted(() => vi.fn(async () => [] as FileTreeEntry[]));
+vi.mock('../../services/workspace.api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/workspace.api')>();
+  return { ...actual, listRecentPages: recentPagesMock };
+});
+
 // The access sheet is a 1200-line dialog with its own suite and its own
 // endpoints. Here it only has to prove WHICH entry the page handed it — a file
 // and its parent folder are the two share scopes, and picking the wrong one is
@@ -986,6 +995,14 @@ describe('FileViewer: nothing open', () => {
             relativePath: 'knowledge-base/KnowledgeBase/Onboarding',
             type: 'directory',
             children: [
+              // The access file the folder carries, sitting exactly where it
+              // does in a real KB: one level ABOVE the page it governs, which
+              // is what put it ahead of every page in a breadth-first walk.
+              {
+                name: 'access.md',
+                relativePath: 'knowledge-base/KnowledgeBase/Onboarding/access.md',
+                type: 'file',
+              },
               {
                 name: 'Day one.md',
                 relativePath: 'knowledge-base/KnowledgeBase/Onboarding/Day one.md',
@@ -1051,7 +1068,37 @@ describe('FileViewer: nothing open', () => {
     // deployment rather than saying anything.
     expect(screen.queryByRole('button', { name: /logo/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /SKILL/ })).toBeNull();
+    // An `access.md` is markdown and it is readable, but it says who may open
+    // the folder rather than saying anything. Both copies in the fixture: the
+    // loose one at the repo root, and the one INSIDE `Onboarding/`, which is
+    // the case a scoped-to-`KnowledgeBase/` walk cannot see and which every
+    // folder in a real KB has.
     expect(screen.queryByRole('button', { name: /access/ })).toBeNull();
+    // And the page that access file was standing in front of is offered.
+    expect(screen.getByRole('button', { name: /Day one/ })).toBeInTheDocument();
+  });
+
+  it('offers what the team last worked on, when the branch has history', async () => {
+    recentPagesMock.mockResolvedValueOnce([
+      {
+        name: 'Pricing.md',
+        relativePath: 'knowledge-base/KnowledgeBase/GTM/Pricing.md',
+        type: 'file',
+      },
+    ]);
+    render(<ViewerHarness filePath={null} fileTree={TREE} />);
+    // Recency wins over position in the tree: `Handbook.md` is the shallowest
+    // page in the fixture and would be first on the fallback walk.
+    expect(await screen.findByRole('button', { name: /Pricing/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Handbook/ })).toBeNull();
+  });
+
+  it('falls back to the tree when there is no history to go on', async () => {
+    // A branch with nothing committed yet, or a reader whose recent pages are
+    // all in folders they cannot open. Either way the invitation still stands.
+    recentPagesMock.mockResolvedValueOnce([]);
+    render(<ViewerHarness filePath={null} fileTree={TREE} />);
+    expect(await screen.findByRole('button', { name: /Handbook/ })).toBeInTheDocument();
   });
 
   /**

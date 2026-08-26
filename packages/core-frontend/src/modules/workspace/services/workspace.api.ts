@@ -47,6 +47,30 @@ export async function listFiles(workspaceId: string): Promise<FileTreeEntry> {
   return res.json();
 }
 
+/**
+ * The pages the team touched most recently that this reader may open, newest
+ * first — what the empty state offers someone with nothing open.
+ *
+ * Never throws: somewhere to start is an invitation, not the page itself, and
+ * a caller that has to handle a failure here would only turn the invitation
+ * into an error message. An empty array is also a real answer (a branch with
+ * no history yet), and the caller treats both the same way: fall back to
+ * walking the tree.
+ */
+export async function listRecentPages(
+  workspaceId: string,
+  limit = 4,
+): Promise<FileTreeEntry[]> {
+  try {
+    const res = await authFetch(`/api/workspace/${workspaceId}/recent-pages?limit=${limit}`);
+    if (!res.ok) return [];
+    const data = (await res.json()) as { pages?: FileTreeEntry[] };
+    return Array.isArray(data.pages) ? data.pages : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function readFile(workspaceId: string, relativePath: string): Promise<string> {
   // `_` cache-bust query parameter. The backend already sends
   // `Cache-Control: no-store` on this route, but intermediate CDNs /

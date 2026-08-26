@@ -36,7 +36,7 @@ import { FileChangeBoxes } from '../../change-requests/components/FileChangeBoxe
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
-import { suggestedPages } from '../utils/fileTree';
+import { useStartingPoints } from '../hooks/useStartingPoints';
 import { getFileRenderer, getRendererLayout, isViewOnlyFile } from './renderers';
 import { CanDownloadContext } from './renderers/DownloadFileButton';
 import type { RendererSaveState } from './renderers';
@@ -798,12 +798,18 @@ export function FileViewer() {
     });
   }, [openFilePath]);
 
-  // Where to start, for a viewer with nothing open. Computed here rather than
-  // in the empty branch below because that branch is a `return` and this is a
-  // hook — and it costs nothing while a file IS open, which is the common case.
-  const suggestions = useMemo(
-    () => suggestedPages(fileTree, SUGGESTION_LIMIT),
-    [fileTree],
+  // Where to start, for a viewer with nothing open: the pages the team touched
+  // most recently that this reader may open, falling back to a walk of the
+  // tree when the branch has no history to go on. Computed here rather than in
+  // the empty branch below because that branch is a `return` and this is a
+  // hook; the `enabled` flag is what keeps it from costing a request while a
+  // file IS open, which is the common case.
+  const showingEmptyState = !openFilePath || openFileContent === null || !Renderer;
+  const suggestions = useStartingPoints(
+    workspaceId,
+    fileTree,
+    SUGGESTION_LIMIT,
+    showingEmptyState,
   );
   // Opening a suggestion is NAVIGATION, the same as clicking the file in the
   // explorer or a tab: the URL is the canonical record of what is open, and a
@@ -833,7 +839,7 @@ export function FileViewer() {
   // change-request dialog — the old PR viewer surface is gone.
   const [bannerCr, setBannerCr] = useState<PullRequestSummary | null>(null);
 
-  if (!openFilePath || openFileContent === null || !Renderer) {
+  if (showingEmptyState) {
     return (
       <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
         <PullNeededBanner />
