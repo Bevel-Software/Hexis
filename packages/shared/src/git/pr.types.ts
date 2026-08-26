@@ -269,6 +269,12 @@ export interface IPullRequestService {
    */
   getPrDetail(
     prNumber: number,
-    opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string },
+    /**
+     * `patches: false` skips per-file patch generation and keeps the result
+     * out of the detail cache: for internal reads (approve / withdraw /
+     * revert pin their work on the detail) that never look at
+     * `files[].patch`. Clients get the full detail by default.
+     */
+    opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string; patches?: boolean },
   ): Promise<PullRequestDetail | null>;
 }

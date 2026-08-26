@@ -1241,7 +1241,7 @@ export class WorkflowService implements IWorkflowService {
 
   getChangeRequestDetail(
     number: number,
-    opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string },
+    opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string; patches?: boolean },
   ): Promise<ChangeRequestDetail | null> {
     return this.prs.getPrDetail(number, opts);
   }

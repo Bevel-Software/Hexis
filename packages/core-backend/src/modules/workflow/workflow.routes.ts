@@ -764,6 +764,10 @@ export function createWorkflowRoutes(
         fresh: true,
         workspaceId: workspace.id,
         viewerEmail: user.email,
+        // Internal read: this route pins its work on the detail and never
+        // reads a patch; skipping them is one git subprocess per file saved
+        // on every click, and the result stays out of the client cache.
+        patches: false,
       });
       if (!detail) {
         res.status(404).json({ error: 'change request not found' });
@@ -805,6 +809,10 @@ export function createWorkflowRoutes(
         fresh: true,
         workspaceId: workspace.id,
         viewerEmail: user.email,
+        // Internal read: this route pins its work on the detail and never
+        // reads a patch; skipping them is one git subprocess per file saved
+        // on every click, and the result stays out of the client cache.
+        patches: false,
       });
       if (!detail) {
         res.status(404).json({ error: 'change request not found' });
@@ -841,6 +849,10 @@ export function createWorkflowRoutes(
         fresh: true,
         workspaceId: workspace.id,
         viewerEmail: user.email,
+        // Internal read: this route pins its work on the detail and never
+        // reads a patch; skipping them is one git subprocess per file saved
+        // on every click, and the result stays out of the client cache.
+        patches: false,
       });
       if (!detail) {
         res.status(404).json({ error: 'change request not found' });
