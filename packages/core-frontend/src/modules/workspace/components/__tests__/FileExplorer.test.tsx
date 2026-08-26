@@ -929,6 +929,9 @@ describe('FileExplorer rows: the prototype tree', () => {
 // folder's menu is nine rows, so pinning it to the raw pointer put `Manage
 // access`, `Rename` and `Delete` below the fold for any right-click in the
 // lower quarter of the sidebar.
+/** jsdom's own viewport, read at import before any test has stubbed it. */
+const REAL_VIEWPORT = { width: window.innerWidth, height: window.innerHeight };
+
 describe('FileExplorer right-click: the menu stays inside the window', () => {
   const TREE: FileTreeEntry = {
     name: '.',
@@ -953,6 +956,11 @@ describe('FileExplorer right-click: the menu stays inside the window', () => {
   function stubViewport(width: number, height: number) {
     const w = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth')!;
     const h = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight')!;
+    // jsdom defines these as own accessors on `window`, so the descriptor is
+    // real and putting it back restores the getter rather than freezing a
+    // number in its place.
+    const iw = Object.getOwnPropertyDescriptor(window, 'innerWidth')!;
+    const ih = Object.getOwnPropertyDescriptor(window, 'innerHeight')!;
     Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
       configurable: true,
       get(this: HTMLElement) {
@@ -970,6 +978,8 @@ describe('FileExplorer right-click: the menu stays inside the window', () => {
     restoreLayout = () => {
       Object.defineProperty(HTMLElement.prototype, 'offsetWidth', w);
       Object.defineProperty(HTMLElement.prototype, 'offsetHeight', h);
+      Object.defineProperty(window, 'innerWidth', iw);
+      Object.defineProperty(window, 'innerHeight', ih);
     };
   }
 
@@ -1046,5 +1056,15 @@ describe('FileExplorer right-click: the menu stays inside the window', () => {
 
     // 300 - 200 - 8: the whole panel, not just its left edge, is on screen.
     expect(menuBox().style.left).toBe('92px');
+  });
+});
+
+// The stub above is only safe if it puts the window back. A viewport left at
+// the last case's 300px would silently narrow whatever runs next, including a
+// block someone appends below this one.
+describe('FileExplorer right-click: the viewport stub cleans up after itself', () => {
+  it('leaves window.innerWidth and innerHeight as it found them', () => {
+    expect(window.innerWidth).toBe(REAL_VIEWPORT.width);
+    expect(window.innerHeight).toBe(REAL_VIEWPORT.height);
   });
 });
