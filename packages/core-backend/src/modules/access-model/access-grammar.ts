@@ -127,9 +127,12 @@ function emptyEntries(): Record<Verb, ParsedEntry[]> {
   return out;
 }
 
-export function isAccessMdPath(p: string): boolean {
-  return p === 'access.md' || p.endsWith('/access.md');
-}
+// The predicate lives in `kb-layout.ts` beside the rest of the repo layout —
+// the frontend needs the same answer (an `access.md` is not a page to read),
+// and two copies of "what counts as an access file" is exactly how one surface
+// starts disagreeing with the resolver. Re-exported here so the access-model's
+// own callers keep importing it from the grammar they already depend on.
+export { isAccessMdPath } from '@bevel-software/platform-shared';
 
 /**
  * Extensions of node files whose OWN `---` frontmatter can carry access verbs

@@ -246,3 +246,30 @@ export type Ontology = string | null;
 // backend-only — it lives in `packages/backend/src/shared/kb-layout.ts`, built
 // from the `KNOWLEDGE_BASE_DIR` / `ONTOLOGY_MARKERS` constants above. This
 // package holds only the cross-cutting constants and types, not logic.
+
+/**
+ * The access-control file. It sits at the repo root AND in any folder that
+ * narrows what it inherits, so `access.md` is a name that recurs at every
+ * depth of the tree rather than one well-known root path.
+ *
+ * That recurrence is why surfaces that pick "documents" out of the tree cannot
+ * do it by extension alone: an `access.md` is markdown, it is readable, and it
+ * sits one level ABOVE the pages of the folder it governs — so any
+ * shallowest-first heuristic reaches the access files before it reaches a
+ * single page. Ask {@link isAccessMdPath}, don't test the extension.
+ */
+export const ACCESS_FILE = 'access.md';
+
+/**
+ * Is this the access-control file for some folder? Accepts a repo-relative,
+ * workspace-relative or clone-prefixed path: the check is on the final
+ * segment, so `access.md`, `KnowledgeBase/GTM/access.md` and
+ * `knowledge-base/KnowledgeBase/GTM/access.md` all answer true.
+ *
+ * The single source of truth for both sides of the app: the resolver's
+ * governs-itself special-cases and the approval gate on the backend, and the
+ * "is this a page a reader wants?" question on the frontend.
+ */
+export function isAccessMdPath(p: string): boolean {
+  return p === ACCESS_FILE || p.endsWith(`/${ACCESS_FILE}`);
+}
