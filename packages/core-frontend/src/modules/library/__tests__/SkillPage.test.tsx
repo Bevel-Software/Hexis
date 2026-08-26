@@ -248,6 +248,30 @@ function renderPage(
 }
 
 /**
+ * Wait for the page to stop loading before driving it.
+ *
+ * The reading pane is the LAST thing to arrive: it needs the skill detail
+ * (which is also what puts the second tab on screen) and then the file's bytes
+ * off the default branch. Waiting on a TAB instead can resolve earlier —
+ * `findByRole('tab', …)` is satisfied by the SKILL.md tab, which renders
+ * before either of those lands.
+ *
+ * Why the keyboard tests use it: `jumps to the first and last file with Home
+ * and End` was seen failing in full-suite runs on a loaded machine, never in
+ * isolation (0 in 20 runs). The cause was NOT established — a deliberately
+ * delayed detail load does not reproduce it, and the same runs on the
+ * unmodified file were too few to tell the two versions apart. What is certain
+ * is that both keyboard tests were driving the tablist while several requests
+ * were still in flight, and they are about arrow keys, not about loading. So
+ * they start from a settled page. If the flake outlives this, the cause is
+ * somewhere else and this at least stops the tablist tests from being where it
+ * is hunted.
+ */
+async function settled() {
+  await screen.findByTestId('md-view');
+}
+
+/**
  * The provider tree `renderPage` mounts, as a value — so a test can hand the
  * SAME tree back to `rerender` with a different git state and watch the page
  * react WITHOUT remounting it. Remounting would reset the very state
@@ -388,7 +412,8 @@ describe('SkillPage', () => {
    */
   it('moves selection AND focus with the arrow keys', async () => {
     renderPage(false);
-    const skillTab = await screen.findByRole('tab', { name: /SKILL\.md/ });
+    await settled();
+    const skillTab = screen.getByRole('tab', { name: /SKILL\.md/ });
     const sourcesTab = screen.getByRole('tab', { name: /sources\.yaml/ });
 
     skillTab.focus();
@@ -404,7 +429,8 @@ describe('SkillPage', () => {
 
   it('jumps to the first and last file with Home and End', async () => {
     renderPage(false);
-    const skillTab = await screen.findByRole('tab', { name: /SKILL\.md/ });
+    await settled();
+    const skillTab = screen.getByRole('tab', { name: /SKILL\.md/ });
     const sourcesTab = screen.getByRole('tab', { name: /sources\.yaml/ });
 
     skillTab.focus();
