@@ -52,23 +52,35 @@ export function usePointerMenuPosition<T extends HTMLElement>(
   const [pos, setPos] = useState<PointerMenuPosition>({ left: x, top: y });
 
   useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    const left = Math.max(MENU_MARGIN, Math.min(x, window.innerWidth - w - MENU_MARGIN));
-    let top: number;
-    if (y + h <= window.innerHeight - MENU_MARGIN) {
-      top = y;
-    } else if (y - MENU_GAP - h >= MENU_MARGIN) {
-      top = y - MENU_GAP - h;
-    } else {
-      top = Math.max(MENU_MARGIN, window.innerHeight - MENU_MARGIN - h);
-    }
-    setPos({ left, top });
-    // Moving the panel cannot change its size, so one measurement per open is
-    // enough and this never feeds itself. `ref` is a stable `useRef` box, so
-    // listing it changes nothing at runtime.
+    const place = () => {
+      const el = ref.current;
+      if (!el) return;
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      const left = Math.max(MENU_MARGIN, Math.min(x, window.innerWidth - w - MENU_MARGIN));
+      let top: number;
+      if (y + h <= window.innerHeight - MENU_MARGIN) {
+        top = y;
+      } else if (y - MENU_GAP - h >= MENU_MARGIN) {
+        top = y - MENU_GAP - h;
+      } else {
+        top = Math.max(MENU_MARGIN, window.innerHeight - MENU_MARGIN - h);
+      }
+      // Keep the previous object when nothing moved. `place` runs again on
+      // every resize, and a fresh object each time would re-render for nothing.
+      setPos((prev) => (prev.left === left && prev.top === top ? prev : { left, top }));
+    };
+    place();
+    // A menu still open across a resize would otherwise keep a placement
+    // measured against a window that no longer exists. Dragging a window edge
+    // closes it first, because that is a mousedown outside the panel, but
+    // zooming, entering fullscreen and OS window snapping all resize without
+    // one, and the panel would be left hanging off the new viewport.
+    //
+    // `ref` is in the deps because it is read here. It is a stable `useRef`
+    // box, so listing it changes nothing at runtime.
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
   }, [x, y, ref]);
 
   return pos;

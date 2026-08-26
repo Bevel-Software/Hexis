@@ -1048,6 +1048,27 @@ describe('FileExplorer right-click: the menu stays inside the window', () => {
     expect(menuBox().style.top).toBe('8px');
   });
 
+  it('re-places an open menu when the window is resized under it', () => {
+    stubViewport(1280, 800);
+    renderExplorer({ fileTree: TREE });
+
+    // Opens with room to spare, so the menu sits at the pointer.
+    fireEvent.contextMenu(screen.getByText('reports'), { clientX: 120, clientY: 400 });
+    expect(menuBox().style.top).toBe('400px');
+
+    // Shrink the window with the menu still open. Dragging a window edge would
+    // have closed it, since that is a mousedown outside the panel, but zoom,
+    // fullscreen and OS window snapping resize without one.
+    act(() => {
+      Object.defineProperty(window, 'innerHeight', { configurable: true, writable: true, value: 500 });
+      window.dispatchEvent(new Event('resize'));
+    });
+
+    // 400 + 300 no longer fits under 500, and 400 - 4 - 300 clears the margin,
+    // so it flips rather than hanging off the bottom of the new viewport.
+    expect(menuBox().style.top).toBe('96px');
+  });
+
   it('pulls the menu back from the right edge of the window', () => {
     stubViewport(300, 800);
     renderExplorer({ fileTree: TREE });

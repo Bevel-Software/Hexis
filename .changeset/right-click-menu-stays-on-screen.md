@@ -17,6 +17,8 @@ own row.
 
 The menu is now measured before it paints. It still opens down and to the right
 of the pointer, flips above when it will not fit below, and sits against the
-bottom margin when the window is shorter than the menu itself. `EditorTabs`
+bottom margin when the window is shorter than the menu itself. A menu that is
+open when the window resizes is placed again against the new viewport, so
+zooming or entering fullscreen no longer leaves it hanging off the edge. `EditorTabs`
 had solved half of this on its own and now shares the placement, so a pointer
 menu's behaviour no longer depends on which surface opened it.
