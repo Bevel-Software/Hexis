@@ -1,8 +1,8 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { MenuPanel, MenuItem } from '../../../shared/components';
-import { useDismissableMenu } from '../../../shared/components';
+import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { useWorkspace } from '../state/workspace.context';
 import { useFileNav } from '../routing/kb-routes';
@@ -339,21 +339,13 @@ function ContextMenu({
   returnFocusTo,
 }: ContextMenuProps) {
   const ref = useDismissableMenu<HTMLDivElement>({ open: true, onClose, returnFocusTo });
-  const [pos, setPos] = useState<{ left: number; top: number }>({ left: state.x, top: state.y });
-
-  // After the menu mounts, measure it and clamp into the viewport so a click
-  // near the right/bottom edge doesn't open a menu that's partially off-screen.
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    const left = Math.max(0, Math.min(state.x, window.innerWidth - w));
-    const top = Math.max(0, Math.min(state.y, window.innerHeight - h));
-    setPos({ left, top });
-    // `ref` comes from `useDismissableMenu` now, so it has to be declared —
-    // it is a stable `useRef` box, so listing it changes nothing at runtime.
-  }, [state.x, state.y, ref]);
+  // This menu measured and clamped itself, which the file tree's did not, and
+  // the two drifting apart is what left a right-click low in the tree with a
+  // menu running off the bottom of the window. One hook now, so a pointer
+  // menu's placement cannot depend on which surface opened it. The tab strip
+  // sits at the top of the window, so what changes here is only the inset from
+  // the right edge: the flip has nothing to flip away from.
+  const pos = usePointerMenuPosition(ref, state.x, state.y);
 
   const targetIdx = openTabs.findIndex((t) => t.path === state.tab.path);
   // If the target tab is gone (closed under us between menu open and click),
