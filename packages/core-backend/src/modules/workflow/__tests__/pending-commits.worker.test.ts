@@ -13,6 +13,7 @@ import type {
   PendingCommit,
   PendingCommitsService,
 } from '../pending-commits.service.js';
+import { assertInsideRepo } from '../../kb-fs/repo-path.js';
 
 /**
  * Unit tests for the queue-draining worker. The service + workflow layers
@@ -20,6 +21,8 @@ import type {
  * applies per claimed row:
  *
  *   - Success → markSucceeded, nothing else.
+ *   - Failure because the path is outside the repository → needs_attention +
+ *     feedback notice at once, whatever the budgets say.
  *   - Failure inside transient budget → markTransientFailure, no recovery agent.
  *   - Failure outside transient budget but inside recovery budget → spawn agent.
  *   - Failure outside recovery budget → mark needs_attention + send feedback notice.
@@ -67,6 +70,16 @@ function makeWorkspaces(): WorkspaceProvider {
   return {
     knownWorkspaces: () => [{ id: 'ws-1', branch: 'feat/x' }],
   };
+}
+
+/** The error `commitFile` throws for a path beside the clone, as the real producer builds it. */
+function captureRefusal(wsPath: string): unknown {
+  try {
+    assertInsideRepo(wsPath, 'knowledge-base');
+  } catch (err) {
+    return err;
+  }
+  throw new Error(`expected assertInsideRepo to refuse "${wsPath}"`);
 }
 
 function makeFeedback(): ISystemNoticeSink {
@@ -212,6 +225,39 @@ describe('PendingCommitsWorker.drainOnce', () => {
     expect(call.message).toContain('ws-1');
     expect(call.message).toContain('Foo.md');
     expect(call.message).toContain('unrecoverable');
+    expect(call.message).toContain('alice@example.com');
+  });
+
+  it('a path-outside-repo refusal escalates at once: no retry, no recovery agent, the notice names the corrected path', async () => {
+    // A fresh row with both budgets untouched: any other failure would be
+    // retried. This one cannot change on retry (the bytes are beside the
+    // clone, where git never looks) and gives a recovery agent nothing to
+    // repair, so the ladder is skipped and the row is flagged immediately.
+    const row = makeRow({ path: 'KnowledgeBase/Reviews/PR-12.html', attempts: 0, recoveryAgentRuns: 0 });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    // The commit layer's own refusal, built by its producer so the shape the
+    // worker switches on cannot drift from what is actually thrown.
+    workflow.runPendingCommit.mockRejectedValueOnce(captureRefusal('KnowledgeBase/Reviews/PR-12.html'));
+
+    await worker.drainOnce();
+
+    expect(service.markTransientFailure).not.toHaveBeenCalled();
+    expect(service.markRecoveryStarted).not.toHaveBeenCalled();
+    expect(recoveryAgent.run).not.toHaveBeenCalled();
+    // `last_error` gets the sanitized message (truncated to fit the column).
+    expect(service.markNeedsAttention).toHaveBeenCalledWith(
+      'row-1',
+      expect.stringContaining('"KnowledgeBase/Reviews/PR-12.html" is outside the knowledge base repository'),
+    );
+    expect(feedback.send).toHaveBeenCalledTimes(1);
+    const call = (feedback.send as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.source).toBe('system');
+    expect(call.user).toEqual(RECOVERY_BOT);
+    expect(call.message).toContain('outside the repository');
+    expect(call.message).toContain('Path:      KnowledgeBase/Reviews/PR-12.html');
+    // The correction survives the truncation: it rides on the error payload,
+    // not on the message.
+    expect(call.message).toContain('Use instead: knowledge-base/KnowledgeBase/Reviews/PR-12.html');
     expect(call.message).toContain('alice@example.com');
   });
 

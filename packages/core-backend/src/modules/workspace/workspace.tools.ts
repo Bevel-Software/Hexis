@@ -20,6 +20,7 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
+import { assertInsideRepo } from '../kb-fs/repo-path.js';
 import type { ISessionSink } from './session-sink.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
@@ -110,6 +111,22 @@ const KB_CONVENTIONS_NOTE =
 const int = (description: string): JsonSchema => ({ type: 'integer', description });
 
 const str = (description: string): JsonSchema => ({ type: 'string', description });
+
+/**
+ * A path input that names the clone folder. The tools are rooted at the
+ * WORKSPACE dir, one level above the git clone, so a path only reaches git
+ * when it starts with that folder; an agent that reads `KnowledgeBase/Foo.md`
+ * in a URL or a doc and passes it verbatim would otherwise write beside the
+ * repository. Saying so in the input itself, not only in prose, is what the
+ * agent actually sees when it fills the argument. `refused` is false for the
+ * inputs that may legitimately name a stray (a source to rescue, a file to
+ * remove).
+ */
+const wsPath = (kbDirName: string, what: string, refused = true): JsonSchema =>
+  str(
+    `${what}: starts with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`).` +
+      (refused ? ' A path without that prefix is outside the repository and is refused.' : ''),
+  );
 
 function asText(content: string | Buffer): string {
   return typeof content === 'string' ? content : content.toString('utf8');
@@ -394,7 +411,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str('Workspace-relative path, or a `__tool_chain_spill__/…` ref from a truncated `call_tool_chain`.'),
+        path: str(`Path to read, starting with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), or a \`__tool_chain_spill__/…\` ref from a truncated \`call_tool_chain\`.`),
         offset: int('Start character index (default 0).'),
         limit: int('Max characters to return from `offset`.'),
         sessionId: SESSION_ID_INPUT,
@@ -453,13 +470,13 @@ export function registerWorkspaceTools(
   mount({
     name: 'list_files',
     description:
-      'List a directory. Returns `{ path, entries: [{ name, type, size? }] }`. Omit `path` for the workspace root.' +
+      `List a directory. Returns \`{ path, entries: [{ name, type, size? }] }\`. Omit \`path\` for the workspace root, which holds the repository as the \`${kbDirName}/\` folder: every content path starts with it (e.g. \`${kbDirName}/KnowledgeBase\`).` +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str('Workspace-relative directory (default: root).'),
+        path: str(`Directory to list, starting with \`${kbDirName}/\` (default: the workspace root, where the repository is the \`${kbDirName}/\` folder).`),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch'],
@@ -501,7 +518,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str('Workspace-relative path.'),
+        path: wsPath(kbDirName, 'Path'),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'path'],
@@ -610,7 +627,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str('Workspace-relative path.'),
+        path: wsPath(kbDirName, 'Path'),
         content: str('Full file content.'),
         sessionId: SESSION_ID_INPUT,
       },
@@ -657,7 +674,7 @@ export function registerWorkspaceTools(
           description: 'Files to write; each created or overwritten.',
           items: {
             type: 'object',
-            properties: { path: str('Workspace-relative path.'), content: str('Full file content.') },
+            properties: { path: wsPath(kbDirName, 'Path'), content: str('Full file content.') },
             required: ['path', 'content'],
             additionalProperties: false,
           },
@@ -705,7 +722,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str('Workspace-relative path.'),
+        path: wsPath(kbDirName, 'Path'),
         old_string: str('Exact text to replace (include enough context to be unique).'),
         new_string: str('Replacement text.'),
         replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match.' },
@@ -750,7 +767,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str('Workspace-relative path.'),
+        path: wsPath(kbDirName, 'Path to the file', false),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'path'],
@@ -781,7 +798,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str('Workspace-relative directory.'),
+        path: wsPath(kbDirName, 'Directory to create'),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'path'],
@@ -808,8 +825,8 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        src: str('Source path.'),
-        dest: str('Destination path.'),
+        src: wsPath(kbDirName, 'Source path', false),
+        dest: wsPath(kbDirName, 'Destination path'),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'src', 'dest'],
@@ -842,8 +859,8 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        src: str('Source path.'),
-        dest: str('Destination path.'),
+        src: wsPath(kbDirName, 'Source path', false),
+        dest: wsPath(kbDirName, 'Destination path'),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'src', 'dest'],
@@ -877,8 +894,8 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str('Workspace-relative .zip path.'),
-        destination: str("Directory to extract into (default: the zip's parent)."),
+        path: wsPath(kbDirName, 'Path to the .zip archive', false),
+        destination: wsPath(kbDirName, "Directory to extract into (default: the zip's parent)"),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'path'],
@@ -916,6 +933,9 @@ export function registerWorkspaceTools(
         // extension policy applies per entry too, so a restricted run can't unzip a
         // `.md` into the graph.
         (wsRelPath) => {
+          // An entry that would land beside the repository is skipped with the
+          // corrected-path reason, like any other refused entry.
+          assertInsideRepo(wsRelPath, kbDirName);
           writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
           return assertOntologyWriteAllowed(sessionOntologyGate, ctx, wsRelPath);
         },

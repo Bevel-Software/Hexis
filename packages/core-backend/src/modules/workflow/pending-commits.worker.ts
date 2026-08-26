@@ -26,6 +26,7 @@ import type {
 } from './pending-commits.service.js';
 import { BACKOFF_MS, N_RECOVERY, N_TRANSIENT } from './pending-commits.service.js';
 import { sanitizeError } from './sanitize-error.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 
 /**
  * Where the worker escalates terminal failures — the narrow, workflow-owned
@@ -276,6 +277,8 @@ export class PendingCommitsWorker {
   /**
    * Process a single claimed row. Outcome paths (see plan §lifecycle):
    *   - commit + push succeeds → delete the row.
+   *   - throws because the path is outside the repository → markNeedsAttention
+   *     + feedback notice at once (no retry can change it, see below).
    *   - throws, transient budget remains → markTransientFailure.
    *   - throws, transient exhausted, recovery budget remains → spawn agent.
    *   - throws, recovery exhausted → markNeedsAttention + feedback notice.
@@ -303,6 +306,19 @@ export class PendingCommitsWorker {
       // contain credentialed URLs ("https://x-access-token:ghp_…@…"); we
       // can't undo a persisted leak, so mask before any of them sees it.
       const message = sanitizeError(err);
+
+      const corrected = pathOutsideRepoCorrection(err);
+      if (corrected !== null) {
+        // The bytes sit BESIDE the clone (a workspace-relative path without
+        // the clone-folder prefix), so git will never see them: no retry can
+        // succeed, and a recovery agent has no commit to repair. Every attempt
+        // would throw this same refusal, so escalate now, with the corrected
+        // path in the notice, instead of spending the transient budget and
+        // N_RECOVERY agent runs to reach the same row state.
+        await this.escalate(row, message, strayPathNotice(row, message, corrected), 'path outside the repository');
+        return;
+      }
+
       const nextAttempts = row.attempts + 1;
 
       if (nextAttempts < N_TRANSIENT) {
@@ -346,28 +362,74 @@ export class PendingCommitsWorker {
       }
 
       // Recovery budget exhausted — escalate.
-      await this.deps.service.markNeedsAttention(row.id, message);
-      console.error(
-        `[pending-commits] TERMINAL ws=${row.workspaceId} branch=${row.branch} path=${row.path} after ${N_RECOVERY} recovery runs: ${message}`,
-      );
-      try {
-        await this.deps.feedback.send({
-          source: 'system',
-          user: this.deps.recoveryBot,
-          message: terminalFailureNotice(row, message),
-        });
-      } catch (feedbackErr) {
-        // Don't let a feedback-sink hiccup mask the underlying terminal
-        // failure — the row is already `needs_attention` and the next
-        // process restart will keep logging it. Just note that the
-        // notice didn't reach the dashboard.
-        console.error(
-          `[pending-commits] failed to emit terminal-failure feedback notice for ws=${row.workspaceId} path=${row.path}:`,
-          sanitizeError(feedbackErr),
-        );
-      }
+      await this.escalate(row, message, terminalFailureNotice(row, message), `after ${N_RECOVERY} recovery runs`);
     }
   }
+
+  /**
+   * The last step of every terminal path: flag the row `needs_attention`
+   * and tell the dashboard. `why` is the log line's reason; `notice` is the
+   * body the admin reads.
+   */
+  private async escalate(row: PendingCommit, message: string, notice: string, why: string): Promise<void> {
+    await this.deps.service.markNeedsAttention(row.id, message);
+    console.error(
+      `[pending-commits] TERMINAL ws=${row.workspaceId} branch=${row.branch} path=${row.path} ${why}: ${message}`,
+    );
+    try {
+      await this.deps.feedback.send({
+        source: 'system',
+        user: this.deps.recoveryBot,
+        message: notice,
+      });
+    } catch (feedbackErr) {
+      // Don't let a feedback-sink hiccup mask the underlying terminal
+      // failure — the row is already `needs_attention` and the next
+      // process restart will keep logging it. Just note that the
+      // notice didn't reach the dashboard.
+      console.error(
+        `[pending-commits] failed to emit terminal-failure feedback notice for ws=${row.workspaceId} path=${row.path}:`,
+        sanitizeError(feedbackErr),
+      );
+    }
+  }
+}
+
+/**
+ * The commit layer's refusal of a path whose bytes sit beside the clone
+ * rather than in it (`kb-fs/repo-path.ts`): the corrected path it carries,
+ * or null for any other error. Read from the payload, not the message: the
+ * message the worker keeps is sanitized and truncated to fit `last_error`,
+ * and the correction is what gets cut. Deterministic: the same row throws
+ * it on every attempt.
+ */
+function pathOutsideRepoCorrection(err: unknown): string | null {
+  if (!(err instanceof WorkflowDomainError) || err.payload?.kind !== 'path-outside-repo') return null;
+  const corrected = err.payload.corrected;
+  return typeof corrected === 'string' && corrected.length > 0 ? corrected : '(see error)';
+}
+
+function strayPathNotice(row: PendingCommit, error: string, corrected: string): string {
+  return [
+    '[pending_commits] Commit refused: the file is outside the repository.',
+    '',
+    `Workspace: ${row.workspaceId}`,
+    `Branch:    ${row.branch}`,
+    `Path:      ${row.path}`,
+    `Use instead: ${corrected}`,
+    `Original author: ${row.authorEmail}`,
+    `Queued at: ${row.queuedAt.toISOString()}`,
+    `Error: ${error}`,
+    '',
+    'The bytes were written beside the git clone (a workspace-relative path',
+    'without the clone-folder prefix), so git never sees them. Nothing was',
+    'committed, retrying cannot change that, and no recovery agent was run.',
+    '',
+    'Resolve manually:',
+    `  - move the file to "${corrected}" and save it again, or delete it if it`,
+    '    should be discarded',
+    '  - then delete the row from pending_commits.',
+  ].join('\n');
 }
 
 function terminalFailureNotice(row: PendingCommit, error: string): string {
