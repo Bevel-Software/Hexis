@@ -98,8 +98,15 @@ async function buildClient(
   });
   // The id travels with the client so shutdown can release the binding — it
   // holds this deployment's config and its cached secret VALUES, and a host
-  // that creates servers over time would otherwise accumulate both.
-  return { client: await CodeModeUtcpClient.create(process.cwd(), clientConfig), bindingId };
+  // that creates servers over time would otherwise accumulate both. The
+  // binding is taken BEFORE the client exists, so a failure here has nothing
+  // downstream to release it and must do so itself.
+  try {
+    return { client: await CodeModeUtcpClient.create(process.cwd(), clientConfig), bindingId };
+  } catch (err) {
+    resetLocalVariableResolver(bindingId);
+    throw err;
+  }
 }
 
 /**

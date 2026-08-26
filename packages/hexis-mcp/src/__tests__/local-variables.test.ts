@@ -211,6 +211,12 @@ describe('HexisLocalVariableLoader', () => {
     await loader.get('a__b_KEY');
     await loader.get('a__b_OTHER');
     expect(errors.mock.calls.filter((c) => String(c[0]).includes('share it'))).toHaveLength(1);
+
+    // A SECOND binding with the same collision is a different server, and its
+    // operator has not been told yet — it must say so again.
+    const second = bind(local({ 'a-b': { slug: 'dash', path: 'p' }, a_b: { slug: 'under', path: 'q' } }));
+    await second.get('a__b_KEY');
+    expect(errors.mock.calls.filter((c) => String(c[0]).includes('share it'))).toHaveLength(2);
   });
 
   it('resolves NEITHER of two manuals sharing a namespace', async () => {

@@ -51,6 +51,13 @@ interface ResolverState {
   local: ReadonlyMap<string, LocalManualInfo>;
   cache: Map<string, { at: number; values: Record<string, string> }>;
   inFlight: Map<string, Promise<Record<string, string>>>;
+  /**
+   * Namespaces whose collision this binding has already reported. Per binding,
+   * not per process: a host that creates servers over time would otherwise
+   * grow the set forever, and a second server with the same collision would
+   * stay silent because the first had already spoken.
+   */
+  reportedCollisions: Set<string>;
   now: () => number;
 }
 
@@ -82,7 +89,7 @@ export function bindLocalVariableResolver(
   now: () => number = Date.now,
 ): string {
   const id = `binding-${nextBindingId++}`;
-  bindings.set(id, { config, local, cache: new Map(), inFlight: new Map(), now });
+  bindings.set(id, { config, local, cache: new Map(), inFlight: new Map(), reportedCollisions: new Set(), now });
   return id;
 }
 
@@ -95,12 +102,8 @@ export function bindLocalVariableResolver(
  * accumulate them for the life of the process with no way to reclaim them.
  */
 export function resetLocalVariableResolver(id?: string): void {
-  if (id === undefined) {
-    bindings.clear();
-    reportedCollisions.clear();
-  } else {
-    bindings.delete(id);
-  }
+  if (id === undefined) bindings.clear();
+  else bindings.delete(id);
 }
 
 /**
@@ -123,8 +126,9 @@ export function resetLocalVariableResolver(id?: string): void {
  */
 function ownerOf(
   effectiveKey: string,
-  local: ReadonlyMap<string, LocalManualInfo>,
+  state: ResolverState,
 ): { manual: string; info: LocalManualInfo; varName: string } | null {
+  const { local } = state;
   let best: { manual: string; info: LocalManualInfo; varName: string; len: number } | null = null;
   let ambiguous: string[] = [];
   for (const [manual, info] of local) {
@@ -144,8 +148,8 @@ function ownerOf(
     // per lookup floods stderr with the same line and buries whatever else the
     // server is trying to say.
     const namespace = effectiveKey.slice(0, effectiveKey.length - best.varName.length);
-    if (!reportedCollisions.has(namespace)) {
-      reportedCollisions.add(namespace);
+    if (!state.reportedCollisions.has(namespace)) {
+      state.reportedCollisions.add(namespace);
       console.error(
         `[hexis-mcp] refusing to resolve the namespace "${namespace}": the manuals ${ambiguous
           .map((m) => `"${m}"`)
@@ -157,8 +161,6 @@ function ownerOf(
   return { manual: best.manual, info: best.info, varName: best.varName };
 }
 
-/** Namespaces whose collision has already been reported, so it is said once. */
-const reportedCollisions = new Set<string>();
 
 /**
  * One manual's variables, cached, with concurrent asks sharing a single fetch.
@@ -208,7 +210,7 @@ export class HexisLocalVariableLoader implements VariableLoader {
   async get(effectiveKey: string): Promise<string | null> {
     const state = bindings.get(this.binding_id);
     if (!state) return null;
-    const owner = ownerOf(effectiveKey, state.local);
+    const owner = ownerOf(effectiveKey, state);
     if (!owner) return null;
     try {
       const values = await variablesFor(state, owner.manual, owner.info);
