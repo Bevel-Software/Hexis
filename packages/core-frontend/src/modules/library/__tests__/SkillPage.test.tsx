@@ -240,6 +240,8 @@ function renderPage(
   library?: Partial<LibraryContextValue>,
   /** Props the canonical /workspace mount passes; the legacy route passes none. */
   pageProps?: { provisional?: boolean },
+  /** Git state — overridden to test what the page does when there is no log. */
+  gitValue: GitContextValue = git,
 ) {
   libraryMock.value = { ...libraryValue(owned, crs, mine), ...library };
   return render(
@@ -250,7 +252,7 @@ function renderPage(
     >
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
-          <GitContext.Provider value={git}>
+          <GitContext.Provider value={gitValue}>
           <EventBusContext.Provider value={bus}>
             {/* The real toast provider: the success message IS the page's
                 report that the merge landed, so a stubbed-out toast would
@@ -1122,5 +1124,92 @@ describe('SkillPage: deciding on a change', () => {
 
     fireEvent.click(withdraw);
     await waitFor(() => expect(apiMock.cancelPullRequest).toHaveBeenCalledWith(7));
+  });
+
+  /**
+   * A skill is a file in the repository, and this page is the ONLY surface it
+   * has: the shell routes every default-branch `Plugins/` URL here
+   * (`isLibraryLocation`) and the Knowledge tree does not list `Plugins/` at
+   * all, so a `⋯` missing here means the git log for every skill in the
+   * deployment is unreachable — the audit trail the product is sold on,
+   * available for Knowledge pages and for nothing else.
+   */
+  describe('version history', () => {
+    it('opens the log for the file on screen, at its workspace path', async () => {
+      renderPage(false);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Version history' }));
+
+      // The path the panel asks git about is the workspace-relative one the
+      // Knowledge viewer would hand it — kbDirName included. Getting this
+      // wrong asks about a file that does not exist and reports an empty
+      // history for one that does.
+      expect(
+        await screen.findByText('Timeline: knowledge-base/Skills/newsletter/SKILL.md'),
+      ).toBeInTheDocument();
+      expect(screen.getByText('Version history: SKILL.md')).toBeInTheDocument();
+
+      // And there is a way back, because history is not in the URL.
+      fireEvent.click(screen.getByRole('button', { name: 'Back to the file' }));
+      expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+    });
+
+    it('does not follow you to another file of the skill', async () => {
+      renderPage(false);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Version history' }));
+      await screen.findByText('Timeline: knowledge-base/Skills/newsletter/SKILL.md');
+
+      // A tab switch is a switch of file, and history is a lens on ONE file.
+      // Carrying it across would show the previous file's log under the new
+      // file's heading.
+      fireEvent.click(screen.getByRole('tab', { name: 'sources.yaml' }));
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+
+      // And it does not come BACK on the way home. Keying the open flag to
+      // the file it was opened for is not enough on its own: returning to
+      // that tab then reopens a log nobody asked for a second time, which is
+      // how you land on history when you meant to read the file.
+      fireEvent.click(screen.getByRole('tab', { name: 'SKILL.md' }));
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+      expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+    });
+
+    /**
+     * `SkillFileEditor` holds the draft in its own state, so swapping it out
+     * for the history panel throws away whatever was typed, with no warning
+     * and no way back. The menu is withdrawn for exactly as long as that is
+     * true.
+     */
+    it('is withdrawn while the editor is open, so a draft cannot be discarded', async () => {
+      accessMock.result = {
+        canWrite: true,
+        eligible: { roles: [], users: [] },
+        owners: { roles: [], users: [] },
+      };
+      renderPage(true);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+      await screen.findByRole('textbox', { name: /Edit SKILL\.md/ });
+      expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
+
+      // It comes back the moment the draft is gone.
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(await screen.findByRole('button', { name: 'More actions' })).toBeInTheDocument();
+    });
+
+    it('has no trigger at all when git cannot answer', async () => {
+      renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+        ...git,
+        availability: 'loading',
+      } as GitContextValue);
+
+      // Version history is the whole menu, so no log means no `⋯` — an
+      // overflow opening onto an empty panel is worse than no overflow.
+      expect(await screen.findByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
+    });
   });
 });

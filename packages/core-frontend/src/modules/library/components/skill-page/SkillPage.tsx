@@ -1,14 +1,25 @@
-import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { ArrowLeft, History } from 'lucide-react';
 import {
   DEFAULT_BRANCH,
   pluginOfPath,
   type PullRequestSummary,
 } from '@bevel-software/platform-shared';
 import '../../library.css';
-import { Badge, Button } from '../../../../shared/components';
+import {
+  Badge,
+  Button,
+  IconButton,
+  MenuItem,
+  MenuPanel,
+  Surface,
+  useDismissableMenu,
+} from '../../../../shared/components';
 import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
+import { useGit } from '../../../git/state/git.context';
+import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
 import { kbFileUrl, resolveRelativePath, useNodeIdNav } from '../../../workspace/routing/kb-routes';
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { useFileAccess } from '../../../access/hooks/useFileAccess';
@@ -91,8 +102,27 @@ export function SkillPage({
   const [selectedState, setSelected] = useState('SKILL.md');
   const selected = activeFile ?? selectedState;
   const [compareCr, setCompareCr] = useState<PullRequestSummary | null>(null);
+  /**
+   * The `⋯` menu's one destination: the git log for the file on screen,
+   * rendered in place of the reading pane. Local state rather than a URL,
+   * matching the Knowledge viewer's `activeTab` — a skill's canonical address
+   * names the FILE, and history is a lens on it, not a different file.
+   *
+   * Cleared whenever the file changes; see `historyKey` for why that is not a
+   * matter of taste.
+   */
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuTriggerRef = useRef<HTMLButtonElement>(null);
+  const closeMenu = useCallback(() => setMenuOpen(false), []);
+  const menuRef = useDismissableMenu<HTMLDivElement>({
+    open: menuOpen,
+    onClose: closeMenu,
+    returnFocusTo: menuTriggerRef,
+  });
   /** Ties the tabs to the panel they control; unique per mounted page. */
   const tabsId = useId();
+  const git = useGit();
 
   // Ownership is a property of the CATALOG entry, not of the skill document —
   // it comes from the per-file ACL the provider already resolved, so the page
@@ -210,6 +240,44 @@ export function SkillPage({
     Boolean((location.state as { startEditing?: boolean } | null)?.startEditing),
   );
   const [busyCr, setBusyCr] = useState<number | null>(null);
+
+  /**
+   * The workspace-relative path `FileHistoryPanel` reads the git log for — the
+   * same string the Knowledge viewer hands it, so a skill file's history is
+   * the file's history, not a second implementation of it. Null until the
+   * workspace and the skill have both resolved: the panel takes a path and
+   * asks immediately, so handing it a half-built one would ask about
+   * `undefined/SKILL.md`.
+   */
+  const historyPath = kbDirName && skillPath ? `${kbDirName}/${fileRepoPath}` : null;
+  /**
+   * Whether `⋯` has anything behind it. Git not ready means there is no log to
+   * show, and an overflow that opens onto an empty panel is worse than no
+   * overflow at all — the same call `KbPageHeader` makes.
+   *
+   * `!editing` is the other half, and it is not cosmetic: `SkillFileEditor`
+   * holds the draft in its own state, so swapping it out for the history panel
+   * would throw away whatever the person had typed with no warning and no way
+   * back. The menu returns the moment they save or cancel.
+   */
+  const historyAvailable = git.availability === 'ready' && historyPath !== null && !editing;
+  /**
+   * History closes when the file changes. It is a lens on ONE file, so a tab
+   * switch must land on that file's CONTENT — and it must stay landed: keying
+   * the open flag to the file it was opened for is not enough, because coming
+   * back to that tab then re-opens the log nobody asked for a second time.
+   *
+   * Adjusted during render rather than in an effect, so the new file's content
+   * paints on the first frame. An effect would show the old file's log under
+   * the new file's heading for one commit, which is the flicker the `active`
+   * derivation a few lines up exists to avoid.
+   */
+  const [historyKey, setHistoryKey] = useState(fileRepoPath);
+  if (historyKey !== fileRepoPath) {
+    setHistoryKey(fileRepoPath);
+    if (historyOpen) setHistoryOpen(false);
+  }
+  const viewingHistory = historyAvailable && historyOpen;
   /**
    * Change requests a merge attempt has REFUSED as unmergeable. Git is the only
    * thing that can answer "does this still apply?", and it answers when asked
@@ -440,11 +508,57 @@ export function SkillPage({
 
       <header className="mt-4">
         <div className="flex items-center gap-3">
-          <h1 className="text-display font-semibold text-ink">{skill?.name ?? name}</h1>
+          <h1 className="min-w-0 text-display font-semibold text-ink">{skill?.name ?? name}</h1>
           {skill && owned && (
             <Badge tone="outline" size="xs" className="shrink-0 uppercase">
               Owner
             </Badge>
+          )}
+
+          {/* The same overflow a Knowledge page carries, for the same reason:
+              a skill is a file in the repository, and "who changed this, when"
+              is answerable about it exactly as it is about any other file. It
+              was unanswerable HERE and nowhere else, because this page is the
+              only surface a `Plugins/` file has — the shell routes those URLs
+              to the Library (`isLibraryLocation`) and the Knowledge tree does
+              not list `Plugins/` at all, so there was no viewer to fall back
+              to and no row to right-click.
+
+              Version history is the whole menu, so the trigger goes where the
+              menu goes — see `historyAvailable`. */}
+          {historyAvailable && (
+            <div className="relative ml-auto flex-none">
+              <IconButton
+                ref={menuTriggerRef}
+                aria-label="More actions"
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                active={menuOpen}
+                onClick={() => setMenuOpen((v) => !v)}
+              >
+                <span aria-hidden className="text-strong leading-none">
+                  ⋯
+                </span>
+              </IconButton>
+              {menuOpen && (
+                <div ref={menuRef} className="absolute right-0 top-[calc(100%+5px)] z-40">
+                  <MenuPanel role="menu" aria-label="More actions" className="min-w-[212px]">
+                    <MenuItem
+                      role="menuitem"
+                      onClick={() => {
+                        closeMenu();
+                        setHistoryOpen(true);
+                      }}
+                    >
+                      <span className="flex items-center gap-2.5">
+                        <History size={14} />
+                        Version history
+                      </span>
+                    </MenuItem>
+                  </MenuPanel>
+                </div>
+              )}
+            </div>
           )}
         </div>
         {/* No description line here — the file pane renders the raw SKILL.md,
@@ -476,16 +590,47 @@ export function SkillPage({
         }}
       />
 
-      {/* The panel the tabs control. It wraps BOTH the reading pane and the
-          editor that replaces it, so `aria-controls` resolves in either state
-          rather than pointing at an element that exists only half the time. */}
+      {/* The panel the tabs control. It wraps the reading pane, the editor
+          that replaces it and the history that replaces both, so
+          `aria-controls` resolves in every state rather than pointing at an
+          element that exists only some of the time. */}
       <div
         role="tabpanel"
         id={skillPanelId(tabsId)}
         aria-labelledby={skillTabId(tabsId, active)}
-        aria-busy={detail.loading || raw === null || undefined}
+        aria-busy={(!viewingHistory && (detail.loading || raw === null)) || undefined}
       >
-      {detail.loading ? (
+      {viewingHistory && historyPath !== null ? (
+        <>
+          {/* An explicit way back. Without it the only route to the file would
+              be reopening it, since history is not in the URL. */}
+          <div className="mb-3 mt-4 flex items-center gap-2">
+            <Button
+              variant="quiet"
+              size="sm"
+              leadingIcon={<ArrowLeft size={13} />}
+              onClick={() => setHistoryOpen(false)}
+            >
+              Back to the file
+            </Button>
+            <span className="text-detail text-ink-faint">{`Version history: ${active}`}</span>
+          </div>
+          {/* A DEFINITE height, and a flex column to hold it. The panel is
+              built for the Knowledge viewer's full-height pane: its list and
+              its diff both scroll inside themselves, which needs a parent
+              whose height does not come from them. Dropped straight into this
+              reading column it would size to its own content instead, so a
+              long diff would stretch the page rather than scroll in place and
+              the empty state would collapse to a line. The measure matches the
+              editor's textarea, which is the same trade in the same column. */}
+          <Surface
+            radius="lg"
+            className="flex h-[60vh] min-h-80 flex-col overflow-hidden"
+          >
+            <FileHistoryPanel filePath={historyPath} />
+          </Surface>
+        </>
+      ) : detail.loading ? (
         <SkillFilePane
           file={active}
           raw={null}
@@ -568,8 +713,12 @@ export function SkillPage({
       )}
 
       {/* Every open proposal on this file, under the file it is about. The
-          owner decides here; the author can take theirs back. */}
+          owner decides here; the author can take theirs back. Not under the
+          history panel: a box asking "approve this?" needs the text it would
+          change above it, and the log is not that text. The dock below still
+          reaches every open request from either view. */}
       {!editing &&
+        !viewingHistory &&
         boxes.map((cr) => {
           const mine = data.myCrNumbers.has(cr.number);
           // `[]` is the hook's "overtaken" answer — the proposal and the file
