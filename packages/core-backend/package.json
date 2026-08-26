@@ -41,6 +41,7 @@
     "@kenjiuno/msgreader": "^1.28.0",
     "@mastra/core": "1.35.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@utcp/cli": "^1.1.1",
     "@utcp/code-mode": "^1.2.13",
     "@utcp/direct-call": "^1.1.1",
     "@utcp/http": "^1.1.7",

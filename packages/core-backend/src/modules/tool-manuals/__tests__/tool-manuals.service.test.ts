@@ -288,7 +288,7 @@ describe('ToolManualService', () => {
     const s = svc();
     expect((await s.toManualCallTemplates('user@x.eu', { remoteOnly: true })).map((t) => t.name).sort()).toEqual(['pub']);
     expect((await s.toManualCallTemplates('user@x.eu')).map((t) => t.name).sort()).toEqual(['loc', 'pub']);
-    expect(await s.listLocalOnly('user@x.eu')).toEqual([{ name: 'loc', path: 'Plugins/loc.tool' }]);
+    expect(await s.listLocalOnly('user@x.eu')).toEqual([{ slug: 'loc', name: 'loc', path: 'Plugins/loc.tool' }]);
     // The local-only manual is still browsable/editable regardless of the remote flag.
     expect((await s.listAccessible('user@x.eu')).map((m) => m.name).sort()).toEqual(['loc', 'pub']);
   });

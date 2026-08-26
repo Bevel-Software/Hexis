@@ -184,12 +184,25 @@ export async function fetchAllManuals(config: HexisMcpConfig): Promise<RawManual
   return body.manuals as RawManual[];
 }
 
+/** What this server needs to know about one local-only manual beyond its name. */
+export interface LocalManualInfo {
+  /**
+   * How the manual is ADDRESSED on the deployment's REST surface — the key for
+   * the variable-resolution route. Distinct from the manual's UTCP `name`,
+   * which is the namespace its `${VAR}` refs are keyed by; they coincide for a
+   * `.tool` file but not necessarily for every source.
+   */
+  slug: string;
+  /** The manual's declaring file in the knowledge base, e.g. `Plugins/<folder>/mcp.json`. */
+  path: string;
+}
+
 /**
- * The names of the manuals that only work locally — the ones this server exists
- * to add. Asking the deployment (rather than inferring from the two list
- * variants) keeps the definition of "local-only" in the one place that owns it.
+ * The manuals that only work locally — the ones this server exists to add.
+ * Asking the deployment (rather than inferring from the two list variants)
+ * keeps the definition of "local-only" in the one place that owns it.
  */
-export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map<string, string>> {
+export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map<string, LocalManualInfo>> {
   const body = (await getJson(`${config.baseUrl}/api/agent/tools/list_local_tools`, {
     label: 'the local-only tool list',
     method: 'POST',
@@ -208,18 +221,101 @@ export async function fetchLocalOnlyManuals(config: HexisMcpConfig): Promise<Map
     );
   }
   const tools = body.tools;
-  // name → KB path of its declaration. The path is what locates the PLUGIN a
-  // stdio server belongs to (`Plugins/<folder>/mcp.json`), which is what gets
-  // materialized locally before the server can spawn.
-  const manuals = new Map<string, string>();
+  // UTCP name → { slug, path }. The path locates the PLUGIN a stdio server
+  // belongs to (`Plugins/<folder>/mcp.json`), which is what gets materialized
+  // locally before the server can spawn; the slug addresses the manual when
+  // asking the deployment to resolve the variables it declares.
+  const manuals = new Map<string, LocalManualInfo>();
   for (const t of tools) {
     const name = (t as { name?: unknown })?.name;
     const path = (t as { path?: unknown })?.path;
+    const slug = (t as { slug?: unknown })?.slug;
     if (typeof name === 'string' && name.length > 0) {
-      manuals.set(name, typeof path === 'string' ? path : '');
+      manuals.set(name, {
+        // An older deployment predates `slug` on this listing; for a `.tool`
+        // the two are equal, so falling back to the name keeps this server
+        // working against one rather than silently resolving nothing.
+        slug: typeof slug === 'string' && slug.length > 0 ? slug : name,
+        path: typeof path === 'string' ? path : '',
+      });
     }
   }
   return manuals;
+}
+
+/** What a resolution attempt produced, and whether it actually succeeded. */
+export interface LocalToolVariables {
+  /**
+   * Whether the deployment answered. FALSE for a network blip, a refusal, or a
+   * deployment predating the route — distinct from "answered, nothing set",
+   * because only a real answer is worth caching.
+   */
+  ok: boolean;
+  values: Record<string, string>;
+}
+
+/**
+ * The variables one LOCAL manual declares, resolved by the deployment.
+ *
+ * The request names the MANUAL, never a variable: the deployment re-reads the
+ * `.tool` file and resolves exactly what that file declares, so the knowledge
+ * base is the allowlist and this process cannot widen it. What comes back is
+ * scoped to one manual's namespace and goes straight into that manual's tool
+ * invocations — see `localVariableLoader`.
+ *
+ * A failure is NOT fatal. A manual may declare variables that are simply unset,
+ * the deployment may be an older build without the route, and either way the
+ * tool should still be offered and fail with its own error message rather than
+ * being absent from the toolset. So the caller gets `ok: false` and an empty
+ * map — and, because it is `ok: false`, the caller knows not to cache it.
+ */
+export async function fetchLocalToolVariables(
+  config: HexisMcpConfig,
+  slug: string,
+): Promise<LocalToolVariables> {
+  try {
+    const body = (await getJson(
+      `${config.baseUrl}/api/agent/local-tools/${encodeURIComponent(slug)}/variables`,
+      {
+        label: `the variables for local tool "${slug}"`,
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.connectionKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+        renew: renewer(config),
+      },
+    )) as { variables?: unknown; missing?: unknown };
+    const vars = body?.variables;
+    if (!vars || typeof vars !== 'object' || Array.isArray(vars)) {
+      // A 200 whose shape we do not recognise is protocol drift, not an unset
+      // secret. Saying so is the difference between an operator debugging their
+      // vault and an operator debugging a version mismatch.
+      console.error(
+        `[hexis-mcp] the deployment answered for local tool "${slug}" without a "variables" object — ` +
+          'its secrets will not resolve. Check that the deployment is new enough to serve this route.',
+      );
+      return { ok: false, values: {} };
+    }
+    if (Array.isArray(body.missing) && body.missing.length > 0) {
+      console.error(
+        `[hexis-mcp] local tool "${slug}" has unset variables: ${body.missing.join(', ')} — ` +
+          'set them on the deployment (Secrets), or the tool will run without them.',
+      );
+    }
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(vars as Record<string, unknown>)) {
+      if (typeof v === 'string') out[k] = v;
+    }
+    return { ok: true, values: out };
+  } catch (err) {
+    console.error(
+      `[hexis-mcp] could not resolve variables for local tool "${slug}": ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { ok: false, values: {} };
+  }
 }
 
 /** A skill as the catalog lists it, and one loaded in full. Shapes mirror the KB tools. */

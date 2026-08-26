@@ -19,7 +19,22 @@
  * exported for embedding it in another process.
  */
 export { type HexisMcpConfig, type ResolvedCliConfig, ConfigError, resolveConfig, USAGE } from './config.js';
-export { DeploymentError, resolveMcpUrl, fetchAllManuals, fetchLocalOnlyManuals } from './deployment.js';
+export {
+  DeploymentError,
+  resolveMcpUrl,
+  fetchAllManuals,
+  fetchLocalOnlyManuals,
+  fetchLocalToolVariables,
+  type LocalManualInfo,
+  type LocalToolVariables,
+} from './deployment.js';
+export {
+  HexisLocalVariableLoader,
+  bindLocalVariableResolver,
+  resetLocalVariableResolver,
+  registerLocalVariableLoader,
+  localVariableLoaderConfig,
+} from './local-variables.js';
 export {
   OAuthError,
   discoverAuthServer,
