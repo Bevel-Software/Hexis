@@ -100,6 +100,18 @@ describe('POST /agent/local-tools/:slug/variables', () => {
     expect(resolve.mock.calls.map((c) => c[1])).toEqual(['git_GITHUB_TOKEN', 'git_OPTIONAL_TOKEN']);
   });
 
+  it('returns a variable named __proto__ rather than losing it to the prototype', async () => {
+    // `__proto__` is a valid `[A-Za-z0-9_]+` name. On a plain object the
+    // assignment sets the prototype, and the resolved secret vanished from the
+    // response with nothing to say it had.
+    const proto: ToolManualSummary = { ...GIT_TOOL, variables: [{ name: '__proto__', scope: 'admin' }] };
+    const { base } = await mount({ manuals: [proto], secrets: { git___proto__: 'p-secret' } });
+    const res = await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' });
+    const body = (await res.json()) as { variables: Record<string, string>; missing: string[] };
+    expect(body.variables.__proto__).toBe('p-secret');
+    expect(body.missing).toEqual([]);
+  });
+
   it('never caches a response carrying a secret', async () => {
     const { base } = await mount({ manuals: [GIT_TOOL], secrets: { git_GITHUB_TOKEN: 'x' } });
     const res = await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' });

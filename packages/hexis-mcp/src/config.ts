@@ -157,6 +157,7 @@ Options
   -v, --version  Print the version
 
 Every tool the hosted endpoint serves is available, plus the local-only tools it
-cannot reach. Credentials for local-only tools come from this process's
-environment — set them in the same MCP client config that launches this command.
+cannot reach. A local-only tool's credentials are resolved from the workspace's
+Secrets Vault (set them there, on the Secrets page), with this process's
+environment as the fallback for tools provisioned the old way.
 `;

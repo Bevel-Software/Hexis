@@ -84,6 +84,13 @@ describe('the access-frontmatter extension set', () => {
     expect(hasAccessFrontmatterExtension('x.pipeline_typo_guard')).toBe(false);
   });
 
+  it('applies nothing from a list that contains a malformed entry', () => {
+    // Validate all, then apply: a list half-applied when it throws leaves later
+    // scans governing a set nobody asked for.
+    expect(() => registerAccessFrontmatterExtensions(['.validfirst', 'broken'])).toThrow(/malformed/);
+    expect(hasAccessFrontmatterExtension('a.validfirst')).toBe(false);
+  });
+
   it('reads verbs out of a registered file kind, ignoring its other keys', () => {
     // The point of per-file access on these: they are configuration rather than
     // graph nodes, but they are exactly the files whose edits grant capability.

@@ -92,16 +92,17 @@ async function buildClient(
   // otherwise share a deployment, and the second to bind would retarget the
   // first's tools at the wrong vault.
   const bindingId = bindLocalVariableResolver(config, localOnly);
-  const clientConfig = new UtcpClientConfigSerializer().validateDict({
-    variables,
-    load_variables_from: [localVariableLoaderConfig(bindingId)],
-  });
   // The id travels with the client so shutdown can release the binding — it
   // holds this deployment's config and its cached secret VALUES, and a host
   // that creates servers over time would otherwise accumulate both. The
-  // binding is taken BEFORE the client exists, so a failure here has nothing
+  // binding is taken BEFORE anything below runs, so EVERY failure past this
+  // line — config validation included, not only client creation — has nothing
   // downstream to release it and must do so itself.
   try {
+    const clientConfig = new UtcpClientConfigSerializer().validateDict({
+      variables,
+      load_variables_from: [localVariableLoaderConfig(bindingId)],
+    });
     return { client: await CodeModeUtcpClient.create(process.cwd(), clientConfig), bindingId };
   } catch (err) {
     resetLocalVariableResolver(bindingId);

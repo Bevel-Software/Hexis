@@ -87,7 +87,11 @@ export function createDeclaredVariableRoutes(
     userId: string,
     entries: { name: string; key: string }[],
   ): Promise<{ values: Record<string, string>; missing: string[] }> {
-    const values: Record<string, string> = {};
+    // Null-prototype: a manual may legitimately declare a variable named
+    // `__proto__` (the name grammar is `[A-Za-z0-9_]+`), and on a plain object
+    // that assignment silently sets the prototype instead of a property — the
+    // secret resolves and then vanishes from the response.
+    const values: Record<string, string> = Object.create(null) as Record<string, string>;
     const missing: string[] = [];
     const resolved = await Promise.all(
       entries.map(async (e) => ({ name: e.name, value: await secretsVault.resolve(userId, e.key) })),

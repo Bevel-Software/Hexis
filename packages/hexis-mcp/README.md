@@ -49,17 +49,16 @@ This is the part worth understanding, because it decides which tools work.
 
 A UTCP tool's `${VAR}` placeholders are filled in **by whichever process holds the client**. This server registers the deployment's own MCP endpoint as a single manual, so every remote tool still *executes on the server* — and keeps resolving its variables from the Secrets Vault there. A shared API key an admin set once, or a Notion sign-in someone completed on the Connect page, keeps working exactly as it does today. Nothing pulls those values onto your machine.
 
-Local-only tools are the exception, necessarily: they run here, so their variables resolve here, from this process's environment. Put them in the `env` block of the MCP client config that launches the command:
+Local-only tools are the exception, necessarily: they run here, so their variables have to be here too. They are resolved from the **same Secrets Vault**, through one deliberately narrow route, and this is the boundary worth knowing:
 
-```json
-"env": {
-  "HEXIS_URL": "https://your-workspace.example",
-  "HEXIS_CONNECTION_KEY": "bevel_…",
-  "mytool_API_KEY": "…"
-}
-```
+- **The request names a manual, never a variable.** This process asks the workspace to resolve *what `mytool` declares*; the workspace re-reads that `.tool` file and answers with exactly those variables. The knowledge base is the allowlist, and nothing this process sends can widen it.
+- **Only `remote: false` manuals resolve here.** A remote tool's credentials are used on the server and are refused by this route — moving them onto a laptop would be a wider exposure than the tool they unlock.
+- **Values are never returned to an agent.** They are substituted into a tool invocation and go no further. An agent calls `git.push(...)`; it never sees the token that made the push work.
+- **A browser session cannot use this route.** It answers connection keys, which is what this process holds. Signed-in users in the web UI get the Secrets page, which is write-only.
 
-The name is the UTCP-namespaced form: the `id` from the `.tool` file, an underscore, then the variable it references. UTCP sanitizes the id first — every character that is not a letter, digit or underscore becomes `_`, and then every `_` is **doubled** — so a plain alphanumeric id keeps the simple shape (`mytool` + `API_KEY` → `mytool_API_KEY`), while `my-tool` or `my_tool` + `API_KEY` both become `my__tool_API_KEY`. There is no way to read a Secrets Vault value from here, and that is deliberate: a vault secret arriving on a laptop is a wider exposure than the one tool it unlocks.
+So: set a local tool's variables on the workspace's Secrets page, like any other tool's. Nothing has to be placed on each machine.
+
+The environment still works as a fallback for tools provisioned the old way. Put the value in the `env` block of the MCP client config that launches the command, under the UTCP-namespaced name — the `id` from the `.tool` file, an underscore, then the variable. UTCP sanitizes the id first: every character that is not a letter, digit or underscore becomes `_`, then every `_` is **doubled**, so `mytool` + `API_KEY` → `mytool_API_KEY`, while `my-tool` or `my_tool` + `API_KEY` both become `my__tool_API_KEY`. (Two manuals whose ids differ only in `-` versus `_` therefore share a namespace; the workspace refuses the second, and this process refuses to resolve either.)
 
 ## Options
 
@@ -80,7 +79,8 @@ Diagnostics go to **stderr** (stdout carries the protocol), and MCP clients surf
 - *"Your sign-in was rejected"* / *"could not be refreshed"* — the workspace revoked the sign-in, or it expired. Restart the command to sign in through your browser again.
 - *"This deployment is too old for browser sign-in"* — the workspace predates the sign-in exchange. Upgrade it, or pass a connection key.
 - **A local tool is missing from the list** — it registered but failed; the log names it and why. A tool whose local server is not running is the usual cause.
-- **A local tool is listed but its calls fail on credentials** — its `${VAR}` is not in this process's environment. See above; note the namespaced prefix, with `-`/`_` in the tool id becoming `__`.
+- **A local tool is listed but its calls fail on credentials** — its variable is not set on the workspace's Secrets page, and not in this process's environment either. The log names which variables came back unset. If you are using the environment fallback, note the namespaced prefix, with `-`/`_` in the tool id becoming `__`.
+- **The log says two manuals share a namespace, or have nested ones** — neither resolves until one is renamed (shared), or a variable of the shorter manual whose name starts with `_` is avoided (nested).
 - **A tool is missing entirely** — the workspace hides tools whose per-user credentials you have not set up yet, on key-authenticated sessions. Configure it on the workspace's Connect page.
 
 ## Licence

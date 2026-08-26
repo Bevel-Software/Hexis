@@ -140,12 +140,56 @@ describe('HexisLocalVariableLoader', () => {
     expect(await loader.get('deploy_TOKEN')).toBe('deploy-token');
   });
 
-  it('matches the longest namespace so one manual cannot shadow another', async () => {
-    // UTCP doubles underscores in a namespace, so `a_b` prefixes as `a__b_`
-    // while `a` prefixes as `a_`. A first-underscore split would mis-attribute.
-    stubVariables({ a: { variables: { _b_KEY: 'wrong' } }, ab: { variables: { KEY: 'right' } } });
+  it('resolves a nested-namespace key to the longer manual when only it provisions it', async () => {
+    // `a` prefixes as `a_`, `a_b` as `a__b_`; the key `a__b_KEY` matches both.
+    // With `a` provisioning nothing overlapping, `a_b`'s KEY is the only claim.
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    stubVariables({ a: { variables: { OTHER: 'x' } }, ab: { variables: { KEY: 'right' } } });
     const loader = bind(local({ a: { slug: 'a', path: 'p' }, a_b: { slug: 'ab', path: 'q' } }));
     expect(await loader.get('a__b_KEY')).toBe('right');
+    // …and the overlap is still reported, once, so the operator knows it exists.
+    await loader.get('a__b_KEY');
+    expect(errors.mock.calls.filter((c) => String(c[0]).includes('nested'))).toHaveLength(1);
+  });
+
+  it('refuses a nested-namespace key that BOTH manuals provision', async () => {
+    // Manual `a` referencing `${_b_KEY}` and manual `a_b` referencing `${KEY}`
+    // both ask this loader for `a__b_KEY`. UTCP never says which tool is
+    // asking, so resolving either way hands one manual the other's secret.
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    stubVariables({ a: { variables: { _b_KEY: 'from-a' } }, ab: { variables: { KEY: 'from-ab' } } });
+    const loader = bind(local({ a: { slug: 'a', path: 'p' }, a_b: { slug: 'ab', path: 'q' } }));
+    expect(await loader.get('a__b_KEY')).toBeNull();
+    expect(errors.mock.calls.filter((c) => String(c[0]).includes('both provision'))).toHaveLength(1);
+  });
+
+  it('will not decide a contested key on a failed fetch', async () => {
+    // "The other manual did not claim it" cannot be known from a blip, and
+    // guessing wrong hands out a secret.
+    stubVariables({ ab: { variables: { KEY: 'right' } } }); // manual `a` 404s
+    const loader = bind(local({ a: { slug: 'a', path: 'p' }, a_b: { slug: 'ab', path: 'q' } }));
+    expect(await loader.get('a__b_KEY')).toBeNull();
+  });
+
+  it('never returns a prototype property for an unset variable', async () => {
+    // `constructor` and `__proto__` are valid variable names. On a plain
+    // object an unset one would come back as a function or an object, and
+    // UTCP would substitute that into the invocation.
+    stubVariables({ git: { variables: { TOKEN: 'ghp_x' } } });
+    const loader = bind(local({ git: { slug: 'git', path: 'p' } }));
+    expect(await loader.get('git_constructor')).toBeNull();
+    expect(await loader.get('git___proto__')).toBeNull();
+    expect(await loader.get('git_hasOwnProperty')).toBeNull();
+  });
+
+  it('resolves a variable that IS named like a prototype property', async () => {
+    // Built with JSON.parse: an object LITERAL with `__proto__:` sets the
+    // prototype rather than a key, so the name would never reach the wire —
+    // the same trap this test exists to cover.
+    stubVariables({ git: { variables: JSON.parse('{"constructor":"ctor-value","__proto__":"proto-value"}') } });
+    const loader = bind(local({ git: { slug: 'git', path: 'p' } }));
+    expect(await loader.get('git_constructor')).toBe('ctor-value');
+    expect(await loader.get('git___proto__')).toBe('proto-value');
   });
 
   it('asks the deployment once per manual, not once per variable', async () => {
@@ -210,13 +254,13 @@ describe('HexisLocalVariableLoader', () => {
     await loader.get('a__b_KEY');
     await loader.get('a__b_KEY');
     await loader.get('a__b_OTHER');
-    expect(errors.mock.calls.filter((c) => String(c[0]).includes('share it'))).toHaveLength(1);
+    expect(errors.mock.calls.filter((c) => String(c[0]).includes('share one variable namespace'))).toHaveLength(1);
 
     // A SECOND binding with the same collision is a different server, and its
     // operator has not been told yet — it must say so again.
     const second = bind(local({ 'a-b': { slug: 'dash', path: 'p' }, a_b: { slug: 'under', path: 'q' } }));
     await second.get('a__b_KEY');
-    expect(errors.mock.calls.filter((c) => String(c[0]).includes('share it'))).toHaveLength(2);
+    expect(errors.mock.calls.filter((c) => String(c[0]).includes('share one variable namespace'))).toHaveLength(2);
   });
 
   it('resolves NEITHER of two manuals sharing a namespace', async () => {

@@ -169,20 +169,23 @@ const accessFrontmatterExtensions = new Set<string>(CORE_ACCESS_FRONTMATTER_EXTE
  * removing one would silently drop grants that are already enforced.
  */
 export function registerAccessFrontmatterExtensions(extensions: readonly string[]): void {
-  for (const ext of extensions) {
-    const normalized = ext.trim().toLowerCase();
-    // THROW rather than skip. These registrations decide which files' edits
-    // carry enforced access grants, so a typo (`pipeline` for `.pipeline`)
-    // would leave exactly the capability-granting files ungoverned — and a
-    // silent skip makes a failed registration indistinguishable from a
-    // successful one, at boot, where nobody is looking.
-    if (!/^\.[a-z0-9]+$/.test(normalized)) {
+  // Validate EVERYTHING first, then apply. These registrations decide which
+  // files' edits carry enforced access grants, so a typo (`pipeline` for
+  // `.pipeline`) must THROW rather than be skipped — a silent skip makes a
+  // failed registration indistinguishable from a successful one, at boot,
+  // where nobody is looking. And it must throw before the registry changes:
+  // a list that is half-applied when it throws leaves later scans governing a
+  // set nobody asked for.
+  const normalized = extensions.map((ext) => {
+    const n = ext.trim().toLowerCase();
+    if (!/^\.[a-z0-9]+$/.test(n)) {
       throw new Error(
         `access frontmatter extension "${ext}" is malformed — expected a leading dot, e.g. ".pipeline"`,
       );
     }
-    accessFrontmatterExtensions.add(normalized);
-  }
+    return n;
+  });
+  for (const n of normalized) accessFrontmatterExtensions.add(n);
 }
 
 /** Every extension currently in the set, core's plus any an overlay registered. */

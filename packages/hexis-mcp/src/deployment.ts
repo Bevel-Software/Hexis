@@ -304,7 +304,10 @@ export async function fetchLocalToolVariables(
           'set them on the deployment (Secrets), or the tool will run without them.',
       );
     }
-    const out: Record<string, string> = {};
+    // Null-prototype, so a variable named `__proto__` or `constructor` is an
+    // ordinary own property rather than a write to the prototype. A `.tool` may
+    // declare any `[A-Za-z0-9_]+` name, and those two are both valid names.
+    const out: Record<string, string> = Object.create(null) as Record<string, string>;
     for (const [k, v] of Object.entries(vars as Record<string, unknown>)) {
       if (typeof v === 'string') out[k] = v;
     }

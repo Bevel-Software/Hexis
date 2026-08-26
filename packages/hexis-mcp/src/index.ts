@@ -13,7 +13,14 @@
  * server: a `.tool` that reaches Notion or a vendor API resolves its `${VAR}`s
  * in the process holding the client, and for those tools that process remains
  * the deployment's, with its Secrets Vault and its completed OAuth sign-ins.
- * Only the local-only tools run here, on credentials from this process's env.
+ * Only the local-only tools run here. Their credentials come from the same
+ * Secrets Vault, resolved through one narrow route: the request names a
+ * MANUAL, never a variable, and the deployment answers with exactly what that
+ * manual's `.tool` declares — so the knowledge base is the allowlist and no
+ * caller can widen it. What arrives is bound to that manual's namespace and is
+ * substituted into a tool invocation; it is never returned to an agent.
+ * `process.env` remains the fallback tier underneath, so a tool provisioned
+ * the old way (in the MCP client config) keeps working.
  *
  * Normally run as a command (`npx @bevel-software/hexis-mcp`); the pieces are
  * exported for embedding it in another process.

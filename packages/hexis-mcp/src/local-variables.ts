@@ -1,7 +1,7 @@
 import { type VariableLoader, VariableLoaderSerializer, Serializer } from '@utcp/sdk';
 import { utcpNamespacePrefix } from '@bevel-software/platform-mcp-core';
 import type { HexisMcpConfig } from './config.js';
-import { fetchLocalToolVariables, type LocalManualInfo } from './deployment.js';
+import { fetchLocalToolVariables, type LocalManualInfo, type LocalToolVariables } from './deployment.js';
 
 /**
  * Resolving a LOCAL tool's `${VAR}`s from the deployment's Secrets Vault.
@@ -50,12 +50,13 @@ interface ResolverState {
   /** UTCP manual name → how the deployment addresses it. Local manuals only. */
   local: ReadonlyMap<string, LocalManualInfo>;
   cache: Map<string, { at: number; values: Record<string, string> }>;
-  inFlight: Map<string, Promise<Record<string, string>>>;
+  inFlight: Map<string, Promise<LocalToolVariables>>;
   /**
-   * Namespaces whose collision this binding has already reported. Per binding,
-   * not per process: a host that creates servers over time would otherwise
-   * grow the set forever, and a second server with the same collision would
-   * stay silent because the first had already spoken.
+   * Collisions this binding has already reported — a shared namespace, or a
+   * nested manual pair. Per binding, not per process: a host that creates
+   * servers over time would otherwise grow the set forever, and a second
+   * server with the same collision would stay silent because the first had
+   * already spoken.
    */
   reportedCollisions: Set<string>;
   now: () => number;
@@ -124,41 +125,116 @@ export function resetLocalVariableResolver(id?: string): void {
  * it wrong means handing one manual's secret to another, silently, so a tie
  * returns null and falls through to `process.env` instead.
  */
-function ownerOf(
-  effectiveKey: string,
-  state: ResolverState,
-): { manual: string; info: LocalManualInfo; varName: string } | null {
-  const { local } = state;
-  let best: { manual: string; info: LocalManualInfo; varName: string; len: number } | null = null;
-  let ambiguous: string[] = [];
+/** A manual whose namespace prefixes the key, with the variable name that implies. */
+interface Candidate {
+  manual: string;
+  info: LocalManualInfo;
+  varName: string;
+  prefixLength: number;
+}
+
+/**
+ * Every local manual whose namespace prefixes this key, longest prefix first.
+ *
+ * More than one can match. Equal-length prefixes mean two names normalized to
+ * one namespace (`a-b` and `a_b` both give `a__b_`). Nested prefixes mean one
+ * name extends another (`github` gives `github_`, `github_enterprise` gives
+ * `github__enterprise_`, and the first prefixes the second) — realistic, and
+ * fine until the shorter manual references a variable whose name starts with
+ * `_`, at which point both manuals imply the same key. UTCP asks this loader
+ * for the KEY alone, never for which tool is asking, so where two manuals both
+ * lay claim to one key there is nothing to disambiguate with.
+ */
+function candidatesFor(effectiveKey: string, local: ReadonlyMap<string, LocalManualInfo>): Candidate[] {
+  const out: Candidate[] = [];
   for (const [manual, info] of local) {
     const prefix = utcpNamespacePrefix(manual);
-    if (!effectiveKey.startsWith(prefix)) continue;
-    if (!best || prefix.length > best.len) {
-      best = { manual, info, varName: effectiveKey.slice(prefix.length), len: prefix.length };
-      ambiguous = [manual];
-    } else if (prefix.length === best.len) {
-      ambiguous.push(manual);
+    if (effectiveKey.startsWith(prefix)) {
+      out.push({ manual, info, varName: effectiveKey.slice(prefix.length), prefixLength: prefix.length });
     }
   }
-  if (!best) return null;
-  if (ambiguous.length > 1) {
-    // Once per colliding namespace, not once per lookup. A single tool call
-    // substitutes several `${VAR}`s, and every call repeats them, so logging
-    // per lookup floods stderr with the same line and buries whatever else the
-    // server is trying to say.
-    const namespace = effectiveKey.slice(0, effectiveKey.length - best.varName.length);
-    if (!state.reportedCollisions.has(namespace)) {
-      state.reportedCollisions.add(namespace);
-      console.error(
-        `[hexis-mcp] refusing to resolve the namespace "${namespace}": the manuals ${ambiguous
-          .map((m) => `"${m}"`)
-          .join(' and ')} share it. Rename one — until then neither resolves.`,
-      );
-    }
+  return out.sort((a, b) => b.prefixLength - a.prefixLength);
+}
+
+/**
+ * Once per COLLISION, not once per lookup. A tool call substitutes several
+ * variables at a time and every call repeats them; the thing an operator needs
+ * to hear once is that two manuals collide, not each key that hit it.
+ */
+function reportOnce(state: ResolverState, collision: string, message: string): void {
+  if (state.reportedCollisions.has(collision)) return;
+  state.reportedCollisions.add(collision);
+  console.error(`[hexis-mcp] ${message}`);
+}
+
+/** An OWN string property — never a prototype property like `constructor`. */
+function ownString(values: Record<string, string>, name: string): string | null {
+  return Object.prototype.hasOwnProperty.call(values, name) && typeof values[name] === 'string' ? values[name] : null;
+}
+
+/**
+ * Resolve one key against the local manuals, or null.
+ *
+ * Refuses whenever more than one manual could be the one asking:
+ *
+ * - Equal-length prefixes: two names, one namespace. Nothing distinguishes the
+ *   tools, so neither resolves — regardless of what either has provisioned,
+ *   because the tool that did NOT provision the name would otherwise receive
+ *   the other's secret.
+ * - Nested prefixes: the longer manual wins ONLY when the shorter one has not
+ *   provisioned the overlapping name. If both have, both are laying claim to
+ *   one key and neither resolves. The overlap itself is reported once either
+ *   way, so an operator learns that `github` and `github_enterprise` can
+ *   collide before a variable starting with `_` makes them.
+ *
+ * A candidate whose fetch failed is treated as unknown: with rivals present the
+ * answer is null, because "the other manual did not claim it" cannot be known
+ * from a blip, and guessing wrong hands out a secret.
+ */
+async function resolve(state: ResolverState, effectiveKey: string): Promise<string | null> {
+  const candidates = candidatesFor(effectiveKey, state.local);
+  if (candidates.length === 0) return null;
+
+  const fetched = await Promise.all(
+    candidates.map(async (c) => ({ c, ...(await variablesFor(state, c.manual, c.info)) })),
+  );
+  if (candidates.length > 1 && fetched.some((f) => !f.ok)) return null;
+
+  const claims = fetched.filter((f) => ownString(f.values, f.c.varName) !== null);
+  const longest = candidates[0].prefixLength;
+  const equalLongest = candidates.filter((c) => c.prefixLength === longest);
+
+  if (equalLongest.length > 1) {
+    reportOnce(
+      state,
+      effectiveKey.slice(0, longest),
+      `refusing to resolve the namespace "${effectiveKey.slice(0, longest)}": the manuals ${equalLongest.map((c) => `"${c.manual}"`).join(' and ')} ` +
+        'share one variable namespace. Rename one — until then neither resolves.',
+    );
     return null;
   }
-  return { manual: best.manual, info: best.info, varName: best.varName };
+
+  if (candidates.length > 1) {
+    const names = candidates.map((c) => `"${c.manual}"`).join(' and ');
+    const pair = candidates.map((c) => c.manual).join('|');
+    if (claims.length > 1) {
+      reportOnce(
+        state,
+        `${pair}|${effectiveKey}`,
+        `refusing to resolve "${effectiveKey}": the manuals ${names} both provision it (one manual's namespace ` +
+          'prefixes the other, and a variable name starting with `_` makes them collide). Rename one.',
+      );
+      return null;
+    }
+    reportOnce(
+      state,
+      pair,
+      `the manuals ${names} have nested variable namespaces; keys like "${effectiveKey}" resolve to the longer one. ` +
+        'A variable of the shorter manual whose name starts with `_` would collide — avoid such names.',
+    );
+  }
+
+  return claims.length === 1 ? ownString(claims[0].values, claims[0].c.varName) : null;
 }
 
 
@@ -171,9 +247,9 @@ function ownerOf(
  * the tool silently running without them rather than retrying on the next
  * substitution. So only a successful fetch is stored; a failure is retried.
  */
-async function variablesFor(s: ResolverState, manual: string, info: LocalManualInfo): Promise<Record<string, string>> {
+async function variablesFor(s: ResolverState, manual: string, info: LocalManualInfo): Promise<LocalToolVariables> {
   const cached = s.cache.get(manual);
-  if (cached && s.now() - cached.at < CACHE_TTL_MS) return cached.values;
+  if (cached && s.now() - cached.at < CACHE_TTL_MS) return { ok: true, values: cached.values };
 
   // A tool call substitutes several variables at once; without this every one
   // of them would open its own request for the same manual.
@@ -183,7 +259,7 @@ async function variablesFor(s: ResolverState, manual: string, info: LocalManualI
   const request = fetchLocalToolVariables(s.config, info.slug)
     .then((result) => {
       if (result.ok) s.cache.set(manual, { at: s.now(), values: result.values });
-      return result.values;
+      return result;
     })
     .finally(() => s.inFlight.delete(manual));
   s.inFlight.set(manual, request);
@@ -210,11 +286,8 @@ export class HexisLocalVariableLoader implements VariableLoader {
   async get(effectiveKey: string): Promise<string | null> {
     const state = bindings.get(this.binding_id);
     if (!state) return null;
-    const owner = ownerOf(effectiveKey, state);
-    if (!owner) return null;
     try {
-      const values = await variablesFor(state, owner.manual, owner.info);
-      return values[owner.varName] ?? null;
+      return await resolve(state, effectiveKey);
     } catch {
       // `fetchLocalToolVariables` already logs; an unresolved variable falls
       // through to `process.env` rather than failing the call outright.
