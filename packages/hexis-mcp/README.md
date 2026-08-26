@@ -54,7 +54,7 @@ Local-only tools are the exception, necessarily: they run here, so their variabl
 - **The request names a manual, never a variable.** This process asks the workspace to resolve *what `mytool` declares*; the workspace re-reads that `.tool` file and answers with exactly those variables. The knowledge base is the allowlist, and nothing this process sends can widen it.
 - **Only `remote: false` manuals resolve here.** A remote tool's credentials are used on the server and are refused by this route — moving them onto a laptop would be a wider exposure than the tool they unlock.
 - **Values are never returned to an agent.** They are substituted into a tool invocation and go no further. An agent calls `git.push(...)`; it never sees the token that made the push work.
-- **A browser session cannot use this route.** It answers connection keys, which is what this process holds. Signed-in users in the web UI get the Secrets page, which is write-only.
+- **A browser session cannot use this route.** It answers the machine credential this process holds — a connection key, or the internal token a browser sign-in exchanges for — and refuses a web-UI session outright. Signed-in users in the web UI get the Secrets page, which is write-only. Both ways of running this command can therefore resolve a local tool's variables; neither lets a person read one back.
 
 So: set a local tool's variables on the workspace's Secrets page, like any other tool's. Nothing has to be placed on each machine.
 
