@@ -1896,6 +1896,10 @@ export class WorkflowService implements IWorkflowService {
         fresh: true,
         workspaceId,
         viewerEmail: user.email,
+        // Only `files[].path` is read below; a patch per file would be one
+        // git subprocess each, generated for nothing, on every reject by a
+        // non-author.
+        patches: false,
       });
       const paths = detail?.files.map((f) => f.path) ?? [];
       if (paths.length > 0) {

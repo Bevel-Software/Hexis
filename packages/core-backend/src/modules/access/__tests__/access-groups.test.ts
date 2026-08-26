@@ -227,6 +227,34 @@ describe('group files as access principals', () => {
     expect([...manual.groups.keys()]).toEqual(['live team']);
   });
 
+  it('an UNREADABLE groups file fails the read closed instead of marking groups broken', async () => {
+    // At-ref reads throw AccessUnreadableError when git itself failed — the
+    // file is neither absent nor malformed, it is unknown. Converting that
+    // into a broken-groups marker would build (and cache) a model with no
+    // groups for the commit, so every group-based verdict would be wrong on
+    // the strength of a flaky subprocess. roles.yaml and access.md fail the
+    // build closed on the same error; groups must too.
+    const { loadActiveGroups } = await import('../access-control.service.js');
+    const { AccessUnreadableError } = await import('../../access-model/access-errors.js');
+    const unreadable = (f: string) => new AccessUnreadableError('test', f);
+    await expect(
+      loadActiveGroups(async (f) => {
+        if (f === 'synced-groups.yaml') throw unreadable(f);
+        return 'groups:\n  Live Team:\n    - here@x.io\n';
+      }),
+    ).rejects.toBeInstanceOf(AccessUnreadableError);
+    await expect(
+      loadActiveGroups(async (f) => {
+        if (f === 'synced-groups.yaml') {
+          const err = new Error('ENOENT') as NodeJS.ErrnoException;
+          err.code = 'ENOENT';
+          throw err;
+        }
+        throw unreadable(f); // groups.yaml unreadable
+      }),
+    ).rejects.toBeInstanceOf(AccessUnreadableError);
+  });
+
   it('a malformed synced file keeps IdP mode (no fallback to manual groups)', async () => {
     const svc = await makeService({
       'roles.yaml': ROLES_YAML,
