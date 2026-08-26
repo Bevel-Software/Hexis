@@ -60,7 +60,11 @@ describe('cli `.tool` manuals — parsed and listed, never executed', () => {
     // And a client built in this process refuses it rather than shelling out.
     const client = await UtcpClient.create(process.cwd(), { variables: {} } as never);
     try {
-      await expect(client.registerManual(template)).rejects.toThrow();
+      // The reason, not any reason: a shape or URL error would also reject,
+      // and would leave the guarantee this test exists for unverified.
+      await expect(client.registerManual(template)).rejects.toThrow(
+        /No communication protocol registered for type: 'cli'/,
+      );
     } finally {
       // Closing releases the client's communication protocols and their
       // transports; left open they outlive the test for the whole run.
@@ -80,6 +84,17 @@ describe('cli `.tool` manuals — parsed and listed, never executed', () => {
       }),
     ).not.toThrow();
     expect(CommunicationProtocol.communicationProtocols.http).toBeDefined();
+  });
+
+  test('a cyclic document is examined, not blown up on', () => {
+    // A YAML self-alias really does produce a cyclic object. The backstop must
+    // still find the cli template beside the cycle rather than overflow.
+    const cyclic: Record<string, unknown> = { tools: [{ tool_call_template: { call_template_type: 'cli' } }] };
+    cyclic.self = cyclic;
+    expect(containsCliCallTemplate(cyclic)).toBe(true);
+    const benign: Record<string, unknown> = { a: { call_template_type: 'http' } };
+    benign.self = benign;
+    expect(containsCliCallTemplate(benign)).toBe(false);
   });
 
   test('a cli call template is found wherever it is nested', () => {

@@ -50,6 +50,18 @@ describe('the access-frontmatter extension set', () => {
     expect(hasAccessFrontmatterExtension('Plugins/E/access.md')).toBe(true);
   });
 
+  it('is case-sensitive on the path, as it always was', () => {
+    // Which files are governed must not change because the set became
+    // registrable. An uppercase extension was never a node and still is not.
+    expect(hasAccessFrontmatterExtension('Data/E/Knowledge/T.MD')).toBe(false);
+    expect(hasAccessFrontmatterExtension('Plugins/E/tools/github.TOOL')).toBe(false);
+    // Registration itself normalizes, so a mixed-case REGISTRATION governs the
+    // lowercase files it meant.
+    registerAccessFrontmatterExtensions(['.CaseKind']);
+    expect(hasAccessFrontmatterExtension('Overlay/x.casekind')).toBe(true);
+    expect(hasAccessFrontmatterExtension('Overlay/x.CaseKind')).toBe(false);
+  });
+
   it('covers nothing an overlay has not registered', () => {
     // The grammar is core's; the file kinds are not necessarily.
     expect(hasAccessFrontmatterExtension('Some/File.neverregistered')).toBe(false);

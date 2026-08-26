@@ -315,12 +315,20 @@ class HexisLocalVariableLoaderSerializer extends Serializer<VariableLoader> {
  * directly — it has to be rebuilt from a plain descriptor.
  */
 export function registerLocalVariableLoader(): void {
+  // Once. The registry is process-global while clients are per server, and
+  // this module explicitly supports several servers in one process; the live
+  // per-server state is isolated through `binding_id`, so re-registering the
+  // TYPE per client does nothing but churn a global.
+  if (loaderRegistered) return;
   VariableLoaderSerializer.registerVariableLoader(
     HEXIS_LOCAL_LOADER_TYPE,
     new HexisLocalVariableLoaderSerializer(),
     true,
   );
+  loaderRegistered = true;
 }
+
+let loaderRegistered = false;
 
 /** The descriptor to put in a client config's `load_variables_from`. */
 export function localVariableLoaderConfig(bindingId: string): Record<string, unknown> {

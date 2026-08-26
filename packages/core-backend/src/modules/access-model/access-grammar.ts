@@ -193,11 +193,19 @@ export function accessFrontmatterExtensionList(): string[] {
   return [...accessFrontmatterExtensions];
 }
 
-/** True when `p` is a file the resolver reads access frontmatter from. */
+/**
+ * True when `p` is a file the resolver reads access frontmatter from.
+ *
+ * Case-SENSITIVE on the path, as it always was: `doc.MD` is not a node and
+ * carries no enforced grant. Registered extensions are normalized to lowercase
+ * so `.Pipeline` and `.pipeline` register the same thing, but which FILES are
+ * governed must not change because the set became registrable — widening it to
+ * `X.MD` silently in a release would be an access-model change nobody asked
+ * for, made in a refactor.
+ */
 export function hasAccessFrontmatterExtension(p: string): boolean {
-  const lower = p.toLowerCase();
   for (const ext of accessFrontmatterExtensions) {
-    if (lower.endsWith(ext)) return true;
+    if (p.endsWith(ext)) return true;
   }
   return false;
 }
