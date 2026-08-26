@@ -244,7 +244,22 @@ function renderPage(
   gitValue: GitContextValue = git,
 ) {
   libraryMock.value = { ...libraryValue(owned, crs, mine), ...library };
-  return render(
+  return render(harness(bus, gitValue, routerState, pageProps));
+}
+
+/**
+ * The provider tree `renderPage` mounts, as a value — so a test can hand the
+ * SAME tree back to `rerender` with a different git state and watch the page
+ * react WITHOUT remounting it. Remounting would reset the very state
+ * (`historyOpen`) those tests are about, and pass whatever the page did.
+ */
+function harness(
+  bus: EventBusContextValue,
+  gitValue: GitContextValue,
+  routerState?: Record<string, unknown>,
+  pageProps?: { provisional?: boolean },
+) {
+  return (
     <MemoryRouter
       initialEntries={[
         { pathname: '/skills-and-tools/skills/newsletter', state: routerState ?? null },
@@ -269,7 +284,7 @@ function renderPage(
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
 }
 
@@ -1198,6 +1213,30 @@ describe('SkillPage: deciding on a change', () => {
       // It comes back the moment the draft is gone.
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
       expect(await screen.findByRole('button', { name: 'More actions' })).toBeInTheDocument();
+    });
+
+    /**
+     * `availability` is re-derived from a POLLED status call, so one failed
+     * poll flips it to `error` and the next good one flips it back. If the
+     * open flag survived that, the log would reappear over the file minutes
+     * after the reader had gone back to reading.
+     */
+    it('closes for good when git stops answering mid-read', async () => {
+      const bus = makeFakeBus();
+      const { rerender } = renderPage(false, [], [], bus);
+      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Version history' }));
+      await screen.findByText(/^Timeline:/);
+
+      // A poll fails: the log goes away, and so does its trigger.
+      rerender(harness(bus, { ...git, availability: 'error' } as GitContextValue));
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+
+      // The next poll succeeds. The file is still what is on screen.
+      rerender(harness(bus, git));
+      expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+      expect(screen.getByRole('button', { name: 'More actions' })).toBeInTheDocument();
     });
 
     it('has no trigger at all when git cannot answer', async () => {

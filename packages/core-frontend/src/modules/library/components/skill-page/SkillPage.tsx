@@ -277,6 +277,13 @@ export function SkillPage({
     setHistoryKey(fileRepoPath);
     if (historyOpen) setHistoryOpen(false);
   }
+  // Losing the log CLOSES it, rather than parking it behind a flag. Git
+  // availability is re-derived from a polled status call, so a single failed
+  // poll flips it to `error` — which takes the panel off screen — and the next
+  // successful one flips it back. Left open, that second poll would put the
+  // log back over the file minutes after the reader returned to reading. Once
+  // it is gone they ask for it again, which is one click.
+  if (historyOpen && !historyAvailable) setHistoryOpen(false);
   const viewingHistory = historyAvailable && historyOpen;
   /**
    * Change requests a merge attempt has REFUSED as unmergeable. Git is the only
