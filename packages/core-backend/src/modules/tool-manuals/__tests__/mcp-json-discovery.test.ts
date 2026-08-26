@@ -188,6 +188,39 @@ describe('descriptorsFromMcpJson', () => {
     expect(out[0]?.variables?.[0]?.oauth?.clientId).toBe('c-1');
   });
 
+  it('accepts a client-id-only sign-in (endpoints discovered later), refuses half a pair, carries pkce/resource', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const declare = (oauth: unknown) =>
+      descriptorsFromMcpJson(
+        'GTM',
+        JSON.stringify({ mcpServers: { vendor: { type: 'streamable-http', url: 'https://v.example/mcp' } } }),
+        JSON.stringify({
+          name: 'gtm',
+          extensions: {
+            'software.bevel.hexis': { mcpServers: { vendor: { variables: [{ name: 'T', scope: 'user', oauth }] } } },
+          },
+        }),
+      )[0]?.variables?.[0]?.oauth;
+    // An MCP server publishes its endpoints — the client id alone is a complete declaration here.
+    expect(declare({ clientId: 'c' })).toEqual({ clientId: 'c' });
+    // …but half a pair is a broken declaration, not a discoverable one.
+    expect(declare({ clientId: 'c', authorizationUrl: 'https://v.example/auth' })).toBeUndefined();
+    expect(declare({ clientId: 'c', tokenUrl: 'https://v.example/token' })).toBeUndefined();
+    // An emptied editor field reads as absent, not as a malformed URL.
+    expect(declare({ clientId: 'c', authorizationUrl: '', tokenUrl: ' ' })).toEqual({ clientId: 'c' });
+    // PKCE is on by default: only the opt-out is stored, and it must be a boolean.
+    expect(declare({ clientId: 'c', pkce: true })).toEqual({ clientId: 'c' });
+    expect(declare({ clientId: 'c', pkce: false })).toEqual({ clientId: 'c', pkce: false });
+    expect(declare({ clientId: 'c', pkce: 'no' })).toBeUndefined();
+    // The resource indicator names the remote server — same https/SSRF bar as the endpoints.
+    expect(declare({ clientId: 'c', resource: 'https://v.example/mcp' })).toEqual({
+      clientId: 'c',
+      resource: 'https://v.example/mcp',
+    });
+    expect(declare({ clientId: 'c', resource: 'http://v.example/mcp' })).toBeUndefined();
+    expect(declare({ clientId: 'c', resource: 'https://169.254.169.254/mcp' })).toBeUndefined();
+  });
+
   it('yields nothing for an unparsable file, quietly for an absent extensions block', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(descriptorsFromMcpJson('GTM', '{ not json', null)).toEqual([]);

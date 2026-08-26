@@ -209,7 +209,8 @@ export class McpServerEditService {
       throw new McpServerEditError(
         'The `variables` declaration is malformed — each entry needs a unique, non-reserved ' +
           'alphanumeric/underscore name, a scope of `admin` or `user`, and any `oauth` block must sit ' +
-          'on a `user`-scoped variable with valid https provider URLs and a client id.',
+          'on a `user`-scoped variable with a client id; its provider URLs are optional (discovered from ' +
+          'the server) but must be valid https URLs, both or neither, when given.',
         422,
       );
     }
