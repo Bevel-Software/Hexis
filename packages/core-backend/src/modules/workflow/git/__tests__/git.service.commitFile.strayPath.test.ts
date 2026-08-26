@@ -133,7 +133,9 @@ describe('GitService.commitFile with bytes beside the repository', () => {
   it('does not mistake an unreadable stray for an absent one', async () => {
     // Only ENOENT means "nothing there". Any other stat failure must surface,
     // or a stray the process cannot read is silently reported as committed.
-    if (process.getuid?.() === 0) return; // root ignores mode bits; nothing to prove here
+    // root ignores mode bits, and Windows has none to set (`chmod` there only
+    // toggles read-only, so the stat below still succeeds): nothing to prove.
+    if (process.getuid?.() === 0 || process.platform === 'win32') return;
     const { workspaceDir } = await seedWorkspace(root, workspaceId);
     const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), new WorkflowHooks(), KB);
     const strayDir = path.join(workspaceDir, 'KnowledgeBase');
