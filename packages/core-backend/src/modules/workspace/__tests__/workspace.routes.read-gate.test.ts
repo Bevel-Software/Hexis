@@ -47,6 +47,10 @@ async function makeHarness(opts: {
   allowFn?: (p: string) => boolean;
   /** Whether the caller is an admin — only `.bevelignore`'s visibility uses it. */
   isAdmin?: boolean;
+  /** Repo-relative paths the branch's history reports as recently changed. */
+  recentPaths?: string[];
+  /** Make the history read fail, the way an unreadable or absent repo would. */
+  recentThrows?: boolean;
 } = {}): Promise<Harness> {
   const allowP = opts.allowFn ?? allow;
   const canRead = vi.fn(async (_w: string, _e: string, p: string) => allowP(p));
@@ -89,7 +93,12 @@ async function makeHarness(opts: {
     createWorkspaceRoutes(
       workspaceService,
       authService,
-      {} as unknown as IWorkflowService,
+      {
+        listRecentlyChangedPaths: async () => {
+          if (opts.recentThrows) throw new Error('no such repository');
+          return opts.recentPaths ?? [];
+        },
+      } as unknown as IWorkflowService,
       {} as unknown as WorkflowEventBus,
       accessControl,
       KB,
@@ -333,5 +342,101 @@ describe('.bevelignore is admin-only in the file tree', () => {
   it('does not hide files whose name only contains it', async () => {
     const verdict = await (await treeFilter(false))([`${KB}/Knowledge/.bevelignore.md`]);
     expect(verdict.get(`${KB}/Knowledge/.bevelignore.md`)).toBe(true);
+  });
+});
+
+/**
+ * GET /recent-pages — where to start, for a reader with nothing open.
+ *
+ * It answers from the branch's history, which knows nothing about who is
+ * asking. Everything that keeps that honest is in this route: the read filter
+ * that must never be widened by recency, and the shape/scope rules that decide
+ * what counts as a page worth offering.
+ */
+describe('GET /recent-pages', () => {
+  let h: Harness | null = null;
+  afterEach(async () => { if (h) await close(h.server); h = null; });
+
+  const recent = async (limit?: number) => {
+    const qs = limit === undefined ? '' : `?limit=${limit}`;
+    const res = await fetch(`${h!.baseUrl}/api/workspace/${WS}/recent-pages${qs}`);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { pages: { relativePath: string }[] }).pages.map(
+      (p) => p.relativePath,
+    );
+  };
+
+  it('offers the recently changed pages, newest first', async () => {
+    h = await makeHarness({
+      recentPaths: ['KnowledgeBase/GTM/Pricing.md', 'KnowledgeBase/Legal/NDA.md'],
+    });
+    expect(await recent()).toEqual([
+      `${KB}/KnowledgeBase/GTM/Pricing.md`,
+      `${KB}/KnowledgeBase/Legal/NDA.md`,
+    ]);
+  });
+
+  it('never offers a page the reader cannot open', async () => {
+    // The whole risk this route carries: history is blind to permissions, so a
+    // recently edited page in a folder this reader was never given must not
+    // become discoverable just because someone else touched it.
+    h = await makeHarness({
+      recentPaths: ['KnowledgeBase/Secret/Layoffs.md', 'KnowledgeBase/GTM/Pricing.md'],
+    });
+    expect(await recent()).toEqual([`${KB}/KnowledgeBase/GTM/Pricing.md`]);
+  });
+
+  it('offers no access file, however recently it changed', async () => {
+    // Editing permissions is one of the most common commits in a knowledge
+    // base, so without this the recency answer degrades into the same list of
+    // access files the tree walk used to produce.
+    h = await makeHarness({
+      recentPaths: [
+        'KnowledgeBase/GTM/access.md',
+        'access.md',
+        'KnowledgeBase/GTM/Pricing.md',
+      ],
+    });
+    expect(await recent()).toEqual([`${KB}/KnowledgeBase/GTM/Pricing.md`]);
+  });
+
+  it('offers only pages, from only the folders Knowledge browses', async () => {
+    h = await makeHarness({
+      recentPaths: [
+        'Plugins/team-a/skills/deploy/SKILL.md', // Skills & Tools storage
+        'Agents/reviewer.agent',                 // execution layer, not prose
+        'Pipelines/nightly.pipeline',
+        'Data/runs/2026-08-01/output.md',        // agent records, not pages
+        'roles.yaml',                            // deployment config
+        'README.md',                             // loose at the repo root
+        'KnowledgeBase/GTM/logo.png',            // not a document
+        'KnowledgeBase/GTM/.notes/draft.md',     // repository bookkeeping
+        'Legal/Contracts/NDA.md',                // a stray content folder counts
+      ],
+    });
+    expect(await recent()).toEqual([`${KB}/Legal/Contracts/NDA.md`]);
+  });
+
+  it('honours the limit, and caps it', async () => {
+    const many = Array.from({ length: 40 }, (_, i) => `KnowledgeBase/GTM/p${i}.md`);
+    h = await makeHarness({ recentPaths: many });
+    expect(await recent(2)).toEqual([
+      `${KB}/KnowledgeBase/GTM/p0.md`,
+      `${KB}/KnowledgeBase/GTM/p1.md`,
+    ]);
+    expect((await recent(999)).length).toBe(20);
+  });
+
+  it('says nothing rather than failing when the history cannot be read', async () => {
+    // Somewhere to start is an invitation, not the page itself: the frontend
+    // falls back to walking the tree, which beats an error where the
+    // invitation should be. `recent()` asserts the 200 on the way through.
+    h = await makeHarness({ recentThrows: true });
+    expect(await recent()).toEqual([]);
+  });
+
+  it('says nothing on a branch with no history yet', async () => {
+    h = await makeHarness({ recentPaths: [] });
+    expect(await recent()).toEqual([]);
   });
 });

@@ -119,6 +119,16 @@ export interface IWorkflowService {
    * `.gitignore`). Returns only paths.
    */
   listPendingChangePaths(workspaceId: string): Promise<string[]>;
+  /**
+   * Repo-relative paths touched by the most recent commits on the workspace's
+   * branch, newest first, deduped, deletions excluded. Recency for surfaces
+   * that offer a reader somewhere to start; carries NO access filtering, so a
+   * caller serving it to a user must apply its own read filter.
+   */
+  listRecentlyChangedPaths(
+    workspaceId: string,
+    opts?: { commits?: number; limit?: number },
+  ): Promise<string[]>;
   // `listWorkingChanges` + `diffFileInWorking` removed: under save=share the
   // working tree is never dirty, so both report the empty state by
   // definition. Cross-branch / per-commit diff cases are covered by

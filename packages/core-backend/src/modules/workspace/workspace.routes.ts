@@ -12,6 +12,7 @@ import {
   KNOWLEDGE_DIR,
   PIPELINES_DIR,
   PLUGINS_DIR,
+  isAccessMdPath,
 } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
@@ -26,6 +27,42 @@ import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
+
+/** Documents, as opposed to the data, config and archives beside them. */
+const READABLE_PAGE = /\.(md|markdown)$/i;
+
+/**
+ * The roots that are NOT browsable knowledge: `Plugins/` is the Skills & Tools
+ * app's storage, and the execution-layer roots hold `.agent` / `.pipeline`
+ * configuration and agent-produced records rather than prose. Mirrors the
+ * scoping the explorer and the empty state's tree walk already apply, so the
+ * three surfaces offer the same set.
+ */
+const NON_BROWSABLE_ROOTS = new Set([PLUGINS_DIR, DATA_DIR, AGENTS_DIR, PIPELINES_DIR]);
+
+/**
+ * Is this repo-relative path a page a reader would want offered to them?
+ *
+ * Markdown, inside the knowledge area, not the repository's own bookkeeping,
+ * and never an `access.md` — the access file is markdown and it is readable,
+ * but it declares who may open the folder rather than saying anything, and it
+ * exists in EVERY folder, so anything that picks pages by extension picks the
+ * access files first and the pages never.
+ *
+ * Purely about what is worth reading. Whether this particular caller may read
+ * it is a separate question, answered by the read filter.
+ */
+function isBrowsableKnowledgePage(repoRelPath: string): boolean {
+  if (!READABLE_PAGE.test(repoRelPath)) return false;
+  if (isAccessMdPath(repoRelPath)) return false;
+  const segments = repoRelPath.split('/');
+  // A loose file at the repo root configures the deployment; a page lives in a
+  // folder.
+  if (segments.length < 2) return false;
+  if (segments.some((seg) => seg.startsWith('.'))) return false;
+  const root = segments[0];
+  return root === KNOWLEDGE_BASE_DIR || !NON_BROWSABLE_ROOTS.has(root);
+}
 
 /**
  * Workspaces are per-branch (PLAN §3). Any authenticated user can access
@@ -325,6 +362,72 @@ export function createWorkspaceRoutes(
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: msg });
+    }
+  });
+
+  /**
+   * Where to start reading, for someone with nothing open: the pages the team
+   * touched most recently, newest first, that this caller is allowed to read.
+   *
+   * Recency comes from the branch's own history, which is the only place that
+   * knows it — the file tree carries no timestamps, and picking by position in
+   * the tree instead answers a different question badly (the shallowest
+   * markdown in a folder is its `access.md`, never a page).
+   *
+   * Three filters, in order of what they protect:
+   *   - SHAPE: markdown only, and never an `access.md`. Both are about what a
+   *     reader wants; neither is a permission decision.
+   *   - SCOPE: the same area the explorer browses under Knowledge —
+   *     `KnowledgeBase/` plus any stray content folder. `Plugins/` belongs to
+   *     Skills & Tools, the execution-layer roots are not prose, and the loose
+   *     root files configure the deployment.
+   *   - READ: `buildTreeReadFilter`, the SAME verdict the file tree is built
+   *     with. Recency must never widen what a reader can see: a page they
+   *     cannot open is not a page we offer, however recently it changed.
+   *
+   * An empty array is a legitimate answer (a branch with no history yet, or
+   * one whose recent work is all outside what this reader can open); the
+   * frontend falls back to walking the tree rather than showing nothing.
+   */
+  router.get('/workspace/:id/recent-pages', async (req, res) => {
+    const id = authenticated(req, res);
+    if (id === null) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const rawLimit = Number.parseInt(String(req.query.limit ?? '4'), 10);
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(rawLimit, 20)) : 4;
+    try {
+      // Ask for more than `limit`: the filters below can drop most of a
+      // candidate list (a commit that touched nothing but plugins, or a folder
+      // this reader cannot open), and re-querying git per shortfall would turn
+      // one cheap log into a loop.
+      const recent = await workflowService.listRecentlyChangedPaths(id, { limit: 400 });
+      // Slack, not the whole list: the read check is the expensive step (a
+      // batched resolve per directory, plus each page's own frontmatter), and
+      // it is pointless to price 400 candidates for an offer of four. A reader
+      // who cannot open even a tenth of recent work is one the tree-walk
+      // fallback serves anyway.
+      const wsPaths = recent
+        .filter(isBrowsableKnowledgePage)
+        .slice(0, limit * 10)
+        .map((rel) => `${kbDirName}/${rel}`);
+      const readable = await buildTreeReadFilter(id, user.email)(wsPaths);
+      const pages = wsPaths
+        .filter((wp) => readable.get(wp) === true)
+        .slice(0, limit)
+        .map((wp) => ({
+          name: wp.slice(wp.lastIndexOf('/') + 1),
+          relativePath: wp,
+          type: 'file' as const,
+        }));
+      res.json({ pages });
+    } catch (error) {
+      // Somewhere to start is a convenience, not the page itself. A history
+      // read that fails leaves the reader with the file tree and the tree-walk
+      // fallback, which is strictly better than an error where an invitation
+      // should be.
+      console.warn(`[workspace] recent-pages failed for ${id}:`, error);
+      res.json({ pages: [] });
     }
   });
 

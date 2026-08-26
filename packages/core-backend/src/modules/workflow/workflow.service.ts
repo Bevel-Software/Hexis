@@ -442,6 +442,13 @@ export class WorkflowService implements IWorkflowService {
     return this.git.pendingChanges(workspaceId);
   }
 
+  listRecentlyChangedPaths(
+    workspaceId: string,
+    opts?: { commits?: number; limit?: number },
+  ): Promise<string[]> {
+    return this.git.recentlyChangedPaths(workspaceId, opts);
+  }
+
   // `listWorkingChanges` + `diffFileInWorking` removed: working-tree dirty
   // state isn't a meaningful surface under save=share.
 

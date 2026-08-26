@@ -1436,6 +1436,71 @@ export class GitService implements IGitService {
     return [...set];
   }
 
+  /**
+   * Repo-relative paths touched by the most recent commits on the checked-out
+   * branch, newest first, each listed once. The recency signal behind "what
+   * should I read?" — a knowledge base answers that with what the team has
+   * been working on, which is a question only its history can answer.
+   *
+   * `--diff-filter=d` drops the deletions, and the surviving candidates are
+   * intersected with the index, because a file modified in one commit and
+   * deleted in a later one would otherwise still be listed by the earlier
+   * commit. Merge commits show no diff by default and so contribute nothing,
+   * which is what we want: a merge republishes work its own commits already
+   * reported.
+   *
+   * `core.quotePath=false` keeps non-ASCII names (a KB is full of them) as
+   * literal UTF-8 rather than `"\303\251"` escapes that would match no file.
+   *
+   * `commits` bounds the scan, not the result — a bulk import of 3000 files in
+   * one commit fills the answer from that commit alone, which is honest: it IS
+   * the most recent work. The caller slices to what it can show.
+   */
+  async recentlyChangedPaths(
+    workspaceId: string,
+    opts: { commits?: number; limit?: number } = {},
+  ): Promise<string[]> {
+    const commits = Math.max(1, Math.min(opts.commits ?? 100, 1000));
+    const limit = Math.max(1, Math.min(opts.limit ?? 200, 2000));
+    const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () => {
+      // A branch with no commits yet makes `log HEAD` fail on an unknown
+      // revision. That is an empty answer, not a fault: a knowledge base
+      // nobody has written to has no recent work to report.
+      const { stdout } = await this.git(cwd, [
+        '-c', 'core.quotePath=false',
+        'log', `-n${commits}`, '-M', '--diff-filter=d',
+        '--name-only', '--pretty=format:', 'HEAD',
+      ]).catch(() => ({ stdout: '' }) as { stdout: string });
+
+      const ordered: string[] = [];
+      const seen = new Set<string>();
+      for (const line of stdout.split('\n')) {
+        const p = line.trim();
+        if (!p || seen.has(p)) continue;
+        seen.add(p);
+        ordered.push(p);
+        if (ordered.length >= limit) break;
+      }
+      if (ordered.length === 0) return [];
+
+      // One existence check for the whole batch. The candidates are NOT passed
+      // as a pathspec: several hundred long KB paths on argv would blow
+      // Windows' ~32K command-line limit, and `ls-files` is the one command in
+      // this file that cannot take `--pathspec-from-file`. Listing the index
+      // and intersecting in memory sidesteps the limit entirely, and `-z`
+      // needs no `core.quotePath` care because NUL-separated output is never
+      // quoted.
+      //
+      // NOT caught: a failure here is unexplained, and swallowing it would
+      // leave the offer permanently and silently empty. The caller logs it and
+      // falls back to walking the tree, which is one visible failure path
+      // instead of a feature that quietly never works.
+      const { stdout: tracked } = await this.git(cwd, ['ls-files', '-z']);
+      const live = new Set(tracked.split('\0').filter(Boolean));
+      return ordered.filter((p) => live.has(p));
+    });
+  }
 
   async fetch(workspaceId: string): Promise<void> {
     return this.mutex.run(workspaceId, async () => {
