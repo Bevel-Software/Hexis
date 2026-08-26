@@ -4,6 +4,7 @@ import {
   KNOWLEDGE_BASE_DIR,
   PIPELINES_DIR,
   PLUGINS_DIR,
+  isAccessMdPath,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
 import type { PendingEntry } from '../state/workspace.context';
@@ -50,12 +51,27 @@ const READABLE_PAGE = /\.(md|markdown)$/i;
  * the top of the knowledge tree, breadth-first, so the opening suggestion is a
  * section heading rather than the fifth file inside the first folder.
  *
+ * The FALLBACK offer. `listRecentPages` answers this better whenever the
+ * branch has history — what the team last worked on beats what happens to sit
+ * near the top of the tree — and this walk covers the cases it cannot: a fresh
+ * branch with no commits, and a reader whose recent work is all outside what
+ * they can open.
+ *
  * Scoped to exactly what the explorer browses under "Knowledge" —
  * `KnowledgeBase/` plus any stray content folder. `Plugins/` is the Skills &
- * Tools app's storage and is not a browsing destination here, and the loose
- * files at the root (`access.md`, `roles.yaml`) are how the deployment is
- * configured, not something to read. A clone that predates the split has no
- * named roots to scope to, so its whole tree is the knowledge.
+ * Tools app's storage and is not a browsing destination here, and `roles.yaml`
+ * is how the deployment is configured, not something to read.
+ *
+ * `access.md` is excluded at EVERY depth, not just at the root. It is markdown
+ * and it is readable, but it declares who may open the folder rather than
+ * saying anything — and because a folder's access file sits one level above
+ * that folder's pages, breadth-first reaches every `access.md` in the tree
+ * before it reaches a single page. Scoping the walk to `KnowledgeBase/` only
+ * ever excluded the root copy; without the name check the offer is the access
+ * files and nothing else, on every knowledge base with subfolders.
+ *
+ * A clone that predates the split has no named roots to scope to, so its whole
+ * tree is the knowledge.
  *
  * Fewer than `limit` — including none at all — is a legitimate answer for a
  * knowledge base that is still empty; the caller says so rather than padding.
@@ -83,7 +99,7 @@ export function suggestedPages(tree: FileTreeEntry | null, limit: number): FileT
       // Dot-prefixed entries are the repository's own bookkeeping.
       if (entry.name.startsWith('.')) continue;
       if (entry.type === 'file') {
-        if (READABLE_PAGE.test(entry.name)) pages.push(entry);
+        if (READABLE_PAGE.test(entry.name) && !isAccessMdPath(entry.name)) pages.push(entry);
       } else if (entry.name !== PLUGINS_DIR) {
         next.push(...(entry.children ?? []));
       }
