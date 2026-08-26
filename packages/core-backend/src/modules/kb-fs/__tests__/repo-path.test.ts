@@ -75,6 +75,9 @@ describe('assertInsideRepo', () => {
       kind: 'path-outside-repo',
       path: 'KnowledgeBase/Reviews/PR-12.html',
       kbDirName: KB,
+      // On its own as well: the pending-commits worker's notice reads it from
+      // here, because the message it keeps is truncated.
+      corrected: 'knowledge-base/KnowledgeBase/Reviews/PR-12.html',
     });
   });
 
