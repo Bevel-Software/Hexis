@@ -1,0 +1,5 @@
+---
+"@bevel-software/platform-core-backend": patch
+---
+
+Deleting a branch — by hand, or as the automatic retirement that follows a merge — now refuses while any open change request still needs it, including one proposing *into* it. A change request names two branches and needs both, but every guard asked only whether the branch was some request's source, so merging `X → main` retired `X` out from under a second open request targeting `X`. That request then became unusable in every direction: its detail read resolves the target before the source and failed with `unknown branch`, so it could not be read, declined, or deleted (the admin verb clones the base branch to reach `roles.yaml`, and the base branch was the missing one), and the start-up sweep that closes requests whose branch is gone also looked only at sources, so it survived every restart. The sweep now closes a request when either end is missing — which also retires the ones already stranded — and deleting a change request whose base branch is unreachable falls back to the default branch's `roles.yaml` for its admin check, so an unusable request is never also undeletable.
