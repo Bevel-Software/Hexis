@@ -283,6 +283,26 @@ export class WorkflowService implements IWorkflowService {
   private readonly branchLifecycle = new WorkspaceMutex();
 
   /**
+   * Hold the lifecycle lock of BOTH branches a change request names, so a
+   * check-then-insert spanning them excludes either one being deleted.
+   *
+   * SORTED, and that is the whole subtlety. Two requests may legally be open
+   * in opposite directions at once — the uniqueness rule blocks `A -> B`
+   * against `A -> B`, but explicitly allows `B -> A` alongside it — so
+   * acquiring in argument order would let one hold `A` waiting for `B` while
+   * the other holds `B` waiting for `A`. A canonical order removes the cycle.
+   * Deletion and retirement each take a single key, so once every two-key
+   * acquisition agrees on the order, no deadlock can form.
+   */
+  private runOnBranchPair<T>(a: string, b: string, fn: () => Promise<T>): Promise<T> {
+    if (a === b) return this.branchLifecycle.run(`branch:${a}`, fn);
+    const [first, second] = a < b ? [a, b] : [b, a];
+    return this.branchLifecycle.run(`branch:${first}`, () =>
+      this.branchLifecycle.run(`branch:${second}`, fn),
+    );
+  }
+
+  /**
    * The open change requests that deleting `branch` would strand — every one
    * that NAMES it, at EITHER end.
    *
@@ -1313,12 +1333,17 @@ export class WorkflowService implements IWorkflowService {
     }
 
     // The whole open sequence — uniqueness check through row insert — runs
-    // under the source branch's lifecycle lock. `retireMergedSourceBranch`
-    // takes the same lock around its own check-then-delete, so a merge
-    // cleanup can never race into the multi-second gap between this
-    // method's "no open request" answer and its row landing, and delete the
-    // branch out from under a request being opened.
-    return this.branchLifecycle.run(`branch:${input.sourceBranch}`, async () => {
+    // under the lifecycle lock of BOTH branches. `retireMergedSourceBranch`
+    // and `deleteBranch` take the lock of the branch they are removing around
+    // their own check-then-delete, so a cleanup can never race into the
+    // multi-second gap between this method's "no open request" answer and its
+    // row landing, and delete a branch out from under a request being opened.
+    //
+    // BOTH, because that gap is symmetric: a request is unusable if EITHER of
+    // its branches is retired inside the window, and holding only the source
+    // left a `Y -> X` request open to X being deleted under it — the very
+    // failure the widened guards exist to prevent.
+    return this.runOnBranchPair(input.sourceBranch, input.targetBranch, async () => {
     // Uniqueness rule — A→B blocks A→B (the spec is explicit that B→A in
     // parallel is still allowed). `listOpenPrs` is cached for 30s so we
     // force-fresh to catch a CR that opened just now.
@@ -1730,29 +1755,40 @@ export class WorkflowService implements IWorkflowService {
       throw new WorkflowDomainError('This change request has already been applied.', 422);
     }
 
-    // Normally the admin check reads `roles.yaml` at `origin/<base>` — admin OF
-    // the branch this proposes into. But the base branch can be GONE (retired
-    // while this request still pointed into it), and then its workspace cannot
-    // be cloned at all. Refusing there would make an already-unusable request
-    // undeletable too, which is the trap this verb exists to open. Fall back to
-    // the default branch's roles.yaml: it is protected, and
-    // `preserveBaseRolesYaml` guarantees no change request can alter it, so it
-    // carries the same authority the missing ref would have. Only a genuine
-    // resolve failure takes this path — a reachable base is judged exactly as
-    // before.
+    // Which `roles.yaml` authorizes this? The base branch's, exactly as before
+    // — unless the base branch is GONE, which is the state that makes a change
+    // request unusable and this verb the only way out of it. Then the default
+    // branch's stands in: it is protected, and `preserveBaseRolesYaml`
+    // guarantees no change request can alter it, so it carries the authority
+    // the missing ref would have.
+    //
+    // The absence has to be PROVEN, and a failed clone does not prove it in
+    // either direction. `getOrCreateForBranch` throws on transient trouble too
+    // (network, auth, disk, a concurrent bootstrap), and it SUCCEEDS from its
+    // in-process cache for a branch that origin no longer has. Inferring from
+    // it would therefore both re-key authorization to the default branch during
+    // an outage — letting an admin there, but not of the still-live base,
+    // delete what they otherwise could not — and miss the retired-but-cached
+    // case this exists for. So the verdict comes from
+    // `listBranches({ freshFetch: true })`, the same authoritative probe the
+    // deleted-branch sweep trusts, and any failure of it propagates: fail
+    // CLOSED. A protected base is live by definition and skips the probe.
+    const defaultWs = await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
     let adminBranch = summary.base;
-    let ws: { id: string };
-    try {
-      ws = await this.workspaceService.getOrCreateForBranch(summary.base);
-    } catch (err) {
-      console.warn(
-        `[cr] base branch "${summary.base}" of change request #${number} is unreachable — ` +
-          `authorizing its deletion against "${DEFAULT_BRANCH}" instead:`,
-        err,
-      );
-      adminBranch = DEFAULT_BRANCH;
-      ws = await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
+    if (!isProtectedBranch(summary.base)) {
+      const live = await this.git.listBranches(defaultWs.id, { freshFetch: true });
+      if (!live.some((b) => b.name === summary.base)) {
+        console.warn(
+          `[cr] base branch "${summary.base}" of change request #${number} no longer exists — ` +
+            `authorizing its deletion against "${DEFAULT_BRANCH}"`,
+        );
+        adminBranch = DEFAULT_BRANCH;
+      }
     }
+    const ws =
+      adminBranch === DEFAULT_BRANCH
+        ? defaultWs
+        : await this.workspaceService.getOrCreateForBranch(adminBranch);
     await this.workspaceService.ensureRemotesFetched(ws.id).catch(() => undefined);
     const isAdmin = await this.accessControl.canWriteAtRef(
       ws.id,

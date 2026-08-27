@@ -636,6 +636,10 @@ describe('WorkflowService — deleteChangeRequest (admin moderation verb)', () =
   function makeDeleteHarness(opts: { isAdmin?: boolean; prState?: string } = {}) {
     const git = Object.assign(makeGit(), {
       changedPathsForPr: vi.fn().mockResolvedValue(['Docs/a.md']),
+      // The verb proves the base branch still exists before deciding which
+      // `roles.yaml` authorizes the delete — a live base keeps the check on
+      // `origin/<base>`, exactly as it always was.
+      listBranches: vi.fn().mockResolvedValue([{ name: 'main' }, { name: 'mallory/spam' }]),
     }) as unknown as GitService;
     const prs = makePrs();
     (prs.getPr as ReturnType<typeof vi.fn>).mockResolvedValue({
