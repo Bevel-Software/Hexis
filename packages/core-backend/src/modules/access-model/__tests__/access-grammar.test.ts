@@ -129,3 +129,52 @@ describe('the access-frontmatter extension set', () => {
     expect(entries!.write).toEqual([]);
   });
 });
+
+describe('parseOwnAccessEntries — whole-document YAML the subset parser cannot read', () => {
+  // A `.tool` / `.pipeline` / `.agent` is one `---` fenced YAML document, and
+  // real ones use folded and literal scalars and nested maps. The subset
+  // parser stops at the first such line; the verbs must still be read.
+  const doc = [
+    '---',
+    'apiVersion: bevel.software/v1',
+    'kind: Agent',
+    'id: delivery_coder',
+    'description: >-',
+    '  Writes and verifies the code for one delivery ticket. Runs the agent steps',
+    '  of a coding pipeline.',
+    'systemPrompt:',
+    '  extend: |',
+    '    You are executing exactly ONE step of a pipeline.',
+    '    When your verdict is recorded, stop.',
+    'env:',
+    '  - { name: STAGING_URL, from: params, param: stagingUrl }',
+    'owner: razvan.radulescu <razvan@bevel.software>',
+    'read: coding-agent <coding-agent@bevel.software>',
+    'write: Developer',
+    '---',
+    '',
+    '# notes after the fence',
+    '',
+  ].join('\n');
+
+  it('reads the verbs out of a document with folded and literal scalars', () => {
+    const own = parseOwnAccessEntries(doc);
+    expect(own).not.toBeNull();
+    expect(own!.owner).toMatchObject([{ kind: 'user', email: 'razvan@bevel.software', deny: false }]);
+    expect(own!.read).toMatchObject([{ kind: 'user', email: 'coding-agent@bevel.software', deny: false }]);
+    expect(own!.write).toMatchObject([{ kind: 'role', role: 'developer', deny: false }]);
+  });
+
+  it('still answers null for a document that declares no verb, and for broken YAML', () => {
+    expect(parseOwnAccessEntries('---\ndescription: >-\n  folded\n  text\n---\n')).toBeNull();
+    // Broken for BOTH parsers: the folded scalar stops the subset one, the
+    // unclosed flow sequence the full one.
+    expect(parseOwnAccessEntries('---\ndescription: >-\n  folded\nread: [unclosed\n---\n')).toBeNull();
+  });
+
+  it('does not change what the subset parser already read', () => {
+    // A node's frontmatter: the historical path, byte for byte.
+    const node = '---\nnodeType: "[Project](../NodeTypes/Project.md)"\nid: project-x\nowner: Someone <s@x.io>\n---\n# Name\n';
+    expect(parseOwnAccessEntries(node)!.owner).toMatchObject([{ kind: 'user', email: 's@x.io' }]);
+  });
+});

@@ -11,6 +11,7 @@
  * `./group-files.js` import below is access-model's own file, not a breach.)
  */
 
+import { parse as parseFullYaml } from 'yaml';
 import type { GroupsIndex } from './group-files.js';
 
 // ---------------------------------------------------------------------------
@@ -809,12 +810,35 @@ export type OwnEntries = Record<Verb, ParsedEntry[]>;
  * entry is dropped rather than failing the file. A typo in a node's `owner:`
  * must never make the node unreadable; it just doesn't grant anything.
  */
+/**
+ * The top-level mapping of a file's own frontmatter, for the verb keys.
+ *
+ * The subset parser is tried first: it is what every `access.md` and node
+ * frontmatter has always been read with, and its answer must not change. But
+ * a whole-document configuration file (`.tool`, and whatever an overlay
+ * registers) is real YAML — folded descriptions (`>-`), literal blocks (`|`),
+ * nested maps — and the subset parser stops at the first line it does not
+ * understand. Before this fallback that meant the file's `owner:` / `read:` /
+ * `write:` were silently dropped: a grant that was reviewed and merged did
+ * not exist, and the file was unreadable by the very principal it named.
+ * So on a subset failure the frontmatter is read by the full parser and only
+ * its top-level mapping is used — the verb keys are looked up exactly as
+ * before, everything else is ignored exactly as before.
+ */
+function ownEntriesRoot(frontmatter: string): unknown {
+  const subset = parseYamlSubset(frontmatter);
+  if (subset.ok) return subset.value;
+  try {
+    return parseFullYaml(frontmatter);
+  } catch {
+    return null;
+  }
+}
+
 export function parseOwnAccessEntries(text: string): OwnEntries | null {
   const fm = extractFrontmatter(text);
   if (!fm.ok) return null;
-  const parsed = parseYamlSubset(fm.frontmatter);
-  if (!parsed.ok) return null;
-  const root = parsed.value;
+  const root = ownEntriesRoot(fm.frontmatter);
   if (root == null || typeof root !== 'object' || Array.isArray(root)) return null;
 
   const entries = emptyEntries();
