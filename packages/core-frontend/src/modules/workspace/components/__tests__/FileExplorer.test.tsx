@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -918,5 +918,174 @@ describe('FileExplorer rows: the prototype tree', () => {
     // A normal row opens the FILE, never the dialog.
     fireEvent.click(row);
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});
+
+// ── The right-click menu has to land on screen ──
+//
+// The panel is `position: fixed`, so whatever falls past the bottom edge of
+// the window is unreachable: the page will not scroll to a fixed box, and the
+// wheel scrolls the tree out from under a menu that stays where it was. A
+// folder's menu is nine rows, so pinning it to the raw pointer put `Manage
+// access`, `Rename` and `Delete` below the fold for any right-click in the
+// lower quarter of the sidebar.
+/** jsdom's own viewport, read at import before any test has stubbed it. */
+const REAL_VIEWPORT = { width: window.innerWidth, height: window.innerHeight };
+
+describe('FileExplorer right-click: the menu stays inside the window', () => {
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      { name: 'reports', relativePath: 'reports', type: 'directory', children: [] },
+      { name: 'brief.md', relativePath: 'brief.md', type: 'file' },
+    ],
+  };
+
+  const MENU_W = 200;
+  const MENU_H = 300;
+
+  // jsdom lays nothing out, so every `offsetWidth`/`offsetHeight` is 0 and the
+  // placement would have nothing to react to. Give a size to the one element
+  // the hook measures: the fixed wrapper, identified by the `role="menu"`
+  // panel it holds.
+  const isMenuBox = (el: HTMLElement) => el.firstElementChild?.getAttribute('role') === 'menu';
+  let restoreLayout: (() => void) | null = null;
+
+  function stubViewport(width: number, height: number) {
+    const w = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth')!;
+    const h = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight')!;
+    // jsdom defines these as own accessors on `window`, so the descriptor is
+    // real and putting it back restores the getter rather than freezing a
+    // number in its place.
+    const iw = Object.getOwnPropertyDescriptor(window, 'innerWidth')!;
+    const ih = Object.getOwnPropertyDescriptor(window, 'innerHeight')!;
+    Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return isMenuBox(this) ? MENU_W : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return isMenuBox(this) ? MENU_H : 0;
+      },
+    });
+    Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: width });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, writable: true, value: height });
+    restoreLayout = () => {
+      Object.defineProperty(HTMLElement.prototype, 'offsetWidth', w);
+      Object.defineProperty(HTMLElement.prototype, 'offsetHeight', h);
+      Object.defineProperty(window, 'innerWidth', iw);
+      Object.defineProperty(window, 'innerHeight', ih);
+    };
+  }
+
+  /** The fixed wrapper the placement writes to: the `role="menu"` panel's parent. */
+  const menuBox = () => screen.getByRole('menu').parentElement as HTMLElement;
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+
+  afterEach(() => {
+    restoreLayout?.();
+    restoreLayout = null;
+  });
+
+  it('flips a folder menu above the pointer when it would run off the bottom', () => {
+    stubViewport(1280, 800);
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('reports'), { clientX: 120, clientY: 760 });
+
+    // Above the pointer, with the 4px gap that keeps the cursor off the last
+    // row: 760 - 4 - 300. Without the gap the pointer would come to rest on
+    // `Delete`, which is exactly the row it should not be resting on.
+    const box = menuBox();
+    expect(box.style.top).toBe('456px');
+    expect(parseInt(box.style.top, 10) + MENU_H).toBeLessThanOrEqual(window.innerHeight);
+  });
+
+  it('keeps every row of a folder menu reachable, Manage access included', () => {
+    stubViewport(1280, 800);
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('reports'), { clientX: 120, clientY: 780 });
+
+    // The impact line, asserted: the row that is the only route to a folder's
+    // access control has to be inside the window, not merely rendered.
+    expect(screen.getByRole('menuitem', { name: /Manage access/i })).toBeInTheDocument();
+    const top = parseInt(menuBox().style.top, 10);
+    expect(top).toBeGreaterThanOrEqual(8);
+    expect(top + MENU_H).toBeLessThanOrEqual(window.innerHeight - 8);
+  });
+
+  it('leaves a menu that already fits where the pointer put it', () => {
+    stubViewport(1280, 800);
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('brief.md'), { clientX: 120, clientY: 100 });
+
+    // Down and to the right of the pointer is what every desktop shell does,
+    // and it leaves the cursor on the first row, which is never destructive.
+    const box = menuBox();
+    expect(box.style.top).toBe('100px');
+    expect(box.style.left).toBe('120px');
+  });
+
+  it('clamps to the top margin when the window is shorter than the menu', () => {
+    stubViewport(1280, 250);
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('reports'), { clientX: 120, clientY: 200 });
+
+    // Neither side fits, so the panel keeps its top rows rather than losing
+    // both ends.
+    expect(menuBox().style.top).toBe('8px');
+  });
+
+  it('re-places an open menu when the window is resized under it', () => {
+    stubViewport(1280, 800);
+    renderExplorer({ fileTree: TREE });
+
+    // Opens with room to spare, so the menu sits at the pointer.
+    fireEvent.contextMenu(screen.getByText('reports'), { clientX: 120, clientY: 400 });
+    expect(menuBox().style.top).toBe('400px');
+
+    // Shrink the window with the menu still open. Dragging a window edge would
+    // have closed it, since that is a mousedown outside the panel, but zoom,
+    // fullscreen and OS window snapping resize without one.
+    act(() => {
+      Object.defineProperty(window, 'innerHeight', { configurable: true, writable: true, value: 500 });
+      window.dispatchEvent(new Event('resize'));
+    });
+
+    // 400 + 300 no longer fits under 500, and 400 - 4 - 300 clears the margin,
+    // so it flips rather than hanging off the bottom of the new viewport.
+    expect(menuBox().style.top).toBe('96px');
+  });
+
+  it('pulls the menu back from the right edge of the window', () => {
+    stubViewport(300, 800);
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('brief.md'), { clientX: 250, clientY: 100 });
+
+    // 300 - 200 - 8: the whole panel, not just its left edge, is on screen.
+    expect(menuBox().style.left).toBe('92px');
+  });
+});
+
+// The stub above is only safe if it puts the window back. A viewport left at
+// the last case's 300px would silently narrow whatever runs next, including a
+// block someone appends below this one.
+describe('FileExplorer right-click: the viewport stub cleans up after itself', () => {
+  it('leaves window.innerWidth and innerHeight as it found them', () => {
+    expect(window.innerWidth).toBe(REAL_VIEWPORT.width);
+    expect(window.innerHeight).toBe(REAL_VIEWPORT.height);
   });
 });
