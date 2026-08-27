@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
+import { useAuth } from '../../../auth/state/auth.context';
 import { kbFileUrl } from '../../../workspace/routing/kb-routes';
 import { checkToolConnection, type ToolSecrets } from '../../../secrets-vault/services/tool-secrets.api';
 import { pathForTool } from '../../routes/library-paths';
@@ -33,6 +34,7 @@ export interface ToolConnectionSectionProps {
 export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnectionSectionProps) {
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
+  const { user } = useAuth();
   /** `{varName, n}` — bumping `n` opens that variable's editor from the banner. */
   const [edit, setEdit] = useState<{ name: string; n: number }>({ name: '', n: 0 });
   const [checking, setChecking] = useState(false);
@@ -118,10 +120,27 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
   const settled =
     !setupUnfinished && toolVariableStatuses(tool).every(({ status }) => status.state === 'ok');
 
-  const runCheck = () => queueProbe(tool.slug, doCheck);
+  /**
+   * Scoped to the viewer, not just the tool. The queue outlives this component
+   * by design, and logging out only clears auth state — it does not reload the
+   * page — so a bare slug key would make the next person to sign in wait behind
+   * the previous one's pending probe.
+   */
+  const queueKey = `${user?.email ?? 'anon'}:${tool.slug}`;
+
+  async function runCheck() {
+    // Set BEFORE enqueueing, not inside the probe: while this call is waiting
+    // its turn behind an earlier probe, nothing has started yet — and an
+    // enabled "Test connection" button during that wait invites a second one.
+    setChecking(true);
+    try {
+      await queueProbe(queueKey, doCheck);
+    } finally {
+      setChecking(false);
+    }
+  }
 
   async function doCheck() {
-    setChecking(true);
     try {
       await checkToolConnection(tool.slug);
       // Refetch rather than patching local state: the verdict belongs to the
@@ -129,8 +148,6 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
       onChanged();
     } catch (err) {
       onError(err instanceof Error ? err.message : "Couldn't test this connection.");
-    } finally {
-      setChecking(false);
     }
   }
 

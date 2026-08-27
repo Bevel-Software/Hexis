@@ -229,6 +229,18 @@ export class ConnectionHealthService implements IConnectionHealthService {
       .onConflictDoUpdate({
         target: [connectionHealth.userId, connectionHealth.manualName],
         set: mark,
+        // The SAME ordering rule the probe write obeys, for the same reason:
+        // this invalidation describes the credential as of `mark.probeStartedAt`,
+        // so it must not overwrite a verdict from a probe that started LATER.
+        // Without it the guard was one-directional — probes deferred to
+        // invalidations, but a delayed invalidation could still clobber a newer
+        // probe's valid result. Ordering only means something if both writers
+        // respect it.
+        //
+        // The INSERT half is deliberately unguarded: with no row there is
+        // nothing to be newer than, and the whole point of upserting here is to
+        // leave a mark for a stale probe's INSERT to collide with.
+        setWhere: lt(connectionHealth.probeStartedAt, mark.probeStartedAt),
       });
   }
 

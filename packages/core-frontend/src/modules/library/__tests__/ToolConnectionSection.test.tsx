@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
+import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
@@ -40,13 +41,25 @@ function LocationProbe() {
   return <div aria-label="pathname">{location.pathname}</div>;
 }
 
+// The section reads the signed-in identity to scope its probe queue — two
+// people sharing a browser tab must not queue behind each other.
+const AUTH = {
+  user: { email: 'user@x.com', name: 'User' },
+  token: 't',
+  isLoading: false,
+  login: vi.fn(),
+  logout: vi.fn(),
+} as unknown as AuthContextValue;
+
 function wrap(children: ReactNode, kbDirName: string | null = 'knowledge-base') {
   return (
     <MemoryRouter>
-      <WorkspaceContext.Provider value={workspace(kbDirName)}>
-        {children}
-        <LocationProbe />
-      </WorkspaceContext.Provider>
+      <AuthContext.Provider value={AUTH}>
+        <WorkspaceContext.Provider value={workspace(kbDirName)}>
+          {children}
+          <LocationProbe />
+        </WorkspaceContext.Provider>
+      </AuthContext.Provider>
     </MemoryRouter>
   );
 }

@@ -266,6 +266,22 @@ describe('ConnectionHealthService: what the probe concludes', () => {
       expect(writes).toEqual([{ status: 'ok', error: null }]);
     });
 
+    it('refuses an invalidation older than the verdict already stored', async () => {
+      // The ordering rule has to bind BOTH writers. A probe deferring to an
+      // invalidation while a delayed invalidation could still clobber a newer
+      // probe's valid result would be a guard that only works one way.
+      const newer = new Date(Date.now() + 60_000);
+      const { svc, writes } = build(HTTP_TOOL, async () => 'sk-live-abc', DECLARED_PROBE, {
+        status: 'ok',
+        error: null,
+        probeStartedAt: newer,
+      });
+
+      await svc.forget('u1', 'acme');
+
+      expect(writes).toEqual([]);
+    });
+
     /**
      * `forget` UPSERTS rather than UPDATEs for exactly this reason: with no row,
      * an UPDATE leaves invalidation no trace, the probe's INSERT finds no
