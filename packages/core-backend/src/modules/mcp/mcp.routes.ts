@@ -1,4 +1,4 @@
-import express, { type Request, type RequestHandler } from 'express';
+import express, { type Request, type Response, type RequestHandler } from 'express';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -26,6 +26,34 @@ function extractBearer(req: Request): string {
   const header = req.headers.authorization ?? '';
   const firstSpace = header.indexOf(' ');
   return firstSpace >= 0 ? header.slice(firstSpace + 1).trim() : '';
+}
+
+/**
+ * The two JSON-RPC codes the Streamable HTTP transport defines for a session
+ * fault, paired with the HTTP status each rides on.
+ *
+ * `SESSION_NOT_FOUND` (404) is the one that carries meaning to a client: the
+ * spec makes a 404 on a request bearing an `Mcp-Session-Id` the trigger to
+ * start a new session with a fresh `initialize`. `BAD_REQUEST` (400) is the
+ * client-side mistake — a non-initialize request that never carried a session
+ * id at all — and has no recovery, because there is nothing to recover.
+ */
+const SESSION_NOT_FOUND = -32001;
+const BAD_REQUEST = -32000;
+
+/**
+ * Answer in the transport's own wire shape
+ * (`{ jsonrpc, error: { code, message }, id: null }`).
+ *
+ * These misses are caught by THIS router, one layer before the request would
+ * have reached an SDK transport, so the router has to speak the transport's
+ * language itself — a client that parses the body as JSON-RPC must not get a
+ * bare `{ error }` blob just because we answered early. `id: null` matches the
+ * SDK: the request id is not reliably known on a body we may never have
+ * parsed as a single message.
+ */
+function jsonRpcError(res: Response, status: number, code: number, message: string): void {
+  res.status(status).json({ jsonrpc: '2.0', error: { code, message }, id: null });
 }
 
 /**
@@ -95,10 +123,12 @@ export function createMcpRoutes(
       const sessionIdHeader = req.headers['mcp-session-id'] as string | undefined;
       const body = req.body;
 
-      // Three valid request shapes on POST /mcp:
-      //  1. No session id + body is initialize → spin up a new transport.
-      //  2. Session id + matching active session → forward.
-      //  3. Anything else → 400 / 404.
+      // Four request shapes on POST /mcp, in this order:
+      //  1. Session id naming a live session → forward to its transport.
+      //  2. An initialize body → spin up a new transport, whatever stale
+      //     session id the client still has attached.
+      //  3. A session id we have no transport for → 404 (`-32001`).
+      //  4. No session id on a non-initialize request → 400 (`-32000`).
       if (sessionIdHeader && active.has(sessionIdHeader)) {
         const session = active.get(sessionIdHeader)!;
         // Defense in depth: the auth middleware bound a userId for this
@@ -113,7 +143,17 @@ export function createMcpRoutes(
         return;
       }
 
-      if (!sessionIdHeader && isInitializeRequest(body)) {
+      // An initialize starts a fresh session even when the client is STILL
+      // sending a stale `mcp-session-id`. Requiring the header to be absent
+      // deadlocked exactly the client this endpoint most needs to let back in:
+      // one whose session died with the server and that re-initializes without
+      // first clearing the id — it got the catch-all below forever. The SDK's
+      // own transport orders the two checks this way for the same reason:
+      // initialize is never session-validated. A LIVE session id is still
+      // caught by the branch above, so re-initializing over a working session
+      // stays the SDK's `-32600 Server already initialized`, not a silent
+      // second session.
+      if (isInitializeRequest(body)) {
         // The proxy authenticates its loopback calls with the SAME bearer the
         // client used here, so it acts on the request exactly as the caller
         // would. Captured at initialize and seeded into the session's UtcpClient.
@@ -139,10 +179,21 @@ export function createMcpRoutes(
         return;
       }
 
-      res.status(400).json({
-        error:
-          'Bad request: missing session id, or session id does not match any active session.',
-      });
+      // A session id we hold no transport for: the store evicted it, or the
+      // process restarted and this in-memory map went with it. 404 + `-32001`
+      // is what the spec reserves for that, and it is the signal a client keys
+      // its re-initialize on. Answering 400 here read as "you sent a malformed
+      // request" and stranded the client on a session that can never come
+      // back — every connected agent, on every restart, until a human
+      // reconnected it by hand.
+      if (sessionIdHeader) {
+        jsonRpcError(res, 404, SESSION_NOT_FOUND, 'Session not found');
+        return;
+      }
+
+      // No session id at all on a non-initialize request: the one case here
+      // that genuinely is the caller's mistake, and the only one 400 fits.
+      jsonRpcError(res, 400, BAD_REQUEST, 'Bad Request: Mcp-Session-Id header is required');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
       console.error('[mcp] POST /mcp failed:', msg);
@@ -156,8 +207,17 @@ export function createMcpRoutes(
 
   const sessionRequest: RequestHandler = async (req, res) => {
     const sessionIdHeader = req.headers['mcp-session-id'] as string | undefined;
-    if (!sessionIdHeader || !active.has(sessionIdHeader)) {
-      res.status(404).json({ error: 'Unknown MCP session' });
+    // Same split as POST, mirrored: a request that never carried a session id
+    // is the caller's mistake (400), while one naming a session we no longer
+    // hold is the re-initialize signal (404). These were a single 404 — right
+    // for the case that matters, wrong for the other, and neither of them
+    // parseable as JSON-RPC.
+    if (!sessionIdHeader) {
+      jsonRpcError(res, 400, BAD_REQUEST, 'Bad Request: Mcp-Session-Id header is required');
+      return;
+    }
+    if (!active.has(sessionIdHeader)) {
+      jsonRpcError(res, 404, SESSION_NOT_FOUND, 'Session not found');
       return;
     }
     const session = active.get(sessionIdHeader)!;
