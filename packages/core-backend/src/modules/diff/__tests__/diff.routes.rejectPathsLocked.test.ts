@@ -82,7 +82,7 @@ describe('rejectPathsLocked', () => {
     const h = await makeHarness();
     workspaceDir = h.workspaceDir;
 
-    await rejectPathsLocked(h.workflow, h.diff, WORKSPACE_ID, USER, [
+    await rejectPathsLocked(h.workflow, h.diff, WORKSPACE_ID, USER, 'knowledge-base', [
       'knowledge-base/a.md',
       'knowledge-base/added.md',
     ]);
@@ -104,7 +104,7 @@ describe('rejectPathsLocked', () => {
     const h = await makeHarness();
     workspaceDir = h.workspaceDir;
     await expect(
-      rejectPathsLocked(h.workflow, h.diff, WORKSPACE_ID, USER, []),
+      rejectPathsLocked(h.workflow, h.diff, WORKSPACE_ID, USER, 'knowledge-base', []),
     ).resolves.toBeUndefined();
     expect(h.calls).toEqual([]);
   });
@@ -119,7 +119,7 @@ describe('rejectPathsLocked', () => {
     workspaceDir = h.workspaceDir;
 
     await expect(
-      rejectPathsLocked(h.workflow, h.diff, WORKSPACE_ID, USER, [
+      rejectPathsLocked(h.workflow, h.diff, WORKSPACE_ID, USER, 'knowledge-base', [
         'knowledge-base/a.md',
         'knowledge-base/added.md',
       ]),
@@ -140,7 +140,7 @@ describe('rejectPathsLocked', () => {
     workspaceDir = h.workspaceDir;
 
     await expect(
-      rejectPathsLocked(h.workflow, h.diff, WORKSPACE_ID, USER, [
+      rejectPathsLocked(h.workflow, h.diff, WORKSPACE_ID, USER, 'knowledge-base', [
         'knowledge-base/a.md',
       ]),
     ).rejects.toBeInstanceOf(WorkflowValidationError);

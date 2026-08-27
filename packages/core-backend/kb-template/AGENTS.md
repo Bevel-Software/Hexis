@@ -26,6 +26,12 @@ knowledge-base/
 └── access.md             ← repo-root access-control rules
 ```
 
+Tool paths are workspace-relative, and the workspace root holds this
+repository as the `knowledge-base/` folder: a file in it is
+`knowledge-base/KnowledgeBase/Foo.md`, never `KnowledgeBase/Foo.md`. A path
+without that prefix is refused, because it would land beside the repository
+where git never sees it.
+
 Only those two folders are structural, and only `Plugins/` has a layout the
 platform reads:
 

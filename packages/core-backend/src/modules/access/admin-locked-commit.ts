@@ -136,6 +136,7 @@ export class AdminLockedCommits {
         workspaceId,
         branch: this.defaultBranch,
         user: actor,
+        kbDirName: this.deps.kbDirName,
         validateWrite: this.deps.validateWrite,
       },
     );

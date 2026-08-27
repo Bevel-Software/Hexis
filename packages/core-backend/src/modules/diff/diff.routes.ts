@@ -45,6 +45,7 @@ export async function rejectPathsLocked(
   diffService: IDiffService,
   workspaceId: string,
   user: AuthUser,
+  kbDirName: string,
   paths: string[],
 ): Promise<void> {
   if (paths.length === 0) return;
@@ -54,7 +55,7 @@ export async function rejectPathsLocked(
   if (total === 0) return;
   const lockingFs = new LockingFilesystem(
     { basePath: plan.workspaceDir, contained: true },
-    { workflow: workflowService, workspaceId, branch, user },
+    { workflow: workflowService, workspaceId, branch, user, kbDirName },
   );
   try {
     await lockingFs.writeFiles(
@@ -265,7 +266,7 @@ export function createDiffRoutes(
           current?.changes.map((c) => c.path) ?? [],
         );
       }
-      await rejectPathsLocked(workflowService, diffService, req.params.id, user, paths);
+      await rejectPathsLocked(workflowService, diffService, req.params.id, user, kbDirName, paths);
       res.json({ session: await diffService.currentSession(req.params.id) });
     } catch (err) {
       const { status, body } = toHttpError(err);
