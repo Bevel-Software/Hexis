@@ -178,3 +178,36 @@ describe('parseOwnAccessEntries — whole-document YAML the subset parser cannot
     expect(parseOwnAccessEntries(node)!.owner).toMatchObject([{ kind: 'user', email: 's@x.io' }]);
   });
 });
+
+describe('parseOwnAccessEntries — quoted and flow-sequence verb values', () => {
+  // The subset parser SUCCEEDS on these and hands the brackets or quotes to
+  // the entry parser as text, so before the fallback they were dropped — or a
+  // quoted role kept its quotes as part of its name. They are real YAML and
+  // must resolve to the grants they spell.
+  it('reads a flow sequence', () => {
+    const own = parseOwnAccessEntries('---\nread: [coding-agent <coding-agent@bevel.software>, Developer]\n---\n');
+    expect(own!.read).toMatchObject([
+      { kind: 'user', email: 'coding-agent@bevel.software' },
+      { kind: 'role', role: 'developer' },
+    ]);
+  });
+
+  it('reads quoted scalars, inline and in a block list', () => {
+    expect(parseOwnAccessEntries('---\nread: "coding-agent <coding-agent@bevel.software>"\n---\n')!.read).toMatchObject([
+      { kind: 'user', email: 'coding-agent@bevel.software' },
+    ]);
+    expect(parseOwnAccessEntries("---\nwrite: 'Developer'\n---\n")!.write).toMatchObject([{ kind: 'role', role: 'developer' }]);
+    expect(parseOwnAccessEntries('---\nowner:\n  - "Someone <s@x.io>"\n---\n')!.owner).toMatchObject([
+      { kind: 'user', email: 's@x.io' },
+    ]);
+  });
+
+  it('leaves the plain forms on the subset path', () => {
+    // An empty flow collection and bare scalars are the subset parser\'s own
+    // grammar; nothing about them asks for the full parser.
+    expect(parseOwnAccessEntries('---\nread: []\nwrite: Developer\n---\n')).toMatchObject({
+      read: [],
+      write: [{ kind: 'role', role: 'developer' }],
+    });
+  });
+});
