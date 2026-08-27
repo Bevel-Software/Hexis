@@ -801,16 +801,6 @@ export function parseAccessFile(
  */
 export type OwnEntries = Record<Verb, ParsedEntry[]>;
 /**
- * Parse the access verbs a node file declares in its own YAML frontmatter.
- * Returns the per-verb entry lists, or null when the file has no frontmatter
- * or declares no access verb at all.
- *
- * Forgiving by design — a node's frontmatter legitimately carries non-access
- * keys (notably `nodeType:`), so unknown keys are ignored, and a malformed
- * entry is dropped rather than failing the file. A typo in a node's `owner:`
- * must never make the node unreadable; it just doesn't grant anything.
- */
-/**
  * The top-level mapping of a file's own frontmatter, for the verb keys.
  *
  * The subset parser is tried first: it is what every `access.md` and node
@@ -835,6 +825,16 @@ function ownEntriesRoot(frontmatter: string): unknown {
   }
 }
 
+/**
+ * Parse the access verbs a node file declares in its own YAML frontmatter.
+ * Returns the per-verb entry lists, or null when the file has no frontmatter
+ * or declares no access verb at all.
+ *
+ * Forgiving by design — a node's frontmatter legitimately carries non-access
+ * keys (notably `nodeType:`), so unknown keys are ignored, and a malformed
+ * entry is dropped rather than failing the file. A typo in a node's `owner:`
+ * must never make the node unreadable; it just doesn't grant anything.
+ */
 export function parseOwnAccessEntries(text: string): OwnEntries | null {
   const fm = extractFrontmatter(text);
   if (!fm.ok) return null;
