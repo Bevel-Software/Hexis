@@ -265,6 +265,10 @@ jobs:
   # Runs on every outcome so the check is never left stuck on "pending —
   # running": the agent can fail to reach a verdict without failing its step (it
   # exits 0 having declined to act), and `failure()` does not fire for that.
+  #
+  # It holds the knowledge-base key, for one read: checking that the one-pager
+  # the agent links to is really there. That is safe here precisely because
+  # this job reads nothing the PR's author wrote — only the four fields below.
   # ---------------------------------------------------------------------------
   publish:
     needs: [start, review]
@@ -285,13 +289,15 @@ jobs:
       # Everything in the verdict came through an agent that reads attacker-
       # controllable text, so treat all four fields as hostile: allowlist the
       # outcome, cap and de-newline the prose, cap the finding count, and
-      # require the link to point at the knowledge base or this repository.
+      # require the link to point at the knowledge base or this repository —
+      # and, for a knowledge-base link, to name a file that actually exists.
       # jq does the parsing — the payload never reaches the shell as code.
       - name: Render the verdict
         id: render
         env:
           VERDICT_B64: ${{ needs.review.outputs.verdict_b64 }}
           KB_ORIGIN: ${{ vars.KNOWLEDGE_BASE_API_URL }}
+          KB_KEY: ${{ secrets.KNOWLEDGE_BASE_CONNECTION_KEY }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -374,6 +380,54 @@ jobs:
             *) echo "::warning::Discarding off-site one_pager_url from the agent: $url"; url="" ;;
           esac
 
+          # A knowledge-base link is also checked for EXISTENCE. The agent
+          # records `one_pager_url` BEFORE it writes the one-pager, so a run
+          # that stops early publishes a link to a file that was never written
+          # — the PR then carries a dead link, and nothing on the PR says so.
+          # Ask the knowledge base whether the file is there: one session, one
+          # stat. Drop the link only on a definite "not found"; when the check
+          # itself cannot run (no key, KB down, access refused) keep the link
+          # and warn, so a hiccup here never hides a one-pager that exists.
+          onepager_missing=0
+          case "$url" in
+            "${KB_ORIGIN%/}"/workspace/*)
+              # <origin>/workspace/<branch>/<workspace path>, both URL-encoded.
+              # The charset filter above already dropped backslashes, so the
+              # %XX → \xXX decode cannot be fed an escape of the agent's own.
+              rest=${url#"${KB_ORIGIN%/}"/workspace/}
+              rest=${rest%%[?#]*}
+              enc_branch=${rest%%/*}
+              enc_path=${rest#*/}
+              branch=$(printf '%b' "${enc_branch//%/\\x}")
+              path=$(printf '%b' "${enc_path//%/\\x}")
+
+              if [ -z "$enc_branch" ] || [ "$enc_path" = "$rest" ] || [ -z "$path" ]; then
+                echo "::warning::The agent's one_pager_url names no file in the knowledge base — dropping the link: $url"
+                url=""; onepager_missing=1
+              elif ! sid=$(curl -sS -f -m 20 -X POST \
+                        -H "Authorization: Bearer $KB_KEY" -H 'Content-Type: application/json' -d '{}' \
+                        "${KB_ORIGIN%/}/api/agent/tools/start_session" | jq -r '.sessionId // empty') \
+                   || [ -z "$sid" ]; then
+                echo "::warning::Could not open a knowledge-base session to verify the one-pager — keeping the link unverified."
+              else
+                stat_args=$(jq -n --arg b "$branch" --arg p "$path" --arg s "$sid" \
+                  '{branch: $b, path: $p, sessionId: $s}')
+                code=$(curl -sS -m 20 -o stat.json -w '%{http_code}' -X POST \
+                        -H "Authorization: Bearer $KB_KEY" -H 'Content-Type: application/json' \
+                        -d "$stat_args" "${KB_ORIGIN%/}/api/agent/tools/file_stat" || echo 000)
+                if [ "$code" = 200 ] && jq -e '.type == "file"' stat.json >/dev/null 2>&1; then
+                  echo "One-pager verified in the knowledge base: $branch:$path"
+                elif grep -qi 'not found' stat.json 2>/dev/null; then
+                  echo "::warning::The agent's one_pager_url names a file the knowledge base does not have ($branch:$path) — dropping the link."
+                  url=""; onepager_missing=1
+                else
+                  echo "::warning::Could not verify the one-pager (HTTP $code) — keeping the link unverified."
+                  cat stat.json 2>/dev/null || true
+                fi
+              fi
+              ;;
+          esac
+
           {
             echo "outcome=$outcome"
             echo "headline=$headline"
@@ -406,6 +460,10 @@ jobs:
             printf '\n'
             if [ -n "$url" ]; then
               printf '[Full analysis](%s)\n' "$url"
+            elif [ "$onepager_missing" = 1 ]; then
+              # Say so on the PR rather than silently dropping the link: the
+              # reader would otherwise assume there is no deeper analysis.
+              echo "The full analysis this review refers to was never written to the knowledge base — re-trigger with \`/bevel-review\` to regenerate it."
             elif [ "$outcome" = none ]; then
               printf '[Run log](%s)\n' "$RUN_URL"
             fi
