@@ -51,10 +51,10 @@ export interface ToolVarRowProps {
   editSignal?: number;
   onChanged(): void;
   /**
-   * A credential VALUE was written (not deleted, not a client secret) — the one
-   * moment worth testing the connection, because it is the only one that can
-   * turn a broken tool into a working one. Deletes and owner-side setup changes
-   * still call `onChanged`; they just have nothing to prove.
+   * A credential was WRITTEN (not deleted) — a typed value or an owner's client
+   * secret. The one moment worth testing the connection, because it is the only
+   * one that can turn a broken tool into a working one. Deletes still call
+   * `onChanged`; they just have nothing to prove.
    */
   onSaved?(): void;
   onError(message: string): void;
@@ -276,7 +276,10 @@ export function ToolVarRow({
   const save = () => {
     const secret = value;
     if (isClientSecret) {
-      return run(() => setOAuthClientSecret(slug, variable.name, secret));
+      // Also a credential change: a replaced client secret can invalidate the
+      // tokens minted under the old one, so the tool's health is now unknown
+      // and worth re-testing — same as any other saved value.
+      return run(() => setOAuthClientSecret(slug, variable.name, secret), true);
     }
     return run(
       () =>

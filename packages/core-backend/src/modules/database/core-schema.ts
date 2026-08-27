@@ -531,8 +531,25 @@ export const connectionHealth = pgTable('connection_health', {
   /** The provider's rejection message when `failed`; null otherwise. */
   error: text('error'),
   checkedAt: timestamp('checked_at').defaultNow().notNull(),
+  /**
+   * When the probe behind this row BEGAN — not when it finished, and not the
+   * same question as `checkedAt`.
+   *
+   * A verdict describes the credential as it was when the probe started, so
+   * this is what decides which of two writes speaks for the row: invalidation
+   * stamps it at the moment the credential changed, and a probe only overwrites
+   * a row whose stamp is older than its own start. Without it, a slow probe
+   * begun against the previous key could land after the new one was saved and
+   * report on a credential that no longer exists.
+   */
+  probeStartedAt: timestamp('probe_started_at').defaultNow().notNull(),
 }, (t) => ({
-  byUser: index('connection_health_by_user').on(t.userId),
+  // Keyed on `manualName` FIRST: the unique index below already serves every
+  // per-user lookup (a `(user_id, manual_name)` btree covers a user-only
+  // prefix), so a second user-keyed index would earn nothing — while
+  // invalidating a SHARED credential fans out across every user of one manual
+  // and had no index to use at all.
+  byManual: index('connection_health_by_manual').on(t.manualName),
   userManualUnq: uniqueIndex('connection_health_user_manual_unq').on(t.userId, t.manualName),
   statusValid: check('connection_health_status', sql`${t.status} IN ('ok', 'failed', 'unverifiable')`),
 }));

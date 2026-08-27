@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ConnectionHealthService } from '../connection-health.service.js';
-import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
+import type {
+  IToolManualService,
+  ToolHealthCheck,
+  ToolManualSummary,
+} from '../../tool-manuals/tool-manuals.contract.js';
 import type { ISecretsVaultService } from '../../secrets-vault/secrets-vault.contract.js';
 import type { Database } from '../../database/connection.js';
 
@@ -16,15 +20,25 @@ import type { Database } from '../../database/connection.js';
  * different colour.
  */
 
-/** Records what the service persisted, without a database. */
+/**
+ * Records what the service persisted, without a database.
+ *
+ * `returning()` reports one row so the write reads as ACCEPTED. The real write
+ * is guarded (`setWhere`) and reports zero rows when a newer verdict already
+ * owns the row; that is database behaviour, expressed in the guard's own SQL,
+ * so it is not simulated here.
+ */
 function fakeDb() {
   const writes: { status: string; error: string | null }[] = [];
   const db = {
     insert: () => ({
       values: (v: { status: string; error: string | null }) => ({
-        onConflictDoUpdate: async () => {
-          writes.push({ status: v.status, error: v.error });
-        },
+        onConflictDoUpdate: () => ({
+          returning: async () => {
+            writes.push({ status: v.status, error: v.error });
+            return [{ id: 'row' }];
+          },
+        }),
       }),
     }),
   } as unknown as Database;
@@ -36,20 +50,33 @@ const HTTP_TOOL: ToolManualSummary = {
   name: 'acme',
   path: 'Plugins/acme.tool',
   type: 'http',
-  healthCheck: { url: 'https://api.acme.test/me', headers: { Authorization: 'Bearer ${API_KEY}' } },
 };
 
-function build(manual: ToolManualSummary, resolve: (key: string) => Promise<string | null>) {
+const DECLARED_PROBE: ToolHealthCheck = {
+  url: 'https://api.acme.test/me',
+  headers: { Authorization: 'Bearer ${API_KEY}' },
+};
+
+function build(
+  manual: ToolManualSummary,
+  resolve: (key: string) => Promise<string | null>,
+  probe: ToolHealthCheck | null = DECLARED_PROBE,
+) {
   const { db, writes } = fakeDb();
   const toolManualService = {
     listAccessible: async () => [manual],
     toManualCallTemplates: async () => [],
+    // Probe config travels by its own accessor rather than on the summary: it
+    // carries `headers`, which a `.tool` may write as a literal token, and the
+    // summary is serialized straight to the browser.
+    healthCheckFor: async () => probe,
   } as unknown as IToolManualService;
   const secretsVault = { resolve: (_u: string, key: string) => resolve(key) } as unknown as ISecretsVaultService;
   return { svc: new ConnectionHealthService(db, toolManualService, secretsVault), writes };
 }
 
-const withKey = (manual: ToolManualSummary = HTTP_TOOL) => build(manual, async () => 'sk-live-abc');
+const withKey = (manual: ToolManualSummary = HTTP_TOOL, probe: ToolHealthCheck | null = DECLARED_PROBE) =>
+  build(manual, async () => 'sk-live-abc', probe);
 
 describe('ConnectionHealthService: what the probe concludes', () => {
   beforeEach(() => {
@@ -129,7 +156,7 @@ describe('ConnectionHealthService: what the probe concludes', () => {
   });
 
   it('is unverifiable, not ok, for an http tool that declares no probe', async () => {
-    const { svc } = withKey({ ...HTTP_TOOL, healthCheck: undefined });
+    const { svc } = withKey(HTTP_TOOL, null);
 
     const r = await svc.probe('u1', 'a@b.c', 'acme');
 
@@ -154,10 +181,9 @@ describe('ConnectionHealthService: what the probe concludes', () => {
    * standing between a `.tool` and the cloud metadata endpoint.
    */
   it('refuses to call an internal host a variable resolved to', async () => {
-    const { svc } = build(
-      { ...HTTP_TOOL, healthCheck: { url: 'https://${HOST}/me' } },
-      async () => '169.254.169.254',
-    );
+    const { svc } = build({ ...HTTP_TOOL }, async () => '169.254.169.254', {
+      url: 'https://${HOST}/me',
+    });
 
     const r = await svc.probe('u1', 'a@b.c', 'acme');
 

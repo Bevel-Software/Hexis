@@ -40,6 +40,27 @@ describe('`.tool` healthCheck', () => {
     expect(hc?.headers).toEqual({ 'X-Key': '${API_KEY}' });
   });
 
+  it("inherits an INLINE manual's headers too, which only the url branch used to set", () => {
+    // `descriptor.headers` is populated only on the url-bearing branch, so
+    // inheriting from it left an inline probe sending nothing and testing an
+    // unauthenticated request — a pass that proved the opposite of what it claimed.
+    const inline = normalizeToolManual(
+      'acme',
+      'Plugins/acme.tool',
+      `---
+name: acme
+type: inline
+headers:
+  Authorization: Bearer \${API_KEY}
+healthCheck:
+  url: https://api.acme.test/me
+tools: []
+---
+`,
+    );
+    expect(inline.healthCheck?.headers).toEqual({ Authorization: 'Bearer ${API_KEY}' });
+  });
+
   it('refuses a method that could mutate', () => {
     // Silently downgrading POST to GET would leave the author believing they had
     // declared something we are not doing.

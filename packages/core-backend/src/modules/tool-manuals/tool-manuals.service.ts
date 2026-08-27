@@ -236,6 +236,18 @@ export class ToolManualService implements IToolManualService {
     return declared?.scope ?? 'admin';
   }
 
+  /**
+   * The probe config for a manual this caller can read — the internal
+   * counterpart to everything on `ToolManualSummary`.
+   *
+   * Access-gated through `accessibleManuals` like every other read, so this
+   * cannot become a way to learn what a `.tool` you can't see declares.
+   */
+  async healthCheckFor(userEmail: string, manualName: string): Promise<ToolHealthCheck | null> {
+    const manuals = await this.accessibleManuals(userEmail);
+    return manuals.find((m) => m.name === manualName)?.healthCheck ?? null;
+  }
+
   async toManualCallTemplates(userEmail: string, opts?: { remoteOnly?: boolean }): Promise<CallTemplate[]> {
     const manuals = await this.accessibleManuals(userEmail);
     const out: CallTemplate[] = [];
@@ -415,6 +427,19 @@ export class ToolManualService implements IToolManualService {
       // templates, not the (Bevel-hosted) discovery template.
       if (m.type === 'inline' && m.tools) {
         refs.push(...variableSubstitutor.findRequiredVariables(m.tools, m.name));
+      }
+      // A probe-only credential still has to reach the secrets UI. The call
+      // template is built from `url`/`headers` and never carries `healthCheck`,
+      // so a `${VAR}` used solely by the probe would never be surfaced for
+      // provisioning — and `probeDeclared` would then report `unverifiable`
+      // forever on a variable no screen ever offered anyone to fill in.
+      if (m.healthCheck) {
+        refs.push(
+          ...variableSubstitutor.findRequiredVariables(
+            { url: m.healthCheck.url, headers: m.healthCheck.headers ?? {} },
+            m.name,
+          ),
+        );
       }
     } catch {
       return; // a malformed template is reported elsewhere; never break the scan
@@ -672,7 +697,6 @@ function toSummary(m: ToolManualDescriptor): ToolManualSummary {
     variables: m.variables,
     remote: m.remote,
     setup: m.setup,
-    healthCheck: m.healthCheck,
   };
 }
 
@@ -867,7 +891,16 @@ export function normalizeToolManual(
   // authenticates exactly like a real call. Resolving that default here, where
   // the whole descriptor is in hand, keeps the probe self-contained: nothing
   // downstream has to re-derive which headers a manual would have sent.
-  const healthCheck = normalizeHealthCheck(obj.healthCheck, name, descriptor.remote, descriptor.headers);
+  // Inherit from the DECLARED `headers`, not `descriptor.headers`: an `inline`
+  // manual never populates the latter (only the url-bearing branch does), so a
+  // one-line probe on an inline tool silently inherited nothing and tested an
+  // unauthenticated request. The declared block is the same object for
+  // http/mcp, so this is identical there and correct for all three.
+  const declaredHeaders =
+    obj.headers && typeof obj.headers === 'object' && !Array.isArray(obj.headers)
+      ? (obj.headers as Record<string, string>)
+      : undefined;
+  const healthCheck = normalizeHealthCheck(obj.healthCheck, name, descriptor.remote, declaredHeaders);
   if (healthCheck) descriptor.healthCheck = healthCheck;
 
   return descriptor;

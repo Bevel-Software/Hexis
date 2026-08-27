@@ -90,6 +90,24 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
   // in the manual namespace), so storage and resolution agree for snake_case ids.
   const varKey = (manualName: string, varName: string) => utcpNamespacedKey(manualName, varName);
 
+  /**
+   * Invalidate a stored probe verdict AFTER the credential write that made it
+   * stale — best-effort, never fatal.
+   *
+   * The write has already succeeded by the time this runs, so letting a
+   * bookkeeping failure escape would answer a saved credential with a 500 and
+   * invite the user to save it again. A missed invalidation is self-correcting
+   * (the next probe overwrites it); a spurious 500 on a successful save is not.
+   * Same reasoning, and now the same shape, as the OAuth callback's.
+   */
+  const invalidateHealth = async (fn: () => Promise<void>, what: string): Promise<void> => {
+    try {
+      await fn();
+    } catch (err) {
+      console.warn(`[secrets] health invalidation after ${what} failed:`, err instanceof Error ? err.message : String(err));
+    }
+  };
+
   /** Find an accessible (readable) manual by slug + its DECLARED variable, or null. */
   async function findManualVar(
     email: string,
@@ -358,7 +376,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       // A shared value changed, so EVERY user's verdict is now about the old
       // one. Clearing beats leaving them stale: "not checked yet" is honest,
       // a verdict about a replaced key is not.
-      await connectionHealth.forgetAll(found.manual.name);
+      await invalidateHealth(() => connectionHealth.forgetAll(found.manual.name), 'shared var write');
       res.status(201).json({ secret });
     } catch (err) {
       mapError(err, res, 'set admin var');
@@ -386,7 +404,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       // Drop the stale verdict rather than probing inline: the caller follows
       // this with an explicit check, which keeps the save fast and gives the
       // UI a "Checking…" state to show instead of a frozen dialog.
-      await connectionHealth.forget(userId, found.manual.name);
+      await invalidateHealth(() => connectionHealth.forget(userId, found.manual.name), 'user var write');
       res.status(201).json({ secret });
     } catch (err) {
       mapError(err, res, 'set user var');
@@ -443,6 +461,10 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
           resource: found.variable.oauth.resource,
         },
       });
+      // A new client secret can invalidate every token minted under the old
+      // one, so every user's verdict is now about a configuration that no
+      // longer exists — the same reasoning as a shared key changing.
+      await invalidateHealth(() => connectionHealth.forgetAll(found.manual.name), 'client secret write');
       res.status(201).json({ ok: true });
     } catch (err) {
       mapError(err, res, 'set oauth client secret');
@@ -510,7 +532,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         return void res.status(403).json({ error: 'You need write access to this tool to remove its shared secrets.' });
       }
       await secretsVault.removeShared(varKey(found.manual.name, found.variable.name));
-      await connectionHealth.forgetAll(found.manual.name);
+      await invalidateHealth(() => connectionHealth.forgetAll(found.manual.name), 'shared var delete');
       res.status(204).end();
     } catch (err) {
       mapError(err, res, 'delete admin var');
@@ -525,7 +547,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       const found = await findManualVar(email, req.params.slug, req.params.var);
       if (!found) return void res.status(404).json({ error: 'Tool or variable not found' });
       await secretsVault.removeUserByKey(userId, varKey(found.manual.name, found.variable.name));
-      await connectionHealth.forget(userId, found.manual.name);
+      await invalidateHealth(() => connectionHealth.forget(userId, found.manual.name), 'user var delete');
       res.status(204).end();
     } catch (err) {
       mapError(err, res, 'delete user var');

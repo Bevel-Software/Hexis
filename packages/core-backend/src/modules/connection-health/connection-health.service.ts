@@ -1,4 +1,4 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, lt } from 'drizzle-orm';
 import '@utcp/http'; // side effect: registers the 'http' UTCP communication protocol
 import '@utcp/mcp'; // side effect: registers the 'mcp' protocol (remote MCP `.tool` sources)
 import { UtcpClientConfigSerializer } from '@utcp/sdk';
@@ -27,6 +27,27 @@ interface Outcome {
 }
 
 const OK: Outcome = { status: 'ok', detail: null };
+
+/**
+ * What invalidation writes. An UPDATE rather than a DELETE for two reasons:
+ * it stamps `probeStartedAt` with the moment the credential changed, which is
+ * what lets the write guard in {@link ConnectionHealthService.probe} refuse an
+ * older probe's stale answer; and it leaves an explicit "not checked since you
+ * changed this" verdict instead of an absent row, which reads identically in
+ * the UI but says so on purpose.
+ */
+function invalidated() {
+  const now = new Date();
+  return {
+    status: 'unverifiable' as const,
+    error: "This hasn't been tested since the credential changed.",
+    checkedAt: now,
+    // MUST be evaluated per call, not once at module load: this stamp is what
+    // the write guard compares against, so a frozen value would let every
+    // probe started after the process booted overwrite a later invalidation.
+    probeStartedAt: now,
+  };
+}
 
 const NO_PROBE: Outcome = {
   status: 'unverifiable',
@@ -64,6 +85,31 @@ function looksLikeAuthRejection(message: string): boolean {
   );
 }
 
+/**
+ * Resolve `work`, or `onTimeout` if it outlives `PROBE_TIMEOUT_MS`.
+ *
+ * The declared-probe path gets its deadline from `AbortSignal.timeout`, but the
+ * MCP path cannot: neither `CodeModeUtcpClient.create` nor `registerManual`
+ * accepts a signal. Without this, an unresponsive server leaves an unattended
+ * probe — one that fires on every key save — pending forever, and the caller
+ * never gets a verdict at all.
+ *
+ * The abandoned work is NOT cancelled, because there is no API to cancel it;
+ * it settles into a void later. That is a leak we accept over a hung request,
+ * and it is bounded by how often a probe can be triggered.
+ */
+async function withProbeTimeout<T>(work: Promise<T>, onTimeout: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout), PROBE_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** Every distinct `${VAR}` referenced in a string. */
 function varRefs(text: string): string[] {
   return [...text.matchAll(/\$\{([A-Za-z0-9_]+)\}/g)].map((m) => m[1]);
@@ -81,9 +127,14 @@ export class ConnectionHealthService implements IConnectionHealthService {
     const manual = manuals.find((m) => m.name === manualName);
     if (!manual) throw new Error(`No readable tool manual named "${manualName}"`);
 
+    // Stamped BEFORE the probe runs, and the value the write is guarded on.
+    // A probe describes the credential as it was when the probe STARTED, so
+    // anything that happened since — a new key saved, a newer probe already
+    // landed — must win over this result no matter which finishes last.
+    const probeStartedAt = new Date();
     const outcome = await this.runProbe(userId, userEmail, manual);
     const checkedAt = new Date();
-    await this.db
+    const written = await this.db
       .insert(connectionHealth)
       .values({
         userId,
@@ -91,11 +142,27 @@ export class ConnectionHealthService implements IConnectionHealthService {
         status: outcome.status,
         error: outcome.detail,
         checkedAt,
+        probeStartedAt,
       })
       .onConflictDoUpdate({
         target: [connectionHealth.userId, connectionHealth.manualName],
-        set: { status: outcome.status, error: outcome.detail, checkedAt },
-      });
+        set: { status: outcome.status, error: outcome.detail, checkedAt, probeStartedAt },
+        // Only overwrite a verdict OLDER than this probe. `forget` stamps the
+        // row with the moment of invalidation, so a probe that began before a
+        // key changed cannot resurrect its own stale answer; and of two
+        // concurrent probes the later-started one wins regardless of finishing
+        // order. Without this, saving twice in quick succession could leave the
+        // badge describing the key the user just replaced.
+        setWhere: lt(connectionHealth.probeStartedAt, probeStartedAt),
+      })
+      .returning({ id: connectionHealth.id });
+
+    // The guard refused: something newer already speaks for this credential.
+    // Report what is actually stored rather than the verdict we discarded.
+    if (Array.isArray(written) && written.length === 0) {
+      const [current] = await this.statusFor(userId, [manualName]);
+      if (current) return current;
+    }
     return { manualName, status: outcome.status, detail: outcome.detail, checkedAt };
   }
 
@@ -120,12 +187,13 @@ export class ConnectionHealthService implements IConnectionHealthService {
 
   async forget(userId: string, manualName: string): Promise<void> {
     await this.db
-      .delete(connectionHealth)
+      .update(connectionHealth)
+      .set(invalidated())
       .where(and(eq(connectionHealth.userId, userId), eq(connectionHealth.manualName, manualName)));
   }
 
   async forgetAll(manualName: string): Promise<void> {
-    await this.db.delete(connectionHealth).where(eq(connectionHealth.manualName, manualName));
+    await this.db.update(connectionHealth).set(invalidated()).where(eq(connectionHealth.manualName, manualName));
   }
 
   // --- internal --------------------------------------------------------------
@@ -151,7 +219,11 @@ export class ConnectionHealthService implements IConnectionHealthService {
     if (manual.remote === false) {
       return { status: 'unverifiable', detail: 'This tool runs only in a local agent, so the server cannot test it.' };
     }
-    if (manual.healthCheck) return this.probeDeclared(userId, manual, manual.healthCheck);
+    // Read through the internal accessor: probe config carries `headers`, which
+    // a `.tool` may write as a literal token, so it deliberately does not ride
+    // on the browser-facing summary this method is otherwise working from.
+    const healthCheck = await this.toolManualService.healthCheckFor(userEmail, manual.name);
+    if (healthCheck) return this.probeDeclared(userId, manual, healthCheck);
     if (manual.type === 'mcp') return this.probeMcpHandshake(userId, userEmail, manual);
     return NO_PROBE;
   }
@@ -252,6 +324,11 @@ export class ConnectionHealthService implements IConnectionHealthService {
       return { status: 'unverifiable', detail: "This tool's definition couldn't be resolved, so it wasn't tested." };
     }
 
+    const TIMED_OUT: Outcome = {
+      status: 'unverifiable',
+      detail: `The server didn't answer within ${PROBE_TIMEOUT_MS / 1000}s, so the credential wasn't tested.`,
+    };
+
     let client: CodeModeUtcpClient;
     try {
       // No loopback seeding (`API_URL`/`CONNECTION_KEY`): those belong to
@@ -262,7 +339,9 @@ export class ConnectionHealthService implements IConnectionHealthService {
         variables: {},
         load_variables_from: [bevelSecretsLoaderConfig(userId)],
       });
-      client = await CodeModeUtcpClient.create(process.cwd(), config);
+      const built = await withProbeTimeout(CodeModeUtcpClient.create(process.cwd(), config), null);
+      if (!built) return TIMED_OUT;
+      client = built;
     } catch (err) {
       return {
         status: 'unverifiable',
@@ -270,11 +349,15 @@ export class ConnectionHealthService implements IConnectionHealthService {
       };
     }
 
-    const result = await registerManual(client, template);
-    if (result.ok) return OK;
-    return looksLikeAuthRejection(result.error)
-      ? { status: 'failed', detail: result.error }
-      : { status: 'unverifiable', detail: `Couldn't reach the provider to check: ${result.error}` };
+    return withProbeTimeout(
+      registerManual(client, template).then((result): Outcome => {
+        if (result.ok) return OK;
+        return looksLikeAuthRejection(result.error)
+          ? { status: 'failed', detail: result.error }
+          : { status: 'unverifiable', detail: `Couldn't reach the provider to check: ${result.error}` };
+      }),
+      TIMED_OUT,
+    );
   }
 
   /**

@@ -28,6 +28,9 @@ const toolManualService = {
       setup: { kind: 'oauth-manual' as const, reason: 'no authorization-server metadata at https://weather.example' },
       variables: [
         { name: 'SHARED_KEY', scope: 'admin' as const, label: 'Org key' },
+        // A plain per-user key, so the user-scoped write path (and the
+        // per-user invalidation it owes) is exercised alongside the shared one.
+        { name: 'MY_KEY', scope: 'user' as const, label: 'Your key' },
         {
           name: 'SIGNIN',
           scope: 'user' as const,
@@ -56,9 +59,11 @@ const toolManualService = {
   ],
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['toolManualService'];
 
+const putStatic = vi.fn(async () => ({ id: 'u1' }));
 const putSharedStatic = vi.fn(async () => ({ id: 's1' }));
 const putSharedOAuthClientSecret = vi.fn(async () => {});
 const secretsVault = {
+  putStatic,
   putSharedStatic,
   putSharedOAuthClientSecret,
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['secretsVault'];
@@ -68,6 +73,15 @@ const accessControl = {
   canRead: async () => true,
   canWrite: async (_ws: string, email: string, path: string) => email === WRITER && path === TOOL_PATH,
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['accessControl'];
+
+const forget = vi.fn(async () => {});
+const forgetAll = vi.fn(async () => {});
+const connectionHealth = {
+  probe: async () => ({ manualName: '', status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+  statusFor: async () => [],
+  forget,
+  forgetAll,
+} as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['connectionHealth'];
 
 let httpServer: HttpServer | undefined;
 
@@ -85,14 +99,11 @@ async function baseUrlAs(email: string): Promise<string> {
       secretsVault,
       toolManualService,
       accessControl,
-      // The routes invalidate a stored probe verdict on every write; these
-      // tests are about the write itself, so the health store is a no-op.
-      connectionHealth: {
-        probe: async () => ({ manualName: '', status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
-        statusFor: async () => [],
-        forget: async () => {},
-        forgetAll: async () => {},
-      },
+      // Spies, not no-ops: clearing the stale verdict is PART of a credential
+      // write's contract here, so the tests below assert it happened. Stubbing
+      // it away would let the invalidation be deleted from the routes with
+      // every test still green.
+      connectionHealth,
       stateSecret: 'test-secret',
       publicBackendUrl: 'http://localhost:3000',
       publicFrontendUrl: 'http://localhost:5173',
@@ -110,6 +121,9 @@ afterEach(async () => {
   httpServer = undefined;
   putSharedStatic.mockClear();
   putSharedOAuthClientSecret.mockClear();
+  putStatic.mockClear();
+  forget.mockClear();
+  forgetAll.mockClear();
 });
 
 describe('tool owner gate — shared config requires WRITE on the `.tool` file', () => {
@@ -122,6 +136,25 @@ describe('tool owner gate — shared config requires WRITE on the `.tool` file',
     });
     expect(res.status).toBe(201);
     expect(putSharedStatic).toHaveBeenCalledWith(expect.objectContaining({ key: 'weather_SHARED_KEY' }));
+    // A SHARED value changed, so every user's verdict is now about the old one.
+    expect(forgetAll).toHaveBeenCalledWith('weather');
+    expect(forget).not.toHaveBeenCalled();
+  });
+
+  it("a per-user write clears only that user's verdict, not everyone's", async () => {
+    // The asymmetry matters: one person's key says nothing about anyone else's,
+    // so clearing every user's verdict here would blank the whole org's badges
+    // because one person retyped their own key.
+    const base = await baseUrlAs(READER);
+    const res = await fetch(`${base}/api/secrets/tools/weather/vars/MY_KEY/user`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: 'mine-123' }),
+    });
+    expect(res.status).toBe(201);
+    expect(putStatic).toHaveBeenCalledWith(expect.objectContaining({ key: 'weather_MY_KEY' }));
+    expect(forget).toHaveBeenCalledWith(`id-${READER}`, 'weather');
+    expect(forgetAll).not.toHaveBeenCalled();
   });
 
   it('a non-writer is refused (403), even though they can READ the tool', async () => {
@@ -133,6 +166,8 @@ describe('tool owner gate — shared config requires WRITE on the `.tool` file',
     });
     expect(res.status).toBe(403);
     expect(putSharedStatic).not.toHaveBeenCalled();
+    // Nothing was written, so nothing is stale.
+    expect(forgetAll).not.toHaveBeenCalled();
   });
 
   it('a writer of the file sets the OAuth client secret, pinned to the declared provider', async () => {
@@ -152,6 +187,9 @@ describe('tool owner gate — shared config requires WRITE on the `.tool` file',
         provider: expect.objectContaining({ clientId: 'client-1', pkce: true, resource: undefined }),
       }),
     );
+    // A replaced client secret can invalidate every token minted under the old
+    // one, so it invalidates like any other shared credential change.
+    expect(forgetAll).toHaveBeenCalledWith('weather');
   });
 
   it('pins the declaration\'s PKCE opt-out and resource indicator with the secret', async () => {

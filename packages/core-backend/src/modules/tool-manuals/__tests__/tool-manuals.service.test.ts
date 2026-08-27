@@ -82,6 +82,31 @@ describe('ToolManualService', () => {
     expect(list.find((m) => m.name === 'billing')!.type).toBe('http');
   });
 
+  test('surfaces a variable referenced ONLY by a health check, and keeps the probe off the summary', async () => {
+    // Two halves of the same contract. The probe's `${VAR}` has to reach the
+    // secrets UI or nobody can ever fill it in and the tool reports
+    // `unverifiable` forever — but the probe's HEADERS must not ride the
+    // browser-facing summary, since a `.tool` may write a literal token there.
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
+    await writeFile(
+      join(tools, 'probe.tool'),
+      JSON.stringify({
+        name: 'probe',
+        type: 'http',
+        url: 'https://api.example.com/utcp',
+        healthCheck: { url: 'https://api.example.com/me', headers: { 'X-Key': '${PROBE_ONLY_KEY}' } },
+      }),
+    );
+
+    const summary = (await svc().listAccessible('user@x.eu')).find((m) => m.name === 'probe')!;
+    expect(summary.variables?.map((v) => v.name)).toContain('PROBE_ONLY_KEY');
+    expect(summary).not.toHaveProperty('healthCheck');
+
+    // The server still reaches it, through the accessor that never serializes.
+    const probe = await svc().healthCheckFor('user@x.eu', 'probe');
+    expect(probe?.headers).toEqual({ 'X-Key': '${PROBE_ONLY_KEY}' });
+  });
+
   test('ACL filters out manuals the user cannot read', async () => {
     const list = await svc(denyBilling).listAccessible('user@x.eu');
     expect(list.map((m) => m.name)).toEqual(['weather']);

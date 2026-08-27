@@ -31,8 +31,7 @@ const TOOL_PATH = 'Tools/weather.tool';
 const USER = 'user@x.com';
 const RETURN_TO = '/skills-and-tools/tools/weather';
 
-const toolManualService = {
-  listAccessible: async () => [
+const MANUALS = [
     {
       slug: 'weather',
       name: 'weather',
@@ -51,7 +50,14 @@ const toolManualService = {
         },
       ],
     },
-  ],
+];
+
+const toolManualService = {
+  listAccessible: async () => MANUALS,
+  // The un-authed callback resolves which manual a secret belongs to by
+  // matching its key against the catalog, so this has to be here for the
+  // invalidation to be reachable at all.
+  listAllSummaries: async () => MANUALS,
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['toolManualService'];
 
 const accessControl = {
@@ -63,20 +69,24 @@ const completeOAuth = vi.fn(async () => {});
 const secretsVault = {
   beginToolOAuthByKey: async () => ({ id: 'secret-1', url: 'https://auth.example.com/authorize?client_id=client-1' }),
   completeOAuth,
+  // Without this the callback's invalidation dies on a TypeError that its own
+  // best-effort catch swallows — the tests would pass while proving nothing.
+  getById: async () => ({ id: 'secret-1', key: 'weather_SIGNIN' }),
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['secretsVault'];
+
+const forget = vi.fn(async () => {});
+const connectionHealth = {
+  probe: async () => ({ manualName: '', status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+  statusFor: async () => [],
+  forget,
+  forgetAll: async () => {},
+} as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['connectionHealth'];
 
 const deps = {
   secretsVault,
   toolManualService,
   accessControl,
-  // The routes invalidate a stored probe verdict on every write; these
-  // tests are about the write itself, so the health store is a no-op.
-  connectionHealth: {
-    probe: async () => ({ manualName: '', status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
-    statusFor: async () => [],
-    forget: async () => {},
-    forgetAll: async () => {},
-  },
+  connectionHealth,
   stateSecret: STATE_SECRET,
   publicBackendUrl: 'http://localhost:3000',
   publicFrontendUrl: FRONTEND,
@@ -216,6 +226,25 @@ describe('POST …/oauth/start — what gets signed into the state', () => {
 
 describe('GET /api/secrets/oauth/callback — where the browser lands', () => {
   it('returns to a signed same-origin path', async () => {
+    const base = await baseUrl();
+    const state = signState({ u: 'u1', i: 'secret-1', n: 'nonce', r: RETURN_TO });
+    expect(await callback(base, state)).toBe(`${FRONTEND}${RETURN_TO}#authorized=secret-1`);
+  });
+
+  it('invalidates the verdict the new sign-in supersedes', async () => {
+    // A fresh token replaces whatever the last probe concluded — including a
+    // `failed` from the expired session the user just signed in to fix, which
+    // would otherwise keep accusing a credential that no longer exists.
+    const base = await baseUrl();
+    const state = signState({ u: 'u1', i: 'secret-1', n: 'nonce', r: RETURN_TO });
+    await callback(base, state);
+    expect(forget).toHaveBeenCalledWith('u1', 'weather');
+  });
+
+  it('still lands the browser even when that invalidation fails', async () => {
+    // The sign-in itself SUCCEEDED; a bookkeeping failure must not send the
+    // user to an error page for it.
+    forget.mockRejectedValueOnce(new Error('db down'));
     const base = await baseUrl();
     const state = signState({ u: 'u1', i: 'secret-1', n: 'nonce', r: RETURN_TO });
     expect(await callback(base, state)).toBe(`${FRONTEND}${RETURN_TO}#authorized=secret-1`);

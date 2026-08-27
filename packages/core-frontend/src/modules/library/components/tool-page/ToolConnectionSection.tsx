@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
@@ -109,9 +109,36 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
   // Vacuously true for a tool that declares no variables: a no-auth MCP server
   // has nothing to set up and is still worth probing — its handshake is exactly
   // the kind of thing that can be reachable one day and not the next.
-  const settled = toolVariableStatuses(tool).every(({ status }) => status.state === 'ok');
+  //
+  // But `!setupUnfinished` first: an `oauth-manual` server whose sign-in nobody
+  // has declared YET also has no variables, and `every([])` would call that
+  // settled — offering Test connection and the words "No key needed" directly
+  // above a banner telling the owner to go configure OAuth.
+  const settled =
+    !setupUnfinished && toolVariableStatuses(tool).every(({ status }) => status.state === 'ok');
+
+  /**
+   * The probe currently in flight, so a second save chains onto it instead of
+   * racing it. The server refuses a probe older than the row it would overwrite,
+   * so a lost race can no longer publish a stale verdict — but two saves in
+   * quick succession would still fire two overlapping requests and leave the
+   * user watching a spinner that means nothing. Chaining keeps the last save
+   * the one that reports.
+   */
+  const inFlight = useRef<Promise<void> | null>(null);
 
   async function runCheck() {
+    const prior = inFlight.current;
+    const run = (async () => {
+      if (prior) await prior.catch(() => {});
+      await doCheck();
+    })();
+    inFlight.current = run;
+    await run;
+    if (inFlight.current === run) inFlight.current = null;
+  }
+
+  async function doCheck() {
     setChecking(true);
     try {
       await checkToolConnection(tool.slug);

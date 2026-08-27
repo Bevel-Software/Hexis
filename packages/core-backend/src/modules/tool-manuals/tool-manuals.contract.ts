@@ -170,7 +170,11 @@ export interface ToolManualDescriptorBase {
   variables?: ToolVariable[];
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
-  /** Optional credential probe for `http`/`inline` manuals — see {@link ToolHealthCheck}. */
+  /**
+   * Optional credential probe for `http`/`inline` manuals — see
+   * {@link ToolHealthCheck}. INTERNAL: lives on the descriptor, never on
+   * {@link ToolManualSummary}, because it carries `headers`.
+   */
   healthCheck?: ToolHealthCheck;
 }
 
@@ -229,8 +233,10 @@ export interface ToolManualSummary {
   remote?: boolean;
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
-  /** Optional credential probe for `http`/`inline` manuals — see {@link ToolHealthCheck}. */
-  healthCheck?: ToolHealthCheck;
+  // NOTE: no `healthCheck` here, deliberately. This type is serialized straight
+  // to the browser by the tool endpoints, and a probe carries `headers` — which
+  // a `.tool` author may write as a literal token rather than a `${VAR}` ref.
+  // The server reads probe config through `IToolManualService.healthCheckFor`.
 }
 
 /** One thing an `inline` manual's embedded tool list says the assistant can do. */
@@ -303,6 +309,16 @@ export interface IToolManualService {
    * a `resolve` reads the shared row or the caller's row.
    */
   scopeOfVariable(effectiveKey: string): Promise<ToolVariableScope>;
+  /**
+   * The credential probe a readable manual declares, or null.
+   *
+   * Deliberately NOT a field on {@link ToolManualSummary}: that type is
+   * serialized straight to the browser by the tool endpoints, and a probe
+   * carries `headers` — which a `.tool` author may write as a literal token
+   * rather than a `${VAR}` ref. Probe config is internal to the server, so it
+   * travels by its own accessor and never rides a public DTO.
+   */
+  healthCheckFor(userEmail: string, manualName: string): Promise<ToolHealthCheck | null>;
   /**
    * The per-user (`user`-scoped) variables a manual declares, each with the vault
    * key (`<manual>_<VAR>`) the caller's value is stored under, its bare name, and
