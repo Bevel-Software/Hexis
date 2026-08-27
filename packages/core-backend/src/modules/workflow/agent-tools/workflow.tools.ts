@@ -448,6 +448,10 @@ export function registerWorkflowTools(
         fresh: true,
         workspaceId,
         viewerEmail: ctx.user.email,
+        // Internal read: only headSha/approvals/state/title/base are consumed
+        // below, never `files[].patch` — skipping patch generation saves one
+        // git subprocess per changed file on every merge.
+        patches: false,
       });
       if (!detail) {        throw new ToolError(`Change request #${number} not found.`, 404);
       }

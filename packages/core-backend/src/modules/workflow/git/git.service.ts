@@ -1469,6 +1469,73 @@ export class GitService implements IGitService {
   }
 
   /**
+   * Refresh `refs/remotes/origin/<branch>` for named branches only, and FAIL
+   * when the refresh doesn't land.
+   *
+   * The narrow counterpart to `fetch`. Explicit destination refspecs, so the
+   * refs the caller is about to read move regardless of any
+   * `remote.origin.fetch` drift (same reasoning as `mergeChangeRequest`), and
+   * nothing else moves. `--no-write-fetch-head` keeps it out of the clone's
+   * shared `FETCH_HEAD` (see `pull`).
+   *
+   * The distinction from `fetchPrRefs` is the error handling, and it is the
+   * whole point of this method existing. `fetchPrRefs` is best-effort: it backs
+   * the change-request DETAIL reads, where a stale ref costs a slightly-off
+   * diff. This one PROPAGATES. It exists for `preserveBaseRolesYaml`, which
+   * compares base-vs-head `roles.yaml` to decide whether a change request is
+   * smuggling a privilege escalation across a merge — answering that from a
+   * silently stale `origin/<head>` would fail OPEN. A caller that must fail
+   * closed needs the throw.
+   *
+   * Runs OUTSIDE the workspace mutex: a network round-trip must not hold a lock
+   * that local operations queue behind, and this only advances remote-tracking
+   * refs, which nothing reads mid-flight.
+   */
+  /**
+   * True when this workspace's HEAD already IS `origin/<branch>` — checked
+   * entirely from local refs, with no network.
+   *
+   * The point is to let a caller skip a refresh it does not need.
+   * `WorkflowService.mergeChangeRequest` pulls the target workspace after a
+   * merge so the working tree the file tools serve isn't behind origin — but
+   * the merge it just ran happened IN that same workspace (`git
+   * mergeChangeRequest` checks out the target, resets to it, commits and
+   * pushes), so the tree is current and the pull's fetch is a ~0.65s HTTPS
+   * round-trip to learn nothing.
+   *
+   * Answers FALSE on any failure — an unresolvable ref, a detached HEAD, a
+   * missing remote-tracking ref. "I could not prove it is current" must send
+   * the caller down the refresh path, never skip it: this gates a freshness
+   * guarantee, so the safe default is to do the work.
+   */
+  async matchesRemoteRef(workspaceId: string, branch: string): Promise<boolean> {
+    assertValidBranchName(branch);
+    try {
+      const cwd = await this.repoDir(workspaceId);
+      const [{ stdout: head }, { stdout: remote }] = await Promise.all([
+        this.git(cwd, ['rev-parse', 'HEAD']),
+        this.git(cwd, ['rev-parse', `refs/remotes/origin/${branch}`]),
+      ]);
+      const h = head.trim();
+      return h.length > 0 && h === remote.trim();
+    } catch {
+      return false;
+    }
+  }
+
+  async fetchBranchRefs(workspaceId: string, branches: string[]): Promise<void> {
+    if (branches.length === 0) return;
+    for (const branch of branches) assertValidBranchName(branch);
+    const cwd = await this.repoDir(workspaceId);
+    await this.git(cwd, [
+      'fetch',
+      '--no-write-fetch-head',
+      'origin',
+      ...branches.map((b) => `+refs/heads/${b}:refs/remotes/origin/${b}`),
+    ]);
+  }
+
+  /**
    * Collapse the clone's drifted tracking config back to one fetch refspec and
    * one upstream ref, then refresh `refs/remotes/origin/<branch>` through an
    * explicit refspec — never touching the shared `FETCH_HEAD`. Returns the ref

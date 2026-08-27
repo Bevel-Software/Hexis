@@ -150,6 +150,13 @@ function makeGit(): GitService {
     // roles.yaml change" — same content at base and head → the guard no-ops.
     resetToRemote: vi.fn().mockResolvedValue(undefined),
     commitChanges: vi.fn().mockResolvedValue(null),
+    // The guard's narrow, fail-closed ref refresh — only the restore path uses
+    // it now, but it must exist for that path to reach its push.
+    fetchBranchRefs: vi.fn().mockResolvedValue(undefined),
+    // Gates the post-merge pull. Default false = "could not prove the workspace
+    // is current", which is the safe answer and keeps the pull-path tests below
+    // exercising the pull. The skip case is asserted separately.
+    matchesRemoteRef: vi.fn().mockResolvedValue(false),
     readFileAtRef: vi.fn().mockResolvedValue('roles:\n  Admin:\n    - admin@x.com\n'),
   } as unknown as GitService;
 }
@@ -336,6 +343,28 @@ describe('WorkflowService — change request delegation + cache invalidation', (
       { bypass: true },
     );
     expect(prs.invalidateDetailCache).toHaveBeenCalledWith(4);
+  });
+
+  it('mergeChangeRequest SKIPS the post-merge pull when the target workspace is already current', async () => {
+    // The merge ran in this very workspace and left it checked out at the merge
+    // commit it pushed, so `pull` would spend an HTTPS round-trip (~0.65s on the
+    // critical path of every merge) confirming what a local rev-parse already
+    // knows. `matchesRemoteRef` true ⇒ skip; the merge still completes normally.
+    const prs = makePrs();
+    const reviewWorkflow = makeReviewWorkflow();
+    const mergeResult = { prNumber: 4, sha: 'abc', mergedAt: 't' };
+    (reviewWorkflow.mergePr as ReturnType<typeof vi.fn>).mockResolvedValue(mergeResult);
+    (prs.getPr as ReturnType<typeof vi.fn>).mockResolvedValue({ branch: 'alice/feat', base: 'main' });
+
+    const git = makeGit();
+    (git.matchesRemoteRef as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    const svc = new WorkflowService(makeDb(), git, prs, reviewWorkflow, makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    const outcome = await svc.mergeChangeRequest(
+      4, makeUser(), 'sha', [], 'open', 'PR title', 'main', 'w1', { bypass: true },
+    );
+    expect(outcome).toEqual({ kind: 'merged', result: mergeResult });
+    expect(git.matchesRemoteRef).toHaveBeenCalledWith('main', 'main');
+    expect(git.pull).not.toHaveBeenCalled();
   });
 
   it('mergeChangeRequest still merges when the post-merge pull conflicts, and queues recovery on the TARGET workspace', async () => {

@@ -26,6 +26,10 @@ import { RolesYamlPreservationError } from '../../../shared/domain-errors.js';
 const KB_DIR = 'knowledge-base';
 const BASE = 'current-company-state';
 const HEAD = 'mallory/escalate';
+// The head SHA the caller resolved and the merge gate authorised against — the
+// guard reads the head's roles.yaml at this COMMIT, not at `origin/<head>`, so
+// a ref that moved after the gate ran can't be waved through.
+const HEAD_SHA = 'sha';
 const USER = { id: 'u-mallory', email: 'mallory@x.com', name: 'Mallory' };
 const BASE_ROLES = 'roles:\n  Admin:\n    - admin@x.com\n';
 const ATTACKER_ROLES = 'roles:\n  Admin:\n    - admin@x.com\n    - mallory@x.com\n';
@@ -80,10 +84,15 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
 
     const git = {
       fetch: vi.fn().mockResolvedValue(undefined),
+      // The narrow, FAIL-CLOSED refresh the comparison runs before reading the
+      // two origin refs. Distinct from `fetch` on purpose: a swallowed failure
+      // here would compare stale refs and wave a roles.yaml change through.
+      fetchBranchRefs: vi.fn().mockResolvedValue(undefined),
       pull: vi.fn().mockResolvedValue(undefined),
-      // Resolve roles.yaml at origin/<ref> from the per-test content.
+      // Base resolves from `origin/<base>`; head resolves from the authorised
+      // COMMIT (HEAD_SHA), which is what the guard reads.
       readFileAtRef: vi.fn(async (_ws: string, ref: string) =>
-        ref === `origin/${BASE}` ? opts.baseRoles : ref === `origin/${HEAD}` ? opts.headRoles : null,
+        ref === `origin/${BASE}` ? opts.baseRoles : ref === HEAD_SHA ? opts.headRoles : null,
       ),
       commitFile: vi.fn().mockResolvedValue(
         'commitFileResult' in opts ? opts.commitFileResult : { sha: 'preserve-sha' },
@@ -123,11 +132,11 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     );
     // Conflicts are now surfaced by the local merge inside `reviewWorkflow.mergePr`
     // (mocked to resolve here), so there's no provider "mergeable" pre-check to stub.
-    return { svc, git, prs, reviewWorkflow, fileLocks };
+    return { svc, git, prs, reviewWorkflow, fileLocks, workspaceService };
   }
 
   async function merge(svc: WorkflowService) {
-    return svc.mergeChangeRequest(1, USER, 'sha', [], 'open', 'Title', BASE, 'w1', { bypass: false });
+    return svc.mergeChangeRequest(1, USER, HEAD_SHA, [], 'open', 'Title', BASE, 'w1', { bypass: false });
   }
 
   it('no-ops when the CR does not change roles.yaml (identical content)', async () => {
@@ -137,6 +146,57 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     expect(git.commitFile).not.toHaveBeenCalled();
     expect(git.push).not.toHaveBeenCalled();
     expect(reviewWorkflow.mergePr).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers the no-op case with NO network and NO source-workspace bootstrap', async () => {
+    // Both halves of the hot path, pinned together.
+    //
+    // No bootstrap: resolving the SOURCE branch's workspace would CLONE it
+    // (checkout + --dissociate) on the critical path of every merge, to answer
+    // "no" almost every time. It is only needed to WRITE a restore.
+    //
+    // No fetch: the caller's `resolvePrShas` already fetched both refs into this
+    // workspace, so re-fetching bought a second ~0.65s HTTPS round-trip for refs
+    // we already had.
+    const { svc, git, workspaceService } = makeSvc({ headRoles: BASE_ROLES, baseRoles: BASE_ROLES });
+    await merge(svc);
+    expect(workspaceService.getOrCreateForBranch).not.toHaveBeenCalledWith(HEAD);
+    expect(git.fetchBranchRefs).not.toHaveBeenCalled();
+    expect(git.fetch).not.toHaveBeenCalled();
+    // Base from the origin ref, head from the AUTHORISED COMMIT — both out of
+    // the workspace the caller passed to merge().
+    expect(git.readFileAtRef).toHaveBeenCalledWith('w1', `origin/${BASE}`, 'roles.yaml');
+    expect(git.readFileAtRef).toHaveBeenCalledWith('w1', HEAD_SHA, 'roles.yaml');
+  });
+
+  it('reads the head roles.yaml at the authorised SHA, never at origin/<head>', async () => {
+    // The gate authorised `HEAD_SHA`. If the guard resolved `origin/<head>`
+    // instead, a push landing between the gate and here would be cleared on the
+    // strength of a commit nobody reviewed. The stub returns the attacker's
+    // roles.yaml ONLY at HEAD_SHA, so a branch-ref read would see null, compare
+    // unequal, and silently take the restore path instead of the no-op.
+    const { svc, git } = makeSvc({ headRoles: BASE_ROLES, baseRoles: BASE_ROLES });
+    await merge(svc);
+    const refsRead = (git.readFileAtRef as unknown as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => c[1] as string,
+    );
+    expect(refsRead).toContain(HEAD_SHA);
+    expect(refsRead).not.toContain(`origin/${HEAD}`);
+  });
+
+  it('ABORTS the merge when the restore-path fetch fails (fail-closed)', async () => {
+    // The rare path still fetches: it is about to commit and push a restore onto
+    // the source branch, and a stale `origin/<head>` there means a
+    // non-fast-forward push. `fetchBranchRefs` throws (unlike best-effort
+    // `fetchPrRefs`), and that must abort the merge rather than merge unprotected.
+    const { svc, git, reviewWorkflow } = makeSvc({
+      headRoles: ATTACKER_ROLES, baseRoles: BASE_ROLES,
+    });
+    (git.fetchBranchRefs as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('git fetch failed: could not read from remote repository'),
+    );
+    await expect(merge(svc)).rejects.toBeInstanceOf(RolesYamlPreservationError);
+    expect(reviewWorkflow.mergePr).not.toHaveBeenCalled();
   });
 
   it('no-ops when neither base nor head has a roles.yaml (both absent)', async () => {

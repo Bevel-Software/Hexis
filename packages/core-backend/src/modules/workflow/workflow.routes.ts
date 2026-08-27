@@ -901,6 +901,12 @@ export function createWorkflowRoutes(
           fresh: true,
           workspaceId: workspace.id,
           viewerEmail: user.email,
+          // Internal read, same as the reject route above: the merge pins its
+          // work on headSha/approvals/state/title/base and never reads
+          // `files[].patch`. Generating them is one git subprocess per changed
+          // file — up to 400, sequentially — on the critical path of every
+          // merge, and the patch-less result stays out of the client cache.
+          patches: false,
         });
         if (!detail) {
           events.emit({
