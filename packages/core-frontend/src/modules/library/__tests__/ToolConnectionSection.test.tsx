@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -24,6 +24,11 @@ vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolConnectionSection } from '../components/tool-page/ToolConnectionSection';
+import { resetProbeQueueForTests } from '../components/tool-page/probe-queue';
+
+// The probe queue outlives the component by design (a save unmounts it), which
+// also means it outlives a TEST unless cleared.
+beforeEach(() => resetProbeQueueForTests());
 
 function workspace(kbDirName: string | null): WorkspaceContextValue {
   return { workspaceId: 'target-company-state', kbDirName } as unknown as WorkspaceContextValue;

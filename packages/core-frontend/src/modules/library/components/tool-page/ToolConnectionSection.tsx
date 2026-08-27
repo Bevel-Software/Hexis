@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
@@ -8,6 +8,7 @@ import { checkToolConnection, type ToolSecrets } from '../../../secrets-vault/se
 import { pathForTool } from '../../routes/library-paths';
 import { toolStatus, toolVariableStatuses } from '../../utils/status';
 import { ToolVarRow } from './ToolVarRow';
+import { queueProbe } from './probe-queue';
 
 /**
  * "Your connection" — what this tool still needs from you, and (if you own it)
@@ -117,26 +118,7 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
   const settled =
     !setupUnfinished && toolVariableStatuses(tool).every(({ status }) => status.state === 'ok');
 
-  /**
-   * The probe currently in flight, so a second save chains onto it instead of
-   * racing it. The server refuses a probe older than the row it would overwrite,
-   * so a lost race can no longer publish a stale verdict — but two saves in
-   * quick succession would still fire two overlapping requests and leave the
-   * user watching a spinner that means nothing. Chaining keeps the last save
-   * the one that reports.
-   */
-  const inFlight = useRef<Promise<void> | null>(null);
-
-  async function runCheck() {
-    const prior = inFlight.current;
-    const run = (async () => {
-      if (prior) await prior.catch(() => {});
-      await doCheck();
-    })();
-    inFlight.current = run;
-    await run;
-    if (inFlight.current === run) inFlight.current = null;
-  }
+  const runCheck = () => queueProbe(tool.slug, doCheck);
 
   async function doCheck() {
     setChecking(true);

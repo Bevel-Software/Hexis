@@ -37,7 +37,7 @@ const OK: Outcome = { status: 'ok', detail: null };
  * the UI but says so on purpose.
  */
 function invalidated() {
-  const now = new Date();
+  const now = monotonicNow();
   return {
     status: 'unverifiable' as const,
     error: "This hasn't been tested since the credential changed.",
@@ -110,6 +110,29 @@ async function withProbeTimeout<T>(work: Promise<T>, onTimeout: T): Promise<T> {
   }
 }
 
+/**
+ * A stamp that is STRICTLY greater than every stamp this process has issued.
+ *
+ * `probe_started_at` is an ordering token, and `Date.now()` has millisecond
+ * resolution — which is coarser than the gap between the two writes that race
+ * on the primary path. Saving a key invalidates (stamp T) and the client
+ * immediately asks for a probe, which can start within the same millisecond;
+ * with equal stamps the guard's strict `<` refuses the probe, and the user is
+ * left looking at "not tested since the credential changed" after a check they
+ * explicitly triggered.
+ *
+ * Ties still fail SAFE across processes (equal stamps refuse the write, keeping
+ * "we don't know" rather than publishing a possibly-stale verdict), so this
+ * only has to remove the same-process collisions — which are the frequent ones,
+ * because they are the ones a single request path produces.
+ */
+let lastStamp = 0;
+function monotonicNow(): Date {
+  const now = Date.now();
+  lastStamp = now > lastStamp ? now : lastStamp + 1;
+  return new Date(lastStamp);
+}
+
 /** Every distinct `${VAR}` referenced in a string. */
 function varRefs(text: string): string[] {
   return [...text.matchAll(/\$\{([A-Za-z0-9_]+)\}/g)].map((m) => m[1]);
@@ -131,7 +154,7 @@ export class ConnectionHealthService implements IConnectionHealthService {
     // A probe describes the credential as it was when the probe STARTED, so
     // anything that happened since — a new key saved, a newer probe already
     // landed — must win over this result no matter which finishes last.
-    const probeStartedAt = new Date();
+    const probeStartedAt = monotonicNow();
     const outcome = await this.runProbe(userId, userEmail, manual);
     const checkedAt = new Date();
     const written = await this.db
@@ -153,6 +176,13 @@ export class ConnectionHealthService implements IConnectionHealthService {
         // concurrent probes the later-started one wins regardless of finishing
         // order. Without this, saving twice in quick succession could leave the
         // badge describing the key the user just replaced.
+        //
+        // STRICTLY less-than, so an equal stamp does NOT overwrite — the safe
+        // direction, since an equal stamp means we cannot tell which came
+        // first. `monotonicNow` removes the same-process collisions that would
+        // otherwise make that refusal routine (see its note); `lte` would be
+        // the wrong relief, letting a stale probe overwrite the very
+        // invalidation meant to supersede it.
         setWhere: lt(connectionHealth.probeStartedAt, probeStartedAt),
       })
       .returning({ id: connectionHealth.id });
@@ -186,12 +216,34 @@ export class ConnectionHealthService implements IConnectionHealthService {
   }
 
   async forget(userId: string, manualName: string): Promise<void> {
+    const mark = invalidated();
+    // UPSERT, not UPDATE. An UPDATE writes nothing when the pair has no row
+    // yet, which leaves the invalidation with no trace — and a probe that
+    // started before the credential changed would then find no conflict, take
+    // the plain INSERT path, and publish its stale verdict with the guard never
+    // consulted. Persisting the mark is what gives that INSERT something to
+    // collide with, so the guard can refuse it.
     await this.db
-      .update(connectionHealth)
-      .set(invalidated())
-      .where(and(eq(connectionHealth.userId, userId), eq(connectionHealth.manualName, manualName)));
+      .insert(connectionHealth)
+      .values({ userId, manualName, ...mark })
+      .onConflictDoUpdate({
+        target: [connectionHealth.userId, connectionHealth.manualName],
+        set: mark,
+      });
   }
 
+  /**
+   * KNOWN GAP, deliberately not closed here. This marks every EXISTING row for
+   * the manual, which covers every user who has been probed before. A user with
+   * no row yet — their first probe in flight while the shared credential
+   * changes — has nothing to mark, so that one probe can still publish a
+   * verdict about the replaced key. It self-corrects on the next probe.
+   *
+   * Closing it needs an invalidation stamp that exists independently of any
+   * user's row (a per-manual epoch the INSERT also checks), which is a second
+   * table and therefore a schema decision — and this table's design is already
+   * with a tech lead. Raised there rather than settled unilaterally mid-review.
+   */
   async forgetAll(manualName: string): Promise<void> {
     await this.db.update(connectionHealth).set(invalidated()).where(eq(connectionHealth.manualName, manualName));
   }

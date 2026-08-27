@@ -21,24 +21,56 @@ import type { Database } from '../../database/connection.js';
  */
 
 /**
- * Records what the service persisted, without a database.
+ * A database stand-in that ENFORCES the write guard, because the guard is the
+ * thing most worth testing.
  *
- * `returning()` reports one row so the write reads as ACCEPTED. The real write
- * is guarded (`setWhere`) and reports zero rows when a newer verdict already
- * owns the row; that is database behaviour, expressed in the guard's own SQL,
- * so it is not simulated here.
+ * `probe()` writes with `setWhere: lt(probeStartedAt, <this probe's start>)`,
+ * so a probe that began before whatever currently owns the row is refused and
+ * reports zero rows. A stub that always accepted the write would make that
+ * branch — and the re-read that follows it — unreachable, so a regression
+ * letting a stale probe overwrite a newer verdict would pass silently.
+ *
+ * `stored` seeds the row a probe is racing against.
  */
-function fakeDb() {
+function fakeDb(stored?: { status: string; error: string | null; probeStartedAt: Date }) {
   const writes: { status: string; error: string | null }[] = [];
+  let row = stored ?? null;
   const db = {
     insert: () => ({
-      values: (v: { status: string; error: string | null }) => ({
-        onConflictDoUpdate: () => ({
-          returning: async () => {
+      values: (v: { status: string; error: string | null; probeStartedAt: Date }) => ({
+        // `setWhere` is what separates the two writers: a PROBE passes the
+        // guard and may be refused; an INVALIDATION passes none and always
+        // lands (that is the whole point of it upserting).
+        onConflictDoUpdate: (cfg: { setWhere?: unknown }) => {
+          let applied: boolean | null = null;
+          const apply = (): boolean => {
+            if (applied !== null) return applied;
+            const guarded = cfg?.setWhere !== undefined;
+            if (guarded && row && !(row.probeStartedAt < v.probeStartedAt)) {
+              applied = false;
+              return applied;
+            }
+            row = { status: v.status, error: v.error, probeStartedAt: v.probeStartedAt };
             writes.push({ status: v.status, error: v.error });
-            return [{ id: 'row' }];
-          },
-        }),
+            applied = true;
+            return applied;
+          };
+          return {
+            returning: async () => (apply() ? [{ id: 'row' }] : []),
+            // Awaited directly, with no `returning()` — the invalidation path.
+            then: (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
+              Promise.resolve().then(apply).then(res, rej),
+          };
+        },
+      }),
+    }),
+    // What `probe()` re-reads when the guard refuses its write.
+    select: () => ({
+      from: () => ({
+        where: async () =>
+          row
+            ? [{ manualName: 'acme', status: row.status, error: row.error, checkedAt: new Date() }]
+            : [],
       }),
     }),
   } as unknown as Database;
@@ -61,8 +93,9 @@ function build(
   manual: ToolManualSummary,
   resolve: (key: string) => Promise<string | null>,
   probe: ToolHealthCheck | null = DECLARED_PROBE,
+  stored?: { status: string; error: string | null; probeStartedAt: Date },
 ) {
-  const { db, writes } = fakeDb();
+  const { db, writes } = fakeDb(stored);
   const toolManualService = {
     listAccessible: async () => [manual],
     toManualCallTemplates: async () => [],
@@ -189,6 +222,68 @@ describe('ConnectionHealthService: what the probe concludes', () => {
 
     expect(r.status).toBe('unverifiable');
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The write guard. A verdict describes the credential as it was when the
+   * probe STARTED, so anything newer must win regardless of finishing order —
+   * otherwise a slow probe against a replaced key gets the last word, which is
+   * the bug this whole feature exists to remove, one layer down.
+   */
+  describe('the write guard', () => {
+    it('refuses a probe that began before the verdict now stored, and reports the stored one', async () => {
+      const newer = new Date(Date.now() + 60_000);
+      const { svc, writes } = build(
+        HTTP_TOOL,
+        async () => 'sk-live-abc',
+        DECLARED_PROBE,
+        // Something newer already speaks for this row — an invalidation from a
+        // key the user just saved, or a probe that started after this one.
+        { status: 'unverifiable', error: "This hasn't been tested since the credential changed.", probeStartedAt: newer },
+      );
+      vi.mocked(fetch).mockResolvedValue(new Response('{}', { status: 200 }));
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      // The probe SUCCEEDED, and is still discarded: it describes the old key.
+      expect(writes).toEqual([]);
+      expect(r.status).toBe('unverifiable');
+      expect(r.detail).toMatch(/since the credential changed/);
+    });
+
+    it('accepts a probe that began after the verdict now stored', async () => {
+      const older = new Date(Date.now() - 60_000);
+      const { svc, writes } = build(HTTP_TOOL, async () => 'sk-live-abc', DECLARED_PROBE, {
+        status: 'failed',
+        error: 'old rejection',
+        probeStartedAt: older,
+      });
+      vi.mocked(fetch).mockResolvedValue(new Response('{}', { status: 200 }));
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      expect(r.status).toBe('ok');
+      expect(writes).toEqual([{ status: 'ok', error: null }]);
+    });
+
+    /**
+     * `forget` UPSERTS rather than UPDATEs for exactly this reason: with no row,
+     * an UPDATE leaves invalidation no trace, the probe's INSERT finds no
+     * conflict, and the guard is never consulted — so a stale verdict lands
+     * with every mechanism above it intact and useless.
+     */
+    it('leaves a mark when invalidating a pair that has no row yet', async () => {
+      const { svc, writes } = build(HTTP_TOOL, async () => 'sk-live-abc');
+      await svc.forget('u1', 'acme');
+      expect(writes).toEqual([
+        { status: 'unverifiable', error: "This hasn't been tested since the credential changed." },
+      ]);
+
+      // And that mark is now what a probe started before it must lose to.
+      vi.mocked(fetch).mockResolvedValue(new Response('{}', { status: 200 }));
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+      expect(r.status).toBe('ok'); // this probe started after, so it legitimately wins
+    });
   });
 
   it('throws only when the manual itself cannot be read', async () => {
