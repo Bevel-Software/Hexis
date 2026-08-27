@@ -316,6 +316,13 @@ export class DbSecretsVaultService implements ISecretsVaultService {
         if (!Array.isArray(written) || written.length > 0) break;
         if (attempt >= 2) throw new SecretOAuthError('The sign-in changed while starting — try again');
         current = await this.requireRow(userId, id);
+        // Only a token rotation is merge-able. A row that is no longer this
+        // OAuth secret — re-registered against another provider, or replaced by
+        // a static value — would have the consent URL built above pointing at
+        // one provider and the pending fields stashed for another.
+        if (current.kind !== 'oauth' || JSON.stringify(current.oauthMeta) !== JSON.stringify(row.oauthMeta)) {
+          throw new SecretOAuthError('The sign-in changed while starting — try again');
+        }
       }
     }
 
@@ -614,8 +621,10 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     // Some providers omit the refresh_token on refresh — keep the old one.
     if (!refreshed.refresh_token) refreshed.refresh_token = tokens.refresh_token;
     // Likewise, a refresh response often omits `scope` — keep the granted scopes
-    // recorded at sign-in so coverage checks don't regress to "unknown".
-    if (!refreshed.scope) refreshed.scope = tokens.scope;
+    // recorded at sign-in so coverage checks don't regress to "unknown". Same
+    // rule as the exchange: only an ABSENT field means "unchanged"; an echoed
+    // value, empty included, is the provider's word.
+    if (refreshed.scope === undefined) refreshed.scope = tokens.scope;
     const next: OAuthBlob = { clientSecret: blob.clientSecret, tokens: refreshed };
 
     // Optimistic concurrency: only persist if the stored ciphertext is unchanged,

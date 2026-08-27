@@ -226,6 +226,20 @@ describe('DbSecretsVaultService — PKCE + public-client tool OAuth', () => {
     const persisted = JSON.parse(crypto.decrypt(captured.set[1].valueEncrypted));
     expect(persisted.tokens).toEqual({ access_token: 'new', refresh_token: 'rt-new' });
     expect(persisted.pendingScopes).toBe('mcp.read');
+
+    // Only a token rotation is merge-able: a row that meanwhile became another
+    // provider's sign-in (or a static value) aborts, since the consent URL was
+    // built for the provider we read first.
+    for (const changed of [
+      { ...rotated, oauthMeta: { ...PUBLIC_META, pkce: false, clientId: 'someone-else' } },
+      { ...rotated, kind: 'static' },
+    ]) {
+      const race = makeFakeDb([[stale], [], [changed]]);
+      await expect(
+        new DbSecretsVaultService(race.db, ENC_KEY).beginOAuth('user-1', 'secret-1', 'https://bevel.example.com/cb', 's'),
+      ).rejects.toBeInstanceOf(SecretOAuthError);
+      expect(race.captured.set).toHaveLength(1); // nothing written onto the changed row
+    }
   });
 });
 
@@ -284,6 +298,20 @@ describe('DbSecretsVaultService — dead-grant detection on refresh', () => {
 
     await expect(svc.resolve('user-1', KEY)).resolves.toBe('fresh-at');
     expect(onMutation).toHaveBeenCalledWith('user-1');
+  });
+
+  it('a refresh keeps the recorded grant when `scope` is absent, and takes an echoed one — empty included', async () => {
+    // Same rule as the code exchange: only an ABSENT field means "unchanged".
+    const refreshWith = async (body: Record<string, unknown>) => {
+      const { db, captured } = makeFakeDb([[userRow()], undefined]);
+      const svc = new DbSecretsVaultService(db, ENC_KEY, undefined, userScope);
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
+      await svc.resolve('user-1', KEY);
+      return JSON.parse(crypto.decrypt(captured.set[0].valueEncrypted)).tokens.scope;
+    };
+    expect(await refreshWith({ access_token: 'a', expires_in: 3600 })).toBe('mcp.read');
+    expect(await refreshWith({ access_token: 'a', expires_in: 3600, scope: 'mcp.read mcp.write' })).toBe('mcp.read mcp.write');
+    expect(await refreshWith({ access_token: 'a', expires_in: 3600, scope: '' })).toBe('');
   });
 
   it('putSharedOAuthProvider notifies mutation listeners with null (shared → everyone)', async () => {
