@@ -422,9 +422,10 @@ export interface IWorkflowService {
   closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean>;
 
   /**
-   * Close every open change request whose source branch no longer exists.
-   * Such a request cannot be read, reviewed, applied or declined — it is a
-   * tombstone, and it makes every open-list poll throw `unknown branch`.
+   * Close every open change request either of whose branches no longer exists
+   * — source or target, since a proposal needs both ends. Such a request
+   * cannot be read, reviewed, applied or declined — it is a tombstone, and it
+   * makes every open-list poll throw `unknown branch`.
    *
    * Closes rather than deletes (the row is the only surviving evidence of the
    * proposal), and fails safe: an unreachable origin closes nothing, because
