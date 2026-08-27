@@ -208,13 +208,14 @@ describe('parseOwnAccessEntries — quoted and flow-sequence verb values', () =>
     // and never reach the entry grammar. They must resolve exactly as they do
     // on the subset path — as the (odd, but legal) role names they spell.
     const viaFull = parseOwnAccessEntries(
-      ['---', 'read: "coding-agent <coding-agent@bevel.software>"', 'write: true', 'owner:', '  - 42', '---', ''].join('\n'),
+      ['---', 'read: "coding-agent <coding-agent@bevel.software>"', 'write: true', 'owner:', '  - 42', '  - 0x10', '  - 1e3', '---', ''].join('\n'),
     );
-    const viaSubset = parseOwnAccessEntries(['---', 'write: true', 'owner:', '  - 42', '---', ''].join('\n'));
+    const viaSubset = parseOwnAccessEntries(['---', 'write: true', 'owner:', '  - 42', '  - 0x10', '  - 1e3', '---', ''].join('\n'));
     expect(viaFull!.write).toEqual(viaSubset!.write);
     expect(viaFull!.owner).toEqual(viaSubset!.owner);
     expect(viaFull!.write).toMatchObject([{ kind: 'role', role: 'true' }]);
-    expect(viaFull!.owner).toMatchObject([{ kind: 'role', role: '42' }]);
+    // Source spelling, not the number it parses to: `0x10` stays `0x10`.
+    expect(viaFull!.owner.map((e) => (e as { role: string }).role)).toEqual(['42', '0x10', '1e3']);
   });
 
   it('leaves the plain forms on the subset path', () => {
