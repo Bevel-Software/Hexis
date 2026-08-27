@@ -151,6 +151,50 @@ describe('DbSecretsVaultService — PKCE + public-client tool OAuth', () => {
     expect(stored.tokens.access_token).toBe('at-1');
     expect(stored.pendingVerifier).toBeUndefined();
   });
+
+  it('beginToolOAuthByKey remembers the scopes it asked for, and completeOAuth takes them as granted when the provider echoes none', async () => {
+    // RFC 6749 §5.1: `scope` in the token response is OPTIONAL when identical
+    // to what was requested. A provider that omits it (HubSpot) granted the
+    // request, not nothing — reading it as nothing would flag every declared
+    // scope as missing and block the tool behind a permanent "sign in again".
+    const begin = makeFakeDb([[sharedRow()], [], [{ id: 'user-row-1' }]]);
+    const svc = new DbSecretsVaultService(begin.db, ENC_KEY);
+    const { url } = await svc.beginToolOAuthByKey({
+      userId: 'user-1',
+      key: KEY,
+      redirectUri: 'https://bevel.example.com/cb',
+      state: 's',
+      scopes: ['crm.objects.contacts.read', 'crm.objects.companies.read'],
+    });
+    expect(new URL(url).searchParams.get('scope')).toBe('crm.objects.contacts.read crm.objects.companies.read');
+    const pending = JSON.parse(crypto.decrypt(begin.captured.values[0].valueEncrypted));
+    expect(pending.pendingScopes).toBe('crm.objects.contacts.read crm.objects.companies.read');
+
+    const complete = async (tokenResponse: Record<string, unknown>) => {
+      const userRow = sharedRow({
+        id: 'user-row-1',
+        userId: 'user-1',
+        valueEncrypted: crypto.encrypt(
+          JSON.stringify({ pendingVerifier: 'v', pendingScopes: 'crm.objects.contacts.read crm.objects.companies.read' }),
+        ),
+      });
+      const { db, captured } = makeFakeDb([[userRow], undefined]);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(JSON.stringify(tokenResponse), { status: 200, headers: { 'Content-Type': 'application/json' } })),
+      );
+      await new DbSecretsVaultService(db, ENC_KEY).completeOAuth('user-1', 'user-row-1', 'code', 'https://bevel.example.com/cb');
+      return JSON.parse(crypto.decrypt(captured.set[0].valueEncrypted));
+    };
+
+    // No `scope` echoed → the requested scopes are the granted ones.
+    const silent = await complete({ access_token: 'at-1', expires_in: 3600 });
+    expect(silent.tokens.scope).toBe('crm.objects.contacts.read crm.objects.companies.read');
+    expect(silent.pendingScopes).toBeUndefined(); // one-time, like the verifier
+    // An echoed `scope` is the provider's word and wins — a narrower grant stays visible.
+    const echoed = await complete({ access_token: 'at-2', expires_in: 3600, scope: 'crm.objects.contacts.read' });
+    expect(echoed.tokens.scope).toBe('crm.objects.contacts.read');
+  });
 });
 
 describe('DbSecretsVaultService — dead-grant detection on refresh', () => {
