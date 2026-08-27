@@ -1,8 +1,9 @@
 import { LocalFilesystem } from '@mastra/core/workspace';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
-import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { LockingFilesystem, type LockingFilesystemContext } from '../kb-fs/locking-filesystem.js';
 import { ReadOnlyFilesystem } from '../kb-fs/read-only-filesystem.js';
 import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
+import { makeSkillPlacementWriteValidator } from '../skills/skill-placement-guard.js';
 import type { ICreatorAccess } from '../access-model/creator.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
@@ -48,6 +49,18 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
   // admin lockout) before it reaches disk — the agent gets a tool error and the
   // file is untouched, mirroring the human editor's save-time gate.
   const validateRolesWrite = makeRolesYamlWriteValidator(deps.kbDirName);
+  // Same treatment for a SKILL.md written where no skill can be found: an agent
+  // composing raw file writes has no schema to conform to, and the old failure
+  // was a successful commit that produced nothing. Refusing turns it into a
+  // message that names the path that works.
+  const validateSkillPlacement = makeSkillPlacementWriteValidator(deps.kbDirName);
+  // One hook, both rules. Each guard ignores paths it has no opinion about, so
+  // order is irrelevant — what matters is that adding a third never means
+  // silently dropping the second.
+  const validateWrite: NonNullable<LockingFilesystemContext['validateWrite']> = (path, content) => {
+    validateRolesWrite(path, content);
+    validateSkillPlacement(path, content);
+  };
 
   return async function resolveToolContext(auth, abortSignal, sessionId) {
     const user = await deps.authService.getUserById(auth.userId);
@@ -70,7 +83,7 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
                 branch: branchForWorkspaceId(workspaceId),
                 user,
                 kbDirName: deps.kbDirName,
-                validateWrite: validateRolesWrite,
+                validateWrite,
                 creatorAccess: deps.creatorAccess,
               },
             )

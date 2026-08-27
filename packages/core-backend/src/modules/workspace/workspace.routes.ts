@@ -21,6 +21,7 @@ import type { IAccessControl } from '../access/access-control.interface.js';
 import { resolveReadableMap, toKbRelative } from '../access-model/kb-read-filter.js';
 import type { ICreatorAccess } from '../access-model/creator.js';
 import { isRolesYamlPath, assertRolesYamlParsable } from '../access-model/roles-yaml-guard.js';
+import { assertSkillPlacement } from '../skills/skill-placement-guard.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
@@ -884,6 +885,11 @@ export function createWorkspaceRoutes(
       // (loadModel hard-throws). The dedicated Roles & Members surface has its
       // own validate gate; this covers the raw-text editor path.
       if (isRolesYamlPath(filePath, kbDirName)) assertRolesYamlParsable(content);
+      // Same shape, different failure: a SKILL.md saved outside `Plugins/` used
+      // to commit happily and then be ignored by every reader, so the editor
+      // reported success for a skill that does not exist. Refuse it here rather
+      // than let the save look like it worked.
+      assertSkillPlacement(filePath, kbDirName);
       // Creator read grant: a brand-new file at a spot whose access chain
       // doesn't grant the creator `read` would vanish from their own explorer
       // (read is default-deny). Plan BEFORE the write: a new subtree gets its

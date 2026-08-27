@@ -206,6 +206,35 @@ export function pluginOfPath(repoRelativePath: string): string | null {
   return segments.length >= 3 ? (segments[1] ?? null) : null;
 }
 
+/** The file whose presence makes a folder a skill. Exact, case-sensitive. */
+export const SKILL_DOC_FILE = 'SKILL.md';
+
+/**
+ * Whether a repo-root-relative path is a `SKILL.md` in a place the catalog
+ * will actually find.
+ *
+ * The scanner walks `Plugins/` and treats every folder that directly holds a
+ * `SKILL.md` as a skill, at any depth — so the rule is simply "under `Plugins/`,
+ * in some folder below it":
+ *
+ *   Plugins/GTM/skills/heyreach/SKILL.md → true
+ *   Plugins/loose-skill/SKILL.md         → true   (the folder IS the plugin)
+ *   Plugins/SKILL.md                     → false  (`Plugins/` is not a skill)
+ *   Skills/example/SKILL.md              → false  (root is no longer read)
+ *   KnowledgeBase/Product/SKILL.md       → false
+ *
+ * This is the placement rule ONLY. Whether a skill that IS well-placed shows up
+ * in review is a separate, stricter question owned by the pending-skill shelf.
+ */
+export function isSkillDocPath(repoRelativePath: string): boolean {
+  const segments = repoRelativePath.split('/').filter(Boolean);
+  return (
+    segments.length >= 3 &&
+    segments[0] === PLUGINS_DIR &&
+    segments[segments.length - 1] === SKILL_DOC_FILE
+  );
+}
+
 /**
  * Folder under the repo root for agent-produced records (pipeline instances,
  * work items, intermediate outputs). Parsed exactly like `KnowledgeBase/`:
