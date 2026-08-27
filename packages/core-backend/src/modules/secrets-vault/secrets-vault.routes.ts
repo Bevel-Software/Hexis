@@ -384,19 +384,37 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       if (!(await accessControl.canWrite(defaultWs(), email, found.manual.path))) {
         return void res.status(403).json({ error: 'You need write access to this tool to set its client secret.' });
       }
+      const { authorizationUrl, tokenUrl } = found.variable.oauth;
+      // A declaration that names only its client id is completed from the
+      // server's OAuth metadata at scan time. When that didn't happen, pinning
+      // the secret to a provider with no endpoints would leave every sign-in
+      // failing later with a far less specific error than the catalog's own.
+      if (!authorizationUrl || !tokenUrl) {
+        const why = found.manual.setup?.reason;
+        return void res.status(422).json({
+          error: why
+            ? `The sign-in endpoints for this server aren't known yet: ${why}.`
+            : "The sign-in endpoints for this server aren't known yet — declare `authorizationUrl` and `tokenUrl` on the sign-in variable.",
+        });
+      }
       const clientSecret = (req.body ?? {}).clientSecret;
       await secretsVault.putSharedOAuthClientSecret({
         key: varKey(found.manual.name, found.variable.name),
         clientSecret,
         provider: {
-          authorizationUrl: found.variable.oauth.authorizationUrl,
-          tokenUrl: found.variable.oauth.tokenUrl,
+          authorizationUrl,
+          tokenUrl,
           clientId: found.variable.oauth.clientId,
           scopes: found.variable.oauth.scopes,
           // Static authorize params (e.g. Google's `access_type=offline`) so the
           // provider returns a refresh token — stored with the secret so a later
           // `.tool` edit can't redirect the flow.
           authParams: found.variable.oauth.authParams,
+          // PKCE unless the declaration opted out; the resource indicator when
+          // the server (or the declaration) names one. Both pinned here for the
+          // same reason as the rest: the flow runs from the stored row.
+          pkce: found.variable.oauth.pkce !== false,
+          resource: found.variable.oauth.resource,
         },
       });
       res.status(201).json({ ok: true });

@@ -6,6 +6,7 @@ import { toolDef, withBranchInput } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { assertInsideRepo } from '../../kb-fs/repo-path.js';
 
 // A function, not a constant: the branch model is applied during boot, and a
 // module-scope capture would freeze this at the empty set that exists before it.
@@ -118,6 +119,8 @@ export function registerWorkflowTools(
   router: Router,
   toolAuth: RequestHandler,
   toolHandler: ToolHandlerFactory,
+  /** The clone folder at the workspace root; `save_file` refuses a path outside it. */
+  kbDirName: string,
 ): void {
   const mount = (spec: {
     name: string;
@@ -221,7 +224,13 @@ export function registerWorkflowTools(
       '`{ saved: false, reason }` rather than throwing. The commit lands asynchronously.',
     inputs: {
       type: 'object',
-      properties: { path: { type: 'string', minLength: 1, description: 'Workspace-relative path (as write_file expects).' } },
+      properties: {
+        path: {
+          type: 'string',
+          minLength: 1,
+          description: `Workspace-relative path, as write_file expects: starts with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`).`,
+        },
+      },
       required: ['path'],
       additionalProperties: false,
     },
@@ -238,6 +247,14 @@ export function registerWorkflowTools(
     handler: async (args, ctx: ToolContext) => {
       const path = args.path as string;
       const branch = args.branch as string;
+      // This tool commits whatever is on disk at `path` through the lock
+      // protocol, bypassing the locking filesystem's own guard. A path without
+      // the clone-folder prefix names a file git can never see: refuse it
+      // before a lock is taken, with the same corrected-path message.
+      if (typeof path !== 'string' || path.length === 0) {
+        throw new ToolError('`path` is required and must be a non-empty string.', 400);
+      }
+      assertInsideRepo(path, kbDirName);
       const workspaceId = workspaceIdForBranch(branch);
       const acquired = await ctx.workflowService.acquireLock(workspaceId, branch, path, ctx.user);
       if (!acquired.acquired) {

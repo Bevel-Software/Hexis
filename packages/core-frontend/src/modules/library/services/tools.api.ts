@@ -67,6 +67,28 @@ export async function getToolDetail(slug: string): Promise<ToolManualDetail> {
  */
 export type McpTransport = 'streamable-http' | 'sse' | 'stdio';
 
+/**
+ * A declared `${VAR}` of an mcp.json server, exactly as plugin.json stores it.
+ * `oauth` makes it a sign-in (user-scoped only): the owner's OAuth app's client
+ * id, and optionally the provider endpoints — absent, they are discovered from
+ * the server's own OAuth metadata. PKCE is on unless `pkce: false`. The client
+ * SECRET is never here; it lives in the vault, set on the tool's page.
+ */
+export interface McpServerVariable {
+  name: string;
+  scope: 'admin' | 'user';
+  label?: string;
+  oauth?: {
+    authorizationUrl?: string;
+    tokenUrl?: string;
+    clientId: string;
+    scopes?: string[];
+    authParams?: Record<string, string>;
+    pkce?: boolean;
+    resource?: string;
+  };
+}
+
 export interface McpServerView {
   name: string;
   transport: McpTransport;
@@ -77,7 +99,7 @@ export interface McpServerView {
   env?: Record<string, string>;
   literalHeaders: Record<string, string>;
   authHeaders: Record<string, string>;
-  variables: { name: string; scope: 'admin' | 'user'; label?: string }[];
+  variables: McpServerVariable[];
   description?: string;
   local: boolean;
   canWrite: boolean;

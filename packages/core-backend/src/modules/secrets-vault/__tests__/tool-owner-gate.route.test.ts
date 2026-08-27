@@ -25,6 +25,7 @@ const toolManualService = {
       name: 'weather',
       path: TOOL_PATH,
       type: 'mcp' as const,
+      setup: { kind: 'oauth-manual' as const, reason: 'no authorization-server metadata at https://weather.example' },
       variables: [
         { name: 'SHARED_KEY', scope: 'admin' as const, label: 'Org key' },
         {
@@ -37,6 +38,19 @@ const toolManualService = {
             clientId: 'client-1',
           },
         },
+        {
+          name: 'LEGACY',
+          scope: 'user' as const,
+          oauth: {
+            authorizationUrl: 'https://auth.example.com/authorize',
+            tokenUrl: 'https://auth.example.com/token',
+            clientId: 'client-2',
+            pkce: false,
+            resource: 'https://weather.example/mcp',
+          },
+        },
+        // Declared by client id alone, and discovery could NOT fill the endpoints in.
+        { name: 'BYO', scope: 'user' as const, oauth: { clientId: 'owner-app' } },
       ],
     },
   ],
@@ -125,9 +139,42 @@ describe('tool owner gate — shared config requires WRITE on the `.tool` file',
       expect.objectContaining({
         key: 'weather_SIGNIN',
         clientSecret: 'cs-123',
-        provider: expect.objectContaining({ clientId: 'client-1' }),
+        // PKCE rides along by default — the MCP spec requires it and a
+        // provider without it ignores the parameters. No `resource` declared.
+        provider: expect.objectContaining({ clientId: 'client-1', pkce: true, resource: undefined }),
       }),
     );
+  });
+
+  it('pins the declaration\'s PKCE opt-out and resource indicator with the secret', async () => {
+    const base = await baseUrlAs(WRITER);
+    const res = await fetch(`${base}/api/secrets/tools/weather/vars/LEGACY/oauth/admin`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientSecret: 'cs-456' }),
+    });
+    expect(res.status).toBe(201);
+    expect(putSharedOAuthClientSecret).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'weather_LEGACY',
+        provider: expect.objectContaining({ clientId: 'client-2', pkce: false, resource: 'https://weather.example/mcp' }),
+      }),
+    );
+  });
+
+  it('refuses the secret while the sign-in endpoints are still unknown, naming why (422)', async () => {
+    const base = await baseUrlAs(WRITER);
+    const res = await fetch(`${base}/api/secrets/tools/weather/vars/BYO/oauth/admin`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientSecret: 'cs-789' }),
+    });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain('no authorization-server metadata at https://weather.example');
+    // Pinning a provider with no endpoints would make every later sign-in
+    // fail with a far vaguer error than this one.
+    expect(putSharedOAuthClientSecret).not.toHaveBeenCalled();
   });
 
   it('a non-writer cannot set the client secret (403)', async () => {

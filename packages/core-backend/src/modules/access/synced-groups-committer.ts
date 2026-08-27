@@ -74,7 +74,7 @@ export function createSyncedGroupsCommitter(deps: {
       // roles admin's atomic writes use.
       const fsys = new LockingFilesystem(
         { basePath, contained: true },
-        { workflow: workflowService, workspaceId, branch, user: bot },
+        { workflow: workflowService, workspaceId, branch, user: bot, kbDirName },
       );
       try {
         await fsys.writeFiles(

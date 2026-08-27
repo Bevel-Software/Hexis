@@ -266,6 +266,22 @@ describe('ToolManualService', () => {
     expect(await svc().listAccessible('user@x.eu')).toHaveLength(0);
   });
 
+  test('carries oauth.pkce:false and a gated oauth.resource; a `.tool` still needs both endpoints', async () => {
+    await writeOAuthTool(oauthVar({ pkce: false, resource: 'https://api.example.com/mcp' }));
+    const [manual] = await svc().listAccessible('user@x.eu');
+    expect(manual.variables?.[0].oauth).toMatchObject({ pkce: false, resource: 'https://api.example.com/mcp' });
+    // PKCE is the default and is not echoed; only the opt-out is stored.
+    await writeOAuthTool(oauthVar({ pkce: true }));
+    expect((await svc().listAccessible('user@x.eu'))[0].variables?.[0].oauth).not.toHaveProperty('pkce');
+    await writeOAuthTool(oauthVar({ pkce: 'yes' }));
+    expect(await svc().listAccessible('user@x.eu')).toHaveLength(0);
+    await writeOAuthTool(oauthVar({ resource: 'http://localhost/mcp' }));
+    expect(await svc().listAccessible('user@x.eu')).toHaveLength(0);
+    // A `.tool` has no server whose metadata could fill the endpoints in.
+    await writeOAuthTool(oauthVar({ authorizationUrl: undefined }));
+    expect(await svc().listAccessible('user@x.eu')).toHaveLength(0);
+  });
+
   test('parses `remote`: default true, explicit false, rejects non-boolean', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsrem-'));
     const tools = join(root, wsId, KB_DIR, 'Plugins');

@@ -14,11 +14,12 @@ import { ToolVarRow } from './ToolVarRow';
  * from you on everyone's behalf.
  *
  * The setup banner above the rows exists because `oauth-manual` is the one
- * state the rows CANNOT explain on their own: auto-discovery found that the
- * remote server wants a sign-in but couldn't register a client for it, so every
- * row underneath is stuck through no fault of the person reading them. The
- * banner names whose move it is — the owner's — and for the owner it links
- * straight at the file they have to edit.
+ * state the rows CANNOT explain on their own: the remote server wants a sign-in
+ * through an app the OWNER registers, so every row underneath is stuck through
+ * no fault of the person reading them. The banner names whose move it is — the
+ * owner's — and what the move is: declare the sign-in (the server editor on
+ * this page for an mcp.json server, the file itself for a `.tool`), then set
+ * its client secret. Once declared, only the secret remains and it says so.
  */
 
 export interface ToolConnectionSectionProps {
@@ -40,6 +41,12 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
   // No oauth variable at all is the un-started case, so it counts as unfinished.
   const setupUnfinished =
     setupKind === 'oauth-manual' && !tool.variables.some((v) => v.oauth && v.adminConfigured);
+  // Declared but not yet finished: the client id is in the file, the secret
+  // isn't in the vault. Different sentence — "set the secret", not "declare".
+  const signInDeclared = tool.variables.some((v) => v.oauth);
+  // An mcp.json server is edited in the server section of THIS page; only a
+  // `.tool` manual sends the owner to a file.
+  const isMcpJsonServer = tool.path.endsWith('/mcp.json');
 
   /**
    * The CONFIGURATION this tool is still missing, named.
@@ -96,13 +103,22 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
 
       {setupUnfinished && (
         <Banner tone="wait" role="status" className="mb-2.5">
-          {tool.canWrite ? (
+          {tool.canWrite && signInDeclared ? (
+            <>
+              Sign-in setup needed: the sign-in is declared — set its client secret below to
+              finish.
+              {tool.setup?.reason && <em className="mt-1 block">{tool.setup.reason}</em>}
+            </>
+          ) : tool.canWrite ? (
             <>
               Sign-in setup needed: this server needs users to sign in, but Bevel couldn't set
-              that up automatically. Declare the OAuth provider in the tool file, then set its
-              client secret below.
+              that up automatically. Register an OAuth app with the provider, then{' '}
+              {isMcpJsonServer
+                ? 'add a user-scoped variable with an OAuth sign-in under "Edit server" below'
+                : 'declare the sign-in on a user-scoped variable in the tool file'}
+              , and set its client secret here.
               {tool.setup?.reason && <em className="mt-1 block">{tool.setup.reason}</em>}
-              {kbDirName && (
+              {kbDirName && !isMcpJsonServer && (
                 <Button
                   variant="quiet"
                   size="tiny"

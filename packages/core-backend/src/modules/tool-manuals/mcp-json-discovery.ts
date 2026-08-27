@@ -106,28 +106,48 @@ export function validatedVariables(raw: unknown): ToolVariable[] | null {
     if (entry.oauth !== undefined) {
       // OAuth is inherently per-caller (same rule the `.tool` parser
       // enforces): an admin-shared OAuth token would leak one user's token
-      // to all callers. The provider config's required halves must be there
-      // — a sign-in wired to a missing URL is a declaration, not a feature.
+      // to all callers.
       if (!isRecord(entry.oauth) || scope !== 'user') return null;
       const o = entry.oauth;
+      // Confidential material never loads from a file, on either declaration
+      // surface: the `.tool` parser throws on these keys, and silently
+      // dropping one here would leave a plugin.json carrying a secret that
+      // "worked" — the file is portable package data, readable by every
+      // client that loads the plugin.
+      if (o.clientSecret !== undefined || o.client_secret !== undefined || o.secret !== undefined) return null;
       // `clientId` is trimmed and must be non-empty, exactly as the `.tool`
       // parser requires: a whitespace-only value would pass discovery and
       // then fail the owner's client-secret setup with "clientId is
       // required" — an error at the wrong surface, long after the save.
-      if (
-        typeof o.authorizationUrl !== 'string' ||
-        typeof o.tokenUrl !== 'string' ||
-        typeof o.clientId !== 'string' ||
-        !o.clientId.trim()
-      ) {
-        return null;
-      }
+      if (typeof o.clientId !== 'string' || !o.clientId.trim()) return null;
+      // The endpoints are OPTIONAL here, unlike in a `.tool`: an MCP server
+      // publishes its authorization-server metadata, so a declaration that
+      // names only the client id is completed at scan time. Both or neither
+      // — one URL without the other is a half-declaration, not a feature.
+      // An empty string counts as absent (the editor's cleared field).
+      const optionalUrl = (v: unknown): string | undefined | null => {
+        if (v === undefined || v === null) return undefined;
+        if (typeof v !== 'string') return null;
+        const trimmed = v.trim();
+        return trimmed ? trimmed : undefined;
+      };
+      const authorizationUrl = optionalUrl(o.authorizationUrl);
+      const tokenUrl = optionalUrl(o.tokenUrl);
+      const resource = optionalUrl(o.resource);
+      if (authorizationUrl === null || tokenUrl === null || resource === null) return null;
+      if ((authorizationUrl === undefined) !== (tokenUrl === undefined)) return null;
       // The same https + SSRF gate the `.tool` parser runs on these URLs: a
       // sign-in or token exchange aimed at an internal host is a declaration
-      // this surface must refuse exactly like the other one does.
+      // this surface must refuse exactly like the other one does. `resource`
+      // is never fetched, but it names the remote server — same bar.
       try {
-        assertSafeFetchUrl(o.authorizationUrl, { requireHttps: true, label: `${entry.name} oauth.authorizationUrl` });
-        assertSafeFetchUrl(o.tokenUrl, { requireHttps: true, label: `${entry.name} oauth.tokenUrl` });
+        if (authorizationUrl !== undefined) {
+          assertSafeFetchUrl(authorizationUrl, { requireHttps: true, label: `${entry.name} oauth.authorizationUrl` });
+          assertSafeFetchUrl(tokenUrl!, { requireHttps: true, label: `${entry.name} oauth.tokenUrl` });
+        }
+        if (resource !== undefined) {
+          assertSafeFetchUrl(resource, { requireHttps: true, label: `${entry.name} oauth.resource` });
+        }
       } catch {
         return null;
       }
@@ -138,14 +158,18 @@ export function validatedVariables(raw: unknown): ToolVariable[] | null {
           return null;
         }
       }
+      // PKCE is on unless the declaration says `false`; anything else there is
+      // a malformed flag, not a preference.
+      if (o.pkce !== undefined && typeof o.pkce !== 'boolean') return null;
       oauth = {
-        authorizationUrl: o.authorizationUrl,
-        tokenUrl: o.tokenUrl,
+        ...(authorizationUrl !== undefined ? { authorizationUrl, tokenUrl: tokenUrl! } : {}),
         clientId: o.clientId.trim(),
         ...(Array.isArray(o.scopes) && o.scopes.every((s) => typeof s === 'string')
           ? { scopes: o.scopes as string[] }
           : {}),
         ...(o.authParams !== undefined ? { authParams: o.authParams as Record<string, string> } : {}),
+        ...(o.pkce === false ? { pkce: false } : {}),
+        ...(resource !== undefined ? { resource } : {}),
       };
     }
     out.push({

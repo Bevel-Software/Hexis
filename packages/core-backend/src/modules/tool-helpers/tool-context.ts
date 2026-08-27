@@ -69,6 +69,7 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
                 workspaceId,
                 branch: branchForWorkspaceId(workspaceId),
                 user,
+                kbDirName: deps.kbDirName,
                 validateWrite: validateRolesWrite,
                 creatorAccess: deps.creatorAccess,
               },

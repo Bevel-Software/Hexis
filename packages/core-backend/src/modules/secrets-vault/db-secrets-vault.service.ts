@@ -34,10 +34,13 @@ interface OAuthTokenSet {
   expires_at?: number;
   token_type?: string;
   /**
-   * Space-delimited scopes the provider actually granted (echoed on the token
-   * response). The durable record of what this token can do, so a later check can
-   * tell whether it still covers a tool whose required scopes have grown. Absent
-   * on tokens minted before this was captured (treated as "covers nothing").
+   * Space-delimited scopes the provider actually granted. The durable record of
+   * what this token can do, so a later check can tell whether it still covers a
+   * tool whose required scopes have grown. Taken from the token response's
+   * `scope` when echoed; when the provider stays silent, RFC 6749 §5.1 says the
+   * grant is identical to the request, so the scopes asked for at `begin*` time
+   * are recorded instead. Absent only on tokens minted before this was captured
+   * (treated as "covers nothing").
    */
   scope?: string;
 }
@@ -51,6 +54,13 @@ interface OAuthBlob {
    * it's a one-time secret binding the pending consent to this server.
    */
   pendingVerifier?: string;
+  /**
+   * The space-delimited `scope` the pending consent asked for — what the
+   * token is deemed granted when the provider's token response echoes none
+   * (RFC 6749 §5.1: `scope` is optional when identical to the request). One-time
+   * like the verifier: consumed by the exchange it was minted for.
+   */
+  pendingScopes?: string;
 }
 
 /**
@@ -281,16 +291,39 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     // PKCE (S256): same as the tool path — mint the verifier, stash it on the
     // row (so `completeOAuth` echoes it at the token exchange), and put only
     // the derived challenge in the consent URL. A provider registered pkce
-    // would otherwise fail the exchange from this standalone flow.
-    let pendingVerifier: string | undefined;
-    if (meta.pkce) {
-      pendingVerifier = randomBytes(32).toString('base64url');
-      const blob = this.readBlob(row.valueEncrypted);
-      const next: OAuthBlob = { ...blob, pendingVerifier };
-      await this.db
-        .update(secrets)
-        .set({ valueEncrypted: this.crypto().encrypt(JSON.stringify(next)), updatedAt: new Date() })
-        .where(and(eq(secrets.id, id), eq(secrets.userId, userId)));
+    // would otherwise fail the exchange from this standalone flow. The
+    // requested scopes ride along for the same exchange (see `pendingScopes`).
+    const pendingVerifier = meta.pkce ? randomBytes(32).toString('base64url') : undefined;
+    const pendingScopes = meta.scopes && meta.scopes.length ? meta.scopes.join(' ') : undefined;
+    if (pendingVerifier || pendingScopes) {
+      // Read-modify-write on the blob, guarded on the ciphertext we read: a
+      // refresh running concurrently (the row is a live credential) may have
+      // persisted ROTATED tokens in between, and writing our copy over them
+      // would leave the row holding a dead refresh token if this consent is
+      // then abandoned. On a miss (0 rows), re-read and merge onto the fresh
+      // blob; bounded so a row that keeps changing fails loudly, not forever.
+      let current = row;
+      for (let attempt = 0; ; attempt++) {
+        const blob = this.readBlob(current.valueEncrypted);
+        const next: OAuthBlob = { ...blob, pendingVerifier, pendingScopes };
+        const written = await this.db
+          .update(secrets)
+          .set({ valueEncrypted: this.crypto().encrypt(JSON.stringify(next)), updatedAt: new Date() })
+          .where(
+            and(eq(secrets.id, id), eq(secrets.userId, userId), eq(secrets.valueEncrypted, current.valueEncrypted)),
+          )
+          .returning({ id: secrets.id });
+        if (!Array.isArray(written) || written.length > 0) break;
+        if (attempt >= 2) throw new SecretOAuthError('The sign-in changed while starting — try again');
+        current = await this.requireRow(userId, id);
+        // Only a token rotation is merge-able. A row that is no longer this
+        // OAuth secret — re-registered against another provider, or replaced by
+        // a static value — would have the consent URL built above pointing at
+        // one provider and the pending fields stashed for another.
+        if (current.kind !== 'oauth' || JSON.stringify(current.oauthMeta) !== JSON.stringify(row.oauthMeta)) {
+          throw new SecretOAuthError('The sign-in changed while starting — try again');
+        }
+      }
     }
 
     const url = new URL(meta.authorizationUrl);
@@ -340,7 +373,14 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     if (meta.resource) body.set('resource', meta.resource);
 
     const tokens = await this.tokenRequest(meta.tokenUrl, body);
-    // The verifier is one-time — never carried past the exchange it was minted for.
+    // A silent token response granted what was asked (RFC 6749 §5.1) — record
+    // the request as the grant, or every declared scope would read as missing
+    // and the sign-in would be flagged "again" forever. An echoed `scope` is
+    // the provider's own word and wins — narrower grants included, and so does
+    // an explicit empty one: only an ABSENT field means "as requested".
+    if (tokens.scope === undefined && blob.pendingScopes) tokens.scope = blob.pendingScopes;
+    // The verifier and the requested scopes are one-time — never carried past
+    // the exchange they were minted for.
     const next: OAuthBlob = { clientSecret: blob.clientSecret, tokens };
     await this.db
       .update(secrets)
@@ -433,11 +473,22 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     // only the derived challenge in the consent URL. `completeOAuth` echoes the
     // verifier at the token exchange and drops it.
     const pendingVerifier = meta.pkce ? randomBytes(32).toString('base64url') : undefined;
+    // The scopes this consent asks for: the caller may override from the live
+    // tool file (`input.scopes`) so an owner adding a permission takes effect
+    // without re-setting the secret. Remembered on the row so a token response
+    // that echoes no `scope` is read as granting exactly this (RFC 6749 §5.1).
+    const requestedScopes = input.scopes && input.scopes.length ? input.scopes : meta.scopes;
+    const pendingScopes = requestedScopes && requestedScopes.length ? requestedScopes.join(' ') : undefined;
 
     // Provision (or reset) the caller's own oauth row for this key from the shared
     // provider meta + secret, preserving any existing tokens. Keyed `<manual>_<VAR>`
     // so `resolve` (scope 'user') returns the token once sign-in completes.
-    const blob: OAuthBlob = { clientSecret: sharedBlob.clientSecret, tokens: existingTokens, pendingVerifier };
+    const blob: OAuthBlob = {
+      clientSecret: sharedBlob.clientSecret,
+      tokens: existingTokens,
+      pendingVerifier,
+      pendingScopes,
+    };
     const valueEncrypted = this.crypto().encrypt(JSON.stringify(blob));
     const [row] = await this.db
       .insert(secrets)
@@ -449,10 +500,8 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .returning();
 
     // Build the consent URL exactly as beginOAuth does, from the stored meta —
-    // EXCEPT the requested scopes, which the caller may override from the live tool
-    // file (`input.scopes`) so an owner adding a permission takes effect without
-    // re-setting the secret. Client id, addresses, and secret stay owner-pinned.
-    const requestedScopes = input.scopes && input.scopes.length ? input.scopes : meta.scopes;
+    // EXCEPT the requested scopes (above). Client id, addresses, and secret
+    // stay owner-pinned.
     const url = new URL(meta.authorizationUrl);
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('client_id', meta.clientId);
@@ -572,8 +621,10 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     // Some providers omit the refresh_token on refresh — keep the old one.
     if (!refreshed.refresh_token) refreshed.refresh_token = tokens.refresh_token;
     // Likewise, a refresh response often omits `scope` — keep the granted scopes
-    // recorded at sign-in so coverage checks don't regress to "unknown".
-    if (!refreshed.scope) refreshed.scope = tokens.scope;
+    // recorded at sign-in so coverage checks don't regress to "unknown". Same
+    // rule as the exchange: only an ABSENT field means "unchanged"; an echoed
+    // value, empty included, is the provider's word.
+    if (refreshed.scope === undefined) refreshed.scope = tokens.scope;
     const next: OAuthBlob = { clientSecret: blob.clientSecret, tokens: refreshed };
 
     // Optimistic concurrency: only persist if the stored ciphertext is unchanged,

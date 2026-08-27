@@ -49,6 +49,14 @@ jobs:
 
       - run: pnpm build
 
+      # `pnpm build` already typechecks the packages whose build IS `tsc`
+      # (shared, mcp-core, core-backend, hexis-mcp). Three are not covered by
+      # it: core-frontend and apps/server have no build step, and apps/web
+      # builds with vite, which does not typecheck. A type error in any of
+      # those reached dev unnoticed until someone ran tsc locally. After
+      # `pnpm build` so the cross-package `dist/` types it resolves exist.
+      - run: pnpm typecheck
+
       - run: pnpm test
 
       # Design-system ratchet. The UI is migrating onto semantic tokens, so a

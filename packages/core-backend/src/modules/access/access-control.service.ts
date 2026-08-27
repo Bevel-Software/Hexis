@@ -193,6 +193,14 @@ export async function loadActiveGroups(
   try {
     syncedText = await read(SYNCED_GROUPS_YAML);
   } catch (err) {
+    // An at-ref `read` throws this when git itself failed — the file's
+    // existence is UNKNOWN, not absent and not broken. That must propagate:
+    // swallowing it into a broken-groups marker builds a model with no groups
+    // in it and caches that model for the commit, so every group-based grant
+    // and denial at that commit is wrong on the strength of a flaky
+    // subprocess. roles.yaml and access.md already fail the build closed on
+    // the same error; groups cannot be the one input that does not.
+    if (err instanceof AccessUnreadableError) throw err;
     if (isAbsenceError(err)) {
       syncedText = null;
     } else {
@@ -211,6 +219,7 @@ export async function loadActiveGroups(
     try {
       text = await read(GROUPS_YAML);
     } catch (err) {
+      if (err instanceof AccessUnreadableError) throw err; // see above
       if (isAbsenceError(err)) text = null;
       else return broken(GROUPS_YAML, err instanceof Error ? err.message : String(err));
     }
@@ -1747,10 +1756,11 @@ export class AccessControlService implements IAccessControl {
 
     // Same group loading as the working-tree model, read AT THE COMMIT — the
     // whole point of file-materialized groups is that the merge/push gates
-    // can evaluate them at the commit they gate. (`showAtRef` folds every git
-    // failure into null/absent — at-ref reads cannot distinguish a missing
-    // path from a repo error, so the broken-groups marker here fires only on
-    // parse failures.)
+    // can evaluate them at the commit they gate. `read` throws
+    // `AccessUnreadableError` on a git failure and `loadActiveGroups` lets
+    // that through, so a flaky subprocess fails this build closed exactly as
+    // it does for roles.yaml and access.md; the broken-groups marker below
+    // fires only on a file that was read and would not parse.
     const activeGroups = await loadActiveGroups(read);
     if (!activeGroups.health.ok) {
       console.error(

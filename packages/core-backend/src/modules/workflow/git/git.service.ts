@@ -17,6 +17,7 @@ import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.j
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
+import { assertInsideRepo } from '../../kb-fs/repo-path.js';
 import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../../kb-fs/clone-config.js';
 import {
   assertValidBranchName,
@@ -240,6 +241,23 @@ async function synthesizeUntrackedSideDiff(
       : synthesizeDeletedFileDiff(relativePath, text);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return '';
+    throw err;
+  }
+}
+
+/**
+ * `stat` for the stray check: false only when nothing can be there (ENOENT,
+ * or ENOTDIR when a parent segment is a file). Permission and I/O failures
+ * propagate: treating them as "absent" would let an unreadable stray pass as
+ * committed.
+ */
+async function existsForCommitCheck(absolutePath: string): Promise<boolean> {
+  try {
+    await fs.stat(absolutePath);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
     throw err;
   }
 }
@@ -928,7 +946,10 @@ export class GitService implements IGitService {
       const { stdout: scoped } = await this.git(cwd, [
         'status', '--porcelain=v1', '--', repoRelativePath,
       ]);
-      if (!scoped.trim()) return null;
+      if (!scoped.trim()) {
+        await this.assertNoBytesBesideRepo(workspaceId, cwd, relativePath, repoRelativePath);
+        return null;
+      }
 
       // **No access check at commit time.** Per the "disk is the source of
       // truth" rule, by the time content is on disk it must not be rejected.
@@ -2461,6 +2482,37 @@ export class GitService implements IGitService {
       if (/does not exist in|exists on disk, but not in/.test(stderr)) return null;
       throw err;
     }
+  }
+
+  /**
+   * A clean `git status` for a path has two honest readings (already
+   * committed; a queued re-apply of something that landed) and one dishonest
+   * one: the bytes exist, but BESIDE the repository, because a caller wrote a
+   * workspace-relative path without the `<kbDirName>/` prefix. Git never sees
+   * that file, so returning null would report "nothing to commit" for a write
+   * that silently never landed. Throw instead; the pending-commits ladder
+   * escalates the row to a needs-attention notice rather than dropping it.
+   *
+   * The stray has to be PROVABLE, because some callers pass repo-relative
+   * paths on purpose (the decline-revert flow, the merge-time `roles.yaml`
+   * preservation): bytes at the workspace-relative location AND nothing at
+   * the same repo-relative location inside the clone. A clean, committed
+   * `roles.yaml` keeps its null even if something of that name sits beside the
+   * clone, so an unrelated stray cannot abort a merge. Only ENOENT (or a
+   * parent that is not a directory) means "absent"; any other stat failure
+   * surfaces, so an unreadable stray is never reported as committed.
+   */
+  private async assertNoBytesBesideRepo(
+    workspaceId: string,
+    repoDir: string,
+    relativePath: string,
+    repoRelativePath: string,
+  ): Promise<void> {
+    if (relativePath !== repoRelativePath) return;
+    const workspaceDir = await this.workspaceService.getWorkspacePath(workspaceId);
+    if (!(await existsForCommitCheck(path.join(workspaceDir, relativePath)))) return;
+    if (await existsForCommitCheck(path.join(repoDir, repoRelativePath))) return;
+    assertInsideRepo(relativePath, this.kbDirName);
   }
 
   private async repoDir(workspaceId: string): Promise<string> {

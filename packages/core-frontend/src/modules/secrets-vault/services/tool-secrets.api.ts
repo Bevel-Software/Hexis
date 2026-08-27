@@ -33,9 +33,12 @@ export interface ToolVarStatus {
  * For a `type: mcp` tool, the setup requirement auto-discovery found:
  *  - `open`         — no auth; nothing to configure.
  *  - `oauth-auto`   — sign-in was set up automatically (appears as a user var).
- *  - `oauth-manual` — the server needs sign-in but couldn't be set up
- *                     automatically; a tool writer must declare the provider in
- *                     the `.tool` file and set its client secret. `reason` says why.
+ *  - `oauth-manual` — the sign-in needs an OAuth app the owner registers with
+ *                     the provider: a tool writer declares its client id on a
+ *                     user-scoped variable (the server editor for an mcp.json
+ *                     server; the `.tool` file otherwise) and sets its client
+ *                     secret. `reason` is present only while something still
+ *                     blocks the sign-in, and says what.
  */
 export interface ToolSetup {
   kind: 'open' | 'oauth-auto' | 'oauth-manual';

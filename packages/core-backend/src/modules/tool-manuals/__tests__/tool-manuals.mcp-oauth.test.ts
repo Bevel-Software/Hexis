@@ -197,4 +197,99 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
     expect(survived.map((m) => m.name).sort()).toEqual(['jira', 'notion']);
     warn.mockRestore();
   });
+
+  /** An mcp.json server whose plugin.json declares a sign-in by client id alone. */
+  async function writeDeclaredServer(oauth: Record<string, unknown>) {
+    const pluginDir = join(root, wsId, KB_DIR, 'Plugins', 'GTM');
+    await mkdir(pluginDir, { recursive: true });
+    await writeFile(
+      join(pluginDir, 'mcp.json'),
+      JSON.stringify({ mcpServers: { hubspot: { type: 'streamable-http', url: 'https://mcp.hubspot.example/mcp' } } }),
+    );
+    await writeFile(
+      join(pluginDir, 'plugin.json'),
+      JSON.stringify({
+        name: 'gtm',
+        extensions: {
+          'software.bevel.hexis': {
+            mcpServers: {
+              hubspot: {
+                headers: { Authorization: 'Bearer ${HUBSPOT_TOKEN}' },
+                variables: [{ name: 'HUBSPOT_TOKEN', scope: 'user', oauth }],
+              },
+            },
+          },
+        },
+      }),
+    );
+  }
+
+  test('a declared client id without endpoints is completed from the server metadata; a miss lands in setup.reason', async () => {
+    await writeDeclaredServer({ clientId: 'owner-app' });
+    const statusFor = vi.fn(async () => ({ status: 'open' as const }));
+    const providerForDeclaredClient = vi.fn(async () => ({
+      status: 'oauth' as const,
+      provider: {
+        authorizationUrl: 'https://auth.hubspot.example/authorize',
+        tokenUrl: 'https://auth.hubspot.example/token',
+        clientId: 'owner-app',
+        pkce: true,
+        resource: 'https://mcp.hubspot.example/mcp',
+      },
+    }));
+    const svc = svcWith({ statusFor, providerForDeclaredClient });
+    const hubspot = (await svc.listAccessible('user@example.com')).find((m) => m.name === 'hubspot')!;
+    // Explicit wins: a declared server is never probed for registration…
+    expect(statusFor).not.toHaveBeenCalledWith('hubspot', expect.anything());
+    expect(providerForDeclaredClient).toHaveBeenCalledWith('hubspot', 'https://mcp.hubspot.example/mcp', 'owner-app');
+    // …its declaration is completed in place — an owner-registered sign-in
+    // with nothing left to explain, so no `reason`.
+    expect(hubspot.setup).toEqual({ kind: 'oauth-manual' });
+    expect(hubspot.variables?.[0].oauth).toEqual({
+      clientId: 'owner-app',
+      authorizationUrl: 'https://auth.hubspot.example/authorize',
+      tokenUrl: 'https://auth.hubspot.example/token',
+      resource: 'https://mcp.hubspot.example/mcp',
+    });
+
+    // When the metadata can't be had, the declaration stays incomplete and the
+    // reason travels with the tool — to the UI banner and to `list_tool_setup`.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const missing = svcWith({
+      statusFor,
+      providerForDeclaredClient: async () => ({
+        status: 'unsupported' as const,
+        reason: 'no authorization-server metadata at https://mcp.hubspot.example',
+      }),
+    });
+    const stuck = (await missing.listAccessible('user@example.com')).find((m) => m.name === 'hubspot')!;
+    expect(stuck.setup).toEqual({
+      kind: 'oauth-manual',
+      reason: 'no authorization-server metadata at https://mcp.hubspot.example',
+    });
+    expect(stuck.variables?.[0].oauth).toEqual({ clientId: 'owner-app' });
+    // A port without the declared-client path says so rather than pretending.
+    const legacy = svcWith({ statusFor });
+    const unsupported = (await legacy.listAccessible('user@example.com')).find((m) => m.name === 'hubspot')!;
+    expect(unsupported.setup?.reason).toContain('discovery is unavailable');
+    warn.mockRestore();
+  });
+
+  test('a fully declared sign-in is oauth-manual with no reason, and is never probed', async () => {
+    await writeDeclaredServer({
+      clientId: 'owner-app',
+      authorizationUrl: 'https://auth.hubspot.example/authorize',
+      tokenUrl: 'https://auth.hubspot.example/token',
+      pkce: false,
+    });
+    const statusFor = vi.fn(async () => ({ status: 'open' as const }));
+    const providerForDeclaredClient = vi.fn();
+    const svc = svcWith({ statusFor, providerForDeclaredClient });
+    const hubspot = (await svc.listAccessible('user@example.com')).find((m) => m.name === 'hubspot')!;
+    expect(hubspot.setup).toEqual({ kind: 'oauth-manual' });
+    expect(providerForDeclaredClient).not.toHaveBeenCalled();
+    expect(statusFor).not.toHaveBeenCalledWith('hubspot', expect.anything());
+    // The declaration is carried verbatim, opt-out included.
+    expect(hubspot.variables?.[0].oauth).toMatchObject({ clientId: 'owner-app', pkce: false });
+  });
 });
