@@ -912,6 +912,76 @@ describe('LockingFilesystem refuses to create anything outside the repository fo
     );
   });
 
+  /**
+   * `copyFile` creates a file at `dest` without carrying its bytes, so it used
+   * to meet neither gate a `writeFile` to the same path would: not the
+   * path-shaped ones, and not the content ones. That made copying the way
+   * around both — including onto `roles.yaml`, whose parse guard exists to stop
+   * an app-wide admin lockout.
+   */
+  it('copyFile runs the path gate on its destination', async () => {
+    await fs.mkdir(path.join(root, `${KB}/KnowledgeBase`), { recursive: true });
+    await fs.writeFile(path.join(root, `${KB}/KnowledgeBase/src.md`), 'x');
+    const workflow = makeWorkflow();
+    const creatorAccess = makeCreatorAccess();
+    const validateCreatePath = vi.fn(() => {
+      throw new WorkflowValidationError('refused by the path gate');
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess, validateCreatePath },
+    );
+    await expect(
+      fsLayer.copyFile(`${KB}/KnowledgeBase/src.md`, `${KB}/KnowledgeBase/dest.md`),
+    ).rejects.toBeInstanceOf(WorkflowValidationError);
+    expect(validateCreatePath).toHaveBeenCalledWith(`${KB}/KnowledgeBase/dest.md`);
+    // Refused before any side effect: no lock, and nothing at the destination.
+    expect(workflow.acquireLock).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(root, `${KB}/KnowledgeBase/dest.md`))).rejects.toBeDefined();
+  });
+
+  it("copyFile runs the content gate with the SOURCE's bytes and the destination path", async () => {
+    await fs.mkdir(path.join(root, `${KB}/KnowledgeBase`), { recursive: true });
+    await fs.writeFile(path.join(root, `${KB}/KnowledgeBase/src.md`), 'source bytes');
+    const workflow = makeWorkflow();
+    const { fsLayer, validateWrite } = layer(workflow);
+    await fsLayer.copyFile(`${KB}/KnowledgeBase/src.md`, `${KB}/KnowledgeBase/dest.md`);
+    // The guard must see what is ACTUALLY about to land at `dest`.
+    expect(validateWrite).toHaveBeenCalledWith(`${KB}/KnowledgeBase/dest.md`, 'source bytes');
+  });
+
+  it('a content gate that refuses stops the copy before the lock', async () => {
+    await fs.mkdir(path.join(root, `${KB}/KnowledgeBase`), { recursive: true });
+    await fs.writeFile(path.join(root, `${KB}/KnowledgeBase/src.md`), 'malformed: [');
+    const workflow = makeWorkflow();
+    const creatorAccess = makeCreatorAccess();
+    const validateWrite = vi.fn(() => {
+      throw new WorkflowValidationError('would not parse');
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess, validateWrite },
+    );
+    await expect(
+      fsLayer.copyFile(`${KB}/KnowledgeBase/src.md`, `${KB}/roles.yaml`),
+    ).rejects.toBeInstanceOf(WorkflowValidationError);
+    expect(workflow.acquireLock).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(root, `${KB}/roles.yaml`))).rejects.toBeDefined();
+  });
+
+  /**
+   * An unreadable source is `super.copyFile`'s failure to report. Inventing one
+   * here would answer a missing file with a validation error.
+   */
+  it('an unreadable source is left to the copy itself to fail on', async () => {
+    const workflow = makeWorkflow();
+    const { fsLayer, validateWrite } = layer(workflow);
+    await expect(
+      fsLayer.copyFile(`${KB}/KnowledgeBase/missing.md`, `${KB}/KnowledgeBase/dest.md`),
+    ).rejects.toBeDefined();
+    expect(validateWrite).not.toHaveBeenCalled();
+  });
+
   it('a `..` under the prefix is refused before the lock: the bytes would land beside the clone', async () => {
     // Containment is checked against the WORKSPACE dir, so the underlying
     // filesystem would happily resolve `knowledge-base/../stray.md` to a file

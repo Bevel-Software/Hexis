@@ -86,7 +86,8 @@ export interface LockingFilesystemContext {
    * Optional pre-disk gate for an op that CREATES a file without supplying its
    * bytes here — today `copyFile`, whose content is whatever the source holds.
    * Rules that depend only on the destination PATH (where a `SKILL.md` may
-   * live) belong here; rules that read content stay in `validateWrite`.
+   * live) belong here; `copyFile` additionally reads its source and runs
+   * `validateWrite`, so a content rule is enforced there too.
    *
    * `moveFile` is deliberately NOT gated: relocating a file is how one that
    * landed in the wrong place gets rescued, and refusing the destination would
@@ -154,9 +155,33 @@ export class LockingFilesystem extends LocalFilesystem {
 
   override async copyFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
     this.assertInsideRepo(dest);
-    // A copy CREATES a file at `dest`, so every path-shaped rule a write must
+    // A copy CREATES a file at `dest`, so every rule a write to `dest` must
     // satisfy applies here too — otherwise copying is the way around them.
+    // Path-shaped rules first, because they need nothing from disk.
     this.lockContext.validateCreatePath?.(dest);
+    // Then the CONTENT rules. `copyFile` is the one creating op that does not
+    // carry its bytes, so the only way to run `validateWrite` is to read what
+    // is about to be copied. Predates this hook — a copy onto `roles.yaml`
+    // never met the parse gate, which is the app-wide admin lockout that guard
+    // exists to prevent.
+    //
+    // Read as text: every guard that inspects content is a text-format guard
+    // (`roles.yaml` YAML), and a guard that has no opinion on `dest` returns
+    // before looking at the bytes. A source that cannot be read at all is left
+    // to `super.copyFile` to fail on, so this never invents an error the copy
+    // itself would not have raised.
+    if (this.lockContext.validateWrite) {
+      const absoluteSrc = this.resolveAbsolutePath(src);
+      if (absoluteSrc) {
+        let content: string | null = null;
+        try {
+          content = await fs.readFile(absoluteSrc, 'utf-8');
+        } catch {
+          content = null;
+        }
+        if (content !== null) this.lockContext.validateWrite(dest, content);
+      }
+    }
     // Lock on `dest`. `src` is read-only from this op's perspective — copy
     // creates a new file at dest without disturbing src on disk.
     return this.withLock(dest, () => super.copyFile(src, dest, options));
