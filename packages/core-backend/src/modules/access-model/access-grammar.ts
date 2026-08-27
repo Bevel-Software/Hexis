@@ -138,12 +138,76 @@ export function isAccessMdPath(p: string): boolean {
  * the access-declarations scan and the shared `KbReferenceScanner` (which
  * must scan/rewrite the same set, or a rename strands a live `.tool`
  * frontmatter grant). `access.md` is covered by `.md`.
+ *
+ * `.tool` is whole-document YAML: the file IS one `---` fenced block, and its
+ * access verbs sit in it as ordinary keys beside the rest of the definition
+ * (`parseOwnAccessEntries` ignores every key that is not a verb). It is
+ * configuration rather than a graph node — it lives outside the typed
+ * ontologies — but it is exactly the kind of file whose edits grant
+ * capability, so it needs the same per-file governance as a node.
+ *
+ * This is the CORE set. An overlay that ships its own whole-document
+ * configuration files adds their extensions through
+ * {@link registerAccessFrontmatterExtensions} — the grammar is core's, the
+ * file kinds are not necessarily.
  */
-export const ACCESS_FRONTMATTER_EXTENSIONS = ['.md', '.tool'] as const;
+const CORE_ACCESS_FRONTMATTER_EXTENSIONS = ['.md', '.tool'] as const;
 
-/** True when `p` is a file the resolver reads access frontmatter from. */
+const accessFrontmatterExtensions = new Set<string>(CORE_ACCESS_FRONTMATTER_EXTENSIONS);
+
+/**
+ * Extend the set of files whose own frontmatter carries access verbs.
+ *
+ * For overlays whose configuration files follow the same whole-document
+ * convention and, like a `.tool`, grant capability by being edited. Call once
+ * at boot, BEFORE any access resolution or reference scan — the declarations
+ * scan and the reference scanner must agree on the set, and a scanner that
+ * learned a new extension after a scan would leave a live grant unrewritten
+ * on the next rename.
+ *
+ * Idempotent, and additive only: an extension cannot be removed, because
+ * removing one would silently drop grants that are already enforced.
+ */
+export function registerAccessFrontmatterExtensions(extensions: readonly string[]): void {
+  // Validate EVERYTHING first, then apply. These registrations decide which
+  // files' edits carry enforced access grants, so a typo (`pipeline` for
+  // `.pipeline`) must THROW rather than be skipped — a silent skip makes a
+  // failed registration indistinguishable from a successful one, at boot,
+  // where nobody is looking. And it must throw before the registry changes:
+  // a list that is half-applied when it throws leaves later scans governing a
+  // set nobody asked for.
+  const normalized = extensions.map((ext) => {
+    const n = ext.trim().toLowerCase();
+    if (!/^\.[a-z0-9]+$/.test(n)) {
+      throw new Error(
+        `access frontmatter extension "${ext}" is malformed — expected a leading dot, e.g. ".pipeline"`,
+      );
+    }
+    return n;
+  });
+  for (const n of normalized) accessFrontmatterExtensions.add(n);
+}
+
+/** Every extension currently in the set, core's plus any an overlay registered. */
+export function accessFrontmatterExtensionList(): string[] {
+  return [...accessFrontmatterExtensions];
+}
+
+/**
+ * True when `p` is a file the resolver reads access frontmatter from.
+ *
+ * Case-SENSITIVE on the path, as it always was: `doc.MD` is not a node and
+ * carries no enforced grant. Registered extensions are normalized to lowercase
+ * so `.Pipeline` and `.pipeline` register the same thing, but which FILES are
+ * governed must not change because the set became registrable — widening it to
+ * `X.MD` silently in a release would be an access-model change nobody asked
+ * for, made in a refactor.
+ */
 export function hasAccessFrontmatterExtension(p: string): boolean {
-  return ACCESS_FRONTMATTER_EXTENSIONS.some((ext) => p.endsWith(ext));
+  for (const ext of accessFrontmatterExtensions) {
+    if (p.endsWith(ext)) return true;
+  }
+  return false;
 }
 /**
  * The PRINCIPAL index — canonical name → member emails. Despite the name it

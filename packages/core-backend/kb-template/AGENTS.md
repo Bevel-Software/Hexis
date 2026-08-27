@@ -230,6 +230,43 @@ Declare who provisions each variable with an optional top-level `variables` arra
 
 `name` must match `[A-Za-z0-9_]+`. A referenced `${VAR}` that you don't declare defaults to `admin` — and it still SURFACES automatically: the app detects every `${VAR}` the file actually references and shows it in the secrets UI, so the `variables` block is only needed to change a variable's scope to `user`, give it a label, or declare an OAuth sign-in. Values are entered in the Secrets Vault UI (or the `.tool` editor's sidebar), never in the file itself. A malformed `variables` entry makes the whole file fail to load, so it is never silently mis-scoped.
 
+### Declaring an OAuth sign-in — the `oauth` block
+
+A `user`-scoped variable can be filled by **signing in** instead of by a typed value: add an `oauth` block and each member authorizes with the provider; the token then rides in whatever header references `${VAR}`. The block carries PUBLIC config only:
+
+| field | | |
+|---|---|---|
+| `clientId` | required | the OAuth app's client id — the tool owner registers the app with the provider, using the redirect URI `<backend>/api/secrets/oauth/callback` |
+| `authorizationUrl`, `tokenUrl` | **optional on an `mcp.json` server**, required in a `.tool` | leave both out on an MCP server: they are discovered from the server's own OAuth metadata. Give both or neither. |
+| `scopes` | optional | `string[]`, requested at sign-in and required back from the token |
+| `pkce` | optional, default **on** | PKCE S256 — MCP servers require it; providers without it ignore it. Only `false` is meaningful. |
+| `resource` | optional | RFC 8707 resource indicator (the MCP server URL); discovered on an `mcp.json` server |
+| `authParams` | optional | extra static authorize params, e.g. Google's `access_type: offline` |
+
+**Never** a `clientSecret` — a `.tool` carrying one fails to load, and an `mcp.json` server whose plugin.json entry carries one is dropped from the catalog. The secret is pasted once by a tool writer on the tool's page, then every member signs in on the Connect page.
+
+For an `mcp.json` server the declaration lives in `plugin.json`, in the same extensions entry as the auth header that uses it:
+
+```json
+{
+  "extensions": {
+    "software.bevel.hexis": {
+      "mcpServers": {
+        "hubspot": {
+          "headers": { "Authorization": "Bearer ${HUBSPOT_TOKEN}" },
+          "variables": [
+            { "name": "HUBSPOT_TOKEN", "scope": "user", "label": "HubSpot sign-in",
+              "oauth": { "clientId": "<the app's client id>" } }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+That is the whole declaration: endpoints, PKCE and the resource indicator come from the server. Add `authorizationUrl`/`tokenUrl` only when `list_tool_setup` reports in `setup.reason` that they could not be discovered.
+
 ### Examples
 
 An `http` manual that authenticates with a shared org key and a per-user key:
@@ -278,7 +315,7 @@ When asked to add/integrate a product as a tool (e.g. "add Notion", "wire up Lin
 2. **Pick the home from what you found.** An MCP server → an entry in the plugin's `mcp.json` (`type: "streamable-http"` with the official `url` — use the `https://…` URL, **never** `ws://`/`wss://`). A plain REST/HTTP endpoint → a `.tool` with `type: http`. Use `type: inline` only when hand-authoring the individual HTTP calls.
 3. **An OAuth-protected MCP server usually needs NOTHING beyond its `mcp.json` entry.** Write just those two and let the app probe the server: it discovers the sign-in provider (MCP authorization spec), registers itself, and surfaces a per-user sign-in on the Connect page. That is the `oauth-auto` case, and for it you must NOT declare `variables` or `headers`.
 
-   Some providers do not support automatic registration (`oauth-manual` — see the walkthrough below). Those DO need a sign-in variable to hold the client id, and an admin pastes the client secret on the tool's page. You do not have to guess which kind you are facing: write the two lines, then run `list_tool_setup` and read `setup.kind`.
+   Some providers do not support automatic registration (`oauth-manual` — HubSpot, Google; see the walkthrough below). Those DO need a sign-in variable holding the client id of an app the owner registers, and an admin pastes the client secret on the tool's page. You do not have to guess which kind you are facing: write the two lines, then run `list_tool_setup` and read `setup.kind` — and `setup.reason`, which spells out the next step (including the redirect URI to register).
 4. **For key-based auth, wire it as `variables`, never a hard-coded secret.** Reference credentials as `${VAR}` in `headers` (e.g. `Authorization: Bearer ${NOTION_TOKEN}`) and declare each in the `variables` block with a scope (`admin` = one shared value; `user` = per-user). Users fill the values in the Secrets Vault.
 5. **Say so when a tool is reachable ONLY from the user's own machine.** For an MCP server (e.g. one on `localhost`), declare `local: true` on its entry in the plugin.json extensions block — `remote: false` is a `.tool` frontmatter field and means nothing in `mcp.json`. For an `http`/`inline` `.tool`, set `remote: false`. Otherwise leave the tool remote-capable.
 
@@ -286,22 +323,23 @@ When asked to add/integrate a product as a tool (e.g. "add Notion", "wire up Lin
 
 Call the **`list_tool_setup`** tool to see, for every accessible tool — `.tool` manuals and `mcp.json` servers alike — what is configured and what is still missing. Use it whenever a tool isn't working, after adding a tool, or when asked "what do I need to set up?" — then EXPLAIN the remaining steps to the user rather than guessing. Per tool it reports:
 
-- **`setup.kind`** (for MCP servers): `open` = no credentials needed; `oauth-auto` = the platform registered itself with the server automatically and users just authorize on the **Connect page**; `oauth-manual` = the provider does not support automatic registration, so a tool writer must configure it by hand (below).
+- **`setup.kind`** (for MCP servers): `open` = no credentials needed; `oauth-auto` = the platform registered itself with the server automatically and users just authorize on the **Connect page**; `oauth-manual` = the sign-in uses an OAuth app the owner registers (the provider offers no automatic registration, or the declaration already names a client id). `setup.reason` is present only while something still blocks that sign-in — no declaration yet, or endpoints that could not be discovered — and says what to do.
 - **Per variable**: `adminConfigured` (the shared value — or, for a sign-in, the owner-side provider setup — is done), `userConfigured` / `authorized` (the CURRENT user's own value / sign-in), and `canWrite` (whether the current user may set the tool's shared config).
 
 The listing is scoped by the same access controls as everything else: a tool the caller can't READ doesn't appear at all, and `canWrite` means write access **on the file that declares it** — the `.tool` file itself (via its frontmatter `write:`/`owner:` verbs or the `access.md` chain), or the plugin's `mcp.json` for an MCP server (via the plugin's `access.md` chain — `mcp.json` carries no verb list of its own) — NOT any platform role. The people who manage that file are exactly the people who configure its shared secrets. To delegate a `.tool` to someone, add them to that file's `write:`/`owner:` list; to delegate an MCP server, grant them `write` on the plugin in its `access.md` (both are edits you can make via change request). That alone lets them configure it.
 
 **Agents never handle secret VALUES.** Never ask for an API key, token, or client secret in the conversation, and there is no tool to set one. Point the right person at the right surface instead:
 
-- **Shared (admin) values and OAuth client secrets** → a tool writer pastes them into the fields on the tool's page in the app (open the `.tool` file; the setup panel is in its sidebar).
+- **Shared (admin) values and OAuth client secrets** → a tool writer pastes them into the fields on the tool's page in the app (the "Your connection" section; for a `.tool` file, the setup panel is also in its editor sidebar).
 - **Per-user values and sign-ins** → each user enters/authorizes on the **Connect page**.
 
-For **`oauth-manual`** (e.g. Google, GitHub, Slack — no dynamic client registration), walk the admin through the one-time setup:
+For **`oauth-manual`** (e.g. HubSpot, Google, GitHub, Slack — no dynamic client registration), walk the admin through the one-time setup:
 
-1. Register an OAuth app in the provider's console, with redirect URI `<backend>/api/secrets/oauth/callback`.
-2. Put the app's **client id** (public) in the `.tool` file's sign-in variable — you can do this edit for them via a change request.
-3. The admin pastes the app's **client secret** into the "Client secret" field on the tool's page — never into the file, never into the chat.
-4. Every user then authorizes on the Connect page.
+1. Register an OAuth app in the provider's console, with redirect URI `<backend>/api/secrets/oauth/callback` (the exact URI is in `setup.reason`).
+2. Ask for the app's **client id** (public — fine to receive in chat) and write the sign-in declaration yourself: for an `mcp.json` server, the `variables` entry with `oauth: { clientId }` plus the `Authorization: Bearer ${VAR}` header in the plugin.json extensions entry (see "Declaring an OAuth sign-in" above — no URLs needed); for a `.tool`, the same entry with `authorizationUrl` and `tokenUrl` as well. You can do this edit for them via a change request. A human can do the same under "Edit server" on the tool's page — the form's fields are exactly this block.
+3. Run `list_tool_setup` again: `setup.reason` must be gone. If it says the endpoints could not be discovered, add `authorizationUrl`/`tokenUrl` from the provider's docs.
+4. The admin pastes the app's **client secret** into the "Client secret" field on the tool's page — never into the file, never into the chat.
+5. Every user then authorizes on the Connect page.
 
 ## Conventions
 

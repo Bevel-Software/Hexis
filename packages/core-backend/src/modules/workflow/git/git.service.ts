@@ -1990,24 +1990,39 @@ export class GitService implements IGitService {
    * list, statuses, and +/- counts; per-file patches are generated for up to
    * `patchCap` files (default 400) — beyond that `patch` is left undefined,
    * exactly like the old API's binary/oversized files (the UI renders those with
-   * no inline diff). Patch generation is skipped for binary files.
+   * no inline diff). Patch generation is skipped for binary files; `patchCap: 0`
+   * skips it entirely, which is one git subprocess per changed file saved.
+   *
+   * `at` pins the diff to two commits the caller has ALREADY resolved (the
+   * change-request detail resolves its SHAs first, which fetches both refs):
+   * no fetch, no ref resolution, and the file list is computed from exactly
+   * the commits the caller pins its head SHA to, so a fetch that lands in
+   * between cannot make the two disagree. Never pass SHAs from a path that
+   * has not just resolved them: the diff would describe a stale head.
    */
   async changedFilesForPr(
     workspaceId: string,
     baseBranch: string,
     headBranch: string,
-    opts: { patchCap?: number } = {},
+    opts: { patchCap?: number; at?: { baseSha: string; headSha: string } } = {},
   ): Promise<PullRequestFile[]> {
     assertValidBranchName(baseBranch);
     assertValidBranchName(headBranch);
+    if (opts.at) {
+      for (const sha of [opts.at.baseSha, opts.at.headSha]) {
+        if (!/^[0-9a-f]{40,64}$/.test(sha)) {
+          throw new WorkflowValidationError(`invalid commit sha: ${sha}`);
+        }
+      }
+    }
     const patchCap = opts.patchCap ?? 400;
     // Fetch outside the mutex (network round-trip) so origin latency can't hold
     // the workspace lock; the lock guards only the local diff work below.
     const cwd = await this.repoDir(workspaceId);
-    await this.fetchPrRefs(cwd, baseBranch, headBranch);
+    if (!opts.at) await this.fetchPrRefs(cwd, baseBranch, headBranch);
     return this.mutex.run(workspaceId, async () => {
-      const baseRef = await this.resolveBranchRef(cwd, baseBranch);
-      const headRef = await this.resolveBranchRef(cwd, headBranch);
+      const baseRef = opts.at ? opts.at.baseSha : await this.resolveBranchRef(cwd, baseBranch);
+      const headRef = opts.at ? opts.at.headSha : await this.resolveBranchRef(cwd, headBranch);
       const range = `${baseRef}...${headRef}`; // three-dot = changes on head since merge-base
 
       const [{ stdout: nameStatusOut }, { stdout: numstatOut }] = await Promise.all([

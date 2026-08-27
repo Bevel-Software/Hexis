@@ -51,8 +51,12 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      pull-requests: read
-      issues: write     # react to the triggering comment
+      # Both, because the 👀 lands on a comment that sits on a PULL REQUEST:
+      # the endpoint is the issues one, but GITHUB_TOKEN gates a PR's comments
+      # and reactions behind `pull-requests`, not `issues`. Grant only the
+      # second and the reaction is refused with a 403.
+      pull-requests: write
+      issues: write
       statuses: write   # open the pending check
     outputs:
       ref: ${{ steps.pr.outputs.ref }}
@@ -92,14 +96,15 @@ jobs:
       # Instant sign of life: react 👀 to the triggering comment so the author
       # knows the command was seen while the agent (~3 min) spins up.
       #
-      # It is cosmetic, so it must never be able to gate the review. Reacting
-      # needs a permission the job token is not reliably granted — it returned
-      # `Resource not accessible by integration` (403) here even with
-      # `issues: write` in scope — and steps run under `bash -e`, so that 403
-      # took down `start` before it could open the check. `publish` is gated on
+      # It is cosmetic, so it must never be able to gate the review. It once
+      # ran with `issues: write` but not `pull-requests: write`, which is the
+      # scope that actually governs a PR's comments (see the job permissions
+      # above); the resulting 403 under `bash -e` took down `start` before it
+      # could open the check; `publish` is gated on
       # `needs.start.result == 'success'`, so the whole review died and the PR
-      # kept whatever stale status it already had. Swallow the failure into a
-      # warning: losing the 👀 is a papercut, losing the review is not.
+      # kept whatever stale status it already had. The scope is granted now,
+      # but keep swallowing any failure into a warning: losing the 👀 is a
+      # papercut, losing the review is not.
       - name: Acknowledge the command
         env:
           GH_TOKEN: ${{ github.token }}
@@ -268,7 +273,13 @@ jobs:
     timeout-minutes: 5
     permissions:
       statuses: write
-      issues: write   # the review comment (a PR is an issue for this endpoint)
+      # The review comment goes through the issues endpoint (a PR is an issue
+      # there), but GITHUB_TOKEN authorises a comment on a PULL REQUEST under
+      # `pull-requests`, not `issues`: with only the latter the POST is refused
+      # with `Resource not accessible by integration` (403), the comment is
+      # lost, and the job fails while the status still publishes. Keep both.
+      pull-requests: write
+      issues: write
 
     steps:
       # Everything in the verdict came through an agent that reads attacker-

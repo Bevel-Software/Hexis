@@ -27,6 +27,7 @@ import {
   createSecretsVaultRoutes,
   createSecretsVaultPublicRoutes,
 } from '../modules/secrets-vault/index.js';
+import { createDeclaredVariableRoutes } from '../modules/declared-variables/index.js';
 import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js';
 import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.js';
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
@@ -360,6 +361,17 @@ export async function createCoreServer(
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
     { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName },
+  ));
+  // The only core route that returns secret VALUES: a local `.tool`'s declared
+  // variables, for the local MCP server that will execute it. It re-reads the
+  // declaring knowledge-base file server-side, so the file is the allowlist and
+  // the caller cannot widen it. Same `manualAuth` as the rest of the agent
+  // surface.
+  toolsRouter.use(createDeclaredVariableRoutes(
+    core.toolManualService,
+    core.secretsVaultService,
+    core.manualAuthMiddleware,
+    async (userId) => (await core.authService.getUserById(userId))?.email,
   ));
   app.use('/api', toolsRouter);
 

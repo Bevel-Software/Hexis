@@ -336,7 +336,15 @@ export interface IWorkflowService {
   getChangeRequest(number: number): Promise<ChangeRequest | null>;
   getChangeRequestDetail(
     number: number,
-    opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string },
+    /**
+     * `fresh` bypasses the detail cache. `patches` defaults to true: clients
+     * get the full detail, per-file patches included, and it is cached.
+     * `patches: false` is for internal reads that never look at
+     * `files[].patch` (approve / withdraw / revert pin their work on the
+     * detail): patch generation is skipped and the result stays out of the
+     * detail cache. Mirrors IPullRequestService.getPrDetail.
+     */
+    opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string; patches?: boolean },
   ): Promise<ChangeRequestDetail | null>;
 
   /**

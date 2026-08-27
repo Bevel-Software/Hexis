@@ -143,7 +143,15 @@ export function ToolVarRow({
 
     if (variable.authorized && !variable.needsReauth) {
       description = 'Each person sets their own';
+      // Connected is not final: a provider can widen what it grants after the
+      // fact (HubSpot's MCP tools do, and answer REQUIRES_REAUTHORIZATION
+      // until the user consents again), a grant can be revoked provider-side,
+      // or the owner can rotate the client. The caller needs a way back into
+      // consent that doesn't wait for the scope check to notice.
       meta.push(
+        <Button key="reconnect" size="tiny" variant="quiet" disabled={busy} onClick={() => void signIn()}>
+          Reconnect
+        </Button>,
         <Badge key="chip" tone="ok">
           Connected
         </Badge>,

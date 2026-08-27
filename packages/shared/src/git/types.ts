@@ -1,4 +1,5 @@
 import type { AuthUser } from '../auth/types.js';
+import type { PullRequestFile } from './pr.types.js';
 
 export interface BranchInfo {
   name: string;
@@ -175,4 +176,35 @@ export interface IGitService {
   // against HEAD reports the empty state by definition. Cross-branch
   // comparison (`diffFileBetweenBranches`) + history (`diffFileAtCommit`)
   // still cover the meaningful diff cases.
+
+  /**
+   * Head and base commit SHAs of a change request, resolved on `origin/*`
+   * after a fetch so a force-push is reflected. These are what approvals
+   * pin against, and what `changedFilesForPr`'s `at` option takes.
+   */
+  resolvePrShas(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<{ baseSha: string; headSha: string }>;
+
+  /**
+   * The changed-file list of a change request: a three-dot (merge-base)
+   * diff, rename-aware. `patchCap` bounds per-file patch generation (`0`
+   * skips it); `at` pins the diff to commits the caller has already
+   * resolved, skipping the fetch and the ref resolution.
+   */
+  changedFilesForPr(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+    opts?: { patchCap?: number; at?: { baseSha: string; headSha: string } },
+  ): Promise<PullRequestFile[]>;
+
+  /**
+   * Just the repo-relative paths a change request touches (three-dot diff,
+   * no statuses, no patches): the cheap form behind change-request list
+   * summaries and owner routing.
+   */
+  changedPathsForPr(workspaceId: string, baseBranch: string, headBranch: string): Promise<string[]>;
 }

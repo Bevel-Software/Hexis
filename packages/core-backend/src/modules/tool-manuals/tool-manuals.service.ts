@@ -3,6 +3,9 @@ import fs from 'node:fs/promises';
 import { parse as parseYaml } from 'yaml';
 import '@utcp/http'; // side effect: register the 'http' call-template type (http + inline sub-manuals)
 import '@utcp/mcp'; // side effect: register the 'mcp' call-template type (mcp `.tool` sources)
+// side effect: register the 'cli' call-template type for PARSING ONLY — the
+// executor is removed again, so this process cannot dispatch a shell command.
+import { containsCliCallTemplate } from './utcp-cli-parse-only.js';
 import {
   UtcpManualSerializer,
   CallTemplateSerializer,
@@ -103,18 +106,31 @@ const variableSubstitutor = new DefaultVariableSubstitutor();
  * the vault applies in the other direction with `VariableScopeResolver`.
  */
 export interface McpAuthDiscoveryPort {
-  statusFor(
-    manualName: string,
-    mcpUrl: string,
-  ): Promise<
-    | { status: 'open' }
-    | {
-        status: 'oauth';
-        provider: { authorizationUrl: string; tokenUrl: string; clientId: string; scopes?: string[] };
-      }
-    | { status: 'unsupported'; reason: string }
-  >;
+  statusFor(manualName: string, mcpUrl: string): Promise<McpAuthDiscoveryResult>;
+  /**
+   * The sign-in endpoints for an OWNER-REGISTERED client: the same metadata
+   * walk as `statusFor`, stopping short of dynamic registration — the manual
+   * already names its `clientId`. Nothing is persisted; the owner's
+   * client-secret save pins the completed provider. Optional so a port that
+   * only knows the zero-config path still satisfies the interface.
+   */
+  providerForDeclaredClient?(manualName: string, mcpUrl: string, clientId: string): Promise<McpAuthDiscoveryResult>;
 }
+
+export type McpAuthDiscoveryResult =
+  | { status: 'open' }
+  | {
+      status: 'oauth';
+      provider: {
+        authorizationUrl: string;
+        tokenUrl: string;
+        clientId: string;
+        scopes?: string[];
+        resource?: string;
+        pkce?: boolean;
+      };
+    }
+  | { status: 'unsupported'; reason: string };
 
 /**
  * Reads `*.tool` manuals from the DEFAULT-branch workspace (never the caller's
@@ -172,9 +188,9 @@ export class ToolManualService implements IToolManualService {
     };
   }
 
-  async listLocalOnly(userEmail: string): Promise<{ name: string; path: string }[]> {
+  async listLocalOnly(userEmail: string): Promise<{ slug: string; name: string; path: string }[]> {
     const manuals = await this.accessibleManuals(userEmail);
-    return manuals.filter((m) => m.remote === false).map((m) => ({ name: m.name, path: m.path }));
+    return manuals.filter((m) => m.remote === false).map((m) => ({ slug: m.slug, name: m.name, path: m.path }));
   }
 
   async userScopedKeysForManual(
@@ -426,21 +442,31 @@ export class ToolManualService implements IToolManualService {
   private async decorateMcpOAuth(manuals: ToolManualDescriptor[]): Promise<void> {
     const discovery = this.mcpAuthDiscovery;
     if (!discovery) return;
-    const eligible = manuals.filter((m) => {
-      if (m.type !== 'mcp' || !m.url) return false;
-      // Local-only servers aren't probeable from here; templated URLs aren't
-      // resolvable without a caller. Both keep their file-declared behavior.
-      if (m.remote === false || m.url.includes('${')) return false;
+    const bare: ToolManualDescriptor[] = [];
+    const declared: { m: ToolManualDescriptor; v: ToolVariable }[] = [];
+    for (const m of manuals) {
+      if (m.type !== 'mcp') continue;
+      const oauthVar = (m.variables ?? []).find((v) => v.oauth != null);
+      if (oauthVar) {
+        // An owner-registered client is `oauth-manual` by definition — whether
+        // the declaration is complete or still needs its endpoints discovered.
+        // Explicit wins over discovery: never registered over, never probed
+        // for anything but the endpoints the declaration left out.
+        m.setup = { kind: 'oauth-manual' };
+        const o = oauthVar.oauth!;
+        if (!o.authorizationUrl || !o.tokenUrl) declared.push({ m, v: oauthVar });
+        continue;
+      }
       // The file configures auth itself — explicit wins over discovery.
       const hasAuthHeader = Object.keys(m.headers ?? {}).some((h) => h.toLowerCase() === 'authorization');
-      const hasOAuthVar = (m.variables ?? []).some((v) => v.oauth != null);
-      return !hasAuthHeader && !hasOAuthVar;
-    });
+      if (!hasAuthHeader && isProbeableMcpServer(m)) bare.push(m);
+    }
     // Probe every eligible server CONCURRENTLY — a cold scan with several bare
     // mcp tools shouldn't pay one network round-trip per tool in series. The
     // mutation still happens per-manual after its own probe settles.
-    await Promise.all(
-      eligible.map(async (m) => {
+    await Promise.all([
+      ...declared.map(({ m, v }) => this.completeDeclaredOAuth(discovery, m, v)),
+      ...bare.map(async (m) => {
         try {
           const found = await discovery.statusFor(m.name, m.url!);
           // Record the setup requirement so the secrets UI can tell an admin
@@ -485,7 +511,62 @@ export class ToolManualService implements IToolManualService {
           );
         }
       }),
-    );
+    ]);
+  }
+
+  /**
+   * "Bring your own client": a declared sign-in that names only its `clientId`
+   * (the owner registered an app with a provider that offers no dynamic
+   * registration — HubSpot, Google) gets its endpoints, PKCE and resource
+   * indicator from the server's own OAuth metadata, exactly as the zero-config
+   * path would. The descriptor is completed IN MEMORY: the client-secret route
+   * reads the completed declaration and pins it with the secret, so nothing
+   * here persists. When the metadata can't be had, the declaration stays
+   * incomplete and `setup.reason` says so — the secret route then refuses
+   * with the same reason instead of pinning a provider with no endpoints.
+   */
+  private async completeDeclaredOAuth(
+    discovery: McpAuthDiscoveryPort,
+    m: ToolManualDescriptor,
+    v: ToolVariable,
+  ): Promise<void> {
+    const declaredByHand = 'declare `authorizationUrl` and `tokenUrl` on the sign-in variable';
+    if (!isProbeableMcpServer(m)) {
+      m.setup = {
+        kind: 'oauth-manual',
+        reason: `the sign-in endpoints can't be discovered for a local-only or templated server URL — ${declaredByHand}`,
+      };
+      return;
+    }
+    if (!discovery.providerForDeclaredClient) {
+      m.setup = { kind: 'oauth-manual', reason: `sign-in endpoint discovery is unavailable — ${declaredByHand}` };
+      return;
+    }
+    try {
+      const found = await discovery.providerForDeclaredClient(m.name, m.url!, v.oauth!.clientId);
+      if (found.status !== 'oauth') {
+        m.setup = {
+          kind: 'oauth-manual',
+          reason:
+            found.status === 'unsupported'
+              ? found.reason
+              : `the server did not ask for a sign-in and publishes no OAuth metadata — ${declaredByHand} if it needs one`,
+        };
+        return;
+      }
+      v.oauth = {
+        ...v.oauth!,
+        authorizationUrl: found.provider.authorizationUrl,
+        tokenUrl: found.provider.tokenUrl,
+        // A hand-declared resource wins; otherwise the server's own canonical URL.
+        ...(!v.oauth!.resource && found.provider.resource ? { resource: found.provider.resource } : {}),
+      };
+    } catch (err) {
+      // Never break the catalog — the sign-in just isn't ready yet.
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[tool-manuals] sign-in endpoint discovery failed for "${m.path}": ${msg}`);
+      m.setup = { kind: 'oauth-manual', reason: `sign-in endpoint discovery failed: ${msg}` };
+    }
   }
 
   private async scanDisk(): Promise<ToolManualDescriptor[]> {
@@ -556,10 +637,19 @@ export class ToolManualService implements IToolManualService {
     // silently rebind a configured secret to a different file. The winner is
     // deterministic (files scanned in sorted path order); the shared `dedupeById`
     // is the one dedup rule across tools and skills.
-    return dedupeById(parsed, (m) => m.name, (m, id) =>
+    // Deduped by NAMESPACE, not by name. The comment below has always said the
+    // id is the secret-variable namespace and must be unique — but the check
+    // compared raw names, and the two are not the same function. Namespacing
+    // maps every non-word character to `_` and then doubles it, so `a-b` and
+    // `a_b` are different names with the SAME namespace `a__b_`. A `.tool` id
+    // cannot contain a hyphen, but an mcp.json server name can, so the pair is
+    // reachable — and the consequence is that two manuals share one set of
+    // vault keys, with either able to resolve the other's secrets.
+    return dedupeById(parsed, (m) => utcpNamespacePrefix(m.name), (m, ns) =>
       console.warn(
-        `[tool-manuals] skipping "${m.path}": manual id "${id}" is already used by another ` +
-          '`.tool` — give it a unique `id` (the id is the secret-variable namespace and must be unique).',
+        `[tool-manuals] skipping "${m.path}": manual "${m.name}" resolves to the secret-variable ` +
+          `namespace "${ns}", which another manual already uses. Names differing only in \`-\` vs \`_\` ` +
+          'share one namespace — rename one of them.',
       ),
     );
   }
@@ -714,6 +804,23 @@ export function normalizeToolManual(
 
   descriptor.remote = normalizeRemote(obj.remote);
 
+  // A `.tool` that shells out is LOCAL, always. The hosted platform parses and
+  // lists these so the local MCP server can find them, but it must never be the
+  // thing that runs them — a `.tool` is knowledge-base content, and agents write
+  // to the knowledge base. A declared `remote: true` beside a shell command is
+  // therefore a refusal rather than a warning: silently correcting it would let
+  // an author believe they had published a remote tool, and would leave the
+  // catalog disagreeing with the file about what the platform will do.
+  if (containsCliCallTemplate(obj)) {
+    if (obj.remote === true) {
+      throw new Error(
+        `\`.tool\` "${name}" declares \`remote: true\` but contains a \`cli\` call template — ` +
+          'shell tools execute only in a local runtime (drop `remote: true`, or the `cli` template).',
+      );
+    }
+    descriptor.remote = false;
+  }
+
   if (type === 'inline') {
     const tools = Array.isArray(obj.tools) ? obj.tools : undefined;
     if (!tools) throw new Error('inline `.tool` must have a `tools` array');
@@ -813,10 +920,22 @@ function normalizeVariables(raw: unknown): ToolVariable[] {
 }
 
 /**
+ * Whether the platform can reach an MCP server's URL for OAuth discovery.
+ * Local-only servers aren't probeable from here; templated URLs aren't
+ * resolvable without a caller. Both keep their file-declared behavior — the
+ * one rule for the zero-config probe and for completing a declared client.
+ */
+function isProbeableMcpServer(m: ToolManualDescriptor): boolean {
+  return !!m.url && m.remote !== false && !m.url.includes('${');
+}
+
+/**
  * Parse a variable's optional OAuth provider config. Carries PUBLIC config only —
  * never a client secret. Both URLs are validated with the SAME SSRF-safe check the
  * vault uses for OAuth endpoints (`assertSafeFetchUrl` with https required), so a
- * `.tool` author can't aim a sign-in/token exchange at an internal host.
+ * `.tool` author can't aim a sign-in/token exchange at an internal host. Both
+ * URLs are REQUIRED here: a `.tool` (http/inline) has no server whose OAuth
+ * metadata could fill them in — that convenience belongs to mcp.json servers.
  */
 function normalizeVariableOAuth(name: string, raw: unknown): ToolVariableOAuth | undefined {
   if (raw === undefined || raw === null) return undefined;
@@ -862,12 +981,21 @@ function normalizeVariableOAuth(name: string, raw: unknown): ToolVariableOAuth |
     }
     authParams = Object.fromEntries(entries) as Record<string, string>;
   }
+  // PKCE is on unless the file says `false`; only the opt-out is ever stored.
+  if (o.pkce !== undefined && typeof o.pkce !== 'boolean') {
+    throw new Error(`variable "${name}" oauth.pkce must be a boolean`);
+  }
+  // Never fetched (it rides as a request param), but it names the remote
+  // server — same https/SSRF bar as the endpoints.
+  const resource = o.resource !== undefined ? safeUrl(o.resource, 'resource') : undefined;
   return {
     authorizationUrl,
     tokenUrl,
     clientId,
     ...(scopes ? { scopes } : {}),
     ...(authParams ? { authParams } : {}),
+    ...(o.pkce === false ? { pkce: false } : {}),
+    ...(resource ? { resource } : {}),
   };
 }
 

@@ -13,6 +13,7 @@ import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { GitService } from '../../git/git.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
 import { hashEmail as hash } from '../../../../shared/hash-email.js';
+import { AccessUnreadableError } from '../../../access-model/access-errors.js';
 
 function file(overrides: Partial<PullRequestFile>): PullRequestFile {
   return {
@@ -555,5 +556,64 @@ describe('mergePr — roles.yaml privilege-escalation guard', () => {
     // Assert the authorization gate actually let the merge through: the local
     // merge was invoked (not just that no auth error was thrown).
     expect(mergeChangeRequestMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * An access tree that could not be READ is not the same as "no eligible
+ * writers": the latter drops a file out of the merge gate, so answering it for
+ * a lost git read would let a change merge past a deny nobody managed to
+ * load. The unreadable case propagates (the caller fails closed, 503); any
+ * other lookup failure still degrades to empty eligibility as documented.
+ */
+describe('ReviewWorkflowService.getApprovalStates — unreadable access tree', () => {
+  const FILES = [file({ path: 'Knowledge/Foo.md' })];
+  function serviceWith(overrides: Partial<IAccessControl>) {
+    const workspace = {
+      ensureRemotesFetched: vi.fn(async () => undefined),
+      getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-base' })),
+    } as unknown as WorkspaceService;
+    const git = { mergeChangeRequest: mergeChangeRequestMock } as unknown as GitService;
+    return new ReviewWorkflowService(makeDb([]), { ...makeAccessControl({}), ...overrides }, workspace, git);
+  }
+
+  it('propagates AccessUnreadableError from the eligibility lookup', async () => {
+    const svc = serviceWith({
+      eligibleWritersForPathsAtRef: async () => {
+        throw new AccessUnreadableError('origin/current-company-state', 'Knowledge/access.md');
+      },
+    });
+    await expect(
+      svc.getApprovalStates(1, FILES, 'head-sha-1', 'current-company-state', null, 'ws-base', 'alice@bevel.software'),
+    ).rejects.toBeInstanceOf(AccessUnreadableError);
+  });
+
+  it('propagates AccessUnreadableError from the viewer batch too', async () => {
+    const svc = serviceWith({
+      canWriteBatchAtRef: async () => {
+        throw new AccessUnreadableError('origin/current-company-state', 'Knowledge/access.md');
+      },
+    });
+    await expect(
+      svc.getApprovalStates(1, FILES, 'head-sha-1', 'current-company-state', null, 'ws-base', 'alice@bevel.software'),
+    ).rejects.toBeInstanceOf(AccessUnreadableError);
+  });
+
+  it('still degrades any other lookup failure to empty eligibility', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const svc = serviceWith({
+        eligibleWritersForPathsAtRef: async () => {
+          throw new Error('origin not fetched yet');
+        },
+      });
+      const states = await svc.getApprovalStates(1, FILES, 'head-sha-1', 'current-company-state', null, 'ws-base');
+      expect(states).toHaveLength(1);
+      expect(states[0].eligibleApprovers).toEqual({ roles: [], users: [] });
+      expect(states[0].isApproved).toBe(false);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

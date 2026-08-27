@@ -233,6 +233,9 @@ function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [scopes, setScopes] = useState('');
+  // On by default: MCP-spec providers require PKCE, and one that doesn't
+  // implement it ignores the extra parameters — off is the rare exception.
+  const [pkce, setPkce] = useState(true);
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
@@ -246,6 +249,7 @@ function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (
           clientId: clientId.trim(),
           clientSecret: clientSecret.trim() || undefined,
           scopes: scopes.split(/[\s,]+/).filter(Boolean),
+          pkce,
         },
       });
       onSaved();
@@ -286,6 +290,10 @@ function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (
       <Field label="Scopes (space or comma separated)">
         <TextField className="w-full" value={scopes} onChange={(e) => setScopes(e.target.value)} />
       </Field>
+      <label className="flex items-center gap-2 text-detail text-ink-muted">
+        <input type="checkbox" checked={pkce} onChange={(e) => setPkce(e.target.checked)} />
+        PKCE (S256) — required by MCP servers; harmless for providers that ignore it
+      </label>
       <p className="text-detail text-ink-muted">
         Save first, then click “Sign in” on the secret to complete the flow.
       </p>
