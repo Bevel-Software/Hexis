@@ -296,12 +296,27 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     const pendingVerifier = meta.pkce ? randomBytes(32).toString('base64url') : undefined;
     const pendingScopes = meta.scopes && meta.scopes.length ? meta.scopes.join(' ') : undefined;
     if (pendingVerifier || pendingScopes) {
-      const blob = this.readBlob(row.valueEncrypted);
-      const next: OAuthBlob = { ...blob, pendingVerifier, pendingScopes };
-      await this.db
-        .update(secrets)
-        .set({ valueEncrypted: this.crypto().encrypt(JSON.stringify(next)), updatedAt: new Date() })
-        .where(and(eq(secrets.id, id), eq(secrets.userId, userId)));
+      // Read-modify-write on the blob, guarded on the ciphertext we read: a
+      // refresh running concurrently (the row is a live credential) may have
+      // persisted ROTATED tokens in between, and writing our copy over them
+      // would leave the row holding a dead refresh token if this consent is
+      // then abandoned. On a miss (0 rows), re-read and merge onto the fresh
+      // blob; bounded so a row that keeps changing fails loudly, not forever.
+      let current = row;
+      for (let attempt = 0; ; attempt++) {
+        const blob = this.readBlob(current.valueEncrypted);
+        const next: OAuthBlob = { ...blob, pendingVerifier, pendingScopes };
+        const written = await this.db
+          .update(secrets)
+          .set({ valueEncrypted: this.crypto().encrypt(JSON.stringify(next)), updatedAt: new Date() })
+          .where(
+            and(eq(secrets.id, id), eq(secrets.userId, userId), eq(secrets.valueEncrypted, current.valueEncrypted)),
+          )
+          .returning({ id: secrets.id });
+        if (!Array.isArray(written) || written.length > 0) break;
+        if (attempt >= 2) throw new SecretOAuthError('The sign-in changed while starting — try again');
+        current = await this.requireRow(userId, id);
+      }
     }
 
     const url = new URL(meta.authorizationUrl);
@@ -354,8 +369,9 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     // A silent token response granted what was asked (RFC 6749 §5.1) — record
     // the request as the grant, or every declared scope would read as missing
     // and the sign-in would be flagged "again" forever. An echoed `scope` is
-    // the provider's own word and wins, narrower grants included.
-    if (!tokens.scope && blob.pendingScopes) tokens.scope = blob.pendingScopes;
+    // the provider's own word and wins — narrower grants included, and so does
+    // an explicit empty one: only an ABSENT field means "as requested".
+    if (tokens.scope === undefined && blob.pendingScopes) tokens.scope = blob.pendingScopes;
     // The verifier and the requested scopes are one-time — never carried past
     // the exchange they were minted for.
     const next: OAuthBlob = { clientSecret: blob.clientSecret, tokens };

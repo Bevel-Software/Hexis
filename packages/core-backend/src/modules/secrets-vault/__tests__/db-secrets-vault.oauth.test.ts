@@ -194,6 +194,38 @@ describe('DbSecretsVaultService — PKCE + public-client tool OAuth', () => {
     // An echoed `scope` is the provider's word and wins — a narrower grant stays visible.
     const echoed = await complete({ access_token: 'at-2', expires_in: 3600, scope: 'crm.objects.contacts.read' });
     expect(echoed.tokens.scope).toBe('crm.objects.contacts.read');
+    // …and so does an EXPLICIT empty grant: only an absent field means "as requested".
+    const empty = await complete({ access_token: 'at-3', expires_in: 3600, scope: '' });
+    expect(empty.tokens.scope).toBe('');
+  });
+
+  it('beginOAuth never writes a stale blob over tokens a concurrent refresh just rotated', async () => {
+    // The standalone flow stashes the pending verifier/scopes with a
+    // read-modify-write. Between its read and its write a refresh persists
+    // rotated tokens; the guarded update misses (0 rows), the row is re-read,
+    // and the pending fields are merged onto THOSE tokens.
+    const stale = sharedRow({
+      id: 'secret-1',
+      userId: 'user-1',
+      oauthMeta: { ...PUBLIC_META, pkce: false },
+      valueEncrypted: crypto.encrypt(JSON.stringify({ tokens: { access_token: 'old', refresh_token: 'rt-old' } })),
+    });
+    const rotated = {
+      ...stale,
+      valueEncrypted: crypto.encrypt(JSON.stringify({ tokens: { access_token: 'new', refresh_token: 'rt-new' } })),
+    };
+    const { db, captured } = makeFakeDb([
+      [stale], // requireRow
+      [], // guarded update: the ciphertext changed underneath us
+      [rotated], // re-read
+      [{ id: 'secret-1' }], // guarded update against the fresh ciphertext
+    ]);
+    const url = await new DbSecretsVaultService(db, ENC_KEY).beginOAuth('user-1', 'secret-1', 'https://bevel.example.com/cb', 's');
+    expect(new URL(url).searchParams.get('scope')).toBe('mcp.read');
+    expect(captured.set).toHaveLength(2);
+    const persisted = JSON.parse(crypto.decrypt(captured.set[1].valueEncrypted));
+    expect(persisted.tokens).toEqual({ access_token: 'new', refresh_token: 'rt-new' });
+    expect(persisted.pendingScopes).toBe('mcp.read');
   });
 });
 
