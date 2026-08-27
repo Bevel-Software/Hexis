@@ -286,20 +286,22 @@ export class WorkflowService implements IWorkflowService {
    * Hold the lifecycle lock of BOTH branches a change request names, so a
    * check-then-insert spanning them excludes either one being deleted.
    *
-   * SORTED, and that is the whole subtlety. Two requests may legally be open
-   * in opposite directions at once — the uniqueness rule blocks `A -> B`
-   * against `A -> B`, but explicitly allows `B -> A` alongside it — so
-   * acquiring in argument order would let one hold `A` waiting for `B` while
-   * the other holds `B` waiting for `A`. A canonical order removes the cycle.
-   * Deletion and retirement each take a single key, so once every two-key
-   * acquisition agrees on the order, no deadlock can form.
+   * ATOMICALLY, via `runAll` — not `run(a, () => run(b, …))`. Taking the keys
+   * one at a time leaves a gap between them in which a delete of the second
+   * branch can start, pass its "is any open request using this?" check
+   * (the row does not exist yet) and finish, so the request lands pointing at
+   * a branch that was removed while it was being opened. That is the same
+   * failure this PR is about, reintroduced one level down — and it would have
+   * been a REGRESSION on the source branch, which the previous single-key
+   * lock held for the whole sequence.
+   *
+   * Reserving the set in one step also removes the deadlock question that
+   * sequential acquisition raises: two requests may legally be open in
+   * opposite directions (`A -> B` and `B -> A`), and nothing is ever held
+   * while waiting for the other key.
    */
   private runOnBranchPair<T>(a: string, b: string, fn: () => Promise<T>): Promise<T> {
-    if (a === b) return this.branchLifecycle.run(`branch:${a}`, fn);
-    const [first, second] = a < b ? [a, b] : [b, a];
-    return this.branchLifecycle.run(`branch:${first}`, () =>
-      this.branchLifecycle.run(`branch:${second}`, fn),
-    );
+    return this.branchLifecycle.runAll([`branch:${a}`, `branch:${b}`], fn);
   }
 
   /**
@@ -1773,22 +1775,27 @@ export class WorkflowService implements IWorkflowService {
     // `listBranches({ freshFetch: true })`, the same authoritative probe the
     // deleted-branch sweep trusts, and any failure of it propagates: fail
     // CLOSED. A protected base is live by definition and skips the probe.
-    const defaultWs = await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
     let adminBranch = summary.base;
+    let ws: { id: string } | null = null;
     if (!isProtectedBranch(summary.base)) {
-      const live = await this.git.listBranches(defaultWs.id, { freshFetch: true });
+      // The probe needs SOME workspace to run git in, and the default
+      // branch's is the one guaranteed to exist. Bootstrapping it is scoped
+      // to this branch of the decision on purpose: a protected base is live
+      // by definition and is authorized from its own workspace exactly as it
+      // always was, so a deployment whose default-branch clone is unhappy
+      // cannot block deletes that never needed it.
+      const probeWs = await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
+      const live = await this.git.listBranches(probeWs.id, { freshFetch: true });
       if (!live.some((b) => b.name === summary.base)) {
         console.warn(
           `[cr] base branch "${summary.base}" of change request #${number} no longer exists — ` +
             `authorizing its deletion against "${DEFAULT_BRANCH}"`,
         );
         adminBranch = DEFAULT_BRANCH;
+        ws = probeWs;
       }
     }
-    const ws =
-      adminBranch === DEFAULT_BRANCH
-        ? defaultWs
-        : await this.workspaceService.getOrCreateForBranch(adminBranch);
+    ws ??= await this.workspaceService.getOrCreateForBranch(adminBranch);
     await this.workspaceService.ensureRemotesFetched(ws.id).catch(() => undefined);
     const isAdmin = await this.accessControl.canWriteAtRef(
       ws.id,

@@ -64,6 +64,20 @@ function fakeDb(rows: CrRow[]) {
       byValue.set(value, [...(byValue.get(value) ?? []), m[1]!]);
     }
 
+    // Reading the predicate off the statement means the reader can go stale
+    // against a future drizzle that quotes, aliases or parameterises
+    // differently. That is survivable ONLY if it fails loudly: an unparsed
+    // WHERE would leave `byValue` empty, `every` over nothing is vacuously
+    // true, and every seeded row would match — which is exactly the blind
+    // mock this harness replaced, silently restored. So refuse to answer a
+    // statement this cannot actually read.
+    if (!projection.length || projection.some((c) => !/^\w+$/.test(c))) {
+      throw new Error(`fakeDb could not read the projection of: ${sql}`);
+    }
+    if (/\bwhere\b/i.test(sql) && byValue.size === 0) {
+      throw new Error(`fakeDb could not read the predicate of: ${sql}`);
+    }
+
     const matched = rows.filter((row) =>
       [...byValue].every(([value, columns]) =>
         columns.some((c) => row[c as keyof CrRow] === value),
