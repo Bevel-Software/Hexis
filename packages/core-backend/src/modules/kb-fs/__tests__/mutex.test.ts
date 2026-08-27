@@ -65,6 +65,42 @@ describe('WorkspaceMutex', () => {
       expect(order).toEqual(['other', 'holder', 'pair']);
     });
 
+    /**
+     * A failing task on ONE key must not release the others. `Promise.all`
+     * settles on the first rejection rather than waiting for the rest, so
+     * combining the predecessors without catching each one first would start
+     * this task while another key was still held.
+     */
+    it('waits for every predecessor even when one of them fails first', async () => {
+      const mtx = new WorkspaceMutex();
+      const order: string[] = [];
+      const failA = deferred();
+      const finishB = deferred();
+
+      const failing = mtx.run('a', async () => {
+        await failA.promise;
+        throw new Error('a-failed');
+      });
+      failing.catch(() => undefined); // handled below; keep the rejection quiet
+      const running = mtx.run('b', async () => {
+        await finishB.promise;
+        order.push('b-end');
+      });
+
+      // Queued while BOTH predecessors are still pending.
+      const pair = mtx.runAll(['a', 'b'], async () => void order.push('pair'));
+
+      failA.resolve();
+      await expect(failing).rejects.toThrow('a-failed');
+      await new Promise((r) => setImmediate(r));
+      // 'a' has failed, but 'b' still holds its key — the pair must wait.
+      expect(order).toEqual([]);
+
+      finishB.resolve();
+      await Promise.all([running, pair]);
+      expect(order).toEqual(['b-end', 'pair']);
+    });
+
     it('releases every key when the body throws', async () => {
       const mtx = new WorkspaceMutex();
       await expect(mtx.runAll(['a', 'b'], async () => { throw new Error('boom'); })).rejects.toThrow('boom');

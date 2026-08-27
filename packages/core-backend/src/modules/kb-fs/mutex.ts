@@ -29,11 +29,20 @@ export class WorkspaceMutex {
    * discipline is needed and no deadlock is possible.
    *
    * Duplicate keys collapse; the operation waits on each distinct key once.
+   *
+   * Each predecessor is caught INDIVIDUALLY, before the `Promise.all`. A bare
+   * `Promise.all` settles on the first rejection rather than waiting for the
+   * rest, so one key's task failing early would start this one while another
+   * key was still held — a failure on any key would punch a hole in the
+   * mutual exclusion of every key beside it. Catching first makes the
+   * combined promise wait for all of them to settle, however each ends.
    */
   async runAll<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
     const distinct = [...new Set(keys)];
-    const prev = Promise.all(distinct.map((k) => this.tails.get(k) ?? Promise.resolve()));
-    const next = prev.catch(() => undefined).then(fn);
+    const prev = Promise.all(
+      distinct.map((k) => (this.tails.get(k) ?? Promise.resolve()).catch(() => undefined)),
+    );
+    const next = prev.then(fn);
     for (const k of distinct) this.tails.set(k, next);
     try {
       return await next;
