@@ -240,9 +240,50 @@ function renderPage(
   library?: Partial<LibraryContextValue>,
   /** Props the canonical /workspace mount passes; the legacy route passes none. */
   pageProps?: { provisional?: boolean },
+  /** Git state — overridden to test what the page does when there is no log. */
+  gitValue: GitContextValue = git,
 ) {
   libraryMock.value = { ...libraryValue(owned, crs, mine), ...library };
-  return render(
+  return render(harness(bus, gitValue, routerState, pageProps));
+}
+
+/**
+ * Wait for the page to stop loading before driving it.
+ *
+ * The reading pane is the LAST thing to arrive: it needs the skill detail
+ * (which is also what puts the second tab on screen) and then the file's bytes
+ * off the default branch. Waiting on a TAB instead can resolve earlier —
+ * `findByRole('tab', …)` is satisfied by the SKILL.md tab, which renders
+ * before either of those lands.
+ *
+ * Why the keyboard tests use it: `jumps to the first and last file with Home
+ * and End` was seen failing in full-suite runs on a loaded machine, never in
+ * isolation (0 in 20 runs). The cause was NOT established — a deliberately
+ * delayed detail load does not reproduce it, and the same runs on the
+ * unmodified file were too few to tell the two versions apart. What is certain
+ * is that both keyboard tests were driving the tablist while several requests
+ * were still in flight, and they are about arrow keys, not about loading. So
+ * they start from a settled page. If the flake outlives this, the cause is
+ * somewhere else and this at least stops the tablist tests from being where it
+ * is hunted.
+ */
+async function settled() {
+  await screen.findByTestId('md-view');
+}
+
+/**
+ * The provider tree `renderPage` mounts, as a value — so a test can hand the
+ * SAME tree back to `rerender` with a different git state and watch the page
+ * react WITHOUT remounting it. Remounting would reset the very state
+ * (`historyOpen`) those tests are about, and pass whatever the page did.
+ */
+function harness(
+  bus: EventBusContextValue,
+  gitValue: GitContextValue,
+  routerState?: Record<string, unknown>,
+  pageProps?: { provisional?: boolean },
+) {
+  return (
     <MemoryRouter
       initialEntries={[
         { pathname: '/skills-and-tools/skills/newsletter', state: routerState ?? null },
@@ -250,7 +291,7 @@ function renderPage(
     >
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
-          <GitContext.Provider value={git}>
+          <GitContext.Provider value={gitValue}>
           <EventBusContext.Provider value={bus}>
             {/* The real toast provider: the success message IS the page's
                 report that the merge landed, so a stubbed-out toast would
@@ -267,7 +308,7 @@ function renderPage(
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
 }
 
@@ -371,7 +412,8 @@ describe('SkillPage', () => {
    */
   it('moves selection AND focus with the arrow keys', async () => {
     renderPage(false);
-    const skillTab = await screen.findByRole('tab', { name: /SKILL\.md/ });
+    await settled();
+    const skillTab = screen.getByRole('tab', { name: /SKILL\.md/ });
     const sourcesTab = screen.getByRole('tab', { name: /sources\.yaml/ });
 
     skillTab.focus();
@@ -387,7 +429,8 @@ describe('SkillPage', () => {
 
   it('jumps to the first and last file with Home and End', async () => {
     renderPage(false);
-    const skillTab = await screen.findByRole('tab', { name: /SKILL\.md/ });
+    await settled();
+    const skillTab = screen.getByRole('tab', { name: /SKILL\.md/ });
     const sourcesTab = screen.getByRole('tab', { name: /sources\.yaml/ });
 
     skillTab.focus();
@@ -1122,5 +1165,166 @@ describe('SkillPage: deciding on a change', () => {
 
     fireEvent.click(withdraw);
     await waitFor(() => expect(apiMock.cancelPullRequest).toHaveBeenCalledWith(7));
+  });
+
+  /**
+   * A skill is a file in the repository, and this page is the ONLY surface it
+   * has: the shell routes every default-branch `Plugins/` URL here
+   * (`isLibraryLocation`) and the Knowledge tree does not list `Plugins/` at
+   * all, so a `⋯` missing here means the git log for every skill in the
+   * deployment is unreachable — the audit trail the product is sold on,
+   * available for Knowledge pages and for nothing else.
+   */
+  describe('version history', () => {
+    it('opens the log for the file on screen, at its workspace path', async () => {
+      renderPage(false);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Version history' }));
+
+      // The path the panel asks git about is the workspace-relative one the
+      // Knowledge viewer would hand it — kbDirName included. Getting this
+      // wrong asks about a file that does not exist and reports an empty
+      // history for one that does.
+      expect(
+        await screen.findByText('Timeline: knowledge-base/Skills/newsletter/SKILL.md'),
+      ).toBeInTheDocument();
+      expect(screen.getByText('Version history: SKILL.md')).toBeInTheDocument();
+
+      // And there is a way back, because history is not in the URL.
+      fireEvent.click(screen.getByRole('button', { name: 'Back to the file' }));
+      expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+    });
+
+    it('does not follow you to another file of the skill', async () => {
+      renderPage(false);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Version history' }));
+      await screen.findByText('Timeline: knowledge-base/Skills/newsletter/SKILL.md');
+
+      // A tab switch is a switch of file, and history is a lens on ONE file.
+      // Carrying it across would show the previous file's log under the new
+      // file's heading.
+      fireEvent.click(screen.getByRole('tab', { name: 'sources.yaml' }));
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+
+      // And it does not come BACK on the way home. Keying the open flag to
+      // the file it was opened for is not enough on its own: returning to
+      // that tab then reopens a log nobody asked for a second time, which is
+      // how you land on history when you meant to read the file.
+      fireEvent.click(screen.getByRole('tab', { name: 'SKILL.md' }));
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+      expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+    });
+
+    /**
+     * `SkillFileEditor` holds the draft in its own state, so swapping it out
+     * for the history panel throws away whatever was typed, with no warning
+     * and no way back. The menu is withdrawn for exactly as long as that is
+     * true.
+     */
+    it('is withdrawn while the editor is open, so a draft cannot be discarded', async () => {
+      accessMock.result = {
+        canWrite: true,
+        eligible: { roles: [], users: [] },
+        owners: { roles: [], users: [] },
+      };
+      renderPage(true);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+      await screen.findByRole('textbox', { name: /Edit SKILL\.md/ });
+      expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
+
+      // It comes back the moment the draft is gone.
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(await screen.findByRole('button', { name: 'More actions' })).toBeInTheDocument();
+    });
+
+    /**
+     * `availability` is re-derived from a POLLED status call, so one failed
+     * poll flips it to `error` and the next good one flips it back. If the
+     * open flag survived that, the log would reappear over the file minutes
+     * after the reader had gone back to reading.
+     */
+    it('closes for good when git stops answering mid-read', async () => {
+      const bus = makeFakeBus();
+      const { rerender } = renderPage(false, [], [], bus);
+      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Version history' }));
+      await screen.findByText(/^Timeline:/);
+
+      // A poll fails: the log goes away, and so does its trigger.
+      rerender(harness(bus, { ...git, availability: 'error' } as GitContextValue));
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+
+      // The next poll succeeds. The file is still what is on screen.
+      rerender(harness(bus, git));
+      expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+      expect(screen.getByRole('button', { name: 'More actions' })).toBeInTheDocument();
+    });
+
+    /**
+     * The MENU flag needs the same treatment as the log's, and it is a
+     * separate flag: the trigger and its panel both live behind
+     * `historyAvailable`, so an open menu unmounts with them and leaves its
+     * flag set behind an element nobody can see. Found by cubic on #103.
+     */
+    it('does not spring the menu back open when git recovers', async () => {
+      const bus = makeFakeBus();
+      const { rerender } = renderPage(false, [], [], bus);
+      const trigger = await screen.findByRole('button', { name: 'More actions' });
+      fireEvent.click(trigger);
+      expect(screen.getByRole('menuitem', { name: 'Version history' })).toBeInTheDocument();
+
+      // A poll fails while the menu is OPEN — trigger and panel go together.
+      rerender(harness(bus, { ...git, availability: 'error' } as GitContextValue));
+      expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
+
+      // The next poll succeeds. The trigger is back, and it is CLOSED.
+      rerender(harness(bus, git));
+      const back = await screen.findByRole('button', { name: 'More actions' });
+      expect(back).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByRole('menuitem', { name: 'Version history' })).toBeNull();
+    });
+
+    /**
+     * `editing` is the same state by a second door, and it is reachable
+     * without a mouse: `useDismissableMenu` dismisses on outside POINTERDOWN,
+     * so tabbing from the open menu to Edit and pressing Enter never dismisses
+     * it. Cancel then used to hand the menu back open over the file.
+     */
+    it('does not spring the menu back open when the editor closes', async () => {
+      accessMock.result = {
+        canWrite: true,
+        eligible: { roles: [], users: [] },
+        owners: { roles: [], users: [] },
+      };
+      renderPage(true);
+      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+      expect(screen.getByRole('menuitem', { name: 'Version history' })).toBeInTheDocument();
+
+      // Reached by keyboard, so no outside pointerdown ever dismissed the menu.
+      fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+      await screen.findByRole('textbox', { name: /Edit SKILL\.md/ });
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+      const back = await screen.findByRole('button', { name: 'More actions' });
+      expect(back).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByRole('menuitem', { name: 'Version history' })).toBeNull();
+    });
+
+    it('has no trigger at all when git cannot answer', async () => {
+      renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
+        ...git,
+        availability: 'loading',
+      } as GitContextValue);
+
+      // Version history is the whole menu, so no log means no `⋯` — an
+      // overflow opening onto an empty panel is worse than no overflow.
+      expect(await screen.findByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
+    });
   });
 });
