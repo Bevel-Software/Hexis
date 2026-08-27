@@ -940,45 +940,18 @@ describe('LockingFilesystem refuses to create anything outside the repository fo
     await expect(fs.access(path.join(root, `${KB}/KnowledgeBase/dest.md`))).rejects.toBeDefined();
   });
 
-  it("copyFile runs the content gate with the SOURCE's bytes and the destination path", async () => {
+  /**
+   * The content gate is deliberately NOT run on a copy: honouring it means
+   * reading `src`, and `super.copyFile` reads it again, so the approved bytes
+   * are not provably the landed ones. Asserted so the omission stays a decision
+   * rather than drifting back in as an unreviewed half-measure.
+   */
+  it('copyFile does not run the content gate', async () => {
     await fs.mkdir(path.join(root, `${KB}/KnowledgeBase`), { recursive: true });
     await fs.writeFile(path.join(root, `${KB}/KnowledgeBase/src.md`), 'source bytes');
     const workflow = makeWorkflow();
     const { fsLayer, validateWrite } = layer(workflow);
     await fsLayer.copyFile(`${KB}/KnowledgeBase/src.md`, `${KB}/KnowledgeBase/dest.md`);
-    // The guard must see what is ACTUALLY about to land at `dest`.
-    expect(validateWrite).toHaveBeenCalledWith(`${KB}/KnowledgeBase/dest.md`, 'source bytes');
-  });
-
-  it('a content gate that refuses stops the copy before the lock', async () => {
-    await fs.mkdir(path.join(root, `${KB}/KnowledgeBase`), { recursive: true });
-    await fs.writeFile(path.join(root, `${KB}/KnowledgeBase/src.md`), 'malformed: [');
-    const workflow = makeWorkflow();
-    const creatorAccess = makeCreatorAccess();
-    const validateWrite = vi.fn(() => {
-      throw new WorkflowValidationError('would not parse');
-    });
-    const fsLayer = new LockingFilesystem(
-      { basePath: root, contained: true },
-      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess, validateWrite },
-    );
-    await expect(
-      fsLayer.copyFile(`${KB}/KnowledgeBase/src.md`, `${KB}/roles.yaml`),
-    ).rejects.toBeInstanceOf(WorkflowValidationError);
-    expect(workflow.acquireLock).not.toHaveBeenCalled();
-    await expect(fs.access(path.join(root, `${KB}/roles.yaml`))).rejects.toBeDefined();
-  });
-
-  /**
-   * An unreadable source is `super.copyFile`'s failure to report. Inventing one
-   * here would answer a missing file with a validation error.
-   */
-  it('an unreadable source is left to the copy itself to fail on', async () => {
-    const workflow = makeWorkflow();
-    const { fsLayer, validateWrite } = layer(workflow);
-    await expect(
-      fsLayer.copyFile(`${KB}/KnowledgeBase/missing.md`, `${KB}/KnowledgeBase/dest.md`),
-    ).rejects.toBeDefined();
     expect(validateWrite).not.toHaveBeenCalled();
   });
 
