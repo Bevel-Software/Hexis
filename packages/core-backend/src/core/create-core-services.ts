@@ -5,7 +5,6 @@ import {
   configureBranchModel,
   validateBranchModel,
   PROTECTED_BRANCHES,
-  PLUGINS_DIR,
 } from '@bevel-software/platform-shared';
 import { CoreConfig } from '../core-config.js';
 import { getDb, type Database } from '../modules/database/connection.js';
@@ -93,6 +92,7 @@ import { TokenCrypto } from '../shared/token-crypto.js';
 import { UpdateCheckService } from '../modules/update-check/update-check.service.js';
 import { resolveAppVersion } from '../version.js';
 import { noopRecoveryAgent, type CorePorts } from './core-ports.js';
+import { registerCatalogCacheInvalidation } from './catalog-cache-invalidation.js';
 
 /**
  * Everything the CORE composition builds: the core services `createCoreServer`
@@ -484,43 +484,16 @@ export async function createCoreServices(
     workflowService,
   );
 
-  // Subscriber A — catalog freshness: a committed change drops the affected
-  // caches immediately instead of waiting out their TTLs. The tool/skill
-  // catalogs are global but read the DEFAULT branch only, so only
-  // default-branch changes under their folders matter. (The kb-graph id-index
-  // invalidation that used to live in this subscriber is registered by the
-  // enterprise overlay, next to the kb-graph service it belongs to — the
-  // caches are independent, so the split preserves behavior.)
-  fileChangeNotifier.onFilesChanged(({ branch, paths }) => {
-    if (branch !== DEFAULT_BRANCH) return;
-    // Skills, tools and the plugin index all live under `Plugins/`, so one
-    // touch check drives all three caches. An access grant lands as a
-    // default-branch change to `Plugins/<plugin>/access.md`, so this is also
-    // what makes a newly-granted plugin unlock within one round-trip instead
-    // of one TTL.
-    const touched = paths.some((p) => p.startsWith(`${kbDirName}/${PLUGINS_DIR}/`));
-    if (touched) {
-      toolManualService.invalidate();
-      skillService.invalidate();
-      pluginIndexService.invalidate();
-    }
-
-  });
-
-  // Subscriber B — WRITE-time freshness for the same three caches. The
-  // workspace routes emit `fs-tree-changed` the moment bytes hit a working
-  // tree; Subscriber A above fires only when the ASYNC commit lands. Between
-  // the two, "create a skill, reload the catalog" raced the commit pipeline
-  // and lost — the new skill's card stayed invisible until a refresh outlived
-  // the TTL. The catalogs scan the working tree anyway, so invalidating at
-  // write time makes the very next read see the file. No path filter: this
-  // event carries none, and a spurious drop only costs one re-scan.
-  eventBus.onEmit((event) => {
-    if (event.kind !== 'fs-tree-changed') return;
-    if (!('branch' in event) || event.branch !== DEFAULT_BRANCH) return;
-    toolManualService.invalidate();
-    skillService.invalidate();
-    pluginIndexService.invalidate();
+  // Catalog freshness: the skill / tool-manual / plugin-index caches all scan
+  // the DEFAULT branch's working tree, and all three go stale on the same
+  // events (a commit, a working-tree write, a merge). Wired in one place so a
+  // new way of reaching the default branch cannot refresh two of them and
+  // leave the third serving last minute's answer.
+  registerCatalogCacheInvalidation({
+    eventBus,
+    fileChangeNotifier,
+    kbDirName,
+    catalogs: [toolManualService, skillService, pluginIndexService],
   });
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the
