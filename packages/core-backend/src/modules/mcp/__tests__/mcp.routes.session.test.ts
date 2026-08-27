@@ -26,6 +26,7 @@ import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.in
  *   - the live-session and cross-user branches are untouched.
  */
 
+/** The id the FIRST session minted in a test gets; `openSession` establishes it. */
 const SESSION_ID = 'sess-1';
 
 /** Auth stand-in: binds the user named by `x-test-user`, defaulting to user-A. */
@@ -50,8 +51,15 @@ afterEach(async () => {
  * session through `onSessionInitialized` from INSIDE that first call — which
  * is when the SDK transport really fires it, and the only ordering the route's
  * `active.set` closure can observe without a TDZ error.
+ *
+ * Each call mints a DISTINCT id (`sess-1`, `sess-2`, …) rather than a constant.
+ * With a constant, a route that wrongly minted a second session answered with
+ * a body identical to the correct one, so "no second session" could only ever
+ * be asserted through the call count. Numbering them puts the mistake in the
+ * response itself: a reply naming `sess-2` IS the extra session.
  */
 function makeMcpService() {
+  let minted = 0;
   const createSession = vi.fn(
     async (
       userId: string,
@@ -59,16 +67,18 @@ function makeMcpService() {
       _bearer: string,
       onSessionInitialized: (sessionId: string) => void,
     ) => {
+      minted += 1;
+      const sessionId = `sess-${minted}`;
       let announced = false;
       const transport = {
-        sessionId: SESSION_ID,
+        sessionId,
         onclose: undefined as undefined | (() => void),
         handleRequest: vi.fn(async (_req: Request, res: Response) => {
           if (!announced) {
             announced = true;
-            onSessionInitialized(SESSION_ID);
+            onSessionInitialized(sessionId);
           }
-          res.status(200).json({ forwarded: true, sessionId: SESSION_ID, userId });
+          res.status(200).json({ forwarded: true, sessionId, userId });
         }),
         close: vi.fn(async () => {}),
       };
@@ -182,6 +192,29 @@ describe('POST /mcp session routing', () => {
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toMatchObject({ forwarded: true, sessionId: SESSION_ID });
     // No second session: the live branch was taken, not the initialize branch.
+    expect(createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes an initialize over a LIVE session to that session, minting no second one', async () => {
+    // The guard this pins is branch ORDER, and only this change made it
+    // load-bearing: `initialize` used to be gated on `!sessionIdHeader`, so
+    // the live-session branch and the initialize branch were mutually
+    // exclusive and their order did not matter. Without that gate, an
+    // initialize check placed first would match here too — and silently mint
+    // a second session over a working one, which is the failure the route
+    // comment and the PR both promise cannot happen.
+    //
+    // What is asserted is what this ROUTER owes: the request reached the
+    // existing transport and no new session was created. Rejecting a
+    // re-initialize is the SDK transport's own job (`-32600 Server already
+    // initialized`), and asserting that here would be asserting against the
+    // stub rather than against the code under test.
+    const { baseUrl, createSession } = await mount();
+    await openSession(baseUrl); // mints sess-1
+    const res = await send(baseUrl, { sessionId: SESSION_ID, body: INITIALIZE });
+    expect(res.status).toBe(200);
+    // sess-1, not sess-2: the live transport answered, not a fresh one.
+    await expect(res.json()).resolves.toMatchObject({ forwarded: true, sessionId: SESSION_ID });
     expect(createSession).toHaveBeenCalledTimes(1);
   });
 
