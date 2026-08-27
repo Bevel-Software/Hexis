@@ -237,7 +237,7 @@ A `user`-scoped variable can be filled by **signing in** instead of by a typed v
 | `resource` | optional | RFC 8707 resource indicator (the MCP server URL); discovered on an `mcp.json` server |
 | `authParams` | optional | extra static authorize params, e.g. Google's `access_type: offline` |
 
-**Never** a `clientSecret` — a file carrying one fails to load. The secret is pasted once by a tool writer on the tool's page, then every member signs in on the Connect page.
+**Never** a `clientSecret` — a `.tool` carrying one fails to load, and an `mcp.json` server whose plugin.json entry carries one is dropped from the catalog. The secret is pasted once by a tool writer on the tool's page, then every member signs in on the Connect page.
 
 For an `mcp.json` server the declaration lives in `plugin.json`, in the same extensions entry as the auth header that uses it:
 

@@ -109,6 +109,12 @@ export function validatedVariables(raw: unknown): ToolVariable[] | null {
       // to all callers.
       if (!isRecord(entry.oauth) || scope !== 'user') return null;
       const o = entry.oauth;
+      // Confidential material never loads from a file, on either declaration
+      // surface: the `.tool` parser throws on these keys, and silently
+      // dropping one here would leave a plugin.json carrying a secret that
+      // "worked" — the file is portable package data, readable by every
+      // client that loads the plugin.
+      if (o.clientSecret !== undefined || o.client_secret !== undefined || o.secret !== undefined) return null;
       // `clientId` is trimmed and must be non-empty, exactly as the `.tool`
       // parser requires: a whitespace-only value would pass discovery and
       // then fail the owner's client-secret setup with "clientId is

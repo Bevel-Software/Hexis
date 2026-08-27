@@ -219,6 +219,11 @@ describe('descriptorsFromMcpJson', () => {
     });
     expect(declare({ clientId: 'c', resource: 'http://v.example/mcp' })).toBeUndefined();
     expect(declare({ clientId: 'c', resource: 'https://169.254.169.254/mcp' })).toBeUndefined();
+    // A secret in a portable file never loads — same keys the `.tool` parser
+    // refuses, and the whole server is dropped rather than the key ignored.
+    expect(declare({ clientId: 'c', clientSecret: 'shh' })).toBeUndefined();
+    expect(declare({ clientId: 'c', client_secret: 'shh' })).toBeUndefined();
+    expect(declare({ clientId: 'c', secret: 'shh' })).toBeUndefined();
   });
 
   it('yields nothing for an unparsable file, quietly for an absent extensions block', () => {

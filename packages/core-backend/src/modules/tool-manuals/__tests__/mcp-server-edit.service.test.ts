@@ -290,6 +290,8 @@ describe('putServer', () => {
           oauth: { authorizationUrl: 'https://v.example/auth', tokenUrl: 'https://v.example/token', clientId: '   ' },
         },
       ],
+      [{ name: 'K', scope: 'user', oauth: { clientId: 'c', clientSecret: 'shh' } }], // a secret never lands in a file
+      [{ name: 'K', scope: 'user', oauth: { clientId: 'c', authorizationUrl: 'https://v.example/auth' } }], // half a pair
     ];
     const before = await readJson('Plugins/GTM/plugin.json');
     for (const variables of bad) {

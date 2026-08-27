@@ -442,10 +442,6 @@ export class ToolManualService implements IToolManualService {
   private async decorateMcpOAuth(manuals: ToolManualDescriptor[]): Promise<void> {
     const discovery = this.mcpAuthDiscovery;
     if (!discovery) return;
-    // Local-only servers aren't probeable from here; templated URLs aren't
-    // resolvable without a caller. Both keep their file-declared behavior.
-    const probeable = (m: ToolManualDescriptor): boolean =>
-      !!m.url && m.remote !== false && !m.url.includes('${');
     const bare: ToolManualDescriptor[] = [];
     const declared: { m: ToolManualDescriptor; v: ToolVariable }[] = [];
     for (const m of manuals) {
@@ -463,7 +459,7 @@ export class ToolManualService implements IToolManualService {
       }
       // The file configures auth itself — explicit wins over discovery.
       const hasAuthHeader = Object.keys(m.headers ?? {}).some((h) => h.toLowerCase() === 'authorization');
-      if (!hasAuthHeader && probeable(m)) bare.push(m);
+      if (!hasAuthHeader && isProbeableMcpServer(m)) bare.push(m);
     }
     // Probe every eligible server CONCURRENTLY — a cold scan with several bare
     // mcp tools shouldn't pay one network round-trip per tool in series. The
@@ -535,7 +531,7 @@ export class ToolManualService implements IToolManualService {
     v: ToolVariable,
   ): Promise<void> {
     const declaredByHand = 'declare `authorizationUrl` and `tokenUrl` on the sign-in variable';
-    if (!m.url || m.remote === false || m.url.includes('${')) {
+    if (!isProbeableMcpServer(m)) {
       m.setup = {
         kind: 'oauth-manual',
         reason: `the sign-in endpoints can't be discovered for a local-only or templated server URL — ${declaredByHand}`,
@@ -547,7 +543,7 @@ export class ToolManualService implements IToolManualService {
       return;
     }
     try {
-      const found = await discovery.providerForDeclaredClient(m.name, m.url, v.oauth!.clientId);
+      const found = await discovery.providerForDeclaredClient(m.name, m.url!, v.oauth!.clientId);
       if (found.status !== 'oauth') {
         m.setup = {
           kind: 'oauth-manual',
@@ -921,6 +917,16 @@ function normalizeVariables(raw: unknown): ToolVariable[] {
       ...(oauth ? { oauth } : {}),
     };
   });
+}
+
+/**
+ * Whether the platform can reach an MCP server's URL for OAuth discovery.
+ * Local-only servers aren't probeable from here; templated URLs aren't
+ * resolvable without a caller. Both keep their file-declared behavior — the
+ * one rule for the zero-config probe and for completing a declared client.
+ */
+function isProbeableMcpServer(m: ToolManualDescriptor): boolean {
+  return !!m.url && m.remote !== false && !m.url.includes('${');
 }
 
 /**
