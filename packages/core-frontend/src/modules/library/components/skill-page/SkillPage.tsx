@@ -283,7 +283,20 @@ export function SkillPage({
   // successful one flips it back. Left open, that second poll would put the
   // log back over the file minutes after the reader returned to reading. Once
   // it is gone they ask for it again, which is one click.
+  //
+  // BOTH flags, for one reason: the trigger and its panel live behind
+  // `historyAvailable` together, so an open menu unmounts with them and its
+  // flag is left set behind an element nobody can see. Closing only the log
+  // fixed the panel and left the menu to spring open by itself on the next
+  // good poll.
+  //
+  // `editing` is the second door into the same state, and it is reachable
+  // without a mouse: `useDismissableMenu` dismisses on outside POINTERDOWN, so
+  // tabbing from the open menu to Edit and pressing Enter never dismisses it.
+  // The editor then withdraws `historyAvailable`, and Cancel used to hand the
+  // menu back open.
   if (historyOpen && !historyAvailable) setHistoryOpen(false);
+  if (menuOpen && !historyAvailable) setMenuOpen(false);
   const viewingHistory = historyAvailable && historyOpen;
   /**
    * Change requests a merge attempt has REFUSED as unmergeable. Git is the only

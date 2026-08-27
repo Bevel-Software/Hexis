@@ -1265,6 +1265,56 @@ describe('SkillPage: deciding on a change', () => {
       expect(screen.getByRole('button', { name: 'More actions' })).toBeInTheDocument();
     });
 
+    /**
+     * The MENU flag needs the same treatment as the log's, and it is a
+     * separate flag: the trigger and its panel both live behind
+     * `historyAvailable`, so an open menu unmounts with them and leaves its
+     * flag set behind an element nobody can see. Found by cubic on #103.
+     */
+    it('does not spring the menu back open when git recovers', async () => {
+      const bus = makeFakeBus();
+      const { rerender } = renderPage(false, [], [], bus);
+      const trigger = await screen.findByRole('button', { name: 'More actions' });
+      fireEvent.click(trigger);
+      expect(screen.getByRole('menuitem', { name: 'Version history' })).toBeInTheDocument();
+
+      // A poll fails while the menu is OPEN — trigger and panel go together.
+      rerender(harness(bus, { ...git, availability: 'error' } as GitContextValue));
+      expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
+
+      // The next poll succeeds. The trigger is back, and it is CLOSED.
+      rerender(harness(bus, git));
+      const back = await screen.findByRole('button', { name: 'More actions' });
+      expect(back).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByRole('menuitem', { name: 'Version history' })).toBeNull();
+    });
+
+    /**
+     * `editing` is the same state by a second door, and it is reachable
+     * without a mouse: `useDismissableMenu` dismisses on outside POINTERDOWN,
+     * so tabbing from the open menu to Edit and pressing Enter never dismisses
+     * it. Cancel then used to hand the menu back open over the file.
+     */
+    it('does not spring the menu back open when the editor closes', async () => {
+      accessMock.result = {
+        canWrite: true,
+        eligible: { roles: [], users: [] },
+        owners: { roles: [], users: [] },
+      };
+      renderPage(true);
+      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+      expect(screen.getByRole('menuitem', { name: 'Version history' })).toBeInTheDocument();
+
+      // Reached by keyboard, so no outside pointerdown ever dismissed the menu.
+      fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+      await screen.findByRole('textbox', { name: /Edit SKILL\.md/ });
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+      const back = await screen.findByRole('button', { name: 'More actions' });
+      expect(back).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByRole('menuitem', { name: 'Version history' })).toBeNull();
+    });
+
     it('has no trigger at all when git cannot answer', async () => {
       renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, {
         ...git,
