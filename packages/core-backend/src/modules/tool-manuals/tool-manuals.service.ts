@@ -45,6 +45,7 @@ import {
   type ToolManualPreview,
   type ToolManualType,
   type ToolVariable,
+  type ToolHealthCheck,
   type ToolVariableScope,
   type ToolVariableOAuth,
 } from './tool-manuals.contract.js';
@@ -671,6 +672,7 @@ function toSummary(m: ToolManualDescriptor): ToolManualSummary {
     variables: m.variables,
     remote: m.remote,
     setup: m.setup,
+    healthCheck: m.healthCheck,
   };
 }
 
@@ -848,20 +850,8 @@ export function normalizeToolManual(
     // literal internal host slips past as a templated scheme or userinfo.
     // Local-only (`remote: false`) `.tool`s are never fetched server-side, so
     // are exempt.
-    const literalScheme = /^([a-zA-Z][a-zA-Z0-9+.-]*:)[\\/]{2}/.exec(url)?.[1];
-    const sepMatch = /:[\\/]{2}/.exec(url);
-    const sepIdx = sepMatch ? sepMatch.index : -1;
-    const authority = sepIdx >= 0 ? url.slice(sepIdx + 3).split(/[/\\?#]/, 1)[0] : url;
-    const hostPort = authority.slice(authority.lastIndexOf('@') + 1);
-    const host = hostPort.startsWith('[') ? hostPort.slice(0, hostPort.indexOf(']') + 1) : hostPort.split(':')[0];
-    if (descriptor.remote !== false && !host.includes('${')) {
-      const checkUrl =
-        literalScheme && !authority.includes('${')
-          ? url // fully literal scheme + authority → validate the URL as-is
-          : sepIdx >= 0
-            ? `${literalScheme ?? 'http:'}//${host}` // templated scheme/userinfo/port, literal host
-            : url; // no authority shape at all → parse raw (refuses malformed)
-      assertSafeFetchUrl(checkUrl, { label: `\`.tool\` "${name}" url` });
+    if (descriptor.remote !== false) {
+      assertSafeManualFetchUrl(url, `\`.tool\` "${name}" url`);
     }
     if (obj.headers && typeof obj.headers === 'object' && !Array.isArray(obj.headers)) {
       descriptor.headers = obj.headers as Record<string, string>;
@@ -871,7 +861,105 @@ export function normalizeToolManual(
       descriptor.httpMethod = m === 'POST' ? 'POST' : 'GET';
     }
   }
+
+  // LAST, because it inherits the manual's own `headers` when it declares none
+  // — which is the common case, and the reason a one-line `healthCheck: {url}`
+  // authenticates exactly like a real call. Resolving that default here, where
+  // the whole descriptor is in hand, keeps the probe self-contained: nothing
+  // downstream has to re-derive which headers a manual would have sent.
+  const healthCheck = normalizeHealthCheck(obj.healthCheck, name, descriptor.remote, descriptor.headers);
+  if (healthCheck) descriptor.healthCheck = healthCheck;
+
   return descriptor;
+}
+
+/**
+ * SSRF guard for a URL a `.tool` will make the SERVER fetch — its manual `url`
+ * and its declared `healthCheck.url` alike, which is why this is a function
+ * rather than an inline block: two fetch targets policed by one rule cannot
+ * drift apart.
+ *
+ * A remote-capable `.tool` triggers a server-side fetch (the MCP proxy, the
+ * in-process agent, headless routines, and now the credential probe), so a
+ * literal private/loopback/metadata host is refused at the producing boundary.
+ * Only a TEMPLATED HOSTNAME (resolved at call time) is uncheckable here — a
+ * `${...}` in the scheme, userinfo, port, path, or query still leaves a
+ * concrete network target (`${S}://169.254.169.254/x` and
+ * `http://${U}@169.254.169.254/x` target the metadata IP no matter what
+ * resolves), so the guard must still run against the literal host. The
+ * authority is therefore taken from `://` INDEPENDENT of the scheme being
+ * literal, and when the raw url can't parse (templated scheme or port) the
+ * check runs on a synthetic `<scheme-or-http>//host`. A BACKSLASH behaves as a
+ * slash for http(s) in WHATWG `new URL` — BOTH as the scheme separator
+ * (`${S}:\\169.254.169.254\\p` → the IP is the host) and inside the authority
+ * (`http://169.254.169.254\\@${HOST}/x` fetches the IP, the `\\@…` becoming
+ * path). So the authority separator is `:` + two `[\/]` (not just `://`), and
+ * `\` also terminates the authority alongside `/?#`; otherwise a literal
+ * internal host slips past as a templated scheme or userinfo.
+ *
+ * Callers gate on `remote !== false`: a local-only `.tool` is never fetched
+ * server-side, so it is exempt.
+ */
+function assertSafeManualFetchUrl(url: string, label: string): void {
+  const literalScheme = /^([a-zA-Z][a-zA-Z0-9+.-]*:)[\\/]{2}/.exec(url)?.[1];
+  const sepMatch = /:[\\/]{2}/.exec(url);
+  const sepIdx = sepMatch ? sepMatch.index : -1;
+  const authority = sepIdx >= 0 ? url.slice(sepIdx + 3).split(/[/\\?#]/, 1)[0] : url;
+  const hostPort = authority.slice(authority.lastIndexOf('@') + 1);
+  const host = hostPort.startsWith('[') ? hostPort.slice(0, hostPort.indexOf(']') + 1) : hostPort.split(':')[0];
+  // A templated host resolves to something we can't know yet — nothing to check.
+  if (host.includes('${')) return;
+  const checkUrl =
+    literalScheme && !authority.includes('${')
+      ? url // fully literal scheme + authority → validate the URL as-is
+      : sepIdx >= 0
+        ? `${literalScheme ?? 'http:'}//${host}` // templated scheme/userinfo/port, literal host
+        : url; // no authority shape at all → parse raw (refuses malformed)
+  assertSafeFetchUrl(checkUrl, { label });
+}
+
+/**
+ * Parse the optional `healthCheck:` block — the read-only call that proves this
+ * tool's credential works (see {@link ToolHealthCheck}).
+ *
+ * Throws on a malformed block rather than dropping it, matching `variables`
+ * and for the same reason inverted: a silently-ignored probe would leave the
+ * tool reporting "can't verify" forever while its author believes they wired
+ * one up, and the whole point of the field is to stop the UI overclaiming.
+ *
+ * `method` accepts only `GET`. A probe that can mutate is not a probe — it runs
+ * unattended on every save and re-check, so `POST` is refused outright instead
+ * of being quietly downgraded.
+ */
+function normalizeHealthCheck(
+  raw: unknown,
+  manualName: string,
+  remote: boolean | undefined,
+  manualHeaders: Record<string, string> | undefined,
+): ToolHealthCheck | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('`healthCheck` must be an object');
+  const e = raw as Record<string, unknown>;
+  const url = typeof e.url === 'string' ? e.url.trim() : '';
+  if (!url) throw new Error('`healthCheck` must have a `url`');
+  if (remote !== false) {
+    assertSafeManualFetchUrl(url, `\`.tool\` "${manualName}" healthCheck.url`);
+  }
+  const check: ToolHealthCheck = { url };
+  if (e.method !== undefined) {
+    const m = typeof e.method === 'string' ? e.method.toUpperCase() : '';
+    if (m !== 'GET') throw new Error('`healthCheck.method` must be `GET` — a health check may not mutate');
+    check.method = 'GET';
+  }
+  if (e.headers !== undefined) {
+    if (!e.headers || typeof e.headers !== 'object' || Array.isArray(e.headers)) {
+      throw new Error('`healthCheck.headers` must be an object');
+    }
+    check.headers = e.headers as Record<string, string>;
+  } else if (manualHeaders) {
+    check.headers = manualHeaders;
+  }
+  return check;
 }
 
 /**

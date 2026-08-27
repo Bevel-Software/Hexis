@@ -76,6 +76,14 @@ async function baseUrlWith(auth: { userId?: string; email?: string }): Promise<s
       secretsVault,
       toolManualService,
       accessControl,
+      // The routes invalidate a stored probe verdict on every write; these
+      // tests are about the write itself, so the health store is a no-op.
+      connectionHealth: {
+        probe: async () => ({ manualName: '', status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+        statusFor: async () => [],
+        forget: async () => {},
+        forgetAll: async () => {},
+      },
       stateSecret: 'test-secret',
       publicBackendUrl: 'http://localhost:3000',
       publicFrontendUrl: 'http://localhost:5173',
@@ -174,6 +182,14 @@ describe('GET /api/connect/pending — OAuth scope coverage', () => {
         secretsVault: vaultWithGranted(grantedScopes),
         toolManualService: oauthTool,
         accessControl,
+        // The routes invalidate a stored probe verdict on every write; these
+        // tests are about the write itself, so the health store is a no-op.
+        connectionHealth: {
+          probe: async () => ({ manualName: '', status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+          statusFor: async () => [],
+          forget: async () => {},
+          forgetAll: async () => {},
+        },
         stateSecret: 'test-secret',
         publicBackendUrl: 'http://localhost:3000',
         publicFrontendUrl: 'http://localhost:5173',
@@ -257,6 +273,14 @@ describe('GET /api/connect/pending — tool sign-ins are not double-listed as st
         secretsVault: vault,
         toolManualService: oauthTool,
         accessControl,
+        // The routes invalidate a stored probe verdict on every write; these
+        // tests are about the write itself, so the health store is a no-op.
+        connectionHealth: {
+          probe: async () => ({ manualName: '', status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+          statusFor: async () => [],
+          forget: async () => {},
+          forgetAll: async () => {},
+        },
         stateSecret: 'test-secret',
         publicBackendUrl: 'http://localhost:3000',
         publicFrontendUrl: 'http://localhost:5173',

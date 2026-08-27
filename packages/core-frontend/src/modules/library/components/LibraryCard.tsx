@@ -166,7 +166,13 @@ export function LibraryCard({
             </span>
           )}
           {footNote && (
-            <span className={cn('flex items-center gap-1.5 font-semibold', STATUS_INK[footNote.state])}>
+            /* `title` carries the evidence behind the word — what the provider
+               said, or when it was last checked. A card has room for one word;
+               the sentence that justifies it belongs on hover. */
+            <span
+              className={cn('flex items-center gap-1.5 font-semibold', STATUS_INK[footNote.state])}
+              title={footNote.hint}
+            >
               <StatusDot state={footNote.state} />
               {footNote.text}
             </span>

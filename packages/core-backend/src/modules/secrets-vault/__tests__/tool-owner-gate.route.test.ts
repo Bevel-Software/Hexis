@@ -85,6 +85,14 @@ async function baseUrlAs(email: string): Promise<string> {
       secretsVault,
       toolManualService,
       accessControl,
+      // The routes invalidate a stored probe verdict on every write; these
+      // tests are about the write itself, so the health store is a no-op.
+      connectionHealth: {
+        probe: async () => ({ manualName: '', status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+        statusFor: async () => [],
+        forget: async () => {},
+        forgetAll: async () => {},
+      },
       stateSecret: 'test-secret',
       publicBackendUrl: 'http://localhost:3000',
       publicFrontendUrl: 'http://localhost:5173',

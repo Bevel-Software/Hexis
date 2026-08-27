@@ -36,6 +36,13 @@
       "when": 1787191920033,
       "tag": "0004_file_lock_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787191920034,
+      "tag": "0005_connection_health",
+      "breakpoints": true
     }
   ]
 }

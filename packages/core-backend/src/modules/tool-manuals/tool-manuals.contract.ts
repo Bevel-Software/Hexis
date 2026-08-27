@@ -89,6 +89,36 @@ export interface ToolVariable {
 }
 
 /**
+ * An optional cheap, read-only call that proves a credential actually WORKS.
+ *
+ * A `type: mcp` manual needs none — its handshake is authenticated, so merely
+ * connecting already tests the token. `http` and `inline` manuals have no such
+ * moment: registering an `http` manual fetches its DESCRIPTION, which providers
+ * usually serve publicly, so a wrong key sails through; an `inline` manual's
+ * discovery template points at Bevel's own API and never touches the provider
+ * at all. Without a declaration there is genuinely nothing to call, and the
+ * platform reports the connection as unverified rather than guessing.
+ *
+ * NOT inferred from the manual's own tools. Picking one automatically would
+ * mean calling an arbitrary tool with invented arguments — a probe that could
+ * send a message or create a record is worse than no probe. The author names a
+ * safe endpoint or the tool stays unverified.
+ *
+ * `${VAR}` refs resolve from the caller's vault exactly as they do in `url` and
+ * `headers`, which is the whole point: the probe must carry the same credential
+ * the real calls carry. Any 2xx is a pass; 401/403 is a rejection; anything
+ * else is treated as the provider being unwell rather than the key being wrong.
+ */
+export interface ToolHealthCheck {
+  /** Absolute URL to call. May contain `${VAR}` refs; SSRF-checked like `url`. */
+  url: string;
+  /** Default `GET`. A health check may not mutate, so nothing else is allowed. */
+  method?: 'GET';
+  /** Defaults to the manual's own `headers` — usually where the credential is. */
+  headers?: Record<string, string>;
+}
+
+/**
  * For a `type: mcp` tool, what an admin must do to make the remote server
  * reachable — derived from OAuth auto-discovery, which a non-mcp tool has no
  * equivalent of (its needs are fully described by its declared `variables`):
@@ -140,6 +170,8 @@ export interface ToolManualDescriptorBase {
   variables?: ToolVariable[];
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
+  /** Optional credential probe for `http`/`inline` manuals — see {@link ToolHealthCheck}. */
+  healthCheck?: ToolHealthCheck;
 }
 
 /** The spawn spec of a stdio-declared MCP server (a plugin `mcp.json` entry). */
@@ -197,6 +229,8 @@ export interface ToolManualSummary {
   remote?: boolean;
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
+  /** Optional credential probe for `http`/`inline` manuals — see {@link ToolHealthCheck}. */
+  healthCheck?: ToolHealthCheck;
 }
 
 /** One thing an `inline` manual's embedded tool list says the assistant can do. */

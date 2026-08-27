@@ -490,3 +490,49 @@ export const deploymentSettings = pgTable('deployment_settings', {
   updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
+
+/**
+ * Connection health — the verdict of the last credential PROBE for one
+ * (user, tool manual).
+ *
+ * The Secrets Vault can only say whether a credential is STORED. That is a
+ * different question from whether it WORKS, and the gap between the two is what
+ * let a mistyped key render as "Connected": presence was being read as health.
+ * A probe closes it by making a real authenticated call and recording what came
+ * back, so the badge reports evidence rather than inference.
+ *
+ * Keyed per USER, not per key or per shared row: a probe runs as a specific
+ * person, resolving whatever mix of shared (admin) and personal values that
+ * person actually gets, so the verdict is "does this tool work for you" — the
+ * only question the badge in front of them is asking. It also means an admin
+ * rotating a shared key can't silently mark every user healthy on the strength
+ * of their own successful probe.
+ *
+ * Rows are a CACHE of the last observation, not history: one row per pair,
+ * overwritten on each probe. Deliberately NOT the in-memory
+ * `ManualFailureMemo` — that is a per-process circuit breaker that forgets on
+ * restart, which is right for suppressing retries and wrong for a badge that
+ * must still be honest tomorrow morning.
+ */
+export const connectionHealth = pgTable('connection_health', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  /** The UTCP manual name (`ToolManualDescriptor.name`), not the slug or path. */
+  manualName: text('manual_name').notNull(),
+  /**
+   * `ok` — the probe called the provider and it accepted the credential.
+   * `failed` — the provider rejected it; `error` carries what it said.
+   * `unverifiable` — there is no way to test this tool, so nothing was called.
+   * The third value exists so "we checked and it's fine" and "we cannot check"
+   * stay distinguishable in the UI; collapsing them is exactly the conflation
+   * this table was added to remove.
+   */
+  status: text('status').notNull(),
+  /** The provider's rejection message when `failed`; null otherwise. */
+  error: text('error'),
+  checkedAt: timestamp('checked_at').defaultNow().notNull(),
+}, (t) => ({
+  byUser: index('connection_health_by_user').on(t.userId),
+  userManualUnq: uniqueIndex('connection_health_user_manual_unq').on(t.userId, t.manualName),
+  statusValid: check('connection_health_status', sql`${t.status} IN ('ok', 'failed', 'unverifiable')`),
+}));

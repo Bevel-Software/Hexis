@@ -1,4 +1,4 @@
-import type { ToolSecrets, ToolVarStatus } from '../../secrets-vault/services/tool-secrets.api';
+import type { ToolHealth, ToolSecrets, ToolVarStatus } from '../../secrets-vault/services/tool-secrets.api';
 
 /**
  * Status derivation for the Library. Everything the cards, gems and loadout
@@ -25,8 +25,18 @@ export interface AttentionStatus {
   state: GemState;
   /** User-facing state line (glossary-compliant plain words). */
   text: string;
+  /**
+   * The sentence behind the word, for a tooltip: what the provider said, or why
+   * we couldn't ask. Absent when the word is the whole story.
+   *
+   * This is where a status EARNS its claim. "Connected" backed by "checked 2
+   * minutes ago" is a different assertion from "Connected" backed by nothing,
+   * and the difference is exactly what used to be missing.
+   */
+  hint?: string;
 }
 
+/** Stored, and PROVEN to work by a real call. */
 const OK: AttentionStatus = { state: 'ok', text: 'Connected' };
 
 /** Severity order for aggregation: broken sign-in beats anything merely unset. */
@@ -61,14 +71,85 @@ function varStatus(v: ToolVarStatus, canWrite: boolean): AttentionStatus {
   return v.adminConfigured ? OK : notSetUp;
 }
 
-/** Aggregate connection state of one integration for the current user. */
+/**
+ * How long ago, in the plainest words that are still true.
+ *
+ * Deliberately coarse: the point of the timestamp is to say whether the claim
+ * is FRESH, and "3 minutes ago" and "3 minutes and 12 seconds ago" answer that
+ * identically. Precision here would only invite the reader to weigh a number
+ * that carries no extra meaning.
+ */
+function agoText(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return 'just now';
+  const mins = Math.floor((Date.now() - then) / 60_000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.floor(hours / 24)} d ago`;
+}
+
+/**
+ * The word for a tool that is fully SET UP, decided by whether the credential
+ * has actually been tested.
+ *
+ * Three outcomes, and the reason there are three: `Connected` is a claim we can
+ * back — something called the provider and it answered. `Key saved` is the
+ * narrower claim we can back when nothing tested it: a value is stored, and
+ * that is genuinely all we know. `Not working` is the provider's own verdict.
+ *
+ * `Key saved` stays GREEN. It is a complete, true statement about a tool that
+ * needs nothing from anybody, and painting it amber would put a permanent
+ * warning on every integration that simply has no way to be tested — which
+ * teaches people that amber means nothing.
+ *
+ * A tool whose vars are oauth-backed says `Signed in` instead: the user did not
+ * give us a key, they signed in, and telling them a key was saved is a small
+ * lie in a component whose entire job is to stop telling small lies.
+ */
+function healthStatus(tool: ToolSecrets): AttentionStatus {
+  const health: ToolHealth | null = tool.health;
+  if (health?.status === 'ok') {
+    return { ...OK, hint: `Checked ${agoText(health.checkedAt)}.` };
+  }
+  if (health?.status === 'failed') {
+    return {
+      state: 'err',
+      text: 'Not working',
+      hint: health.detail ?? 'The provider rejected this credential.',
+    };
+  }
+  // The word has to match what the user actually did. A tool with no variables
+  // asked nothing of them, so "Key saved" would name a key that does not exist;
+  // an oauth-backed one got a sign-in, not a key. Same claim in all three cases
+  // — something is in place, nothing has tested it — said in the reader's terms.
+  const allOAuth = tool.variables.length > 0 && tool.variables.every((v) => v.oauth);
+  const text =
+    tool.variables.length === 0 ? 'No key needed' : allOAuth ? 'Signed in' : 'Key saved';
+  return {
+    state: 'ok',
+    text,
+    hint: health?.detail ?? "Not verified — this tool hasn't been tested yet.",
+  };
+}
+
+/**
+ * Aggregate connection state of one integration for the current user.
+ *
+ * Setup comes FIRST: a tool still missing a key is `Needs a key from you`, never
+ * `Not working`. Both are unhealthy, but only one names something the user can
+ * act on, and a stale probe verdict from before the key was entered must not
+ * outrank the thing actually in the way. Only once every variable is provided
+ * does the question become whether what was provided works.
+ */
 export function toolStatus(tool: ToolSecrets): AttentionStatus {
-  let worst = OK;
+  let worst: AttentionStatus | null = null;
   for (const v of tool.variables) {
     const s = varStatus(v, tool.canWrite);
-    if (RANK[s.state] > RANK[worst.state]) worst = s;
+    if (s.state !== 'ok' && (worst === null || RANK[s.state] > RANK[worst.state])) worst = s;
   }
-  return worst;
+  return worst ?? healthStatus(tool);
 }
 
 /** Per-variable status rows for the integration detail dialog. */

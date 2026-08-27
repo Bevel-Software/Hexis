@@ -4,9 +4,9 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
 import { kbFileUrl } from '../../../workspace/routing/kb-routes';
-import type { ToolSecrets } from '../../../secrets-vault/services/tool-secrets.api';
+import { checkToolConnection, type ToolSecrets } from '../../../secrets-vault/services/tool-secrets.api';
 import { pathForTool } from '../../routes/library-paths';
-import { toolVariableStatuses } from '../../utils/status';
+import { toolStatus, toolVariableStatuses } from '../../utils/status';
 import { ToolVarRow } from './ToolVarRow';
 
 /**
@@ -34,6 +34,7 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
   const { kbDirName } = useWorkspace();
   /** `{varName, n}` — bumping `n` opens that variable's editor from the banner. */
   const [edit, setEdit] = useState<{ name: string; n: number }>({ name: '', n: 0 });
+  const [checking, setChecking] = useState(false);
 
   const setupKind = tool.setup?.kind ?? null;
   // Not just "kind is oauth-manual": once the owner declares the provider and
@@ -92,13 +93,69 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
     </Button>
   ) : null;
 
+  /**
+   * The health line, shown only once every variable is provided.
+   *
+   * While something is still missing, the amber banner above already names it,
+   * and a second line saying the connection is untested would be answering a
+   * question nobody has reached yet. Once nothing is missing, this is the only
+   * remaining question — and the one the badge used to answer by guessing.
+   */
+  const health = toolStatus(tool);
+  // Every variable genuinely provided — NOT merely `missing.length === 0`, which
+  // excludes a pending sign-in on a configured provider. A tool nobody has
+  // signed into yet has no credential to test, and saying so would put a health
+  // line above a row that already says "Needs your sign-in".
+  // Vacuously true for a tool that declares no variables: a no-auth MCP server
+  // has nothing to set up and is still worth probing — its handshake is exactly
+  // the kind of thing that can be reachable one day and not the next.
+  const settled = toolVariableStatuses(tool).every(({ status }) => status.state === 'ok');
+
+  async function runCheck() {
+    setChecking(true);
+    try {
+      await checkToolConnection(tool.slug);
+      // Refetch rather than patching local state: the verdict belongs to the
+      // tool record the whole page reads from, so one source stays one source.
+      onChanged();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Couldn't test this connection.");
+    } finally {
+      setChecking(false);
+    }
+  }
+
   return (
     <section className="mt-8">
       <div className="mb-2.5 flex items-center justify-between gap-3">
         <h2 className="text-label font-semibold uppercase text-ink-faint">Your connection</h2>
-        <Link to="/secrets" className={buttonClasses({ variant: 'quiet', size: 'tiny' })}>
-          Open Secrets
-        </Link>
+        <div className="flex items-center gap-2">
+          {/* A healthy connection stays QUIET — this section's rule is that only
+              things needing a person get a banner, and a working tool needs
+              nobody. But it still has to be sayable: the word plus its evidence
+              on hover is how "Connected" stops being an assumption, and the
+              button is the only way to ask the question on demand. A REJECTED
+              credential does need a person, so it escalates to a banner below. */}
+          {settled && health.state !== 'err' && (
+            <span className="text-meta text-ink-faint" title={health.hint} data-testid="tool-health">
+              {health.text}
+            </span>
+          )}
+          {settled && (
+            <Button
+              variant="quiet"
+              size="tiny"
+              disabled={checking}
+              onClick={() => void runCheck()}
+              aria-label={`Test connection: ${tool.name}`}
+            >
+              {checking ? 'Testing…' : 'Test connection'}
+            </Button>
+          )}
+          <Link to="/secrets" className={buttonClasses({ variant: 'quiet', size: 'tiny' })}>
+            Open Secrets
+          </Link>
+        </div>
       </div>
 
       {setupUnfinished && (
@@ -167,6 +224,22 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
         </Banner>
       )}
 
+      {/* The one health state that needs a person: the provider tested this
+          credential and refused it. Everything is configured, so no other
+          banner covers it, and the row below cannot know — only a real call
+          could tell us. `alert`, not `status`: this is the case the whole
+          feature exists to surface. */}
+      {settled && health.state === 'err' && (
+        <Banner tone="danger" role="alert" className="mb-2.5" data-testid="tool-health-failed">
+          <div className="flex items-center gap-3">
+            <span className="min-w-0 flex-1">
+              <span className="font-semibold">{health.text}.</span>
+              {health.hint && <span> {health.hint}</span>}
+            </span>
+          </div>
+        </Banner>
+      )}
+
       {tool.variables.length === 0 ? (
         <p className="text-body text-ink-muted">Nothing to set up</p>
       ) : (
@@ -181,6 +254,11 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
               returnTo={pathForTool(tool.slug)}
               editSignal={edit.name === variable.name ? edit.n : undefined}
               onChanged={onChanged}
+              // Test the moment a key is entered — while the user still has it
+              // to hand, which is when a typo is cheapest to fix. Waiting for
+              // an agent to trip over it is how the wrong key got to look
+              // connected in the first place.
+              onSaved={() => void runCheck()}
               onError={onError}
             />
           ))}

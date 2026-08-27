@@ -55,6 +55,7 @@ const CATALOG: LibraryData = {
       setup: null,
       canWrite: false,
       variables: [],
+      health: null,
     },
   ],
   ownedSkills: new Set<string>(),
@@ -243,6 +244,7 @@ describe('WorkspaceItemRoute', () => {
             setup: null,
             canWrite: false,
             variables: [],
+            health: null,
           },
         ],
       });
@@ -355,6 +357,7 @@ describe('WorkspaceItemRoute', () => {
       setup: null,
       canWrite: false,
       variables: [],
+      health: null,
     });
     const MCP: LibraryData = {
       ...CATALOG,

@@ -45,6 +45,25 @@ export interface ToolSetup {
   reason?: string;
 }
 
+/**
+ * The verdict of the last credential PROBE — a different question from every
+ * `ToolVarStatus` field, which say only what is STORED.
+ *
+ *  - `ok`           — the provider was called and accepted the credential.
+ *  - `failed`       — the provider rejected it; `detail` is what it said.
+ *  - `unverifiable` — we don't know: either the tool offers no way to test it,
+ *                     or the attempt couldn't reach a verdict. `detail` says which.
+ *
+ * `null` on a tool that has never been probed, which the UI reads exactly like
+ * `unverifiable` — "not checked yet" and "can't be checked" are both "we don't
+ * know", and inventing a fourth badge for the difference would be noise.
+ */
+export interface ToolHealth {
+  status: 'ok' | 'failed' | 'unverifiable';
+  detail: string | null;
+  checkedAt: string;
+}
+
 export interface ToolSecrets {
   slug: string;
   name: string;
@@ -55,6 +74,8 @@ export interface ToolSecrets {
   /** Whether the caller may set this tool's admin (shared) secrets. */
   canWrite: boolean;
   variables: ToolVarStatus[];
+  /** Last probe verdict; `null` when never probed. See {@link ToolHealth}. */
+  health: ToolHealth | null;
 }
 
 async function unwrap(res: Response, fallback: string): Promise<never> {
@@ -109,6 +130,21 @@ export async function setOAuthClientSecret(slug: string, varName: string, client
     },
   );
   if (!res.ok) await unwrap(res, "Couldn't save the client secret.");
+}
+
+/**
+ * Probe this tool's credential NOW and return the verdict.
+ *
+ * Called after saving a key so the user learns immediately whether it works,
+ * while they still have it to hand — the moment a wrong key is cheapest to fix.
+ * A rejected credential is a SUCCESSFUL check, so it resolves with
+ * `status: 'failed'` rather than throwing; only a transport or access failure
+ * rejects.
+ */
+export async function checkToolConnection(slug: string): Promise<ToolHealth> {
+  const res = await authFetch(`/api/secrets/tools/${encodeURIComponent(slug)}/check`, { method: 'POST' });
+  if (!res.ok) await unwrap(res, "Couldn't test this connection.");
+  return ((await res.json()) as { health: ToolHealth }).health;
 }
 
 export const setAdminVar = (slug: string, varName: string, value: string, label?: string | null) =>

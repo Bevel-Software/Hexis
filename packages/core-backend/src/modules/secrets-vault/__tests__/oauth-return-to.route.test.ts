@@ -69,6 +69,14 @@ const deps = {
   secretsVault,
   toolManualService,
   accessControl,
+  // The routes invalidate a stored probe verdict on every write; these
+  // tests are about the write itself, so the health store is a no-op.
+  connectionHealth: {
+    probe: async () => ({ manualName: '', status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+    statusFor: async () => [],
+    forget: async () => {},
+    forgetAll: async () => {},
+  },
   stateSecret: STATE_SECRET,
   publicBackendUrl: 'http://localhost:3000',
   publicFrontendUrl: FRONTEND,
