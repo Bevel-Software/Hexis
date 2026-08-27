@@ -819,38 +819,18 @@ function ownEntriesRoot(frontmatter: string): unknown {
   const subset = parseYamlSubset(frontmatter);
   if (subset.ok && !verbValuesNeedFullYaml(subset.value)) return subset.value;
   try {
-    const full = parseFullYaml(frontmatter);
+    // The FAILSAFE schema: every scalar stays the text it was written as —
+    // `true`, `42`, `0x10`, `2026-01-01` — which is all the subset parser has
+    // ever handed the entry grammar. The core schema would type them, and a
+    // role spelled `0x10` would come back as `16` the moment another verb on
+    // the same file used a quoted value.
+    const full = parseFullYaml(frontmatter, { schema: 'failsafe' });
     // A document the full parser rejects but the subset parser accepted keeps
     // the subset answer — whatever it read is what has always been read.
-    return full == null ? (subset.ok ? subset.value : null) : verbValuesAsText(full);
+    return full == null ? (subset.ok ? subset.value : null) : full;
   } catch {
     return subset.ok ? subset.value : null;
   }
-}
-
-/**
- * The full parser TYPES its scalars — `write: true` is a boolean, `- 42` a
- * number, `owner: 2026-01-01` a date — where the subset parser has only ever
- * handed the entry grammar text. A principal is text, so a verb value is put
- * back into the form every entry has always arrived in: scalars become their
- * source text, list items likewise, and a nested mapping (which the grammar
- * never accepted) is left for the entry parser to refuse as before.
- */
-function verbValuesAsText(root: unknown): unknown {
-  if (!root || typeof root !== 'object' || Array.isArray(root)) return root;
-  const asText = (v: unknown): unknown =>
-    typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' || typeof v === 'bigint'
-      ? String(v)
-      : v instanceof Date
-        ? v.toISOString().slice(0, 10)
-        : v;
-  const out: Record<string, unknown> = { ...(root as Record<string, unknown>) };
-  for (const key of Object.keys(out)) {
-    if (!KNOWN_VERBS_SET.has(key)) continue;
-    const value = out[key];
-    out[key] = Array.isArray(value) ? value.map(asText) : asText(value);
-  }
-  return out;
 }
 
 /**
