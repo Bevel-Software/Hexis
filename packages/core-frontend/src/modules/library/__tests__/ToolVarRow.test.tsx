@@ -166,6 +166,24 @@ describe('ToolVarRow: oauth', () => {
     expect(screen.getByText('Connected')).toBeInTheDocument();
   });
 
+  it('offers Reconnect beside Connected, for everyone, and it re-enters the same sign-in flow', async () => {
+    // A provider can widen what it grants after the fact (HubSpot answers
+    // REQUIRES_REAUTHORIZATION until the user consents again) or revoke a
+    // grant — the caller needs a way back into consent that doesn't wait for
+    // the scope check to notice. Left of the chip, so the chip stays the
+    // row's terminal state at a glance.
+    renderRow(signin({ authorized: true }));
+    const reconnect = screen.getByRole('button', { name: 'Reconnect' });
+    expect(reconnect.compareDocumentPosition(screen.getByText('Connected')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(reconnect);
+    await waitFor(() =>
+      expect(connectMock.startToolOAuth).toHaveBeenCalledWith('github', 'SIGNIN', { returnTo: RETURN_TO }),
+    );
+    await waitFor(() =>
+      expect(navMock.navigateExternal).toHaveBeenCalledWith('https://provider.example/authorize'),
+    );
+  });
+
   it('asks for a fresh sign-in when the token is under-scoped', () => {
     renderRow(signin({ authorized: true, needsReauth: true }));
     expect(screen.getByRole('button', { name: 'Sign in again' })).toBeInTheDocument();
