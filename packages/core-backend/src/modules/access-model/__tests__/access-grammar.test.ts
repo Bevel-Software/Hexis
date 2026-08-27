@@ -202,6 +202,21 @@ describe('parseOwnAccessEntries — quoted and flow-sequence verb values', () =>
     ]);
   });
 
+  it('keeps the plain entries beside a quoted one exactly as the subset parser read them', () => {
+    // One quoted value sends the whole document to the full parser, which
+    // TYPES scalars: `true` and `42` would come back as a boolean and a number
+    // and never reach the entry grammar. They must resolve exactly as they do
+    // on the subset path — as the (odd, but legal) role names they spell.
+    const viaFull = parseOwnAccessEntries(
+      ['---', 'read: "coding-agent <coding-agent@bevel.software>"', 'write: true', 'owner:', '  - 42', '---', ''].join('\n'),
+    );
+    const viaSubset = parseOwnAccessEntries(['---', 'write: true', 'owner:', '  - 42', '---', ''].join('\n'));
+    expect(viaFull!.write).toEqual(viaSubset!.write);
+    expect(viaFull!.owner).toEqual(viaSubset!.owner);
+    expect(viaFull!.write).toMatchObject([{ kind: 'role', role: 'true' }]);
+    expect(viaFull!.owner).toMatchObject([{ kind: 'role', role: '42' }]);
+  });
+
   it('leaves the plain forms on the subset path', () => {
     // An empty flow collection and bare scalars are the subset parser\'s own
     // grammar; nothing about them asks for the full parser.
