@@ -63,6 +63,14 @@ async function seed(root: string, baseFiles: Record<string, string>) {
   return { upstream, seedDir, baseWsId, baseRepo };
 }
 
+/**
+ * The published tip of `branch` on the bare upstream — what the review gate
+ * would have resolved as `headSha` and what the merge is now pinned to.
+ */
+async function remoteTip(upstream: string, branch: string): Promise<string> {
+  return (await gitOut(upstream, ['rev-parse', `refs/heads/${branch}`])).trim();
+}
+
 /** Branch `name` off origin/BASE in a throwaway clone, apply `mutate`, push. */
 async function pushFeatureBranch(
   root: string,
@@ -96,7 +104,8 @@ describe('GitService.mergeChangeRequest', () => {
 
     const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
     const result = await git.mergeChangeRequest(
-      baseWsId, 'alice/add', BASE, { subject: 'Add feature (#1)', body: 'Merged via Bevel' }, USER,
+      baseWsId, 'alice/add', await remoteTip(upstream, 'alice/add'), BASE,
+      { subject: 'Add feature (#1)', body: 'Merged via Bevel' }, USER,
     );
 
     expect(result.kind).toBe('merged');
@@ -131,7 +140,8 @@ describe('GitService.mergeChangeRequest', () => {
 
     const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
     const result = await git.mergeChangeRequest(
-      baseWsId, 'alice/edit', BASE, { subject: 'Edit (#2)', body: 'x' }, USER,
+      baseWsId, 'alice/edit', await remoteTip(upstream, 'alice/edit'), BASE,
+      { subject: 'Edit (#2)', body: 'x' }, USER,
     );
 
     expect(result.kind).toBe('conflicts');
@@ -141,5 +151,73 @@ describe('GitService.mergeChangeRequest', () => {
     // The base workspace must be left clean (merge aborted) — not stuck mid-merge.
     const status = await gitOut(baseRepo, ['status', '--porcelain=v1']);
     expect(status.trim()).toBe('');
+  });
+
+  it('merges ONLY the authorised commit when the branch advances after the gate', async () => {
+    // The review gate resolves a head SHA and approvals are pinned to it, but
+    // this method fetches again before merging. Merging `origin/<source>` would
+    // therefore land whatever arrived in between — verified to reach the
+    // protected branch before the SHA pin. The unreviewed commit must not ride in.
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, 'mallory/escalate', async (dir) => {
+      await fs.writeFile(path.join(dir, 'reviewed.md'), 'reviewed content\n');
+    });
+    const authorised = await remoteTip(upstream, 'mallory/escalate');
+
+    // A second commit lands on the same branch after the gate ran.
+    const racer = path.join(root, 'racer');
+    await runGit(root, ['clone', '-b', 'mallory/escalate', upstream, racer]);
+    await fs.writeFile(path.join(racer, 'sneaked.md'), 'never reviewed\n');
+    await runGit(racer, ['add', '-A']);
+    await runGit(racer, ['commit', '-m', 'sneaked in after the gate']);
+    await runGit(racer, ['push', 'origin', 'mallory/escalate']);
+    expect(await remoteTip(upstream, 'mallory/escalate')).not.toBe(authorised);
+
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+    const result = await git.mergeChangeRequest(
+      baseWsId, 'mallory/escalate', authorised, BASE,
+      { subject: 'Apply (#1)', body: 'body' }, USER,
+    );
+    expect(result.kind).toBe('merged');
+
+    const verify = path.join(root, 'verify');
+    await runGit(root, ['clone', '-b', BASE, upstream, verify]);
+    const landed = await fs.readdir(verify);
+    expect(landed).toContain('reviewed.md');
+    expect(landed).not.toContain('sneaked.md');
+  });
+
+  it('REFUSES to merge a head that is no longer on its branch (force-push)', async () => {
+    // Pinning to a SHA on its own would happily merge a commit the author has
+    // since force-pushed away, resurrecting withdrawn content. The ancestor
+    // check makes that a hard failure instead.
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, 'alice/withdrawn', async (dir) => {
+      await fs.writeFile(path.join(dir, 'withdrawn.md'), 'oops, secrets\n');
+    });
+    const withdrawn = await remoteTip(upstream, 'alice/withdrawn');
+
+    // The author rewrites the branch to drop that commit entirely.
+    const rewriter = path.join(root, 'rewriter');
+    await runGit(root, ['clone', '-b', 'alice/withdrawn', upstream, rewriter]);
+    await runGit(rewriter, ['reset', '--hard', 'HEAD~1']);
+    await fs.writeFile(path.join(rewriter, 'clean.md'), 'clean replacement\n');
+    await runGit(rewriter, ['add', '-A']);
+    await runGit(rewriter, ['commit', '-m', 'clean replacement']);
+    await runGit(rewriter, ['push', '--force', 'origin', 'alice/withdrawn']);
+
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new WorkflowHooks(), 'knowledge-base');
+    await expect(
+      git.mergeChangeRequest(
+        baseWsId, 'alice/withdrawn', withdrawn, BASE,
+        { subject: 'Apply (#2)', body: 'body' }, USER,
+      ),
+    ).rejects.toThrow(/no longer on "alice\/withdrawn"/);
+
+    // Nothing landed, and the workspace is clean.
+    const verify = path.join(root, 'verify2');
+    await runGit(root, ['clone', '-b', BASE, upstream, verify]);
+    expect(await fs.readdir(verify)).not.toContain('withdrawn.md');
+    expect((await gitOut(baseRepo, ['status', '--porcelain=v1'])).trim()).toBe('');
   });
 });

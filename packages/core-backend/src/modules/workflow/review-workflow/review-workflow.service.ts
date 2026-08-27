@@ -647,6 +647,11 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       mergeResult = await this.git.mergeChangeRequest(
         baseWorkspace.id,
         cr.sourceBranch,
+        // The gate above authorised THIS commit, and it is what `prMergeLog`
+        // records as `headShaAtMerge`. Passing it through pins the merge to it,
+        // so the commit that lands is the commit that was approved — the branch
+        // ref can advance between the detail resolve and the merge's own fetch.
+        headSha,
         cr.targetBranch,
         { subject, body },
         user,

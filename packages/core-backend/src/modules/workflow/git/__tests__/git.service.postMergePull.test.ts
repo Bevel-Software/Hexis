@@ -28,6 +28,14 @@ const SOURCE = 'alice/add-feature';
 const KB_DIR = 'knowledge-base';
 const USER: AuthUser = { id: 'u1', email: 'alice@example.com', name: 'Alice' };
 
+/**
+ * The published tip of `branch` on the bare upstream — what the review gate
+ * would have resolved as `headSha` and what the merge is now pinned to.
+ */
+async function remoteTip(upstream: string, branch: string): Promise<string> {
+  return (await gitOut(upstream, ['rev-parse', `refs/heads/${branch}`])).trim();
+}
+
 /** Clone `branch` into `<root>/<wsId>/knowledge-base`, like prod's layout. */
 async function cloneWorkspace(root: string, upstream: string, branch: string): Promise<string> {
   const wsDir = path.join(root, encodeURIComponent(branch));
@@ -81,7 +89,7 @@ describe('post-merge refresh of the target branch workspace', () => {
   });
 
   it('pulls the target workspace up to origin after a merge, even with a drifted clone config', async () => {
-    const { sourceRepo, baseRepo } = await seed(root);
+    const { upstream, sourceRepo, baseRepo } = await seed(root);
 
     // The target branch's workspace has drifted into the state that strands the
     // refresh: the branch tracks two merge refs and origin is fetched through
@@ -114,7 +122,8 @@ describe('post-merge refresh of the target branch workspace', () => {
 
     // 1. The merge lands on origin/BASE (run from the caller's workspace).
     const merged = await git.mergeChangeRequest(
-      sourceWsId, SOURCE, BASE, { subject: 'Add feature (#1)', body: 'Merged via Bevel' }, USER,
+      sourceWsId, SOURCE, await remoteTip(upstream, SOURCE), BASE,
+      { subject: 'Add feature (#1)', body: 'Merged via Bevel' }, USER,
     );
     expect(merged.kind).toBe('merged');
 
@@ -156,7 +165,7 @@ describe('post-merge refresh of the target branch workspace', () => {
   // `git pull --rebase --autostash origin <base>` this dies with the reported
   // fatal; the refresh now touches no shared state, so it cannot.
   it('refreshes the target workspace while a concurrent fetch rewrites FETCH_HEAD', async () => {
-    const { sourceRepo, baseRepo } = await seed(root);
+    const { upstream, sourceRepo, baseRepo } = await seed(root);
     const git = new GitService(
       stubWorkspaceService({
         [sourceWsId]: path.dirname(sourceRepo),
@@ -167,7 +176,8 @@ describe('post-merge refresh of the target branch workspace', () => {
     );
 
     const merged = await git.mergeChangeRequest(
-      sourceWsId, SOURCE, BASE, { subject: 'Add feature (#1)', body: 'Merged via Bevel' }, USER,
+      sourceWsId, SOURCE, await remoteTip(upstream, SOURCE), BASE,
+      { subject: 'Add feature (#1)', body: 'Merged via Bevel' }, USER,
     );
     expect(merged.kind).toBe('merged');
 
@@ -257,8 +267,12 @@ describe('post-merge refresh of the target branch workspace', () => {
       KB_DIR,
     );
 
+    // Pinned to that latest revision — the SHA the gate would have resolved.
+    // The drifted refspec must not stop the fetch from bringing its objects, and
+    // the ancestor check must find it on the branch.
     const merged = await git.mergeChangeRequest(
-      sourceWsId, SOURCE, BASE, { subject: 'Add feature (#1)', body: 'Merged via Bevel' }, USER,
+      sourceWsId, SOURCE, latestSource, BASE,
+      { subject: 'Add feature (#1)', body: 'Merged via Bevel' }, USER,
     );
     expect(merged.kind).toBe('merged');
 

@@ -1313,8 +1313,17 @@ export class GitService implements IGitService {
   /**
    * Merge a change request locally and publish it to the target branch — the
    * provider-agnostic replacement for `gh pr merge`. Runs in the *base* branch's
-   * workspace: reset to the published base tip, merge the source's published
-   * tip as a `--no-ff` commit authored by the human triggerer, and push.
+   * workspace: reset to the published base tip, merge `sourceSha` as a `--no-ff`
+   * commit authored by the human triggerer, and push.
+   *
+   * `sourceSha` — NOT `origin/<sourceBranch>` — is what gets merged, and the
+   * distinction is a security boundary rather than a detail. The review gate
+   * resolves a head SHA, approvals are pinned to it, and `prMergeLog` records it
+   * as `headShaAtMerge`; but this method fetches again, and merging the branch
+   * ref would land whatever arrived in between. That is not theoretical — a
+   * commit pushed after the gate ran was observed reaching the protected branch.
+   * The SHA is additionally required to still be an ancestor of the fetched
+   * branch tip, so a force-push cannot make this resurrect withdrawn content.
    *
    * Serialized per base workspace via the mutex, with a bounded retry: if the
    * push is rejected because the base advanced (a concurrent merge), we reset to
@@ -1326,12 +1335,19 @@ export class GitService implements IGitService {
   async mergeChangeRequest(
     baseWorkspaceId: string,
     sourceBranch: string,
+    sourceSha: string,
     targetBranch: string,
     commit: { subject: string; body: string },
     user: AuthUser,
   ): Promise<{ kind: 'merged'; sha: string } | { kind: 'conflicts'; paths: string[] }> {
     assertValidBranchName(sourceBranch);
     assertValidBranchName(targetBranch);
+    // Both `sourceBranch` and `sourceSha` are strings and adjacent in the
+    // parameter list; the shape check here is what makes a swapped call fail
+    // loudly instead of merging something surprising.
+    if (!/^[0-9a-f]{40,64}$/.test(sourceSha)) {
+      throw new WorkflowValidationError(`invalid source commit sha: ${sourceSha}`);
+    }
     assertValidAuthor(user);
     const MAX_ATTEMPTS = 3;
     return this.mutex.run(baseWorkspaceId, async () => {
@@ -1369,10 +1385,43 @@ export class GitService implements IGitService {
         await this.git(cwd, ['checkout', targetBranch]);
         await this.git(cwd, ['reset', '--hard', `origin/${targetBranch}`]);
 
-        // `--no-commit --no-ff` so we author the merge commit as the human and
-        // never fast-forward past the merge record.
+        // The pinned head must still be ON its branch. Merging `sourceSha` is
+        // what stops a commit pushed after the review gate from riding in — but
+        // on its own it would also happily merge a commit that has since been
+        // force-pushed AWAY, resurrecting content the author withdrew.
+        //
+        // Any non-zero exit refuses, and deliberately so. `--is-ancestor` exits
+        // 1 for "no" when both objects resolve, but a commit that was rewritten
+        // away is typically not in this clone's object store at all (the fetch
+        // above force-updates the remote-tracking ref; a base workspace may
+        // never have seen the old tip), which exits 128 instead. Both mean the
+        // same thing here — we cannot show this commit is published on that
+        // branch — and this is a fail-closed guard, so "cannot prove" must
+        // refuse. The git detail rides along so a genuine infra failure is still
+        // diagnosable rather than silently reported as a force-push.
         try {
-          await this.git(cwd, ['merge', '--no-commit', '--no-ff', `origin/${sourceBranch}`]);
+          await this.git(cwd, [
+            'merge-base', '--is-ancestor', sourceSha, `origin/${sourceBranch}`,
+          ]);
+        } catch (err) {
+          throw new Error(
+            `change request head ${sourceSha.slice(0, 8)} is no longer on "${sourceBranch}" ` +
+              '(force-pushed, rewritten, or unreachable); refusing to merge a commit ' +
+              `that is not published on its branch: ${redact(
+                err instanceof Error ? err.message : String(err),
+              )}`,
+          );
+        }
+
+        // `--no-commit --no-ff` so we author the merge commit as the human and
+        // never fast-forward past the merge record. Merging the pinned SHA, not
+        // `origin/<source>`: the branch ref can advance between the review gate
+        // resolving `headSha` and this fetch, and merging the ref would land
+        // commits nobody approved (verified: a commit pushed after the gate
+        // reached the protected branch). Pinning also makes the retry loop
+        // below deterministic — only the base moves between attempts.
+        try {
+          await this.git(cwd, ['merge', '--no-commit', '--no-ff', sourceSha]);
         } catch (err) {
           const paths = await this.conflictedPaths(cwd);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
