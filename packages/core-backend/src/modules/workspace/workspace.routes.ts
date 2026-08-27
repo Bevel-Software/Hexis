@@ -982,6 +982,11 @@ export function createWorkspaceRoutes(
       // (e.g. validator 422), the loop stops there so the user sees the
       // first concrete problem rather than a list of N similar failures.
       const result = await workspaceService.unzipFile(id, zipPath, destination);
+      // Judge every entry BEFORE committing any of them: an archive carrying
+      // one misplaced SKILL.md must not leave half its files committed and the
+      // rest stranded. Extraction has already touched disk either way, so the
+      // choice is only about what lands in git.
+      for (const relFile of result.extracted) assertSkillPlacement(relFile, kbDirName);
       for (const relFile of result.extracted) {
         await withLock(id, user, relFile, async () => {
           // The file is already on disk from the unzip; the release commits +
@@ -1048,6 +1053,11 @@ export function createWorkspaceRoutes(
       // access.md first, or fold the grant into an uploaded markdown file's
       // frontmatter. Binary uploads into a pre-existing unreadable folder
       // can't carry a per-file grant (no frontmatter) and proceed ungranted.
+      // An upload names its own destination, so it can land a SKILL.md
+      // wherever it likes — the same silent no-op the save route now refuses.
+      // Placement reads the path, not the bytes, so a binary upload is judged
+      // exactly like a text one.
+      assertSkillPlacement(filePath, kbDirName);
       const plan = await creatorAccess.planForCreate(id, user, filePath, 'file');
       if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
       const toWrite =

@@ -97,13 +97,21 @@ describe('assertSkillPlacement', () => {
     expect(() => assertSkillPlacement(`${KB}/Skills/example/Skill.md`, KB)).not.toThrow();
   });
 
-  test('normalises backslashes and a leading ./', () => {
-    expect(() => assertSkillPlacement(`./${KB}/Skills/example/SKILL.md`, KB)).toThrow(
-      SkillPlacementError,
-    );
-    expect(() => assertSkillPlacement(`${KB}\\Skills\\example\\SKILL.md`, KB)).toThrow(
-      SkillPlacementError,
-    );
+  /**
+   * A malformed path is not this gate's to judge. `isInsideRepo` refuses
+   * backslashes and `.`/`..` segments outright and answers with a corrected
+   * path; normalising them here would invent a semantics the repository
+   * rejects and would swap that answer for a placement error. Staying silent
+   * leaves the canonical refusal in place.
+   */
+  test('stays silent on a path the repository would reject as malformed', () => {
+    for (const p of [
+      `./${KB}/Skills/example/SKILL.md`,
+      `${KB}\\Skills\\example\\SKILL.md`,
+      `/${KB}/Skills/example/SKILL.md`,
+    ]) {
+      expect(() => assertSkillPlacement(p, KB)).not.toThrow();
+    }
   });
 
   /**
@@ -133,12 +141,17 @@ describe('makeSkillPlacementWriteValidator', () => {
   });
 
   /**
-   * Binary writes are left alone, matching the roles.yaml guard: a SKILL.md is
-   * markdown by definition, so a buffer at that path is a different mistake and
-   * not this gate's to name.
+   * Content is not consulted at all. The roles.yaml guard skips buffers because
+   * it PARSES; this one reads only the path, and skipping binary content would
+   * leave the hole exactly where `POST /upload` puts one — it writes a Buffer.
    */
-  test('ignores non-string content', () => {
+  test('judges placement regardless of content type', () => {
     const validate = makeSkillPlacementWriteValidator(KB);
-    expect(() => validate(`${KB}/Skills/example/SKILL.md`, Buffer.from([0, 1, 2]))).not.toThrow();
+    expect(() => validate(`${KB}/Skills/example/SKILL.md`, Buffer.from([0, 1, 2]))).toThrow(
+      SkillPlacementError,
+    );
+    expect(() =>
+      validate(`${KB}/Plugins/GTM/skills/example/SKILL.md`, Buffer.from([0, 1, 2])),
+    ).not.toThrow();
   });
 });

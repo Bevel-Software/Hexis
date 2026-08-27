@@ -51,21 +51,26 @@ export class SkillPlacementError extends WorkflowDomainError {
   }
 }
 
-/** Normalise a workspace-relative path: backslashes → `/`, strip a leading `./`. */
-function normalizeWsPath(p: string): string {
-  return p.replace(/\\/g, '/').replace(/^\.\//, '');
-}
-
 /**
  * Strip the clone-folder prefix, turning the workspace-relative path both raw
  * write paths speak into the repo-root-relative path the layout rules are
- * written against. Returns null when the path is not inside the KB clone —
- * `assertInsideRepo` already refuses those, so there is nothing here to judge.
+ * written against. Returns null for anything else, which is the whole of this
+ * gate's opinion about malformed paths.
+ *
+ * Deliberately NO normalisation. `isInsideRepo` refuses backslashes outright
+ * (on Windows they separate segments, so `foo\..\..` climbs out) and refuses
+ * `.`/`..` segments, and it reports that with a corrected path. Folding those
+ * forms into something acceptable here would invent a path semantics the
+ * repository rejects, and — on the editor route, where this runs before the
+ * write — would answer a malformed path with a SKILL.md placement error
+ * instead of the canonical one. On the agent path the question never arises:
+ * `assertInsideRepo` runs BEFORE `validateWrite`.
  */
 function toRepoRelative(workspaceRelPath: string, kbDirName: string): string | null {
-  const norm = normalizeWsPath(workspaceRelPath);
   const prefix = `${kbDirName}/`;
-  return norm.startsWith(prefix) ? norm.slice(prefix.length) : null;
+  return workspaceRelPath.startsWith(prefix)
+    ? workspaceRelPath.slice(prefix.length)
+    : null;
 }
 
 /** Is this write targeting a file named `SKILL.md`, wherever it sits? */
@@ -91,15 +96,13 @@ export function assertSkillPlacement(workspaceRelPath: string, kbDirName: string
  * that would put a `SKILL.md` outside `Plugins/`. Pass the returned closure as
  * the filesystem's `validateWrite` hook.
  *
- * Only string writes are checked, matching the roles.yaml guard: a `SKILL.md`
- * is markdown by definition, and a binary write to that path is nonsensical
- * rather than something to have an opinion about.
+ * Content is ignored, and that is the difference from the roles.yaml guard:
+ * that one PARSES, so it has nothing to say about a buffer. Placement is a
+ * property of the path alone, so skipping binary writes would leave a hole
+ * exactly where an upload puts one.
  */
 export function makeSkillPlacementWriteValidator(
   kbDirName: string,
 ): (path: string, content: FileContent) => void {
-  return (path, content) => {
-    if (typeof content !== 'string') return;
-    assertSkillPlacement(path, kbDirName);
-  };
+  return (path) => assertSkillPlacement(path, kbDirName);
 }

@@ -3,7 +3,10 @@ import type { IWorkflowService } from '@bevel-software/platform-shared';
 import { LockingFilesystem, type LockingFilesystemContext } from '../kb-fs/locking-filesystem.js';
 import { ReadOnlyFilesystem } from '../kb-fs/read-only-filesystem.js';
 import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
-import { makeSkillPlacementWriteValidator } from '../skills/skill-placement-guard.js';
+import {
+  assertSkillPlacement,
+  makeSkillPlacementWriteValidator,
+} from '../skills/skill-placement-guard.js';
 import type { ICreatorAccess } from '../access-model/creator.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
@@ -84,6 +87,10 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
                 user,
                 kbDirName: deps.kbDirName,
                 validateWrite,
+                // `copy_file` creates a file without passing its bytes through
+                // `validateWrite`, so placement is enforced on the destination
+                // path too — otherwise copying is the way around the rule.
+                validateCreatePath: (p) => assertSkillPlacement(p, deps.kbDirName),
                 creatorAccess: deps.creatorAccess,
               },
             )

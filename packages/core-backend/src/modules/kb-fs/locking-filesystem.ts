@@ -83,6 +83,17 @@ export interface LockingFilesystemContext {
    */
   validateWrite?: (path: string, content: FileContent) => void;
   /**
+   * Optional pre-disk gate for an op that CREATES a file without supplying its
+   * bytes here — today `copyFile`, whose content is whatever the source holds.
+   * Rules that depend only on the destination PATH (where a `SKILL.md` may
+   * live) belong here; rules that read content stay in `validateWrite`.
+   *
+   * `moveFile` is deliberately NOT gated: relocating a file is how one that
+   * landed in the wrong place gets rescued, and refusing the destination would
+   * strand it.
+   */
+  validateCreatePath?: (path: string) => void;
+  /**
    * Post-commit hook for the BATCH `writeFiles` path (which commits via
    * `commitChanges` and so skips `runPendingCommit`'s emit). Single-file ops
    * emit through the queue instead, so they don't need this. Optional.
@@ -143,6 +154,9 @@ export class LockingFilesystem extends LocalFilesystem {
 
   override async copyFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
     this.assertInsideRepo(dest);
+    // A copy CREATES a file at `dest`, so every path-shaped rule a write must
+    // satisfy applies here too — otherwise copying is the way around them.
+    this.lockContext.validateCreatePath?.(dest);
     // Lock on `dest`. `src` is read-only from this op's perspective — copy
     // creates a new file at dest without disturbing src on disk.
     return this.withLock(dest, () => super.copyFile(src, dest, options));
