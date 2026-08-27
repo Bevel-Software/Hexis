@@ -151,6 +151,96 @@ describe('DbSecretsVaultService — PKCE + public-client tool OAuth', () => {
     expect(stored.tokens.access_token).toBe('at-1');
     expect(stored.pendingVerifier).toBeUndefined();
   });
+
+  it('beginToolOAuthByKey remembers the scopes it asked for, and completeOAuth takes them as granted when the provider echoes none', async () => {
+    // RFC 6749 §5.1: `scope` in the token response is OPTIONAL when identical
+    // to what was requested. A provider that omits it (HubSpot) granted the
+    // request, not nothing — reading it as nothing would flag every declared
+    // scope as missing and block the tool behind a permanent "sign in again".
+    const begin = makeFakeDb([[sharedRow()], [], [{ id: 'user-row-1' }]]);
+    const svc = new DbSecretsVaultService(begin.db, ENC_KEY);
+    const { url } = await svc.beginToolOAuthByKey({
+      userId: 'user-1',
+      key: KEY,
+      redirectUri: 'https://bevel.example.com/cb',
+      state: 's',
+      scopes: ['crm.objects.contacts.read', 'crm.objects.companies.read'],
+    });
+    expect(new URL(url).searchParams.get('scope')).toBe('crm.objects.contacts.read crm.objects.companies.read');
+    const pending = JSON.parse(crypto.decrypt(begin.captured.values[0].valueEncrypted));
+    expect(pending.pendingScopes).toBe('crm.objects.contacts.read crm.objects.companies.read');
+
+    const complete = async (tokenResponse: Record<string, unknown>) => {
+      const userRow = sharedRow({
+        id: 'user-row-1',
+        userId: 'user-1',
+        valueEncrypted: crypto.encrypt(
+          JSON.stringify({ pendingVerifier: 'v', pendingScopes: 'crm.objects.contacts.read crm.objects.companies.read' }),
+        ),
+      });
+      const { db, captured } = makeFakeDb([[userRow], undefined]);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(JSON.stringify(tokenResponse), { status: 200, headers: { 'Content-Type': 'application/json' } })),
+      );
+      await new DbSecretsVaultService(db, ENC_KEY).completeOAuth('user-1', 'user-row-1', 'code', 'https://bevel.example.com/cb');
+      return JSON.parse(crypto.decrypt(captured.set[0].valueEncrypted));
+    };
+
+    // No `scope` echoed → the requested scopes are the granted ones.
+    const silent = await complete({ access_token: 'at-1', expires_in: 3600 });
+    expect(silent.tokens.scope).toBe('crm.objects.contacts.read crm.objects.companies.read');
+    expect(silent.pendingScopes).toBeUndefined(); // one-time, like the verifier
+    // An echoed `scope` is the provider's word and wins — a narrower grant stays visible.
+    const echoed = await complete({ access_token: 'at-2', expires_in: 3600, scope: 'crm.objects.contacts.read' });
+    expect(echoed.tokens.scope).toBe('crm.objects.contacts.read');
+    // …and so does an EXPLICIT empty grant: only an absent field means "as requested".
+    const empty = await complete({ access_token: 'at-3', expires_in: 3600, scope: '' });
+    expect(empty.tokens.scope).toBe('');
+  });
+
+  it('beginOAuth never writes a stale blob over tokens a concurrent refresh just rotated', async () => {
+    // The standalone flow stashes the pending verifier/scopes with a
+    // read-modify-write. Between its read and its write a refresh persists
+    // rotated tokens; the guarded update misses (0 rows), the row is re-read,
+    // and the pending fields are merged onto THOSE tokens.
+    const stale = sharedRow({
+      id: 'secret-1',
+      userId: 'user-1',
+      oauthMeta: { ...PUBLIC_META, pkce: false },
+      valueEncrypted: crypto.encrypt(JSON.stringify({ tokens: { access_token: 'old', refresh_token: 'rt-old' } })),
+    });
+    const rotated = {
+      ...stale,
+      valueEncrypted: crypto.encrypt(JSON.stringify({ tokens: { access_token: 'new', refresh_token: 'rt-new' } })),
+    };
+    const { db, captured } = makeFakeDb([
+      [stale], // requireRow
+      [], // guarded update: the ciphertext changed underneath us
+      [rotated], // re-read
+      [{ id: 'secret-1' }], // guarded update against the fresh ciphertext
+    ]);
+    const url = await new DbSecretsVaultService(db, ENC_KEY).beginOAuth('user-1', 'secret-1', 'https://bevel.example.com/cb', 's');
+    expect(new URL(url).searchParams.get('scope')).toBe('mcp.read');
+    expect(captured.set).toHaveLength(2);
+    const persisted = JSON.parse(crypto.decrypt(captured.set[1].valueEncrypted));
+    expect(persisted.tokens).toEqual({ access_token: 'new', refresh_token: 'rt-new' });
+    expect(persisted.pendingScopes).toBe('mcp.read');
+
+    // Only a token rotation is merge-able: a row that meanwhile became another
+    // provider's sign-in (or a static value) aborts, since the consent URL was
+    // built for the provider we read first.
+    for (const changed of [
+      { ...rotated, oauthMeta: { ...PUBLIC_META, pkce: false, clientId: 'someone-else' } },
+      { ...rotated, kind: 'static' },
+    ]) {
+      const race = makeFakeDb([[stale], [], [changed]]);
+      await expect(
+        new DbSecretsVaultService(race.db, ENC_KEY).beginOAuth('user-1', 'secret-1', 'https://bevel.example.com/cb', 's'),
+      ).rejects.toBeInstanceOf(SecretOAuthError);
+      expect(race.captured.set).toHaveLength(1); // nothing written onto the changed row
+    }
+  });
 });
 
 describe('DbSecretsVaultService — dead-grant detection on refresh', () => {
@@ -208,6 +298,20 @@ describe('DbSecretsVaultService — dead-grant detection on refresh', () => {
 
     await expect(svc.resolve('user-1', KEY)).resolves.toBe('fresh-at');
     expect(onMutation).toHaveBeenCalledWith('user-1');
+  });
+
+  it('a refresh keeps the recorded grant when `scope` is absent, and takes an echoed one — empty included', async () => {
+    // Same rule as the code exchange: only an ABSENT field means "unchanged".
+    const refreshWith = async (body: Record<string, unknown>) => {
+      const { db, captured } = makeFakeDb([[userRow()], undefined]);
+      const svc = new DbSecretsVaultService(db, ENC_KEY, undefined, userScope);
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
+      await svc.resolve('user-1', KEY);
+      return JSON.parse(crypto.decrypt(captured.set[0].valueEncrypted)).tokens.scope;
+    };
+    expect(await refreshWith({ access_token: 'a', expires_in: 3600 })).toBe('mcp.read');
+    expect(await refreshWith({ access_token: 'a', expires_in: 3600, scope: 'mcp.read mcp.write' })).toBe('mcp.read mcp.write');
+    expect(await refreshWith({ access_token: 'a', expires_in: 3600, scope: '' })).toBe('');
   });
 
   it('putSharedOAuthProvider notifies mutation listeners with null (shared → everyone)', async () => {
