@@ -392,8 +392,11 @@ jobs:
           case "$url" in
             "${KB_ORIGIN%/}"/workspace/*)
               # <origin>/workspace/<branch>/<workspace path>, both URL-encoded.
-              # The charset filter above already dropped backslashes, so the
-              # %XX → \xXX decode cannot be fed an escape of the agent's own.
+              # The %XX → \xXX decode CAN yield characters the charset filter
+              # dropped (`%5C` is a backslash, `%20` a space): the decoded
+              # branch and path are agent-chosen text. They are safe because
+              # of where they go — `jq --arg` and a JSON request body, both of
+              # which escape their input — and never into a command line.
               rest=${url#"${KB_ORIGIN%/}"/workspace/}
               rest=${rest%%[?#]*}
               enc_branch=${rest%%/*}
@@ -415,9 +418,16 @@ jobs:
                 code=$(curl -sS -m 20 -o stat.json -w '%{http_code}' -X POST \
                         -H "Authorization: Bearer $KB_KEY" -H 'Content-Type: application/json' \
                         -d "$stat_args" "${KB_ORIGIN%/}/api/agent/tools/file_stat" || echo 000)
+                # "Definite not found" is the knowledge base's own answer for
+                # a missing path: `file_stat` surfaces the filesystem's ENOENT
+                # as `{ "error": "File not found: <path>" }` — served with a
+                # 500, not a 404, so the status code is no help — while an
+                # access refusal or an outage says something else entirely.
+                # Match that one error message, in the JSON field it lives in,
+                # so no other failure text can pass for an absence.
                 if [ "$code" = 200 ] && jq -e '.type == "file"' stat.json >/dev/null 2>&1; then
                   echo "One-pager verified in the knowledge base: $branch:$path"
-                elif grep -qi 'not found' stat.json 2>/dev/null; then
+                elif jq -e '(.error? // "") | tostring | startswith("File not found: ")' stat.json >/dev/null 2>&1; then
                   echo "::warning::The agent's one_pager_url names a file the knowledge base does not have ($branch:$path) — dropping the link."
                   url=""; onepager_missing=1
                 else
