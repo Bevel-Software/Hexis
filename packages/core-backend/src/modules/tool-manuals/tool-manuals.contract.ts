@@ -30,10 +30,17 @@ export type ToolVariableScope = 'admin' | 'user';
  * present, the variable's value is obtained by signing in with this provider
  * (the per-user secret row is `kind:'oauth'`), rather than being typed. The
  * confidential client secret is provisioned separately by a tool writer.
+ *
+ * The endpoints are OPTIONAL for an `mcp.json` server: an MCP-spec server
+ * publishes its authorization-server metadata, so a declaration carrying only
+ * the `clientId` of an owner-registered app is completed at scan time
+ * (`authorizationUrl`/`tokenUrl`/`resource` filled in from that metadata). A
+ * `.tool` manual has no server to ask, so there both URLs are required.
  */
 export interface ToolVariableOAuth {
-  authorizationUrl: string;
-  tokenUrl: string;
+  /** Absent on an mcp.json server ⇒ discovered from the server's OAuth metadata. */
+  authorizationUrl?: string;
+  tokenUrl?: string;
   clientId: string;
   scopes?: string[];
   /**
@@ -45,6 +52,20 @@ export interface ToolVariableOAuth {
    * secret is still provisioned only through the protected route.
    */
   authParams?: Record<string, string>;
+  /**
+   * PKCE (S256) on the authorization-code flow. ON unless explicitly `false`:
+   * the MCP authorization spec requires it, and a provider that doesn't
+   * implement it ignores the extra parameters (RFC 6749 §3.1). Only `false` is
+   * ever stored — absent means the default.
+   */
+  pkce?: boolean;
+  /**
+   * RFC 8707 resource indicator — the MCP server's canonical URL, so the token
+   * is audience-bound. Filled in from the server's metadata for an mcp.json
+   * server; declare it by hand only when the provider demands it and the
+   * endpoints are declared by hand too.
+   */
+  resource?: string;
 }
 
 /**
@@ -74,14 +95,18 @@ export interface ToolVariable {
  *  - `open`         — the server needs no auth; nothing to configure.
  *  - `oauth-auto`   — OAuth was auto-configured; the sign-in appears as a
  *                     `user`-scoped variable, so users just authorize.
- *  - `oauth-manual` — the server needs OAuth but auto-discovery couldn't set it
- *                     up (typically no dynamic client registration, e.g. Google);
- *                     a tool writer must declare the provider in the `.tool` file
- *                     and set its client secret. `reason` says exactly why.
+ *  - `oauth-manual` — the server needs OAuth with an OWNER-REGISTERED client:
+ *                     auto-discovery couldn't register one (typically no dynamic
+ *                     client registration — Google, HubSpot), or the declaration
+ *                     already names a client id. A tool writer declares the
+ *                     sign-in on a `user`-scoped variable (the server editor for
+ *                     an `mcp.json` server; the `variables` block of a `.tool`)
+ *                     and sets its client secret. `reason` is present only while
+ *                     something is still missing, and says exactly what.
  */
 export interface ToolManualSetup {
   kind: 'open' | 'oauth-auto' | 'oauth-manual';
-  /** Why auto-setup didn't complete — present for `oauth-manual`. */
+  /** What still blocks the sign-in — present for an unfinished `oauth-manual`. */
   reason?: string;
 }
 

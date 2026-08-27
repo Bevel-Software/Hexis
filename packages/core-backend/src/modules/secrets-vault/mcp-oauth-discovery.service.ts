@@ -10,6 +10,22 @@ export type McpAuthDiscovery =
   /** The server wants auth but the spec chain didn't complete — leave the tool as-is. */
   | { status: 'unsupported'; reason: string };
 
+/** Where a server's sign-in lives — the spec chain's answer before any client exists. */
+interface AuthorizationServerInfo {
+  authorizationUrl: string;
+  tokenUrl: string;
+  /** RFC 7591 endpoint, when the AS offers dynamic registration. */
+  registrationUrl?: string;
+  /** RFC 8707 resource indicator: the PRM's `resource`, else the MCP URL itself. */
+  resource: string;
+  scopes?: string[];
+}
+
+type AuthorizationServerResolution =
+  | { status: 'open' }
+  | { status: 'found'; as: AuthorizationServerInfo }
+  | { status: 'unsupported'; reason: string };
+
 const FETCH_TIMEOUT_MS = 5_000;
 /** Re-probe an open/unsupported server after this long (it may grow/lose auth). */
 const NEGATIVE_TTL_MS = 5 * 60_000;
@@ -37,12 +53,21 @@ const OAUTH_TTL_MS = 60 * 60_000;
  * row from the shared one, and the UTCP variable loader injects the fresh
  * access token into the manual's `Authorization` header at call time.
  *
+ * Providers without dynamic registration (HubSpot, Google) stop at step 3.
+ * For those, `providerForDeclaredClient` runs steps 1–3 for a client id the
+ * OWNER registered by hand and declared on the manual — same endpoints, same
+ * PKCE, same resource indicator, nothing persisted (the owner's client-secret
+ * save pins the completed provider).
+ *
  * Every fetch is SSRF-guarded (https-only, no redirects, bounded) — these URLs
  * originate from user-authored `.tool` files and remote servers' own metadata.
  */
 export class McpOAuthDiscoveryService {
   private readonly cache = new Map<string, { result: McpAuthDiscovery; expiresAt: number }>();
   private readonly inflight = new Map<string, Promise<McpAuthDiscovery>>();
+  /** The metadata walk alone, per MCP URL — shared by every declared client on that server. */
+  private readonly asCache = new Map<string, { result: AuthorizationServerResolution; expiresAt: number }>();
+  private readonly asInflight = new Map<string, Promise<AuthorizationServerResolution>>();
 
   constructor(
     private readonly deps: {
@@ -73,6 +98,30 @@ export class McpOAuthDiscoveryService {
       this.inflight.set(key, pending);
     }
     return pending;
+  }
+
+  /**
+   * The provider for a client the OWNER registered: the server's discovered
+   * endpoints + resource indicator around the declared `clientId`, PKCE on (the
+   * MCP spec requires it; a provider without it ignores the parameters). No
+   * registration call, no vault write — the metadata is cached per URL so a
+   * re-scan or a second declared client on the same server costs no network.
+   */
+  async providerForDeclaredClient(manualName: string, mcpUrl: string, clientId: string): Promise<McpAuthDiscovery> {
+    const resolved = await this.resolveAuthorizationServer(manualName, mcpUrl);
+    if (resolved.status === 'open') {
+      return {
+        status: 'unsupported',
+        reason:
+          'the server did not ask for a sign-in and publishes no OAuth metadata — declare `authorizationUrl` and `tokenUrl` on the sign-in variable if it needs one',
+      };
+    }
+    if (resolved.status === 'unsupported') return resolved;
+    const { authorizationUrl, tokenUrl, resource, scopes } = resolved.as;
+    return {
+      status: 'oauth',
+      provider: { authorizationUrl, tokenUrl, clientId, scopes, pkce: true, resource },
+    };
   }
 
   private remember(key: string, result: McpAuthDiscovery): McpAuthDiscovery {
@@ -114,6 +163,89 @@ export class McpOAuthDiscoveryService {
   }
 
   private async discoverFresh(manualName: string, key: string, mcpUrl: string): Promise<McpAuthDiscovery> {
+    const resolved = await this.resolveAuthorizationServer(manualName, mcpUrl);
+    if (resolved.status !== 'found') return resolved;
+    const { authorizationUrl, tokenUrl, registrationUrl, resource, scopes } = resolved.as;
+    if (!registrationUrl) {
+      return {
+        status: 'unsupported',
+        reason:
+          'the server requires sign-in but does not allow automatic client registration — register an OAuth app ' +
+          `with the provider (redirect URI: ${this.deps.redirectUri}), declare its client id on a user-scoped ` +
+          'sign-in variable (the server editor on the tool\'s page, or the plugin.json extensions entry), then set its client secret',
+      };
+    }
+
+    // 4. Dynamic client registration (RFC 7591), as a PUBLIC client: PKCE
+    //    carries the proof, no secret to store or leak.
+    assertSafeFetchUrl(registrationUrl, { requireHttps: true, label: 'registration_endpoint' });
+    const regRes = await this.fetchRaw(registrationUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        client_name: 'Bevel Knowledge Base',
+        redirect_uris: [this.deps.redirectUri],
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        token_endpoint_auth_method: 'none',
+      }),
+    });
+    if (!regRes.ok) {
+      return { status: 'unsupported', reason: `client registration failed: HTTP ${regRes.status}` };
+    }
+    const reg = (await regRes.json().catch(() => null)) as Record<string, unknown> | null;
+    const clientId = typeof reg?.client_id === 'string' ? reg.client_id : '';
+    if (!clientId) {
+      return { status: 'unsupported', reason: 'client registration returned no client_id' };
+    }
+    const clientSecret = typeof reg?.client_secret === 'string' && reg.client_secret ? reg.client_secret : undefined;
+
+    const provider: OAuthProviderConfig = {
+      authorizationUrl,
+      tokenUrl,
+      clientId,
+      clientSecret,
+      scopes,
+      pkce: true,
+      publicClient: !clientSecret,
+      resource,
+    };
+    await this.deps.secretsVault.putSharedOAuthProvider({
+      key,
+      label: `${manualName} sign-in`,
+      provider,
+    });
+    // Return the stored (public) shape — no secret rides in cache entries.
+    const publicProvider = { ...provider };
+    delete publicProvider.clientSecret;
+    return { status: 'oauth', provider: publicProvider };
+  }
+
+  /** Steps 1–3, memoised per MCP URL (positive and negative alike, short TTL). */
+  private async resolveAuthorizationServer(manualName: string, mcpUrl: string): Promise<AuthorizationServerResolution> {
+    const cached = this.asCache.get(mcpUrl);
+    if (cached && cached.expiresAt > this.now()) return cached.result;
+    let pending = this.asInflight.get(mcpUrl);
+    if (!pending) {
+      pending = this.resolveAuthorizationServerFresh(mcpUrl)
+        .catch((err: unknown): AuthorizationServerResolution => ({
+          status: 'unsupported',
+          reason: err instanceof Error ? err.message : String(err),
+        }))
+        .then((result) => {
+          if (result.status === 'unsupported') {
+            console.warn(`[mcp-oauth-discovery] "${manualName}" (${mcpUrl}): ${result.reason}`);
+          }
+          this.asCache.set(mcpUrl, { result, expiresAt: this.now() + NEGATIVE_TTL_MS });
+          return result;
+        })
+        .finally(() => this.asInflight.delete(mcpUrl));
+      this.asInflight.set(mcpUrl, pending);
+    }
+    return pending;
+  }
+
+  private async resolveAuthorizationServerFresh(mcpUrl: string): Promise<AuthorizationServerResolution> {
     // 1. Probe: an unauthenticated initialize. A 401/403, or ANY response
     //    carrying a `WWW-Authenticate` challenge, means the server wants OAuth;
     //    a redirect to a login page (fetch throws under `redirect:'error'`)
@@ -205,57 +337,16 @@ export class McpOAuthDiscoveryService {
     if (!authorizationUrl || !tokenUrl) {
       return { status: 'unsupported', reason: 'authorization-server metadata is missing endpoints' };
     }
-    if (!registrationUrl) {
-      return {
-        status: 'unsupported',
-        reason:
-          'server requires sign-in but does not support automatic client registration — declare the oauth provider in the .tool file instead',
-      };
-    }
-
-    // 4. Dynamic client registration (RFC 7591), as a PUBLIC client: PKCE
-    //    carries the proof, no secret to store or leak.
-    assertSafeFetchUrl(registrationUrl, { requireHttps: true, label: 'registration_endpoint' });
-    const regRes = await this.fetchRaw(registrationUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({
-        client_name: 'Bevel Knowledge Base',
-        redirect_uris: [this.deps.redirectUri],
-        grant_types: ['authorization_code', 'refresh_token'],
-        response_types: ['code'],
-        token_endpoint_auth_method: 'none',
-      }),
-    });
-    if (!regRes.ok) {
-      return { status: 'unsupported', reason: `client registration failed: HTTP ${regRes.status}` };
-    }
-    const reg = (await regRes.json().catch(() => null)) as Record<string, unknown> | null;
-    const clientId = typeof reg?.client_id === 'string' ? reg.client_id : '';
-    if (!clientId) {
-      return { status: 'unsupported', reason: 'client registration returned no client_id' };
-    }
-    const clientSecret = typeof reg?.client_secret === 'string' && reg.client_secret ? reg.client_secret : undefined;
-
-    const provider: OAuthProviderConfig = {
-      authorizationUrl,
-      tokenUrl,
-      clientId,
-      clientSecret,
-      scopes,
-      pkce: true,
-      publicClient: !clientSecret,
-      resource,
+    return {
+      status: 'found',
+      as: {
+        authorizationUrl,
+        tokenUrl,
+        ...(registrationUrl ? { registrationUrl } : {}),
+        resource,
+        ...(scopes ? { scopes } : {}),
+      },
     };
-    await this.deps.secretsVault.putSharedOAuthProvider({
-      key,
-      label: `${manualName} sign-in`,
-      provider,
-    });
-    // Return the stored (public) shape — no secret rides in cache entries.
-    const publicProvider = { ...provider };
-    delete publicProvider.clientSecret;
-    return { status: 'oauth', provider: publicProvider };
   }
 
   private async fetchRaw(url: string, init: RequestInit): Promise<Response> {

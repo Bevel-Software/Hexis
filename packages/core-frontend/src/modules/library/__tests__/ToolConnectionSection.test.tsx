@@ -122,6 +122,37 @@ describe('ToolConnectionSection', () => {
     expect(screen.queryByRole('button', { name: 'Edit the tool file' })).toBeNull();
   });
 
+  it('sends the owner of an mcp.json server to "Edit server" on this page, not to a file', () => {
+    renderSection(tool({ path: 'Plugins/GTM/mcp.json', setup: OAUTH_MANUAL, canWrite: true }));
+    expect(screen.getByRole('status')).toHaveTextContent(/under "Edit server" below/);
+    expect(screen.queryByRole('button', { name: 'Edit the tool file' })).toBeNull();
+  });
+
+  it('once the sign-in is declared, asks the owner only for the client secret', () => {
+    renderSection(
+      tool({
+        setup: { kind: 'oauth-manual' },
+        canWrite: true,
+        variables: [
+          {
+            name: 'SIGNIN',
+            scope: 'user',
+            label: null,
+            key: 'github_SIGNIN',
+            adminConfigured: false,
+            userConfigured: false,
+            oauth: true,
+            authorized: false,
+          },
+        ],
+      }),
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'the sign-in is declared — set its client secret below to finish',
+    );
+    expect(screen.queryByRole('button', { name: 'Edit the tool file' })).toBeNull();
+  });
+
   it('omits the edit link while the workspace has no kb directory yet', () => {
     renderSection(tool({ setup: OAUTH_MANUAL, canWrite: true }), null);
     expect(screen.getByRole('status')).toBeInTheDocument();

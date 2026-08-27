@@ -31,7 +31,7 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
   if (tool.variables.length === 0) {
     return (
       <div className="flex flex-col gap-3">
-        <SetupBanner setup={tool.setup} />
+        <SetupBanner setup={tool.setup} declared={tool.variables.some((v) => v.oauth)} />
         {tool.setup?.kind !== 'oauth-manual' && (
           <p className="text-detail text-ink-muted">
             {tool.setup?.kind === 'open' ? (
@@ -51,7 +51,7 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
 
   return (
     <div className="flex flex-col gap-3.5">
-      <SetupBanner setup={tool.setup} />
+      <SetupBanner setup={tool.setup} declared={tool.variables.some((v) => v.oauth)} />
       {adminVars.length > 0 && (
         <VarPlugin
           title="Set by the tool owner"
@@ -95,21 +95,30 @@ function Chip({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * When a `type: mcp` server needs sign-in that auto-discovery COULDN'T set up
- * (typically the provider has no dynamic client registration — e.g. Google),
- * the tool would otherwise look like it needs nothing. Make the required manual
- * setup explicit, and surface the discovery `reason` so the admin knows why.
+ * When a `type: mcp` server needs a sign-in with an owner-registered OAuth app
+ * (auto-discovery couldn't register one — Google, HubSpot — or the declaration
+ * already names a client id), the tool would otherwise look like it needs
+ * nothing until the owner finishes. Make the remaining step explicit, and
+ * surface the discovery `reason` so the admin knows what still blocks it.
  * The `open` / `oauth-auto` cases need no banner — they're either self-evident
  * (a sign-in variable appears below) or nothing-to-do.
  */
-function SetupBanner({ setup }: { setup: ToolSetup | null }) {
+function SetupBanner({ setup, declared }: { setup: ToolSetup | null; declared: boolean }) {
   if (setup?.kind !== 'oauth-manual') return null;
   return (
     <Banner tone="wait" role="status">
-      <span className="font-semibold">Sign-in setup needed.</span> This server needs users to sign
-      in, but Bevel couldn&apos;t set that up automatically. A tool writer must register an OAuth
-      client with the provider, declare it in the <Chip>.tool</Chip> file&apos;s{' '}
-      <Chip>variables</Chip> block, then set its client secret here.
+      <span className="font-semibold">Sign-in setup needed.</span>{' '}
+      {declared ? (
+        <>The sign-in is declared — a tool writer sets its client secret here to finish.</>
+      ) : (
+        <>
+          This server needs users to sign in, but Bevel couldn&apos;t set that up automatically. A
+          tool writer must register an OAuth app with the provider and declare its client id on a
+          user-scoped sign-in variable — under <Chip>Edit server</Chip> on the tool&apos;s page for
+          an MCP server, or in the <Chip>.tool</Chip> file&apos;s <Chip>variables</Chip> block —
+          then set its client secret here.
+        </>
+      )}
       {setup.reason && <em className="mt-1 block text-detail">{setup.reason}</em>}
     </Banner>
   );

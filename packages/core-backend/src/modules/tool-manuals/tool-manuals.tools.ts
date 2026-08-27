@@ -69,9 +69,12 @@ export function registerToolManualsTools(
       'what is already configured. Results are scoped to the caller — a `.tool` the caller cannot READ is ' +
       'absent entirely, and all status flags reflect the caller\'s own state. Per tool: `setup` describes ' +
       'an MCP server\'s sign-in requirement (`open` = none; `oauth-auto` = sign-in was configured ' +
-      'automatically; `oauth-manual` = the provider does not support automatic registration, so a writer ' +
-      'must declare the OAuth provider in the `.tool` file and paste its client secret into the tool ' +
-      'editor). Per variable: whether the shared (admin) value is set, whether the CURRENT user has ' +
+      'automatically; `oauth-manual` = the sign-in needs an OAuth app the owner registers with the provider: ' +
+      'a writer declares its client id on a `user`-scoped variable with an `oauth` block — in the plugin.json ' +
+      'extensions entry for an mcp.json server (endpoints are discovered from the server; PKCE is on by ' +
+      'default), or in the `.tool` file with explicit URLs — and pastes the client secret on the tool\'s page. ' +
+      '`setup.reason` is present only while something still blocks the sign-in and says what). ' +
+      'Per variable: whether the shared (admin) value is set, whether the CURRENT user has ' +
       'set/authorized their own, and whether it is an OAuth sign-in (users authorize those on the /connect ' +
       'page, never by typing a value). `canWrite` = the caller may write THAT `.tool` FILE (per-file access ' +
       'from its frontmatter `write:`/`owner:` verbs and the access.md chain — NOT a platform role), which ' +

@@ -147,7 +147,59 @@ describe('McpOAuthDiscoveryService', () => {
     });
     const res = await makeService(vault, fetchFn).statusFor('notion', MCP_URL);
     expect(res.status).toBe('unsupported');
+    // The reason is the admin's to-do list: it names the redirect URI to
+    // register and where the client id goes, because that is the next step.
+    expect(res).toMatchObject({ reason: expect.stringContaining(REDIRECT_URI) });
+    expect(res).toMatchObject({ reason: expect.stringContaining('client id') });
     expect(vault.putSharedOAuthProvider).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('completes an owner-declared client from the server metadata — no registration, nothing persisted', async () => {
+    const vault = makeVault();
+    const { fetchFn, calls } = makeFetch({
+      [MCP_URL]: () => json({}, 401),
+      [PRM_URL]: () => json(PRM),
+      [AS_META_URL]: () => json({ ...AS_META, registration_endpoint: undefined }),
+    });
+    const svc = makeService(vault, fetchFn);
+    const res = await svc.providerForDeclaredClient('hubspot', MCP_URL, 'owner-app-1');
+    expect(res).toEqual({
+      status: 'oauth',
+      provider: {
+        authorizationUrl: 'https://auth.example.com/authorize',
+        tokenUrl: 'https://auth.example.com/token',
+        clientId: 'owner-app-1',
+        scopes: ['mcp.read'],
+        pkce: true,
+        resource: MCP_URL,
+      },
+    });
+    expect(calls).not.toContain('https://auth.example.com/register');
+    expect(vault.putSharedOAuthProvider).not.toHaveBeenCalled();
+    // The metadata walk is per server, so a second declared client on the
+    // same URL costs no network — and gets ITS client id, not the first one's.
+    const before = calls.length;
+    const again = await svc.providerForDeclaredClient('hubspot_eu', MCP_URL, 'owner-app-2');
+    expect(again).toMatchObject({ status: 'oauth', provider: { clientId: 'owner-app-2' } });
+    expect(calls.length).toBe(before);
+  });
+
+  it('refuses to complete a declared client when the server is open or publishes no metadata', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const open = makeService(makeVault(), makeFetch({ [MCP_URL]: () => json({ ok: true }) }).fetchFn);
+    expect(await open.providerForDeclaredClient('x', MCP_URL, 'c')).toMatchObject({
+      status: 'unsupported',
+      reason: expect.stringContaining('authorizationUrl'),
+    });
+    const noMeta = makeService(
+      makeVault(),
+      makeFetch({ [MCP_URL]: () => json({}, 401), [PRM_URL]: () => json(PRM) }).fetchFn,
+    );
+    expect(await noMeta.providerForDeclaredClient('x', MCP_URL, 'c')).toMatchObject({
+      status: 'unsupported',
+      reason: expect.stringContaining('no authorization-server metadata'),
+    });
     warn.mockRestore();
   });
 
