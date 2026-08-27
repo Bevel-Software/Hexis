@@ -46,3 +46,5 @@ export type { PageShellWidth } from './PageShell';
 export { useModalLayer } from './useModalLayer';
 export { useDismissableMenu } from './useDismissableMenu';
 export type { DismissableMenuOptions } from './useDismissableMenu';
+export { usePointerMenuPosition } from './usePointerMenuPosition';
+export type { PointerMenuPosition } from './usePointerMenuPosition';
