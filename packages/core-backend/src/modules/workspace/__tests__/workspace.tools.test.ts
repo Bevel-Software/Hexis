@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -147,6 +147,25 @@ afterEach(async () => {
   }
 });
 
+/**
+ * True once `pid` has been killed: either it is gone, or it is a zombie
+ * waiting on a reaper (Linux: `State:\tZ` in /proc). `kill(pid, 0)` alone
+ * cannot tell a zombie from a live process.
+ */
+async function isDeadOrZombie(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return true;
+  }
+  try {
+    const status = await readFile(`/proc/${pid}/status`, 'utf8');
+    return /^State:\s*Z/m.test(status);
+  } catch {
+    return false; // no /proc (macOS): alive as far as the signal says
+  }
+}
+
 describe('workspace file primitives', () => {
   it('read_file returns the content', async () => {
     const base = await start();
@@ -189,6 +208,40 @@ describe('workspace file primitives', () => {
     const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'echo hello-exec' })).json()) as { stdout: string; exitCode: number };
     expect(res.stdout).toContain('hello-exec');
     expect(res.exitCode).toBe(0);
+  });
+
+  // The command runs under `sh -c`; a timeout used to SIGKILL that shell and
+  // leave what it had started running on as an orphan. The whole process
+  // group goes now. POSIX only: Windows has no process groups to kill.
+  it.skipIf(process.platform === 'win32')('execute_command kills what the command started, not just its shell, on timeout', async () => {
+    const base = await start();
+    // Print the grandchild's pid, then block on it so the timeout fires. The
+    // timeout is the schema's minimum — inside the tool's declared contract,
+    // and long enough that a slow spawn still prints the pid before it fires.
+    const res = (await (
+      await post(`${base}/api/agent/tools/execute_command`, {
+        branch: 'main',
+        command: 'sleep 30 & echo $!; wait',
+        timeout_ms: 1000,
+      })
+    ).json()) as { stdout: string; exitCode: number };
+    expect(res.exitCode).toBe(-1);
+    const grandchild = Number(res.stdout.trim());
+    expect(grandchild).toBeGreaterThan(0);
+    // Dead means killed, not reaped: a SIGKILLed process keeps its pid — and
+    // answers `kill(pid, 0)` as alive — until whoever inherited it reaps it,
+    // and on a host with no reaper (the very thing this guards) that is
+    // never. So where /proc exists, a zombie (`State: Z`) counts as dead; a
+    // vanished pid counts everywhere. Poll to a deadline rather than trust
+    // one fixed pause. Without the fix the grandchild is still sleeping at
+    // the deadline, so what fails is the deadline — never an early check.
+    const deadline = Date.now() + 3_000;
+    let dead = false;
+    while (!dead && Date.now() < deadline) {
+      dead = await isDeadOrZombie(grandchild);
+      if (!dead) await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(dead).toBe(true);
   });
 
   it('execute_command 400s when no branch is given AND no focused branch (external caller)', async () => {
