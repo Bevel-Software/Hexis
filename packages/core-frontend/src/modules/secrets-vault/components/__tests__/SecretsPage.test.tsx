@@ -56,7 +56,6 @@ describe('SecretsPage', () => {
       setup: null,
       canWrite: false,
       variables: [],
-      health: null,
     };
     toolSecretsMock.listToolSecrets.mockResolvedValue([heyreach]);
 

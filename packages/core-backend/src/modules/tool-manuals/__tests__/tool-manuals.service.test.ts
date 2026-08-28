@@ -103,8 +103,8 @@ describe('ToolManualService', () => {
     expect(summary).not.toHaveProperty('healthCheck');
 
     // The server still reaches it, through the accessor that never serializes.
-    const probe = await svc().healthCheckFor('user@x.eu', 'probe');
-    expect(probe?.headers).toEqual({ 'X-Key': '${PROBE_ONLY_KEY}' });
+    const target = await svc().probeTargetFor('user@x.eu', 'probe');
+    expect(target?.healthCheck?.headers).toEqual({ 'X-Key': '${PROBE_ONLY_KEY}' });
   });
 
   test('ACL filters out manuals the user cannot read', async () => {

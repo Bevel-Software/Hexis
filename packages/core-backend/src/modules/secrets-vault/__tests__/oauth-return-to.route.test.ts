@@ -74,19 +74,15 @@ const secretsVault = {
   getById: async () => ({ id: 'secret-1', key: 'weather_SIGNIN' }),
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['secretsVault'];
 
-const forget = vi.fn(async () => {});
-const connectionHealth = {
-  probe: async () => ({ manualName: '', status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
-  statusFor: async () => [],
-  forget,
-  forgetAll: async () => {},
-} as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['connectionHealth'];
+const connectionProbe = {
+  probe: async () => ({ status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+} as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['connectionProbe'];
 
 const deps = {
   secretsVault,
   toolManualService,
   accessControl,
-  connectionHealth,
+  connectionProbe,
   stateSecret: STATE_SECRET,
   publicBackendUrl: 'http://localhost:3000',
   publicFrontendUrl: FRONTEND,
@@ -226,25 +222,6 @@ describe('POST …/oauth/start — what gets signed into the state', () => {
 
 describe('GET /api/secrets/oauth/callback — where the browser lands', () => {
   it('returns to a signed same-origin path', async () => {
-    const base = await baseUrl();
-    const state = signState({ u: 'u1', i: 'secret-1', n: 'nonce', r: RETURN_TO });
-    expect(await callback(base, state)).toBe(`${FRONTEND}${RETURN_TO}#authorized=secret-1`);
-  });
-
-  it('invalidates the verdict the new sign-in supersedes', async () => {
-    // A fresh token replaces whatever the last probe concluded — including a
-    // `failed` from the expired session the user just signed in to fix, which
-    // would otherwise keep accusing a credential that no longer exists.
-    const base = await baseUrl();
-    const state = signState({ u: 'u1', i: 'secret-1', n: 'nonce', r: RETURN_TO });
-    await callback(base, state);
-    expect(forget).toHaveBeenCalledWith('u1', 'weather');
-  });
-
-  it('still lands the browser even when that invalidation fails', async () => {
-    // The sign-in itself SUCCEEDED; a bookkeeping failure must not send the
-    // user to an error page for it.
-    forget.mockRejectedValueOnce(new Error('db down'));
     const base = await baseUrl();
     const state = signState({ u: 'u1', i: 'secret-1', n: 'nonce', r: RETURN_TO });
     expect(await callback(base, state)).toBe(`${FRONTEND}${RETURN_TO}#authorized=secret-1`);

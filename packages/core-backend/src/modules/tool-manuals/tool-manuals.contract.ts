@@ -119,6 +119,27 @@ export interface ToolHealthCheck {
 }
 
 /**
+ * One manual, reduced to exactly what testing its credential requires.
+ *
+ * Server-internal, like {@link ToolHealthCheck} and for the same reason: both
+ * `healthCheck.headers` and `callTemplate` can carry a literal token.
+ */
+export interface ToolProbeTarget {
+  name: string;
+  type: ToolManualType;
+  /** `false` for a local-only tool this server is not the one that can reach it. */
+  remote?: boolean;
+  /** The probe the `.tool` declares, if any. */
+  healthCheck?: ToolHealthCheck;
+  /**
+   * The validated UTCP call template, or `null` when the manual doesn't produce
+   * a valid one. Only the `mcp` probe uses it — its handshake IS the test — but
+   * it is built here so the probe never has to walk the catalog again.
+   */
+  callTemplate: CallTemplate | null;
+}
+
+/**
  * For a `type: mcp` tool, what an admin must do to make the remote server
  * reachable — derived from OAuth auto-discovery, which a non-mcp tool has no
  * equivalent of (its needs are fully described by its declared `variables`):
@@ -310,15 +331,30 @@ export interface IToolManualService {
    */
   scopeOfVariable(effectiveKey: string): Promise<ToolVariableScope>;
   /**
-   * The credential probe a readable manual declares, or null.
+   * Everything the credential probe needs about one readable manual, resolved
+   * in a SINGLE catalog + ACL pass.
    *
-   * Deliberately NOT a field on {@link ToolManualSummary}: that type is
+   * One accessor rather than three because the probe needs three facts that all
+   * come from the same file — is it local-only, does it declare a health check,
+   * and what call template would reach it — and asking for them separately made
+   * one probe walk the catalog four times, building call templates for every
+   * manual in the workspace to use exactly one of them.
+   *
+   * Deliberately NOT reachable through {@link ToolManualSummary}: that type is
    * serialized straight to the browser by the tool endpoints, and a probe
    * carries `headers` — which a `.tool` author may write as a literal token
    * rather than a `${VAR}` ref. Probe config is internal to the server, so it
    * travels by its own accessor and never rides a public DTO.
+   *
+   * Addressed by SLUG, which is what the route has: resolving the slug here
+   * rather than making the caller map it to a name first is what reduces a
+   * probe to one pass. `ToolProbeTarget.name` carries the UTCP namespace back
+   * out, since that is what the probe's `${VAR}` lookups are keyed by.
+   *
+   * `null` when no such manual exists OR the caller can't read it — the two are
+   * indistinguishable on purpose, as everywhere else in this contract.
    */
-  healthCheckFor(userEmail: string, manualName: string): Promise<ToolHealthCheck | null>;
+  probeTargetFor(userEmail: string, slug: string): Promise<ToolProbeTarget | null>;
   /**
    * The per-user (`user`-scoped) variables a manual declares, each with the vault
    * key (`<manual>_<VAR>`) the caller's value is stored under, its bare name, and

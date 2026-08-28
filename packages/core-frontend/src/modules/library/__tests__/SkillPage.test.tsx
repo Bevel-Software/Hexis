@@ -148,7 +148,6 @@ const slackTool: ToolSecrets = {
   type: 'http',
   setup: null,
   canWrite: false,
-  health: null,
   variables: [
     {
       name: 'SIGNIN',

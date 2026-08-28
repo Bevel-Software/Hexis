@@ -46,7 +46,7 @@ import {
   McpOAuthDiscoveryService,
   registerBevelSecretsVariableLoader,
 } from '../modules/secrets-vault/index.js';
-import { ConnectionHealthService } from '../modules/connection-health/index.js';
+import { ConnectionProbeService } from '../modules/connection-probe/index.js';
 import { GitService } from '../modules/workflow/git/git.service.js';
 import { PullRequestService } from '../modules/workflow/git/pull-request.service.js';
 import { WorkspaceMutex } from '../modules/kb-fs/mutex.js';
@@ -170,7 +170,7 @@ export interface CoreServices {
    */
   kbDirName: string;
   secretsVaultService: DbSecretsVaultService;
-  connectionHealthService: ConnectionHealthService;
+  connectionProbeService: ConnectionProbeService;
   externalApiKeyService: ExternalApiKeyService;
   internalTokenService: InternalTokenService;
   mcpService: McpService;
@@ -564,15 +564,13 @@ export async function createCoreServices(
   // UTCP client can resolve `${VAR}` from the caller's secrets at tool-call time.
   registerBevelSecretsVariableLoader(secretsVaultService);
 
-  // Connection health: whether each tool's credential actually WORKS, as
+  // The credential probe: whether a tool's stored credential actually WORKS, as
   // distinct from whether one is stored. Built here — after the vault and the
   // tool catalog — because a probe needs both: the catalog to know what to
-  // call, the vault to resolve the credential to call it with.
-  const connectionHealthService = new ConnectionHealthService(
-    db,
-    toolManualService,
-    secretsVaultService,
-  );
+  // call, the vault to resolve the credential to call it with. Holds no state
+  // and takes no `db`: a verdict is returned to the caller that asked for it and
+  // never outlives their page (see `ProbeVerdict`).
+  const connectionProbeService = new ConnectionProbeService(toolManualService, secretsVaultService);
 
   // Zero-config OAuth for bare `type: mcp` `.tool`s: when the remote server
   // demands OAuth (MCP authorization spec), discover its authorization server,
@@ -847,7 +845,7 @@ export async function createCoreServices(
     createSyncedGroupsMaterializer,
     updateCheckService,
     secretsVaultService,
-    connectionHealthService,
+    connectionProbeService,
     externalApiKeyService,
     internalTokenService,
     mcpService,

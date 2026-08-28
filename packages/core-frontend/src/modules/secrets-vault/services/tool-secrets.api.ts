@@ -54,11 +54,13 @@ export interface ToolSetup {
  *  - `unverifiable` — we don't know: either the tool offers no way to test it,
  *                     or the attempt couldn't reach a verdict. `detail` says which.
  *
- * `null` on a tool that has never been probed, which the UI reads exactly like
- * `unverifiable` — "not checked yet" and "can't be checked" are both "we don't
- * know", and inventing a fourth badge for the difference would be noise.
+ * NOT stored anywhere. A verdict is returned to the page that asked for it and
+ * lives in that page's state until it is closed or reloaded — because a saved
+ * verdict is evidence with a date on it, and a credential can be revoked or
+ * expire between the check and the render. "Connected" therefore means "a call
+ * succeeded moments ago", which is the only claim a badge can honestly make.
  */
-export interface ToolHealth {
+export interface ProbeVerdict {
   status: 'ok' | 'failed' | 'unverifiable';
   detail: string | null;
   checkedAt: string;
@@ -74,8 +76,6 @@ export interface ToolSecrets {
   /** Whether the caller may set this tool's admin (shared) secrets. */
   canWrite: boolean;
   variables: ToolVarStatus[];
-  /** Last probe verdict; `null` when never probed. See {@link ToolHealth}. */
-  health: ToolHealth | null;
 }
 
 async function unwrap(res: Response, fallback: string): Promise<never> {
@@ -141,10 +141,10 @@ export async function setOAuthClientSecret(slug: string, varName: string, client
  * `status: 'failed'` rather than throwing; only a transport or access failure
  * rejects.
  */
-export async function checkToolConnection(slug: string): Promise<ToolHealth> {
+export async function checkToolConnection(slug: string): Promise<ProbeVerdict> {
   const res = await authFetch(`/api/secrets/tools/${encodeURIComponent(slug)}/check`, { method: 'POST' });
   if (!res.ok) await unwrap(res, "Couldn't test this connection.");
-  return ((await res.json()) as { health: ToolHealth }).health;
+  return ((await res.json()) as { verdict: ProbeVerdict }).verdict;
 }
 
 export const setAdminVar = (slug: string, varName: string, value: string, label?: string | null) =>

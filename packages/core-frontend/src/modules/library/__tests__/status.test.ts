@@ -20,7 +20,6 @@ function tool(overrides: Partial<ToolSecrets>): ToolSecrets {
     setup: null,
     canWrite: false,
     variables: [],
-    health: null,
     ...overrides,
   };
 }
@@ -31,16 +30,17 @@ function tool(overrides: Partial<ToolSecrets>): ToolSecrets {
  * the evidence of the first.
  */
 describe('toolStatus: stored vs working', () => {
-  const withKey = (health: ToolSecrets['health']) =>
+  const withKey = () =>
     tool({
-      health,
       variables: [
         { name: 'API_KEY', scope: 'user', label: null, key: 'slack_API_KEY', adminConfigured: false, userConfigured: true },
       ],
     });
 
   it('says Key saved — not Connected — when a key is stored but never tested', () => {
-    const s = toolStatus(withKey(null));
+    // No verdict at all is the DEFAULT everywhere but the tool page: nothing is
+    // stored, so a list built from saved values can never earn "Connected".
+    const s = toolStatus(withKey());
     expect(s.state).toBe('ok');
     expect(s.text).toBe('Key saved');
     // Green, because nothing needs a person; but the word claims only what is known.
@@ -48,21 +48,21 @@ describe('toolStatus: stored vs working', () => {
   });
 
   it('says Key saved when the probe could not reach a verdict', () => {
-    const s = toolStatus(withKey({ status: 'unverifiable', detail: 'Provider timed out.', checkedAt: new Date().toISOString() }));
+    const s = toolStatus(withKey(), { status: 'unverifiable', detail: 'Provider timed out.', checkedAt: new Date().toISOString() });
     expect(s.state).toBe('ok');
     expect(s.text).toBe('Key saved');
     expect(s.hint).toBe('Provider timed out.');
   });
 
   it('earns Connected only from a passing probe, and shows when it was checked', () => {
-    const s = toolStatus(withKey({ status: 'ok', detail: null, checkedAt: new Date().toISOString() }));
+    const s = toolStatus(withKey(), { status: 'ok', detail: null, checkedAt: new Date().toISOString() });
     expect(s.state).toBe('ok');
     expect(s.text).toBe('Connected');
     expect(s.hint).toMatch(/^Checked /);
   });
 
   it('goes red with the provider\'s own words when the credential is rejected', () => {
-    const s = toolStatus(withKey({ status: 'failed', detail: 'Invalid API key.', checkedAt: new Date().toISOString() }));
+    const s = toolStatus(withKey(), { status: 'failed', detail: 'Invalid API key.', checkedAt: new Date().toISOString() });
     expect(s.state).toBe('err');
     expect(s.text).toBe('Not working');
     expect(s.hint).toBe('Invalid API key.');
@@ -71,7 +71,6 @@ describe('toolStatus: stored vs working', () => {
   it('says Signed in rather than Key saved when the tool is oauth-backed', () => {
     const s = toolStatus(
       tool({
-        health: null,
         variables: [
           { name: 'SIGNIN', scope: 'user', label: null, key: 'slack_SIGNIN', adminConfigured: true, userConfigured: true, oauth: true, authorized: true },
         ],
@@ -81,18 +80,18 @@ describe('toolStatus: stored vs working', () => {
   });
 
   /**
-   * Setup outranks health. A stale `failed` from before the key was entered
-   * must never displace the thing actually in the way — "Needs a key from you"
-   * is the sentence the reader can act on.
+   * Setup outranks the verdict. A `failed` from before the key was entered must
+   * never displace the thing actually in the way — "Needs a key from you" is the
+   * sentence the reader can act on.
    */
   it('names the missing key rather than a stale failure', () => {
     const s = toolStatus(
       tool({
-        health: { status: 'failed', detail: 'Invalid API key.', checkedAt: new Date().toISOString() },
         variables: [
           { name: 'API_KEY', scope: 'user', label: null, key: 'slack_API_KEY', adminConfigured: false, userConfigured: false },
         ],
       }),
+      { status: 'failed', detail: 'Invalid API key.', checkedAt: new Date().toISOString() },
     );
     expect(s.state).toBe('warn');
     expect(s.text).toBe('Needs a key from you');
@@ -100,12 +99,12 @@ describe('toolStatus: stored vs working', () => {
 
   it('says No key needed for a tool that asks for nothing', () => {
     // "Key saved" would name a key the user was never asked for.
-    expect(toolStatus(tool({ health: null, variables: [] })).text).toBe('No key needed');
+    expect(toolStatus(tool({ variables: [] })).text).toBe('No key needed');
   });
 
   /** An unverified tool blocks nothing: it needs no person, so a skill is Ready. */
   it('leaves a skill Ready when its tools are merely unverified', () => {
-    expect(skillStatus([withKey(null)]).state).toBe('ok');
+    expect(skillStatus([withKey()]).state).toBe('ok');
   });
 });
 

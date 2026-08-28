@@ -10,7 +10,7 @@ import {
   type ISecretsVaultService,
 } from './secrets-vault.contract.js';
 import type { IToolManualService, ToolManualSummary, ToolVariable } from '../tool-manuals/tool-manuals.contract.js';
-import type { IConnectionHealthService } from '../connection-health/connection-health.contract.js';
+import type { IConnectionProbeService } from '../connection-probe/connection-probe.contract.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
@@ -26,7 +26,7 @@ export interface SecretsVaultRoutesDeps {
    * Verdicts of the last credential PROBE per tool — what makes the difference
    * between "a key is stored" and "the key works" visible to the UI.
    */
-  connectionHealth: IConnectionHealthService;
+  connectionProbe: IConnectionProbeService;
   /** HMAC secret for signing the OAuth `state` (reuse the connector state secret). */
   stateSecret: string;
   /** Public base URL of THIS backend — builds the OAuth redirect URI. */
@@ -75,7 +75,7 @@ export function isSafeReturnPath(returnTo: unknown): returnTo is string {
  * `req.userId` — secrets are private per user. Mounted behind the JWT middleware.
  */
 export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.Router {
-  const { secretsVault, toolManualService, accessControl, connectionHealth } = deps;
+  const { secretsVault, toolManualService, accessControl, connectionProbe } = deps;
   const router = express.Router();
   // A FUNCTION, not a constant. Routers are constructed at boot, and on a
   // deployment configured through the setup screen the branch model does not
@@ -89,24 +89,6 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
   // The vault key = the exact key UTCP looks the var up under (doubles underscores
   // in the manual namespace), so storage and resolution agree for snake_case ids.
   const varKey = (manualName: string, varName: string) => utcpNamespacedKey(manualName, varName);
-
-  /**
-   * Invalidate a stored probe verdict AFTER the credential write that made it
-   * stale — best-effort, never fatal.
-   *
-   * The write has already succeeded by the time this runs, so letting a
-   * bookkeeping failure escape would answer a saved credential with a 500 and
-   * invite the user to save it again. A missed invalidation is self-correcting
-   * (the next probe overwrites it); a spurious 500 on a successful save is not.
-   * Same reasoning, and now the same shape, as the OAuth callback's.
-   */
-  const invalidateHealth = async (fn: () => Promise<void>, what: string): Promise<void> => {
-    try {
-      await fn();
-    } catch (err) {
-      console.warn(`[secrets] health invalidation after ${what} failed:`, err instanceof Error ? err.message : String(err));
-    }
-  };
 
   /** Find an accessible (readable) manual by slug + its DECLARED variable, or null. */
   async function findManualVar(
@@ -217,12 +199,6 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       if (pathFilter) manuals = manuals.filter((m) => m.path === pathFilter);
 
       const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
-      // One read for the whole listing rather than per tool: the badge on every
-      // card needs it, so N round-trips would be N per page render.
-      const healthRows = await connectionHealth.statusFor(userId, manuals.map((m) => m.name));
-      const healthByManual = new Map(
-        healthRows.map((h) => [h.manualName, { status: h.status, detail: h.detail, checkedAt: h.checkedAt }]),
-      );
       const status = await secretsVault.statusFor(userId, allKeys);
       const statusByKey = new Map(status.map((s) => [s.key, s]));
 
@@ -256,12 +232,6 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
               missingScopes: missing,
             };
           }),
-          // The verdict of the last PROBE, which is a different question from
-          // everything above it: those fields say what is stored, this says
-          // whether it works. Absent when the tool was never probed — the UI
-          // reads a missing verdict the same way it reads `unverifiable`, since
-          // "not checked yet" and "can't be checked" are both "we don't know".
-          health: healthByManual.get(m.name) ?? null,
         })),
       );
       res.json({ tools });
@@ -376,7 +346,6 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       // A shared value changed, so EVERY user's verdict is now about the old
       // one. Clearing beats leaving them stale: "not checked yet" is honest,
       // a verdict about a replaced key is not.
-      await invalidateHealth(() => connectionHealth.forgetAll(found.manual.name), 'shared var write');
       res.status(201).json({ secret });
     } catch (err) {
       mapError(err, res, 'set admin var');
@@ -404,7 +373,6 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       // Drop the stale verdict rather than probing inline: the caller follows
       // this with an explicit check, which keeps the save fast and gives the
       // UI a "Checking…" state to show instead of a frozen dialog.
-      await invalidateHealth(() => connectionHealth.forget(userId, found.manual.name), 'user var write');
       res.status(201).json({ secret });
     } catch (err) {
       mapError(err, res, 'set user var');
@@ -464,7 +432,6 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       // A new client secret can invalidate every token minted under the old
       // one, so every user's verdict is now about a configuration that no
       // longer exists — the same reasoning as a shared key changing.
-      await invalidateHealth(() => connectionHealth.forgetAll(found.manual.name), 'client secret write');
       res.status(201).json({ ok: true });
     } catch (err) {
       mapError(err, res, 'set oauth client secret');
@@ -532,7 +499,6 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         return void res.status(403).json({ error: 'You need write access to this tool to remove its shared secrets.' });
       }
       await secretsVault.removeShared(varKey(found.manual.name, found.variable.name));
-      await invalidateHealth(() => connectionHealth.forgetAll(found.manual.name), 'shared var delete');
       res.status(204).end();
     } catch (err) {
       mapError(err, res, 'delete admin var');
@@ -547,7 +513,6 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       const found = await findManualVar(email, req.params.slug, req.params.var);
       if (!found) return void res.status(404).json({ error: 'Tool or variable not found' });
       await secretsVault.removeUserByKey(userId, varKey(found.manual.name, found.variable.name));
-      await invalidateHealth(() => connectionHealth.forget(userId, found.manual.name), 'user var delete');
       res.status(204).end();
     } catch (err) {
       mapError(err, res, 'delete user var');
@@ -557,9 +522,9 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
   /**
    * Probe one tool's credential NOW and return the verdict.
    *
-   * A POST because it has an effect on the world — it calls the provider and
-   * overwrites the stored verdict — and because browsers and proxies are free
-   * to cache a GET, which for a health check would defeat the point.
+   * A POST because it has an effect on the world — it makes a real
+   * authenticated call to the provider — and because browsers and proxies are
+   * free to cache a GET, which for a freshness check would defeat the point.
    *
    * A probe outcome is never an HTTP error: a rejected credential is a
    * successful check that found a problem, so it comes back 200 with
@@ -570,11 +535,9 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
     const email = req.userEmail;
     if (!userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
     try {
-      const manuals = await toolManualService.listAccessible(email);
-      const manual = manuals.find((m) => m.slug === req.params.slug);
-      if (!manual) return void res.status(404).json({ error: 'Tool not found' });
-      const health = await connectionHealth.probe(userId, email, manual.name);
-      res.json({ health });
+      const verdict = await connectionProbe.probe(userId, email, req.params.slug);
+      if (!verdict) return void res.status(404).json({ error: 'Tool not found' });
+      res.json({ verdict });
     } catch (err) {
       mapError(err, res, 'check tool connection');
     }
@@ -589,25 +552,8 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
  * caller's identity rides in the signed `state`.
  */
 export function createSecretsVaultPublicRoutes(deps: SecretsVaultRoutesDeps): express.Router {
-  const { secretsVault, toolManualService, connectionHealth } = deps;
+  const { secretsVault } = deps;
   const router = express.Router();
-
-  /**
-   * Which manual an oauth secret belongs to, by matching its stored key against
-   * the catalog's namespaced keys. Matched rather than parsed: `utcpNamespacedKey`
-   * DOUBLES underscores in the manual name, so splitting `<manual>_<VAR>` back
-   * apart is ambiguous for any manual whose name contains one. Comparing against
-   * keys built the same way is exact.
-   */
-  async function forgetHealthForSecret(userId: string, secretId: string): Promise<void> {
-    const secret = await secretsVault.getById(userId, secretId);
-    if (!secret) return;
-    const manuals = await toolManualService.listAllSummaries();
-    const owner = manuals.find((m) =>
-      (m.variables ?? []).some((v) => utcpNamespacedKey(m.name, v.name) === secret.key),
-    );
-    if (owner) await connectionHealth.forget(userId, owner.name);
-  }
 
   router.get('/secrets/oauth/callback', async (req, res) => {
     const code = typeof req.query.code === 'string' ? req.query.code : '';
@@ -631,14 +577,6 @@ export function createSecretsVaultPublicRoutes(deps: SecretsVaultRoutesDeps): ex
 
     try {
       await secretsVault.completeOAuth(state.u, state.i, code, redirectUriFor(deps.publicBackendUrl));
-      // A new token supersedes whatever the last probe concluded — including a
-      // `failed` from the expired session the user just signed in to replace,
-      // which would otherwise keep accusing a credential that no longer exists.
-      // Best-effort: the sign-in itself SUCCEEDED, so a bookkeeping failure here
-      // must not redirect the user to an error page.
-      await forgetHealthForSecret(state.u, state.i).catch((err) =>
-        console.warn('[secrets] health invalidation after oauth failed:', err instanceof Error ? err.message : String(err)),
-      );
       back(`authorized=${encodeURIComponent(state.i)}`, dest);
     } catch (err) {
       console.error('[secrets] oauth callback failed:', err instanceof Error ? err.message : String(err));

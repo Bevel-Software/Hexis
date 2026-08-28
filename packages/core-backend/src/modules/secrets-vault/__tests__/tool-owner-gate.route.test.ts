@@ -74,14 +74,9 @@ const accessControl = {
   canWrite: async (_ws: string, email: string, path: string) => email === WRITER && path === TOOL_PATH,
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['accessControl'];
 
-const forget = vi.fn(async () => {});
-const forgetAll = vi.fn(async () => {});
-const connectionHealth = {
-  probe: async () => ({ manualName: '', status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
-  statusFor: async () => [],
-  forget,
-  forgetAll,
-} as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['connectionHealth'];
+const connectionProbe = {
+  probe: async () => ({ status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+} as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['connectionProbe'];
 
 let httpServer: HttpServer | undefined;
 
@@ -103,7 +98,7 @@ async function baseUrlAs(email: string): Promise<string> {
       // write's contract here, so the tests below assert it happened. Stubbing
       // it away would let the invalidation be deleted from the routes with
       // every test still green.
-      connectionHealth,
+      connectionProbe,
       stateSecret: 'test-secret',
       publicBackendUrl: 'http://localhost:3000',
       publicFrontendUrl: 'http://localhost:5173',
@@ -122,8 +117,6 @@ afterEach(async () => {
   putSharedStatic.mockClear();
   putSharedOAuthClientSecret.mockClear();
   putStatic.mockClear();
-  forget.mockClear();
-  forgetAll.mockClear();
 });
 
 describe('tool owner gate — shared config requires WRITE on the `.tool` file', () => {
@@ -136,15 +129,12 @@ describe('tool owner gate — shared config requires WRITE on the `.tool` file',
     });
     expect(res.status).toBe(201);
     expect(putSharedStatic).toHaveBeenCalledWith(expect.objectContaining({ key: 'weather_SHARED_KEY' }));
-    // A SHARED value changed, so every user's verdict is now about the old one.
-    expect(forgetAll).toHaveBeenCalledWith('weather');
-    expect(forget).not.toHaveBeenCalled();
   });
 
-  it("a per-user write clears only that user's verdict, not everyone's", async () => {
-    // The asymmetry matters: one person's key says nothing about anyone else's,
-    // so clearing every user's verdict here would blank the whole org's badges
-    // because one person retyped their own key.
+  it('a mere READER may still set their OWN value for the same tool', async () => {
+    // The gate is on the SHARED value only. One person's own key says nothing
+    // about anyone else's, so needing write access to the `.tool` file to type
+    // your own credential would lock every reader out of the tools they can see.
     const base = await baseUrlAs(READER);
     const res = await fetch(`${base}/api/secrets/tools/weather/vars/MY_KEY/user`, {
       method: 'PUT',
@@ -153,8 +143,7 @@ describe('tool owner gate — shared config requires WRITE on the `.tool` file',
     });
     expect(res.status).toBe(201);
     expect(putStatic).toHaveBeenCalledWith(expect.objectContaining({ key: 'weather_MY_KEY' }));
-    expect(forget).toHaveBeenCalledWith(`id-${READER}`, 'weather');
-    expect(forgetAll).not.toHaveBeenCalled();
+    expect(putSharedStatic).not.toHaveBeenCalled();
   });
 
   it('a non-writer is refused (403), even though they can READ the tool', async () => {
@@ -166,8 +155,6 @@ describe('tool owner gate — shared config requires WRITE on the `.tool` file',
     });
     expect(res.status).toBe(403);
     expect(putSharedStatic).not.toHaveBeenCalled();
-    // Nothing was written, so nothing is stale.
-    expect(forgetAll).not.toHaveBeenCalled();
   });
 
   it('a writer of the file sets the OAuth client secret, pinned to the declared provider', async () => {
@@ -187,9 +174,6 @@ describe('tool owner gate — shared config requires WRITE on the `.tool` file',
         provider: expect.objectContaining({ clientId: 'client-1', pkce: true, resource: undefined }),
       }),
     );
-    // A replaced client secret can invalidate every token minted under the old
-    // one, so it invalidates like any other shared credential change.
-    expect(forgetAll).toHaveBeenCalledWith('weather');
   });
 
   it('pins the declaration\'s PKCE opt-out and resource indicator with the secret', async () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -7,7 +7,11 @@ import {
   WorkspaceContext,
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
-import type { ToolSecrets, ToolSetup } from '../../secrets-vault/services/tool-secrets.api';
+import {
+  checkToolConnection,
+  type ToolSecrets,
+  type ToolSetup,
+} from '../../secrets-vault/services/tool-secrets.api';
 
 /**
  * The section frame: the Secrets deep link, the setup banner's three audiences,
@@ -20,17 +24,12 @@ vi.mock('../../secrets-vault/services/tool-secrets.api', () => ({
   setUserVar: vi.fn(),
   deleteAdminVar: vi.fn(),
   setOAuthClientSecret: vi.fn(),
+  checkToolConnection: vi.fn(),
 }));
 vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.fn() }));
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolConnectionSection } from '../components/tool-page/ToolConnectionSection';
-import { resetProbeQueueForTests } from '../components/tool-page/probe-queue';
-
-// The probe queue outlives the component by design (a save unmounts it), which
-// also means it outlives a TEST unless cleared.
-beforeEach(() => resetProbeQueueForTests());
-
 function workspace(kbDirName: string | null): WorkspaceContextValue {
   return { workspaceId: 'target-company-state', kbDirName } as unknown as WorkspaceContextValue;
 }
@@ -41,8 +40,8 @@ function LocationProbe() {
   return <div aria-label="pathname">{location.pathname}</div>;
 }
 
-// The section reads the signed-in identity to scope its probe queue — two
-// people sharing a browser tab must not queue behind each other.
+// The rendered tree reaches for the signed-in identity, so the provider has to
+// be present even though this section no longer reads it itself.
 const AUTH = {
   user: { email: 'user@x.com', name: 'User' },
   token: 't',
@@ -73,7 +72,6 @@ function tool(over: Partial<ToolSecrets> = {}): ToolSecrets {
     setup: null,
     canWrite: false,
     variables: [],
-    health: null,
     ...over,
   };
 }
@@ -306,4 +304,93 @@ describe('ToolConnectionSection', () => {
       expect(screen.queryByRole('status')).toBeNull();
     },
   );
+
+  /**
+   * The word "Connected" and the evidence for it.
+   *
+   * Nothing stores a verdict, so this component's own state is the only place
+   * one exists — which is exactly why the claim can be trusted: it cannot
+   * outlive the page that watched the call succeed.
+   */
+  describe('the verdict', () => {
+    const settled = () =>
+      tool({
+        variables: [
+          {
+            name: 'API_KEY',
+            scope: 'user',
+            label: null,
+            key: 'github_API_KEY',
+            adminConfigured: true,
+            userConfigured: true,
+          },
+        ],
+      });
+
+    it('says Key saved — never Connected — before anything has been tested', () => {
+      renderSection(settled());
+      expect(screen.getByTestId('tool-health')).toHaveTextContent('Key saved');
+    });
+
+    it('earns Connected from a passing probe, and only then', async () => {
+      vi.mocked(checkToolConnection).mockResolvedValue({
+        status: 'ok',
+        detail: null,
+        checkedAt: new Date().toISOString(),
+      });
+      renderSection(settled());
+
+      fireEvent.click(screen.getByRole('button', { name: 'Test connection: github' }));
+
+      await waitFor(() => expect(screen.getByTestId('tool-health')).toHaveTextContent('Connected'));
+      expect(checkToolConnection).toHaveBeenCalledWith('github');
+    });
+
+    it("goes red with the provider's own words when the credential is rejected", async () => {
+      vi.mocked(checkToolConnection).mockResolvedValue({
+        status: 'failed',
+        detail: 'Invalid API key.',
+        checkedAt: new Date().toISOString(),
+      });
+      renderSection(settled());
+
+      fireEvent.click(screen.getByRole('button', { name: 'Test connection: github' }));
+
+      // A rejected credential needs a person, so it escalates from the quiet
+      // line to a banner.
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Invalid API key.'));
+    });
+
+    it('keeps the button disabled while the probe is in flight', async () => {
+      let release: (v: unknown) => void = () => {};
+      vi.mocked(checkToolConnection).mockReturnValue(
+        new Promise((r) => {
+          release = r;
+        }) as ReturnType<typeof checkToolConnection>,
+      );
+      renderSection(settled());
+      const button = screen.getByRole('button', { name: 'Test connection: github' });
+
+      fireEvent.click(button);
+
+      // The in-flight state lives beside the button precisely so it survives
+      // the refetch a save triggers — a remount would re-enable it mid-probe.
+      await waitFor(() => expect(screen.getByRole('button', { name: /Test connection/ })).toBeDisabled());
+      expect(screen.getByRole('button', { name: /Test connection/ })).toHaveTextContent('Testing…');
+      release({ status: 'ok', detail: null, checkedAt: new Date().toISOString() });
+      await waitFor(() => expect(screen.getByRole('button', { name: /Test connection/ })).toBeEnabled());
+    });
+
+    it('does not claim a verdict when the CHECK itself failed', async () => {
+      // Our own network trouble is not evidence about someone else's credential.
+      vi.mocked(checkToolConnection).mockRejectedValue(new Error('Network down'));
+      const onError = vi.fn();
+      render(wrap(<ToolConnectionSection tool={settled()} onChanged={vi.fn()} onError={onError} />));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Test connection: github' }));
+
+      await waitFor(() => expect(onError).toHaveBeenCalledWith('Network down'));
+      expect(screen.getByTestId('tool-health')).toHaveTextContent('Key saved');
+    });
+  });
 });

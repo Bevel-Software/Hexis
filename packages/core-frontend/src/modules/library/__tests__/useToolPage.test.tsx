@@ -33,7 +33,6 @@ const GITHUB: ToolSecrets = {
   setup: null,
   canWrite: false,
   variables: [],
-  health: null,
 };
 
 const DETAIL: ToolManualDetail = {

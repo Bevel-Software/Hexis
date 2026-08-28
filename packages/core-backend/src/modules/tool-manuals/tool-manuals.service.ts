@@ -46,6 +46,7 @@ import {
   type ToolManualType,
   type ToolVariable,
   type ToolHealthCheck,
+  type ToolProbeTarget,
   type ToolVariableScope,
   type ToolVariableOAuth,
 } from './tool-manuals.contract.js';
@@ -243,9 +244,23 @@ export class ToolManualService implements IToolManualService {
    * Access-gated through `accessibleManuals` like every other read, so this
    * cannot become a way to learn what a `.tool` you can't see declares.
    */
-  async healthCheckFor(userEmail: string, manualName: string): Promise<ToolHealthCheck | null> {
+  async probeTargetFor(userEmail: string, slug: string): Promise<ToolProbeTarget | null> {
     const manuals = await this.accessibleManuals(userEmail);
-    return manuals.find((m) => m.name === manualName)?.healthCheck ?? null;
+    const m = manuals.find((x) => x.slug === slug);
+    if (!m) return null;
+    // Built here, from the manual already in hand. `toManualCallTemplates`
+    // would validate every manual in the workspace to hand back the one we
+    // want; an invalid template for THIS manual is not an error, just a probe
+    // that has nothing to dial (the caller reports it as unverifiable).
+    let callTemplate: CallTemplate | null = null;
+    try {
+      callTemplate = callTemplateSerializer.validateDict(this.buildCallTemplateDict(m));
+    } catch (err) {
+      console.warn(
+        `[tool-manuals] no valid call template for "${m.path}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return { name: m.name, type: m.type, remote: m.remote, healthCheck: m.healthCheck, callTemplate };
   }
 
   async toManualCallTemplates(userEmail: string, opts?: { remoteOnly?: boolean }): Promise<CallTemplate[]> {
@@ -987,6 +1002,17 @@ function normalizeHealthCheck(
   if (e.headers !== undefined) {
     if (!e.headers || typeof e.headers !== 'object' || Array.isArray(e.headers)) {
       throw new Error('`healthCheck.headers` must be an object');
+    }
+    // Check the VALUES, not just the container. YAML types `Authorization: 1234`
+    // as a number, and the cast alone let it through to the probe, where
+    // substitution calls `.matchAll` on it — surfacing `text.matchAll is not a
+    // function` to the user as the reason their credential is unhealthy. Caught
+    // at parse time, next to `url` and `method`, it reads as what it is: a
+    // mistake in the `.tool` file.
+    for (const [k, v] of Object.entries(e.headers as Record<string, unknown>)) {
+      if (typeof v !== 'string') {
+        throw new Error(`\`healthCheck.headers.${k}\` must be a string (quote it if it looks like a number)`);
+      }
     }
     check.headers = e.headers as Record<string, string>;
   } else if (manualHeaders) {

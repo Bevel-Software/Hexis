@@ -1,4 +1,4 @@
-import type { ToolHealth, ToolSecrets, ToolVarStatus } from '../../secrets-vault/services/tool-secrets.api';
+import type { ProbeVerdict, ToolSecrets, ToolVarStatus } from '../../secrets-vault/services/tool-secrets.api';
 
 /**
  * Status derivation for the Library. Everything the cards, gems and loadout
@@ -36,14 +36,32 @@ export interface AttentionStatus {
   hint?: string;
 }
 
-/** Stored, and PROVEN to work by a real call. */
+/**
+ * Stored, and PROVEN to work by a real call.
+ *
+ * Reachable ONLY from a passing probe verdict. Nothing derived from what is
+ * merely stored may return this — that inference is the entire bug.
+ */
 const OK: AttentionStatus = { state: 'ok', text: 'Connected' };
+
+/**
+ * In place, and untested — all a STORED value can ever support.
+ *
+ * Two words rather than one because they describe two different things the
+ * reader did. Green, because nothing here needs a person.
+ */
+const SIGNED_IN: AttentionStatus = { state: 'ok', text: 'Signed in' };
+const KEY_SAVED: AttentionStatus = { state: 'ok', text: 'Key saved' };
 
 /** Severity order for aggregation: broken sign-in beats anything merely unset. */
 const RANK: Record<GemState, number> = { ok: 0, warn: 1, err: 2 };
 
 /**
- * Two states, and the words for them: `Connected`, or `Needs <the thing>`.
+ * What ONE variable is: in place, or `Needs <the thing>`.
+ *
+ * Never `Connected`. This reads the vault, which knows only whether a value
+ * exists — so the strongest true statement it can make is that something was
+ * saved or signed into. Only a probe earns the other word.
  *
  * There is deliberately no middle. "Not set up yet", "Sign in again to keep
  * this working" and "Needs your sign-in" were three ways of saying one thing —
@@ -63,12 +81,12 @@ function varStatus(v: ToolVarStatus, canWrite: boolean): AttentionStatus {
     if (!v.adminConfigured) return notSetUp;
     if (v.authorized && v.needsReauth) return { state: 'err', text: 'Needs signing in again' };
     if (!v.authorized) return { state: 'warn', text: 'Needs your sign-in' };
-    return OK;
+    return SIGNED_IN;
   }
   if (v.scope === 'user') {
-    return v.userConfigured ? OK : { state: 'warn', text: 'Needs a key from you' };
+    return v.userConfigured ? KEY_SAVED : { state: 'warn', text: 'Needs a key from you' };
   }
-  return v.adminConfigured ? OK : notSetUp;
+  return v.adminConfigured ? KEY_SAVED : notSetUp;
 }
 
 /**
@@ -108,16 +126,15 @@ function agoText(iso: string): string {
  * give us a key, they signed in, and telling them a key was saved is a small
  * lie in a component whose entire job is to stop telling small lies.
  */
-function healthStatus(tool: ToolSecrets): AttentionStatus {
-  const health: ToolHealth | null = tool.health;
-  if (health?.status === 'ok') {
-    return { ...OK, hint: `Checked ${agoText(health.checkedAt)}.` };
+function healthStatus(tool: ToolSecrets, verdict?: ProbeVerdict | null): AttentionStatus {
+  if (verdict?.status === 'ok') {
+    return { ...OK, hint: `Checked ${agoText(verdict.checkedAt)}.` };
   }
-  if (health?.status === 'failed') {
+  if (verdict?.status === 'failed') {
     return {
       state: 'err',
       text: 'Not working',
-      hint: health.detail ?? 'The provider rejected this credential.',
+      hint: verdict.detail ?? 'The provider rejected this credential.',
     };
   }
   // The word has to match what the user actually did. A tool with no variables
@@ -130,7 +147,7 @@ function healthStatus(tool: ToolSecrets): AttentionStatus {
   return {
     state: 'ok',
     text,
-    hint: health?.detail ?? "Not verified — this tool hasn't been tested yet.",
+    hint: verdict?.detail ?? "Not verified — this tool hasn't been tested yet.",
   };
 }
 
@@ -139,17 +156,23 @@ function healthStatus(tool: ToolSecrets): AttentionStatus {
  *
  * Setup comes FIRST: a tool still missing a key is `Needs a key from you`, never
  * `Not working`. Both are unhealthy, but only one names something the user can
- * act on, and a stale probe verdict from before the key was entered must not
- * outrank the thing actually in the way. Only once every variable is provided
- * does the question become whether what was provided works.
+ * act on, and a probe verdict from before the key was entered must not outrank
+ * the thing actually in the way. Only once every variable is provided does the
+ * question become whether what was provided works.
+ *
+ * `verdict` is the result of a probe the CALLER just ran and is holding, so only
+ * the tool page passes one. Every other surface — the library cards, the skill
+ * page's tool list — renders the untested green, because nothing there has
+ * tested anything: no verdict is stored, so claiming `Connected` on a list built
+ * from what is merely saved is the exact lie this module exists to stop.
  */
-export function toolStatus(tool: ToolSecrets): AttentionStatus {
+export function toolStatus(tool: ToolSecrets, verdict?: ProbeVerdict | null): AttentionStatus {
   let worst: AttentionStatus | null = null;
   for (const v of tool.variables) {
     const s = varStatus(v, tool.canWrite);
     if (s.state !== 'ok' && (worst === null || RANK[s.state] > RANK[worst.state])) worst = s;
   }
-  return worst ?? healthStatus(tool);
+  return worst ?? healthStatus(tool, verdict);
 }
 
 /** Per-variable status rows for the integration detail dialog. */

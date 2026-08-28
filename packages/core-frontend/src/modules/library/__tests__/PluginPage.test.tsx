@@ -96,7 +96,6 @@ const connectedTool = (over: Partial<ToolSecrets> = {}): ToolSecrets => ({
   setup: null,
   canWrite: false,
   variables: [],
-  health: null,
   ...over,
 });
 
@@ -116,7 +115,6 @@ const unsetTool = (over: Partial<ToolSecrets> = {}): ToolSecrets =>
         userConfigured: false,
       },
     ],
-    health: null,
     ...over,
   });
 

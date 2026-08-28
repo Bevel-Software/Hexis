@@ -72,7 +72,6 @@ const tool = (over: Partial<ToolSecrets>): ToolSecrets => ({
   setup: null,
   canWrite: false,
   variables: [],
-  health: null,
   ...over,
 });
 

@@ -3,13 +3,15 @@ import { Link, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
-import { useAuth } from '../../../auth/state/auth.context';
 import { kbFileUrl } from '../../../workspace/routing/kb-routes';
-import { checkToolConnection, type ToolSecrets } from '../../../secrets-vault/services/tool-secrets.api';
+import {
+  checkToolConnection,
+  type ProbeVerdict,
+  type ToolSecrets,
+} from '../../../secrets-vault/services/tool-secrets.api';
 import { pathForTool } from '../../routes/library-paths';
 import { toolStatus, toolVariableStatuses } from '../../utils/status';
 import { ToolVarRow } from './ToolVarRow';
-import { queueProbe } from './probe-queue';
 
 /**
  * "Your connection" — what this tool still needs from you, and (if you own it)
@@ -34,10 +36,18 @@ export interface ToolConnectionSectionProps {
 export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnectionSectionProps) {
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
-  const { user } = useAuth();
   /** `{varName, n}` — bumping `n` opens that variable's editor from the banner. */
   const [edit, setEdit] = useState<{ name: string; n: number }>({ name: '', n: 0 });
   const [checking, setChecking] = useState(false);
+  /**
+   * The last probe's answer, and the ONLY place one exists.
+   *
+   * Nothing persists a verdict, so this state IS the evidence behind the word
+   * "Connected" — which is why the claim can be trusted: it cannot outlive the
+   * page that watched the call succeed. Cleared whenever the credential changes,
+   * because a verdict about the old key says nothing about the new one.
+   */
+  const [verdict, setVerdict] = useState<ProbeVerdict | null>(null);
 
   const setupKind = tool.setup?.kind ?? null;
   // Not just "kind is oauth-manual": once the owner declares the provider and
@@ -104,7 +114,7 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
    * question nobody has reached yet. Once nothing is missing, this is the only
    * remaining question — and the one the badge used to answer by guessing.
    */
-  const health = toolStatus(tool);
+  const health = toolStatus(tool, verdict);
   // Every variable genuinely provided — NOT merely `missing.length === 0`, which
   // excludes a pending sign-in on a configured provider. A tool nobody has
   // signed into yet has no credential to test, and saying so would put a health
@@ -121,34 +131,37 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
     !setupUnfinished && toolVariableStatuses(tool).every(({ status }) => status.state === 'ok');
 
   /**
-   * Scoped to the viewer, not just the tool. The queue outlives this component
-   * by design, and logging out only clears auth state — it does not reload the
-   * page — so a bare slug key would make the next person to sign in wait behind
-   * the previous one's pending probe.
+   * Run a probe and keep its answer.
+   *
+   * `checking` lives here, beside the button it disables, so it is still true
+   * while the request is in flight — the reason a save no longer blanks the
+   * page (see `useToolPage`): a remount would drop both this flag and the
+   * verdict, leaving an enabled "Test connection" over a probe already running.
    */
-  const queueKey = `${user?.email ?? 'anon'}:${tool.slug}`;
-
   async function runCheck() {
-    // Set BEFORE enqueueing, not inside the probe: while this call is waiting
-    // its turn behind an earlier probe, nothing has started yet — and an
-    // enabled "Test connection" button during that wait invites a second one.
     setChecking(true);
     try {
-      await queueProbe(queueKey, doCheck);
+      setVerdict(await checkToolConnection(tool.slug));
+    } catch (err) {
+      // A rejected credential resolves with `status: 'failed'`; only a
+      // transport or access failure lands here, and that is not a verdict about
+      // the credential — so the badge keeps saying "untested" rather than
+      // inventing a result from our own network trouble.
+      setVerdict(null);
+      onError(err instanceof Error ? err.message : "Couldn't test this connection.");
     } finally {
       setChecking(false);
     }
   }
 
-  async function doCheck() {
-    try {
-      await checkToolConnection(tool.slug);
-      // Refetch rather than patching local state: the verdict belongs to the
-      // tool record the whole page reads from, so one source stays one source.
-      onChanged();
-    } catch (err) {
-      onError(err instanceof Error ? err.message : "Couldn't test this connection.");
-    }
+  /**
+   * A credential was just saved: whatever the last probe concluded was about
+   * the key it replaced, so drop it and test the new one straight away — while
+   * the user still has it to hand, which is when a wrong key is cheapest to fix.
+   */
+  function onSaved() {
+    setVerdict(null);
+    void runCheck();
   }
 
   return (
@@ -284,7 +297,7 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
               // to hand, which is when a typo is cheapest to fix. Waiting for
               // an agent to trip over it is how the wrong key got to look
               // connected in the first place.
-              onSaved={() => void runCheck()}
+              onSaved={onSaved}
               onError={onError}
             />
           ))}

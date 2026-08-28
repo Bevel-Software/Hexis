@@ -193,7 +193,10 @@ export function SecretsPage() {
                     {`\${${s.key}}`}
                   </code>
                   <Badge tone={s.authorized ? 'ok' : 'wait'} size="xs" className="shrink-0">
-                    {s.authorized ? 'Connected' : 'Needs your sign-in'}
+                    {/* "Signed in", not "Connected": a stored token is the whole
+                        of what this page knows, and only a probe that called the
+                        provider may claim the connection works. */}
+                    {s.authorized ? 'Signed in' : 'Needs your sign-in'}
                   </Badge>
                   <span className="ml-auto flex shrink-0 items-center gap-1.5">
                     <Button variant="outline" size="tiny" onClick={() => void onAuthorize(s.id)}>
