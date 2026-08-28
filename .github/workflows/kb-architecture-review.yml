@@ -437,9 +437,12 @@ jobs:
                   # previous run's page, and nothing distinguishes the two.
                   # The page names the head it reviewed in a meta tag; require
                   # this run's head there. Read only the top of the file — the
-                  # tag is in <head>, the page can be long. The needle is built
-                  # here and handed to jq as an argument, never as jq syntax.
-                  needle="name=\"bevel-review-head\" content=\"$HEAD_SHA\""
+                  # tag is in <head>, the page can be long. The needle is the
+                  # WHOLE tag exactly as the template emits it — an attribute
+                  # fragment alone would match the same text quoted anywhere
+                  # in the page — built here and handed to jq as an argument,
+                  # never as jq syntax.
+                  needle="<meta name=\"bevel-review-head\" content=\"$HEAD_SHA\">"
                   read_args=$(jq -n --arg b "$branch" --arg p "$path" --arg s "$sid" \
                     '{branch: $b, path: $p, sessionId: $s, limit: 4000}')
                   rcode=$(curl -sS -m 20 -o page.json -w '%{http_code}' -X POST \
