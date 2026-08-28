@@ -68,11 +68,18 @@ export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
   // pdf.js 6 dropped `PDFDocumentProxy.destroy()`, and destroying the task
   // frees the document (and its pages) with it — the shape the viewer uses.
   let task: Awaited<ReturnType<typeof openPdf>>;
-  let doc: Awaited<typeof task.promise>;
   try {
     task = await openPdf(bytes);
+  } catch (err) {
+    return { ok: false, message: `could not be parsed as a PDF (${(err as Error).message})` };
+  }
+  let doc: Awaited<typeof task.promise>;
+  try {
     doc = await task.promise;
   } catch (err) {
+    // A task exists even when the document never will (malformed, truncated):
+    // destroy it, or its worker-side state outlives every failed extraction.
+    await task.destroy().catch(() => undefined);
     return { ok: false, message: `could not be parsed as a PDF (${(err as Error).message})` };
   }
   try {
