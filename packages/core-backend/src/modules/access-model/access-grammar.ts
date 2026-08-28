@@ -817,12 +817,41 @@ export type OwnEntries = Record<Verb, ParsedEntry[]>;
  */
 function ownEntriesRoot(frontmatter: string): unknown {
   const subset = parseYamlSubset(frontmatter);
-  if (subset.ok) return subset.value;
+  if (subset.ok && !verbValuesNeedFullYaml(subset.value)) return subset.value;
   try {
-    return parseFullYaml(frontmatter);
+    // The FAILSAFE schema: every scalar stays the text it was written as —
+    // `true`, `42`, `0x10`, `2026-01-01` — which is all the subset parser has
+    // ever handed the entry grammar. The core schema would type them, and a
+    // role spelled `0x10` would come back as `16` the moment another verb on
+    // the same file used a quoted value.
+    const full = parseFullYaml(frontmatter, { schema: 'failsafe' });
+    // A document the full parser rejects but the subset parser accepted keeps
+    // the subset answer — whatever it read is what has always been read.
+    return full == null ? (subset.ok ? subset.value : null) : full;
   } catch {
-    return null;
+    return subset.ok ? subset.value : null;
   }
+}
+
+/**
+ * Whether a verb's value, as the subset parser read it, is really YAML syntax
+ * the subset parser does not understand and passed through as text: a flow
+ * sequence (`read: [A, B]`) or a quoted scalar (`read: "A <a@x>"`, `- 'Role'`).
+ * The subset parser SUCCEEDS on these — it just hands the brackets and quotes
+ * to the entry parser, which then drops the entry, or worse, keeps the quotes
+ * as part of a role name. Such a value means the full parser has to read the
+ * document.
+ */
+function verbValuesNeedFullYaml(root: unknown): boolean {
+  if (!root || typeof root !== 'object' || Array.isArray(root)) return false;
+  const looksLikeSyntax = (v: unknown): boolean =>
+    typeof v === 'string' && /^\s*(\[\s*\S|\{\s*\S|"|')/.test(v);
+  for (const [key, value] of Object.entries(root as Record<string, unknown>)) {
+    if (!KNOWN_VERBS_SET.has(key)) continue;
+    if (looksLikeSyntax(value)) return true;
+    if (Array.isArray(value) && value.some(looksLikeSyntax)) return true;
+  }
+  return false;
 }
 
 /**

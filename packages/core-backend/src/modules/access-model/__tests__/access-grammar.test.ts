@@ -178,3 +178,52 @@ describe('parseOwnAccessEntries — whole-document YAML the subset parser cannot
     expect(parseOwnAccessEntries(node)!.owner).toMatchObject([{ kind: 'user', email: 's@x.io' }]);
   });
 });
+
+describe('parseOwnAccessEntries — quoted and flow-sequence verb values', () => {
+  // The subset parser SUCCEEDS on these and hands the brackets or quotes to
+  // the entry parser as text, so before the fallback they were dropped — or a
+  // quoted role kept its quotes as part of its name. They are real YAML and
+  // must resolve to the grants they spell.
+  it('reads a flow sequence', () => {
+    const own = parseOwnAccessEntries('---\nread: [coding-agent <coding-agent@bevel.software>, Developer]\n---\n');
+    expect(own!.read).toMatchObject([
+      { kind: 'user', email: 'coding-agent@bevel.software' },
+      { kind: 'role', role: 'developer' },
+    ]);
+  });
+
+  it('reads quoted scalars, inline and in a block list', () => {
+    expect(parseOwnAccessEntries('---\nread: "coding-agent <coding-agent@bevel.software>"\n---\n')!.read).toMatchObject([
+      { kind: 'user', email: 'coding-agent@bevel.software' },
+    ]);
+    expect(parseOwnAccessEntries("---\nwrite: 'Developer'\n---\n")!.write).toMatchObject([{ kind: 'role', role: 'developer' }]);
+    expect(parseOwnAccessEntries('---\nowner:\n  - "Someone <s@x.io>"\n---\n')!.owner).toMatchObject([
+      { kind: 'user', email: 's@x.io' },
+    ]);
+  });
+
+  it('keeps the plain entries beside a quoted one exactly as the subset parser read them', () => {
+    // One quoted value sends the whole document to the full parser, which
+    // TYPES scalars: `true` and `42` would come back as a boolean and a number
+    // and never reach the entry grammar. They must resolve exactly as they do
+    // on the subset path — as the (odd, but legal) role names they spell.
+    const viaFull = parseOwnAccessEntries(
+      ['---', 'read: "coding-agent <coding-agent@bevel.software>"', 'write: true', 'owner:', '  - 42', '  - 0x10', '  - 1e3', '---', ''].join('\n'),
+    );
+    const viaSubset = parseOwnAccessEntries(['---', 'write: true', 'owner:', '  - 42', '  - 0x10', '  - 1e3', '---', ''].join('\n'));
+    expect(viaFull!.write).toEqual(viaSubset!.write);
+    expect(viaFull!.owner).toEqual(viaSubset!.owner);
+    expect(viaFull!.write).toMatchObject([{ kind: 'role', role: 'true' }]);
+    // Source spelling, not the number it parses to: `0x10` stays `0x10`.
+    expect(viaFull!.owner.map((e) => (e as { role: string }).role)).toEqual(['42', '0x10', '1e3']);
+  });
+
+  it('leaves the plain forms on the subset path', () => {
+    // An empty flow collection and bare scalars are the subset parser\'s own
+    // grammar; nothing about them asks for the full parser.
+    expect(parseOwnAccessEntries('---\nread: []\nwrite: Developer\n---\n')).toMatchObject({
+      read: [],
+      write: [{ kind: 'role', role: 'developer' }],
+    });
+  });
+});
