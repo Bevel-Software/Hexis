@@ -1,9 +1,6 @@
-import type { Server as HttpServer } from 'node:http';
-import type { Request, RequestHandler, Response } from 'express';
-import express from 'express';
+import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createMcpRoutes } from '../mcp.routes.js';
-import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
+import { closeMountedRoutes, mountMcpRoutes } from './mcp-routes-harness.js';
 
 /**
  * Session routing on the MCP transport routes — how `/api/mcp` answers a
@@ -29,19 +26,8 @@ import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.in
 /** The id the FIRST session minted in a test gets; `openSession` establishes it. */
 const SESSION_ID = 'sess-1';
 
-/** Auth stand-in: binds the user named by `x-test-user`, defaulting to user-A. */
-const fakeAuth: RequestHandler = (req, _res, next) => {
-  req.userId = (req.headers['x-test-user'] as string | undefined) ?? 'user-A';
-  next();
-};
-
-let httpServer: HttpServer | undefined;
-
 afterEach(async () => {
-  if (httpServer) {
-    await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
-    httpServer = undefined;
-  }
+  await closeMountedRoutes();
   vi.restoreAllMocks();
 });
 
@@ -73,7 +59,7 @@ function makeMcpService() {
       const transport = {
         sessionId,
         onclose: undefined as undefined | (() => void),
-        handleRequest: vi.fn(async (_req: Request, res: Response) => {
+        handleRequest: vi.fn(async (_req: ExpressRequest, res: ExpressResponse) => {
           if (!announced) {
             announced = true;
             onSessionInitialized(sessionId);
@@ -91,27 +77,8 @@ function makeMcpService() {
 
 async function mount(): Promise<{ baseUrl: string; createSession: ReturnType<typeof vi.fn> }> {
   const mcpService = makeMcpService();
-  const stub = {} as never;
-  const app = express();
-  app.use(express.json());
-  app.use(
-    '/api',
-    createMcpRoutes(
-      mcpService as never,
-      {} as unknown as IExternalApiKeyService,
-      fakeAuth,
-      fakeAuth,
-      stub,
-      stub,
-      stub,
-      '',
-    ),
-  );
-  httpServer = await new Promise<HttpServer>((resolve) => {
-    const s = app.listen(0, () => resolve(s));
-  });
-  const port = (httpServer.address() as { port: number }).port;
-  return { baseUrl: `http://127.0.0.1:${port}`, createSession: mcpService.createSession };
+  const baseUrl = await mountMcpRoutes({ mcpService });
+  return { baseUrl, createSession: mcpService.createSession };
 }
 
 const INITIALIZE = {
@@ -223,7 +190,14 @@ describe('POST /mcp session routing', () => {
     await openSession(baseUrl); // owned by user-A
     const res = await send(baseUrl, { sessionId: SESSION_ID, body: TOOL_CALL, user: 'user-B' });
     expect(res.status).toBe(403);
-    await expect(res.json()).resolves.toEqual({ error: 'Session does not belong to this user' });
+    // JSON-RPC like every other answer this router gives before the SDK
+    // transport — a client parsing /api/mcp bodies as JSON-RPC must not hit a
+    // bare `{ error }` on this one branch.
+    await expect(res.json()).resolves.toEqual({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Session does not belong to this user' },
+      id: null,
+    });
   });
 });
 

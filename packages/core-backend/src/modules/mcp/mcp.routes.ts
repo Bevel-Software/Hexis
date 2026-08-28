@@ -40,6 +40,8 @@ function extractBearer(req: Request): string {
  */
 const SESSION_NOT_FOUND = -32001;
 const BAD_REQUEST = -32000;
+/** JSON-RPC 2.0's own code for a fault on our side, used for the 500 catch-alls. */
+const INTERNAL_ERROR = -32603;
 
 /**
  * Answer in the transport's own wire shape
@@ -54,6 +56,35 @@ const BAD_REQUEST = -32000;
  */
 function jsonRpcError(res: Response, status: number, code: number, message: string): void {
   res.status(status).json({ jsonrpc: '2.0', error: { code, message }, id: null });
+}
+
+/**
+ * The answer to a session this router cannot resolve, shared by all three verbs.
+ *
+ * POST and GET/DELETE reach the miss from opposite directions — POST falls
+ * through to it, GET/DELETE test for it up front — but owe the caller the same
+ * two answers, and they were hand-synchronised copies of the same pair of
+ * codes and strings. Sharing the mechanism makes that parity structural
+ * instead of merely asserted by tests.
+ *
+ * Call only once the session is known to be a miss; a live session id never
+ * reaches here.
+ */
+function rejectSessionMiss(res: Response, sessionIdHeader: string | undefined): void {
+  if (sessionIdHeader) {
+    // A session id we hold no transport for: the store evicted it, or the
+    // process restarted and this in-memory map went with it. 404 + `-32001`
+    // is what the spec reserves for that, and it is the signal a client keys
+    // its re-initialize on. Answering 400 here read as "you sent a malformed
+    // request" and stranded the client on a session that can never come
+    // back — every connected agent, on every restart, until a human
+    // reconnected it by hand.
+    jsonRpcError(res, 404, SESSION_NOT_FOUND, 'Session not found');
+    return;
+  }
+  // No session id at all: the one case here that genuinely is the caller's
+  // mistake, and the only one 400 fits.
+  jsonRpcError(res, 400, BAD_REQUEST, 'Bad Request: Mcp-Session-Id header is required');
 }
 
 /**
@@ -136,7 +167,7 @@ export function createMcpRoutes(
         // a leaked session id from being used cross-user even if the
         // attacker has their own valid connection key.
         if (session.userId !== req.userId) {
-          res.status(403).json({ error: 'Session does not belong to this user' });
+          jsonRpcError(res, 403, BAD_REQUEST, 'Session does not belong to this user');
           return;
         }
         await session.transport.handleRequest(req, res, body);
@@ -179,26 +210,14 @@ export function createMcpRoutes(
         return;
       }
 
-      // A session id we hold no transport for: the store evicted it, or the
-      // process restarted and this in-memory map went with it. 404 + `-32001`
-      // is what the spec reserves for that, and it is the signal a client keys
-      // its re-initialize on. Answering 400 here read as "you sent a malformed
-      // request" and stranded the client on a session that can never come
-      // back — every connected agent, on every restart, until a human
-      // reconnected it by hand.
-      if (sessionIdHeader) {
-        jsonRpcError(res, 404, SESSION_NOT_FOUND, 'Session not found');
-        return;
-      }
-
-      // No session id at all on a non-initialize request: the one case here
-      // that genuinely is the caller's mistake, and the only one 400 fits.
-      jsonRpcError(res, 400, BAD_REQUEST, 'Bad Request: Mcp-Session-Id header is required');
+      // Neither a live session nor an initialize: whichever miss this is,
+      // `rejectSessionMiss` owns both answers.
+      rejectSessionMiss(res, sessionIdHeader);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
       console.error('[mcp] POST /mcp failed:', msg);
       if (!res.headersSent) {
-        res.status(500).json({ error: msg });
+        jsonRpcError(res, 500, INTERNAL_ERROR, msg);
       } else {
         res.end();
       }
@@ -207,22 +226,16 @@ export function createMcpRoutes(
 
   const sessionRequest: RequestHandler = async (req, res) => {
     const sessionIdHeader = req.headers['mcp-session-id'] as string | undefined;
-    // Same split as POST, mirrored: a request that never carried a session id
-    // is the caller's mistake (400), while one naming a session we no longer
-    // hold is the re-initialize signal (404). These were a single 404 — right
-    // for the case that matters, wrong for the other, and neither of them
-    // parseable as JSON-RPC.
-    if (!sessionIdHeader) {
-      jsonRpcError(res, 400, BAD_REQUEST, 'Bad Request: Mcp-Session-Id header is required');
-      return;
-    }
-    if (!active.has(sessionIdHeader)) {
-      jsonRpcError(res, 404, SESSION_NOT_FOUND, 'Session not found');
+    // The same two answers POST gives, from the same helper: these were
+    // collapsed into a single 404 — right for the unknown-session case, wrong
+    // for the missing-header one, and neither parseable as JSON-RPC.
+    if (!sessionIdHeader || !active.has(sessionIdHeader)) {
+      rejectSessionMiss(res, sessionIdHeader);
       return;
     }
     const session = active.get(sessionIdHeader)!;
     if (session.userId !== req.userId) {
-      res.status(403).json({ error: 'Session does not belong to this user' });
+      jsonRpcError(res, 403, BAD_REQUEST, 'Session does not belong to this user');
       return;
     }
     try {
@@ -230,7 +243,7 @@ export function createMcpRoutes(
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
       console.error('[mcp] session request failed:', msg);
-      if (!res.headersSent) res.status(500).json({ error: msg });
+      if (!res.headersSent) jsonRpcError(res, 500, INTERNAL_ERROR, msg);
       else res.end();
     }
   };
