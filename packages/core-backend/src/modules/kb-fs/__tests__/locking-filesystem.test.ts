@@ -970,6 +970,10 @@ describe('LockingFilesystem refuses to create anything outside the repository fo
     await fs.mkdir(path.join(root, `${KB}/Plugins/GTM/skills/x`), { recursive: true });
     await fs.writeFile(path.join(root, `${KB}/Plugins/GTM/skills/x/SKILL.md`), 'x');
     await fs.writeFile(path.join(root, `${KB}/Plugins/GTM/skills/x/notes.md`), 'y');
+    // A hidden entry is copied like any other, so the gate has to see it too —
+    // `walkFiles` (the catalog scanners' walk) would skip it.
+    await fs.mkdir(path.join(root, `${KB}/Plugins/GTM/skills/x/.hidden`), { recursive: true });
+    await fs.writeFile(path.join(root, `${KB}/Plugins/GTM/skills/x/.hidden/SKILL.md`), 'z');
     const workflow = makeWorkflow();
     const creatorAccess = makeCreatorAccess();
     const seen: string[] = [];
@@ -985,6 +989,7 @@ describe('LockingFilesystem refuses to create anything outside the repository fo
     });
     expect(seen).toContain(`${KB}/Plugins/GTM/skills/y/SKILL.md`);
     expect(seen).toContain(`${KB}/Plugins/GTM/skills/y/notes.md`);
+    expect(seen).toContain(`${KB}/Plugins/GTM/skills/y/.hidden/SKILL.md`);
   });
 
   /**

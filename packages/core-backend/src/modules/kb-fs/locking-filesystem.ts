@@ -33,6 +33,7 @@
  */
 
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import {
   LocalFilesystem,
   type LocalFilesystemOptions,
@@ -45,7 +46,6 @@ import type { AuthUser, Change, IWorkflowService } from '@bevel-software/platfor
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { FileChangeNotifier } from './file-change-notifier.js';
 import { assertInsideRepo } from './repo-path.js';
-import { walkFiles } from '../../shared/fs-walk.js';
 import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
 
 /** How many times to retry a contended acquire before giving up. */
@@ -179,7 +179,7 @@ export class LockingFilesystem extends LocalFilesystem {
       if (options?.recursive) {
         const absoluteSrc = this.resolveAbsolutePath(src);
         if (absoluteSrc) {
-          for (const rel of await walkFiles(absoluteSrc, () => true)) {
+          for (const rel of await everyFileUnder(absoluteSrc)) {
             guardCreate(`${dest}/${rel}`);
           }
         }
@@ -727,4 +727,34 @@ export class LockingFilesystem extends LocalFilesystem {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+
+/**
+ * Every file under `root`, relative and `/`-separated — dot-entries included.
+ *
+ * Deliberately NOT `walkFiles`, which documents itself as the walk "for catalog
+ * scanners" and skips dot-entries. That is right for a scanner and wrong here:
+ * a recursive copy creates `.hidden/SKILL.md` just as surely as a visible one,
+ * so a gate that enumerates with a scanner's walk judges fewer files than the
+ * copy lands. The rule that decides each path is the same either way; what this
+ * has to get right is only WHICH paths the operation will create.
+ */
+async function everyFileUnder(root: string): Promise<string[]> {
+  const out: string[] = [];
+  const walk = async (dir: string, rel: string): Promise<void> => {
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await walk(path.join(dir, entry.name), childRel);
+      else if (entry.isFile()) out.push(childRel);
+    }
+  };
+  await walk(root, '');
+  return out;
 }
