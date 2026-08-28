@@ -1069,14 +1069,32 @@ export function registerWorkspaceTools(
           }
         : process.env;
       return new Promise((resolve) => {
-        const child = spawn(a.command as string, { cwd, shell: true, env });
+        // Own process group on POSIX, so a timeout or abort kills the WHOLE
+        // tree. `shell: true` puts an `sh` between us and the command; killing
+        // only that shell left whatever it had started running on — orphaned,
+        // unreaped, still holding the workspace and its memory. A self-hosted
+        // deployment leaked ~4,500 tasks that way before nothing could fork.
+        const detached = process.platform !== 'win32';
+        const child = spawn(a.command as string, { cwd, shell: true, env, detached });
         let stdout = '';
         let stderr = '';
-        const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-        // If the caller disconnects (request aborted), kill the child instead of
+        const killTree = () => {
+          try {
+            if (detached && child.pid) process.kill(-child.pid, 'SIGKILL');
+            else child.kill('SIGKILL');
+          } catch {
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              // Already gone.
+            }
+          }
+        };
+        const timer = setTimeout(killTree, timeoutMs);
+        // If the caller disconnects (request aborted), kill the tree instead of
         // letting it run to the timeout; the resulting `close`/`error` settles
         // the promise through `finish`.
-        const onAbort = () => child.kill('SIGKILL');
+        const onAbort = killTree;
         ctx.abortSignal.addEventListener('abort', onAbort, { once: true });
         const finish = (value: unknown) => {
           clearTimeout(timer);
