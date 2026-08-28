@@ -266,9 +266,11 @@ jobs:
   # running": the agent can fail to reach a verdict without failing its step (it
   # exits 0 having declined to act), and `failure()` does not fire for that.
   #
-  # It holds the knowledge-base key, for one read: checking that the one-pager
-  # the agent links to is really there. That is safe here precisely because
-  # this job reads nothing the PR's author wrote — only the four fields below.
+  # It holds the knowledge-base key, for two reads: checking that the one-pager
+  # the agent links to is really there, and that it was written for THIS run's
+  # head rather than left over from an earlier one. That is safe here precisely
+  # because this job reads nothing the PR's author wrote — only the four fields
+  # below, and the head of a page the agent wrote into the knowledge base.
   # ---------------------------------------------------------------------------
   publish:
     needs: [start, review]
@@ -300,6 +302,7 @@ jobs:
           KB_KEY: ${{ secrets.KNOWLEDGE_BASE_CONNECTION_KEY }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEAD_SHA: ${{ needs.start.outputs.sha }}
         run: |
           set -euo pipefail
 
@@ -389,6 +392,7 @@ jobs:
           # itself cannot run (no key, KB down, access refused) keep the link
           # and warn, so a hiccup here never hides a one-pager that exists.
           onepager_missing=0
+          onepager_stale=0
           case "$url" in
             "${KB_ORIGIN%/}"/workspace/*)
               # <origin>/workspace/<branch>/<workspace path>, both URL-encoded.
@@ -427,6 +431,29 @@ jobs:
                 # so no other failure text can pass for an absence.
                 if [ "$code" = 200 ] && jq -e '.type == "file"' stat.json >/dev/null 2>&1; then
                   echo "One-pager verified in the knowledge base: $branch:$path"
+                  # EXISTENCE is not enough. Every terminal run must REGENERATE
+                  # the one-pager, and the file sits at a fixed per-PR path —
+                  # so a run that stops after the verdict still links to the
+                  # previous run's page, and nothing distinguishes the two.
+                  # The page names the head it reviewed in a meta tag; require
+                  # this run's head there. Read only the top of the file — the
+                  # tag is in <head>, the page can be long. The needle is built
+                  # here and handed to jq as an argument, never as jq syntax.
+                  needle="name=\"bevel-review-head\" content=\"$HEAD_SHA\""
+                  read_args=$(jq -n --arg b "$branch" --arg p "$path" --arg s "$sid" \
+                    '{branch: $b, path: $p, sessionId: $s, limit: 4000}')
+                  rcode=$(curl -sS -m 20 -o page.json -w '%{http_code}' -X POST \
+                          -H "Authorization: Bearer $KB_KEY" -H 'Content-Type: application/json' \
+                          -d "$read_args" "${KB_ORIGIN%/}/api/agent/tools/read_file" || echo 000)
+                  if [ "$rcode" = 200 ] && [ -n "${HEAD_SHA:-}" ] \
+                     && jq -e --arg needle "$needle" '(.content? // "") | tostring | contains($needle)' page.json >/dev/null 2>&1; then
+                    echo "One-pager is fresh: it names this run's head $HEAD_SHA"
+                  elif [ "$rcode" = 200 ]; then
+                    echo "::warning::The one-pager at $branch:$path does not name this run's head ($HEAD_SHA) — it is a previous run's page; dropping the link."
+                    url=""; onepager_stale=1
+                  else
+                    echo "::warning::Could not read the one-pager to check its freshness (HTTP $rcode) — keeping the link unverified."
+                  fi
                 elif jq -e '(.error? // "") | tostring | startswith("File not found: ")' stat.json >/dev/null 2>&1; then
                   echo "::warning::The agent's one_pager_url names a file the knowledge base does not have ($branch:$path) — dropping the link."
                   url=""; onepager_missing=1
@@ -442,6 +469,8 @@ jobs:
             echo "outcome=$outcome"
             echo "headline=$headline"
             echo "url=$url"
+            echo "onepager_missing=$onepager_missing"
+            echo "onepager_stale=$onepager_stale"
           } >> "$GITHUB_OUTPUT"
 
           # The comment body: verdict line, the risks and blockers, the link.
@@ -472,8 +501,12 @@ jobs:
               printf '[Full analysis](%s)\n' "$url"
             elif [ "$onepager_missing" = 1 ]; then
               # Say so on the PR rather than silently dropping the link: the
-              # reader would otherwise assume there is no deeper analysis.
-              echo "The full analysis this review refers to was never written to the knowledge base — re-trigger with \`/bevel-review\` to regenerate it."
+              # reader would otherwise assume there is no deeper analysis. For
+              # a terminal verdict this also fails the check (see the status
+              # step) — a review without its one-pager is an unfinished review.
+              echo "The full analysis this review refers to was never written to the knowledge base, so the check is marked as errored — re-trigger with \`/bevel-review\` to regenerate it."
+            elif [ "$onepager_stale" = 1 ]; then
+              echo "The full analysis at the expected link is from an earlier run and does not cover this head, so the check is marked as errored — re-trigger with \`/bevel-review\` to regenerate it."
             elif [ "$outcome" = none ]; then
               printf '[Run log](%s)\n' "$RUN_URL"
             fi
@@ -508,6 +541,8 @@ jobs:
           OUTCOME: ${{ steps.render.outputs.outcome }}
           HEADLINE: ${{ steps.render.outputs.headline }}
           URL: ${{ steps.render.outputs.url }}
+          ONEPAGER_MISSING: ${{ steps.render.outputs.onepager_missing }}
+          ONEPAGER_STALE: ${{ steps.render.outputs.onepager_stale }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -523,6 +558,19 @@ jobs:
             escalated) state=pending; fallback="awaiting tech lead decision" ;;
             *)         state=error;   fallback="Review agent posted no verdict — see run log, then re-trigger /bevel-review" ;;
           esac
+
+          # A terminal verdict owes a one-pager written for THIS head — it is
+          # where the rule checks, the evidence table and the lead's approval
+          # instrument live. A run that wrote the verdict and stopped, or that
+          # left an earlier run's page in place, has not finished reviewing;
+          # publishing it green would reward exactly that, run after run. The
+          # verdict stays visible in the comment; the check says "incomplete".
+          if [ "$OUTCOME" = go-ahead ] || [ "$OUTCOME" = escalated ]; then
+            if [ "${ONEPAGER_MISSING:-0}" = 1 ] || [ "${ONEPAGER_STALE:-0}" = 1 ]; then
+              state=error
+              fallback="review incomplete — one-pager missing or stale for this head; re-trigger /bevel-review"
+            fi
+          fi
 
           description="${HEADLINE:-}"
           if [ "$state" = "error" ] || [ -z "$description" ]; then
