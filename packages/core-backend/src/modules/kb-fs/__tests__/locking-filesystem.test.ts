@@ -940,6 +940,53 @@ describe('LockingFilesystem refuses to create anything outside the repository fo
     await expect(fs.access(path.join(root, `${KB}/KnowledgeBase/dest.md`))).rejects.toBeDefined();
   });
 
+  it('moveFile runs the path gate on its destination', async () => {
+    await fs.mkdir(path.join(root, `${KB}/KnowledgeBase`), { recursive: true });
+    await fs.writeFile(path.join(root, `${KB}/KnowledgeBase/src.md`), 'x');
+    const workflow = makeWorkflow();
+    const creatorAccess = makeCreatorAccess();
+    const validateCreatePath = vi.fn(() => {
+      throw new WorkflowValidationError('refused by the path gate');
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess, validateCreatePath },
+    );
+    await expect(
+      fsLayer.moveFile(`${KB}/KnowledgeBase/src.md`, `${KB}/KnowledgeBase/dest.md`),
+    ).rejects.toBeInstanceOf(WorkflowValidationError);
+    expect(validateCreatePath).toHaveBeenCalledWith(`${KB}/KnowledgeBase/dest.md`);
+    expect(workflow.acquireLock).not.toHaveBeenCalled();
+    // The source is untouched: a refused move must not delete anything.
+    await expect(fs.access(path.join(root, `${KB}/KnowledgeBase/src.md`))).resolves.toBeUndefined();
+  });
+
+  /**
+   * A recursive copy carries a subtree, so judging the `dest` string alone sees
+   * one path and lands many. Each file the copy would create is judged at the
+   * path it lands on.
+   */
+  it('a recursive copy judges every file it would create, not just dest', async () => {
+    await fs.mkdir(path.join(root, `${KB}/Plugins/GTM/skills/x`), { recursive: true });
+    await fs.writeFile(path.join(root, `${KB}/Plugins/GTM/skills/x/SKILL.md`), 'x');
+    await fs.writeFile(path.join(root, `${KB}/Plugins/GTM/skills/x/notes.md`), 'y');
+    const workflow = makeWorkflow();
+    const creatorAccess = makeCreatorAccess();
+    const seen: string[] = [];
+    const validateCreatePath = vi.fn((p: string) => {
+      seen.push(p);
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess, validateCreatePath },
+    );
+    await fsLayer.copyFile(`${KB}/Plugins/GTM/skills/x`, `${KB}/Plugins/GTM/skills/y`, {
+      recursive: true,
+    });
+    expect(seen).toContain(`${KB}/Plugins/GTM/skills/y/SKILL.md`);
+    expect(seen).toContain(`${KB}/Plugins/GTM/skills/y/notes.md`);
+  });
+
   /**
    * The content gate is deliberately NOT run on a copy: honouring it means
    * reading `src`, and `super.copyFile` reads it again, so the approved bytes

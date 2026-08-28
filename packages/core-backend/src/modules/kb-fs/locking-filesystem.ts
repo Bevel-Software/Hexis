@@ -45,6 +45,7 @@ import type { AuthUser, Change, IWorkflowService } from '@bevel-software/platfor
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { FileChangeNotifier } from './file-change-notifier.js';
 import { assertInsideRepo } from './repo-path.js';
+import { walkFiles } from '../../shared/fs-walk.js';
 import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
 
 /** How many times to retry a contended acquire before giving up. */
@@ -89,9 +90,9 @@ export interface LockingFilesystemContext {
    * live) belong here. Content rules stay in `validateWrite` and are NOT
    * enforced on a copy — see `copyFile` for why that is a deliberate gap.
    *
-   * `moveFile` is deliberately NOT gated: relocating a file is how one that
-   * landed in the wrong place gets rescued, and refusing the destination would
-   * strand it.
+   * Every op that CREATES content at a path runs this on its destination —
+   * `copyFile` (including each file of a recursive copy) and `moveFile`. A
+   * rescue move is unaffected: its destination is a valid place by definition.
    */
   validateCreatePath?: (path: string) => void;
   /**
@@ -166,7 +167,24 @@ export class LockingFilesystem extends LocalFilesystem {
     // gate) and closing it properly means reading once and writing the exact
     // bytes back, which is a change to what `copyFile` IS. That belongs in its
     // own change, not as a side effect of a placement rule.
-    this.lockContext.validateCreatePath?.(dest);
+    const guardCreate = this.lockContext.validateCreatePath;
+    if (guardCreate) {
+      guardCreate(dest);
+      // A recursive copy carries a whole SUBTREE, so judging the `dest` string
+      // alone sees one path and lands many: `copyFile('Plugins/GTM/skills/x',
+      // 'Skills/x', { recursive: true })` would put a SKILL.md somewhere no
+      // reader looks without the gate ever seeing it. No in-repo caller passes
+      // options today, which makes this cheap to get right now and easy to miss
+      // later. Judge each file the copy would create, at the path it lands on.
+      if (options?.recursive) {
+        const absoluteSrc = this.resolveAbsolutePath(src);
+        if (absoluteSrc) {
+          for (const rel of await walkFiles(absoluteSrc, () => true)) {
+            guardCreate(`${dest}/${rel}`);
+          }
+        }
+      }
+    }
     // Lock on `dest`. `src` is read-only from this op's perspective — copy
     // creates a new file at dest without disturbing src on disk.
     return this.withLock(dest, () => super.copyFile(src, dest, options));
@@ -176,6 +194,13 @@ export class LockingFilesystem extends LocalFilesystem {
     // Only the destination is gated: moving a stray INTO the repository is how
     // a file the old behaviour left beside the clone gets rescued.
     this.assertInsideRepo(dest);
+    // Same for path-shaped rules, and for the same reason: a rescue's
+    // DESTINATION is by definition a place the file belongs, so judging it
+    // strands nothing. What it does refuse is the opposite move — taking a
+    // live skill OUT to somewhere no reader looks, which today commits,
+    // pushes, and drops it from the catalog without a word. Only the source
+    // needs the exemption; the destination never did.
+    this.lockContext.validateCreatePath?.(dest);
     // A move mutates two paths: the source is deleted and the destination
     // is created. Only locking `dest` would let a concurrent writer hold
     // the source's lock and mutate it under us, and would also leave the

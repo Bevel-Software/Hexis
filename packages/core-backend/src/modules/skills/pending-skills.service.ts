@@ -1,6 +1,7 @@
 import {
   DEFAULT_BRANCH,
-  PLUGINS_DIR,
+  SKILL_DOC_FILE,
+  isSkillDocPath,
   type ChangeRequest,
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
@@ -11,8 +12,6 @@ import { hashEmail } from '../../shared/hash-email.js';
 import { resolveDeclaredId } from '../../shared/frontmatter-id.js';
 import { isSafeSkillName, parseSkillFrontmatter } from './skills.service.js';
 import type { IPendingSkillService, ISkillService, PendingSkill } from './skills.contract.js';
-
-const SKILL_DOC = 'SKILL.md';
 
 /**
  * Skills that exist only on an open change request — proposed, not released.
@@ -72,7 +71,7 @@ export class PendingSkillsService implements IPendingSkillService {
 
     const candidates = crs.flatMap((cr) =>
       cr.touchedNodePaths
-        .filter((p) => isSkillDoc(p) && !released.has(folderOf(p)))
+        .filter((p) => isSkillDocPath(p) && !released.has(folderOf(p)))
         .map((p) => ({ cr, docPath: p, folder: folderOf(p) })),
     );
     if (candidates.length === 0) return [];
@@ -146,24 +145,7 @@ export class PendingSkillsService implements IPendingSkillService {
   }
 }
 
-/**
- * Is this touched path a skill's own SKILL.md?
- *
- * `Plugins/<plugin>/<skill>/SKILL.md` is the shallowest shape, hence four
- * segments; deeper ones are skills nested in a category subfolder, which the
- * catalog already supports. `Plugins/<plugin>/SKILL.md` is NOT a skill — a plugin
- * folder is not itself one.
- */
-function isSkillDoc(repoRelPath: string): boolean {
-  const segments = repoRelPath.split('/');
-  return (
-    segments.length >= 4 &&
-    segments[0] === PLUGINS_DIR &&
-    segments[segments.length - 1] === SKILL_DOC
-  );
-}
-
 /** The skill folder holding a SKILL.md. */
 function folderOf(skillDocPath: string): string {
-  return skillDocPath.slice(0, -(SKILL_DOC.length + 1));
+  return skillDocPath.slice(0, -(SKILL_DOC_FILE.length + 1));
 }

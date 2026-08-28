@@ -3,10 +3,7 @@ import type { IWorkflowService } from '@bevel-software/platform-shared';
 import { LockingFilesystem, type LockingFilesystemContext } from '../kb-fs/locking-filesystem.js';
 import { ReadOnlyFilesystem } from '../kb-fs/read-only-filesystem.js';
 import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
-import {
-  assertSkillPlacement,
-  makeSkillPlacementWriteValidator,
-} from '../skills/skill-placement-guard.js';
+import { skillPlacementGuardFor } from '../skills/skill-placement-guard.js';
 import type { ICreatorAccess } from '../access-model/creator.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
@@ -55,14 +52,16 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
   // Same treatment for a SKILL.md written where no skill can be found: an agent
   // composing raw file writes has no schema to conform to, and the old failure
   // was a successful commit that produced nothing. Refusing turns it into a
-  // message that names the path that works.
-  const validateSkillPlacement = makeSkillPlacementWriteValidator(deps.kbDirName);
+  // message that names the path that works. ONE closure, wired into both
+  // filesystem hooks below — the content-carrying one ignores its `content`
+  // argument, because placement is a property of the path alone.
+  const validateSkillPlacement = skillPlacementGuardFor(deps.kbDirName);
   // One hook, both rules. Each guard ignores paths it has no opinion about, so
   // order is irrelevant — what matters is that adding a third never means
   // silently dropping the second.
   const validateWrite: NonNullable<LockingFilesystemContext['validateWrite']> = (path, content) => {
     validateRolesWrite(path, content);
-    validateSkillPlacement(path, content);
+    validateSkillPlacement(path);
   };
 
   return async function resolveToolContext(auth, abortSignal, sessionId) {
@@ -87,10 +86,10 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
                 user,
                 kbDirName: deps.kbDirName,
                 validateWrite,
-                // `copy_file` creates a file without passing its bytes through
-                // `validateWrite`, so placement is enforced on the destination
-                // path too — otherwise copying is the way around the rule.
-                validateCreatePath: (p) => assertSkillPlacement(p, deps.kbDirName),
+                // `copy_file` and `move_file` create a file without passing
+                // its bytes through `validateWrite`, so the same closure judges
+                // their destination — otherwise they are the way around the rule.
+                validateCreatePath: validateSkillPlacement,
                 creatorAccess: deps.creatorAccess,
               },
             )

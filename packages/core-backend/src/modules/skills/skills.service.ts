@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { parseDocument } from 'yaml';
-import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR, SKILL_DOC_FILE } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -128,10 +128,10 @@ export class SkillService implements ISkillService {
       } catch {
         return;
       }
-      if (entries.some((e) => e.isFile() && e.name === 'SKILL.md')) {
+      if (entries.some((e) => e.isFile() && e.name === SKILL_DOC_FILE)) {
         let raw: string;
         try {
-          raw = await fs.readFile(path.join(dir, 'SKILL.md'), 'utf-8');
+          raw = await fs.readFile(path.join(dir, SKILL_DOC_FILE), 'utf-8');
         } catch {
           return;
         }
@@ -248,6 +248,6 @@ export function parseSkillFrontmatter(raw: string): {
 /** Repo-root-relative paths of every bundled file under a skill folder (excludes SKILL.md). */
 async function listBundledFiles(dir: string, relFolder: string): Promise<string[]> {
   return (await walkFiles(dir, () => true))
-    .filter((rel) => rel !== 'SKILL.md')
+    .filter((rel) => rel !== SKILL_DOC_FILE)
     .map((rel) => `${relFolder}/${rel}`);
 }

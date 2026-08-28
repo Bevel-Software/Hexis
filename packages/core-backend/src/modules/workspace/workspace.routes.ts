@@ -981,12 +981,14 @@ export function createWorkspaceRoutes(
       // but correct for a 100-file zip. If a single file's release fails
       // (e.g. validator 422), the loop stops there so the user sees the
       // first concrete problem rather than a list of N similar failures.
-      const result = await workspaceService.unzipFile(id, zipPath, destination);
-      // Judge every entry BEFORE committing any of them: an archive carrying
-      // one misplaced SKILL.md must not leave half its files committed and the
-      // rest stranded. Extraction has already touched disk either way, so the
-      // choice is only about what lands in git.
-      for (const relFile of result.extracted) assertSkillPlacement(relFile, kbDirName);
+      // Placement is judged PER ENTRY, inside the extraction guard: a refused
+      // entry is skipped with its reason and never written, so the rest of the
+      // archive still lands. Checking after extraction instead would leave a
+      // misplaced SKILL.md on disk beside forty good files that then could not
+      // commit either — worse than the silent no-op this exists to fix.
+      const result = await workspaceService.unzipFile(id, zipPath, destination, async (relFile) =>
+        assertSkillPlacement(relFile, kbDirName),
+      );
       for (const relFile of result.extracted) {
         await withLock(id, user, relFile, async () => {
           // The file is already on disk from the unzip; the release commits +

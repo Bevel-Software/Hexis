@@ -211,25 +211,30 @@ export const SKILL_DOC_FILE = 'SKILL.md';
 
 /**
  * Whether a repo-root-relative path is a `SKILL.md` in a place the catalog
- * will actually find.
- *
- * The scanner walks `Plugins/` and treats every folder that directly holds a
- * `SKILL.md` as a skill, at any depth — so the rule is simply "under `Plugins/`,
- * in some folder below it":
+ * will actually find — `Plugins/<plugin>/<skill>/SKILL.md` at minimum, deeper
+ * when the plugin groups its skills into subfolders:
  *
  *   Plugins/GTM/skills/heyreach/SKILL.md → true
- *   Plugins/loose-skill/SKILL.md         → true   (the folder IS the plugin)
+ *   Plugins/Engineering/coding/hunt/SKILL.md → true
+ *   Plugins/GTM/SKILL.md                 → false  (see below — this one BREAKS things)
  *   Plugins/SKILL.md                     → false  (`Plugins/` is not a skill)
  *   Skills/example/SKILL.md              → false  (root is no longer read)
- *   KnowledgeBase/Product/SKILL.md       → false
  *
- * This is the placement rule ONLY. Whether a skill that IS well-placed shows up
- * in review is a separate, stricter question owned by the pending-skill shelf.
+ * A `SKILL.md` directly in a PLUGIN folder is refused, and that is the case
+ * worth explaining. The scanner treats the first folder holding a `SKILL.md`
+ * as a leaf and stops descending (`skills.service.ts`), so `Plugins/GTM/SKILL.md`
+ * would not merely add one odd skill — it would make `Plugins/GTM` itself the
+ * skill and hide every real skill under `Plugins/GTM/skills/`. The pending-skill
+ * shelf already refuses this shape; blessing it on the write side would let one
+ * file silently empty a plugin's catalog.
+ *
+ * Four segments, therefore: `Plugins`, the plugin, at least one folder that is
+ * the skill, and the file.
  */
 export function isSkillDocPath(repoRelativePath: string): boolean {
   const segments = repoRelativePath.split('/').filter(Boolean);
   return (
-    segments.length >= 3 &&
+    segments.length >= 4 &&
     segments[0] === PLUGINS_DIR &&
     segments[segments.length - 1] === SKILL_DOC_FILE
   );

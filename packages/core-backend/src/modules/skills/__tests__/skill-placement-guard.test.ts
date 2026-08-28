@@ -2,7 +2,7 @@ import { describe, test, expect } from 'vitest';
 import {
   SkillPlacementError,
   assertSkillPlacement,
-  makeSkillPlacementWriteValidator,
+  skillPlacementGuardFor,
 } from '../skill-placement-guard.js';
 
 /**
@@ -15,7 +15,6 @@ import {
  */
 
 const KB = 'knowledge-base';
-const BODY = '---\nname: example\ndescription: x\n---\n\n# Example\n';
 
 describe('assertSkillPlacement', () => {
   test('accepts the documented shape', () => {
@@ -25,13 +24,19 @@ describe('assertSkillPlacement', () => {
   });
 
   /**
-   * `Plugins/<name>/SKILL.md` is a real, supported state: the scanner walks
-   * `Plugins/` and treats any folder directly holding a SKILL.md as a skill, so
-   * the folder simply IS the plugin. Refusing it here would break a layout the
-   * catalog already reads.
+   * A SKILL.md directly in a PLUGIN folder is refused, and this is the case
+   * that matters most. The scanner stops descending at the first folder holding
+   * a SKILL.md, so `Plugins/GTM/SKILL.md` makes `Plugins/GTM` itself the skill
+   * and hides every real skill under `Plugins/GTM/skills/`. One file, a plugin's
+   * whole catalog gone — the write gate must not bless that.
    */
-  test('accepts a skill whose folder is the plugin itself', () => {
-    expect(() => assertSkillPlacement(`${KB}/Plugins/loose-skill/SKILL.md`, KB)).not.toThrow();
+  test('refuses a SKILL.md directly in a plugin folder, which would hide its skills', () => {
+    expect(() => assertSkillPlacement(`${KB}/Plugins/GTM/SKILL.md`, KB)).toThrow(
+      SkillPlacementError,
+    );
+    expect(() => assertSkillPlacement(`${KB}/Plugins/loose-skill/SKILL.md`, KB)).toThrow(
+      SkillPlacementError,
+    );
   });
 
   test('accepts a skill nested under extra grouping folders', () => {
@@ -133,25 +138,23 @@ describe('assertSkillPlacement', () => {
   });
 });
 
-describe('makeSkillPlacementWriteValidator', () => {
+describe('skillPlacementGuardFor', () => {
+  /**
+   * ONE closure for both filesystem hooks. `validateWrite` passes content it
+   * has no use for here and `validateCreatePath` passes none at all; a wrapper
+   * per hook was two spellings of the same call.
+   */
   test('refuses a misplaced skill write and passes a well-placed one', () => {
-    const validate = makeSkillPlacementWriteValidator(KB);
-    expect(() => validate(`${KB}/Skills/example/SKILL.md`, BODY)).toThrow(SkillPlacementError);
-    expect(() => validate(`${KB}/Plugins/GTM/skills/example/SKILL.md`, BODY)).not.toThrow();
+    const guard = skillPlacementGuardFor(KB);
+    expect(() => guard(`${KB}/Skills/example/SKILL.md`)).toThrow(SkillPlacementError);
+    expect(() => guard(`${KB}/Plugins/GTM/skills/example/SKILL.md`)).not.toThrow();
   });
 
-  /**
-   * Content is not consulted at all. The roles.yaml guard skips buffers because
-   * it PARSES; this one reads only the path, and skipping binary content would
-   * leave the hole exactly where `POST /upload` puts one — it writes a Buffer.
-   */
-  test('judges placement regardless of content type', () => {
-    const validate = makeSkillPlacementWriteValidator(KB);
-    expect(() => validate(`${KB}/Skills/example/SKILL.md`, Buffer.from([0, 1, 2]))).toThrow(
-      SkillPlacementError,
-    );
+  test('honours a non-default clone folder name', () => {
+    const guard = skillPlacementGuardFor('unite-process-map');
+    expect(() => guard('unite-process-map/Skills/example/SKILL.md')).toThrow(SkillPlacementError);
     expect(() =>
-      validate(`${KB}/Plugins/GTM/skills/example/SKILL.md`, Buffer.from([0, 1, 2])),
+      guard('unite-process-map/Plugins/RFI/skills/rfi-answer/SKILL.md'),
     ).not.toThrow();
   });
 });

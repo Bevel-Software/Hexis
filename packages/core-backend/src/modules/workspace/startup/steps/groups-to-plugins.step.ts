@@ -9,6 +9,7 @@ import {
   PLUGIN_MCP_FILE,
   PLUGIN_MCP_SCHEMA,
   PLUGIN_SKILLS_DIR,
+  SKILL_DOC_FILE,
   renderPluginManifest,
 } from '@bevel-software/platform-shared';
 import type { ToolManualDescriptor } from '../../../tool-manuals/tool-manuals.contract.js';
@@ -382,7 +383,7 @@ async function migratePluginFolder(
     const abs = path.join(folderDir, entry.name);
 
     // A skill is a folder carrying SKILL.md — the same rule the catalog uses.
-    if (entry.isDirectory() && (await exists(path.join(abs, 'SKILL.md')))) {
+    if (entry.isDirectory() && (await exists(path.join(abs, SKILL_DOC_FILE)))) {
       if (!(await exists(path.join(folderDir, PLUGIN_SKILLS_DIR, entry.name)))) {
         branch.move(`${relPlugin}/${entry.name}`, `${relPlugin}/${PLUGIN_SKILLS_DIR}/${entry.name}`);
         details.push(`${folderName}: ${entry.name}/ → ${PLUGIN_SKILLS_DIR}/${entry.name}/`);

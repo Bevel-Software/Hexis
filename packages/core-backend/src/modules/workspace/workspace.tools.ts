@@ -21,6 +21,7 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { assertInsideRepo } from '../kb-fs/repo-path.js';
+import { assertSkillPlacement } from '../skills/skill-placement-guard.js';
 import type { ISessionSink } from './session-sink.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
@@ -936,6 +937,11 @@ export function registerWorkspaceTools(
           // An entry that would land beside the repository is skipped with the
           // corrected-path reason, like any other refused entry.
           assertInsideRepo(wsRelPath, kbDirName);
+          // A SKILL.md inside the archive is judged like any other creation.
+          // Per ENTRY, not after the fact: a refused entry is skipped with its
+          // reason and the rest of the archive still lands, so one misplaced
+          // file cannot strand the other forty.
+          assertSkillPlacement(wsRelPath, kbDirName);
           writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
           return assertOntologyWriteAllowed(sessionOntologyGate, ctx, wsRelPath);
         },

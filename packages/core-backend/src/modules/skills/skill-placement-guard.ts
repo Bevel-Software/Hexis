@@ -21,13 +21,12 @@
  * already see. A misplaced file is the only failure that leaves nothing behind
  * to fix.
  *
- * Mirrors {@link makeRolesYamlWriteValidator} in shape and wiring on purpose:
- * the same `LockingFilesystem.validateWrite` hook for the agent's file tools,
- * and the same explicit call on the human editor's save route. One rule, both
- * raw write paths.
+ * Mirrors {@link makeRolesYamlWriteValidator} in shape and wiring on purpose.
+ * One rule, one definition (`isSkillDocPath` in `kb-layout.ts`), applied at
+ * every path that CREATES a file: the agent's filesystem hooks, the editor's
+ * save and upload routes, and the per-entry guard both unzip callers pass.
  */
 
-import type { FileContent } from '@mastra/core/workspace';
 import { PLUGINS_DIR, SKILL_DOC_FILE, isSkillDocPath } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 
@@ -92,17 +91,13 @@ export function assertSkillPlacement(workspaceRelPath: string, kbDirName: string
 }
 
 /**
- * A `LockingFilesystem` write-validator scoped to a KB dir: refuses a raw write
- * that would put a `SKILL.md` outside `Plugins/`. Pass the returned closure as
- * the filesystem's `validateWrite` hook.
+ * `assertSkillPlacement` bound to a KB dir, for the hooks that take a closure.
  *
- * Content is ignored, and that is the difference from the roles.yaml guard:
- * that one PARSES, so it has nothing to say about a buffer. Placement is a
- * property of the path alone, so skipping binary writes would leave a hole
- * exactly where an upload puts one.
+ * One closure serves BOTH filesystem hooks — `validateWrite`, whose extra
+ * `content` argument this rule has no use for, and `validateCreatePath`. A
+ * separate wrapper per hook was two spellings of the same call, which is the
+ * drift this change exists to remove.
  */
-export function makeSkillPlacementWriteValidator(
-  kbDirName: string,
-): (path: string, content: FileContent) => void {
+export function skillPlacementGuardFor(kbDirName: string): (path: string) => void {
   return (path) => assertSkillPlacement(path, kbDirName);
 }
