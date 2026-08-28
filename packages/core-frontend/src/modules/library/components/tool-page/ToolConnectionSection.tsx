@@ -178,8 +178,13 @@ export function ToolConnectionSection({
       // transport or access failure lands here, and that is not a verdict about
       // the credential — so the badge keeps saying "untested" rather than
       // inventing a result from our own network trouble.
-      if (probeSeq.current === mine) setProbed(null);
-      onError(err instanceof Error ? err.message : "Couldn't test this connection.");
+      // Inside the guard too: an older probe rejecting after a newer one has
+      // already answered would otherwise raise a transport error over a verdict
+      // that is currently correct.
+      if (probeSeq.current === mine) {
+        setProbed(null);
+        onError(err instanceof Error ? err.message : "Couldn't test this connection.");
+      }
     } finally {
       // Only the newest probe owns the button: an older one finishing late must
       // not re-enable it while the newer one is still running.

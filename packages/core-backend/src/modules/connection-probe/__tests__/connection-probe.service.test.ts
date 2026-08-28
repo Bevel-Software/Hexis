@@ -33,7 +33,7 @@ vi.mock('@utcp/code-mode', () => ({
   CodeModeUtcpClient: { create: () => createClientMock() },
 }));
 
-const { ConnectionProbeService } = await import('../connection-probe.service.js');
+const { ConnectionProbeService, readCapped } = await import('../connection-probe.service.js');
 
 const DECLARED_PROBE: ToolHealthCheck = {
   url: 'https://api.acme.test/me',
@@ -379,5 +379,26 @@ describe('ConnectionProbeService: what the probe concludes', () => {
     // 200 chars of quote plus the ellipsis and the fixed prefix — not 5MB.
     expect(r?.detail!.length).toBeLessThan(400);
     expect(cancelled).toBe(true);
+  });
+
+  /**
+   * The cap has to bound what is DECODED, not merely how many times we loop.
+   * Counting a chunk against the budget after decoding it lets a provider that
+   * answers in one huge chunk put the whole thing through the decoder — the
+   * bound bypassed by exactly the party it exists to bound. Asserted on
+   * `readCapped` directly because the caller's 200-character snippet is
+   * identical either way, which is how the first version of this passed.
+   */
+  it('holds one oversized chunk to the byte budget, not just the loop', async () => {
+    const oneHugeChunk = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('x'.repeat(5_000_000)));
+        controller.close();
+      },
+    });
+
+    const out = await readCapped(new Response(oneHugeChunk), 8 * 1024);
+
+    expect(out.length).toBe(8 * 1024);
   });
 });
