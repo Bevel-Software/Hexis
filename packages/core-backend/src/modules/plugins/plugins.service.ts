@@ -63,6 +63,9 @@ export class PluginIndexService implements IPluginIndexService {
   async catalog(): Promise<PluginCatalogEntry[]> {
     const cached = this.cache.get();
     if (cached) return cached;
+    // See `TtlCache.begin`: taken before the read so an `invalidate()` that
+    // lands mid-build discards this result instead of being overwritten by it.
+    const token = this.cache.begin();
     const entries = await this.build();
     // A failed scan and a KB with genuinely no plugin folders both serve `[]`,
     // but only the second is a fact worth holding for the TTL. Caching the
@@ -72,7 +75,7 @@ export class PluginIndexService implements IPluginIndexService {
     // never arrive in that window. So a degraded read is served, not stored,
     // and the next caller retries.
     if (entries === null) return [];
-    this.cache.set(entries);
+    this.cache.set(entries, token);
     return entries;
   }
 

@@ -66,32 +66,41 @@ describe('registerCatalogCacheInvalidation', () => {
     });
   });
 
-  describe('write-time (fs-tree-changed)', () => {
+  describe("the default branch's tree changed", () => {
     it('drops the catalogs on a default-branch working-tree write', () => {
       const { eventBus, drops } = setup();
       eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws', branch: DEFAULT_BRANCH });
       expect(drops()).toBe(1);
     });
 
-    it('ignores a write to another branch', () => {
-      const { eventBus, drops } = setup();
-      eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws', branch: 'feature/x' });
-      expect(drops()).toBe(0);
-    });
-  });
-
-  describe('merge-time (change-request-merged)', () => {
     /**
      * The bug this exists for: approving a proposed skill closed its change
      * request (so it left the pending shelf at once) while the released catalog
      * kept serving its pre-merge scan, and the card vanished from the library
-     * until the TTL ran out. A merge writes the default branch through `git
-     * pull`, so neither of the two subscribers above ever fires for it.
+     * until the TTL ran out.
+     *
+     * The merge reaches here as the `fs-tree-changed` its post-merge pull
+     * emits, NOT as a `change-request-merged` special case — a pull is how a
+     * merge, a recovery and a remote sync all rewrite the default tree, so one
+     * signal covers the three.
      */
-    it('drops the catalogs when a change request merges', () => {
+    it('drops them when a pull rewrites the default tree (the merge path)', () => {
       const { eventBus, drops } = setup();
-      eventBus.emit({ kind: 'change-request-merged', number: 42 });
+      eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws', branch: DEFAULT_BRANCH });
       expect(drops()).toBe(1);
+    });
+
+    it('drops them when a diverged workspace is reconciled', () => {
+      const { eventBus, drops } = setup();
+      eventBus.emit({ kind: 'git-sync-recovered', workspaceId: 'ws', branch: DEFAULT_BRANCH });
+      expect(drops()).toBe(1);
+    });
+
+    it('ignores both events on another branch', () => {
+      const { eventBus, drops } = setup();
+      eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws', branch: 'feature/x' });
+      eventBus.emit({ kind: 'git-sync-recovered', workspaceId: 'ws', branch: 'feature/x' });
+      expect(drops()).toBe(0);
     });
 
     it('drops them BEFORE the event reaches a browser session', () => {
@@ -100,12 +109,14 @@ describe('registerCatalogCacheInvalidation', () => {
       eventBus.subscribe({
         sessionId: 's1',
         userId: 'u1',
-        getFocusedWorkspaceId: () => null,
+        // `fs-tree-changed` is workspace-scoped, so a session only receives
+        // it while focused on that workspace.
+        getFocusedWorkspaceId: () => 'ws',
         // The browser reloads the library off this event; if the caches were
         // still warm here, the reload would re-read the stale catalog.
         push: () => seenAtPush.push(drops()),
       });
-      eventBus.emit({ kind: 'change-request-merged', number: 42 });
+      eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws', branch: DEFAULT_BRANCH });
       expect(seenAtPush).toEqual([1]);
     });
 

@@ -51,36 +51,29 @@ export function registerCatalogCacheInvalidation(deps: {
     if (paths.some((p) => p.startsWith(`${kbDirName}/${PLUGINS_DIR}/`))) invalidateAll();
   });
 
-  // Subscriber B — WRITE-time freshness for the same catalogs. The workspace
-  // routes emit `fs-tree-changed` the moment bytes hit a working tree;
-  // Subscriber A fires only when the ASYNC commit lands. Between the two,
-  // "create a skill, reload the catalog" raced the commit pipeline and lost —
-  // the new skill's card stayed invisible until a refresh outlived the TTL.
-  // The catalogs scan the working tree anyway, so invalidating at write time
-  // makes the very next read see the file. No path filter: this event carries
-  // none, and a spurious drop only costs one re-scan.
+  // Subscriber B — the DEFAULT branch's tree changed under the catalogs.
   //
-  // Subscriber C — MERGE-time freshness, the third way a skill reaches the
-  // default branch and the one neither of the above covers. A merge writes the
-  // default branch's tree through `git pull`, not through the write routes or
-  // the commit pipeline, so it emits neither event. That left approving a
-  // proposed skill with a hole the reviewer sees: the change request closes, so
-  // the skill drops off the pending shelf at once, while the released catalog
-  // keeps serving the pre-merge scan for the rest of its TTL — the card the
-  // reviewer just approved vanishes from the library entirely and comes back
-  // only when the TTL runs out. `change-request-merged` is emitted after the
-  // post-merge pull of the target workspace, so by the time this runs the file
-  // is on disk, and `onEmit` runs before the SSE fan-out, so the browser that
-  // is told to reload cannot beat the invalidation. The event carries no
-  // branch, so a merge to a non-default base drops the caches too — one
-  // needless re-scan, on the same reasoning as Subscriber B.
+  // `fs-tree-changed` is emitted the moment bytes hit a working tree: by the
+  // workspace routes when someone writes a file, and by `pullWorkspace` when a
+  // pull rewrites the default workspace — a merge landing an approved skill,
+  // the non-fast-forward recovery ladder, a plain sync from the remote. That
+  // is deliberately ONE signal rather than one per occasion: the catalogs do
+  // not care which path rewrote the tree, only that it is no longer the tree
+  // they scanned. Enumerating the occasions instead (a subscriber for merges,
+  // another for recoveries) left every path nobody had thought of yet serving
+  // a stale catalog for a full TTL — which is exactly how the merge case got
+  // missed.
+  //
+  // `git-sync-recovered` is the same fact arriving by the other road: a
+  // workspace that had diverged from origin has been reconciled, so its tree
+  // moved. The pull inside that recovery announces itself, but the recovery
+  // can also complete by paths that do not run one, and a catalog left holding
+  // a scan of the diverged tree is the failure this exists to prevent.
   const offEmit = eventBus.onEmit((event) => {
-    if (event.kind === 'change-request-merged') {
-      invalidateAll();
-      return;
-    }
-    if (event.kind !== 'fs-tree-changed') return;
-    if (!('branch' in event) || event.branch !== DEFAULT_BRANCH) return;
+    if (event.kind !== 'fs-tree-changed' && event.kind !== 'git-sync-recovered') return;
+    // Both events declare `branch`, so no `in` guard: the kind check above has
+    // already narrowed the union to the two that carry one.
+    if (event.branch !== DEFAULT_BRANCH) return;
     invalidateAll();
   });
 
