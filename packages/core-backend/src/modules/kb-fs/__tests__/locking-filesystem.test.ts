@@ -974,6 +974,17 @@ describe('LockingFilesystem refuses to create anything outside the repository fo
     // `walkFiles` (the catalog scanners' walk) would skip it.
     await fs.mkdir(path.join(root, `${KB}/Plugins/GTM/skills/x/.hidden`), { recursive: true });
     await fs.writeFile(path.join(root, `${KB}/Plugins/GTM/skills/x/.hidden/SKILL.md`), 'z');
+    // A SYMLINK named SKILL.md is not `isFile()`, but `copyDirectory` hands
+    // everything that is not a directory to `fs.copyFile`, which DEREFERENCES —
+    // so this lands as a real SKILL.md carrying the target's bytes. Enumerating
+    // by `isFile()` would have judged every path but this one.
+    await fs.writeFile(path.join(root, `${KB}/Plugins/GTM/skills/x/target.md`), 'linked');
+    await fs.symlink('target.md', path.join(root, `${KB}/Plugins/GTM/skills/x/linked`));
+    await fs.mkdir(path.join(root, `${KB}/Plugins/GTM/skills/x/via-link`), { recursive: true });
+    await fs.symlink(
+      '../target.md',
+      path.join(root, `${KB}/Plugins/GTM/skills/x/via-link/SKILL.md`),
+    );
     const workflow = makeWorkflow();
     const creatorAccess = makeCreatorAccess();
     const seen: string[] = [];
@@ -990,6 +1001,8 @@ describe('LockingFilesystem refuses to create anything outside the repository fo
     expect(seen).toContain(`${KB}/Plugins/GTM/skills/y/SKILL.md`);
     expect(seen).toContain(`${KB}/Plugins/GTM/skills/y/notes.md`);
     expect(seen).toContain(`${KB}/Plugins/GTM/skills/y/.hidden/SKILL.md`);
+    expect(seen).toContain(`${KB}/Plugins/GTM/skills/y/via-link/SKILL.md`);
+    expect(seen).toContain(`${KB}/Plugins/GTM/skills/y/linked`);
   });
 
   /**

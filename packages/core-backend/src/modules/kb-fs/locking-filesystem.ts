@@ -731,14 +731,17 @@ function sleep(ms: number): Promise<void> {
 
 
 /**
- * Every file under `root`, relative and `/`-separated — dot-entries included.
+ * Every path a recursive copy of `root` would CREATE, relative and
+ * `/`-separated — dot-entries and symlinks included.
  *
  * Deliberately NOT `walkFiles`, which documents itself as the walk "for catalog
  * scanners" and skips dot-entries. That is right for a scanner and wrong here:
  * a recursive copy creates `.hidden/SKILL.md` just as surely as a visible one,
  * so a gate that enumerates with a scanner's walk judges fewer files than the
  * copy lands. The rule that decides each path is the same either way; what this
- * has to get right is only WHICH paths the operation will create.
+ * has to get right is only WHICH paths the operation will create — so it is
+ * written against `copyDirectory`, not against what a reader would later find
+ * interesting.
  */
 async function everyFileUnder(root: string): Promise<string[]> {
   const out: string[] = [];
@@ -751,8 +754,14 @@ async function everyFileUnder(root: string): Promise<string[]> {
     }
     for (const entry of entries) {
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      // Mirror `copyDirectory` exactly: it recurses on `isDirectory()` and hands
+      // EVERYTHING else to `fs.copyFile`. So `isFile()` is the wrong question —
+      // a symlink named `SKILL.md` answers false to it, and `fs.copyFile`
+      // dereferences, landing a real file with the target's bytes at a path this
+      // gate never saw. Anything that is not a directory is a path the copy
+      // creates; enumerate it.
       if (entry.isDirectory()) await walk(path.join(dir, entry.name), childRel);
-      else if (entry.isFile()) out.push(childRel);
+      else out.push(childRel);
     }
   };
   await walk(root, '');
