@@ -64,10 +64,22 @@ export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
       message: `could not be extracted as a PDF (the file is ${bytes.length} bytes — over the ${MAX_DOC_PART_BYTES}-byte (50 MB) extraction limit)`,
     };
   }
-  let doc: Awaited<ReturnType<typeof openPdf>>;
+  // The loading TASK is what gets destroyed at the end, not the document:
+  // pdf.js 6 dropped `PDFDocumentProxy.destroy()`, and destroying the task
+  // frees the document (and its pages) with it — the shape the viewer uses.
+  let task: Awaited<ReturnType<typeof openPdf>>;
   try {
-    doc = await openPdf(bytes);
+    task = await openPdf(bytes);
   } catch (err) {
+    return { ok: false, message: `could not be parsed as a PDF (${(err as Error).message})` };
+  }
+  let doc: Awaited<typeof task.promise>;
+  try {
+    doc = await task.promise;
+  } catch (err) {
+    // A task exists even when the document never will (malformed, truncated):
+    // destroy it, or its worker-side state outlives every failed extraction.
+    await task.destroy().catch(() => undefined);
     return { ok: false, message: `could not be parsed as a PDF (${(err as Error).message})` };
   }
   try {
@@ -151,7 +163,7 @@ export async function extractPdf(bytes: Buffer): Promise<ExtractResult> {
   } catch (err) {
     return { ok: false, message: `could not extract the PDF's text (${(err as Error).message})` };
   } finally {
-    await doc.destroy();
+    await task.destroy();
   }
 }
 
@@ -167,6 +179,8 @@ async function openPdf(bytes: Buffer) {
     throw err;
   });
   const { getDocument } = await pdfjsPromise;
+  // Returns the loading task; the caller awaits `.promise` for the document
+  // and destroys the task when done (see `extractPdf`).
   return getDocument({
     // Copy into a fresh Uint8Array: pdf.js TRANSFERS the buffer it is given
     // (detaching it), and the caller's Buffer must stay usable for hashing.
@@ -174,5 +188,5 @@ async function openPdf(bytes: Buffer) {
     // Server side: no font rendering — text content is all we consume.
     disableFontFace: true,
     useSystemFonts: true,
-  }).promise;
+  });
 }
