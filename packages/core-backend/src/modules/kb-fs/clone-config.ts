@@ -68,12 +68,23 @@ export const SAFE_IMPLICIT_FETCH_ARGS: readonly string[] = [
  * Returns the arguments rather than running them so each caller can use its own
  * git runner (the git service's mutex-aware wrapper, `git -C` from the
  * workspace service) — no process is spawned here.
+ *
+ * `gc.autoDetach=false` rides along because it is stamped in the same two
+ * places — on adopt, and before every pull — which is how clones already on
+ * disk pick it up. After a fetch or a commit git may decide to run
+ * `gc --auto`, and by default it forks that into the BACKGROUND, detached from
+ * the git command this process is waiting on. The detached gc reparents to
+ * PID 1 and, when it exits, stays a zombie unless PID 1 reaps it — a node
+ * server does not. One shared host was found carrying 1,500 zombie `git`
+ * processes under a single platform container. With auto-detach off the gc
+ * runs inside the command that triggered it, and that command's exit reaps it.
  */
 export function cloneTrackingConfigArgs(branch: string): string[][] {
   return [
     ['config', '--replace-all', 'remote.origin.fetch', ORIGIN_FETCH_REFSPEC],
     ['config', '--replace-all', `branch.${branch}.remote`, 'origin'],
     ['config', '--replace-all', `branch.${branch}.merge`, `refs/heads/${branch}`],
+    ['config', '--replace-all', 'gc.autoDetach', 'false'],
   ];
 }
 

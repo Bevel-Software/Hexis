@@ -207,13 +207,20 @@ describe('workspace file primitives', () => {
     expect(res.exitCode).toBe(-1);
     const grandchild = Number(res.stdout.trim());
     expect(grandchild).toBeGreaterThan(0);
-    // Give the kernel a beat to deliver the signal, then the pid must be gone.
-    await new Promise((r) => setTimeout(r, 200));
+    // A killed process keeps its pid — and answers `kill(pid, 0)` as alive —
+    // until whoever inherited it reaps it, which on a loaded machine is not
+    // instant. Poll to a deadline rather than trust one fixed pause. Without
+    // the fix the grandchild is not dead at all, so the deadline is what
+    // fails, not a lucky early check that passes.
+    const deadline = Date.now() + 3_000;
     let alive = true;
-    try {
-      process.kill(grandchild, 0);
-    } catch {
-      alive = false;
+    while (alive && Date.now() < deadline) {
+      try {
+        process.kill(grandchild, 0);
+        await new Promise((r) => setTimeout(r, 50));
+      } catch {
+        alive = false;
+      }
     }
     expect(alive).toBe(false);
   });
