@@ -315,5 +315,69 @@ describe('ConnectionProbeService: what the probe concludes', () => {
       expect(r?.status).toBe('ok');
       expect(registerManualMock).not.toHaveBeenCalled();
     });
+
+    /**
+     * The parse-time guard cannot see a templated host, exactly as for the
+     * declared probe — and `@utcp/mcp`'s own `ensureSecureMcpUrl` is no
+     * substitute: it checks the SCHEME, so `https://169.254.169.254` sails
+     * through it. Without a re-check here, clicking Test connection on such a
+     * manual reaches the metadata endpoint.
+     */
+    it('refuses to dial an internal host the server url resolved to', async () => {
+      const templated = {
+        name: 'acme',
+        call_template_type: 'mcp',
+        config: { mcpServers: { acme: { transport: 'http', url: 'https://${HOST}/mcp' } } },
+      } as unknown as CallTemplate;
+      const svc = build({ type: 'mcp', callTemplate: templated }, async () => '169.254.169.254');
+      createClientMock.mockResolvedValue({});
+      registerManualMock.mockResolvedValue({ ok: true });
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      expect(r?.status).toBe('unverifiable');
+      expect(registerManualMock).not.toHaveBeenCalled();
+      expect(createClientMock).not.toHaveBeenCalled();
+    });
+
+    it('still dials a templated host that resolves somewhere public', async () => {
+      const templated = {
+        name: 'acme',
+        call_template_type: 'mcp',
+        config: { mcpServers: { acme: { transport: 'http', url: 'https://${HOST}/mcp' } } },
+      } as unknown as CallTemplate;
+      const svc = build({ type: 'mcp', callTemplate: templated }, async () => 'mcp.acme.test');
+      createClientMock.mockResolvedValue({});
+      registerManualMock.mockResolvedValue({ ok: true });
+
+      expect((await svc.probe('u1', 'a@b.c', 'acme'))?.status).toBe('ok');
+      expect(registerManualMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  /**
+   * The rejecting body is written by whatever server the credential points at,
+   * so how much of it we read is that server's choice unless we bound it.
+   */
+  it('quotes a rejection without swallowing an unbounded body', async () => {
+    const huge = 'x'.repeat(5_000_000);
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        // Endless: only the read cap can stop this.
+        controller.enqueue(new TextEncoder().encode(huge));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.mocked(fetch).mockResolvedValue(new Response(body, { status: 401 }));
+
+    const r = await httpTool().probe('u1', 'a@b.c', 'acme');
+
+    expect(r?.status).toBe('failed');
+    // 200 chars of quote plus the ellipsis and the fixed prefix — not 5MB.
+    expect(r?.detail!.length).toBeLessThan(400);
+    expect(cancelled).toBe(true);
   });
 });

@@ -257,7 +257,7 @@ export interface ToolManualSummary {
   // NOTE: no `healthCheck` here, deliberately. This type is serialized straight
   // to the browser by the tool endpoints, and a probe carries `headers` — which
   // a `.tool` author may write as a literal token rather than a `${VAR}` ref.
-  // The server reads probe config through `IToolManualService.healthCheckFor`.
+  // The server reads probe config through `IToolManualService.probeTargetFor`.
 }
 
 /** One thing an `inline` manual's embedded tool list says the assistant can do. */

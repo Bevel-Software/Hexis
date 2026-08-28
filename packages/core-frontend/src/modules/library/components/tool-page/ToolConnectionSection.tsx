@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
@@ -28,12 +28,26 @@ import { ToolVarRow } from './ToolVarRow';
 
 export interface ToolConnectionSectionProps {
   tool: ToolSecrets;
+  /**
+   * Bumped whenever the tool's DEFINITION changes — today, an mcp.json server
+   * edit. A verdict describes the endpoint and headers it was probed against,
+   * so changing those makes it a statement about a server that is no longer
+   * configured; the badge must stop claiming it. Deliberately NOT bumped by a
+   * credential write: that path clears and re-probes on its own, and bumping
+   * here would discard the answer it is in the middle of fetching.
+   */
+  configRevision: number;
   /** A write landed — the caller refetches so the chips catch up. */
   onChanged(): void;
   onError(message: string): void;
 }
 
-export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnectionSectionProps) {
+export function ToolConnectionSection({
+  tool,
+  configRevision,
+  onChanged,
+  onError,
+}: ToolConnectionSectionProps) {
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
   /** `{varName, n}` — bumping `n` opens that variable's editor from the banner. */
@@ -44,10 +58,24 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
    *
    * Nothing persists a verdict, so this state IS the evidence behind the word
    * "Connected" — which is why the claim can be trusted: it cannot outlive the
-   * page that watched the call succeed. Cleared whenever the credential changes,
-   * because a verdict about the old key says nothing about the new one.
+   * page that watched the call succeed.
+   *
+   * Stored WITH the config revision it was probed under, and read back only
+   * when that still matches. Comparing rather than clearing keeps it pure: an
+   * effect that cleared on change would race the probe it is meant to protect,
+   * since a credential save starts a probe and a refetch at the same moment.
    */
-  const [verdict, setVerdict] = useState<ProbeVerdict | null>(null);
+  const [probed, setProbed] = useState<{ rev: number; value: ProbeVerdict } | null>(null);
+  const verdict = probed && probed.rev === configRevision ? probed.value : null;
+
+  /**
+   * Which probe is allowed to publish. Two saves in quick succession start two
+   * probes, and the first can answer last — so a result is applied only while
+   * it is still the newest one asked for. Without it the older credential's
+   * verdict wins by finishing late, which is the same stale-answer bug this
+   * whole feature exists to remove, one layer up.
+   */
+  const probeSeq = useRef(0);
 
   const setupKind = tool.setup?.kind ?? null;
   // Not just "kind is oauth-manual": once the owner declares the provider and
@@ -139,18 +167,23 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
    * verdict, leaving an enabled "Test connection" over a probe already running.
    */
   async function runCheck() {
+    const mine = ++probeSeq.current;
+    const rev = configRevision;
     setChecking(true);
     try {
-      setVerdict(await checkToolConnection(tool.slug));
+      const value = await checkToolConnection(tool.slug);
+      if (probeSeq.current === mine) setProbed({ rev, value });
     } catch (err) {
       // A rejected credential resolves with `status: 'failed'`; only a
       // transport or access failure lands here, and that is not a verdict about
       // the credential — so the badge keeps saying "untested" rather than
       // inventing a result from our own network trouble.
-      setVerdict(null);
+      if (probeSeq.current === mine) setProbed(null);
       onError(err instanceof Error ? err.message : "Couldn't test this connection.");
     } finally {
-      setChecking(false);
+      // Only the newest probe owns the button: an older one finishing late must
+      // not re-enable it while the newer one is still running.
+      if (probeSeq.current === mine) setChecking(false);
     }
   }
 
@@ -160,7 +193,7 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
    * the user still has it to hand, which is when a wrong key is cheapest to fix.
    */
   function onSaved() {
-    setVerdict(null);
+    setProbed(null);
     void runCheck();
   }
 

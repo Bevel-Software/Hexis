@@ -999,26 +999,37 @@ function normalizeHealthCheck(
     if (m !== 'GET') throw new Error('`healthCheck.method` must be `GET` — a health check may not mutate');
     check.method = 'GET';
   }
+  // Whichever headers the probe ends up carrying get checked — declared OR
+  // inherited. Validating only the declared branch left the common case
+  // unguarded: `healthCheck: { url }` alone inherits the manual's headers, so a
+  // YAML `Authorization: 1234` there still reached the probe untouched.
   if (e.headers !== undefined) {
     if (!e.headers || typeof e.headers !== 'object' || Array.isArray(e.headers)) {
       throw new Error('`healthCheck.headers` must be an object');
     }
-    // Check the VALUES, not just the container. YAML types `Authorization: 1234`
-    // as a number, and the cast alone let it through to the probe, where
-    // substitution calls `.matchAll` on it — surfacing `text.matchAll is not a
-    // function` to the user as the reason their credential is unhealthy. Caught
-    // at parse time, next to `url` and `method`, it reads as what it is: a
-    // mistake in the `.tool` file.
-    for (const [k, v] of Object.entries(e.headers as Record<string, unknown>)) {
-      if (typeof v !== 'string') {
-        throw new Error(`\`healthCheck.headers.${k}\` must be a string (quote it if it looks like a number)`);
-      }
-    }
-    check.headers = e.headers as Record<string, string>;
+    check.headers = assertStringHeaders(e.headers as Record<string, unknown>, 'healthCheck.headers');
   } else if (manualHeaders) {
-    check.headers = manualHeaders;
+    check.headers = assertStringHeaders(manualHeaders as Record<string, unknown>, 'headers');
   }
   return check;
+}
+
+/**
+ * The VALUES of a header map, not just its container.
+ *
+ * YAML types `Authorization: 1234` as a number, and a cast alone let it through
+ * to the probe, where substitution calls `.matchAll` on it — surfacing
+ * `text.matchAll is not a function` to the user as the reason their credential
+ * is unhealthy. Caught at parse time, next to `url` and `method`, it reads as
+ * what it is: a mistake in the `.tool` file.
+ */
+function assertStringHeaders(headers: Record<string, unknown>, label: string): Record<string, string> {
+  for (const [k, v] of Object.entries(headers)) {
+    if (typeof v !== 'string') {
+      throw new Error(`\`${label}.${k}\` must be a string (quote it if it looks like a number)`);
+    }
+  }
+  return headers as Record<string, string>;
 }
 
 /**

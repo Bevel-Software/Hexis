@@ -303,7 +303,10 @@ export function ConnectToolsPage() {
             <>
               {outstanding === 0 && (
                 <Banner role="status" tone="ok" className="mb-5">
-                  Everything is connected. You can use your tools in your agent.
+                  {/* Not "everything is connected": nothing on this page has
+                      called a provider, so every row above is stored-but-untested.
+                      The banner has to make the same claim its rows do. */}
+                  Everything is set up. You can use your tools in your agent.
                 </Banner>
               )}
 

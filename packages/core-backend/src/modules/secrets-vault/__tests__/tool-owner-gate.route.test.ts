@@ -94,10 +94,6 @@ async function baseUrlAs(email: string): Promise<string> {
       secretsVault,
       toolManualService,
       accessControl,
-      // Spies, not no-ops: clearing the stale verdict is PART of a credential
-      // write's contract here, so the tests below assert it happened. Stubbing
-      // it away would let the invalidation be deleted from the routes with
-      // every test still green.
       connectionProbe,
       stateSecret: 'test-secret',
       publicBackendUrl: 'http://localhost:3000',

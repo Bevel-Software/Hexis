@@ -38,7 +38,8 @@ function renderSection(configuredCount = 2) {
   const onError = vi.fn();
   render(
     <MemoryRouter>
-      <McpServerSection slug="vendor" configuredCount={configuredCount} onSaved={onSaved} onError={onError} />
+      <McpServerSection slug="vendor" reloadSignal={0}
+      configuredCount={configuredCount} onSaved={onSaved} onError={onError} />
     </MemoryRouter>,
   );
   return { onSaved, onError };

@@ -41,6 +41,12 @@ export interface ToolPageState {
   skillsLoaded: boolean;
   /** Skills whose `allowed-tools` reach this tool. */
   poweredSkills: LibrarySkillSummary[];
+  /**
+   * Bumped by every `reload()`. A same-slug reload no longer remounts the page,
+   * so a child that fetches its own data on `[slug]` would never refetch —
+   * this is the signal it puts in its dependency list instead.
+   */
+  revision: number;
   reload(): void;
 }
 
@@ -149,5 +155,5 @@ export function useToolPage(slug: string): ToolPageState {
 
   const reload = useCallback(() => setRevision((r) => r + 1), []);
 
-  return { ...spine, detail, skillsLoaded, poweredSkills, reload };
+  return { ...spine, detail, skillsLoaded, poweredSkills, revision, reload };
 }

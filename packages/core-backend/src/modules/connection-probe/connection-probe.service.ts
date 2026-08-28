@@ -284,6 +284,15 @@ export class ConnectionProbeService implements IConnectionProbeService {
     // session opened with an older credential.
     const template = withIsolatedServerKeys(target.callTemplate);
 
+    // The SAME fetch-time SSRF re-check the declared probe gets, for the same
+    // reason: a templated host does not exist at parse time, so the guard there
+    // could not see it. Without this, an `mcp` manual whose url is
+    // `https://${HOST}/mcp` reaches the metadata endpoint the moment someone
+    // clicks Test connection. `@utcp/mcp`'s own `ensureSecureMcpUrl` is no help
+    // here — it checks the SCHEME, and allows https to any host at all.
+    const unsafe = await this.firstUnsafeServerUrl(userId, target.name, template);
+    if (unsafe) return unsafe;
+
     const TIMED_OUT: Outcome = {
       status: 'unverifiable',
       detail: `The server didn't answer within ${PROBE_TIMEOUT_MS / 1000}s, so the credential wasn't tested.`,
@@ -322,6 +331,34 @@ export class ConnectionProbeService implements IConnectionProbeService {
   }
 
   /**
+   * The reason the first MCP server url in `template` may not be dialled, or
+   * `null` when every one of them is safe.
+   *
+   * Resolves each url through the caller's own vault — the same values UTCP
+   * will resolve when it registers the manual — and holds the result to the
+   * rule the manual's literal url already obeys at parse time.
+   */
+  private async firstUnsafeServerUrl(
+    userId: string,
+    manualName: string,
+    template: CallTemplate,
+  ): Promise<Outcome | null> {
+    const servers = (template as { config?: { mcpServers?: Record<string, unknown> } }).config?.mcpServers;
+    for (const server of Object.values(servers ?? {})) {
+      // `stdio` servers carry a command, not a url, and are never reached from
+      // this process anyway (they imply `remote: false`, refused above).
+      const raw = (server as { url?: unknown }).url;
+      if (typeof raw !== 'string') continue;
+      try {
+        assertSafeFetchUrl(await this.substitute(userId, manualName, raw), { label: 'MCP server url' });
+      } catch (err) {
+        return { status: 'unverifiable', detail: err instanceof Error ? err.message : String(err) };
+      }
+    }
+    return null;
+  }
+
+  /**
    * Replace every variable reference with the caller's resolved secret. Throws
    * when one has no value, so the caller can report "not set yet" rather than
    * sending a request with an empty credential and reading the inevitable 401
@@ -352,19 +389,54 @@ export class ConnectionProbeService implements IConnectionProbeService {
   }
 }
 
+/** How much of a rejecting body we are willing to read to quote it. */
+const MAX_REJECTION_BYTES = 8 * 1024;
+/** How much of what we read we are willing to show. */
+const REJECTION_SNIPPET_CHARS = 200;
+
 /**
  * A short, human-readable reason from a rejecting response — the provider's own
  * words are far more actionable than "401". Bounded and best-effort: a body
  * that is huge, binary, or unreadable falls back to the status line.
+ *
+ * Read from the STREAM with a byte cap rather than `res.text()`. The body here
+ * is written by whatever server the credential points at, so buffering all of
+ * it to keep 200 characters lets that server decide how much memory this
+ * process spends and how long an unattended probe takes. The reader is
+ * cancelled as soon as we have enough, which closes the connection rather than
+ * politely draining a response we already stopped caring about.
  */
 async function describeRejection(res: Response): Promise<string> {
   const fallback = `The provider rejected this credential (${res.status}).`;
   try {
-    const body = (await res.text()).trim();
+    const body = (await readCapped(res, MAX_REJECTION_BYTES)).trim();
     if (!body) return fallback;
-    const snippet = body.length > 200 ? `${body.slice(0, 200)}…` : body;
+    const snippet =
+      body.length > REJECTION_SNIPPET_CHARS ? `${body.slice(0, REJECTION_SNIPPET_CHARS)}…` : body;
     return `${fallback} ${snippet}`;
   } catch {
     return fallback;
   }
+}
+
+/** At most `limit` bytes of a response body, decoded as text. */
+async function readCapped(res: Response, limit: number): Promise<string> {
+  const reader = res.body?.getReader();
+  // No stream (a mocked or already-consumed response): fall back to the whole
+  // body, which for those cases is ours and small.
+  if (!reader) return (await res.text()).slice(0, limit);
+  const decoder = new TextDecoder();
+  let out = '';
+  let read = 0;
+  try {
+    while (read < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      read += value.byteLength;
+      out += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return out;
 }
