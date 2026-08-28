@@ -191,6 +191,33 @@ describe('workspace file primitives', () => {
     expect(res.exitCode).toBe(0);
   });
 
+  // The command runs under `sh -c`; a timeout used to SIGKILL that shell and
+  // leave what it had started running on as an orphan. The whole process
+  // group goes now. POSIX only: Windows has no process groups to kill.
+  it.skipIf(process.platform === 'win32')('execute_command kills what the command started, not just its shell, on timeout', async () => {
+    const base = await start();
+    // Print the grandchild's pid, then block on it so the timeout fires.
+    const res = (await (
+      await post(`${base}/api/agent/tools/execute_command`, {
+        branch: 'main',
+        command: 'sleep 30 & echo $!; wait',
+        timeout_ms: 300,
+      })
+    ).json()) as { stdout: string; exitCode: number };
+    expect(res.exitCode).toBe(-1);
+    const grandchild = Number(res.stdout.trim());
+    expect(grandchild).toBeGreaterThan(0);
+    // Give the kernel a beat to deliver the signal, then the pid must be gone.
+    await new Promise((r) => setTimeout(r, 200));
+    let alive = true;
+    try {
+      process.kill(grandchild, 0);
+    } catch {
+      alive = false;
+    }
+    expect(alive).toBe(false);
+  });
+
   it('execute_command 400s when no branch is given AND no focused branch (external caller)', async () => {
     const base = await start();
     // No `branch` arg and no `ctx.focusedBranch` (an external caller carries no

@@ -62,8 +62,16 @@ FROM node:22-slim AS production
 RUN corepack enable && corepack prepare pnpm@10.33.3 --activate
 
 # git backs every workspace operation (clone/commit/push of the KB repo).
+# tini is PID 1: the reaper. The server spawns git, MCP servers and the
+# shell tool's commands; a grandchild that outlives its parent reparents to
+# PID 1, and a node process there never reaps it — zombies accumulate until
+# the host cannot fork (a self-hosted deployment reached ~4,500 tasks that
+# way). The shipped compose files set `init: true` for the same reason, but a
+# deployment built from this Dockerfile alone — a Coolify "Dockerfile" app, a
+# hand-written compose — got no reaper. Baking it in means no deployment can
+# forget it; `init: true` on top is harmless.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates \
+      git ca-certificates tini \
     && rm -rf /var/lib/apt/lists/*
 
 # tsx runs the TypeScript server shell at runtime. It lives in apps/server's
@@ -121,4 +129,5 @@ ENV GIT_SHA=${GIT_SHA}
 EXPOSE 3001
 
 WORKDIR /app/apps/server
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["tsx", "src/main.ts"]
