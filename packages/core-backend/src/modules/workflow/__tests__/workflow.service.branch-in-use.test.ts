@@ -183,12 +183,26 @@ describe('post-merge branch retirement', () => {
 });
 
 describe('deleteBranch', () => {
-  it('refuses a branch an open request proposes INTO', async () => {
+  it('refuses a branch an open request proposes INTO, naming who can act', async () => {
     const { db } = fakeDb([OPEN_24_INTO_RFI]);
     const svc = makeService(db, { deleteBranch: vi.fn() });
 
+    // Not "withdraw or decline it": the request belongs to someone else, and
+    // the branch owner may be authorized to do neither. The message has to
+    // say what the situation is and who can clear it.
     await expect(svc.deleteBranch('ws', 'juan/rfi', USER)).rejects.toThrow(
-      /open change request \(#24\)/,
+      /change request #24 proposes changes into "juan\/rfi"/,
+    );
+  });
+
+  it('refuses a branch an open request proposes FROM, offering the withdraw verb', async () => {
+    const { db } = fakeDb([
+      { number: 26, source_branch: 'juan/rfi', target_branch: 'target-company-state', state: 'open' },
+    ]);
+    const svc = makeService(db, { deleteBranch: vi.fn() });
+
+    await expect(svc.deleteBranch('ws', 'juan/rfi', USER)).rejects.toThrow(
+      /open change request \(#26\)\. Withdraw or decline it/,
     );
   });
 
@@ -202,6 +216,94 @@ describe('deleteBranch', () => {
     await svc.deleteBranch('ws', 'juan/unrelated', USER);
 
     expect(deleted).toEqual(['juan/unrelated']);
+  });
+});
+
+describe('runOnBranchPair', () => {
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => { resolve = r; });
+    return { promise, resolve };
+  }
+
+  type LockInternals = {
+    branchLifecycle: { run(key: string, fn: () => Promise<void>): Promise<void> };
+    runOnBranchPair(source: string, target: string, fn: () => Promise<void>): Promise<void>;
+  };
+
+  function locks(svc: WorkflowService) {
+    return svc as unknown as LockInternals;
+  }
+
+  it('waits on an unprotected target: its key really is reserved', async () => {
+    const { db } = fakeDb([]);
+    const svc = locks(makeService(db, {}));
+    const order: string[] = [];
+    const release = deferred();
+
+    const holder = svc.branchLifecycle.run('branch:juan/rfi', async () => {
+      await release.promise;
+      order.push('holder');
+    });
+    await new Promise((r) => setImmediate(r));
+
+    const pair = svc.runOnBranchPair('juan/other', 'juan/rfi', async () => {
+      order.push('pair');
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(order).toEqual([]);
+
+    release.resolve();
+    await Promise.all([holder, pair]);
+    expect(order).toEqual(['holder', 'pair']);
+  });
+
+  it('does not reserve a PROTECTED target key', async () => {
+    // No path in the system can delete a protected branch, so the key would
+    // exclude nothing while serializing every open into the default branch,
+    // which is where nearly all requests point. The pair operation must run
+    // even while something else holds the protected branch's key.
+    const { db } = fakeDb([]);
+    const svc = locks(makeService(db, {}));
+    const order: string[] = [];
+    const release = deferred();
+
+    const holder = svc.branchLifecycle.run('branch:target-company-state', async () => {
+      await release.promise;
+      order.push('holder');
+    });
+    await new Promise((r) => setImmediate(r));
+
+    await svc.runOnBranchPair('juan/other', 'target-company-state', async () => {
+      order.push('pair');
+    });
+    expect(order).toEqual(['pair']);
+
+    release.resolve();
+    await holder;
+  });
+
+  it('always reserves the source key', async () => {
+    const { db } = fakeDb([]);
+    const svc = locks(makeService(db, {}));
+    const order: string[] = [];
+    const release = deferred();
+
+    const holder = svc.branchLifecycle.run('branch:juan/other', async () => {
+      await release.promise;
+      order.push('holder');
+    });
+    await new Promise((r) => setImmediate(r));
+
+    const pair = svc.runOnBranchPair('juan/other', 'target-company-state', async () => {
+      order.push('pair');
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(order).toEqual([]);
+
+    release.resolve();
+    await Promise.all([holder, pair]);
+    expect(order).toEqual(['holder', 'pair']);
   });
 });
 

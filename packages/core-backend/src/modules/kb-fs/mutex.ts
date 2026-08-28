@@ -25,8 +25,18 @@ export class WorkspaceMutex {
    * rewritten without an await between, so no other call can observe a
    * half-taken set: a concurrent `run` on any of these keys either already
    * sits in `prev` (it goes first) or chains onto `next` (it goes after).
-   * Nothing is ever held while waiting for something else, so no ordering
-   * discipline is needed and no deadlock is possible.
+   * Within one call nothing is ever held while waiting for something else,
+   * so callers that do not nest need no ordering discipline and cannot
+   * deadlock.
+   *
+   * NESTING is the one way to reintroduce hold-and-wait, so never nest
+   * `run`/`runAll` calls on the same instance. An inner call chains behind
+   * everything already queued on its keys, which can include a `runAll` that
+   * is itself waiting for the outer call to finish: `run(b, () => run(a, …))`
+   * was harmless when every operation took a single key, but against a
+   * concurrent `runAll([a, b])` it deadlocks — outer waits inner, inner
+   * waits the pair, the pair waits outer. No caller nests today; keep it
+   * that way, or hand the full key set to one `runAll` at the top.
    *
    * Duplicate keys collapse; the operation waits on each distinct key once.
    *
