@@ -9,6 +9,7 @@ import {
 } from '../../workspace/state/workspace.context';
 import {
   checkToolConnection,
+  type ProbeVerdict,
   type ToolSecrets,
   type ToolSetup,
 } from '../../secrets-vault/services/tool-secrets.api';
@@ -362,11 +363,11 @@ describe('ToolConnectionSection', () => {
     });
 
     it('keeps the button disabled while the probe is in flight', async () => {
-      let release: (v: unknown) => void = () => {};
+      let release: (v: ProbeVerdict) => void = () => {};
       vi.mocked(checkToolConnection).mockReturnValue(
-        new Promise((r) => {
+        new Promise<ProbeVerdict>((r) => {
           release = r;
-        }) as ReturnType<typeof checkToolConnection>,
+        }),
       );
       renderSection(settled());
       const button = screen.getByRole('button', { name: 'Test connection: github' });
