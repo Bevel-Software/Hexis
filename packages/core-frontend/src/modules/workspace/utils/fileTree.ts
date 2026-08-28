@@ -46,6 +46,15 @@ export function findKbRoot(node: FileTreeEntry | null): FileTreeEntry | null {
 const READABLE_PAGE = /\.(md|markdown)$/i;
 
 /**
+ * An `access.md` is a document by extension only: it is a folder's
+ * access-control rules, and it sits INSIDE the knowledge tree (every plugin
+ * and any governed folder carries one), so the root-file exclusion below
+ * never reaches it. Nobody opens a knowledge base to read who may edit it.
+ */
+const ACCESS_RULES_FILE = 'access.md';
+const isAccessRulesFile = (entry: FileTreeEntry): boolean => entry.name.toLowerCase() === ACCESS_RULES_FILE;
+
+/**
  * Pages worth offering to someone who has nothing open: the documents nearest
  * the top of the knowledge tree, breadth-first, so the opening suggestion is a
  * section heading rather than the fifth file inside the first folder.
@@ -83,7 +92,7 @@ export function suggestedPages(tree: FileTreeEntry | null, limit: number): FileT
       // Dot-prefixed entries are the repository's own bookkeeping.
       if (entry.name.startsWith('.')) continue;
       if (entry.type === 'file') {
-        if (READABLE_PAGE.test(entry.name)) pages.push(entry);
+        if (READABLE_PAGE.test(entry.name) && !isAccessRulesFile(entry)) pages.push(entry);
       } else if (entry.name !== PLUGINS_DIR) {
         next.push(...(entry.children ?? []));
       }

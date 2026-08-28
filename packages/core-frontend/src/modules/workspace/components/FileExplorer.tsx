@@ -34,7 +34,7 @@ import { useFileNav } from '../routing/kb-routes';
 import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
 import { MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
-import { useDismissableMenu } from '../../../shared/components';
+import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { PullRequestsForMe } from '../../git/components/PullRequestsForMe';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
@@ -180,6 +180,12 @@ function ContextMenu({
   // Outside-click, Escape, and focus return — none of which `MenuPanel`
   // provides (it is presentation only, by design).
   const ref = useDismissableMenu<HTMLDivElement>({ open: true, onClose, returnFocusTo });
+  // Measured placement, because the pointer is not a safe place to paint from.
+  // A folder's menu is nine rows, and a right-click low in the sidebar used to
+  // draw it straight off the bottom of the window with no way to reach what
+  // fell below: `Manage access`, `Rename` and `Delete` among them, and for a
+  // folder that `Manage access` row is the product's only route to it.
+  const pos = usePointerMenuPosition(ref, x, y);
 
   // Only files whose name ends with `.zip` (case-insensitive) get the
   // extraction affordance — matches the OS shell-extension behavior users
@@ -245,12 +251,12 @@ function ContextMenu({
 
   return (
     // Positioning stays with the caller — `MenuPanel` is presentation only, so
-    // the fixed-to-the-pointer wrapper is ours and the panel inside is the
-    // shared one.
+    // the fixed wrapper and its measured placement are ours, and the panel
+    // inside is the shared one.
     <div
       ref={ref}
       className="fixed z-50"
-      style={{ left: x, top: y }}
+      style={{ left: pos.left, top: pos.top }}
       onMouseDown={(e) => e.stopPropagation()}
     >
     <MenuPanel role="menu" aria-label={`Actions for ${entry.name}`} className="min-w-[180px]">
