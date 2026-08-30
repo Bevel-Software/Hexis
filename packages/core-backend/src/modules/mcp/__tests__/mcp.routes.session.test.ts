@@ -195,7 +195,7 @@ describe('POST /mcp session routing', () => {
     // bare `{ error }` on this one branch.
     await expect(res.json()).resolves.toEqual({
       jsonrpc: '2.0',
-      error: { code: -32000, message: 'Session does not belong to this user' },
+      error: { code: -32003, message: 'Session does not belong to this user' },
       id: null,
     });
   });

@@ -265,11 +265,15 @@ function SourceSection({ path }: { path: string }) {
   const [open, setOpen] = useState(false);
   const source = useToolSource(path, open);
   const panelId = useId();
+  const buttonId = useId();
+  // Open and neither settled state: the read is in flight.
+  const loading = open && source.status !== 'loaded' && source.status !== 'error';
 
   return (
     <section className="mt-8">
       <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
         <button
+          id={buttonId}
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
@@ -288,8 +292,20 @@ function SourceSection({ path }: { path: string }) {
       </div>
 
       {/* Always in the tree, so `aria-controls` never points at nothing; the
-          CONTENT is what is conditional, which is what keeps the read lazy. */}
-      <div id={panelId} hidden={!open}>
+          CONTENT is what is conditional, which is what keeps the read lazy.
+
+          A labelled region that is live and busy while the read runs: a
+          screen reader otherwise hears the button flip to "expanded" and
+          then nothing, because the content arrives a fetch later. `polite`
+          — the source is worth hearing, not worth interrupting for. */}
+      <div
+        id={panelId}
+        role="region"
+        aria-labelledby={buttonId}
+        aria-live="polite"
+        aria-busy={loading}
+        hidden={!open}
+      >
         {open &&
           (source.status === 'error' ? (
             <p className="mt-2.5 text-detail text-ink-muted">Couldn't load the source.</p>

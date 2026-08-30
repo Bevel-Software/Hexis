@@ -37,9 +37,9 @@ export function ConnectionInstructions({ mcpUrl }: { mcpUrl: string }) {
           <ChatGptInstallLink mcpUrl={mcpUrl} />
         </div>
         <p className="text-[11px] text-ink-muted mb-1 leading-snug">
-          Or add it by hand — Claude: Settings → Connectors → Add custom connector. ChatGPT:
-          Settings → Apps &amp; Connectors → Advanced → turn on Developer mode, then Create.
-          Name it <span className="font-medium">{MCP_DISPLAY_NAME}</span> and paste this URL.
+          Or add it by hand and paste this URL — Claude: Settings → Connectors → Add custom
+          connector. ChatGPT: Settings → Apps &amp; Connectors → Advanced → turn on Developer
+          mode, then Create, and name it <span className="font-medium">{MCP_DISPLAY_NAME}</span>.
           When asked to authorize, your browser opens this app to finish connecting.
         </p>
         <CopyBlock label={null} value={mcpUrl} rows={1} />

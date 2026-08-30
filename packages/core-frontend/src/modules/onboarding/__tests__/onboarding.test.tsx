@@ -444,7 +444,7 @@ describe('WelcomePage', () => {
       expect(screen.queryByRole('link', { name: 'Add to ChatGPT' })).toBeNull();
       await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
       const link = screen.getByRole('link', { name: 'Add to ChatGPT' });
-      expect(new URL(link.getAttribute('href')!).origin).toBe('https://chatgpt.com');
+      expect(link).toHaveAttribute('href', 'https://chatgpt.com/#settings/Connectors');
       expect(link).toHaveAttribute('target', '_blank');
       expect(link).toHaveAttribute('rel', 'noopener noreferrer');
       expect(screen.getByText(/Skills, Tools and Knowledge/)).toBeInTheDocument();
