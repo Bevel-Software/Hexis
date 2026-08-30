@@ -1,10 +1,7 @@
-import type { Server as HttpServer } from 'node:http';
-import type { RequestHandler } from 'express';
-import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createMcpRoutes } from '../mcp.routes.js';
 import { TokenNotFoundError, TokenStillActiveError } from '../../tool-auth/external-api-key.errors.js';
 import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
+import { closeMountedRoutes, mountMcpRoutes } from './mcp-routes-harness.js';
 
 /**
  * Focused coverage for the status mapping of
@@ -14,19 +11,8 @@ import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.in
  * HTTP status codes (404 / 409 / 500) and the success shape.
  */
 
-// Stand-in auth: bind a user like the real jwtAuthMiddleware does.
-const fakeAuth: RequestHandler = (req, _res, next) => {
-  req.userId = 'user-A';
-  next();
-};
-
-let httpServer: HttpServer | undefined;
-
 afterEach(async () => {
-  if (httpServer) {
-    await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
-    httpServer = undefined;
-  }
+  await closeMountedRoutes();
   vi.restoreAllMocks();
 });
 
@@ -35,24 +21,10 @@ async function mountWithRemove(
 ): Promise<{ baseUrl: string; remove: ReturnType<typeof vi.fn> }> {
   const spy = vi.fn(remove);
   const externalApiKeyService = { remove: spy } as unknown as IExternalApiKeyService;
-  // createMcpRoutes only touches mcpService.onSessionEvicted at construction.
-  const mcpService = { onSessionEvicted: () => {} } as never;
-  const stub = {} as never;
-
-  const app = express();
-  app.use(express.json());
-  // local-token deps (internal tokens / OAuth provider / metadata URL) are only
-  // dereferenced by that route's handler — stubs suffice here.
-  app.use(
-    '/api',
-    createMcpRoutes(mcpService, externalApiKeyService, fakeAuth, fakeAuth, stub, stub, stub, ''),
-  );
-
-  httpServer = await new Promise<HttpServer>((resolve) => {
-    const s = app.listen(0, () => resolve(s));
-  });
-  const port = (httpServer.address() as { port: number }).port;
-  return { baseUrl: `http://127.0.0.1:${port}`, remove: spy };
+  // The local-token deps (internal tokens / OAuth provider / metadata URL) are
+  // only dereferenced by that route's handler, so the harness's stubs suffice.
+  const baseUrl = await mountMcpRoutes({ externalApiKeyService });
+  return { baseUrl, remove: spy };
 }
 
 async function del(baseUrl: string, id: string): Promise<Response> {

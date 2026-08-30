@@ -1,14 +1,11 @@
-import type { Server as HttpServer } from 'node:http';
-import type { RequestHandler } from 'express';
-import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-import { createMcpRoutes } from '../mcp.routes.js';
 import { MCP_LOOPBACK_TOKEN_TTL_MS } from '../mcp.service.js';
 import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
 import { createTokenVerifier } from '../../tool-auth/tool-auth.middleware.js';
 import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
 import type { BevelOAuthProvider } from '../oauth/bevel-oauth-provider.js';
+import { closeMountedRoutes, mountMcpRoutes } from './mcp-routes-harness.js';
 
 /**
  * Coverage for POST /api/mcp/local-token — the OAuth-access-token → internal
@@ -31,19 +28,8 @@ import type { BevelOAuthProvider } from '../oauth/bevel-oauth-provider.js';
 
 const RESOURCE_METADATA_URL = 'https://bevel.example/.well-known/oauth-protected-resource/api/mcp';
 
-// Stand-in for routes this suite never exercises.
-const fakeAuth: RequestHandler = (req, _res, next) => {
-  req.userId = 'user-A';
-  next();
-};
-
-let httpServer: HttpServer | undefined;
-
 afterEach(async () => {
-  if (httpServer) {
-    await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
-    httpServer = undefined;
-  }
+  await closeMountedRoutes();
   vi.restoreAllMocks();
 });
 
@@ -69,31 +55,13 @@ async function mount(oauth: BevelOAuthProvider): Promise<{
   const externalApiKeyService = {
     looksLikeExternalApiKey: (t: string) => typeof t === 'string' && t.startsWith('bevel_'),
   } as unknown as IExternalApiKeyService;
-  // createMcpRoutes only touches mcpService.onSessionEvicted at construction.
-  const mcpService = { onSessionEvicted: () => {} } as never;
-  const stub = {} as never;
-
-  const app = express();
-  app.use(express.json());
-  app.use(
-    '/api',
-    createMcpRoutes(
-      mcpService,
-      externalApiKeyService,
-      fakeAuth,
-      fakeAuth,
-      stub,
-      internalTokens,
-      oauth,
-      RESOURCE_METADATA_URL,
-    ),
-  );
-
-  httpServer = await new Promise<HttpServer>((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+  const baseUrl = await mountMcpRoutes({
+    externalApiKeyService,
+    internalTokens,
+    oauthProvider: oauth,
+    resourceMetadataUrl: RESOURCE_METADATA_URL,
   });
-  const port = (httpServer.address() as { port: number }).port;
-  return { baseUrl: `http://127.0.0.1:${port}`, internalTokens };
+  return { baseUrl, internalTokens };
 }
 
 async function exchange(baseUrl: string, authorization?: string): Promise<Response> {
