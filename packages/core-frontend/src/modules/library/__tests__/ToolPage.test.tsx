@@ -45,6 +45,9 @@ vi.mock('../services/library.api', () => ({
   getSkill: libraryMock.getSkill,
 }));
 
+const sourceMock = vi.hoisted(() => ({ readFileOnBranch: vi.fn() }));
+vi.mock('../../change-requests/services/change-requests.api', () => sourceMock);
+
 vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.fn() }));
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
@@ -72,6 +75,29 @@ const DETAIL: ToolManualDetail = {
   ],
 };
 
+/**
+ * A `.tool` with everything a formatter would be tempted to touch: the `---`
+ * fences, a folded description, a comment, and a fenced template carrying an
+ * unexpanded `${VAR}`. The section shows these bytes or it shows a lie.
+ */
+const SOURCE = [
+  '---',
+  'name: heyreach',
+  'description: >-',
+  '  Runs LinkedIn',
+  '  outreach campaigns.',
+  '---',
+  '',
+  '# heyreach',
+  '',
+  '<!-- keep me: a reader is here precisely for this -->',
+  '',
+  '```http',
+  'GET https://api.heyreach.io/campaigns',
+  'Authorization: Bearer ${HEYREACH_API_KEY}',
+  '```',
+  '',
+].join('\n');
 const workspace = {
   workspaceId: 'target-company-state',
   kbDirName: 'knowledge-base',
@@ -126,6 +152,7 @@ beforeEach(() => {
   toolsMock.getMcpServer.mockClear();
   libraryMock.listSkills.mockReset().mockResolvedValue([]);
   libraryMock.getSkill.mockReset().mockResolvedValue({ allowedTools: [] });
+  sourceMock.readFileOnBranch.mockReset().mockResolvedValue(SOURCE);
 });
 
 describe('ToolPage: frame', () => {
@@ -362,5 +389,126 @@ describe('ToolPage: OAuth round-trip', () => {
     expect(window.location.pathname).toBe(
       '/workspace/main/knowledge-base/Plugins/Everyone/mcp.json',
     );
+  });
+});
+
+/**
+ * The `.tool` itself, at the bottom of the page.
+ *
+ * The four things worth pinning are the four the section can get wrong in a
+ * way nobody notices: it must be CLOSED (a reader who wanted the tool, not its
+ * file, sees no change), the text must be the file's BYTES (a view that
+ * reformats is worse than no view — it invents a source that does not exist),
+ * a failed read must cost the section and nothing else, and the read must not
+ * happen until it is asked for.
+ */
+describe('ToolPage: source', () => {
+  const toggle = () => screen.getByRole('button', { name: 'Source' });
+
+  it('is closed on first visit, with the file path beside its label', async () => {
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+
+    expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByText('Plugins/GTM/heyreach.tool')).toBeInTheDocument();
+    expect(document.querySelector('pre')).toBeNull();
+  });
+
+  it('reads nothing until it is opened, and then exactly once', async () => {
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    // The whole point of the disclosure: no reader pays for a file they did
+    // not ask to see.
+    expect(sourceMock.readFileOnBranch).not.toHaveBeenCalled();
+
+    fireEvent.click(toggle());
+    await waitFor(() => expect(sourceMock.readFileOnBranch).toHaveBeenCalledTimes(1));
+    // The OFFICIAL version — the file the platform runs, not a draft branch.
+    expect(sourceMock.readFileOnBranch).toHaveBeenCalledWith(
+      'target-company-state',
+      'Plugins/GTM/heyreach.tool',
+    );
+  });
+
+  it('shows the file verbatim — fences, comments, folding and all', async () => {
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    fireEvent.click(toggle());
+
+    await waitFor(() => expect(document.querySelector('pre')).not.toBeNull());
+    // Byte for byte. Not "contains", not "matches after trimming".
+    expect(document.querySelector('pre')!.textContent).toBe(SOURCE);
+    expect(toggle()).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('offers no way to edit what it shows', async () => {
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    fireEvent.click(toggle());
+    await waitFor(() => expect(document.querySelector('pre')).not.toBeNull());
+
+    expect(document.querySelector('textarea')).toBeNull();
+    expect(document.querySelector('pre')!.closest('[contenteditable]')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+  });
+
+  it('opening it changes nothing above it', async () => {
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    fireEvent.click(toggle());
+    await waitFor(() => expect(document.querySelector('pre')).not.toBeNull());
+
+    expect(screen.getByText('Runs LinkedIn outreach campaigns.')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'What it lets the assistant do' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Powers these skills' })).toBeInTheDocument();
+    expect(screen.getByText('Managed by the Admins.')).toBeInTheDocument();
+  });
+
+  it('shows a short message in place of the content when the file cannot be read, and retries on reopen', async () => {
+    sourceMock.readFileOnBranch.mockRejectedValueOnce(new Error('HTTP 404'));
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+
+    fireEvent.click(toggle());
+    expect(await screen.findByText("Couldn't load the source.")).toBeInTheDocument();
+    expect(document.querySelector('pre')).toBeNull();
+    // The page around it is untouched — a missing file is not a broken page.
+    expect(screen.getByRole('heading', { name: 'heyreach', level: 1 })).toBeInTheDocument();
+    expect(screen.getByText('Runs LinkedIn outreach campaigns.')).toBeInTheDocument();
+
+    fireEvent.click(toggle()); // close
+    fireEvent.click(toggle()); // open again — a failed read is never the final answer
+    await waitFor(() => expect(document.querySelector('pre')).not.toBeNull());
+    expect(document.querySelector('pre')!.textContent).toBe(SOURCE);
+  });
+
+  it.each(['inline', 'http', 'mcp'] as const)('is present on a %s tool', async (type) => {
+    secretsMock.listToolSecrets.mockResolvedValue([{ ...GITHUB, type }]);
+    toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, type, capabilities: [] });
+
+    renderPage();
+    await screen.findByRole('heading', { name: 'heyreach', level: 1 });
+    expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('shows the mcp.json for a tool declared through a plugin, like every other type', async () => {
+    const MCP_JSON = '{\n  "mcpServers": {\n    "notion": { "url": "https://mcp.notion.com/mcp" }\n  }\n}\n';
+    secretsMock.listToolSecrets.mockResolvedValue([
+      { ...GITHUB, slug: 'notion', name: 'notion', type: 'mcp', path: 'Plugins/GTM/mcp.json' },
+    ]);
+    toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, slug: 'notion', name: 'notion' });
+    sourceMock.readFileOnBranch.mockResolvedValue(MCP_JSON);
+
+    renderPage({ slug: 'notion' });
+    await screen.findByRole('heading', { name: 'notion', level: 1 });
+    expect(screen.getByText('Plugins/GTM/mcp.json')).toBeInTheDocument();
+
+    fireEvent.click(toggle());
+    await waitFor(() => expect(document.querySelector('pre')).not.toBeNull());
+    expect(sourceMock.readFileOnBranch).toHaveBeenCalledWith(
+      'target-company-state',
+      'Plugins/GTM/mcp.json',
+    );
+    expect(document.querySelector('pre')!.textContent).toBe(MCP_JSON);
   });
 });

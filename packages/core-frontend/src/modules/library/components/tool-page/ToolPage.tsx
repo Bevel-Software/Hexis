@@ -1,7 +1,10 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { ChevronRight } from 'lucide-react';
+import { cn } from '../../../../lib/utils';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
 import { useToolPage } from '../../hooks/useToolPage';
+import { useToolSource } from '../../hooks/useToolSource';
 import { McpServerSection } from './McpServerSection';
 import { libraryHomeForItemPath, LIBRARY_ROOT } from '../../routes/library-paths';
 import { readOAuthFragment } from '../../utils/oauth-fragment';
@@ -175,6 +178,10 @@ export function ToolPage({
         Managed by the Admins.
       </div>
 
+      {/* Last, and for EVERY type: `path` is the file the platform reads to
+          make this tool — the `.tool`, or the plugin `mcp.json` that declares
+          the server. */}
+      <SourceSection path={tool.path} />
     </Article>
   );
 }
@@ -237,6 +244,66 @@ function PoweredSkillsSection({
           ))}
         </div>
       )}
+    </section>
+  );
+}
+
+/**
+ * The definition file, as text, behind a closed disclosure.
+ *
+ * A WINDOW, NOT AN EDITOR. The file is edited where files are edited; showing
+ * it here is what saves a developer the trip to the knowledge tree to answer
+ * "which template does this capability use" — and nothing in this section can
+ * change it.
+ *
+ * Closed by default is the mechanism, not just the default: the read hangs off
+ * the open state (`useToolSource`), so a reader who never opens the section
+ * never costs a file read, and everything above it renders the same whether
+ * the read succeeds, fails, or never happens.
+ */
+function SourceSection({ path }: { path: string }) {
+  const [open, setOpen] = useState(false);
+  const source = useToolSource(path, open);
+  const panelId = useId();
+
+  return (
+    <section className="mt-8">
+      <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-controls={panelId}
+          className="flex items-center gap-1.5 text-label font-semibold uppercase text-ink-faint transition-colors hover:text-ink"
+        >
+          <ChevronRight
+            size={11}
+            className={cn('transition-transform duration-150', open && 'rotate-90')}
+          />
+          Source
+        </button>
+        <span className="min-w-0 truncate font-mono text-meta text-ink-faint" title={path}>
+          {path}
+        </span>
+      </div>
+
+      {/* Always in the tree, so `aria-controls` never points at nothing; the
+          CONTENT is what is conditional, which is what keeps the read lazy. */}
+      <div id={panelId} hidden={!open}>
+        {open &&
+          (source.status === 'error' ? (
+            <p className="mt-2.5 text-detail text-ink-muted">Couldn't load the source.</p>
+          ) : source.status === 'loaded' ? (
+            /* `whitespace-pre` and nothing else: the bytes are shown as the
+               platform stores them — no wrapping, reindenting or trimming.
+               Long lines scroll rather than fold. */
+            <pre className="mt-2.5 max-h-[32rem] select-text overflow-auto whitespace-pre rounded-lg border border-line bg-sunken p-3 font-mono text-meta leading-relaxed text-ink">
+              {source.content}
+            </pre>
+          ) : (
+            <p className="mt-2.5 text-detail text-ink-faint">Loading the source…</p>
+          ))}
+      </div>
     </section>
   );
 }
