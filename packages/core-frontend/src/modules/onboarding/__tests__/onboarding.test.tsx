@@ -343,7 +343,7 @@ describe('WelcomePage', () => {
     expect(screen.getByText(/\/api\/mcp$/)).toBeInTheDocument();
     expect(screen.queryByText(/mcpServers/)).toBeNull();
     await userEvent.click(screen.getByRole('radio', { name: 'Other' }));
-    expect(screen.getByText(/knowledge-base/)).toBeInTheDocument();
+    expect(screen.getByText(/skills-tools-knowledge/)).toBeInTheDocument();
   });
 
   /**
@@ -388,7 +388,7 @@ describe('WelcomePage', () => {
       const href = new URL(link.getAttribute('href')!);
       expect(href.origin + href.pathname).toBe('https://claude.ai/customize/connectors');
       expect(href.searchParams.get('connectorUrl')).toBe('https://kb.acme.com/api/mcp');
-      expect(href.searchParams.get('connectorName')).toBe('Knowledge — kb.acme.com');
+      expect(href.searchParams.get('connectorName')).toBe('Skills, Tools and Knowledge — kb.acme.com');
     });
 
     /**
@@ -428,6 +428,36 @@ describe('WelcomePage', () => {
       expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
       await userEvent.click(screen.getByRole('radio', { name: 'Other' }));
       expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
+    });
+
+    /**
+     * ChatGPT gets its own button, on its own option only. It cannot prefill
+     * anything — ChatGPT has no such link — so it opens the settings pane and
+     * the hint beside it spells out the name to type, which is what stops a
+     * dozen employees each inventing their own.
+     */
+    it('offers Add to ChatGPT on the ChatGPT option alone, with the name to type', async () => {
+      configureMcpUrl('https://kb.acme.com/api/mcp');
+      mountPage();
+      expect(screen.queryByRole('link', { name: 'Add to ChatGPT' })).toBeNull();
+      await userEvent.click(screen.getByRole('radio', { name: 'Claude' }));
+      expect(screen.queryByRole('link', { name: 'Add to ChatGPT' })).toBeNull();
+      await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
+      const link = screen.getByRole('link', { name: 'Add to ChatGPT' });
+      expect(link).toHaveAttribute('href', 'https://chatgpt.com/#settings/Connectors');
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+      expect(screen.getByText(/Skills, Tools and Knowledge/)).toBeInTheDocument();
+      // …and the URL to paste is still the copy block.
+      expect(screen.getByText('https://kb.acme.com/api/mcp')).toBeInTheDocument();
+    });
+
+    it('offers no ChatGPT button on a localhost deployment either', async () => {
+      configureMcpUrl('http://localhost:3001/api/mcp');
+      mountPage();
+      await userEvent.click(screen.getByRole('radio', { name: 'ChatGPT' }));
+      expect(screen.queryByRole('link', { name: 'Add to ChatGPT' })).toBeNull();
+      expect(screen.getByText('http://localhost:3001/api/mcp')).toBeInTheDocument();
     });
 
     // Opening claude.ai must not hand it a handle on this window.

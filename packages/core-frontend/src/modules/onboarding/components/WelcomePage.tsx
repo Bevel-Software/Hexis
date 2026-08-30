@@ -10,7 +10,7 @@ import { pathForLibraryFilter } from '../../library/routes/library-paths';
 import { useAppRegistry } from '../../../core/registry';
 import { displayFirstName } from '../../library/utils/personal-plugin';
 import { setSidebarCollapsed } from '../../layout/state/sidebar';
-import { ClaudeInstallLink, mcpEndpointUrl } from '../../../shared/mcp';
+import { ChatGptInstallLink, ClaudeInstallLink, mcpEndpointUrl } from '../../../shared/mcp';
 import { AGENT_CLIENTS, type AgentClient } from '../agent-clients';
 import { useOnboarding } from '../state/onboarding';
 import { useWelcomeRouteState } from '../welcome-state';
@@ -314,13 +314,15 @@ export function WelcomePage() {
 
         <p className="mt-2.5 text-meta leading-normal text-ink-faint">{client.hint}</p>
 
-        {/* Claude only, because Claude is the only client with an install
-            link — and it renders nothing at all when this deployment is one
-            Anthropic could not reach, rather than offering a shortcut that
-            dead-ends. No `showHint`: the reader here is a new employee, and
-            naming an env var they cannot change is noise. The copy block
-            below is the route that always works. */}
+        {/* The web assistants only: Claude's link prefills the connector,
+            ChatGPT's opens the settings pane it is created in. Both render
+            nothing at all when this deployment is one their vendor could not
+            reach, rather than offering a shortcut that dead-ends. No
+            `showHint`: the reader here is a new employee, and naming an env
+            var they cannot change is noise. The copy block below is the route
+            that always works. */}
         {client.id === 'claude' && <ClaudeInstallLink mcpUrl={mcpUrl} className="mt-3.5" />}
+        {client.id === 'chatgpt' && <ChatGptInstallLink mcpUrl={mcpUrl} className="mt-3.5" />}
 
         {/* The copy rides the block it copies. */}
         <div className="relative mt-3.5">

@@ -85,14 +85,14 @@ describe('the interactive tab: local first, hosted second, each with its own add
 
     // 1. the Claude Code one-liner
     expect(values).toContain(
-      `claude mcp add --transport http knowledge-base ${PUBLIC_URL}`,
+      `claude mcp add --transport http skills-tools-knowledge ${PUBLIC_URL}`,
     );
     // 2. the bare URL for claude.ai / Claude Desktop
     expect(values).toContain(PUBLIC_URL);
     // 3. the JSON config for everything else — the LOCAL section renders a
     // `mcpServers` block too, so pick the hosted one by its server name.
-    const json = values.find((v) => v.includes('knowledge-base') && v.includes('mcpServers'));
-    expect(JSON.parse(json!).mcpServers['knowledge-base'].url).toBe(PUBLIC_URL);
+    const json = values.find((v) => v.includes('"type": "http"') && v.includes('mcpServers'));
+    expect(JSON.parse(json!).mcpServers['skills-tools-knowledge'].url).toBe(PUBLIC_URL);
   });
 
   /**
@@ -118,10 +118,10 @@ describe('the interactive tab: local first, hosted second, each with its own add
 
     const values = snippets();
     expect(values).toContain(
-      `claude mcp add knowledge --env HEXIS_URL="${window.location.origin}" -- npx -y @bevel-software/hexis-mcp`,
+      `claude mcp add skills-tools-knowledge --env HEXIS_URL="${window.location.origin}" -- npx -y @bevel-software/hexis-mcp`,
     );
-    const json = values.find((v) => v.includes('mcpServers') && v.includes('"knowledge"'));
-    const parsed = JSON.parse(json!).mcpServers['knowledge'];
+    const json = values.find((v) => v.includes('mcpServers') && v.includes('"command"'));
+    const parsed = JSON.parse(json!).mcpServers['skills-tools-knowledge'];
     expect(parsed.args).toEqual(['-y', '@bevel-software/hexis-mcp']);
     expect(parsed.env.HEXIS_URL).toBe(window.location.origin);
     // Keyless = interactive: the browser-sign-in mode carries no key env.
@@ -175,7 +175,7 @@ describe('the key-bearing snippets quote the deployment too', () => {
 
     // 4. the Claude Code one-liner, with the key
     expect(values).toContain(
-      `claude mcp add --transport http knowledge-base ${PUBLIC_URL} --header "Authorization: Bearer ${KEY}"`,
+      `claude mcp add --transport http skills-tools-knowledge ${PUBLIC_URL} --header "Authorization: Bearer ${KEY}"`,
     );
     // 5. the Langdock field list
     expect(values).toContain(
@@ -183,7 +183,7 @@ describe('the key-bearing snippets quote the deployment too', () => {
     );
     // 6. the JSON config, with the key
     const json = values.find((v) => v.includes('mcpServers') && v.includes('headers'));
-    const parsed = JSON.parse(json!).mcpServers['knowledge-base'];
+    const parsed = JSON.parse(json!).mcpServers['skills-tools-knowledge'];
     expect(parsed.url).toBe(PUBLIC_URL);
     expect(parsed.headers.Authorization).toBe(`Bearer ${KEY}`);
   });
@@ -209,11 +209,11 @@ describe('the key-bearing snippets quote the deployment too', () => {
 
     // 7. the Claude Code stdio one-liner
     expect(values).toContain(
-      `claude mcp add knowledge --env HEXIS_URL="${window.location.origin}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp`,
+      `claude mcp add skills-tools-knowledge --env HEXIS_URL="${window.location.origin}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp`,
     );
     // 8. the JSON config that spawns the package
-    const json = values.find((v) => v.includes('mcpServers') && v.includes('"knowledge"'));
-    const parsed = JSON.parse(json!).mcpServers['knowledge'];
+    const json = values.find((v) => v.includes('mcpServers') && v.includes('"command"'));
+    const parsed = JSON.parse(json!).mcpServers['skills-tools-knowledge'];
     expect(parsed.args).toEqual(['-y', '@bevel-software/hexis-mcp']);
     expect(parsed.env.HEXIS_URL).toBe(window.location.origin);
     expect(parsed.env.HEXIS_CONNECTION_KEY).toBe(KEY);
@@ -246,7 +246,7 @@ describe('the one-click install link', () => {
     expect(href.origin + href.pathname).toBe('https://claude.ai/customize/connectors');
     expect(href.searchParams.get('modal')).toBe('add-custom-connector');
     expect(href.searchParams.get('connectorUrl')).toBe(PUBLIC_URL);
-    expect(href.searchParams.get('connectorName')).toBe('Knowledge — kb.acme.com');
+    expect(href.searchParams.get('connectorName')).toBe('Skills, Tools and Knowledge — kb.acme.com');
   });
 
   it('opens in a new tab without handing Claude a window reference', () => {
@@ -254,6 +254,28 @@ describe('the one-click install link', () => {
     const link = screen.getByRole('link', { name: 'Add to Claude' });
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
+  /**
+   * ChatGPT sits beside Claude, with the honest difference: no prefill
+   * exists, so the button opens the settings pane and the copy under it
+   * names the connector to type. Same gate — an endpoint Anthropic cannot
+   * reach is one OpenAI cannot reach.
+   */
+  it('offers Add to ChatGPT beside it, naming what to call the connector', () => {
+    mount(PUBLIC_URL);
+    const link = screen.getByRole('link', { name: 'Add to ChatGPT' });
+    // The whole href, not just the origin: the settings-pane anchor is the
+    // only part that makes the link worth clicking.
+    expect(link).toHaveAttribute('href', 'https://chatgpt.com/#settings/Connectors');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(screen.getByText('Skills, Tools and Knowledge')).toBeInTheDocument();
+  });
+
+  it('offers no ChatGPT button on a localhost deployment', () => {
+    mount(LOCALHOST_URL);
+    expect(screen.queryByRole('link', { name: 'Add to ChatGPT' })).toBeNull();
   });
 
   /**
