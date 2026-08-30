@@ -65,9 +65,9 @@ export function ClaudeInstallLink({
          new copy goes on-scale even when it sits beside copy that is not. */
       <p className={cn('text-meta text-ink-muted leading-snug', className)}>
         One-click connect is off because this deployment&rsquo;s public address is{' '}
-        <code className="font-mono">{withoutCredentials(mcpUrl)}</code>, which Claude cannot reach from the
-        internet. Set <code className="font-mono">PUBLIC_BACKEND_URL</code> to the https
-        address people actually use to turn it on. The URL below works either way.
+        <code className="font-mono">{withoutCredentials(mcpUrl)}</code>, which Claude and ChatGPT cannot
+        reach from the internet. Set <code className="font-mono">PUBLIC_BACKEND_URL</code> to the
+        https address people actually use to turn it on. The URL below works either way.
       </p>
     );
   }

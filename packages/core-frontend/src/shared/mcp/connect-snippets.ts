@@ -29,6 +29,25 @@
 const MCP_PATH = '/api/mcp';
 
 /**
+ * What this workspace is called when it shows up in an agent's server list.
+ * Two spellings of one name, because the two places it goes have different
+ * rules:
+ *
+ * - {@link MCP_DISPLAY_NAME} is for humans: the connector name claude.ai
+ *   shows, and what someone types into ChatGPT's "Create" dialog. Spaces and
+ *   punctuation are fine there.
+ * - {@link MCP_SERVER_KEY} is for config files: the `mcpServers` key and the
+ *   `claude mcp add <name>` argument. Clients derive identifiers from it —
+ *   Claude Code names every tool `mcp__<server>__<tool>` — so it has to be a
+ *   plain slug. The same key serves the hosted endpoint and the local server:
+ *   they are one workspace, and nobody adds both to one client.
+ *
+ * Everything below spells the name through these two; nothing re-types it.
+ */
+export const MCP_DISPLAY_NAME = 'Skills, Tools and Knowledge';
+export const MCP_SERVER_KEY = 'skills-tools-knowledge';
+
+/**
  * The deployment's own answer, from `GET /api/config`. Module-global because
  * it is a property of the deployment rather than of any component, and it is
  * settled once during boot — the same shape as the branch model next door.
@@ -279,9 +298,9 @@ function isPrivateIpv6(bracketed: string): boolean {
  */
 export function connectorName(mcpUrl: string): string {
   try {
-    return `Knowledge — ${new URL(mcpUrl).host}`;
+    return `${MCP_DISPLAY_NAME} — ${new URL(mcpUrl).host}`;
   } catch {
-    return 'Knowledge';
+    return MCP_DISPLAY_NAME;
   }
 }
 
@@ -308,6 +327,22 @@ export function claudeInstallUrl(mcpUrl: string, name: string): string {
   return `${CLAUDE_ADD_CONNECTOR}?${params}`;
 }
 
+/**
+ * Where ChatGPT keeps its connector settings — the pane whose "Advanced"
+ * section holds the Developer mode toggle and, once it is on, the "Create"
+ * button for a custom MCP server.
+ *
+ * Unlike Claude, ChatGPT publishes no install link: there is no query
+ * parameter that prefills a connector's name or URL. So this is a shortcut to
+ * the right settings pane and nothing more — the person still types the name
+ * and pastes the endpoint, which is why every surface that offers this link
+ * shows both right beside it. The settings pane is a hash route, so it takes
+ * no parameters and there is nothing to encode.
+ */
+export function chatgptInstallUrl(): string {
+  return 'https://chatgpt.com/#settings/Connectors';
+}
+
 /* ------------------------------------------------------------------ *
  * The snippets themselves. One builder per client, each taking the URL
  * so no caller ever re-derives it, and an optional bearer token for the
@@ -326,7 +361,7 @@ function escapeForDoubleQuotes(value: string): string {
 
 /** The `claude mcp add` one-liner, with the key appended when there is one. */
 export function claudeCodeCommand(mcpUrl: string, bearer?: string): string {
-  const base = `claude mcp add --transport http knowledge-base ${mcpUrl}`;
+  const base = `claude mcp add --transport http ${MCP_SERVER_KEY} ${mcpUrl}`;
   return bearer ? `${base} --header "Authorization: Bearer ${escapeForDoubleQuotes(bearer)}"` : base;
 }
 
@@ -335,7 +370,7 @@ export function jsonConfigSnippet(mcpUrl: string, bearer?: string): string {
   return JSON.stringify(
     {
       mcpServers: {
-        'knowledge-base': {
+        [MCP_SERVER_KEY]: {
           type: 'http',
           url: mcpUrl,
           ...(bearer ? { headers: { Authorization: `Bearer ${bearer}` } } : {}),
@@ -394,7 +429,7 @@ export function hexisMcpJsonSnippet(baseUrl: string, bearer?: string): string {
   return JSON.stringify(
     {
       mcpServers: {
-        knowledge: {
+        [MCP_SERVER_KEY]: {
           command: 'npx',
           args: ['-y', '@bevel-software/hexis-mcp'],
           env: {
@@ -421,7 +456,7 @@ export function hexisMcpJsonSnippet(baseUrl: string, bearer?: string): string {
  */
 export function hexisMcpClaudeCommand(baseUrl: string, bearer?: string): string {
   return (
-    `claude mcp add knowledge` +
+    `claude mcp add ${MCP_SERVER_KEY}` +
     ` --env HEXIS_URL="${escapeForDoubleQuotes(baseUrl)}"` +
     (bearer ? ` --env HEXIS_CONNECTION_KEY="${escapeForDoubleQuotes(bearer)}"` : '') +
     ` -- npx -y @bevel-software/hexis-mcp`
