@@ -11,11 +11,14 @@ describe('cloneTrackingConfigArgs', () => {
   // A slashed draft name is the everyday case (`<email-localpart>/<slug>`), and
   // the branch lands verbatim inside the config KEY — pin the exact tuples so a
   // future quoting/encoding change can't silently re-point tracking.
-  it('emits the three --replace-all tuples for a slashed branch', () => {
+  it('emits the tracking tuples for a slashed branch, and keeps gc in the foreground', () => {
     expect(cloneTrackingConfigArgs('feature/x')).toEqual([
       ['config', '--replace-all', 'remote.origin.fetch', ORIGIN_FETCH_REFSPEC],
       ['config', '--replace-all', 'branch.feature/x.remote', 'origin'],
       ['config', '--replace-all', 'branch.feature/x.merge', 'refs/heads/feature/x'],
+      // A detached `gc --auto` outlives the command this process waits on and
+      // is never reaped; stamped here so existing clones get it on next pull.
+      ['config', '--replace-all', 'gc.autoDetach', 'false'],
     ]);
   });
 });

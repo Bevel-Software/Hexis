@@ -211,6 +211,7 @@ jobs:
             - Repository: ${{ github.repository }}
             - Pull request: #${{ github.event.issue.number }}
             - Knowledge base origin: ${{ vars.KNOWLEDGE_BASE_API_URL }}
+            - Review run id (stamp it into the one-pager's `bevel-review-run` meta tag): ${{ github.run_id }}
             - Verdict file (write your verdict JSON here): ${{ runner.temp }}/bevel-verdict.json
 
       # Hand the verdict to `publish` as one base64 line. `always()` so a
@@ -267,8 +268,10 @@ jobs:
   # exits 0 having declined to act), and `failure()` does not fire for that.
   #
   # It holds the knowledge-base key, for one read: checking that the one-pager
-  # the agent links to is really there. That is safe here precisely because
-  # this job reads nothing the PR's author wrote — only the four fields below.
+  # the agent links to is really there AND was written by this run rather than
+  # left over from an earlier one. That is safe here precisely because this job
+  # reads nothing the PR's author wrote — only the four fields below, and the
+  # head of a page the agent wrote into the knowledge base.
   # ---------------------------------------------------------------------------
   publish:
     needs: [start, review]
@@ -300,6 +303,7 @@ jobs:
           KB_KEY: ${{ secrets.KNOWLEDGE_BASE_CONNECTION_KEY }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REVIEW_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
 
@@ -389,6 +393,14 @@ jobs:
           # itself cannot run (no key, KB down, access refused) keep the link
           # and warn, so a hiccup here never hides a one-pager that exists.
           onepager_missing=0
+          onepager_stale=0
+          # 1 only when the one-pager was read back and names THIS run — or
+          # when the knowledge base could not be asked at all, because an
+          # outage must never fail a review by itself. Everything else — no
+          # link, an off-site or over-long link, a missing file, another
+          # run's page — leaves it 0, and a terminal verdict is then published
+          # as an errored, incomplete review (see the status step).
+          onepager_ok=0
           case "$url" in
             "${KB_ORIGIN%/}"/workspace/*)
               # <origin>/workspace/<branch>/<workspace path>, both URL-encoded.
@@ -412,27 +424,45 @@ jobs:
                         "${KB_ORIGIN%/}/api/agent/tools/start_session" | jq -r '.sessionId // empty') \
                    || [ -z "$sid" ]; then
                 echo "::warning::Could not open a knowledge-base session to verify the one-pager — keeping the link unverified."
+                onepager_ok=1
               else
-                stat_args=$(jq -n --arg b "$branch" --arg p "$path" --arg s "$sid" \
-                  '{branch: $b, path: $p, sessionId: $s}')
-                code=$(curl -sS -m 20 -o stat.json -w '%{http_code}' -X POST \
+                # ONE read answers both questions. `read_file` on a missing
+                # path surfaces the filesystem's ENOENT as
+                # `{ "error": "File not found: <path>" }` — served with a 500,
+                # not a 404, so the status code is no help — while an access
+                # refusal or an outage says something else entirely; match
+                # that one message, in the JSON field it lives in, so no other
+                # failure text can pass for an absence. And existence is not
+                # enough: every terminal run must REGENERATE the one-pager at
+                # its fixed per-PR path, so a run that stopped after the
+                # verdict still links to the previous run's page — which may
+                # even review the same head, when a re-trigger applies changed
+                # rules to unchanged code. So the page names the RUN that wrote
+                # it, and only this run's id passes. Read the top of the file
+                # only (the tag is in <head>; the page can be long). The
+                # pattern is handed to jq as an argument — POSIX classes, no
+                # backslashes — and tolerates quote style, spacing and a
+                # self-closing `/>`, never a different run id.
+                read_args=$(jq -n --arg b "$branch" --arg p "$path" --arg s "$sid" \
+                  '{branch: $b, path: $p, sessionId: $s, limit: 4000}')
+                code=$(curl -sS -m 20 -o page.json -w '%{http_code}' -X POST \
                         -H "Authorization: Bearer $KB_KEY" -H 'Content-Type: application/json' \
-                        -d "$stat_args" "${KB_ORIGIN%/}/api/agent/tools/file_stat" || echo 000)
-                # "Definite not found" is the knowledge base's own answer for
-                # a missing path: `file_stat` surfaces the filesystem's ENOENT
-                # as `{ "error": "File not found: <path>" }` — served with a
-                # 500, not a 404, so the status code is no help — while an
-                # access refusal or an outage says something else entirely.
-                # Match that one error message, in the JSON field it lives in,
-                # so no other failure text can pass for an absence.
-                if [ "$code" = 200 ] && jq -e '.type == "file"' stat.json >/dev/null 2>&1; then
-                  echo "One-pager verified in the knowledge base: $branch:$path"
-                elif jq -e '(.error? // "") | tostring | startswith("File not found: ")' stat.json >/dev/null 2>&1; then
+                        -d "$read_args" "${KB_ORIGIN%/}/api/agent/tools/read_file" || echo 000)
+                tag_pattern="<meta[[:space:]]+name=[\"']bevel-review-run[\"'][[:space:]]+content=[\"']${REVIEW_RUN_ID}[\"'][[:space:]]*/?>"
+                if [ "$code" = 200 ] && [ -n "${REVIEW_RUN_ID:-}" ] \
+                   && jq -e --arg pat "$tag_pattern" '(.content? // "") | tostring | test($pat; "i")' page.json >/dev/null 2>&1; then
+                  echo "One-pager verified in the knowledge base and written by this run: $branch:$path"
+                  onepager_ok=1
+                elif [ "$code" = 200 ]; then
+                  echo "::warning::The one-pager at $branch:$path was not written by this run ($REVIEW_RUN_ID) — a previous run's page; dropping the link."
+                  url=""; onepager_stale=1
+                elif jq -e '(.error? // "") | tostring | startswith("File not found: ")' page.json >/dev/null 2>&1; then
                   echo "::warning::The agent's one_pager_url names a file the knowledge base does not have ($branch:$path) — dropping the link."
                   url=""; onepager_missing=1
                 else
                   echo "::warning::Could not verify the one-pager (HTTP $code) — keeping the link unverified."
-                  cat stat.json 2>/dev/null || true
+                  cat page.json 2>/dev/null || true
+                  onepager_ok=1
                 fi
               fi
               ;;
@@ -442,6 +472,7 @@ jobs:
             echo "outcome=$outcome"
             echo "headline=$headline"
             echo "url=$url"
+            echo "onepager_ok=$onepager_ok"
           } >> "$GITHUB_OUTPUT"
 
           # The comment body: verdict line, the risks and blockers, the link.
@@ -470,10 +501,17 @@ jobs:
             printf '\n'
             if [ -n "$url" ]; then
               printf '[Full analysis](%s)\n' "$url"
-            elif [ "$onepager_missing" = 1 ]; then
-              # Say so on the PR rather than silently dropping the link: the
-              # reader would otherwise assume there is no deeper analysis.
-              echo "The full analysis this review refers to was never written to the knowledge base — re-trigger with \`/bevel-review\` to regenerate it."
+            elif [ "$outcome" = go-ahead ] || [ "$outcome" = escalated ]; then
+              # A terminal verdict without its one-pager: say so on the PR
+              # rather than silently dropping the link — the reader would
+              # otherwise assume there is no deeper analysis — and say what
+              # the status step does about it. This condition and that step's
+              # are the same on purpose; a bounce owes no one-pager.
+              if [ "$onepager_stale" = 1 ]; then
+                echo "The full analysis at the expected link was written by an earlier run, not this one, so the check is marked as errored — re-trigger with \`/bevel-review\` to regenerate it."
+              else
+                echo "The full analysis this review refers to was not written to the knowledge base, so the check is marked as errored — re-trigger with \`/bevel-review\` to regenerate it."
+              fi
             elif [ "$outcome" = none ]; then
               printf '[Run log](%s)\n' "$RUN_URL"
             fi
@@ -508,6 +546,7 @@ jobs:
           OUTCOME: ${{ steps.render.outputs.outcome }}
           HEADLINE: ${{ steps.render.outputs.headline }}
           URL: ${{ steps.render.outputs.url }}
+          ONEPAGER_OK: ${{ steps.render.outputs.onepager_ok }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -523,6 +562,21 @@ jobs:
             escalated) state=pending; fallback="awaiting tech lead decision" ;;
             *)         state=error;   fallback="Review agent posted no verdict — see run log, then re-trigger /bevel-review" ;;
           esac
+
+          # A terminal verdict owes a one-pager written by THIS run — it is
+          # where the rule checks, the evidence table and the lead's approval
+          # instrument live. A run that wrote the verdict and stopped, linked
+          # nothing (or something off-site), or left an earlier run's page in
+          # place has not finished reviewing; publishing it green would reward
+          # exactly that, run after run. Only a verified page — or a knowledge
+          # base that could not be asked — keeps the verdict's own state. The
+          # verdict stays visible in the comment; the check says "incomplete".
+          if [ "$OUTCOME" = go-ahead ] || [ "$OUTCOME" = escalated ]; then
+            if [ "${ONEPAGER_OK:-0}" != 1 ]; then
+              state=error
+              fallback="review incomplete — no one-pager written by this run; re-trigger /bevel-review"
+            fi
+          fi
 
           description="${HEADLINE:-}"
           if [ "$state" = "error" ] || [ -z "$description" ]; then

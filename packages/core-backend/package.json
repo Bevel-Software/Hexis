@@ -1,6 +1,6 @@
 {
   "name": "@bevel-software/platform-core-backend",
-  "version": "0.13.1",
+  "version": "0.13.5",
   "description": "Open-source core backend of the Bevel platform: git-backed knowledge workspace, workflow (branches/change requests/locks/SSE), skills, tools, secrets vault, access control and the remote MCP surface.",
   "type": "module",
   "main": "./dist/index.js",
@@ -55,7 +55,7 @@
     "htmlparser2": "^12.0.0",
     "ignore": "^7.0.5",
     "jsonwebtoken": "^9.0.3",
-    "pdfjs-dist": "^5.4.624",
+    "pdfjs-dist": "^6.2.108",
     "pg": "^8.20.0",
     "postal-mime": "^3.0.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",

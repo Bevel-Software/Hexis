@@ -59,8 +59,13 @@ export function usePointerMenuPosition<T extends HTMLElement>(
       const h = el.offsetHeight;
       const left = Math.max(MENU_MARGIN, Math.min(x, window.innerWidth - w - MENU_MARGIN));
       let top: number;
-      if (y + h <= window.innerHeight - MENU_MARGIN) {
-        top = y;
+      // Downward from the pointer, but never above the top margin: a pointer
+      // in the first few pixels of the window would otherwise put the menu's
+      // edge flush against the chrome, the one placement every other branch
+      // here keeps a margin from.
+      const below = Math.max(MENU_MARGIN, y);
+      if (below + h <= window.innerHeight - MENU_MARGIN) {
+        top = below;
       } else if (y - MENU_GAP - h >= MENU_MARGIN) {
         top = y - MENU_GAP - h;
       } else {

@@ -1,6 +1,6 @@
 {
   "name": "@bevel-software/hexis-mcp",
-  "version": "0.13.1",
+  "version": "0.13.5",
   "description": "Run a Hexis workspace as a local MCP server: every tool the hosted endpoint serves, plus the local-only tools it cannot reach.",
   "type": "module",
   "main": "./dist/index.js",

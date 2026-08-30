@@ -122,8 +122,10 @@ export async function createCoreServer(
   // `exposedHeaders` lets a BROWSER-based MCP client (e.g. MCP Inspector) read
   // the Streamable-HTTP session header off the `initialize` response — custom
   // response headers are hidden from browser JS unless exposed, so without this
-  // the client can't send `Mcp-Session-Id` back and every follow-up 400s with
-  // "session id does not match any active session". `WWW-Authenticate` is
+  // the client can't send `Mcp-Session-Id` back at all, and every follow-up
+  // 400s with "Bad Request: Mcp-Session-Id header is required" — the
+  // missing-header case, not the unknown-session one (that answers 404
+  // "Session not found"). `WWW-Authenticate` is
   // exposed so a browser client can read the 401 challenge and start the OAuth
   // discovery flow. (Native clients like Claude Code aren't subject to CORS.)
   app.use(
