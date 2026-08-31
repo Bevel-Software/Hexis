@@ -97,7 +97,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     if (!this.cryptoInstance) {
       if (!this.encKey) {
         throw new InvalidSecretError(
-          'Secrets require an encryption key — set CONNECTOR_CONFIG_ENC_KEY (or SHAREPOINT_TOKEN_ENC_KEY).',
+          'Secrets require an encryption key — set SECRETS_ENC_KEY.',
         );
       }
       this.cryptoInstance = new TokenCrypto(this.encKey);

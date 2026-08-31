@@ -11,12 +11,19 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 export class TokenCrypto {
   private readonly key: Buffer;
 
-  /** @param rawKey 32-byte key as hex (64 chars) or base64. */
-  constructor(rawKey: string) {
+  /**
+   * @param rawKey 32-byte key as hex (64 chars) or base64.
+   * @param envVarName the environment variable the caller read `rawKey` from,
+   *   so a bad key is reported against the variable the operator actually has
+   *   to fix. Defaults to core's own `SECRETS_ENC_KEY` — every core consumer
+   *   reads that; an overlay bringing its own key (the SharePoint token
+   *   cache, connector configs) passes its own name.
+   */
+  constructor(rawKey: string, envVarName = 'SECRETS_ENC_KEY') {
     const key = decodeKey(rawKey);
     if (key.length !== 32) {
       throw new Error(
-        `SHAREPOINT_TOKEN_ENC_KEY must decode to 32 bytes (got ${key.length}). ` +
+        `${envVarName} must decode to 32 bytes (got ${key.length}). ` +
           'Generate one with: `node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"`.',
       );
     }
