@@ -26,6 +26,8 @@ import type {
   PostChangeRequestCommentInput,
 } from '@bevel-software/platform-shared';
 import type { AuthService } from '../auth/auth.service.js';
+import type { IAccessControl } from '../access/access-control.interface.js';
+import { toKbRelative } from '../access-model/kb-read-filter.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from './event-bus.js';
@@ -60,6 +62,8 @@ export function createWorkflowRoutes(
   workspaceService: WorkspaceService,
   authService: AuthService,
   events: WorkflowEventBus,
+  accessControl: IAccessControl,
+  kbDirName: string,
 ): express.Router {
   const router = express.Router({ mergeParams: true });
 
@@ -91,6 +95,43 @@ export function createWorkflowRoutes(
       res.status(500).json({ error: 'Internal server error' });
       return null;
     }
+  }
+
+  /**
+   * Gate a history read on the same `read:` verb the content routes enforce.
+   * The history endpoints below serve a file's past — its commit list, its
+   * diffs, its full content at a commit — and a file's past IS its content,
+   * with a time axis. They used to check only "is authenticated", so any
+   * logged-in user could pull a read-denied file's history by path, straight
+   * past the default-deny read model that hides the file everywhere else.
+   * Same rules as the content read (`workspace.routes` /
+   * `diff.routes.canReadPath`): the FULL `canRead` (per-node frontmatter
+   * honoured), non-KB paths ungated (they carry no `read:` rules), and both
+   * denial and any error fail closed with the content route's 403.
+   */
+  async function requireReadPermission(
+    req: express.Request,
+    res: express.Response,
+    workspaceId: string,
+    relativePath: string,
+  ): Promise<boolean> {
+    const user = await requireUser(req, res);
+    if (!user) return false;
+    const repoRelative = toKbRelative(relativePath, kbDirName);
+    if (repoRelative === null) return true; // non-KB path — no read rules apply
+    let allowed: boolean;
+    try {
+      allowed = await accessControl.canRead(workspaceId, user.email, repoRelative);
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+      return false;
+    }
+    if (!allowed) {
+      res.status(403).json({ error: `You don't have permission to read "${relativePath}".` });
+      return false;
+    }
+    return true;
   }
 
   // ── Branches ──────────────────────────────────────────────────────────────
@@ -250,12 +291,12 @@ export function createWorkflowRoutes(
   });
 
   router.get('/workspace/:id/workflow/changes', async (req, res) => {
-    if (!(await requireUser(req, res))) return;
     const pathParam = typeof req.query.path === 'string' ? req.query.path : '';
     if (!pathParam) {
       res.status(400).json({ error: 'path is required' });
       return;
     }
+    if (!(await requireReadPermission(req, res, req.params.id, pathParam))) return;
     const rawLimit = Number.parseInt(String(req.query.limit ?? '20'), 10);
     const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(rawLimit, 100)) : 20;
     try {
@@ -267,7 +308,6 @@ export function createWorkflowRoutes(
   });
 
   router.get('/workspace/:id/workflow/compare-file', async (req, res) => {
-    if (!(await requireUser(req, res))) return;
     const pathParam = typeof req.query.path === 'string' ? req.query.path : '';
     const fromBranch = typeof req.query.from === 'string' ? req.query.from : '';
     const toBranch = typeof req.query.to === 'string' ? req.query.to : '';
@@ -275,6 +315,7 @@ export function createWorkflowRoutes(
       res.status(400).json({ error: 'path, from, and to are required' });
       return;
     }
+    if (!(await requireReadPermission(req, res, req.params.id, pathParam))) return;
     try {
       const diff = await workflow.compareFile(req.params.id, pathParam, fromBranch, toBranch);
       res.json({ diff });
@@ -285,13 +326,13 @@ export function createWorkflowRoutes(
   });
 
   router.get('/workspace/:id/workflow/show-file', async (req, res) => {
-    if (!(await requireUser(req, res))) return;
     const pathParam = typeof req.query.path === 'string' ? req.query.path : '';
     const sha = typeof req.query.sha === 'string' ? req.query.sha : '';
     if (!pathParam || !sha) {
       res.status(400).json({ error: 'path and sha are required' });
       return;
     }
+    if (!(await requireReadPermission(req, res, req.params.id, pathParam))) return;
     try {
       const diff = await workflow.showFileAtChange(req.params.id, pathParam, sha);
       res.json({ diff });
@@ -302,13 +343,13 @@ export function createWorkflowRoutes(
   });
 
   router.get('/workspace/:id/workflow/file-at-change', async (req, res) => {
-    if (!(await requireUser(req, res))) return;
     const pathParam = typeof req.query.path === 'string' ? req.query.path : '';
     const sha = typeof req.query.sha === 'string' ? req.query.sha : '';
     if (!pathParam || !sha) {
       res.status(400).json({ error: 'path and sha are required' });
       return;
     }
+    if (!(await requireReadPermission(req, res, req.params.id, pathParam))) return;
     try {
       const { baseline, current } = await workflow.fileAtChange(req.params.id, pathParam, sha);
       res.json({ baseline, current });
