@@ -11,16 +11,16 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 export class TokenCrypto {
   private readonly key: Buffer;
 
-  /** @param rawKey 32-byte key as hex (64 chars) or base64. */
-  constructor(rawKey: string) {
-    const key = decodeKey(rawKey);
-    if (key.length !== 32) {
-      throw new Error(
-        `SHAREPOINT_TOKEN_ENC_KEY must decode to 32 bytes (got ${key.length}). ` +
-          'Generate one with: `node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"`.',
-      );
-    }
-    this.key = key;
+  /**
+   * @param rawKey 32-byte key as hex (64 chars) or base64.
+   * @param envVarName the environment variable the caller read `rawKey` from,
+   *   so a bad key is reported against the variable the operator actually has
+   *   to fix. Defaults to core's own `SECRETS_ENC_KEY` — every core consumer
+   *   reads that; an overlay bringing its own key (the SharePoint token
+   *   cache, connector configs) passes its own name.
+   */
+  constructor(rawKey: string, envVarName = 'SECRETS_ENC_KEY') {
+    this.key = assertKeyDecodesTo32Bytes(rawKey, envVarName);
   }
 
   encrypt(plaintext: string): string {
@@ -51,4 +51,22 @@ function decodeKey(raw: string): Buffer {
   // hex string being misread as base64.
   if (/^[0-9a-fA-F]{64}$/.test(raw)) return Buffer.from(raw, 'hex');
   return Buffer.from(raw, 'base64');
+}
+
+/**
+ * Decode a key and refuse anything that is not exactly 32 bytes, blaming
+ * `envVarName`. Exported so boot-time config can validate the key THE MOMENT
+ * it knows which environment variable supplied it (`SECRETS_ENC_KEY` or a
+ * legacy fallback) — every later `new TokenCrypto(key)` with the default name
+ * is then safe, because a bad key never gets that far.
+ */
+export function assertKeyDecodesTo32Bytes(rawKey: string, envVarName: string): Buffer {
+  const key = decodeKey(rawKey);
+  if (key.length !== 32) {
+    throw new Error(
+      `${envVarName} must decode to 32 bytes (got ${key.length}). ` +
+        'Generate one with: `node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"`.',
+    );
+  }
+  return key;
 }

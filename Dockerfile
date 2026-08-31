@@ -69,7 +69,10 @@ RUN corepack enable && corepack prepare pnpm@10.33.3 --activate
 # way). The shipped compose files set `init: true` for the same reason, but a
 # deployment built from this Dockerfile alone — a Coolify "Dockerfile" app, a
 # hand-written compose — got no reaper. Baking it in means no deployment can
-# forget it; `init: true` on top is harmless.
+# forget it; `init: true` on top is harmless. (When both are present, Docker's
+# own init takes PID 1 and this tini runs under it — the `-s` on the
+# ENTRYPOINT registers it as a child subreaper for exactly that case, so it
+# still reaps its subtree instead of warning on every boot.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates tini \
     && rm -rf /var/lib/apt/lists/*
@@ -129,5 +132,5 @@ ENV GIT_SHA=${GIT_SHA}
 EXPOSE 3001
 
 WORKDIR /app/apps/server
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 CMD ["tsx", "src/main.ts"]
