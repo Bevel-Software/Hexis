@@ -27,7 +27,7 @@ import type {
 } from '@bevel-software/platform-shared';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { toKbRelative } from '../access-model/kb-read-filter.js';
+import { canReadWorkspacePath } from '../access-model/kb-read-filter.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from './event-bus.js';
@@ -117,11 +117,15 @@ export function createWorkflowRoutes(
   ): Promise<boolean> {
     const user = await requireUser(req, res);
     if (!user) return false;
-    const repoRelative = toKbRelative(relativePath, kbDirName);
-    if (repoRelative === null) return true; // non-KB path — no read rules apply
     let allowed: boolean;
     try {
-      allowed = await accessControl.canRead(workspaceId, user.email, repoRelative);
+      allowed = await canReadWorkspacePath(
+        (w, e, p) => accessControl.canRead(w, e, p),
+        workspaceId,
+        user.email,
+        kbDirName,
+        relativePath,
+      );
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

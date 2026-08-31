@@ -3,7 +3,7 @@ import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared
 import type { IDiffService } from './diff.interface.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
+import { canReadWorkspacePath, toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import { WorkflowDomainError, WorkflowValidationError } from '../../shared/domain-errors.js';
 import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
@@ -138,10 +138,14 @@ export function createDiffRoutes(
   }
 
   /** Read gate for a single change path (mirrors GET /review/file). Returns true to proceed. */
-  async function canReadPath(workspaceId: string, email: string, pathParam: string): Promise<boolean> {
-    const rel = toKbRelative(pathParam, kbDirName);
-    // Non-KB paths (toKbRelative → null) carry no read rules and pass.
-    return rel === null || (await accessControl.canRead(workspaceId, email, rel));
+  function canReadPath(workspaceId: string, email: string, pathParam: string): Promise<boolean> {
+    return canReadWorkspacePath(
+      (w, e, p) => accessControl.canRead(w, e, p),
+      workspaceId,
+      email,
+      kbDirName,
+      pathParam,
+    );
   }
 
   router.get('/workspace/:id/review', async (req, res) => {
