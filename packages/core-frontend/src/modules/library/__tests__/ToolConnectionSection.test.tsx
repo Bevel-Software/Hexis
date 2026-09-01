@@ -33,11 +33,13 @@ vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolConnectionSection } from '../components/tool-page/ToolConnectionSection';
 
-// `checkToolConnection` is one module-level mock shared by every test here, so
-// without this a test that does not set its own implementation inherits the
-// previous one's — and the suite passes only because of the order it happens to
-// run in. Clears call history and keeps each test's own `mockResolvedValue`.
-beforeEach(() => vi.clearAllMocks());
+// `checkToolConnection` is one module-level mock shared by every test here.
+// `resetAllMocks`, not `clearAllMocks`: clearing kept whatever implementation
+// the previous test installed with `mockResolvedValue`, which is exactly the
+// ordering hazard this line claims to prevent — a test that forgot its own
+// implementation inherited its neighbour's and passed by accident. Reset
+// drops implementations too, so every test states what its probe answers.
+beforeEach(() => vi.resetAllMocks());
 function workspace(kbDirName: string | null): WorkspaceContextValue {
   return { workspaceId: 'target-company-state', kbDirName } as unknown as WorkspaceContextValue;
 }

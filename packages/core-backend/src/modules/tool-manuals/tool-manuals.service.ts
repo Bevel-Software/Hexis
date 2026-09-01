@@ -389,7 +389,7 @@ export class ToolManualService implements IToolManualService {
         config: {
           mcpServers: {
             [m.name]: {
-              transport: 'http',
+              transport: m.transport ?? 'http',
               url: m.url,
               ...(m.headers ? { headers: m.headers } : {}),
             },
@@ -532,6 +532,20 @@ export class ToolManualService implements IToolManualService {
           }
           m.setup = { kind: 'oauth-auto' };
           m.headers = { ...(m.headers ?? {}), Authorization: `Bearer \${${MCP_OAUTH_VAR}}` };
+          // A declared healthCheck froze its headers during normalize —
+          // BEFORE this decoration — so it would dial without the bearer
+          // every real call now carries and read its own 401 as a rejected
+          // credential. The injected sign-in reaches the check too, unless
+          // the check declares its own Authorization.
+          if (
+            m.healthCheck &&
+            !Object.keys(m.healthCheck.headers ?? {}).some((h) => h.toLowerCase() === 'authorization')
+          ) {
+            m.healthCheck = {
+              ...m.healthCheck,
+              headers: { ...(m.healthCheck.headers ?? {}), Authorization: `Bearer \${${MCP_OAUTH_VAR}}` },
+            };
+          }
           m.variables = [
             ...(m.variables ?? []),
             {
@@ -915,13 +929,14 @@ export function normalizeToolManual(
   // authenticates exactly like a real call. Resolving that default here, where
   // the whole descriptor is in hand, keeps the probe self-contained: nothing
   // downstream has to re-derive which headers a manual would have sent.
-  // Inherit from the DECLARED `headers`, not `descriptor.headers`: an `inline`
-  // manual never populates the latter (only the url-bearing branch does), so a
-  // one-line probe on an inline tool silently inherited nothing and tested an
-  // unauthenticated request. The declared block is the same object for
-  // http/mcp, so this is identical there and correct for all three.
+  //
+  // For `http`/`mcp` only. An `inline` manual's execution never sends its
+  // top-level `headers` — each embedded tool carries its own call template —
+  // so inheriting them would have the probe prove a request no real call
+  // makes. An inline probe declares its own headers on the healthCheck, or
+  // sends none.
   const declaredHeaders =
-    obj.headers && typeof obj.headers === 'object' && !Array.isArray(obj.headers)
+    type !== 'inline' && obj.headers && typeof obj.headers === 'object' && !Array.isArray(obj.headers)
       ? (obj.headers as Record<string, string>)
       : undefined;
   const healthCheck = normalizeHealthCheck(obj.healthCheck, name, descriptor.remote, declaredHeaders);

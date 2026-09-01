@@ -150,7 +150,13 @@ export function ToolPage({
         </Banner>
       )}
 
+      {/* Keyed by slug: the section's probe verdict and `checking` flag are
+          component state about THIS tool. Navigating between two canonical
+          tools re-renders the same component instance, and without the key
+          the previous tool's "Connected" (or its failure banner) survives
+          under the next tool's heading. */}
       <ToolConnectionSection
+        key={tool.slug}
         tool={tool}
         configRevision={serverRevision}
         onChanged={() => {
@@ -158,6 +164,7 @@ export function ToolPage({
           page.reload();
         }}
         onError={setActionError}
+        onRecovered={() => setActionError(null)}
       />
 
       {/* Only an mcp-type tool can have an mcp.json server pair — mounting the

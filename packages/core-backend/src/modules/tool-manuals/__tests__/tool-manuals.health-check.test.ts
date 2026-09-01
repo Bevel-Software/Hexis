@@ -40,10 +40,12 @@ describe('`.tool` healthCheck', () => {
     expect(hc?.headers).toEqual({ 'X-Key': '${API_KEY}' });
   });
 
-  it("inherits an INLINE manual's headers too, which only the url branch used to set", () => {
-    // `descriptor.headers` is populated only on the url-bearing branch, so
-    // inheriting from it left an inline probe sending nothing and testing an
-    // unauthenticated request — a pass that proved the opposite of what it claimed.
+  it("an INLINE manual's probe inherits NO top-level headers — execution never sends them", () => {
+    // An inline manual's real calls go through each embedded tool's own call
+    // template; nothing ever sends the manual's top-level `headers:`. A probe
+    // that inherited them proved a request no call makes — `Connected` about
+    // the wrong request. An inline probe declares its headers on the
+    // healthCheck itself, or sends none.
     const inline = normalizeToolManual(
       'acme',
       'Plugins/acme.tool',
@@ -58,7 +60,7 @@ tools: []
 ---
 `,
     );
-    expect(inline.healthCheck?.headers).toEqual({ Authorization: 'Bearer ${API_KEY}' });
+    expect(inline.healthCheck?.headers).toBeUndefined();
   });
 
   it('refuses a method that could mutate', () => {

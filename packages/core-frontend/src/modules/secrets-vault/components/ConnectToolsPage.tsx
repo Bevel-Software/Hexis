@@ -40,8 +40,10 @@ const MCP_OAUTH_STATE_KEY = 'mcp-oauth-state';
  *    sends the browser back to the agent.
  *
  * DESIGN: this page speaks the Library's vocabulary, because it is the other
- * half of the same job. Every state reads `Connected` or `Needs …` (never a
- * third phrasing), nothing that needs a person is grey, and a tool is
+ * half of the same job. Every state reads what is STORED — `Signed in`,
+ * `Key saved` — or `Needs …` (never a third phrasing; `Connected` is
+ * reserved for the tool page, whose probe actually earns the word), nothing
+ * that needs a person is grey, and a tool is
  * identified by its mark before its name — the same `ToolLogo` the gallery
  * cards use. It went through the design system wholesale: no raw palette, no
  * off-scale type, no ad-hoc bordered `div`s pretending to be Surfaces.

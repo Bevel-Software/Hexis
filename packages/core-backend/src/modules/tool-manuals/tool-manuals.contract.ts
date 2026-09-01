@@ -184,6 +184,13 @@ export interface ToolManualDescriptorBase {
   /** For `http`/`mcp`: the endpoint URL (may contain `${VAR}` refs). */
   url?: string;
   httpMethod?: 'GET' | 'POST';
+  /**
+   * For a remote `type: mcp` server from an `mcp.json`: the declared
+   * transport. `sse` used to be flattened to `http` when the call template
+   * was rebuilt, leaving a probe (and any consumer of the template) unable
+   * to complete the handshake the file actually configured.
+   */
+  transport?: 'http' | 'sse';
   headers?: Record<string, string>;
   /** For `inline`: the embedded UTCP tools (validated when served). */
   tools?: unknown[];
@@ -192,9 +199,12 @@ export interface ToolManualDescriptorBase {
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
   /**
-   * Optional credential probe for `http`/`inline` manuals — see
-   * {@link ToolHealthCheck}. INTERNAL: lives on the descriptor, never on
-   * {@link ToolManualSummary}, because it carries `headers`.
+   * Optional credential probe — see {@link ToolHealthCheck}. Declared on
+   * `http`/`inline` manuals, and honoured on `type: mcp` too, where it
+   * OVERRIDES the default handshake probe (a server whose health endpoint is
+   * cheaper or more truthful than a full MCP handshake says so here).
+   * INTERNAL: lives on the descriptor, never on {@link ToolManualSummary},
+   * because it carries `headers`.
    */
   healthCheck?: ToolHealthCheck;
 }

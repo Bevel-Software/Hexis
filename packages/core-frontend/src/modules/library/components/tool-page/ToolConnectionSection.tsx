@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
@@ -40,6 +40,12 @@ export interface ToolConnectionSectionProps {
   /** A write landed — the caller refetches so the chips catch up. */
   onChanged(): void;
   onError(message: string): void;
+  /**
+   * The NEWEST probe answered cleanly. A transport error an older attempt
+   * raised through `onError` is history at that point — without this, its
+   * banner stands beside a fresh verdict, two contradicting answers at once.
+   */
+  onRecovered?(): void;
 }
 
 export function ToolConnectionSection({
@@ -47,12 +53,21 @@ export function ToolConnectionSection({
   configRevision,
   onChanged,
   onError,
+  onRecovered,
 }: ToolConnectionSectionProps) {
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
   /** `{varName, n}` — bumping `n` opens that variable's editor from the banner. */
   const [edit, setEdit] = useState<{ name: string; n: number }>({ name: '', n: 0 });
-  const [checking, setChecking] = useState(false);
+  /**
+   * The revision of the probe in flight, or null. `checking` is DERIVED: an
+   * in-flight probe owns the Test button only while the definition it dials
+   * is still the one on screen, so a config edit mid-probe re-enables the
+   * button for the new definition immediately instead of waiting for the
+   * orphan to settle.
+   */
+  const [inFlight, setInFlight] = useState<{ rev: number } | null>(null);
+  const checking = inFlight !== null && inFlight.rev === configRevision;
   /**
    * The last probe's answer, and the ONLY place one exists.
    *
@@ -76,6 +91,19 @@ export function ToolConnectionSection({
    * whole feature exists to remove, one layer up.
    */
   const probeSeq = useRef(0);
+
+  /**
+   * The revision currently on screen, readable from async closures. A probe
+   * launched under an older revision is ORPHANED the moment the definition
+   * changes: its verdict is already discarded by the `rev` comparison above,
+   * and its callbacks must not speak either — no banner, no recovery — about
+   * a definition that is gone. Updated in an effect (never during render),
+   * read only from handlers.
+   */
+  const latestRev = useRef(configRevision);
+  useEffect(() => {
+    latestRev.current = configRevision;
+  });
 
   const setupKind = tool.setup?.kind ?? null;
   // Not just "kind is oauth-manual": once the owner declares the provider and
@@ -169,10 +197,17 @@ export function ToolConnectionSection({
   async function runCheck() {
     const mine = ++probeSeq.current;
     const rev = configRevision;
-    setChecking(true);
+    setInFlight({ rev });
+    // Publication needs BOTH guards: newest probe (two saves in quick
+    // succession) AND current revision (a definition edit mid-probe) — a
+    // probe that lost either race describes something no longer on screen.
+    const speaks = () => probeSeq.current === mine && rev === latestRev.current;
     try {
       const value = await checkToolConnection(tool.slug);
-      if (probeSeq.current === mine) setProbed({ rev, value });
+      if (speaks()) {
+        setProbed({ rev, value });
+        onRecovered?.();
+      }
     } catch (err) {
       // A rejected credential resolves with `status: 'failed'`; only a
       // transport or access failure lands here, and that is not a verdict about
@@ -181,14 +216,14 @@ export function ToolConnectionSection({
       // Inside the guard too: an older probe rejecting after a newer one has
       // already answered would otherwise raise a transport error over a verdict
       // that is currently correct.
-      if (probeSeq.current === mine) {
+      if (speaks()) {
         setProbed(null);
         onError(err instanceof Error ? err.message : "Couldn't test this connection.");
       }
     } finally {
-      // Only the newest probe owns the button: an older one finishing late must
-      // not re-enable it while the newer one is still running.
-      if (probeSeq.current === mine) setChecking(false);
+      // Only the newest probe releases the slot: an older one finishing late
+      // must not clear a newer probe's in-flight marker.
+      if (probeSeq.current === mine) setInFlight(null);
     }
   }
 

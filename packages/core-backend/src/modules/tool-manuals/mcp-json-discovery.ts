@@ -338,6 +338,10 @@ export function descriptorsFromMcpJson(
       out.push({
         ...shared,
         url: raw.url,
+        // The declared transport rides along — the call template is rebuilt
+        // from this descriptor, and rebuilding an `sse` server as `http`
+        // configures a handshake the server does not speak.
+        transport: raw.type === 'sse' ? 'sse' : 'http',
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
         ...(ext.local === true ? { remote: false } : {}),
       });

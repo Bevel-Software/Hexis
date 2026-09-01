@@ -120,7 +120,10 @@ export function useToolPage(slug: string): ToolPageState {
         if (current()) setDetail(d);
       })
       .catch(() => {
-        // Degraded, not broken: no lede and no capabilities section.
+        // Degraded, not broken: no lede and no capabilities section — and on
+        // a same-slug reload, degraded NOW: the previous fetch's description
+        // must not stand in for one this fetch could not vouch for.
+        if (current()) setDetail(null);
       });
 
     listSkills()

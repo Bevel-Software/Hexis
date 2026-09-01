@@ -640,7 +640,16 @@ export class ConnectionProbeService implements IConnectionProbeService {
 
     const values = new Map<string, string>();
     for (const name of names) {
-      const value = await this.secretsVault.resolve(userId, utcpNamespacedKey(manualName, name));
+      let value = await this.secretsVault.resolve(userId, utcpNamespacedKey(manualName, name));
+      if (value === null) {
+        // UTCP keeps `process.env` as its LAST resolution tier, so a real
+        // call can resolve what the vault does not hold (a deployment-level
+        // variable). The probe must test the request the call would send —
+        // reporting "not set yet" for a variable the call resolves fine is
+        // the badge crying wolf. Namespaced form first, bare name second,
+        // mirroring the loader's own order.
+        value = process.env[utcpNamespacedKey(manualName, name)] ?? process.env[name] ?? null;
+      }
       if (value === null) throw new Error(`\${${name}} isn't set yet, so there was nothing to test.`);
       values.set(name, value);
       redactor?.remember(value);

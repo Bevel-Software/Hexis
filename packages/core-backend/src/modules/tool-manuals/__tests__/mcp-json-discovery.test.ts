@@ -33,6 +33,7 @@ describe('descriptorsFromMcpJson', () => {
         path: 'Plugins/GTM/mcp.json',
         type: 'mcp',
         url: 'https://mcp.notion.com/mcp',
+        transport: 'http',
       },
     ]);
   });
