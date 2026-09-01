@@ -51,7 +51,11 @@ function rowMatches(cond: unknown, row: Record<string, unknown>): boolean {
         if (String((c as { value: unknown }).value).includes(' or ')) anyOr = true;
       }
     }
-    if (results.length === 0) return true;
+    // A node this walker cannot decompose (`inArray`, `isNull`, a future
+    // rewrite of the query) must NOT read as a match — `true` here would be
+    // the permissive direction, returning rows the real query excludes and
+    // masking exactly the guard regressions these tests exist to catch.
+    if (results.length === 0) return false;
     return anyOr ? results.some(Boolean) : results.every(Boolean);
   };
   return evalNode(cond);

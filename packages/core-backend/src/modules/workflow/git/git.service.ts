@@ -317,6 +317,11 @@ export class GitService implements IGitService {
    */
   noteWorkspaceFetched(workspaceId: string): void {
     this.lastImplicitFetchAt.set(workspaceId, Date.now());
+    // A fresh clone IS a successful fetch. Without this, a workspace
+    // recreated after some earlier failed fetch inherits the stale `false`
+    // under the same id, and a strict listBranches inside the TTL window
+    // refuses a list that is in fact provably fresh.
+    this.lastImplicitFetchOk.set(workspaceId, true);
   }
 
   /**
@@ -1838,6 +1843,7 @@ export class GitService implements IGitService {
     const repoRelativePath = this.stripRepoPrefix(relativePath);
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
+      await this.assertNotTreeAtRef(cwd, sha, repoRelativePath, relativePath);
       try {
         const { stdout } = await this.git(cwd, [
           'show',
@@ -1883,6 +1889,9 @@ export class GitService implements IGitService {
     }
     const repoRelativePath = this.stripRepoPrefix(relativePath);
     return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      await this.assertNotTreeAtRef(cwd, sha, repoRelativePath, relativePath);
+      await this.assertNotTreeAtRef(cwd, `${sha}^`, repoRelativePath, relativePath);
       const current = await this.readFileAtRef(workspaceId, sha, repoRelativePath);
       let baseline: string | null;
       try {
@@ -1919,6 +1928,8 @@ export class GitService implements IGitService {
       const cwd = await this.repoDir(workspaceId);
       const fromRef = await this.resolveBranchRef(cwd, fromBranch);
       const toRef = await this.resolveBranchRef(cwd, toBranch);
+      await this.assertNotTreeAtRef(cwd, fromRef, repoRelativePath, relativePath);
+      await this.assertNotTreeAtRef(cwd, toRef, repoRelativePath, relativePath);
       // When one side is the currently-checked-out branch, diff against the
       // working tree instead of the branch's HEAD commit. Otherwise saves
       // that haven't been committed yet (which is the normal state in the
@@ -2415,6 +2426,36 @@ export class GitService implements IGitService {
    * `showAtRef`) — the caller distinguishes "absent" from "present but empty".
    * Read-only: `git show <ref>:<path>` never mutates the working tree.
    */
+  /**
+   * Refuse a history pathspec that names a TREE at `ref`. The history
+   * surfaces are per-file, and their read gate upstream checked exactly one
+   * path — but `git show/diff -- <dir>` walks every child, and a directory
+   * whose folder chain grants read can hold children whose own frontmatter
+   * denies it. `git show <ref>:<dir>` even prints the tree listing. Absent
+   * at the ref is fine (absent is not a tree — a deleted file's history is
+   * still its own), and an unresolvable ref is left for the actual read to
+   * report in its own words.
+   */
+  private async assertNotTreeAtRef(
+    cwd: string,
+    ref: string,
+    repoRelativePath: string,
+    displayPath: string,
+  ): Promise<void> {
+    let kind: string;
+    try {
+      const { stdout } = await this.git(cwd, ['cat-file', '-t', `${ref}:${repoRelativePath}`]);
+      kind = stdout.trim();
+    } catch {
+      return; // absent at the ref, or the ref itself is unresolvable
+    }
+    if (kind === 'tree') {
+      throw new WorkflowValidationError(
+        `"${displayPath}" is a directory at that point in history — history is served per file`,
+      );
+    }
+  }
+
   async readFileAtRef(
     workspaceId: string,
     ref: string,

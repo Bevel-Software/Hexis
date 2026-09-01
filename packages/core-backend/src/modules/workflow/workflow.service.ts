@@ -1802,7 +1802,19 @@ export class WorkflowService implements IWorkflowService {
     let isAdmin: boolean | null;
     try {
       ws = await this.workspaceService.getOrCreateForBranch(summary.base);
-      await this.workspaceService.ensureRemotesFetched(ws.id).catch(() => undefined);
+      // STRICT: the admin check below reads roles.yaml at `origin/<base>`,
+      // and on a swallowed fetch failure that ref is whatever the clone last
+      // saw — a user whose rights were since revoked would still pass
+      // against the stale tree. Authorization never runs against refs of
+      // unknown age.
+      try {
+        await this.workspaceService.ensureRemotesFetched(ws.id, { strict: true });
+      } catch {
+        throw new WorkflowDomainError(
+          `Could not verify the base branch "${summary.base}" — origin was unreachable. Retry in a moment.`,
+          409,
+        );
+      }
       isAdmin = await this.accessControl.canWriteAtRef(
         ws.id,
         `origin/${summary.base}`,

@@ -27,7 +27,7 @@ import type {
 } from '@bevel-software/platform-shared';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { canReadWorkspacePath } from '../access-model/kb-read-filter.js';
+import { canReadWorkspacePath, toKbRelative } from '../access-model/kb-read-filter.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from './event-bus.js';
@@ -117,6 +117,21 @@ export function createWorkflowRoutes(
   ): Promise<boolean> {
     const user = await requireUser(req, res);
     if (!user) return false;
+    // No ungated path form here, unlike the content routes: the git layer
+    // accepts BOTH the workspace-relative form (`knowledge-base/GTM/x.md`)
+    // and the repo-relative one (`GTM/x.md` — it strips the prefix when
+    // present, `stripRepoPrefix`), so treating an unprefixed path as
+    // "non-KB, no rules" would let the same repository object through
+    // without its gate. History exists only for tracked files and every
+    // tracked file lives in the repository — a path without the prefix is
+    // refused, not exempted. (Workspace scratch files outside the repo are
+    // untracked; their "history" was always an empty list.)
+    if (toKbRelative(relativePath, kbDirName) === null) {
+      res.status(400).json({
+        error: `History is served for repository files — pass the workspace-relative path (starting "${kbDirName}/").`,
+      });
+      return false;
+    }
     let allowed: boolean;
     try {
       allowed = await canReadWorkspacePath(
@@ -320,6 +335,30 @@ export function createWorkflowRoutes(
       return;
     }
     if (!(await requireReadPermission(req, res, req.params.id, pathParam))) return;
+    // The other history endpoints serve commits of the URL workspace's own
+    // branch, so its working-tree verdict covers what they return. This one
+    // serves content of TWO caller-named branches — the verdict must come
+    // from the refs actually being served, or a caller could pick a
+    // workspace whose tree grants what the compared branches' trees deny.
+    // `canReadAtRef` answers null when the ref cannot be resolved: deny —
+    // never serve a ref that cannot be authorized.
+    {
+      const user = await requireUser(req, res);
+      if (!user) return;
+      const repoRelative = toKbRelative(pathParam, kbDirName)!;
+      for (const branch of [fromBranch, toBranch]) {
+        let ok: boolean | null;
+        try {
+          ok = await accessControl.canReadAtRef(req.params.id, `origin/${branch}`, user.email, repoRelative);
+        } catch {
+          ok = null;
+        }
+        if (ok !== true) {
+          res.status(403).json({ error: `You don't have permission to read "${pathParam}" on "${branch}".` });
+          return;
+        }
+      }
+    }
     try {
       const diff = await workflow.compareFile(req.params.id, pathParam, fromBranch, toBranch);
       res.json({ diff });

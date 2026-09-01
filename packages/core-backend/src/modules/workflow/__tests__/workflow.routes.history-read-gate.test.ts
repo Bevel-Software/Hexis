@@ -21,6 +21,7 @@ const allow = (p: string) => !p.includes('Secret');
 interface Harness {
   server: Server;
   canRead: ReturnType<typeof vi.fn>;
+  canReadAtRef: ReturnType<typeof vi.fn>;
   workflow: {
     listChangesForFile: ReturnType<typeof vi.fn>;
     compareFile: ReturnType<typeof vi.fn>;
@@ -32,7 +33,8 @@ interface Harness {
 
 async function makeHarness(): Promise<Harness> {
   const canRead = vi.fn(async (_w: string, _e: string, p: string) => allow(p));
-  const accessControl = { canRead } as unknown as IAccessControl;
+  const canReadAtRef = vi.fn(async (_w: string, _r: string, _e: string, p: string) => allow(p));
+  const accessControl = { canRead, canReadAtRef } as unknown as IAccessControl;
   const workflow = {
     listChangesForFile: vi.fn(async () => []),
     compareFile: vi.fn(async () => ''),
@@ -62,7 +64,7 @@ async function makeHarness(): Promise<Harness> {
     const s = app.listen(0, () => resolve(s));
   });
   const addr = server.address() as AddressInfo;
-  return { server, canRead, workflow, baseUrl: `http://127.0.0.1:${addr.port}` };
+  return { server, canRead, canReadAtRef, workflow, baseUrl: `http://127.0.0.1:${addr.port}` };
 }
 
 function close(s: Server): Promise<void> {
@@ -95,11 +97,29 @@ describe('history routes enforce the read model', () => {
     expect(String(calls[0][1])).toContain('Open');
   });
 
-  it('a non-KB path carries no read rules and passes without consulting canRead', async () => {
+  it('a path without the repo prefix is refused outright — the git layer would read it as repo-relative', async () => {
+    // `stripRepoPrefix` makes `Secret/x.md` and `knowledge-base/Secret/x.md`
+    // name the same object, so an ungated "non-KB" branch would be a gate
+    // bypass by spelling. History is for tracked files only; no prefix, 400.
     h = await makeHarness();
-    const res = await get(`/changes?path=${encodeURIComponent('scratch/notes.txt')}`);
+    for (const p of ['Secret/x.md', 'scratch/notes.txt']) {
+      const res = await get(`/changes?path=${encodeURIComponent(p)}`);
+      expect(res.status).toBe(400);
+    }
+    expect(h.workflow.listChangesForFile).not.toHaveBeenCalled();
+  });
+
+  it('compare-file authorizes at BOTH served refs, not just the URL workspace', async () => {
+    h = await makeHarness();
+    const res = await get(`/compare-file?from=a&to=b&path=${OPEN}`);
     expect(res.status).toBe(200);
-    expect(h.canRead).not.toHaveBeenCalled();
+    const refs = h.canReadAtRef.mock.calls.map((c) => c[1]).sort();
+    expect(refs).toEqual(['origin/a', 'origin/b']);
+
+    // One branch's tree denies the read (or the ref cannot be resolved —
+    // canReadAtRef answers null): the diff is refused.
+    h.canReadAtRef.mockResolvedValueOnce(true).mockResolvedValueOnce(null);
+    expect((await get(`/compare-file?from=a&to=b&path=${OPEN}`)).status).toBe(403);
   });
 
   it('an access-model error fails closed, not open', async () => {
