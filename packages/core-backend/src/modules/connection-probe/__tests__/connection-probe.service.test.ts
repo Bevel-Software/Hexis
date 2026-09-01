@@ -312,6 +312,27 @@ describe('ConnectionProbeService: what the probe concludes', () => {
       }
     });
 
+    it('a 401 that only appears inside a URL accuses nobody', async () => {
+      // `fetch failed: https://mcp.example.com/v1/401/stream` carries the
+      // digits in a PATH — the provider said nothing about the credential.
+      const deregisterManual = vi.fn(async () => {});
+      const previous = CommunicationProtocol.communicationProtocols.mcp;
+      CommunicationProtocol.communicationProtocols.mcp = { deregisterManual } as never;
+      try {
+        createClientMock.mockResolvedValue({});
+        registerManualMock.mockResolvedValue({
+          ok: false,
+          error: 'fetch failed: https://mcp.example.com/v1/401/stream — socket hang up',
+        });
+
+        const r = await mcpTool().probe('u1', 'a@b.c', 'acme');
+
+        expect(r?.status).toBe('unverifiable');
+      } finally {
+        CommunicationProtocol.communicationProtocols.mcp = previous;
+      }
+    });
+
     it('reports a non-auth registration failure as unverifiable, not as a bad key', async () => {
       createClientMock.mockResolvedValue({});
       registerManualMock.mockResolvedValue({ ok: false, error: 'ECONNREFUSED' });

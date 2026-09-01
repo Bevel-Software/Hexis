@@ -64,8 +64,14 @@ function varRefPattern(): RegExp {
  */
 function looksLikeAuthRejection(message: string): boolean {
   const m = message.toLowerCase();
+  // A status number proves nothing from inside a URL — `/v1/401/stream`, a
+  // port, an id in a path all contain the digits without any rejection having
+  // happened. Scrub URLs before reading digits; the word list below still
+  // runs against the full message, because words like "unauthorized" accuse
+  // wherever they appear.
+  const scrubbed = m.replace(/\bhttps?:\/\/\S+/g, ' ');
   return (
-    /\b(401|403)\b/.test(m) ||
+    /\b(401|403)\b/.test(scrubbed) ||
     m.includes('unauthorized') ||
     m.includes('unauthenticated') ||
     m.includes('forbidden') ||

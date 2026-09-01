@@ -271,6 +271,8 @@ export class GitService implements IGitService {
   // worst case for branch-switching UX).
   private readonly fetchLocks = new Map<string, Promise<void>>();
   private readonly lastImplicitFetchAt = new Map<string, number>();
+  /** Whether the last implicit fetch per workspace SUCCEEDED — see `fetchOriginIfStale`. */
+  private readonly lastImplicitFetchOk = new Map<string, boolean>();
   private static readonly IMPLICIT_FETCH_TTL_MS = 5_000;
   // Cap on concurrent `aheadBehindForBranch` calls inside `listBranches`. Each
   // call serializes up to 3 `git rev-list` spawns, so 8 workers ≈ ≤24
@@ -399,7 +401,7 @@ export class GitService implements IGitService {
 
   async listBranches(
     workspaceId: string,
-    opts: { freshFetch?: boolean } = {},
+    opts: { freshFetch?: boolean; strictFetch?: boolean } = {},
   ): Promise<BranchInfo[]> {
     const cwd = await this.repoDir(workspaceId);
     // Run the fetch BEFORE entering the mutex so a slow origin can't block
@@ -409,7 +411,18 @@ export class GitService implements IGitService {
     // bypasses the TTL — used for user-initiated refreshes (opening the branch
     // selector) so a draft another workspace just deleted is pruned right away
     // instead of lingering up to one TTL window.
-    await this.fetchOriginIfStale(cwd, workspaceId, opts.freshFetch);
+    const fresh = await this.fetchOriginIfStale(cwd, workspaceId, opts.freshFetch);
+    // `strictFetch` is for callers that USE the list to prove absence — the
+    // deleted-branch sweep closes change requests on it. The degrade-to-stale
+    // behaviour below is right for a UI listing (stale branches beat a 500),
+    // and exactly wrong for an absence proof: a clone that last fetched
+    // before a branch was created reports it missing. Such a caller gets a
+    // thrown error instead of a list it must not trust.
+    if (opts.strictFetch && !fresh) {
+      throw new Error(
+        'the fetch from origin failed, so the branch list cannot prove absence — refusing to serve a stale list to a strict caller',
+      );
+    }
     return this.mutex.run(workspaceId, async () => {
       // Union local heads with origin's remote-tracking refs: a fresh per-user
       // clone only has one local head (HEAD's default), so without this we'd hide
@@ -509,7 +522,10 @@ export class GitService implements IGitService {
    * onto a single in-flight fetch instead of each waiting their turn behind
    * the network round-trip. Failures (offline, bad auth, no remote) are
    * logged and swallowed so the branch list still serves stale local data
-   * instead of returning 500.
+   * instead of returning 500 — the RETURN VALUE says whether the refs are
+   * provably fresh (`true`: this call fetched, or shared a fetch, that
+   * succeeded; also `true` on a TTL skip, whose window a recent success
+   * opened). Callers that need proof (strict listing) read it.
    *
    * Safe to keep outside the mutex: fetch only writes remote-tracking refs
    * and the object store, neither of which checkout/status/commit touch.
@@ -518,9 +534,11 @@ export class GitService implements IGitService {
     cwd: string,
     workspaceId: string,
     force = false,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const last = this.lastImplicitFetchAt.get(workspaceId) ?? 0;
-    if (!force && Date.now() - last < GitService.IMPLICIT_FETCH_TTL_MS) return;
+    if (!force && Date.now() - last < GitService.IMPLICIT_FETCH_TTL_MS) {
+      return this.lastImplicitFetchOk.get(workspaceId) ?? true;
+    }
 
     const inFlight = this.fetchLocks.get(workspaceId);
     if (inFlight) {
@@ -529,7 +547,7 @@ export class GitService implements IGitService {
       // the same promise also means subsequent listBranches calls see the
       // newly fetched refs.
       await inFlight;
-      return;
+      return this.lastImplicitFetchOk.get(workspaceId) ?? false;
     }
 
     const runFetch = async (): Promise<void> => {
@@ -546,6 +564,7 @@ export class GitService implements IGitService {
           ...SAFE_IMPLICIT_FETCH_ARGS,
         ]);
         this.lastImplicitFetchAt.set(workspaceId, Date.now());
+        this.lastImplicitFetchOk.set(workspaceId, true);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(`[git] implicit fetch failed for workspace ${workspaceId}: ${msg}`);
@@ -553,12 +572,14 @@ export class GitService implements IGitService {
         // every subsequent listBranches retry the (still-failing) fetch and
         // pile up 10s timeouts. Stale local refs are better than spinning.
         this.lastImplicitFetchAt.set(workspaceId, Date.now());
+        this.lastImplicitFetchOk.set(workspaceId, false);
       }
     };
     const p = runFetch();
     this.fetchLocks.set(workspaceId, p);
     try {
       await p;
+      return this.lastImplicitFetchOk.get(workspaceId) ?? false;
     } finally {
       // Drop the lock once the fetch settles so the next caller past the TTL
       // can spawn a fresh one. Compare-and-delete in case a future race

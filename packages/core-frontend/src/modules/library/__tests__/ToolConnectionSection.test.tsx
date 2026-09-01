@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
@@ -474,9 +474,12 @@ describe('ToolConnectionSection', () => {
       await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Invalid API key.'));
 
       // The first probe now answers "ok" — about `first-key`, which no longer
-      // exists — and must not be believed.
-      releaseFirst({ status: 'ok', detail: null, checkedAt: new Date().toISOString() });
-      await Promise.resolve();
+      // exists — and must not be believed. `act` flushes the re-render that a
+      // BROKEN guard would schedule here; a bare microtask await did not, so
+      // the assertions below used to pass with the guard removed.
+      await act(async () => {
+        releaseFirst({ status: 'ok', detail: null, checkedAt: new Date().toISOString() });
+      });
       expect(screen.getByRole('alert')).toHaveTextContent('Invalid API key.');
       expect(screen.queryByTestId('tool-health')).toBeNull();
     });

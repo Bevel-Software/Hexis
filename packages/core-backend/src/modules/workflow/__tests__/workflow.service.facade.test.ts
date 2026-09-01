@@ -16,14 +16,57 @@ import { PullRebaseConflictError } from '../../../shared/domain-errors.js';
 import type { Database } from '../../database/connection.js';
 
 // `deleteBranch`'s open-request guard is the only DB touch these tests
-// exercise: a chainable select→from→where→limit stub resolving `rows` covers
-// it (rows default to "no open request").
-function makeDb(rows: unknown[] = []): Database {
+// exercise. The stub ANSWERS FROM THE WHERE-CLAUSE rather than returning the
+// rows unfiltered — a guard that dropped the `state = 'open'` filter or asked
+// about only one branch end used to pass these tests anyway, because any row
+// came back regardless of the predicate.
+//
+// The evaluator walks the drizzle condition tree (duck-typing the
+// SQL/Column/Param/StringChunk shapes) and evaluates it against the row:
+// an `eq(column, value)` leaf compares the row's field, and a node combines
+// its children with whichever connector its literal chunks carry (`and` /
+// `or` — drizzle nests them, so one node never mixes both).
+function rowMatches(cond: unknown, row: Record<string, unknown>): boolean {
+  // snake_case column → camelCase row field (the stubs carry row objects in
+  // the service's own field names).
+  const field = (col: string) => col.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase());
+  const evalNode = (node: unknown): boolean => {
+    const chunks = (node as { queryChunks?: unknown[] }).queryChunks;
+    if (!Array.isArray(chunks)) return true;
+    const results: boolean[] = [];
+    let anyOr = false;
+    let pendingColumn: string | null = null;
+    for (const c of chunks) {
+      if (!c || typeof c !== 'object') continue;
+      if ('queryChunks' in c) {
+        results.push(evalNode(c));
+      } else if ('name' in c && 'keyAsName' in c) {
+        pendingColumn = String((c as { name: unknown }).name);
+      } else if ('encoder' in c && 'value' in c) {
+        if (pendingColumn !== null) {
+          results.push(row[field(pendingColumn)] === (c as { value: unknown }).value);
+          pendingColumn = null;
+        }
+      } else if ('value' in c) {
+        if (String((c as { value: unknown }).value).includes(' or ')) anyOr = true;
+      }
+    }
+    if (results.length === 0) return true;
+    return anyOr ? results.some(Boolean) : results.every(Boolean);
+  };
+  return evalNode(cond);
+}
+
+function makeDb(rows: Record<string, unknown>[] = []): Database {
+  let lastWhere: unknown;
   const chain = {
     select: vi.fn(() => chain),
     from: vi.fn(() => chain),
-    where: vi.fn(() => chain),
-    limit: vi.fn(async () => rows),
+    where: vi.fn((cond: unknown) => {
+      lastWhere = cond;
+      return chain;
+    }),
+    limit: vi.fn(async () => rows.filter((r) => rowMatches(lastWhere, r))),
   };
   return chain as unknown as Database;
 }
@@ -437,9 +480,23 @@ describe('WorkflowService — file lock delegation', () => {
     // One open request rides the branch — deleting it would strand the request.
     // `sourceBranch` matters to the guard now: it decides whether the refusal
     // says "withdraw yours" (source) or names the other request's actors (target).
-    const svc = new WorkflowService(makeDb([{ number: 7, sourceBranch: 'feat/x' }]), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    const svc = new WorkflowService(makeDb([{ number: 7, sourceBranch: 'feat/x', targetBranch: 'dev', state: 'open' }]), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
     await expect(svc.deleteBranch('w1', 'feat/x', makeUser())).rejects.toThrow(/open change request \(#7\)/);
     expect(git.deleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('deleteBranch refuses when an open request proposes INTO the branch (target end)', async () => {
+    const git = makeGit();
+    const svc = new WorkflowService(makeDb([{ number: 9, sourceBranch: 'other/y', targetBranch: 'feat/x', state: 'open' }]), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    await expect(svc.deleteBranch('w1', 'feat/x', makeUser())).rejects.toThrow(/proposes changes into/);
+    expect(git.deleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('deleteBranch proceeds past a CLOSED request — the guard filters on state, not mere mention', async () => {
+    const git = makeGit();
+    const svc = new WorkflowService(makeDb([{ number: 7, sourceBranch: 'feat/x', targetBranch: 'dev', state: 'closed' }]), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    await expect(svc.deleteBranch('w1', 'feat/x', makeUser())).resolves.toBeUndefined();
+    expect(git.deleteBranch).toHaveBeenCalled();
   });
 
   it('deleteBranch deletes when the branch has no open change request', async () => {

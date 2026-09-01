@@ -1813,12 +1813,19 @@ export class WorkflowService implements IWorkflowService {
       this.kickDeletedBranchSweep();
       throw err;
     }
-    // null is "the ref did not resolve", not "denied". Deny all the same
-    // (fall through to deny is this predicate's contract), but kick the
-    // sweep first: `origin/<base>` failing to resolve in the base's own
-    // workspace is the cached-clone shape of a deleted base, and the sweep
-    // is what proves it and clears the stranded rows.
-    if (isAdmin === null) this.kickDeletedBranchSweep();
+    // null is "the ref did not resolve", not "denied" — and saying "only an
+    // admin can do this" to an admin whose base branch is merely unfetchable
+    // sent people chasing their role instead of the branch. Kick the sweep
+    // (it proves absence itself, with a strict fetch, and closes the
+    // stranded rows) and fail with the honest condition; by the next
+    // attempt the sweep has either closed the row or shown the base alive.
+    if (isAdmin === null) {
+      this.kickDeletedBranchSweep();
+      throw new WorkflowDomainError(
+        `The base branch "${summary.base}" could not be resolved — it may have been deleted, or origin was unreachable. A background check is running; retry in a moment.`,
+        409,
+      );
+    }
     if (isAdmin !== true) {
       throw new WorkflowDomainError('Only an admin can delete a change request.', 403);
     }
@@ -1944,6 +1951,11 @@ export class WorkflowService implements IWorkflowService {
     try {
       const branches = await this.git.listBranches(workspaceIdForBranch(DEFAULT_BRANCH), {
         freshFetch: true,
+        // The list is used to PROVE absence, and the listing's normal
+        // degrade-to-stale behaviour would report every branch created since
+        // the last good fetch as missing — closing live requests. Strict:
+        // a failed fetch throws into the catch below, which closes nothing.
+        strictFetch: true,
       });
       live = new Set(branches.map((b) => b.name));
     } catch (err) {
