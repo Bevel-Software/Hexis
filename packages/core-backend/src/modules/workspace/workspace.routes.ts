@@ -18,7 +18,7 @@ import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkspaceService } from './workspace.service.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { resolveReadableMap, toKbRelative } from '../access-model/kb-read-filter.js';
+import { canReadWorkspacePath, resolveReadableMap, toKbRelative } from '../access-model/kb-read-filter.js';
 import type { ICreatorAccess } from '../access-model/creator.js';
 import { isRolesYamlPath, assertRolesYamlParsable } from '../access-model/roles-yaml-guard.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
@@ -426,11 +426,15 @@ export function createWorkspaceRoutes(
   ): Promise<boolean> {
     const user = await requireUser(req, res);
     if (!user) return false;
-    const repoRelative = toKbRelative(relativePath, kbDirName);
-    if (repoRelative === null) return true; // non-KB path — no read rules apply
     let allowed: boolean;
     try {
-      allowed = await accessControl.canRead(workspaceId, user.email, repoRelative);
+      allowed = await canReadWorkspacePath(
+        (w, e, p) => accessControl.canRead(w, e, p),
+        workspaceId,
+        user.email,
+        kbDirName,
+        relativePath,
+      );
     } catch (err) {
       sendError(res, err);
       return false;
