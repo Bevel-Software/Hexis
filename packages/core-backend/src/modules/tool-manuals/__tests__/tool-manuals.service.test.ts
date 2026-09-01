@@ -128,7 +128,10 @@ describe('ToolManualService', () => {
     );
 
     const service = svc();
-    expect((await service.probeTargetFor('user@x.eu', 'chat'))?.callTemplate).not.toBeNull();
+    // Asserted through the template's own type, not `not.toBeNull()`: the
+    // optional chain yields `undefined` when the lookup itself fails, and
+    // `undefined` is not null — so the weaker form passes on no target at all.
+    expect((await service.probeTargetFor('user@x.eu', 'chat'))?.callTemplate?.call_template_type).toBe('mcp');
     // A declared health check wins for every type, so this one never dials it.
     expect((await service.probeTargetFor('user@x.eu', 'checked'))?.callTemplate).toBeNull();
     // An http manual is probed only by what it declares, never by a handshake.

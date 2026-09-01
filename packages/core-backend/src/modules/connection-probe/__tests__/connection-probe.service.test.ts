@@ -485,6 +485,97 @@ describe('ConnectionProbeService: what the probe concludes', () => {
       expect(r?.detail).not.toContain(SECRET.slice(0, 14));
       expect(r?.detail).toContain('[redacted]');
     });
+
+    /**
+     * Redacting a short secret before a long one that starts with it consumes
+     * the long one's head and prints its tail — the half-redaction this class
+     * exists to prevent, reached from the other direction. Set iteration is
+     * insertion order, and the url is substituted before the headers, so
+     * putting the shorter value in the url makes that order deterministic.
+     */
+    it('redacts a secret that another secret is a prefix of, whole', async () => {
+      const short = 'sk-live-abc123';
+      const long = `${short}-456789`;
+      const svc = build(
+        {
+          type: 'http',
+          healthCheck: {
+            url: 'https://api.acme.test/me?v=${SHORTKEY}',
+            headers: { Authorization: 'Bearer ${LONGKEY}' },
+          },
+        },
+        async (key) => (key.includes('SHORTKEY') ? short : long),
+      );
+      vi.mocked(fetch).mockResolvedValue(
+        new Response(`Incorrect API key provided: ${long}. Check your key.`, { status: 401 }),
+      );
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      expect(r?.detail).not.toContain('456789');
+      expect(r?.detail).toContain('Check your key.');
+    });
+
+    /**
+     * A `.tool` may write its token inline instead of through a `${VAR}`, which
+     * is why `ToolManualSummary` withholds `headers` from the browser at all.
+     * Substitution never sees such a value, so before this the one credential a
+     * reader could not otherwise reach was the one a 401 could quote back.
+     */
+    it('redacts a token the manual wrote out in full, not only one from the vault', async () => {
+      const literal = 'sk-live-written-into-the-file';
+      const svc = build({
+        type: 'http',
+        healthCheck: { url: 'https://api.acme.test/me', headers: { Authorization: `Bearer ${literal}` } },
+      });
+      vi.mocked(fetch).mockResolvedValue(
+        new Response(`Incorrect API key provided: ${literal}. Check your key at acme.test.`, { status: 401 }),
+      );
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      expect(r?.status).toBe('failed');
+      expect(r?.detail).not.toContain(literal);
+      expect(r?.detail).toContain('Check your key at acme.test.');
+    });
+
+    it('redacts a literal token an mcp manual carries on its server headers', async () => {
+      const literal = 'sk-live-mcp-in-the-file';
+      const template = {
+        name: 'acme',
+        call_template_type: 'mcp',
+        config: {
+          mcpServers: {
+            acme: { transport: 'http', url: 'https://mcp.acme.test', headers: { Authorization: `Bearer ${literal}` } },
+          },
+        },
+      } as unknown as CallTemplate;
+      createClientMock.mockResolvedValue({});
+      registerManualMock.mockResolvedValue({ ok: false, error: `401 Unauthorized: bad token ${literal}` });
+
+      const r = await build({ type: 'mcp', callTemplate: template }).probe('u1', 'a@b.c', 'acme');
+
+      expect(r?.status).toBe('failed');
+      expect(r?.detail).not.toContain(literal);
+    });
+
+    /**
+     * The other half of the bargain: the quote is only worth having because it
+     * carries the provider's own words, so a header that is a description of
+     * the request rather than a credential must survive it.
+     */
+    it('leaves a header that is not a credential in the message', async () => {
+      const accept = 'application/vnd.acme.v3+json';
+      const svc = build({
+        type: 'http',
+        healthCheck: { url: 'https://api.acme.test/me', headers: { Accept: accept } },
+      });
+      vi.mocked(fetch).mockResolvedValue(new Response(`Unsupported Accept: ${accept}`, { status: 401 }));
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      expect(r?.detail).toContain(accept);
+    });
   });
 
   /**

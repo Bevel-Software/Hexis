@@ -162,7 +162,12 @@ class SecretRedactor {
 
   redact(text: string): string {
     let out = text;
-    for (const secret of this.values) {
+    // Longest SECRET first, and not merely the longest prefix of each: when one
+    // resolved value is a prefix of another (a key and that same key with a
+    // suffix), redacting the short one first eats the head of the long one and
+    // leaves its tail printed — the exact half-redaction this class exists to
+    // avoid, arrived at from the other direction.
+    for (const secret of [...this.values].sort((a, b) => b.length - a.length)) {
       // Longest match first: replacing the whole value when it is present beats
       // replacing a prefix of it and leaving the tail on screen.
       const shortest = Math.min(secret.length, MIN_ECHOED_PREFIX_CHARS);
@@ -174,6 +179,64 @@ class SecretRedactor {
       }
     }
     return out;
+  }
+}
+
+/**
+ * Header names whose value IS a credential rather than a description of the
+ * request. Matched as substrings and on purpose generously: a header wrongly
+ * treated as secret costs one blanked word in an error message, while one
+ * wrongly treated as public costs the credential.
+ */
+const CREDENTIAL_HEADER_MARKERS = ['auth', 'key', 'token', 'secret', 'password', 'cookie', 'credential'];
+
+function carriesCredential(headerName: string): boolean {
+  const name = headerName.toLowerCase();
+  return CREDENTIAL_HEADER_MARKERS.some((marker) => name.includes(marker));
+}
+
+/**
+ * Remember a credential the manual spelled out in full.
+ *
+ * {@link ConnectionProbeService.substitute} only ever learns values it resolved
+ * from the vault, so a `.tool` whose header reads `Authorization: Bearer sk-…`
+ * rather than `Bearer ${TOKEN}` left the redactor with nothing to look for. That
+ * is the one credential a reader has no other route to: `ToolManualSummary`
+ * withholds `headers` from the browser for precisely this reason, and a
+ * provider quoting it in a 401 would have handed it back regardless.
+ *
+ * What follows the auth scheme is remembered as well as the whole value,
+ * because `Bearer sk-…` is echoed as the bare token far more often than in
+ * full, and `Bearer` by itself is not worth blanking out of a message.
+ */
+function rememberCredentialHeaders(headers: Record<string, unknown>, redactor: SecretRedactor): void {
+  for (const [name, value] of Object.entries(headers)) {
+    if (typeof value !== 'string' || !carriesCredential(name)) continue;
+    redactor.remember(value);
+    const afterScheme = /^\S+\s+(\S.*)$/.exec(value.trim());
+    if (afterScheme) redactor.remember(afterScheme[1]);
+  }
+}
+
+/**
+ * The same, for the headers an `mcp` manual carries on its server entry. This
+ * path never substitutes them — UTCP's own loader does that inside the SDK — so
+ * a templated value belongs to the vault and `rememberTemplateSecrets` already
+ * holds it; only what the file spells out in full is new here, and skipping the
+ * rest keeps a half-literal value like `example.com/${TENANT}` from lending its
+ * public prefix to the redactor.
+ */
+function rememberLiteralServerHeaders(template: CallTemplate, redactor: SecretRedactor): void {
+  const servers = (template as { config?: { mcpServers?: Record<string, unknown> } }).config?.mcpServers;
+  for (const server of Object.values(servers ?? {})) {
+    const headers = (server as { headers?: unknown }).headers;
+    if (!headers || typeof headers !== 'object') continue;
+    const literal = Object.fromEntries(
+      Object.entries(headers as Record<string, unknown>).filter(
+        ([, value]) => typeof value === 'string' && !varRefPattern().test(value),
+      ),
+    );
+    rememberCredentialHeaders(literal, redactor);
   }
 }
 
@@ -312,6 +375,11 @@ export class ConnectionProbeService implements IConnectionProbeService {
       return { status: 'unverifiable', detail: err instanceof Error ? err.message : String(err) };
     }
 
+    // A `.tool` may write its token straight into `headers` rather than through
+    // a `${VAR}`, and substitution never saw it. Record what is actually about
+    // to be sent, so the provider cannot quote it back at a reader.
+    rememberCredentialHeaders(headers, redactor);
+
     // Re-check at fetch time even though the declaration was checked at parse
     // time: a TEMPLATED host is unknowable until now, so this is the first
     // moment the real target exists (`${HOST}` could resolve to the metadata IP).
@@ -376,6 +444,7 @@ export class ConnectionProbeService implements IConnectionProbeService {
     // The rest of the template keeps its `${VAR}`s for UTCP's own loader; these
     // values are read only so that nothing quoted below can echo one back.
     await this.rememberTemplateSecrets(userId, target.name, target.callTemplate, redactor);
+    rememberLiteralServerHeaders(target.callTemplate, redactor);
 
     const timedOut: Outcome = {
       status: 'unverifiable',
