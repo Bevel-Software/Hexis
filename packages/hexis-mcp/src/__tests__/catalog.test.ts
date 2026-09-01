@@ -62,6 +62,44 @@ describe('localManualTemplates', () => {
     expect(localManualTemplates([localHttp, remoteHttp], new Set())).toEqual([]);
   });
 
+  const platformRef = {
+    name: 'git',
+    call_template_type: 'http',
+    http_method: 'GET',
+    url: 'https://knowledge.example.com/api/tools/git/manual',
+  };
+
+  it("lets a platform '.tool' reference carry cli tools — the reason this server exists", () => {
+    // The deployment serves a `.tool` manual as an http reference, and UTCP's
+    // secure default limits a manual to its template's own protocol. Without
+    // the widening, every cli tool in a local `.tool` was silently dropped at
+    // registration ("registered manual 'git' with 0 tools") and no session
+    // ever had `git.push`.
+    const out = localManualTemplates([platformRef], new Set(['git']));
+    expect(out[0]!.allowed_communication_protocols).toEqual(['cli', 'http']);
+  });
+
+  it('widens ONLY the platform reference shape — a genuine local http integration stays strict', () => {
+    const out = localManualTemplates([localHttp], new Set(['localbox']));
+    expect(out[0]!.allowed_communication_protocols).toBeUndefined();
+  });
+
+  it('respects a declared protocol list — an empty one included — and leaves non-http templates alone', () => {
+    const explicit = { ...platformRef, name: 'a', allowed_communication_protocols: ['http'] };
+    // An explicit [] is the author's restriction (the SDK reads it as
+    // own-protocol-only); declaring it must not be treated as absence.
+    const explicitEmpty = { ...platformRef, name: 'b', allowed_communication_protocols: [] as string[] };
+    const mcpLocal = {
+      name: 'stdiobox',
+      call_template_type: 'mcp',
+      config: { mcpServers: { stdiobox: { transport: 'stdio', command: 'x', args: [] } } },
+    };
+    const out = localManualTemplates([explicit, explicitEmpty, mcpLocal], new Set(['a', 'b', 'stdiobox']));
+    expect(out[0]!.allowed_communication_protocols).toEqual(['http']);
+    expect(out[1]!.allowed_communication_protocols).toEqual([]);
+    expect(out[2]!.allowed_communication_protocols ?? []).toEqual([]);
+  });
+
   it('drops a malformed manual instead of failing the whole catalog', () => {
     const broken = { name: 'broken', call_template_type: 'nonsense-protocol' };
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
