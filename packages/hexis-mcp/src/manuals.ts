@@ -72,13 +72,19 @@ export function localManualTemplates(
       // its force everywhere else — the remote manual is untouched, any
       // template that declares its own list (even an empty one) is respected
       // as-is, and a local manual that is a genuine http integration rather
-      // than a platform reference keeps the strict default: the widening keys
-      // on the reference's own URL shape, not merely on being http.
+      // than a platform reference keeps the strict default: the widening
+      // requires the literal `${API_URL}` origin, not merely the path shape.
+      // That anchor is author-unreachable by construction — the platform
+      // refuses any author-written `.tool` that references `${API_URL}` (so
+      // content can never carry platform credentials), so only its own
+      // generated references ever look like this. A path-only check would
+      // have let a `.tool` aimed at a foreign host that answers with a cli
+      // manual execute commands here.
       const url = (template as { url?: unknown }).url;
       const isPlatformToolReference =
         template.call_template_type === 'http' &&
         typeof url === 'string' &&
-        /\/api\/tools\/[^/]+\/manual$/.test(url.split('?')[0]!);
+        /^\$\{API_URL\}\/api\/tools\/[^/]+\/manual$/.test(url);
       if (isPlatformToolReference && template.allowed_communication_protocols == null) {
         template.allowed_communication_protocols = ['cli', 'http'];
       }

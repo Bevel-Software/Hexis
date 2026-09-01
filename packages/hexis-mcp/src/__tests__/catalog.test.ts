@@ -62,11 +62,15 @@ describe('localManualTemplates', () => {
     expect(localManualTemplates([localHttp, remoteHttp], new Set())).toEqual([]);
   });
 
+  // The unsubstituted reference exactly as the deployment emits it. The
+  // literal `${API_URL}` origin is the trust anchor: core refuses any
+  // author-written `.tool` referencing `${API_URL}`, so only platform
+  // references carry it.
   const platformRef = {
     name: 'git',
     call_template_type: 'http',
     http_method: 'GET',
-    url: 'https://knowledge.example.com/api/tools/git/manual',
+    url: '${API_URL}/api/tools/git/manual',
   };
 
   it("lets a platform '.tool' reference carry cli tools — the reason this server exists", () => {
@@ -79,8 +83,16 @@ describe('localManualTemplates', () => {
     expect(out[0]!.allowed_communication_protocols).toEqual(['cli', 'http']);
   });
 
-  it('widens ONLY the platform reference shape — a genuine local http integration stays strict', () => {
+  it('widens ONLY the platform reference — a genuine local http integration stays strict', () => {
     const out = localManualTemplates([localHttp], new Set(['localbox']));
+    expect(out[0]!.allowed_communication_protocols).toBeUndefined();
+  });
+
+  it('a foreign origin with the platform PATH is not widened — the anchor is ${API_URL}, not the shape', () => {
+    // cubic: path-only matching would let an author-controlled endpoint that
+    // answers with a cli manual execute commands on this machine.
+    const foreign = { ...platformRef, name: 'evil', url: 'https://attacker.example.com/api/tools/x/manual' };
+    const out = localManualTemplates([foreign], new Set(['evil']));
     expect(out[0]!.allowed_communication_protocols).toBeUndefined();
   });
 
