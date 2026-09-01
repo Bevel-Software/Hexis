@@ -183,16 +183,36 @@ class SecretRedactor {
 }
 
 /**
- * Header names whose value IS a credential rather than a description of the
- * request. Matched as substrings and on purpose generously: a header wrongly
- * treated as secret costs one blanked word in an error message, while one
- * wrongly treated as public costs the credential.
+ * Names — of a header or of a query parameter — whose value IS a credential
+ * rather than a description of the request. Matched as substrings and on
+ * purpose generously: a name wrongly treated as secret costs one blanked word
+ * in an error message, while one wrongly treated as public costs the
+ * credential. `signature` and `hmac` earn their place because a signed url
+ * (`X-Amz-Signature`, an Azure SAS) grants access exactly as a bearer token
+ * does — the secret is what derived it, and the derivation is what is sent.
  */
-const CREDENTIAL_HEADER_MARKERS = ['auth', 'key', 'token', 'secret', 'password', 'cookie', 'credential'];
+const CREDENTIAL_MARKERS = [
+  'auth',
+  'key',
+  'token',
+  'secret',
+  'password',
+  'cookie',
+  'credential',
+  'signature',
+  'hmac',
+];
 
-function carriesCredential(headerName: string): boolean {
-  const name = headerName.toLowerCase();
-  return CREDENTIAL_HEADER_MARKERS.some((marker) => name.includes(marker));
+/**
+ * The same, for names too short to match as substrings: `sig` inside a word
+ * would swallow `design`, `assign` and `signal`, and blanking those would eat
+ * the message rather than protect anything in it.
+ */
+const CREDENTIAL_WORDS = /(?:^|[-_])(sig|hash)(?:$|[-_])/;
+
+function carriesCredential(fieldName: string): boolean {
+  const name = fieldName.toLowerCase();
+  return CREDENTIAL_MARKERS.some((marker) => name.includes(marker)) || CREDENTIAL_WORDS.test(name);
 }
 
 /**

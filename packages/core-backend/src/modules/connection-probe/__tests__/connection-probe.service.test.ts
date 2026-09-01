@@ -575,6 +575,28 @@ describe('ConnectionProbeService: what the probe concludes', () => {
     });
 
     /**
+     * A signed url grants access exactly as a bearer token does — the secret is
+     * what derived the signature, and the signature is what travels. `sig` is
+     * matched only as a whole word, since inside one it would swallow `design`.
+     */
+    it('redacts a signature, and leaves a word that merely contains "sig" alone', async () => {
+      const signature = 'a3f9c1e77b2d4406b8e15c9f0d3a7e42';
+      const design = 'lakeside-revision-7';
+      const svc = build({
+        type: 'http',
+        healthCheck: { url: `https://api.acme.test/me?sig=${signature}&design=${design}` },
+      });
+      vi.mocked(fetch).mockResolvedValue(
+        new Response(`Signature ${signature} is not valid for design ${design}`, { status: 401 }),
+      );
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      expect(r?.detail).not.toContain(signature);
+      expect(r?.detail).toContain(design);
+    });
+
+    /**
      * The other half of the bargain: the quote is only worth having because it
      * carries the provider's own words, so a header that is a description of
      * the request rather than a credential must survive it.
