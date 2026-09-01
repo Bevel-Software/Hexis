@@ -69,9 +69,17 @@ export function localManualTemplates(
       // registry), and this process exists precisely to be where those tools
       // run. The reference is platform-authored and fetched over the
       // authenticated channel to the caller's own deployment; the rule keeps
-      // its force everywhere else — the remote manual is untouched, and an
-      // explicit list on the template is respected as-is.
-      if (template.call_template_type === 'http' && !template.allowed_communication_protocols?.length) {
+      // its force everywhere else — the remote manual is untouched, any
+      // template that declares its own list (even an empty one) is respected
+      // as-is, and a local manual that is a genuine http integration rather
+      // than a platform reference keeps the strict default: the widening keys
+      // on the reference's own URL shape, not merely on being http.
+      const url = (template as { url?: unknown }).url;
+      const isPlatformToolReference =
+        template.call_template_type === 'http' &&
+        typeof url === 'string' &&
+        /\/api\/tools\/[^/]+\/manual$/.test(url.split('?')[0]!);
+      if (isPlatformToolReference && template.allowed_communication_protocols == null) {
         template.allowed_communication_protocols = ['cli', 'http'];
       }
       out.push(template);
