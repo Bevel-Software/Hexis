@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultKbTemplateDir } from './assets.js';
+import { assertKeyDecodesTo32Bytes } from './shared/token-crypto.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
@@ -337,19 +338,25 @@ export class CoreConfig {
       .split(/[\s,]+/)
       .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
       .filter((d) => d.length > 0);
-    this.secretsEncKey = (
-      process.env.SECRETS_ENC_KEY ||
-      process.env.CONNECTOR_CONFIG_ENC_KEY ||
-      process.env.SHAREPOINT_TOKEN_ENC_KEY ||
-      ''
-    ).trim();
-    if (!this.secretsEncKey) {
+    // Which variable actually supplied the key decides whose name a bad key
+    // is reported under: a legacy deploy still on the fallback chain must be
+    // told to fix the variable it set, not one it never heard of.
+    const secretsKeySource = (
+      ['SECRETS_ENC_KEY', 'CONNECTOR_CONFIG_ENC_KEY', 'SHAREPOINT_TOKEN_ENC_KEY'] as const
+    ).find((name) => (process.env[name] ?? '').trim() !== '');
+    this.secretsEncKey = secretsKeySource ? process.env[secretsKeySource]!.trim() : '';
+    if (!secretsKeySource) {
       throw new Error(
         'SECRETS_ENC_KEY is required — it encrypts the secrets vault, the MCP OAuth ' +
           'tokens and the git credential saved from the setup screen. Generate one ' +
           `with: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`,
       );
     }
+    // Validate the LENGTH here too, while the winning variable's name is in
+    // hand. Every later `new TokenCrypto(config.secretsEncKey)` blames
+    // SECRETS_ENC_KEY by default, which is only certainly right because a bad
+    // key never gets past this line.
+    assertKeyDecodesTo32Bytes(this.secretsEncKey, secretsKeySource);
     this.internalTokenSecret = (process.env.INTERNAL_TOKEN_SECRET || '').trim();
     // Setting DOMAIN declares "the bundled Caddy `https` profile fronts this
     // deployment" — one proxy hop, and the public origin IS that domain. The

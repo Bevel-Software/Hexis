@@ -40,6 +40,16 @@ function extractBearer(req: Request): string {
  */
 const SESSION_NOT_FOUND = -32001;
 const BAD_REQUEST = -32000;
+/**
+ * The 403: a session id that exists but belongs to someone else. Its own code,
+ * in the same implementation-defined range (-32000..-32099), because it is
+ * neither of the two above — the request was well-formed and the session is
+ * live; the caller simply may not have it. A client that reads only
+ * `error.code` must not mistake an authorization refusal for a malformed
+ * request, and must not re-initialize on it either. -32002 is skipped: the
+ * MCP SDK spends it on "resource not found".
+ */
+const FORBIDDEN = -32003;
 /** JSON-RPC 2.0's own code for a fault on our side, used for the 500 catch-alls. */
 const INTERNAL_ERROR = -32603;
 
@@ -155,7 +165,8 @@ export function createMcpRoutes(
       const body = req.body;
 
       // Four request shapes on POST /mcp, in this order:
-      //  1. Session id naming a live session → forward to its transport.
+      //  1. Session id naming a live session → forward to its transport
+      //     (unless it is someone else's → 403 (`-32003`)).
       //  2. An initialize body → spin up a new transport, whatever stale
       //     session id the client still has attached.
       //  3. A session id we have no transport for → 404 (`-32001`).
@@ -167,7 +178,7 @@ export function createMcpRoutes(
         // a leaked session id from being used cross-user even if the
         // attacker has their own valid connection key.
         if (session.userId !== req.userId) {
-          jsonRpcError(res, 403, BAD_REQUEST, 'Session does not belong to this user');
+          jsonRpcError(res, 403, FORBIDDEN, 'Session does not belong to this user');
           return;
         }
         await session.transport.handleRequest(req, res, body);
@@ -235,7 +246,7 @@ export function createMcpRoutes(
     }
     const session = active.get(sessionIdHeader)!;
     if (session.userId !== req.userId) {
-      jsonRpcError(res, 403, BAD_REQUEST, 'Session does not belong to this user');
+      jsonRpcError(res, 403, FORBIDDEN, 'Session does not belong to this user');
       return;
     }
     try {

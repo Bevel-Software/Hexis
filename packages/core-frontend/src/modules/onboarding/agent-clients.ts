@@ -1,4 +1,9 @@
-import { hexisMcpJsonSnippet, jsonConfigSnippet, workspaceBaseUrl } from '../../shared/mcp';
+import {
+  MCP_DISPLAY_NAME,
+  hexisMcpJsonSnippet,
+  jsonConfigSnippet,
+  workspaceBaseUrl,
+} from '../../shared/mcp';
 
 /**
  * The ways an agent connects, named by PRODUCT rather than surface —
@@ -53,8 +58,9 @@ export const AGENT_CLIENTS: AgentClient[] = [
     id: 'chatgpt',
     label: 'ChatGPT',
     // Developer mode first: it is off by default, and every "Create" button
-    // someone hunts for is behind it.
-    hint: 'Settings → Apps & Connectors → Advanced → turn on Developer mode, then Create and paste this.',
+    // someone hunts for is behind it. The name is spelled out because, unlike
+    // Claude, ChatGPT has no link that prefills it.
+    hint: `Settings → Apps & Connectors → Advanced → turn on Developer mode, then Create: name it “${MCP_DISPLAY_NAME}” and paste this.`,
     snip: (url) => url,
   },
   {
