@@ -559,6 +559,21 @@ describe('ConnectionProbeService: what the probe concludes', () => {
       expect(r?.detail).not.toContain(literal);
     });
 
+    it('redacts a literal token the manual put in the query string', async () => {
+      const literal = 'sk-live-in-the-query-string';
+      const svc = build({
+        type: 'http',
+        healthCheck: { url: `https://api.acme.test/me?api_key=${literal}` },
+      });
+      vi.mocked(fetch).mockResolvedValue(
+        new Response(`Incorrect API key provided: ${literal}`, { status: 401 }),
+      );
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      expect(r?.detail).not.toContain(literal);
+    });
+
     /**
      * The other half of the bargain: the quote is only worth having because it
      * carries the provider's own words, so a header that is a description of

@@ -219,6 +219,24 @@ function rememberCredentialHeaders(headers: Record<string, unknown>, redactor: S
 }
 
 /**
+ * The same, for a credential written into a query string (`?api_key=…`) rather
+ * than a header. Only the values of credential-NAMED parameters: a rejection
+ * usually names the endpoint it rejected, and blanking the url wholesale would
+ * cost more of the message than it protects.
+ */
+function rememberCredentialQuery(url: string, redactor: SecretRedactor): void {
+  let params: URLSearchParams;
+  try {
+    params = new URL(url).searchParams;
+  } catch {
+    return;
+  }
+  for (const [name, value] of params) {
+    if (carriesCredential(name)) redactor.remember(value);
+  }
+}
+
+/**
  * The same, for the headers an `mcp` manual carries on its server entry. This
  * path never substitutes them — UTCP's own loader does that inside the SDK — so
  * a templated value belongs to the vault and `rememberTemplateSecrets` already
@@ -379,6 +397,7 @@ export class ConnectionProbeService implements IConnectionProbeService {
     // a `${VAR}`, and substitution never saw it. Record what is actually about
     // to be sent, so the provider cannot quote it back at a reader.
     rememberCredentialHeaders(headers, redactor);
+    rememberCredentialQuery(url, redactor);
 
     // Re-check at fetch time even though the declaration was checked at parse
     // time: a TEMPLATED host is unknowable until now, so this is the first
@@ -535,6 +554,7 @@ export class ConnectionProbeService implements IConnectionProbeService {
         return { status: 'unverifiable', detail: err instanceof Error ? err.message : String(err) };
       }
       entry.url = resolved;
+      rememberCredentialQuery(resolved, redactor);
     }
     return null;
   }
