@@ -435,7 +435,9 @@ describe('WorkflowService — file lock delegation', () => {
   it('deleteBranch refuses while the branch carries an open change request', async () => {
     const git = makeGit();
     // One open request rides the branch — deleting it would strand the request.
-    const svc = new WorkflowService(makeDb([{ number: 7 }]), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    // `sourceBranch` matters to the guard now: it decides whether the refusal
+    // says "withdraw yours" (source) or names the other request's actors (target).
+    const svc = new WorkflowService(makeDb([{ number: 7, sourceBranch: 'feat/x' }]), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
     await expect(svc.deleteBranch('w1', 'feat/x', makeUser())).rejects.toThrow(/open change request \(#7\)/);
     expect(git.deleteBranch).not.toHaveBeenCalled();
   });
@@ -656,8 +658,9 @@ describe('WorkflowService — deleteChangeRequest (admin moderation verb)', () =
       set: vi.fn(() => chain),
       returning: vi.fn(async () => [{ id: 1 }]),
     });
-    const svc = new WorkflowService(chain as unknown as Database, git, prs, makeReviewWorkflow(), makeWorkspaceService(), access, makeFileLockService(), makePendingCommits(), 'knowledge-base');
-    return { svc, prs, db: chain, access };
+    const workspaces = makeWorkspaceService();
+    const svc = new WorkflowService(chain as unknown as Database, git, prs, makeReviewWorkflow(), workspaces, access, makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    return { svc, prs, db: chain, access, workspaces };
   }
 
   it('refuses a non-admin with 403 and touches nothing', async () => {
@@ -676,6 +679,29 @@ describe('WorkflowService — deleteChangeRequest (admin moderation verb)', () =
   it('refuses a merged request — applied history is not deletable', async () => {
     const { svc, db } = makeDeleteHarness({ isAdmin: true, prState: 'merged' });
     await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toMatchObject({ status: 422 });
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it('kicks the deleted-branch sweep when the base workspace cannot be resolved', async () => {
+    const { svc, db, workspaces } = makeDeleteHarness({ isAdmin: true });
+    (workspaces.getOrCreateForBranch as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('Remote branch main not found in upstream origin'),
+    );
+    const sweep = vi.spyOn(svc, 'closeChangeRequestsWithDeletedBranches').mockResolvedValue(0);
+
+    // The failure still surfaces (it is not proven absence, so the verb must
+    // not pretend to succeed), but the sweep is kicked so a genuinely
+    // stranded request is closed without waiting for a restart.
+    await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toThrow(/not found/);
+    expect(sweep).toHaveBeenCalledTimes(1);
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it('does not kick the sweep on a plain authorization refusal', async () => {
+    const { svc, db } = makeDeleteHarness({ isAdmin: false });
+    const sweep = vi.spyOn(svc, 'closeChangeRequestsWithDeletedBranches').mockResolvedValue(0);
+    await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toMatchObject({ status: 403 });
+    expect(sweep).not.toHaveBeenCalled();
     expect(db.update).not.toHaveBeenCalled();
   });
 });
