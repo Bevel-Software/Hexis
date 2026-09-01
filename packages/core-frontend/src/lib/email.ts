@@ -23,3 +23,18 @@ export const GROUP_MEMBER_PREFIX = 'group:';
 export function isGroupPrefixed(value: string): boolean {
   return value.trim().toLowerCase().startsWith(GROUP_MEMBER_PREFIX);
 }
+
+/**
+ * Avatar letters for a person, from their email or display name: two initials
+ * when the local part looks like `first.last`, otherwise the first two
+ * characters. Lives beside the email rule because every caller is an
+ * email-keyed people surface.
+ */
+export function initials(value: string): string {
+  const cleaned = value.trim();
+  if (!cleaned) return '?';
+  const [name] = cleaned.split('@');
+  const parts = name.split(/[.\s_-]+/).filter(Boolean);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return name.slice(0, 2).toUpperCase();
+}
