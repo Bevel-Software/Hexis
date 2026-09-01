@@ -107,6 +107,34 @@ describe('ToolManualService', () => {
     expect(target?.healthCheck?.headers).toEqual({ 'X-Key': '${PROBE_ONLY_KEY}' });
   });
 
+  test('builds a call template only for the probe that actually dials one', async () => {
+    // The template is dialled by exactly one probe: an `mcp` manual, reachable
+    // from this process, that declared no health check. Building it for the
+    // others costs a validation pass per probe and warn-logs about a value
+    // nothing was going to use.
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
+    await writeFile(
+      join(tools, 'chat.tool'),
+      JSON.stringify({ name: 'chat', type: 'mcp', url: 'https://mcp.example.com' }),
+    );
+    await writeFile(
+      join(tools, 'checked.tool'),
+      JSON.stringify({
+        name: 'checked',
+        type: 'mcp',
+        url: 'https://mcp.example.com',
+        healthCheck: { url: 'https://api.example.com/me' },
+      }),
+    );
+
+    const service = svc();
+    expect((await service.probeTargetFor('user@x.eu', 'chat'))?.callTemplate).not.toBeNull();
+    // A declared health check wins for every type, so this one never dials it.
+    expect((await service.probeTargetFor('user@x.eu', 'checked'))?.callTemplate).toBeNull();
+    // An http manual is probed only by what it declares, never by a handshake.
+    expect((await service.probeTargetFor('user@x.eu', 'billing'))?.callTemplate).toBeNull();
+  });
+
   test('ACL filters out manuals the user cannot read', async () => {
     const list = await svc(denyBilling).listAccessible('user@x.eu');
     expect(list.map((m) => m.name)).toEqual(['weather']);

@@ -252,13 +252,22 @@ export class ToolManualService implements IToolManualService {
     // would validate every manual in the workspace to hand back the one we
     // want; an invalid template for THIS manual is not an error, just a probe
     // that has nothing to dial (the caller reports it as unverifiable).
+    //
+    // Only for the ONE path that dials it — an `mcp` manual, reachable from
+    // this process, that declared no health check of its own. Everywhere else
+    // the template is built, validated and thrown away, and an http tool with
+    // an unvalidatable template warn-logs on every probe about a value nothing
+    // was ever going to use.
+    const dialsTheTemplate = m.type === 'mcp' && !m.healthCheck && m.remote !== false;
     let callTemplate: CallTemplate | null = null;
-    try {
-      callTemplate = callTemplateSerializer.validateDict(this.buildCallTemplateDict(m));
-    } catch (err) {
-      console.warn(
-        `[tool-manuals] no valid call template for "${m.path}": ${err instanceof Error ? err.message : String(err)}`,
-      );
+    if (dialsTheTemplate) {
+      try {
+        callTemplate = callTemplateSerializer.validateDict(this.buildCallTemplateDict(m));
+      } catch (err) {
+        console.warn(
+          `[tool-manuals] no valid call template for "${m.path}": ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
     return { name: m.name, type: m.type, remote: m.remote, healthCheck: m.healthCheck, callTemplate };
   }

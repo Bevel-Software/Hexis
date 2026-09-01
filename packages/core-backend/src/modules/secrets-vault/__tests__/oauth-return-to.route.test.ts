@@ -54,10 +54,6 @@ const MANUALS = [
 
 const toolManualService = {
   listAccessible: async () => MANUALS,
-  // The un-authed callback resolves which manual a secret belongs to by
-  // matching its key against the catalog, so this has to be here for the
-  // invalidation to be reachable at all.
-  listAllSummaries: async () => MANUALS,
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['toolManualService'];
 
 const accessControl = {
@@ -69,9 +65,6 @@ const completeOAuth = vi.fn(async () => {});
 const secretsVault = {
   beginToolOAuthByKey: async () => ({ id: 'secret-1', url: 'https://auth.example.com/authorize?client_id=client-1' }),
   completeOAuth,
-  // Without this the callback's invalidation dies on a TypeError that its own
-  // best-effort catch swallows — the tests would pass while proving nothing.
-  getById: async () => ({ id: 'secret-1', key: 'weather_SIGNIN' }),
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['secretsVault'];
 
 const connectionProbe = {

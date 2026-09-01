@@ -343,9 +343,6 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         value: body.value,
         label: body.label,
       });
-      // A shared value changed, so EVERY user's verdict is now about the old
-      // one. Clearing beats leaving them stale: "not checked yet" is honest,
-      // a verdict about a replaced key is not.
       res.status(201).json({ secret });
     } catch (err) {
       mapError(err, res, 'set admin var');
@@ -370,9 +367,10 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         value: body.value,
         label: body.label,
       });
-      // Drop the stale verdict rather than probing inline: the caller follows
-      // this with an explicit check, which keeps the save fast and gives the
-      // UI a "Checking…" state to show instead of a frozen dialog.
+      // No probe here, and nothing to invalidate: a verdict is never stored, so
+      // saving a key cannot leave a stale one behind. The caller follows this
+      // with an explicit check, which keeps the save fast and gives the UI a
+      // "Testing…" state to show instead of a frozen dialog.
       res.status(201).json({ secret });
     } catch (err) {
       mapError(err, res, 'set user var');
@@ -429,9 +427,6 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
           resource: found.variable.oauth.resource,
         },
       });
-      // A new client secret can invalidate every token minted under the old
-      // one, so every user's verdict is now about a configuration that no
-      // longer exists — the same reasoning as a shared key changing.
       res.status(201).json({ ok: true });
     } catch (err) {
       mapError(err, res, 'set oauth client secret');

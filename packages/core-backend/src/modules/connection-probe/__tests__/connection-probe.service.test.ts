@@ -46,6 +46,30 @@ const MCP_TEMPLATE = {
   config: { mcpServers: { acme: { transport: 'http', url: 'https://mcp.acme.test' } } },
 } as unknown as CallTemplate;
 
+/** The shape a real remote MCP manual has: a url and a credential in a header. */
+const MCP_TEMPLATE_WITH_KEY = {
+  name: 'acme',
+  call_template_type: 'mcp',
+  config: {
+    mcpServers: {
+      acme: {
+        transport: 'http',
+        url: 'https://mcp.acme.test',
+        headers: { Authorization: 'Bearer ${API_KEY}' },
+      },
+    },
+  },
+} as unknown as CallTemplate;
+
+const TEMPLATED_HOST = {
+  name: 'acme',
+  call_template_type: 'mcp',
+  config: { mcpServers: { acme: { transport: 'http', url: 'https://${HOST}/mcp' } } },
+} as unknown as CallTemplate;
+
+const serversOf = (template: unknown) =>
+  (template as { config: { mcpServers: Record<string, { url?: string }> } }).config.mcpServers;
+
 function build(
   target: Partial<ToolProbeTarget> | null,
   resolve: (key: string) => Promise<string | null> = async () => 'sk-live-abc',
@@ -64,6 +88,10 @@ function build(
 }
 
 const httpTool = (probe: ToolHealthCheck = DECLARED_PROBE) => build({ type: 'http', healthCheck: probe });
+const mcpTool = () => build({ type: 'mcp', callTemplate: MCP_TEMPLATE });
+
+/** Long enough to be redactable, and shaped like the keys providers echo. */
+const SECRET = 'sk-live-supersecret-1234';
 
 describe('ConnectionProbeService: what the probe concludes', () => {
   beforeEach(() => {
@@ -231,8 +259,6 @@ describe('ConnectionProbeService: what the probe concludes', () => {
    * which is the bug this module exists to remove.
    */
   describe('the MCP handshake probes the credential, not the session cache', () => {
-    const mcpTool = () => build({ type: 'mcp', callTemplate: MCP_TEMPLATE });
-
     it('never dials under the manual’s own session key, and never twice under the same one', async () => {
       createClientMock.mockResolvedValue({});
       registerManualMock.mockResolvedValue({ ok: true });
@@ -324,12 +350,7 @@ describe('ConnectionProbeService: what the probe concludes', () => {
      * manual reaches the metadata endpoint.
      */
     it('refuses to dial an internal host the server url resolved to', async () => {
-      const templated = {
-        name: 'acme',
-        call_template_type: 'mcp',
-        config: { mcpServers: { acme: { transport: 'http', url: 'https://${HOST}/mcp' } } },
-      } as unknown as CallTemplate;
-      const svc = build({ type: 'mcp', callTemplate: templated }, async () => '169.254.169.254');
+      const svc = build({ type: 'mcp', callTemplate: TEMPLATED_HOST }, async () => '169.254.169.254');
       createClientMock.mockResolvedValue({});
       registerManualMock.mockResolvedValue({ ok: true });
 
@@ -341,17 +362,128 @@ describe('ConnectionProbeService: what the probe concludes', () => {
     });
 
     it('still dials a templated host that resolves somewhere public', async () => {
-      const templated = {
-        name: 'acme',
-        call_template_type: 'mcp',
-        config: { mcpServers: { acme: { transport: 'http', url: 'https://${HOST}/mcp' } } },
-      } as unknown as CallTemplate;
-      const svc = build({ type: 'mcp', callTemplate: templated }, async () => 'mcp.acme.test');
+      const svc = build({ type: 'mcp', callTemplate: TEMPLATED_HOST }, async () => 'mcp.acme.test');
       createClientMock.mockResolvedValue({});
       registerManualMock.mockResolvedValue({ ok: true });
 
       expect((await svc.probe('u1', 'a@b.c', 'acme'))?.status).toBe('ok');
       expect(registerManualMock).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * The guard and the handshake have to see the SAME bytes. Checking
+     * `https://${HOST}/mcp` and then handing UTCP the template back leaves the
+     * vault free to answer differently the second time, so a concurrent
+     * `PUT …/vars/HOST` landing in that gap aims the handshake wherever it
+     * likes — with the guard's approval behind it.
+     */
+    it('registers the url it CHECKED, not the template that produced it', async () => {
+      const svc = build({ type: 'mcp', callTemplate: TEMPLATED_HOST }, async () => 'mcp.acme.test');
+      createClientMock.mockResolvedValue({});
+      registerManualMock.mockResolvedValue({ ok: true });
+
+      await svc.probe('u1', 'a@b.c', 'acme');
+
+      const dialled = Object.values(serversOf(registerManualMock.mock.calls[0][1]))[0];
+      expect(dialled.url).toBe('https://mcp.acme.test/mcp');
+      // The manual's own template is untouched — only the probe's clone resolves.
+      expect(serversOf(TEMPLATED_HOST).acme.url).toBe('https://${HOST}/mcp');
+    });
+
+    /**
+     * A handshake that outlives the deadline is abandoned, not cancelled — and
+     * `@utcp/mcp` caches its session only AFTER `connect()` resolves. So the
+     * verdict's own cleanup runs while there is nothing yet to close, and the
+     * session appears moments later with nobody holding it: one live session
+     * leaked per probe against a slow server, on every save and every click.
+     */
+    it('closes the session a slow handshake opens AFTER the probe gave up', async () => {
+      vi.useFakeTimers();
+      const deregisterManual = vi.fn(async () => {});
+      const previous = CommunicationProtocol.communicationProtocols.mcp;
+      CommunicationProtocol.communicationProtocols.mcp = { deregisterManual } as never;
+      try {
+        createClientMock.mockResolvedValue({});
+        let finishHandshake: (result: unknown) => void = () => {};
+        registerManualMock.mockReturnValue(
+          new Promise((resolve) => {
+            finishHandshake = resolve;
+          }),
+        );
+
+        const pending = mcpTool().probe('u1', 'a@b.c', 'acme');
+        await vi.advanceTimersByTimeAsync(11_000);
+        const r = await pending;
+
+        expect(r?.status).toBe('unverifiable');
+        expect(r?.detail).toMatch(/didn't answer within/);
+        // One close so far, and it found nothing: the session does not exist yet.
+        expect(deregisterManual).toHaveBeenCalledTimes(1);
+
+        finishHandshake({ ok: true });
+        await vi.advanceTimersByTimeAsync(0);
+
+        // The late-settle owner. Without it this session stays open forever.
+        expect(deregisterManual).toHaveBeenCalledTimes(2);
+        expect(Object.keys(serversOf(deregisterManual.mock.calls[1][1]))).toEqual(
+          Object.keys(serversOf(registerManualMock.mock.calls[0][1])),
+        );
+      } finally {
+        CommunicationProtocol.communicationProtocols.mcp = previous;
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not quote the credential back from a rejected handshake', async () => {
+      const svc = build({ type: 'mcp', callTemplate: MCP_TEMPLATE_WITH_KEY }, async () => SECRET);
+      createClientMock.mockResolvedValue({});
+      registerManualMock.mockResolvedValue({
+        ok: false,
+        error: `401 Unauthorized: {"message":"bad token ${SECRET}"}`,
+      });
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      expect(r?.status).toBe('failed');
+      expect(r?.detail).not.toContain(SECRET);
+      expect(r?.detail).toContain('[redacted]');
+    });
+  });
+
+  /**
+   * Anyone who can READ a tool can probe it, and providers routinely echo the
+   * key they refused. Quoting that body verbatim hands a plain reader part of a
+   * shared ADMIN credential they were never allowed to see — the 200-character
+   * cap bounds the quote, it does not redact it.
+   */
+  describe('the quoted rejection cannot carry the credential back out', () => {
+    it('redacts the credential the provider echoed in full', async () => {
+      const svc = build({ type: 'http', healthCheck: DECLARED_PROBE }, async () => SECRET);
+      vi.mocked(fetch).mockResolvedValue(
+        new Response(`Incorrect API key provided: ${SECRET}. Check your key at acme.test.`, { status: 401 }),
+      );
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      expect(r?.status).toBe('failed');
+      expect(r?.detail).not.toContain(SECRET);
+      expect(r?.detail).toContain('[redacted]');
+      // The actionable half of the provider's sentence still survives — that is
+      // the whole reason the body is quoted at all.
+      expect(r?.detail).toContain('Check your key at acme.test.');
+    });
+
+    it('redacts a TRUNCATED echo, which is the usual shape of one', async () => {
+      const svc = build({ type: 'http', healthCheck: DECLARED_PROBE }, async () => SECRET);
+      vi.mocked(fetch).mockResolvedValue(
+        new Response(`Incorrect API key provided: ${SECRET.slice(0, 14)}****`, { status: 401 }),
+      );
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      // A whole-value search finds nothing here and prints the head of the key.
+      expect(r?.detail).not.toContain(SECRET.slice(0, 14));
+      expect(r?.detail).toContain('[redacted]');
     });
   });
 

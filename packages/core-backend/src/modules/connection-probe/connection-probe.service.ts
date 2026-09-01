@@ -78,27 +78,102 @@ function looksLikeAuthRejection(message: string): boolean {
   );
 }
 
+/** What {@link withProbeTimeout} returns for work that outlived the deadline. */
+const TIMED_OUT = Symbol('probe-timed-out');
+
 /**
- * Resolve `work`, or `onTimeout` if it outlives `PROBE_TIMEOUT_MS`.
+ * Resolve `work`, or {@link TIMED_OUT} if it outlives `PROBE_TIMEOUT_MS`.
  *
  * The declared-probe path gets its deadline from `AbortSignal.timeout`, but the
  * MCP path cannot: neither `CodeModeUtcpClient.create` nor `registerManual`
  * accepts a signal. Without this, an unresponsive server leaves a probe pending
  * forever and the caller never gets a verdict at all.
  *
- * The abandoned work is NOT cancelled, because there is no API to cancel it; it
- * settles into a void later. Any MCP session it managed to open is still closed
- * by the caller's `finally`, so what leaks is bounded to the client object.
+ * Abandoning work is not the same as stopping it, and on the MCP path the
+ * difference is a live socket. `@utcp/mcp` caches a session only AFTER its
+ * `connect()` resolves, so a handshake still in flight at the deadline has
+ * nothing for the caller's `finally` to find — and then caches its session (and
+ * its standalone SSE stream) moments later with nobody left holding it. That is
+ * one leaked session per probe against a slow server, on every credential save.
+ * `onLateSettle` is the owner for exactly that window: it runs when abandoned
+ * work eventually settles, and it is the only thing that can close a session
+ * opened after the verdict was returned.
  */
-async function withProbeTimeout<T>(work: Promise<T>, onTimeout: T): Promise<T> {
+async function withProbeTimeout<T>(
+  work: Promise<T>,
+  onLateSettle?: () => Promise<void> | void,
+): Promise<T | typeof TIMED_OUT> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<T>((resolve) => {
-    timer = setTimeout(() => resolve(onTimeout), PROBE_TIMEOUT_MS);
+  let abandoned = false;
+  // Attached before the race, so the continuation exists no matter when `work`
+  // settles. Both branches: a rejection can also have opened something — a
+  // successful `connect()` followed by a failing `listTools` leaves a session
+  // cached and the promise rejected.
+  void work
+    .then(
+      () => (abandoned ? onLateSettle?.() : undefined),
+      () => (abandoned ? onLateSettle?.() : undefined),
+    )
+    .catch((err) => {
+      console.warn(`[probe] late cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => {
+      abandoned = true;
+      resolve(TIMED_OUT);
+    }, PROBE_TIMEOUT_MS);
   });
   try {
     return await Promise.race([work, deadline]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+/** Below this, a "secret" is too short to blank out without eating the message. */
+const MIN_SECRET_CHARS = 6;
+/** The shortest leading run of a secret we will treat as an echo of it. */
+const MIN_ECHOED_PREFIX_CHARS = 8;
+const REDACTED = '[redacted]';
+
+/**
+ * Every secret this probe resolved, so that none of them can come back out in
+ * something we quote.
+ *
+ * A rejection is quoted verbatim because the provider's own words are the
+ * actionable part — but providers routinely echo the credential they refused
+ * ("Incorrect API key provided: sk-…"). Anyone who can READ a tool can probe
+ * it, so without this a plain reader could recover part of a shared ADMIN key
+ * they were never allowed to see by saving a probe's failure text. The 200-char
+ * cap on the quote bounds it; it does not redact it.
+ *
+ * Leading PREFIXES count as well as whole values, because that echo is usually
+ * masked in the middle ("sk-live-abcd…wxyz"): a whole-value search finds
+ * nothing there and prints the head of the key regardless. Short values are
+ * left alone — blanking a five-character string would hit unrelated text and
+ * destroy the message that makes the verdict useful.
+ */
+class SecretRedactor {
+  private readonly values = new Set<string>();
+
+  remember(value: string): void {
+    if (value.length >= MIN_SECRET_CHARS) this.values.add(value);
+  }
+
+  redact(text: string): string {
+    let out = text;
+    for (const secret of this.values) {
+      // Longest match first: replacing the whole value when it is present beats
+      // replacing a prefix of it and leaving the tail on screen.
+      const shortest = Math.min(secret.length, MIN_ECHOED_PREFIX_CHARS);
+      for (let len = secret.length; len >= shortest; len--) {
+        const candidate = secret.slice(0, len);
+        if (!out.includes(candidate)) continue;
+        out = out.split(candidate).join(REDACTED);
+        break;
+      }
+    }
+    return out;
   }
 }
 
@@ -216,14 +291,17 @@ export class ConnectionProbeService implements IConnectionProbeService {
     // `headers` is already defaulted to the manual's own at parse time, so a
     // one-line `healthCheck: { url }` still carries the credential.
     const headerTemplate = check.headers ?? {};
+    // Collects what the substitutions resolve, so the provider cannot quote any
+    // of it back at a reader who is not allowed to see it.
+    const redactor = new SecretRedactor();
     let url: string;
     let headers: Record<string, string>;
     try {
-      url = await this.substitute(userId, target.name, check.url);
+      url = await this.substitute(userId, target.name, check.url, redactor);
       headers = Object.fromEntries(
         await Promise.all(
           Object.entries(headerTemplate).map(
-            async ([k, v]) => [k, await this.substitute(userId, target.name, v)] as const,
+            async ([k, v]) => [k, await this.substitute(userId, target.name, v, redactor)] as const,
           ),
         ),
       );
@@ -254,15 +332,17 @@ export class ConnectionProbeService implements IConnectionProbeService {
         signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
       });
     } catch (err) {
+      // Redacted like everything else quoted from outside: a transport error
+      // names the url it failed on, and a templated url can carry a token.
       return {
         status: 'unverifiable',
-        detail: `Couldn't reach the provider to check: ${err instanceof Error ? err.message : String(err)}`,
+        detail: `Couldn't reach the provider to check: ${redactor.redact(err instanceof Error ? err.message : String(err))}`,
       };
     }
 
     if (res.ok) return OK;
     if (res.status === 401 || res.status === 403) {
-      return { status: 'failed', detail: await describeRejection(res) };
+      return { status: 'failed', detail: await describeRejection(res, redactor) };
     }
     return {
       status: 'unverifiable',
@@ -283,6 +363,7 @@ export class ConnectionProbeService implements IConnectionProbeService {
     // See `withIsolatedServerKeys`: without this the probe can be answered by a
     // session opened with an older credential.
     const template = withIsolatedServerKeys(target.callTemplate);
+    const redactor = new SecretRedactor();
 
     // The SAME fetch-time SSRF re-check the declared probe gets, for the same
     // reason: a templated host does not exist at parse time, so the guard there
@@ -290,10 +371,13 @@ export class ConnectionProbeService implements IConnectionProbeService {
     // `https://${HOST}/mcp` reaches the metadata endpoint the moment someone
     // clicks Test connection. `@utcp/mcp`'s own `ensureSecureMcpUrl` is no help
     // here — it checks the SCHEME, and allows https to any host at all.
-    const unsafe = await this.firstUnsafeServerUrl(userId, target.name, template);
+    const unsafe = await this.resolveServerUrls(userId, target.name, template, redactor);
     if (unsafe) return unsafe;
+    // The rest of the template keeps its `${VAR}`s for UTCP's own loader; these
+    // values are read only so that nothing quoted below can echo one back.
+    await this.rememberTemplateSecrets(userId, target.name, target.callTemplate, redactor);
 
-    const TIMED_OUT: Outcome = {
+    const timedOut: Outcome = {
       status: 'unverifiable',
       detail: `The server didn't answer within ${PROBE_TIMEOUT_MS / 1000}s, so the credential wasn't tested.`,
     };
@@ -308,54 +392,112 @@ export class ConnectionProbeService implements IConnectionProbeService {
         variables: {},
         load_variables_from: [bevelSecretsLoaderConfig(userId)],
       });
-      client = await withProbeTimeout(CodeModeUtcpClient.create(process.cwd(), config), null);
-      if (!client) return TIMED_OUT;
+      // No late-settle owner: a client that arrives after the deadline has no
+      // manual registered and therefore no session, and neither
+      // `CodeModeUtcpClient` nor the SDK client it wraps exposes any disposal.
+      const created = await withProbeTimeout(CodeModeUtcpClient.create(process.cwd(), config));
+      if (created === TIMED_OUT) return timedOut;
+      client = created;
 
-      const result = await withProbeTimeout(registerManual(client, template), null);
-      if (!result) return TIMED_OUT;
+      // The handshake IS the connection-opener, so its abandoned form gets a
+      // closing owner: past the deadline the `finally` below has already run
+      // and found nothing to close.
+      const dialled = client;
+      const result = await withProbeTimeout(registerManual(dialled, template), () =>
+        closeProbeSessions(dialled, template),
+      );
+      if (result === TIMED_OUT) return timedOut;
       if (result.ok) return OK;
+      // Classified on the raw error, shown redacted: the provider's rejection
+      // text may quote the very credential under test back at us.
+      const detail = redactor.redact(result.error);
       return looksLikeAuthRejection(result.error)
-        ? { status: 'failed', detail: result.error }
-        : { status: 'unverifiable', detail: `Couldn't reach the provider to check: ${result.error}` };
+        ? { status: 'failed', detail }
+        : { status: 'unverifiable', detail: `Couldn't reach the provider to check: ${detail}` };
     } catch (err) {
       return {
         status: 'unverifiable',
-        detail: `Couldn't build the connection to test: ${err instanceof Error ? err.message : String(err)}`,
+        detail: `Couldn't build the connection to test: ${redactor.redact(err instanceof Error ? err.message : String(err))}`,
       };
     } finally {
-      // Runs on every path, including the timeout: the session is keyed to this
-      // probe alone, so leaving it open leaks one Streamable-HTTP session per
-      // credential save.
+      // Runs on every path that got as far as a client: the session is keyed to
+      // this probe alone, so leaving it open leaks one Streamable-HTTP session
+      // per credential save. Past the deadline this finds nothing — the session
+      // does not exist yet — which is what the late-settle owner above is for.
       if (client) await closeProbeSessions(client, template);
     }
   }
 
   /**
-   * The reason the first MCP server url in `template` may not be dialled, or
-   * `null` when every one of them is safe.
+   * Resolve every MCP server url in `template` IN PLACE, or say why one of them
+   * may not be dialled.
    *
-   * Resolves each url through the caller's own vault — the same values UTCP
-   * will resolve when it registers the manual — and holds the result to the
-   * rule the manual's literal url already obeys at parse time.
+   * The substitution and the check are the same act, deliberately: checking a
+   * resolved url and then handing UTCP the `${HOST}` template back would leave
+   * the vault free to answer differently the second time. A concurrent
+   * `PUT …/vars/HOST` landing in that gap aims the handshake at whatever the
+   * new value says — the metadata endpoint, say — with the guard's approval
+   * behind it. Writing the resolved url back means the bytes that passed the
+   * check are the bytes dialled, which is how the declared probe already works.
    */
-  private async firstUnsafeServerUrl(
+  private async resolveServerUrls(
     userId: string,
     manualName: string,
     template: CallTemplate,
+    redactor: SecretRedactor,
   ): Promise<Outcome | null> {
     const servers = (template as { config?: { mcpServers?: Record<string, unknown> } }).config?.mcpServers;
     for (const server of Object.values(servers ?? {})) {
       // `stdio` servers carry a command, not a url, and are never reached from
       // this process anyway (they imply `remote: false`, refused above).
-      const raw = (server as { url?: unknown }).url;
-      if (typeof raw !== 'string') continue;
+      const entry = server as { url?: unknown };
+      if (typeof entry.url !== 'string') continue;
+      let resolved: string;
       try {
-        assertSafeFetchUrl(await this.substitute(userId, manualName, raw), { label: 'MCP server url' });
+        resolved = await this.substitute(userId, manualName, entry.url, redactor);
+      } catch (err) {
+        // An unset variable, exactly as on the declared path: nothing to test,
+        // and nothing said about the credential.
+        return { status: 'unverifiable', detail: err instanceof Error ? err.message : String(err) };
+      }
+      try {
+        assertSafeFetchUrl(resolved, { label: 'MCP server url' });
       } catch (err) {
         return { status: 'unverifiable', detail: err instanceof Error ? err.message : String(err) };
       }
+      entry.url = resolved;
     }
     return null;
+  }
+
+  /**
+   * Read the values behind every variable `template` references, purely so
+   * {@link SecretRedactor} can keep them out of anything quoted.
+   *
+   * The MCP path leaves headers and auth as `${VAR}` for UTCP's loader, so
+   * unlike the declared probe it never learns those values in passing — and a
+   * rejected handshake surfaces as prose from the transport, which on many
+   * servers includes the response body and therefore the key. Best-effort by
+   * design: redaction is a safety net over the quote, and failing to build it
+   * must not fail the probe.
+   */
+  private async rememberTemplateSecrets(
+    userId: string,
+    manualName: string,
+    template: CallTemplate,
+    redactor: SecretRedactor,
+  ): Promise<void> {
+    const names = new Set(
+      [...JSON.stringify(template).matchAll(varRefPattern())].map((m) => m[1] ?? m[2]),
+    );
+    for (const name of names) {
+      try {
+        const value = await this.secretsVault.resolve(userId, utcpNamespacedKey(manualName, name));
+        if (value) redactor.remember(value);
+      } catch {
+        // A variable we cannot read is one the provider cannot echo either.
+      }
+    }
   }
 
   /**
@@ -368,7 +510,12 @@ export class ConnectionProbeService implements IConnectionProbeService {
    * replace per name: with bare `$VAR` accepted, substituting `$API` before
    * `$API_KEY` would corrupt the longer reference.
    */
-  private async substitute(userId: string, manualName: string, template: string): Promise<string> {
+  private async substitute(
+    userId: string,
+    manualName: string,
+    template: string,
+    redactor?: SecretRedactor,
+  ): Promise<string> {
     // UTCP leaves any string containing `$ref` alone (JSON-Schema references),
     // so a probe that substituted one would stop testing what a real call sends.
     if (template.includes('$ref')) return template;
@@ -381,6 +528,7 @@ export class ConnectionProbeService implements IConnectionProbeService {
       const value = await this.secretsVault.resolve(userId, utcpNamespacedKey(manualName, name));
       if (value === null) throw new Error(`\${${name}} isn't set yet, so there was nothing to test.`);
       values.set(name, value);
+      redactor?.remember(value);
     }
     return template.replace(varRefPattern(), (_full, braced?: string, bare?: string) => {
       const name = braced ?? bare;
@@ -396,8 +544,10 @@ const REJECTION_SNIPPET_CHARS = 200;
 
 /**
  * A short, human-readable reason from a rejecting response — the provider's own
- * words are far more actionable than "401". Bounded and best-effort: a body
- * that is huge, binary, or unreadable falls back to the status line.
+ * words are far more actionable than "401" — with every secret this probe
+ * resolved taken back out of it (see {@link SecretRedactor}). Bounded and
+ * best-effort: a body that is huge, binary, or unreadable falls back to the
+ * status line.
  *
  * Read from the STREAM with a byte cap rather than `res.text()`. The body here
  * is written by whatever server the credential points at, so buffering all of
@@ -406,10 +556,12 @@ const REJECTION_SNIPPET_CHARS = 200;
  * cancelled as soon as we have enough, which closes the connection rather than
  * politely draining a response we already stopped caring about.
  */
-async function describeRejection(res: Response): Promise<string> {
+async function describeRejection(res: Response, redactor: SecretRedactor): Promise<string> {
   const fallback = `The provider rejected this credential (${res.status}).`;
   try {
-    const body = (await readCapped(res, MAX_REJECTION_BYTES)).trim();
+    // Redact BEFORE the snippet is cut, so a secret straddling the 200-character
+    // boundary loses its head rather than surviving as one.
+    const body = redactor.redact((await readCapped(res, MAX_REJECTION_BYTES)).trim());
     if (!body) return fallback;
     const snippet =
       body.length > REJECTION_SNIPPET_CHARS ? `${body.slice(0, REJECTION_SNIPPET_CHARS)}…` : body;

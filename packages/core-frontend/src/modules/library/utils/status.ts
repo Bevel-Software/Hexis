@@ -1,3 +1,4 @@
+import { formatRelativeTime } from '../../../lib/utils';
 import type { ProbeVerdict, ToolSecrets, ToolVarStatus } from '../../secrets-vault/services/tool-secrets.api';
 
 /**
@@ -90,25 +91,6 @@ function varStatus(v: ToolVarStatus, canWrite: boolean): AttentionStatus {
 }
 
 /**
- * How long ago, in the plainest words that are still true.
- *
- * Deliberately coarse: the point of the timestamp is to say whether the claim
- * is FRESH, and "3 minutes ago" and "3 minutes and 12 seconds ago" answer that
- * identically. Precision here would only invite the reader to weigh a number
- * that carries no extra meaning.
- */
-function agoText(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return 'just now';
-  const mins = Math.floor((Date.now() - then) / 60_000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins} min ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours} h ago`;
-  return `${Math.floor(hours / 24)} d ago`;
-}
-
-/**
  * The word for a tool that is fully SET UP, decided by whether the credential
  * has actually been tested.
  *
@@ -128,7 +110,10 @@ function agoText(iso: string): string {
  */
 function healthStatus(tool: ToolSecrets, verdict?: ProbeVerdict | null): AttentionStatus {
   if (verdict?.status === 'ok') {
-    return { ...OK, hint: `Checked ${agoText(verdict.checkedAt)}.` };
+    // The app's one relative-time formatter, not a local dialect of it. A
+    // verdict with no usable timestamp still just happened — it cannot outlive
+    // the component holding it — so "just now" is the honest fallback.
+    return { ...OK, hint: `Checked ${formatRelativeTime(verdict.checkedAt) || 'just now'}.` };
   }
   if (verdict?.status === 'failed') {
     return {
