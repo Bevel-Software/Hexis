@@ -57,7 +57,24 @@ export function localManualTemplates(
     const name = typeof raw?.name === 'string' ? raw.name : '';
     if (!localOnlyNames.has(name)) continue;
     try {
-      out.push(callTemplateSerializer.validateDict(raw as Record<string, unknown>));
+      const template = callTemplateSerializer.validateDict(raw as Record<string, unknown>);
+      // The deployment hands a `.tool` manual over as an http REFERENCE (a
+      // template that fetches `/api/tools/<slug>/manual`), and UTCP's
+      // secure-by-default rule limits a manual's tools to the protocol of the
+      // template that registered it. Left alone, that dropped every `cli`
+      // tool in a local `.tool` with a per-tool warning nobody sees — a `git`
+      // manual "registered with 0 tools", and no session ever had `git.push`.
+      // Widening to `cli` HERE is the design, not a bypass: the deployment
+      // refuses to execute cli (it strips the executor from its own
+      // registry), and this process exists precisely to be where those tools
+      // run. The reference is platform-authored and fetched over the
+      // authenticated channel to the caller's own deployment; the rule keeps
+      // its force everywhere else — the remote manual is untouched, and an
+      // explicit list on the template is respected as-is.
+      if (template.call_template_type === 'http' && !template.allowed_communication_protocols?.length) {
+        template.allowed_communication_protocols = ['cli', 'http'];
+      }
+      out.push(template);
     } catch (err) {
       console.error(
         `[hexis-mcp] skipping local tool "${name}": ${err instanceof Error ? err.message : String(err)}`,

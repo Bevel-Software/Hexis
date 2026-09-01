@@ -62,6 +62,28 @@ describe('localManualTemplates', () => {
     expect(localManualTemplates([localHttp, remoteHttp], new Set())).toEqual([]);
   });
 
+  it('lets a local http reference carry cli tools — the reason this server exists', () => {
+    // The deployment serves a `.tool` manual as an http reference, and UTCP's
+    // secure default limits a manual to its template's own protocol. Without
+    // the widening, every cli tool in a local `.tool` was silently dropped at
+    // registration ("registered manual 'git' with 0 tools") and no session
+    // ever had `git.push`.
+    const out = localManualTemplates([localHttp], new Set(['localbox']));
+    expect(out[0]!.allowed_communication_protocols).toEqual(['cli', 'http']);
+  });
+
+  it('respects an explicit protocol list and leaves non-http templates alone', () => {
+    const explicit = { ...localHttp, allowed_communication_protocols: ['http'] };
+    const mcpLocal = {
+      name: 'stdiobox',
+      call_template_type: 'mcp',
+      config: { mcpServers: { stdiobox: { transport: 'stdio', command: 'x', args: [] } } },
+    };
+    const out = localManualTemplates([explicit, mcpLocal], new Set(['localbox', 'stdiobox']));
+    expect(out[0]!.allowed_communication_protocols).toEqual(['http']);
+    expect(out[1]!.allowed_communication_protocols ?? []).toEqual([]);
+  });
+
   it('drops a malformed manual instead of failing the whole catalog', () => {
     const broken = { name: 'broken', call_template_type: 'nonsense-protocol' };
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
