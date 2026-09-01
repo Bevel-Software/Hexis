@@ -7,6 +7,7 @@ import {
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
 import { AdminContext } from '../../admin/state/admin.context';
+import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { ToolManualDetail } from '../services/tools.api';
 
@@ -122,11 +123,23 @@ function LocationProbe() {
   return <div aria-label="pathname">{location.pathname}</div>;
 }
 
+// The connection section this page renders reads the signed-in identity to
+// scope its probe queue, so the page needs an auth context to mount at all.
+const AUTH = {
+  user: { email: 'user@x.com', name: 'User' },
+  token: 't',
+  isLoading: false,
+  login: vi.fn(),
+  logout: vi.fn(),
+} as unknown as AuthContextValue;
+
 function wrap(children: ReactNode, isAdmin: boolean) {
   return (
-    <AdminContext.Provider value={admin(isAdmin)}>
-      <WorkspaceContext.Provider value={workspace}>{children}</WorkspaceContext.Provider>
-    </AdminContext.Provider>
+    <AuthContext.Provider value={AUTH}>
+      <AdminContext.Provider value={admin(isAdmin)}>
+        <WorkspaceContext.Provider value={workspace}>{children}</WorkspaceContext.Provider>
+      </AdminContext.Provider>
+    </AuthContext.Provider>
   );
 }
 

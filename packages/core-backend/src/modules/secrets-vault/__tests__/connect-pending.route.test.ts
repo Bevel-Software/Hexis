@@ -76,6 +76,10 @@ async function baseUrlWith(auth: { userId?: string; email?: string }): Promise<s
       secretsVault,
       toolManualService,
       accessControl,
+      // These tests are about the credential write, not the probe.
+      connectionProbe: {
+        probe: async () => ({ status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+      },
       stateSecret: 'test-secret',
       publicBackendUrl: 'http://localhost:3000',
       publicFrontendUrl: 'http://localhost:5173',
@@ -174,6 +178,10 @@ describe('GET /api/connect/pending — OAuth scope coverage', () => {
         secretsVault: vaultWithGranted(grantedScopes),
         toolManualService: oauthTool,
         accessControl,
+        // These tests are about the credential write, not the probe.
+        connectionProbe: {
+          probe: async () => ({ status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+        },
         stateSecret: 'test-secret',
         publicBackendUrl: 'http://localhost:3000',
         publicFrontendUrl: 'http://localhost:5173',
@@ -257,6 +265,10 @@ describe('GET /api/connect/pending — tool sign-ins are not double-listed as st
         secretsVault: vault,
         toolManualService: oauthTool,
         accessControl,
+        // These tests are about the credential write, not the probe.
+        connectionProbe: {
+          probe: async () => ({ status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+        },
         stateSecret: 'test-secret',
         publicBackendUrl: 'http://localhost:3000',
         publicFrontendUrl: 'http://localhost:5173',

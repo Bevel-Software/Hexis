@@ -31,8 +31,7 @@ const TOOL_PATH = 'Tools/weather.tool';
 const USER = 'user@x.com';
 const RETURN_TO = '/skills-and-tools/tools/weather';
 
-const toolManualService = {
-  listAccessible: async () => [
+const MANUALS = [
     {
       slug: 'weather',
       name: 'weather',
@@ -51,7 +50,10 @@ const toolManualService = {
         },
       ],
     },
-  ],
+];
+
+const toolManualService = {
+  listAccessible: async () => MANUALS,
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['toolManualService'];
 
 const accessControl = {
@@ -65,10 +67,15 @@ const secretsVault = {
   completeOAuth,
 } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['secretsVault'];
 
+const connectionProbe = {
+  probe: async () => ({ status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+} as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['connectionProbe'];
+
 const deps = {
   secretsVault,
   toolManualService,
   accessControl,
+  connectionProbe,
   stateSecret: STATE_SECRET,
   publicBackendUrl: 'http://localhost:3000',
   publicFrontendUrl: FRONTEND,

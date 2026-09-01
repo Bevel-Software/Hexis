@@ -320,10 +320,13 @@ function OAuthVarRow({
           size="xs"
           className="shrink-0"
         >
+          {/* "Signed in", not "Connected": at variable level all we know is that
+              a token is stored. Only the tool page runs a probe, and only a
+              probe may claim the connection works. */}
           {v.needsReauth
             ? 'Needs signing in again'
             : v.authorized
-              ? 'Connected'
+              ? 'Signed in'
               : 'Needs your sign-in'}
         </Badge>
         <Button

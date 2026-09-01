@@ -118,7 +118,9 @@ export function ConnectToolsPage() {
     const hash = window.location.hash.replace(/^#/, '');
     if (!hash) return;
     const params = new URLSearchParams(hash);
-    if (params.has('authorized')) setNotice('Connected. You can go back to your agent and try again.');
+    // "Signed in", not "Connected": the sign-in landing here proves a token was
+    // issued, not that a call with it will succeed.
+    if (params.has('authorized')) setNotice('Signed in. You can go back to your agent and try again.');
     else if (params.has('error')) setError(params.get('error') || 'Authorization failed.');
     if (params.has('authorized') || params.has('error')) {
       window.history.replaceState(null, '', window.location.pathname + window.location.search);
@@ -301,7 +303,10 @@ export function ConnectToolsPage() {
             <>
               {outstanding === 0 && (
                 <Banner role="status" tone="ok" className="mb-5">
-                  Everything is connected. You can use your tools in your agent.
+                  {/* Not "everything is connected": nothing on this page has
+                      called a provider, so every row above is stored-but-untested.
+                      The banner has to make the same claim its rows do. */}
+                  Everything is set up. You can use your tools in your agent.
                 </Banner>
               )}
 
@@ -325,7 +330,7 @@ export function ConnectToolsPage() {
                             : o.needsReauth
                               ? 'needs-reauth'
                               : o.authorized
-                                ? 'connected'
+                                ? 'signed-in'
                                 : 'needs-signin'
                         }
                         onToggle={() =>
@@ -354,7 +359,7 @@ export function ConnectToolsPage() {
                       label={o.label || o.key}
                       on
                       busy={false}
-                      state={o.authorized ? 'connected' : 'needs-signin'}
+                      state={o.authorized ? 'signed-in' : 'needs-signin'}
                       action={
                         <Button
                           variant="outline"
@@ -391,7 +396,7 @@ export function ConnectToolsPage() {
                           label={tool.name}
                           on={on}
                           busy={wiping.has(id)}
-                          state={!on ? 'skipped' : unset > 0 ? 'needs-key' : 'connected'}
+                          state={!on ? 'skipped' : unset > 0 ? 'needs-key' : 'key-saved'}
                           onToggle={() =>
                             void onToggle(id, configured, async () => {
                               for (const v of tool.variables.filter((x) => x.configured)) {
@@ -438,18 +443,26 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 /**
- * The five things a row can be — and the words for each.
+ * The things a row can be — and the words for each.
  *
- * `Connected` or `Needs …`, exactly as the Library says it, because this is the
- * page you land on to FIX what the Library told you was broken and the two must
- * not disagree about what is wrong. "skipped" is the one non-status here: it is
- * a choice you made, not a state of the tool, so it stays grey.
+ * The same vocabulary the Library uses, because this is the page you land on to
+ * FIX what the Library told you was broken and the two must not disagree about
+ * what is wrong. "skipped" is the one non-status here: it is a choice you made,
+ * not a state of the tool, so it stays grey.
+ *
+ * Note what is NOT here: `Connected`. This page knows only what is STORED, and
+ * the one word that asserts a working connection is reserved for a probe that
+ * actually called the provider — which only the tool page does. Two states
+ * rather than one, because "signed in" and "key saved" describe two different
+ * things the reader did, and telling someone a key was saved when they signed
+ * in is a small lie of exactly the kind this vocabulary exists to stop.
  */
 const ROW_STATE: Record<
-  'connected' | 'needs-signin' | 'needs-reauth' | 'needs-key' | 'skipped',
+  'signed-in' | 'key-saved' | 'needs-signin' | 'needs-reauth' | 'needs-key' | 'skipped',
   { text: string; tone: 'ok' | 'wait' | 'outline' }
 > = {
-  connected: { text: 'Connected', tone: 'ok' },
+  'signed-in': { text: 'Signed in', tone: 'ok' },
+  'key-saved': { text: 'Key saved', tone: 'ok' },
   'needs-signin': { text: 'Needs your sign-in', tone: 'wait' },
   'needs-reauth': { text: 'Needs signing in again', tone: 'wait' },
   'needs-key': { text: 'Needs a key from you', tone: 'wait' },

@@ -303,6 +303,7 @@ export async function createCoreServer(
     secretsVault: core.secretsVaultService,
     toolManualService: core.toolManualService,
     accessControl: core.accessControl,
+    connectionProbe: core.connectionProbeService,
     stateSecret: core.config.jwtSecret,
     publicBackendUrl: core.config.publicBackendUrl,
     publicFrontendUrl: core.config.publicFrontendUrl,

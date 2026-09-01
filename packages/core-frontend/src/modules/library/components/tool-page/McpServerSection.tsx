@@ -32,12 +32,20 @@ import { pathForTool } from '../../routes/library-paths';
 export function McpServerSection({
   slug,
   configuredCount,
+  reloadSignal,
   onSaved,
   onError,
 }: {
   slug: string;
   /** Configured secrets + sign-ins under this server's name — what a rename disconnects. */
   configuredCount: number;
+  /**
+   * Changes on every page reload, including one that keeps the same slug.
+   * Saving a server without renaming it leaves `slug` untouched, and the page
+   * no longer remounts on reload — so without this in the dependency list the
+   * fetch below never re-runs and the section renders its cleared view.
+   */
+  reloadSignal: number;
   /** Called after a save lands; the new slug when the server was renamed. */
   onSaved(newSlug?: string): void;
   onError(message: string): void;
@@ -74,7 +82,7 @@ export function McpServerSection({
     return () => {
       live = false;
     };
-  }, [slug]);
+  }, [slug, reloadSignal]);
 
   if (!server) return null;
 

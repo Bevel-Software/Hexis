@@ -45,6 +45,8 @@ import {
   type ToolManualPreview,
   type ToolManualType,
   type ToolVariable,
+  type ToolHealthCheck,
+  type ToolProbeTarget,
   type ToolVariableScope,
   type ToolVariableOAuth,
 } from './tool-manuals.contract.js';
@@ -235,6 +237,41 @@ export class ToolManualService implements IToolManualService {
     return declared?.scope ?? 'admin';
   }
 
+  /**
+   * The probe config for a manual this caller can read — the internal
+   * counterpart to everything on `ToolManualSummary`.
+   *
+   * Access-gated through `accessibleManuals` like every other read, so this
+   * cannot become a way to learn what a `.tool` you can't see declares.
+   */
+  async probeTargetFor(userEmail: string, slug: string): Promise<ToolProbeTarget | null> {
+    const manuals = await this.accessibleManuals(userEmail);
+    const m = manuals.find((x) => x.slug === slug);
+    if (!m) return null;
+    // Built here, from the manual already in hand. `toManualCallTemplates`
+    // would validate every manual in the workspace to hand back the one we
+    // want; an invalid template for THIS manual is not an error, just a probe
+    // that has nothing to dial (the caller reports it as unverifiable).
+    //
+    // Only for the ONE path that dials it — an `mcp` manual, reachable from
+    // this process, that declared no health check of its own. Everywhere else
+    // the template is built, validated and thrown away, and an http tool with
+    // an unvalidatable template warn-logs on every probe about a value nothing
+    // was ever going to use.
+    const dialsTheTemplate = m.type === 'mcp' && !m.healthCheck && m.remote !== false;
+    let callTemplate: CallTemplate | null = null;
+    if (dialsTheTemplate) {
+      try {
+        callTemplate = callTemplateSerializer.validateDict(this.buildCallTemplateDict(m));
+      } catch (err) {
+        console.warn(
+          `[tool-manuals] no valid call template for "${m.path}": ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return { name: m.name, type: m.type, remote: m.remote, healthCheck: m.healthCheck, callTemplate };
+  }
+
   async toManualCallTemplates(userEmail: string, opts?: { remoteOnly?: boolean }): Promise<CallTemplate[]> {
     const manuals = await this.accessibleManuals(userEmail);
     const out: CallTemplate[] = [];
@@ -414,6 +451,19 @@ export class ToolManualService implements IToolManualService {
       // templates, not the (Bevel-hosted) discovery template.
       if (m.type === 'inline' && m.tools) {
         refs.push(...variableSubstitutor.findRequiredVariables(m.tools, m.name));
+      }
+      // A probe-only credential still has to reach the secrets UI. The call
+      // template is built from `url`/`headers` and never carries `healthCheck`,
+      // so a `${VAR}` used solely by the probe would never be surfaced for
+      // provisioning — and `probeDeclared` would then report `unverifiable`
+      // forever on a variable no screen ever offered anyone to fill in.
+      if (m.healthCheck) {
+        refs.push(
+          ...variableSubstitutor.findRequiredVariables(
+            { url: m.healthCheck.url, headers: m.healthCheck.headers ?? {} },
+            m.name,
+          ),
+        );
       }
     } catch {
       return; // a malformed template is reported elsewhere; never break the scan
@@ -848,20 +898,8 @@ export function normalizeToolManual(
     // literal internal host slips past as a templated scheme or userinfo.
     // Local-only (`remote: false`) `.tool`s are never fetched server-side, so
     // are exempt.
-    const literalScheme = /^([a-zA-Z][a-zA-Z0-9+.-]*:)[\\/]{2}/.exec(url)?.[1];
-    const sepMatch = /:[\\/]{2}/.exec(url);
-    const sepIdx = sepMatch ? sepMatch.index : -1;
-    const authority = sepIdx >= 0 ? url.slice(sepIdx + 3).split(/[/\\?#]/, 1)[0] : url;
-    const hostPort = authority.slice(authority.lastIndexOf('@') + 1);
-    const host = hostPort.startsWith('[') ? hostPort.slice(0, hostPort.indexOf(']') + 1) : hostPort.split(':')[0];
-    if (descriptor.remote !== false && !host.includes('${')) {
-      const checkUrl =
-        literalScheme && !authority.includes('${')
-          ? url // fully literal scheme + authority → validate the URL as-is
-          : sepIdx >= 0
-            ? `${literalScheme ?? 'http:'}//${host}` // templated scheme/userinfo/port, literal host
-            : url; // no authority shape at all → parse raw (refuses malformed)
-      assertSafeFetchUrl(checkUrl, { label: `\`.tool\` "${name}" url` });
+    if (descriptor.remote !== false) {
+      assertSafeManualFetchUrl(url, `\`.tool\` "${name}" url`);
     }
     if (obj.headers && typeof obj.headers === 'object' && !Array.isArray(obj.headers)) {
       descriptor.headers = obj.headers as Record<string, string>;
@@ -871,7 +909,136 @@ export function normalizeToolManual(
       descriptor.httpMethod = m === 'POST' ? 'POST' : 'GET';
     }
   }
+
+  // LAST, because it inherits the manual's own `headers` when it declares none
+  // — which is the common case, and the reason a one-line `healthCheck: {url}`
+  // authenticates exactly like a real call. Resolving that default here, where
+  // the whole descriptor is in hand, keeps the probe self-contained: nothing
+  // downstream has to re-derive which headers a manual would have sent.
+  // Inherit from the DECLARED `headers`, not `descriptor.headers`: an `inline`
+  // manual never populates the latter (only the url-bearing branch does), so a
+  // one-line probe on an inline tool silently inherited nothing and tested an
+  // unauthenticated request. The declared block is the same object for
+  // http/mcp, so this is identical there and correct for all three.
+  const declaredHeaders =
+    obj.headers && typeof obj.headers === 'object' && !Array.isArray(obj.headers)
+      ? (obj.headers as Record<string, string>)
+      : undefined;
+  const healthCheck = normalizeHealthCheck(obj.healthCheck, name, descriptor.remote, declaredHeaders);
+  if (healthCheck) descriptor.healthCheck = healthCheck;
+
   return descriptor;
+}
+
+/**
+ * SSRF guard for a URL a `.tool` will make the SERVER fetch — its manual `url`
+ * and its declared `healthCheck.url` alike, which is why this is a function
+ * rather than an inline block: two fetch targets policed by one rule cannot
+ * drift apart.
+ *
+ * A remote-capable `.tool` triggers a server-side fetch (the MCP proxy, the
+ * in-process agent, headless routines, and now the credential probe), so a
+ * literal private/loopback/metadata host is refused at the producing boundary.
+ * Only a TEMPLATED HOSTNAME (resolved at call time) is uncheckable here — a
+ * `${...}` in the scheme, userinfo, port, path, or query still leaves a
+ * concrete network target (`${S}://169.254.169.254/x` and
+ * `http://${U}@169.254.169.254/x` target the metadata IP no matter what
+ * resolves), so the guard must still run against the literal host. The
+ * authority is therefore taken from `://` INDEPENDENT of the scheme being
+ * literal, and when the raw url can't parse (templated scheme or port) the
+ * check runs on a synthetic `<scheme-or-http>//host`. A BACKSLASH behaves as a
+ * slash for http(s) in WHATWG `new URL` — BOTH as the scheme separator
+ * (`${S}:\\169.254.169.254\\p` → the IP is the host) and inside the authority
+ * (`http://169.254.169.254\\@${HOST}/x` fetches the IP, the `\\@…` becoming
+ * path). So the authority separator is `:` + two `[\/]` (not just `://`), and
+ * `\` also terminates the authority alongside `/?#`; otherwise a literal
+ * internal host slips past as a templated scheme or userinfo.
+ *
+ * Callers gate on `remote !== false`: a local-only `.tool` is never fetched
+ * server-side, so it is exempt.
+ */
+function assertSafeManualFetchUrl(url: string, label: string): void {
+  const literalScheme = /^([a-zA-Z][a-zA-Z0-9+.-]*:)[\\/]{2}/.exec(url)?.[1];
+  const sepMatch = /:[\\/]{2}/.exec(url);
+  const sepIdx = sepMatch ? sepMatch.index : -1;
+  const authority = sepIdx >= 0 ? url.slice(sepIdx + 3).split(/[/\\?#]/, 1)[0] : url;
+  const hostPort = authority.slice(authority.lastIndexOf('@') + 1);
+  const host = hostPort.startsWith('[') ? hostPort.slice(0, hostPort.indexOf(']') + 1) : hostPort.split(':')[0];
+  // A templated host resolves to something we can't know yet — nothing to check.
+  if (host.includes('${')) return;
+  const checkUrl =
+    literalScheme && !authority.includes('${')
+      ? url // fully literal scheme + authority → validate the URL as-is
+      : sepIdx >= 0
+        ? `${literalScheme ?? 'http:'}//${host}` // templated scheme/userinfo/port, literal host
+        : url; // no authority shape at all → parse raw (refuses malformed)
+  assertSafeFetchUrl(checkUrl, { label });
+}
+
+/**
+ * Parse the optional `healthCheck:` block — the read-only call that proves this
+ * tool's credential works (see {@link ToolHealthCheck}).
+ *
+ * Throws on a malformed block rather than dropping it, matching `variables`
+ * and for the same reason inverted: a silently-ignored probe would leave the
+ * tool reporting "can't verify" forever while its author believes they wired
+ * one up, and the whole point of the field is to stop the UI overclaiming.
+ *
+ * `method` accepts only `GET`. A probe that can mutate is not a probe — it runs
+ * unattended on every save and re-check, so `POST` is refused outright instead
+ * of being quietly downgraded.
+ */
+function normalizeHealthCheck(
+  raw: unknown,
+  manualName: string,
+  remote: boolean | undefined,
+  manualHeaders: Record<string, string> | undefined,
+): ToolHealthCheck | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('`healthCheck` must be an object');
+  const e = raw as Record<string, unknown>;
+  const url = typeof e.url === 'string' ? e.url.trim() : '';
+  if (!url) throw new Error('`healthCheck` must have a `url`');
+  if (remote !== false) {
+    assertSafeManualFetchUrl(url, `\`.tool\` "${manualName}" healthCheck.url`);
+  }
+  const check: ToolHealthCheck = { url };
+  if (e.method !== undefined) {
+    const m = typeof e.method === 'string' ? e.method.toUpperCase() : '';
+    if (m !== 'GET') throw new Error('`healthCheck.method` must be `GET` — a health check may not mutate');
+    check.method = 'GET';
+  }
+  // Whichever headers the probe ends up carrying get checked — declared OR
+  // inherited. Validating only the declared branch left the common case
+  // unguarded: `healthCheck: { url }` alone inherits the manual's headers, so a
+  // YAML `Authorization: 1234` there still reached the probe untouched.
+  if (e.headers !== undefined) {
+    if (!e.headers || typeof e.headers !== 'object' || Array.isArray(e.headers)) {
+      throw new Error('`healthCheck.headers` must be an object');
+    }
+    check.headers = assertStringHeaders(e.headers as Record<string, unknown>, 'healthCheck.headers');
+  } else if (manualHeaders) {
+    check.headers = assertStringHeaders(manualHeaders as Record<string, unknown>, 'headers');
+  }
+  return check;
+}
+
+/**
+ * The VALUES of a header map, not just its container.
+ *
+ * YAML types `Authorization: 1234` as a number, and a cast alone let it through
+ * to the probe, where substitution calls `.matchAll` on it — surfacing
+ * `text.matchAll is not a function` to the user as the reason their credential
+ * is unhealthy. Caught at parse time, next to `url` and `method`, it reads as
+ * what it is: a mistake in the `.tool` file.
+ */
+function assertStringHeaders(headers: Record<string, unknown>, label: string): Record<string, string> {
+  for (const [k, v] of Object.entries(headers)) {
+    if (typeof v !== 'string') {
+      throw new Error(`\`${label}.${k}\` must be a string (quote it if it looks like a number)`);
+    }
+  }
+  return headers as Record<string, string>;
 }
 
 /**
