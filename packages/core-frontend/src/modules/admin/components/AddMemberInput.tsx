@@ -17,8 +17,13 @@ export interface PersonSuggestion {
  */
 const SUGGEST_MIN_CHARS = 2;
 
-/** Typing settles for this long before a suggest request goes out. */
-const SUGGEST_DEBOUNCE_MS = 200;
+/**
+ * Typing settles for this long before a suggest request goes out. Exported so
+ * a test that has to outlast the debounce derives its wait from this value
+ * rather than restating it — a number here that a test does not follow is a
+ * silently flaky test.
+ */
+export const SUGGEST_DEBOUNCE_MS = 200;
 
 /** The default-branch workspace id — the admin surfaces are managed there. */
 // A function, not a constant: the branch model arrives from `/api/config`
@@ -75,6 +80,9 @@ export function AddMemberInput({
   // Bumped per request so a slow response never repopulates the list after a
   // newer query (or a backspace below the threshold) has superseded it.
   const suggestReq = useRef(0);
+  // The input and its list together. Focus moving between them is movement
+  // WITHIN the widget, not away from it — see the wrapper's onBlur.
+  const widget = useRef<HTMLDivElement>(null);
 
   // A newline-joined key rather than the array itself: callers build `exclude`
   // inline (`[...members, ...pending]`), so a reference dependency would
@@ -93,6 +101,10 @@ export function AddMemberInput({
       return;
     }
     const myReq = ++suggestReq.current;
+    // The previous query's people are wrong for this one the moment the text
+    // changes. Leaving them up through the debounce and the request would keep
+    // a row clickable that adds someone the current text never named.
+    setSuggestions([]);
     const t = setTimeout(() => {
       suggestPrincipals(suggestWorkspaceId(), q)
         .then((res) => {
@@ -116,7 +128,19 @@ export function AddMemberInput({
       {/* The input is capped rather than fixed-width, and its wrapper may shrink,
           so the row fits the card on a narrow viewport instead of pushing the
           Add button past the card border. */}
-      <div className="relative flex-1 min-w-0 max-w-[16rem]">
+      <div
+        ref={widget}
+        className="relative flex-1 min-w-0 max-w-[16rem]"
+        // React's onBlur bubbles (it is focusout underneath), so this one
+        // handler covers the input and every suggestion row. The list closes
+        // only when focus lands outside the widget entirely — which is what
+        // lets a keyboard user Tab from the input into the list at all.
+        onBlur={(e) => {
+          if (!widget.current?.contains(e.relatedTarget as Node | null)) {
+            setShowSuggest(false);
+          }
+        }}
+      >
         <input
           type="email"
           value={value}
@@ -125,8 +149,6 @@ export function AddMemberInput({
             setShowSuggest(true);
           }}
           onFocus={() => setShowSuggest(true)}
-          // Delay so a click on a suggestion lands before the list unmounts.
-          onBlur={() => setTimeout(() => setShowSuggest(false), 150)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') onSubmit(value);
             if (e.key === 'Escape') setShowSuggest(false);
@@ -137,17 +159,19 @@ export function AddMemberInput({
           aria-label={inputLabel}
           autoComplete="off"
         />
-        {showSuggest && suggestions.length > 0 && (
+        {!busy && showSuggest && suggestions.length > 0 && (
           <ul className="absolute z-10 mt-1 w-full sm:w-72 max-w-full max-h-56 overflow-auto bg-white border border-line rounded-lg shadow-lg py-1">
             {suggestions.map((p) => (
               <li key={p.email}>
                 <button
                   type="button"
-                  // onMouseDown (not onClick) so it fires before the input's blur.
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    onSubmit(p.email);
-                  }}
+                  // preventDefault on mousedown keeps focus in the input, so a
+                  // mouse click never blurs the widget out from under itself.
+                  // The submit hangs off onClick, which a pointer AND a
+                  // keyboard (Enter/Space on the focused row) both raise —
+                  // onMouseDown alone was unreachable without a mouse.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => onSubmit(p.email)}
                   className="w-full text-left px-2 py-1.5 hover:bg-hover flex items-center gap-2"
                 >
                   <span className="w-5 h-5 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center shrink-0">
