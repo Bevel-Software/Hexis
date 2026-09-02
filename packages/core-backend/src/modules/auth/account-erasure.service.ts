@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
+import { blindIndex } from '../../shared/column-crypto.js';
 import type { Database } from '../database/connection.js';
 import {
   changeRequests,
@@ -97,11 +98,14 @@ export class AccountErasureService implements IAccountErasureService {
   ) {}
 
   async listUsers(): Promise<AdminUserView[]> {
+    // Sorted in-process: `email` is ciphertext in the DB, so ORDER BY would
+    // sort by IV noise. One row per team member — negligible.
     const rows = await this.db
       .select({ id: users.id, email: users.email, name: users.name, createdAt: users.createdAt })
-      .from(users)
-      .orderBy(users.email);
-    return rows.map((r) => ({ ...r, createdAt: r.createdAt.getTime() }));
+      .from(users);
+    return rows
+      .map((r) => ({ ...r, createdAt: r.createdAt.getTime() }))
+      .sort((a, b) => a.email.localeCompare(b.email));
   }
 
   async eraseUser(userId: string): Promise<boolean> {
@@ -134,30 +138,55 @@ export class AccountErasureService implements IAccountErasureService {
       // Personal-data rows the core owns.
       await tx.delete(fileLocks).where(eq(fileLocks.holderUserId, userId));
 
-      // Audit rows: anonymize in place (no user FK on these; they key by email).
+      // Audit rows: anonymize in place (no user FK on these; they key by
+      // email). Matched via the blind index — the email columns are randomized
+      // ciphertext — and the bidx is rewritten to the placeholder's too, so no
+      // residual value keyed to the erased address survives the erasure.
+      const emailBidx = blindIndex(target.email);
+      const erasedBidx = blindIndex(target.erasedEmail);
       await tx
         .update(prFileApprovals)
-        .set({ approverEmail: target.erasedEmail, approverName: target.erasedName })
-        .where(eq(prFileApprovals.approverEmail, target.email));
+        .set({
+          approverEmail: target.erasedEmail,
+          approverEmailBidx: erasedBidx,
+          approverName: target.erasedName,
+        })
+        .where(eq(prFileApprovals.approverEmailBidx, emailBidx));
       await tx
         .update(prMergeLog)
-        .set({ triggeredByEmail: target.erasedEmail, triggeredByName: target.erasedName })
-        .where(eq(prMergeLog.triggeredByEmail, target.email));
+        .set({
+          triggeredByEmail: target.erasedEmail,
+          triggeredByEmailBidx: erasedBidx,
+          triggeredByName: target.erasedName,
+        })
+        .where(eq(prMergeLog.triggeredByEmailBidx, emailBidx));
       await tx
         .update(prComments)
-        .set({ authorEmail: target.erasedEmail, authorName: target.erasedName })
-        .where(eq(prComments.authorEmail, target.email));
+        .set({
+          authorEmail: target.erasedEmail,
+          authorEmailBidx: erasedBidx,
+          authorName: target.erasedName,
+        })
+        .where(eq(prComments.authorEmailBidx, emailBidx));
       await tx
         .update(changeRequests)
-        .set({ authorEmail: target.erasedEmail, authorName: target.erasedName })
-        .where(eq(changeRequests.authorEmail, target.email));
+        .set({
+          authorEmail: target.erasedEmail,
+          authorEmailBidx: erasedBidx,
+          authorName: target.erasedName,
+        })
+        .where(eq(changeRequests.authorEmailBidx, emailBidx));
       // Queued-but-uncommitted saves: the eventual git commit is authored with
       // the placeholder instead of the erased identity. The file content still
       // lands — erasing an account must not lose other people's KB state.
       await tx
         .update(pendingCommits)
-        .set({ authorEmail: target.erasedEmail, authorName: target.erasedName })
-        .where(eq(pendingCommits.authorEmail, target.email));
+        .set({
+          authorEmail: target.erasedEmail,
+          authorEmailBidx: erasedBidx,
+          authorName: target.erasedName,
+        })
+        .where(eq(pendingCommits.authorEmailBidx, emailBidx));
 
       // Module-owned rows, before the users delete so FKs onto users are
       // still satisfiable — and so a participant that MISSES rows makes the

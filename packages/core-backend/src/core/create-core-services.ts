@@ -9,7 +9,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { CoreConfig } from '../core-config.js';
 import { getDb, type Database } from '../modules/database/connection.js';
-import { runCoreMigrations } from '../modules/database/migrate.js';
+import { runCoreMigrations, runPiiEncryptionBackfill } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
@@ -215,6 +215,10 @@ export async function createCoreServices(
   // `migrations/` folder, tracked in `__drizzle_migrations_core`. An
   // enterprise overlay runs its own history AFTER this (see migrate.ts).
   await runCoreMigrations(db, coreMigrationsDir());
+  // Seal any pre-encryption plaintext PII rows and swap the unique constraints
+  // onto the blind-index columns (see migrate.ts). Idempotent; must complete
+  // before any service reads or writes a PII column.
+  await runPiiEncryptionBackfill(db);
 
   // Deployment settings come next, before ANY service is built: the KB remote
   // is resolved through them, and a fresh install has none of it in the

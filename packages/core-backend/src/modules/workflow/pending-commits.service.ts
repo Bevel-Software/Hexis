@@ -37,6 +37,7 @@
 import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { pendingCommits } from '../database/schema.js';
+import { blindIndex } from '../../shared/column-crypto.js';
 
 /**
  * Transient-failure budget per recovery cycle. After this many consecutive
@@ -191,6 +192,7 @@ export class PendingCommitsService {
       .set({
         queuedAt: new Date(),
         authorEmail: email,
+        authorEmailBidx: blindIndex(email),
         authorName: input.authorName,
         // Reset transient counters — this is effectively a fresh enqueue.
         attempts: 0,
@@ -212,6 +214,7 @@ export class PendingCommitsService {
       branch: input.branch,
       path: input.path,
       authorEmail: email,
+      authorEmailBidx: blindIndex(email),
       authorName: input.authorName,
     });
   }
@@ -245,11 +248,13 @@ export class PendingCommitsService {
         ),
       );
     if ((rows[0]?.count ?? 0) > 0) return false;
+    const email = input.authorEmail.trim().toLowerCase();
     await this.db.insert(pendingCommits).values({
       workspaceId,
       branch: input.branch,
       path: input.path,
-      authorEmail: input.authorEmail.trim().toLowerCase(),
+      authorEmail: email,
+      authorEmailBidx: blindIndex(email),
       authorName: input.authorName,
     });
     return true;

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultKbTemplateDir } from './assets.js';
 import { assertKeyDecodesTo32Bytes } from './shared/token-crypto.js';
+import { initColumnCrypto } from './shared/column-crypto.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
@@ -357,6 +358,11 @@ export class CoreConfig {
     // SECRETS_ENC_KEY by default, which is only certainly right because a bad
     // key never gets past this line.
     assertKeyDecodesTo32Bytes(this.secretsEncKey, secretsKeySource);
+    // Install the derived PII column-encryption + blind-index keys the moment
+    // the secrets key is known to be valid. The schema module's encryptedText
+    // columns read this module-level state, so it must be in place before the
+    // first query — config construction always is.
+    initColumnCrypto(this.secretsEncKey);
     this.internalTokenSecret = (process.env.INTERNAL_TOKEN_SECRET || '').trim();
     // Setting DOMAIN declares "the bundled Caddy `https` profile fronts this
     // deployment" — one proxy hop, and the public origin IS that domain. The

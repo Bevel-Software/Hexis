@@ -5,6 +5,7 @@ import type { CoreConfig } from '../../core-config.js';
 import { users } from '../database/schema.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { hashEmail } from '../../shared/hash-email.js';
+import { blindIndex } from '../../shared/column-crypto.js';
 import {
   hashPassword,
   verifyPassword,
@@ -107,10 +108,11 @@ export class AuthService {
       return { token: this.signToken(user.id, user.email), user: toAuthUser(user) };
     }
 
+    // Lookup goes through the blind index — `email` is randomized ciphertext.
     const [user] = await this.db
       .select()
       .from(users)
-      .where(eq(users.email, normalizedEmail))
+      .where(eq(users.emailBidx, blindIndex(normalizedEmail)))
       .limit(1);
     // Always run one scrypt verification — against the stored hash when there
     // is one, against the decoy otherwise — so unknown emails and
@@ -170,9 +172,14 @@ export class AuthService {
     // fallback. `returning()` yields the authoritative row either way.
     const [row] = await this.db
       .insert(users)
-      .values({ email: normalizedEmail, name: displayName, passwordHash })
+      .values({
+        email: normalizedEmail,
+        emailBidx: blindIndex(normalizedEmail),
+        name: displayName,
+        passwordHash,
+      })
       .onConflictDoUpdate({
-        target: users.email,
+        target: users.emailBidx,
         set: suppliedName
           ? { passwordHash, name: suppliedName, updatedAt: new Date() }
           : { passwordHash, updatedAt: new Date() },
@@ -211,14 +218,18 @@ export class AuthService {
   async listAccounts(): Promise<
     Array<{ id: string; email: string; name: string; hasPassword: boolean; createdAt: Date }>
   > {
-    const rows = await this.db.select().from(users).orderBy(users.email);
-    return rows.map((row) => ({
-      id: row.id,
-      email: row.email,
-      name: row.name,
-      hasPassword: row.passwordHash != null,
-      createdAt: row.createdAt,
-    }));
+    // Sorted in-process: `email` is ciphertext in the DB, so ORDER BY would
+    // sort by IV noise. The table is one row per team member — negligible.
+    const rows = await this.db.select().from(users);
+    return rows
+      .map((row) => ({
+        id: row.id,
+        email: row.email,
+        name: row.name,
+        hasPassword: row.passwordHash != null,
+        createdAt: row.createdAt,
+      }))
+      .sort((a, b) => a.email.localeCompare(b.email));
   }
 
   private assertPasswordPolicy(password: string): void {
@@ -253,8 +264,8 @@ export class AuthService {
   private async upsertUserByEmail(email: string, name: string) {
     const [user] = await this.db
       .insert(users)
-      .values({ email, name })
-      .onConflictDoUpdate({ target: users.email, set: { updatedAt: new Date() } })
+      .values({ email, emailBidx: blindIndex(email), name })
+      .onConflictDoUpdate({ target: users.emailBidx, set: { updatedAt: new Date() } })
       .returning();
     return user;
   }

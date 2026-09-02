@@ -31,8 +31,22 @@ export { coreMigrationsDir, defaultKbTemplateDir } from './assets.js';
 export {
   runCoreMigrations,
   runEnterpriseMigrations,
+  runPiiEncryptionBackfill,
 } from './modules/database/migrate.js';
 export { getDb, type Database } from './modules/database/connection.js';
+
+// PII column encryption (see shared/column-crypto.ts). `encryptedText` and
+// `blindIndex` are exported so an enterprise overlay can seal its own schema's
+// PII columns with the same keys; `initColumnCrypto` for entry points that
+// build a Database without constructing CoreConfig.
+export {
+  initColumnCrypto,
+  encryptedText,
+  blindIndex,
+  encryptPii,
+  decryptPii,
+  isEncryptedBlob,
+} from './shared/column-crypto.js';
 
 // Build identity surfaced by GET /api/health.
 export { GIT_SHA, resolveGitSha } from './version.js';

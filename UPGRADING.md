@@ -25,6 +25,24 @@ after an upgrade can take a little longer.
 older app cannot read a newer database. To go back, restore the backup you
 took before upgrading.
 
+### PII encryption (0.14+)
+
+From 0.14, personal data in the database — emails, display names, and
+change-request/review text — is encrypted with a key derived from
+`SECRETS_ENC_KEY`, in addition to the secrets vault it already sealed. The
+first boot after the upgrade rewrites existing rows automatically; nothing
+to do.
+
+What it changes for operations:
+
+- **Losing `SECRETS_ENC_KEY` now loses this data too**, not just stored
+  credentials. Keep a copy of the key somewhere safe *outside* the server —
+  a database backup can only be read back with the key that was in `.env`
+  when it was taken.
+- Database dumps contain ciphertext for these columns; ad-hoc SQL against
+  them (looking up a user by email in `psql`, say) no longer works — use
+  the app or its API instead.
+
 ## Backups
 
 Everything that matters lives in Postgres and the named Docker volumes; the
