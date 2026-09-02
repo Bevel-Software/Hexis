@@ -399,8 +399,17 @@ describe('ToolConnectionSection', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Test connection: github' }));
 
-      await waitFor(() => expect(onError).toHaveBeenCalledWith('Network down'));
+      // The section's OWN banner, not the page's shared one: page state
+      // outlived its subject (another action's error cleared by a probe, a
+      // previous tool's probe touching the current tool's banner).
+      await waitFor(() => expect(screen.getByTestId('tool-probe-error')).toHaveTextContent('Network down'));
+      expect(onError).not.toHaveBeenCalled();
       expect(screen.getByTestId('tool-health')).toHaveTextContent('Key saved');
+
+      // The next clean probe clears it.
+      vi.mocked(checkToolConnection).mockResolvedValue({ status: 'ok', detail: null, checkedAt: new Date().toISOString() });
+      fireEvent.click(screen.getByRole('button', { name: 'Test connection: github' }));
+      await waitFor(() => expect(screen.queryByTestId('tool-probe-error')).toBeNull());
     });
 
     it('stops claiming Connected once the server definition changes', async () => {

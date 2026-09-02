@@ -292,7 +292,19 @@ export function descriptorsFromMcpJson(
       continue;
     }
 
-    if (raw.type === 'streamable-http' || raw.type === 'sse') {
+    if (raw.type === 'sse') {
+      // The pinned `@utcp/mcp` speaks `stdio` and streamable `http` — there
+      // is no sse transport in its schema, so a template claiming one either
+      // fails validation or, worse, dials a handshake the server does not
+      // speak. Refusing here names the fix; silently rebuilding as http used
+      // to configure exactly that wrong handshake.
+      console.warn(
+        `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: the MCP client has no \`sse\` transport — declare the server as \`streamable-http\` if it supports it.`,
+      );
+      continue;
+    }
+
+    if (raw.type === 'streamable-http') {
       if (typeof raw.url !== 'string' || raw.url.length === 0) {
         console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: no url.`);
         continue;
@@ -338,10 +350,6 @@ export function descriptorsFromMcpJson(
       out.push({
         ...shared,
         url: raw.url,
-        // The declared transport rides along — the call template is rebuilt
-        // from this descriptor, and rebuilding an `sse` server as `http`
-        // configures a handshake the server does not speak.
-        transport: raw.type === 'sse' ? 'sse' : 'http',
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
         ...(ext.local === true ? { remote: false } : {}),
       });

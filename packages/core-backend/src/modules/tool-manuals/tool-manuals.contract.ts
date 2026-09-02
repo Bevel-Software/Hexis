@@ -184,13 +184,6 @@ export interface ToolManualDescriptorBase {
   /** For `http`/`mcp`: the endpoint URL (may contain `${VAR}` refs). */
   url?: string;
   httpMethod?: 'GET' | 'POST';
-  /**
-   * For a remote `type: mcp` server from an `mcp.json`: the declared
-   * transport. `sse` used to be flattened to `http` when the call template
-   * was rebuilt, leaving a probe (and any consumer of the template) unable
-   * to complete the handshake the file actually configured.
-   */
-  transport?: 'http' | 'sse';
   headers?: Record<string, string>;
   /** For `inline`: the embedded UTCP tools (validated when served). */
   tools?: unknown[];

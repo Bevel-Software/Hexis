@@ -340,20 +340,29 @@ export function createWorkflowRoutes(
     // serves content of TWO caller-named branches — the verdict must come
     // from the refs actually being served, or a caller could pick a
     // workspace whose tree grants what the compared branches' trees deny.
-    // `canReadAtRef` answers null when the ref cannot be resolved: deny —
-    // never serve a ref that cannot be authorized.
+    //
+    // The comparison prefers a LOCAL ref (and the working tree for the
+    // checked-out branch) over `origin/<branch>`, so both candidate refs are
+    // authorized: every ref that RESOLVES must grant the read, and a branch
+    // none of whose refs resolve is denied — never serve a ref that cannot
+    // be authorized. (The working-tree side is additionally covered by the
+    // workspace `canRead` above.)
     {
       const user = await requireUser(req, res);
       if (!user) return;
       const repoRelative = toKbRelative(pathParam, kbDirName)!;
       for (const branch of [fromBranch, toBranch]) {
-        let ok: boolean | null;
-        try {
-          ok = await accessControl.canReadAtRef(req.params.id, `origin/${branch}`, user.email, repoRelative);
-        } catch {
-          ok = null;
+        const verdicts: (boolean | null)[] = [];
+        for (const ref of [`origin/${branch}`, branch]) {
+          try {
+            verdicts.push(await accessControl.canReadAtRef(req.params.id, ref, user.email, repoRelative));
+          } catch {
+            verdicts.push(null);
+          }
         }
-        if (ok !== true) {
+        const denied = verdicts.some((v) => v === false);
+        const unresolvable = verdicts.every((v) => v === null);
+        if (denied || unresolvable) {
           res.status(403).json({ error: `You don't have permission to read "${pathParam}" on "${branch}".` });
           return;
         }

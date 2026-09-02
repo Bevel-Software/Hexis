@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
@@ -40,12 +40,6 @@ export interface ToolConnectionSectionProps {
   /** A write landed — the caller refetches so the chips catch up. */
   onChanged(): void;
   onError(message: string): void;
-  /**
-   * The NEWEST probe answered cleanly. A transport error an older attempt
-   * raised through `onError` is history at that point — without this, its
-   * banner stands beside a fresh verdict, two contradicting answers at once.
-   */
-  onRecovered?(): void;
 }
 
 export function ToolConnectionSection({
@@ -53,7 +47,6 @@ export function ToolConnectionSection({
   configRevision,
   onChanged,
   onError,
-  onRecovered,
 }: ToolConnectionSectionProps) {
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
@@ -68,6 +61,19 @@ export function ToolConnectionSection({
    */
   const [inFlight, setInFlight] = useState<{ rev: number } | null>(null);
   const checking = inFlight !== null && inFlight.rev === configRevision;
+
+  /**
+   * A probe's TRANSPORT failure (network, access — not a verdict about the
+   * credential), held here rather than raised to the page's shared error
+   * banner. Page-level state outlived its subject twice over: another
+   * action's error could be cleared by a probe that happened to recover,
+   * and a probe of the PREVIOUS tool (this section is keyed by slug) could
+   * clear or raise it after unmount. Section state dies with the section,
+   * and the revision stamp makes it self-invalidating, exactly like the
+   * verdict: shown only while it describes the configuration on screen.
+   */
+  const [probeError, setProbeError] = useState<{ rev: number; message: string } | null>(null);
+  const shownProbeError = probeError && probeError.rev === configRevision ? probeError.message : null;
   /**
    * The last probe's answer, and the ONLY place one exists.
    *
@@ -92,18 +98,6 @@ export function ToolConnectionSection({
    */
   const probeSeq = useRef(0);
 
-  /**
-   * The revision currently on screen, readable from async closures. A probe
-   * launched under an older revision is ORPHANED the moment the definition
-   * changes: its verdict is already discarded by the `rev` comparison above,
-   * and its callbacks must not speak either — no banner, no recovery — about
-   * a definition that is gone. Updated in an effect (never during render),
-   * read only from handlers.
-   */
-  const latestRev = useRef(configRevision);
-  useEffect(() => {
-    latestRev.current = configRevision;
-  });
 
   const setupKind = tool.setup?.kind ?? null;
   // Not just "kind is oauth-manual": once the owner declares the provider and
@@ -198,15 +192,15 @@ export function ToolConnectionSection({
     const mine = ++probeSeq.current;
     const rev = configRevision;
     setInFlight({ rev });
-    // Publication needs BOTH guards: newest probe (two saves in quick
-    // succession) AND current revision (a definition edit mid-probe) — a
-    // probe that lost either race describes something no longer on screen.
-    const speaks = () => probeSeq.current === mine && rev === latestRev.current;
     try {
       const value = await checkToolConnection(tool.slug);
-      if (speaks()) {
+      // Newest-probe guard only: everything published is REVISION-STAMPED
+      // and compared at render, so a probe that raced a definition change
+      // stores state that simply never shows — no clock to synchronise, no
+      // ref to read mid-render.
+      if (probeSeq.current === mine) {
         setProbed({ rev, value });
-        onRecovered?.();
+        setProbeError(null);
       }
     } catch (err) {
       // A rejected credential resolves with `status: 'failed'`; only a
@@ -216,9 +210,9 @@ export function ToolConnectionSection({
       // Inside the guard too: an older probe rejecting after a newer one has
       // already answered would otherwise raise a transport error over a verdict
       // that is currently correct.
-      if (speaks()) {
+      if (probeSeq.current === mine) {
         setProbed(null);
-        onError(err instanceof Error ? err.message : "Couldn't test this connection.");
+        setProbeError({ rev, message: err instanceof Error ? err.message : "Couldn't test this connection." });
       }
     } finally {
       // Only the newest probe releases the slot: an older one finishing late
@@ -268,6 +262,11 @@ export function ToolConnectionSection({
             Open Secrets
           </Link>
         </div>
+      {shownProbeError && (
+        <Banner tone="danger" role="alert" className="mb-2.5" data-testid="tool-probe-error">
+          {shownProbeError}
+        </Banner>
+      )}
       </div>
 
       {setupUnfinished && (

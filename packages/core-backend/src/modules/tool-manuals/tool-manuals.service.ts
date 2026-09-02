@@ -389,7 +389,7 @@ export class ToolManualService implements IToolManualService {
         config: {
           mcpServers: {
             [m.name]: {
-              transport: m.transport ?? 'http',
+              transport: 'http',
               url: m.url,
               ...(m.headers ? { headers: m.headers } : {}),
             },

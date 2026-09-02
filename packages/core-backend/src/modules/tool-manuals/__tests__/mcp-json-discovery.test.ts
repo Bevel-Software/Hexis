@@ -33,9 +33,19 @@ describe('descriptorsFromMcpJson', () => {
         path: 'Plugins/GTM/mcp.json',
         type: 'mcp',
         url: 'https://mcp.notion.com/mcp',
-        transport: 'http',
       },
     ]);
+  });
+
+  it('refuses an sse server rather than rebuilding it as a transport it is not', () => {
+    // The pinned MCP client has no sse transport; emitting `http` for an sse
+    // server configures a handshake the server does not speak.
+    const out = descriptorsFromMcpJson(
+      'GTM',
+      JSON.stringify({ mcpServers: { legacy: { type: 'sse', url: 'https://mcp.legacy.example/sse' } } }),
+      null,
+    );
+    expect(out).toEqual([]);
   });
 
   it('merges extension auth over mcp.json literals and carries variables + description', () => {

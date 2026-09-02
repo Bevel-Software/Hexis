@@ -645,10 +645,13 @@ export class ConnectionProbeService implements IConnectionProbeService {
         // UTCP keeps `process.env` as its LAST resolution tier, so a real
         // call can resolve what the vault does not hold (a deployment-level
         // variable). The probe must test the request the call would send —
-        // reporting "not set yet" for a variable the call resolves fine is
-        // the badge crying wolf. Namespaced form first, bare name second,
-        // mirroring the loader's own order.
-        value = process.env[utcpNamespacedKey(manualName, name)] ?? process.env[name] ?? null;
+        // and the SDK's `_getVariable` builds ONE `effectiveKey` (the
+        // namespace with doubled underscores plus the variable, exactly
+        // `utcpNamespacedKey`) and consults every tier, env included, under
+        // that single spelling. No bare-name lookup here: an env var under a
+        // spelling the call never reads would have the probe testing a
+        // request no call sends.
+        value = process.env[utcpNamespacedKey(manualName, name)] ?? null;
       }
       if (value === null) throw new Error(`\${${name}} isn't set yet, so there was nothing to test.`);
       values.set(name, value);

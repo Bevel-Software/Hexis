@@ -1807,6 +1807,10 @@ export class GitService implements IGitService {
     const repoRelativePath = this.stripRepoPrefix(relativePath);
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
+      // Same per-file rule as the diff endpoints: `git log -- <dir>` lists
+      // every child's commits, and even metadata (subjects, authors, when)
+      // is history the per-file gate never authorized for the children.
+      await this.assertNotTreeAtRef(cwd, 'HEAD', repoRelativePath, relativePath);
       const { stdout } = await this.git(cwd, [
         'log',
         `--max-count=${max}`,
@@ -1843,7 +1847,11 @@ export class GitService implements IGitService {
     const repoRelativePath = this.stripRepoPrefix(relativePath);
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
+      // BOTH sides: at a commit that DELETES a directory the path is absent
+      // at `sha` but a tree at `sha^` — and the diff of that deletion is
+      // every child's content, exactly what the per-file gate never checked.
       await this.assertNotTreeAtRef(cwd, sha, repoRelativePath, relativePath);
+      await this.assertNotTreeAtRef(cwd, `${sha}^`, repoRelativePath, relativePath);
       try {
         const { stdout } = await this.git(cwd, [
           'show',
@@ -2446,8 +2454,21 @@ export class GitService implements IGitService {
     try {
       const { stdout } = await this.git(cwd, ['cat-file', '-t', `${ref}:${repoRelativePath}`]);
       kind = stdout.trim();
-    } catch {
-      return; // absent at the ref, or the ref itself is unresolvable
+    } catch (err) {
+      // ONLY proven absence passes: the path missing at the ref, or the ref
+      // itself unresolvable (a root commit's `^`), which the actual read
+      // reports in its own words. Anything else — a locked repo, a corrupt
+      // object, git failing to run — must not be read as "not a tree": a
+      // guard that fails open on its own errors is not a guard.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (
+        /not a valid object name|invalid object name|does not exist in|unknown revision|bad revision|exists on disk, but not in/i.test(
+          msg,
+        )
+      ) {
+        return;
+      }
+      throw err;
     }
     if (kind === 'tree') {
       throw new WorkflowValidationError(

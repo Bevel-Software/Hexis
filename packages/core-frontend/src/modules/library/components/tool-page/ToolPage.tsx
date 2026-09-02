@@ -164,7 +164,6 @@ export function ToolPage({
           page.reload();
         }}
         onError={setActionError}
-        onRecovered={() => setActionError(null)}
       />
 
       {/* Only an mcp-type tool can have an mcp.json server pair — mounting the
