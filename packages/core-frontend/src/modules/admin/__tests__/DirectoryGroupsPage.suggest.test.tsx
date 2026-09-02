@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { DirectoryGroupsPage } from '../components/DirectoryGroupsPage';
+import { SUGGEST_DEBOUNCE_MS } from '../components/AddMemberInput';
 import { AdminContext } from '../state/admin.context';
 import { AppRegistryContext, EMPTY_REGISTRY } from '../../../core/registry';
 import { addGroupMember, getGroupsRoster, type GroupsRoster } from '../services/groups.api';
@@ -16,8 +17,12 @@ vi.mock('../../access/api', async (importOriginal) => {
   return { ...actual, suggestPrincipals: vi.fn() };
 });
 
-/** The component's debounce, plus slack — how long "no request" has to hold. */
-const PAST_DEBOUNCE_MS = 350;
+/**
+ * How long "no request" has to hold: the component's own debounce plus slack,
+ * derived from the component so raising the debounce cannot leave this test
+ * asserting over a window the request has not been scheduled in yet.
+ */
+const PAST_DEBOUNCE_MS = SUGGEST_DEBOUNCE_MS + 150;
 
 const ALICE = { name: 'Alice Green', email: 'alice@example.com' };
 const PAT = { name: 'Pat Kim', email: 'pat@example.com' };
