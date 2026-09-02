@@ -16,14 +16,61 @@ import { PullRebaseConflictError } from '../../../shared/domain-errors.js';
 import type { Database } from '../../database/connection.js';
 
 // `deleteBranch`'s open-request guard is the only DB touch these tests
-// exercise: a chainable select→from→where→limit stub resolving `rows` covers
-// it (rows default to "no open request").
-function makeDb(rows: unknown[] = []): Database {
+// exercise. The stub ANSWERS FROM THE WHERE-CLAUSE rather than returning the
+// rows unfiltered — a guard that dropped the `state = 'open'` filter or asked
+// about only one branch end used to pass these tests anyway, because any row
+// came back regardless of the predicate.
+//
+// The evaluator walks the drizzle condition tree (duck-typing the
+// SQL/Column/Param/StringChunk shapes) and evaluates it against the row:
+// an `eq(column, value)` leaf compares the row's field, and a node combines
+// its children with whichever connector its literal chunks carry (`and` /
+// `or` — drizzle nests them, so one node never mixes both).
+function rowMatches(cond: unknown, row: Record<string, unknown>): boolean {
+  // snake_case column → camelCase row field (the stubs carry row objects in
+  // the service's own field names).
+  const field = (col: string) => col.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase());
+  const evalNode = (node: unknown): boolean => {
+    const chunks = (node as { queryChunks?: unknown[] }).queryChunks;
+    if (!Array.isArray(chunks)) return true;
+    const results: boolean[] = [];
+    let anyOr = false;
+    let pendingColumn: string | null = null;
+    for (const c of chunks) {
+      if (!c || typeof c !== 'object') continue;
+      if ('queryChunks' in c) {
+        results.push(evalNode(c));
+      } else if ('name' in c && 'keyAsName' in c) {
+        pendingColumn = String((c as { name: unknown }).name);
+      } else if ('encoder' in c && 'value' in c) {
+        if (pendingColumn !== null) {
+          results.push(row[field(pendingColumn)] === (c as { value: unknown }).value);
+          pendingColumn = null;
+        }
+      } else if ('value' in c) {
+        if (String((c as { value: unknown }).value).includes(' or ')) anyOr = true;
+      }
+    }
+    // A node this walker cannot decompose (`inArray`, `isNull`, a future
+    // rewrite of the query) must NOT read as a match — `true` here would be
+    // the permissive direction, returning rows the real query excludes and
+    // masking exactly the guard regressions these tests exist to catch.
+    if (results.length === 0) return false;
+    return anyOr ? results.some(Boolean) : results.every(Boolean);
+  };
+  return evalNode(cond);
+}
+
+function makeDb(rows: Record<string, unknown>[] = []): Database {
+  let lastWhere: unknown;
   const chain = {
     select: vi.fn(() => chain),
     from: vi.fn(() => chain),
-    where: vi.fn(() => chain),
-    limit: vi.fn(async () => rows),
+    where: vi.fn((cond: unknown) => {
+      lastWhere = cond;
+      return chain;
+    }),
+    limit: vi.fn(async () => rows.filter((r) => rowMatches(lastWhere, r))),
   };
   return chain as unknown as Database;
 }
@@ -435,9 +482,25 @@ describe('WorkflowService — file lock delegation', () => {
   it('deleteBranch refuses while the branch carries an open change request', async () => {
     const git = makeGit();
     // One open request rides the branch — deleting it would strand the request.
-    const svc = new WorkflowService(makeDb([{ number: 7 }]), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    // `sourceBranch` matters to the guard now: it decides whether the refusal
+    // says "withdraw yours" (source) or names the other request's actors (target).
+    const svc = new WorkflowService(makeDb([{ number: 7, sourceBranch: 'feat/x', targetBranch: 'dev', state: 'open' }]), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
     await expect(svc.deleteBranch('w1', 'feat/x', makeUser())).rejects.toThrow(/open change request \(#7\)/);
     expect(git.deleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('deleteBranch refuses when an open request proposes INTO the branch (target end)', async () => {
+    const git = makeGit();
+    const svc = new WorkflowService(makeDb([{ number: 9, sourceBranch: 'other/y', targetBranch: 'feat/x', state: 'open' }]), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    await expect(svc.deleteBranch('w1', 'feat/x', makeUser())).rejects.toThrow(/proposes changes into/);
+    expect(git.deleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('deleteBranch proceeds past a CLOSED request — the guard filters on state, not mere mention', async () => {
+    const git = makeGit();
+    const svc = new WorkflowService(makeDb([{ number: 7, sourceBranch: 'feat/x', targetBranch: 'dev', state: 'closed' }]), git, makePrs(), makeReviewWorkflow(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    await expect(svc.deleteBranch('w1', 'feat/x', makeUser())).resolves.toBeUndefined();
+    expect(git.deleteBranch).toHaveBeenCalled();
   });
 
   it('deleteBranch deletes when the branch has no open change request', async () => {
@@ -656,8 +719,9 @@ describe('WorkflowService — deleteChangeRequest (admin moderation verb)', () =
       set: vi.fn(() => chain),
       returning: vi.fn(async () => [{ id: 1 }]),
     });
-    const svc = new WorkflowService(chain as unknown as Database, git, prs, makeReviewWorkflow(), makeWorkspaceService(), access, makeFileLockService(), makePendingCommits(), 'knowledge-base');
-    return { svc, prs, db: chain, access };
+    const workspaces = makeWorkspaceService();
+    const svc = new WorkflowService(chain as unknown as Database, git, prs, makeReviewWorkflow(), workspaces, access, makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    return { svc, prs, db: chain, access, workspaces };
   }
 
   it('refuses a non-admin with 403 and touches nothing', async () => {
@@ -676,6 +740,29 @@ describe('WorkflowService — deleteChangeRequest (admin moderation verb)', () =
   it('refuses a merged request — applied history is not deletable', async () => {
     const { svc, db } = makeDeleteHarness({ isAdmin: true, prState: 'merged' });
     await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toMatchObject({ status: 422 });
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it('kicks the deleted-branch sweep when the base workspace cannot be resolved', async () => {
+    const { svc, db, workspaces } = makeDeleteHarness({ isAdmin: true });
+    (workspaces.getOrCreateForBranch as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('Remote branch main not found in upstream origin'),
+    );
+    const sweep = vi.spyOn(svc, 'closeChangeRequestsWithDeletedBranches').mockResolvedValue(0);
+
+    // The failure still surfaces (it is not proven absence, so the verb must
+    // not pretend to succeed), but the sweep is kicked so a genuinely
+    // stranded request is closed without waiting for a restart.
+    await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toThrow(/not found/);
+    expect(sweep).toHaveBeenCalledTimes(1);
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it('does not kick the sweep on a plain authorization refusal', async () => {
+    const { svc, db } = makeDeleteHarness({ isAdmin: false });
+    const sweep = vi.spyOn(svc, 'closeChangeRequestsWithDeletedBranches').mockResolvedValue(0);
+    await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toMatchObject({ status: 403 });
+    expect(sweep).not.toHaveBeenCalled();
     expect(db.update).not.toHaveBeenCalled();
   });
 });

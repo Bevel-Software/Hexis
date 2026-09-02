@@ -832,7 +832,11 @@ function IntegrationsSection({
               <div className="min-w-0">
                 <b className="block text-detail font-semibold text-ink">{t.name}</b>
                 <small className="block text-meta text-ink-faint">
-                  {status.state === 'ok' ? 'Connected. Nothing to do' : status.text}
+                  {/* `status.text`, never a hardcoded "Connected": this list is
+                      built from what is stored, and nothing here has probed
+                      anything — so it says "Key saved"/"Signed in" and keeps the
+                      reassurance that no action is needed. */}
+                  {status.state === 'ok' ? `${status.text}. Nothing to do` : status.text}
                 </small>
               </div>
               <div className="ml-auto flex shrink-0 items-center gap-2">

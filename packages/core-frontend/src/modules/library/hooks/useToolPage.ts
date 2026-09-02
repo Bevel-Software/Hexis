@@ -41,6 +41,12 @@ export interface ToolPageState {
   skillsLoaded: boolean;
   /** Skills whose `allowed-tools` reach this tool. */
   poweredSkills: LibrarySkillSummary[];
+  /**
+   * Bumped by every `reload()`. A same-slug reload no longer remounts the page,
+   * so a child that fetches its own data on `[slug]` would never refetch —
+   * this is the signal it puts in its dependency list instead.
+   */
+  revision: number;
   reload(): void;
 }
 
@@ -64,15 +70,23 @@ export function useToolPage(slug: string): ToolPageState {
   const [revision, setRevision] = useState(0);
   const requestRef = useRef(0);
 
-  // Switching tools (or reloading) has to clear the PREVIOUS tool's spine and
-  // detail, or the page paints stale content under the new slug's heading. That
-  // reset is state derived from a changed input, so it happens during render
-  // against the previous key rather than in the effect body — an effect resets
-  // after paint, which is both a frame of the old tool showing through and the
-  // synchronous setState that `react-hooks/set-state-in-effect` flags.
-  // `useState(key)` seeds the key so a fresh mount, already holding LOADING,
-  // does not reset itself on the first render.
-  const key = `${slug}:${revision}`;
+  // Switching tools has to clear the PREVIOUS tool's spine and detail, or the
+  // page paints stale content under the new slug's heading. That reset is state
+  // derived from a changed input, so it happens during render against the
+  // previous key rather than in the effect body — an effect resets after paint,
+  // which is both a frame of the old tool showing through and the synchronous
+  // setState that `react-hooks/set-state-in-effect` flags. `useState(key)` seeds
+  // the key so a fresh mount, already holding LOADING, does not reset itself on
+  // the first render.
+  //
+  // Keyed on the SLUG ALONE, so a same-tool `reload()` refetches WITHOUT
+  // blanking the page. There is no stale-slug hazard when the slug hasn't
+  // changed, and blanking had a cost: it dropped the page to `loading`, which
+  // unmounts the whole tool page — taking with it the connection section's
+  // probe verdict, which is held in component state precisely because it is not
+  // stored anywhere. Saving a key and then being told nothing about whether it
+  // works is the outcome that made this worth fixing.
+  const key = slug;
   const [seenKey, setSeenKey] = useState(key);
   if (key !== seenKey) {
     setSeenKey(key);
@@ -106,7 +120,10 @@ export function useToolPage(slug: string): ToolPageState {
         if (current()) setDetail(d);
       })
       .catch(() => {
-        // Degraded, not broken: no lede and no capabilities section.
+        // Degraded, not broken: no lede and no capabilities section — and on
+        // a same-slug reload, degraded NOW: the previous fetch's description
+        // must not stand in for one this fetch could not vouch for.
+        if (current()) setDetail(null);
       });
 
     listSkills()
@@ -141,5 +158,5 @@ export function useToolPage(slug: string): ToolPageState {
 
   const reload = useCallback(() => setRevision((r) => r + 1), []);
 
-  return { ...spine, detail, skillsLoaded, poweredSkills, reload };
+  return { ...spine, detail, skillsLoaded, poweredSkills, revision, reload };
 }

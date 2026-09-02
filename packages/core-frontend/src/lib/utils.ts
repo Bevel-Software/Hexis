@@ -88,14 +88,22 @@ export function getFileExtension(filename: string): string {
  * Human-readable relative time ("2h ago", "3d ago"). Falls back to an absolute
  * date past ~a month, where "5w ago" stops meaning anything.
  *
- * Shared rather than per-surface: the file-history timeline and the document
- * rail both say when a file was last touched, and two formatters would
- * eventually disagree about the same commit on the same screen.
+ * THE relative-time formatter, not one of several: a file-history entry, a
+ * document rail, an API key's last use and a connection check all answer the
+ * same question, and per-surface copies drift — "2h ago" beside "2 hr ago" for
+ * the same instant, one flooring where the other rounds. Anything that needs a
+ * different WORD for a missing timestamp supplies its own around this ('' comes
+ * back for nothing to format), rather than a second dialect for the times it
+ * can format.
+ *
+ * Accepts what the surfaces actually hold: an ISO string from the API, epoch
+ * milliseconds from a browser-side record, or a `Date`. Anything unparseable
+ * formats as '' — a caller's fallback word beats echoing a malformed value.
  */
-export function formatRelativeTime(iso: string): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
+export function formatRelativeTime(at: string | number | Date | null | undefined): string {
+  if (at === null || at === undefined || at === '') return '';
+  const d = at instanceof Date ? at : new Date(at);
+  if (Number.isNaN(d.getTime())) return '';
   const diffMs = Date.now() - d.getTime();
   const absolute = () =>
     d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });

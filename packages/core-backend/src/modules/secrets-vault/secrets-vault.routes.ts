@@ -10,6 +10,7 @@ import {
   type ISecretsVaultService,
 } from './secrets-vault.contract.js';
 import type { IToolManualService, ToolManualSummary, ToolVariable } from '../tool-manuals/tool-manuals.contract.js';
+import type { IConnectionProbeService } from '../connection-probe/connection-probe.contract.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
@@ -21,6 +22,11 @@ export interface SecretsVaultRoutesDeps {
   toolManualService: IToolManualService;
   /** Gates who may set a tool's ADMIN (shared) secrets — writers of the `.tool` file. */
   accessControl: IAccessControl;
+  /**
+   * Verdicts of the last credential PROBE per tool — what makes the difference
+   * between "a key is stored" and "the key works" visible to the UI.
+   */
+  connectionProbe: IConnectionProbeService;
   /** HMAC secret for signing the OAuth `state` (reuse the connector state secret). */
   stateSecret: string;
   /** Public base URL of THIS backend — builds the OAuth redirect URI. */
@@ -69,7 +75,7 @@ export function isSafeReturnPath(returnTo: unknown): returnTo is string {
  * `req.userId` — secrets are private per user. Mounted behind the JWT middleware.
  */
 export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.Router {
-  const { secretsVault, toolManualService, accessControl } = deps;
+  const { secretsVault, toolManualService, accessControl, connectionProbe } = deps;
   const router = express.Router();
   // A FUNCTION, not a constant. Routers are constructed at boot, and on a
   // deployment configured through the setup screen the branch model does not
@@ -361,6 +367,10 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
         value: body.value,
         label: body.label,
       });
+      // No probe here, and nothing to invalidate: a verdict is never stored, so
+      // saving a key cannot leave a stale one behind. The caller follows this
+      // with an explicit check, which keeps the save fast and gives the UI a
+      // "Testing…" state to show instead of a frozen dialog.
       res.status(201).json({ secret });
     } catch (err) {
       mapError(err, res, 'set user var');
@@ -501,6 +511,30 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       res.status(204).end();
     } catch (err) {
       mapError(err, res, 'delete user var');
+    }
+  });
+
+  /**
+   * Probe one tool's credential NOW and return the verdict.
+   *
+   * A POST because it has an effect on the world — it makes a real
+   * authenticated call to the provider — and because browsers and proxies are
+   * free to cache a GET, which for a freshness check would defeat the point.
+   *
+   * A probe outcome is never an HTTP error: a rejected credential is a
+   * successful check that found a problem, so it comes back 200 with
+   * `status: 'failed'`. Only a tool that can't be found or read 404s.
+   */
+  router.post('/secrets/tools/:slug/check', async (req, res) => {
+    const userId = req.userId;
+    const email = req.userEmail;
+    if (!userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const verdict = await connectionProbe.probe(userId, email, req.params.slug);
+      if (!verdict) return void res.status(404).json({ error: 'Tool not found' });
+      res.json({ verdict });
+    } catch (err) {
+      mapError(err, res, 'check tool connection');
     }
   });
 

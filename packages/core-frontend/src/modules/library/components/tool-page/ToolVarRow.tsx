@@ -50,6 +50,13 @@ export interface ToolVarRowProps {
    */
   editSignal?: number;
   onChanged(): void;
+  /**
+   * A credential was WRITTEN (not deleted) — a typed value or an owner's client
+   * secret. The one moment worth testing the connection, because it is the only
+   * one that can turn a broken tool into a working one. Deletes still call
+   * `onChanged`; they just have nothing to prove.
+   */
+  onSaved?(): void;
   onError(message: string): void;
 }
 
@@ -63,6 +70,7 @@ export function ToolVarRow({
   returnTo,
   editSignal,
   onChanged,
+  onSaved,
   onError,
 }: ToolVarRowProps) {
   const [editor, setEditor] = useState<Editor>(null);
@@ -108,12 +116,13 @@ export function ToolVarRow({
   }
 
   /** Every write funnels through here so busy/close/report is identical. */
-  async function run(action: () => Promise<void>) {
+  async function run(action: () => Promise<void>, saved = false) {
     setBusy(true);
     try {
       await action();
       close();
       onChanged();
+      if (saved) onSaved?.();
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -152,8 +161,12 @@ export function ToolVarRow({
         <Button key="reconnect" size="tiny" variant="quiet" disabled={busy} onClick={() => void signIn()}>
           Reconnect
         </Button>,
+        // "Signed in", not "Connected": at ROW level all we know is that a token
+        // exists. Whether it still works is the tool-level health line's claim,
+        // and it is the only place in the UI allowed to say "Connected" — one
+        // word, one meaning, backed by a real call.
         <Badge key="chip" tone="ok">
-          Connected
+          Signed in
         </Badge>,
       );
       if (mayEditClientSecret) {
@@ -242,8 +255,12 @@ export function ToolVarRow({
     description = 'Each person sets their own';
     if (variable.userConfigured) {
       meta.push(
+        // "Key saved", not "Connected": a stored value is the whole of what
+        // this row knows. Whether it WORKS is the tool-level health line's
+        // claim, and letting a row make it was how a mistyped key came to
+        // render as a connection.
         <Badge key="chip" tone="ok">
-          Connected
+          Key saved
         </Badge>,
       );
     } else {
@@ -259,12 +276,17 @@ export function ToolVarRow({
   const save = () => {
     const secret = value;
     if (isClientSecret) {
-      return run(() => setOAuthClientSecret(slug, variable.name, secret));
+      // Also a credential change: a replaced client secret can invalidate the
+      // tokens minted under the old one, so the tool's health is now unknown
+      // and worth re-testing — same as any other saved value.
+      return run(() => setOAuthClientSecret(slug, variable.name, secret), true);
     }
-    return run(() =>
-      variable.scope === 'admin'
-        ? setAdminVar(slug, variable.name, secret)
-        : setUserVar(slug, variable.name, secret),
+    return run(
+      () =>
+        variable.scope === 'admin'
+          ? setAdminVar(slug, variable.name, secret)
+          : setUserVar(slug, variable.name, secret),
+      true,
     );
   };
 

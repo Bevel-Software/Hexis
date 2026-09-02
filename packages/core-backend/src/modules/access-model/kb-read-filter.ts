@@ -43,6 +43,28 @@ export function toKbRelative(p: string, kbDirName: string): string | null {
 }
 
 /**
+ * THE single-path read verdict every route module shares: may `userEmail`
+ * read the workspace-relative `wsPath`? Non-KB paths (outside `kbDirName`)
+ * carry no `read:` rules and pass; KB paths go through the FULL `canRead`
+ * (folder `access.md` chain + per-node frontmatter). Content, diff and
+ * history routes all gate through this one function so the rule cannot
+ * drift between the surfaces — a file's history and its diffs are its
+ * content, and must deny exactly where the content route denies. Throws
+ * whatever `canRead` throws: the caller decides how a verdict failure is
+ * reported, and MUST fail closed.
+ */
+export async function canReadWorkspacePath(
+  canRead: (workspaceId: string, userEmail: string, kbRelPath: string) => Promise<boolean>,
+  workspaceId: string,
+  userEmail: string,
+  kbDirName: string,
+  wsPath: string,
+): Promise<boolean> {
+  const rel = toKbRelative(wsPath, kbDirName);
+  return rel === null || (await canRead(workspaceId, userEmail, rel));
+}
+
+/**
  * Resolve read verdicts for a set of workspace-relative paths in ONE batched
  * access call. Non-KB paths (outside `kbDirName`) are always readable — they
  * carry no `read:` rules. KB paths are checked via `batchFn`. Returns a map

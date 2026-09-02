@@ -1,12 +1,19 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
+import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
-import type { ToolSecrets, ToolSetup } from '../../secrets-vault/services/tool-secrets.api';
+import {
+  checkToolConnection,
+  setAdminVar,
+  type ProbeVerdict,
+  type ToolSecrets,
+  type ToolSetup,
+} from '../../secrets-vault/services/tool-secrets.api';
 
 /**
  * The section frame: the Secrets deep link, the setup banner's three audiences,
@@ -19,12 +26,20 @@ vi.mock('../../secrets-vault/services/tool-secrets.api', () => ({
   setUserVar: vi.fn(),
   deleteAdminVar: vi.fn(),
   setOAuthClientSecret: vi.fn(),
+  checkToolConnection: vi.fn(),
 }));
 vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.fn() }));
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolConnectionSection } from '../components/tool-page/ToolConnectionSection';
 
+// `checkToolConnection` is one module-level mock shared by every test here.
+// `resetAllMocks`, not `clearAllMocks`: clearing kept whatever implementation
+// the previous test installed with `mockResolvedValue`, which is exactly the
+// ordering hazard this line claims to prevent — a test that forgot its own
+// implementation inherited its neighbour's and passed by accident. Reset
+// drops implementations too, so every test states what its probe answers.
+beforeEach(() => vi.resetAllMocks());
 function workspace(kbDirName: string | null): WorkspaceContextValue {
   return { workspaceId: 'target-company-state', kbDirName } as unknown as WorkspaceContextValue;
 }
@@ -35,13 +50,25 @@ function LocationProbe() {
   return <div aria-label="pathname">{location.pathname}</div>;
 }
 
+// The rendered tree reaches for the signed-in identity, so the provider has to
+// be present even though this section no longer reads it itself.
+const AUTH = {
+  user: { email: 'user@x.com', name: 'User' },
+  token: 't',
+  isLoading: false,
+  login: vi.fn(),
+  logout: vi.fn(),
+} as unknown as AuthContextValue;
+
 function wrap(children: ReactNode, kbDirName: string | null = 'knowledge-base') {
   return (
     <MemoryRouter>
-      <WorkspaceContext.Provider value={workspace(kbDirName)}>
-        {children}
-        <LocationProbe />
-      </WorkspaceContext.Provider>
+      <AuthContext.Provider value={AUTH}>
+        <WorkspaceContext.Provider value={workspace(kbDirName)}>
+          {children}
+          <LocationProbe />
+        </WorkspaceContext.Provider>
+      </AuthContext.Provider>
     </MemoryRouter>
   );
 }
@@ -67,7 +94,7 @@ const OAUTH_MANUAL: ToolSetup = {
 function renderSection(t: ToolSecrets, kbDirName: string | null = 'knowledge-base') {
   return render(
     wrap(
-      <ToolConnectionSection tool={t} onChanged={vi.fn()} onError={vi.fn()} />,
+      <ToolConnectionSection tool={t} configRevision={0} onChanged={vi.fn()} onError={vi.fn()} />,
       kbDirName,
     ),
   );
@@ -287,4 +314,185 @@ describe('ToolConnectionSection', () => {
       expect(screen.queryByRole('status')).toBeNull();
     },
   );
+
+  /**
+   * The word "Connected" and the evidence for it.
+   *
+   * Nothing stores a verdict, so this component's own state is the only place
+   * one exists — which is exactly why the claim can be trusted: it cannot
+   * outlive the page that watched the call succeed.
+   */
+  describe('the verdict', () => {
+    const settled = () =>
+      tool({
+        variables: [
+          {
+            name: 'API_KEY',
+            scope: 'user',
+            label: null,
+            key: 'github_API_KEY',
+            adminConfigured: true,
+            userConfigured: true,
+          },
+        ],
+      });
+
+    it('says Key saved — never Connected — before anything has been tested', () => {
+      renderSection(settled());
+      expect(screen.getByTestId('tool-health')).toHaveTextContent('Key saved');
+    });
+
+    it('earns Connected from a passing probe, and only then', async () => {
+      vi.mocked(checkToolConnection).mockResolvedValue({
+        status: 'ok',
+        detail: null,
+        checkedAt: new Date().toISOString(),
+      });
+      renderSection(settled());
+
+      fireEvent.click(screen.getByRole('button', { name: 'Test connection: github' }));
+
+      await waitFor(() => expect(screen.getByTestId('tool-health')).toHaveTextContent('Connected'));
+      expect(checkToolConnection).toHaveBeenCalledWith('github');
+    });
+
+    it("goes red with the provider's own words when the credential is rejected", async () => {
+      vi.mocked(checkToolConnection).mockResolvedValue({
+        status: 'failed',
+        detail: 'Invalid API key.',
+        checkedAt: new Date().toISOString(),
+      });
+      renderSection(settled());
+
+      fireEvent.click(screen.getByRole('button', { name: 'Test connection: github' }));
+
+      // A rejected credential needs a person, so it escalates from the quiet
+      // line to a banner.
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Invalid API key.'));
+    });
+
+    it('keeps the button disabled while the probe is in flight', async () => {
+      let release: (v: ProbeVerdict) => void = () => {};
+      vi.mocked(checkToolConnection).mockReturnValue(
+        new Promise<ProbeVerdict>((r) => {
+          release = r;
+        }),
+      );
+      renderSection(settled());
+      const button = screen.getByRole('button', { name: 'Test connection: github' });
+
+      fireEvent.click(button);
+
+      // The in-flight state lives beside the button precisely so it survives
+      // the refetch a save triggers — a remount would re-enable it mid-probe.
+      await waitFor(() => expect(screen.getByRole('button', { name: /Test connection/ })).toBeDisabled());
+      expect(screen.getByRole('button', { name: /Test connection/ })).toHaveTextContent('Testing…');
+      release({ status: 'ok', detail: null, checkedAt: new Date().toISOString() });
+      await waitFor(() => expect(screen.getByRole('button', { name: /Test connection/ })).toBeEnabled());
+    });
+
+    it('does not claim a verdict when the CHECK itself failed', async () => {
+      // Our own network trouble is not evidence about someone else's credential.
+      vi.mocked(checkToolConnection).mockRejectedValue(new Error('Network down'));
+      const onError = vi.fn();
+      render(wrap(<ToolConnectionSection tool={settled()} configRevision={0} onChanged={vi.fn()} onError={onError} />));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Test connection: github' }));
+
+      // The section's OWN banner, not the page's shared one: page state
+      // outlived its subject (another action's error cleared by a probe, a
+      // previous tool's probe touching the current tool's banner).
+      await waitFor(() => expect(screen.getByTestId('tool-probe-error')).toHaveTextContent('Network down'));
+      expect(onError).not.toHaveBeenCalled();
+      expect(screen.getByTestId('tool-health')).toHaveTextContent('Key saved');
+
+      // The next clean probe clears it.
+      vi.mocked(checkToolConnection).mockResolvedValue({ status: 'ok', detail: null, checkedAt: new Date().toISOString() });
+      fireEvent.click(screen.getByRole('button', { name: 'Test connection: github' }));
+      await waitFor(() => expect(screen.queryByTestId('tool-probe-error')).toBeNull());
+    });
+
+    it('stops claiming Connected once the server definition changes', async () => {
+      // A verdict describes the endpoint and headers it was probed against.
+      // Editing the mcp.json server replaces those, so the old answer is about
+      // a server that is no longer configured — and the page not remounting on
+      // a same-slug reload is exactly why it would otherwise survive.
+      vi.mocked(checkToolConnection).mockResolvedValue({
+        status: 'ok',
+        detail: null,
+        checkedAt: new Date().toISOString(),
+      });
+      const view = render(
+        wrap(<ToolConnectionSection tool={settled()} configRevision={0} onChanged={vi.fn()} onError={vi.fn()} />),
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Test connection: github' }));
+      await waitFor(() => expect(screen.getByTestId('tool-health')).toHaveTextContent('Connected'));
+
+      view.rerender(
+        wrap(<ToolConnectionSection tool={settled()} configRevision={1} onChanged={vi.fn()} onError={vi.fn()} />),
+      );
+
+      expect(screen.getByTestId('tool-health')).toHaveTextContent('Key saved');
+    });
+
+    it('lets the NEWER of two overlapping probes win, however they finish', async () => {
+      // Two saves in quick succession start two probes. If the first answers
+      // last, its verdict is about the credential the second one replaced —
+      // the same stale-answer bug this feature exists to remove, one layer up.
+      //
+      // Driven through SAVES, not the button: the button disables itself while
+      // a probe runs, so it cannot start the second one. A save can, because
+      // nothing stops a user typing the next key while the last check is still
+      // in flight — which is what makes this reachable at all.
+      let releaseFirst: (v: ProbeVerdict) => void = () => {};
+      vi.mocked(checkToolConnection)
+        .mockReturnValueOnce(
+          new Promise<ProbeVerdict>((r) => {
+            releaseFirst = r;
+          }),
+        )
+        .mockResolvedValueOnce({ status: 'failed', detail: 'Invalid API key.', checkedAt: new Date().toISOString() });
+      vi.mocked(setAdminVar).mockResolvedValue(undefined);
+
+      // An ADMIN variable a writer can replace: a user-scope row offers no way
+      // back into the editor once its key is stored, so it cannot produce the
+      // second save this race needs.
+      renderSection(
+        tool({
+          canWrite: true,
+          variables: [
+            {
+              name: 'API_KEY',
+              scope: 'admin',
+              label: null,
+              key: 'github_API_KEY',
+              adminConfigured: true,
+              userConfigured: false,
+            },
+          ],
+        }),
+      );
+      const save = async (value: string) => {
+        fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+        fireEvent.change(screen.getByLabelText('Value for API_KEY'), { target: { value } });
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+        await waitFor(() => expect(screen.queryByLabelText('Value for API_KEY')).toBeNull());
+      };
+
+      await save('first-key');
+      await save('second-key');
+      await waitFor(() => expect(checkToolConnection).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Invalid API key.'));
+
+      // The first probe now answers "ok" — about `first-key`, which no longer
+      // exists — and must not be believed. `act` flushes the re-render that a
+      // BROKEN guard would schedule here; a bare microtask await did not, so
+      // the assertions below used to pass with the guard removed.
+      await act(async () => {
+        releaseFirst({ status: 'ok', detail: null, checkedAt: new Date().toISOString() });
+      });
+      expect(screen.getByRole('alert')).toHaveTextContent('Invalid API key.');
+      expect(screen.queryByTestId('tool-health')).toBeNull();
+    });
+  });
 });

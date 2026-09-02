@@ -114,7 +114,13 @@ describe('closeChangeRequestsWithDeletedBranches', () => {
       { name: 'x' },
     ]);
     await svc.closeChangeRequestsWithDeletedBranches();
-    expect(git.listBranches).toHaveBeenCalledWith('target-company-state', { freshFetch: true });
+    expect(git.listBranches).toHaveBeenCalledWith('target-company-state', {
+      freshFetch: true,
+      // Strict: a fetch that cannot be proven fresh throws instead of serving
+      // stale refs, and the sweep's catch closes nothing. Without this, a
+      // branch created after the clone's last good fetch reads as "deleted".
+      strictFetch: true,
+    });
   });
 
   /**

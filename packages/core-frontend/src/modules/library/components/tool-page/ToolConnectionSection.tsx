@@ -1,12 +1,16 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
 import { kbFileUrl } from '../../../workspace/routing/kb-routes';
-import type { ToolSecrets } from '../../../secrets-vault/services/tool-secrets.api';
+import {
+  checkToolConnection,
+  type ProbeVerdict,
+  type ToolSecrets,
+} from '../../../secrets-vault/services/tool-secrets.api';
 import { pathForTool } from '../../routes/library-paths';
-import { toolVariableStatuses } from '../../utils/status';
+import { toolStatus, toolVariableStatuses } from '../../utils/status';
 import { ToolVarRow } from './ToolVarRow';
 
 /**
@@ -24,16 +28,76 @@ import { ToolVarRow } from './ToolVarRow';
 
 export interface ToolConnectionSectionProps {
   tool: ToolSecrets;
+  /**
+   * Bumped whenever the tool's DEFINITION changes — today, an mcp.json server
+   * edit. A verdict describes the endpoint and headers it was probed against,
+   * so changing those makes it a statement about a server that is no longer
+   * configured; the badge must stop claiming it. Deliberately NOT bumped by a
+   * credential write: that path clears and re-probes on its own, and bumping
+   * here would discard the answer it is in the middle of fetching.
+   */
+  configRevision: number;
   /** A write landed — the caller refetches so the chips catch up. */
   onChanged(): void;
   onError(message: string): void;
 }
 
-export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnectionSectionProps) {
+export function ToolConnectionSection({
+  tool,
+  configRevision,
+  onChanged,
+  onError,
+}: ToolConnectionSectionProps) {
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
   /** `{varName, n}` — bumping `n` opens that variable's editor from the banner. */
   const [edit, setEdit] = useState<{ name: string; n: number }>({ name: '', n: 0 });
+  /**
+   * The revision of the probe in flight, or null. `checking` is DERIVED: an
+   * in-flight probe owns the Test button only while the definition it dials
+   * is still the one on screen, so a config edit mid-probe re-enables the
+   * button for the new definition immediately instead of waiting for the
+   * orphan to settle.
+   */
+  const [inFlight, setInFlight] = useState<{ rev: number } | null>(null);
+  const checking = inFlight !== null && inFlight.rev === configRevision;
+
+  /**
+   * A probe's TRANSPORT failure (network, access — not a verdict about the
+   * credential), held here rather than raised to the page's shared error
+   * banner. Page-level state outlived its subject twice over: another
+   * action's error could be cleared by a probe that happened to recover,
+   * and a probe of the PREVIOUS tool (this section is keyed by slug) could
+   * clear or raise it after unmount. Section state dies with the section,
+   * and the revision stamp makes it self-invalidating, exactly like the
+   * verdict: shown only while it describes the configuration on screen.
+   */
+  const [probeError, setProbeError] = useState<{ rev: number; message: string } | null>(null);
+  const shownProbeError = probeError && probeError.rev === configRevision ? probeError.message : null;
+  /**
+   * The last probe's answer, and the ONLY place one exists.
+   *
+   * Nothing persists a verdict, so this state IS the evidence behind the word
+   * "Connected" — which is why the claim can be trusted: it cannot outlive the
+   * page that watched the call succeed.
+   *
+   * Stored WITH the config revision it was probed under, and read back only
+   * when that still matches. Comparing rather than clearing keeps it pure: an
+   * effect that cleared on change would race the probe it is meant to protect,
+   * since a credential save starts a probe and a refetch at the same moment.
+   */
+  const [probed, setProbed] = useState<{ rev: number; value: ProbeVerdict } | null>(null);
+  const verdict = probed && probed.rev === configRevision ? probed.value : null;
+
+  /**
+   * Which probe is allowed to publish. Two saves in quick succession start two
+   * probes, and the first can answer last — so a result is applied only while
+   * it is still the newest one asked for. Without it the older credential's
+   * verdict wins by finishing late, which is the same stale-answer bug this
+   * whole feature exists to remove, one layer up.
+   */
+  const probeSeq = useRef(0);
+
 
   const setupKind = tool.setup?.kind ?? null;
   // Not just "kind is oauth-manual": once the owner declares the provider and
@@ -92,14 +156,144 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
     </Button>
   ) : null;
 
+  /**
+   * The health line, shown only once every variable is provided.
+   *
+   * While something is still missing, the amber banner above already names it,
+   * and a second line saying the connection is untested would be answering a
+   * question nobody has reached yet. Once nothing is missing, this is the only
+   * remaining question — and the one the badge used to answer by guessing.
+   */
+  const health = toolStatus(tool, verdict);
+  // Every variable genuinely provided — NOT merely `missing.length === 0`, which
+  // excludes a pending sign-in on a configured provider. A tool nobody has
+  // signed into yet has no credential to test, and saying so would put a health
+  // line above a row that already says "Needs your sign-in".
+  // Vacuously true for a tool that declares no variables: a no-auth MCP server
+  // has nothing to set up and is still worth probing — its handshake is exactly
+  // the kind of thing that can be reachable one day and not the next.
+  //
+  // But `!setupUnfinished` first: an `oauth-manual` server whose sign-in nobody
+  // has declared YET also has no variables, and `every([])` would call that
+  // settled — offering Test connection and the words "No key needed" directly
+  // above a banner telling the owner to go configure OAuth.
+  const settled =
+    !setupUnfinished && toolVariableStatuses(tool).every(({ status }) => status.state === 'ok');
+
+  /**
+   * Run a probe and keep its answer.
+   *
+   * `checking` lives here, beside the button it disables, so it is still true
+   * while the request is in flight — the reason a save no longer blanks the
+   * page (see `useToolPage`): a remount would drop both this flag and the
+   * verdict, leaving an enabled "Test connection" over a probe already running.
+   */
+  async function runCheck() {
+    const mine = ++probeSeq.current;
+    const rev = configRevision;
+    setInFlight({ rev });
+    // A replacement probe makes the previous transport failure history the
+    // moment it starts — leaving the alert up while "Testing…" runs reads as
+    // the new attempt already having failed.
+    setProbeError(null);
+    try {
+      const value = await checkToolConnection(tool.slug);
+      // Newest-probe guard only: everything published is REVISION-STAMPED
+      // and compared at render, so a probe that raced a definition change
+      // stores state that simply never shows — no clock to synchronise, no
+      // ref to read mid-render.
+      if (probeSeq.current === mine) {
+        setProbed({ rev, value });
+        setProbeError(null);
+      }
+    } catch (err) {
+      // A rejected credential resolves with `status: 'failed'`; only a
+      // transport or access failure lands here, and that is not a verdict about
+      // the credential — so the badge keeps saying "untested" rather than
+      // inventing a result from our own network trouble.
+      // Inside the guard too: an older probe rejecting after a newer one has
+      // already answered would otherwise raise a transport error over a verdict
+      // that is currently correct.
+      if (probeSeq.current === mine) {
+        setProbed(null);
+        setProbeError({ rev, message: err instanceof Error ? err.message : "Couldn't test this connection." });
+      }
+    } finally {
+      // Only the newest probe releases the slot: an older one finishing late
+      // must not clear a newer probe's in-flight marker.
+      if (probeSeq.current === mine) setInFlight(null);
+    }
+  }
+
+  /**
+   * A credential write LANDED (save or delete, from the banner's editor or a
+   * row). Everything a pending probe could still say is about a credential
+   * that no longer exists in that form, so the write ORPHANS it outright —
+   * the sequence bump takes its voice (a delete starts no replacement probe,
+   * so nothing else would), the in-flight slot is released, and the old
+   * transport alert goes with them.
+   */
+  function changed() {
+    probeSeq.current++;
+    setInFlight(null);
+    setProbeError(null);
+    // The VERDICT too: after a delete, “Connected” would otherwise keep
+    // describing a credential that no longer exists while the refetch is
+    // still in flight.
+    setProbed(null);
+    onChanged();
+  }
+
+  /**
+   * A credential was just SAVED: whatever the last probe concluded was about
+   * the key it replaced, so drop it and test the new one straight away —
+   * while the user still has it to hand, which is when a wrong key is
+   * cheapest to fix. (The row calls `changed` too, which orphans the old
+   * probe; the fresh `runCheck` claims the sequence for the new key.)
+   */
+  function onSaved() {
+    setProbed(null);
+    void runCheck();
+  }
+
   return (
     <section className="mt-8">
       <div className="mb-2.5 flex items-center justify-between gap-3">
         <h2 className="text-label font-semibold uppercase text-ink-faint">Your connection</h2>
-        <Link to="/secrets" className={buttonClasses({ variant: 'quiet', size: 'tiny' })}>
-          Open Secrets
-        </Link>
+        <div className="flex items-center gap-2">
+          {/* A healthy connection stays QUIET — this section's rule is that only
+              things needing a person get a banner, and a working tool needs
+              nobody. But it still has to be sayable: the word plus its evidence
+              on hover is how "Connected" stops being an assumption, and the
+              button is the only way to ask the question on demand. A REJECTED
+              credential does need a person, so it escalates to a banner below. */}
+          {settled && health.state !== 'err' && (
+            <span className="text-meta text-ink-faint" title={health.hint} data-testid="tool-health">
+              {health.text}
+            </span>
+          )}
+          {settled && (
+            <Button
+              variant="quiet"
+              size="tiny"
+              disabled={checking}
+              onClick={() => void runCheck()}
+              aria-label={`Test connection: ${tool.name}`}
+            >
+              {checking ? 'Testing…' : 'Test connection'}
+            </Button>
+          )}
+          <Link to="/secrets" className={buttonClasses({ variant: 'quiet', size: 'tiny' })}>
+            Open Secrets
+          </Link>
+        </div>
       </div>
+
+      {shownProbeError && (
+        <Banner tone="danger" role="alert" className="mb-2.5" data-testid="tool-probe-error">
+          {shownProbeError}
+        </Banner>
+      )}
 
       {setupUnfinished && (
         <Banner tone="wait" role="status" className="mb-2.5">
@@ -167,6 +361,22 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
         </Banner>
       )}
 
+      {/* The one health state that needs a person: the provider tested this
+          credential and refused it. Everything is configured, so no other
+          banner covers it, and the row below cannot know — only a real call
+          could tell us. `alert`, not `status`: this is the case the whole
+          feature exists to surface. */}
+      {settled && health.state === 'err' && (
+        <Banner tone="danger" role="alert" className="mb-2.5" data-testid="tool-health-failed">
+          <div className="flex items-center gap-3">
+            <span className="min-w-0 flex-1">
+              <span className="font-semibold">{health.text}.</span>
+              {health.hint && <span> {health.hint}</span>}
+            </span>
+          </div>
+        </Banner>
+      )}
+
       {tool.variables.length === 0 ? (
         <p className="text-body text-ink-muted">Nothing to set up</p>
       ) : (
@@ -180,7 +390,12 @@ export function ToolConnectionSection({ tool, onChanged, onError }: ToolConnecti
               setupKind={setupKind}
               returnTo={pathForTool(tool.slug)}
               editSignal={edit.name === variable.name ? edit.n : undefined}
-              onChanged={onChanged}
+              onChanged={changed}
+              // Test the moment a key is entered — while the user still has it
+              // to hand, which is when a typo is cheapest to fix. Waiting for
+              // an agent to trip over it is how the wrong key got to look
+              // connected in the first place.
+              onSaved={onSaved}
               onError={onError}
             />
           ))}

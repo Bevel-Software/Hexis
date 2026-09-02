@@ -121,6 +121,7 @@ const TOOL_PAGE_STATE: ToolPageState = {
   detail: null,
   skillsLoaded: true,
   poweredSkills: [],
+  revision: 0,
   reload: vi.fn(),
 };
 

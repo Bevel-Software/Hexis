@@ -89,6 +89,57 @@ export interface ToolVariable {
 }
 
 /**
+ * An optional cheap, read-only call that proves a credential actually WORKS.
+ *
+ * A `type: mcp` manual needs none — its handshake is authenticated, so merely
+ * connecting already tests the token. `http` and `inline` manuals have no such
+ * moment: registering an `http` manual fetches its DESCRIPTION, which providers
+ * usually serve publicly, so a wrong key sails through; an `inline` manual's
+ * discovery template points at Bevel's own API and never touches the provider
+ * at all. Without a declaration there is genuinely nothing to call, and the
+ * platform reports the connection as unverified rather than guessing.
+ *
+ * NOT inferred from the manual's own tools. Picking one automatically would
+ * mean calling an arbitrary tool with invented arguments — a probe that could
+ * send a message or create a record is worse than no probe. The author names a
+ * safe endpoint or the tool stays unverified.
+ *
+ * `${VAR}` refs resolve from the caller's vault exactly as they do in `url` and
+ * `headers`, which is the whole point: the probe must carry the same credential
+ * the real calls carry. Any 2xx is a pass; 401/403 is a rejection; anything
+ * else is treated as the provider being unwell rather than the key being wrong.
+ */
+export interface ToolHealthCheck {
+  /** Absolute URL to call. May contain `${VAR}` refs; SSRF-checked like `url`. */
+  url: string;
+  /** Default `GET`. A health check may not mutate, so nothing else is allowed. */
+  method?: 'GET';
+  /** Defaults to the manual's own `headers` — usually where the credential is. */
+  headers?: Record<string, string>;
+}
+
+/**
+ * One manual, reduced to exactly what testing its credential requires.
+ *
+ * Server-internal, like {@link ToolHealthCheck} and for the same reason: both
+ * `healthCheck.headers` and `callTemplate` can carry a literal token.
+ */
+export interface ToolProbeTarget {
+  name: string;
+  type: ToolManualType;
+  /** `false` for a local-only tool this server is not the one that can reach it. */
+  remote?: boolean;
+  /** The probe the `.tool` declares, if any. */
+  healthCheck?: ToolHealthCheck;
+  /**
+   * The validated UTCP call template, or `null` when the manual doesn't produce
+   * a valid one. Only the `mcp` probe uses it — its handshake IS the test — but
+   * it is built here so the probe never has to walk the catalog again.
+   */
+  callTemplate: CallTemplate | null;
+}
+
+/**
  * For a `type: mcp` tool, what an admin must do to make the remote server
  * reachable — derived from OAuth auto-discovery, which a non-mcp tool has no
  * equivalent of (its needs are fully described by its declared `variables`):
@@ -140,6 +191,15 @@ export interface ToolManualDescriptorBase {
   variables?: ToolVariable[];
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
+  /**
+   * Optional credential probe — see {@link ToolHealthCheck}. Declared on
+   * `http`/`inline` manuals, and honoured on `type: mcp` too, where it
+   * OVERRIDES the default handshake probe (a server whose health endpoint is
+   * cheaper or more truthful than a full MCP handshake says so here).
+   * INTERNAL: lives on the descriptor, never on {@link ToolManualSummary},
+   * because it carries `headers`.
+   */
+  healthCheck?: ToolHealthCheck;
 }
 
 /** The spawn spec of a stdio-declared MCP server (a plugin `mcp.json` entry). */
@@ -197,6 +257,10 @@ export interface ToolManualSummary {
   remote?: boolean;
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
+  // NOTE: no `healthCheck` here, deliberately. This type is serialized straight
+  // to the browser by the tool endpoints, and a probe carries `headers` — which
+  // a `.tool` author may write as a literal token rather than a `${VAR}` ref.
+  // The server reads probe config through `IToolManualService.probeTargetFor`.
 }
 
 /** One thing an `inline` manual's embedded tool list says the assistant can do. */
@@ -269,6 +333,31 @@ export interface IToolManualService {
    * a `resolve` reads the shared row or the caller's row.
    */
   scopeOfVariable(effectiveKey: string): Promise<ToolVariableScope>;
+  /**
+   * Everything the credential probe needs about one readable manual, resolved
+   * in a SINGLE catalog + ACL pass.
+   *
+   * One accessor rather than three because the probe needs three facts that all
+   * come from the same file — is it local-only, does it declare a health check,
+   * and what call template would reach it — and asking for them separately made
+   * one probe walk the catalog four times, building call templates for every
+   * manual in the workspace to use exactly one of them.
+   *
+   * Deliberately NOT reachable through {@link ToolManualSummary}: that type is
+   * serialized straight to the browser by the tool endpoints, and a probe
+   * carries `headers` — which a `.tool` author may write as a literal token
+   * rather than a `${VAR}` ref. Probe config is internal to the server, so it
+   * travels by its own accessor and never rides a public DTO.
+   *
+   * Addressed by SLUG, which is what the route has: resolving the slug here
+   * rather than making the caller map it to a name first is what reduces a
+   * probe to one pass. `ToolProbeTarget.name` carries the UTCP namespace back
+   * out, since that is what the probe's `${VAR}` lookups are keyed by.
+   *
+   * `null` when no such manual exists OR the caller can't read it — the two are
+   * indistinguishable on purpose, as everywhere else in this contract.
+   */
+  probeTargetFor(userEmail: string, slug: string): Promise<ToolProbeTarget | null>;
   /**
    * The per-user (`user`-scoped) variables a manual declares, each with the vault
    * key (`<manual>_<VAR>`) the caller's value is stored under, its bare name, and

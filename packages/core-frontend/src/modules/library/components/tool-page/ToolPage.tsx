@@ -50,6 +50,13 @@ export function ToolPage({
   // `actionError` so a successful reload can't clear a callback failure.
   const [oauthOutcome] = useState(readOAuthFragment);
   const [actionError, setActionError] = useState<string | null>(null);
+  /**
+   * Bumped when the tool's DEFINITION changes — an mcp.json server edit. Lives
+   * here rather than in the connection section because the section is not the
+   * component that knows a server was edited, and a probe verdict about the old
+   * endpoint must not survive the change.
+   */
+  const [serverRevision, setServerRevision] = useState(0);
 
   useEffect(() => {
     // Consume the OAuth `#…` fragment, KEEPING the query string: on an
@@ -143,8 +150,15 @@ export function ToolPage({
         </Banner>
       )}
 
+      {/* Keyed by slug: the section's probe verdict and `checking` flag are
+          component state about THIS tool. Navigating between two canonical
+          tools re-renders the same component instance, and without the key
+          the previous tool's "Connected" (or its failure banner) survives
+          under the next tool's heading. */}
       <ToolConnectionSection
+        key={tool.slug}
         tool={tool}
+        configRevision={serverRevision}
         onChanged={() => {
           setActionError(null);
           page.reload();
@@ -160,8 +174,13 @@ export function ToolPage({
         <McpServerSection
           slug={tool.slug}
           configuredCount={tool.variables.filter((v) => v.adminConfigured || v.userConfigured || v.authorized === true).length}
+          reloadSignal={page.revision}
           onSaved={() => {
             setActionError(null);
+            // The endpoint or headers may have just changed, so any verdict the
+            // connection section is holding describes a server that is no
+            // longer configured.
+            setServerRevision((r) => r + 1);
             page.reload();
           }}
           onError={setActionError}

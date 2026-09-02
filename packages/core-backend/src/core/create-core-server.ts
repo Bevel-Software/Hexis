@@ -303,6 +303,7 @@ export async function createCoreServer(
     secretsVault: core.secretsVaultService,
     toolManualService: core.toolManualService,
     accessControl: core.accessControl,
+    connectionProbe: core.connectionProbeService,
     stateSecret: core.config.jwtSecret,
     publicBackendUrl: core.config.publicBackendUrl,
     publicFrontendUrl: core.config.publicFrontendUrl,
@@ -401,6 +402,8 @@ export async function createCoreServer(
     core.workspaceService,
     core.authService,
     core.eventBus,
+    core.accessControl,
+    core.kbDirName,
   ));
   // SSE event-bus surface. The route owns its own auth gating via the
   // injected middleware (which accepts both Bearer and the `bevel_token`

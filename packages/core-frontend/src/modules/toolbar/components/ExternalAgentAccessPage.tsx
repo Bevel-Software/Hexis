@@ -4,6 +4,7 @@ import { Check, Copy, Wrench, ExternalLink } from 'lucide-react';
 import { Dialog } from '../../../shared/components/Dialog';
 import { PageShell } from '../../../shared/components/PageShell';
 import { buttonClasses } from '../../../shared/components';
+import { formatRelativeTime } from '../../../lib/utils';
 import {
   ConnectionInstructions,
   CopyBlock,
@@ -27,17 +28,12 @@ import {
 
 const MAX_LABEL_LEN = 200;
 
+/**
+ * The shared formatter, plus the one word it deliberately leaves to the caller:
+ * a key that has never been used has no instant to describe.
+ */
 function formatRelative(ts: number | null): string {
-  if (ts === null) return 'never';
-  const diff = Date.now() - ts;
-  const minutes = Math.round(diff / 60_000);
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} hr ago`;
-  const days = Math.round(hours / 24);
-  if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`;
-  return new Date(ts).toLocaleDateString();
+  return formatRelativeTime(ts) || 'never';
 }
 
 /**

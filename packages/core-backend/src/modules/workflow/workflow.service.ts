@@ -42,7 +42,7 @@ import type {
   PostChangeRequestCommentInput,
 } from '@bevel-software/platform-shared';
 import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
 import type { GitService } from './git/git.service.js';
@@ -282,6 +282,85 @@ export class WorkflowService implements IWorkflowService {
    */
   private readonly branchLifecycle = new WorkspaceMutex();
 
+  /**
+   * Hold the lifecycle lock of BOTH branches a change request names, so a
+   * check-then-insert spanning them excludes either one being deleted.
+   *
+   * ATOMICALLY, via `runAll` — not `run(a, () => run(b, …))`. Taking the keys
+   * one at a time leaves a gap between them in which a delete of the second
+   * branch can start, pass its "is any open request using this?" check
+   * (the row does not exist yet) and finish, so the request lands pointing at
+   * a branch that was removed while it was being opened. That is the same
+   * failure this PR is about, reintroduced one level down — and it would have
+   * been a REGRESSION on the source branch, which the previous single-key
+   * lock held for the whole sequence.
+   *
+   * Reserving the set in one step also removes the deadlock question that
+   * sequential acquisition raises: two requests may legally be open in
+   * opposite directions (`A -> B` and `B -> A`), and nothing is ever held
+   * while waiting for the other key.
+   *
+   * A PROTECTED target's key is NOT reserved. No path in the system can
+   * delete a protected branch (`git.deleteBranch` throws
+   * `ProtectedBranchError` before any lock, `retireMergedSourceBranch`
+   * returns early on one), so the key would exclude nothing. It would only
+   * cost: nearly every request targets the protected default branch, so one
+   * shared key there would serialize every open on the hottest path for the
+   * duration of a fetch + merge + push + diff. The source needs no such
+   * carve-out; `openChangeRequest` refuses protected sources before locking.
+   */
+  private runOnBranchPair<T>(
+    source: string,
+    target: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const keys = [`branch:${source}`];
+    if (!isProtectedBranch(target)) keys.push(`branch:${target}`);
+    return this.branchLifecycle.runAll(keys, fn);
+  }
+
+  /**
+   * The open change requests that deleting `branch` would strand — every one
+   * that NAMES it, at EITHER end.
+   *
+   * Both ends, not just the source. A change request is a proposal to move
+   * commits FROM one branch INTO another and it needs both to exist: the
+   * detail read resolves the target BEFORE the source, so a request whose
+   * target has been deleted cannot be read, declined, or deleted either. It
+   * is also the worse half to lose — a stranded source is closed by the boot
+   * sweep, while a stranded target used to survive every restart, because
+   * every guard here asked only "is this branch anybody's SOURCE?".
+   *
+   * That question is what let a merge retire a branch a second, still-open
+   * request was pointing INTO: the pair `X -> B` (merged, B retired) and
+   * `Y -> X` (open, now unusable forever).
+   *
+   * Returns the first such request's number and which end of it names the
+   * branch, or null when the branch is free. The end matters to the caller's
+   * error message: "withdraw your request" is only actionable when the asker
+   * owns the request, and a request proposing INTO the branch is someone
+   * else's.
+   */
+  private async openChangeRequestOn(
+    branch: string,
+  ): Promise<{ number: number; end: 'source' | 'target' } | null> {
+    const [row] = await this.db
+      .select({ number: changeRequests.number, sourceBranch: changeRequests.sourceBranch })
+      .from(changeRequests)
+      .where(
+        and(
+          or(
+            eq(changeRequests.sourceBranch, branch),
+            eq(changeRequests.targetBranch, branch),
+          ),
+          eq(changeRequests.state, 'open'),
+        ),
+      )
+      .limit(1);
+    if (!row) return null;
+    return { number: row.number, end: row.sourceBranch === branch ? 'source' : 'target' };
+  }
+
   async deleteBranch(
     workspaceId: string,
     name: string,
@@ -296,16 +375,19 @@ export class WorkflowService implements IWorkflowService {
       // its own open-request check under this same lock, and the legacy
       // `onlyIfNoRemote` prune only fires when origin no longer has the ref.
       if (!opts?.systemCleanup && !opts?.onlyIfNoRemote) {
-        const open = await this.db
-          .select({ number: changeRequests.number })
-          .from(changeRequests)
-          .where(
-            and(eq(changeRequests.sourceBranch, name), eq(changeRequests.state, 'open')),
-          )
-          .limit(1);
-        if (open.length > 0) {
+        const open = await this.openChangeRequestOn(name);
+        if (open !== null) {
+          // Two different situations, two different actors. A request FROM
+          // this branch is the deleter's own to withdraw; a request INTO it
+          // belongs to someone else, and telling the branch owner to
+          // "withdraw" it points them at a verb they cannot use.
           throw new WorkflowValidationError(
-            `Branch "${name}" has an open change request (#${open[0].number}) — withdraw or decline it before deleting the branch.`,
+            open.end === 'source'
+              ? `Branch "${name}" has an open change request (#${open.number}). ` +
+                `Withdraw or decline it before deleting the branch.`
+              : `Open change request #${open.number} proposes changes into "${name}". ` +
+                `Its author can withdraw it, or an admin can decline it; ` +
+                `after that the branch can be deleted.`,
           );
         }
       }
@@ -1284,12 +1366,17 @@ export class WorkflowService implements IWorkflowService {
     }
 
     // The whole open sequence — uniqueness check through row insert — runs
-    // under the source branch's lifecycle lock. `retireMergedSourceBranch`
-    // takes the same lock around its own check-then-delete, so a merge
-    // cleanup can never race into the multi-second gap between this
-    // method's "no open request" answer and its row landing, and delete the
-    // branch out from under a request being opened.
-    return this.branchLifecycle.run(`branch:${input.sourceBranch}`, async () => {
+    // under the lifecycle lock of BOTH branches. `retireMergedSourceBranch`
+    // and `deleteBranch` take the lock of the branch they are removing around
+    // their own check-then-delete, so a cleanup can never race into the
+    // multi-second gap between this method's "no open request" answer and its
+    // row landing, and delete a branch out from under a request being opened.
+    //
+    // BOTH, because that gap is symmetric: a request is unusable if EITHER of
+    // its branches is retired inside the window, and holding only the source
+    // left a `Y -> X` request open to X being deleted under it — the very
+    // failure the widened guards exist to prevent.
+    return this.runOnBranchPair(input.sourceBranch, input.targetBranch, async () => {
     // Uniqueness rule — A→B blocks A→B (the spec is explicit that B→A in
     // parallel is still allowed). `listOpenPrs` is cached for 30s so we
     // force-fresh to catch a CR that opened just now.
@@ -1701,14 +1788,56 @@ export class WorkflowService implements IWorkflowService {
       throw new WorkflowDomainError('This change request has already been applied.', 422);
     }
 
-    const ws = await this.workspaceService.getOrCreateForBranch(summary.base);
-    await this.workspaceService.ensureRemotesFetched(ws.id).catch(() => undefined);
-    const isAdmin = await this.accessControl.canWriteAtRef(
-      ws.id,
-      `origin/${summary.base}`,
-      user.email,
-      'roles.yaml',
-    );
+    // Which `roles.yaml` authorizes this? The base branch's, exactly as every
+    // other admin check here. When the base branch itself is gone, this
+    // bootstrap (or the at-ref check below) fails; that failure is NOT proven
+    // absence, so it never re-keys authorization to some other branch. It
+    // kicks the deleted-branch sweep instead: the one mechanism that proves a
+    // branch is missing (fresh fetch, then a set lookup) and closes every
+    // request stranded by it, this one included. This call still fails; by
+    // the next attempt the sweep has either closed the row (nothing left to
+    // delete) or shown the base alive, meaning the failure was transient and
+    // a retry can succeed.
+    let ws: { id: string };
+    let isAdmin: boolean | null;
+    try {
+      ws = await this.workspaceService.getOrCreateForBranch(summary.base);
+      // STRICT: the admin check below reads roles.yaml at `origin/<base>`,
+      // and on a swallowed fetch failure that ref is whatever the clone last
+      // saw — a user whose rights were since revoked would still pass
+      // against the stale tree. Authorization never runs against refs of
+      // unknown age.
+      try {
+        await this.workspaceService.ensureRemotesFetched(ws.id, { strict: true });
+      } catch {
+        throw new WorkflowDomainError(
+          `Could not verify the base branch "${summary.base}" — origin was unreachable. Retry in a moment.`,
+          409,
+        );
+      }
+      isAdmin = await this.accessControl.canWriteAtRef(
+        ws.id,
+        `origin/${summary.base}`,
+        user.email,
+        'roles.yaml',
+      );
+    } catch (err) {
+      this.kickDeletedBranchSweep();
+      throw err;
+    }
+    // null is "the ref did not resolve", not "denied" — and saying "only an
+    // admin can do this" to an admin whose base branch is merely unfetchable
+    // sent people chasing their role instead of the branch. Kick the sweep
+    // (it proves absence itself, with a strict fetch, and closes the
+    // stranded rows) and fail with the honest condition; by the next
+    // attempt the sweep has either closed the row or shown the base alive.
+    if (isAdmin === null) {
+      this.kickDeletedBranchSweep();
+      throw new WorkflowDomainError(
+        `The base branch "${summary.base}" could not be resolved — it may have been deleted, or origin was unreachable. A background check is running; retry in a moment.`,
+        409,
+      );
+    }
     if (isAdmin !== true) {
       throw new WorkflowDomainError('Only an admin can delete a change request.', 403);
     }
@@ -1780,16 +1909,22 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
-   * Close every open change request whose source branch no longer exists.
+   * Close every open change request either of whose branches no longer exists.
    *
-   * A change request is a proposal to merge a branch. When that branch is
-   * gone — deleted after a manual merge, pruned as abandoned, or left behind
-   * by a feature that has itself been removed — the request cannot be read,
-   * reviewed, applied or declined. It is not a pending decision, it is a
-   * tombstone, and it costs more than tidiness: `listOpenPrs` resolves each
-   * open request's changed paths, so every one of these throws
+   * A change request is a proposal to merge one branch into another, so it
+   * needs BOTH. When either is gone — deleted after a manual merge, pruned as
+   * abandoned, or left behind by a feature that has itself been removed — the
+   * request cannot be read, reviewed, applied or declined. It is not a pending
+   * decision, it is a tombstone, and it costs more than tidiness: `listOpenPrs`
+   * resolves each open request's changed paths, so every one of these throws
    * `unknown branch` on every poll, filling the log and slowing the list it
    * appears in.
+   *
+   * The TARGET half is the one that used to be missed, and it was the worse
+   * half: a missing source could only ever arrive by a path that also closed
+   * the request, while a request whose target had been retired under it was
+   * unreadable, undeclinable, undeletable — and invisible here, so it survived
+   * every restart.
    *
    * CLOSED, NOT DELETED. The row is evidence — who proposed what, when, and
    * that it was never applied — and it is the only remaining trace once the
@@ -1799,7 +1934,7 @@ export class WorkflowService implements IWorkflowService {
    * operation in the workflow that destroys history without a human asking.
    *
    * ONE fetch, then a set lookup. The freshness matters more than the cost:
-   * `changedPathsForPr` fails when the branch is missing from THAT
+   * `changedPathsForPr` fails when a branch is missing from THAT
    * workspace's refs, which is not the same thing as missing from origin —
    * a clone that never fetched a branch someone else created reports exactly
    * the same error. Closing on that signal would eat live requests. So the
@@ -1815,7 +1950,11 @@ export class WorkflowService implements IWorkflowService {
    */
   async closeChangeRequestsWithDeletedBranches(): Promise<number> {
     const open = await this.db
-      .select({ number: changeRequests.number, sourceBranch: changeRequests.sourceBranch })
+      .select({
+        number: changeRequests.number,
+        sourceBranch: changeRequests.sourceBranch,
+        targetBranch: changeRequests.targetBranch,
+      })
       .from(changeRequests)
       .where(eq(changeRequests.state, 'open'));
     if (open.length === 0) return 0;
@@ -1824,6 +1963,11 @@ export class WorkflowService implements IWorkflowService {
     try {
       const branches = await this.git.listBranches(workspaceIdForBranch(DEFAULT_BRANCH), {
         freshFetch: true,
+        // The list is used to PROVE absence, and the listing's normal
+        // degrade-to-stale behaviour would report every branch created since
+        // the last good fetch as missing — closing live requests. Strict:
+        // a failed fetch throws into the catch below, which closes nothing.
+        strictFetch: true,
       });
       live = new Set(branches.map((b) => b.name));
     } catch (err) {
@@ -1839,7 +1983,15 @@ export class WorkflowService implements IWorkflowService {
 
     let closed = 0;
     for (const cr of open) {
-      if (live.has(cr.sourceBranch)) continue;
+      // Either end being gone makes the request unusable — the detail read
+      // resolves the target first, so a missing target fails it just as hard
+      // as a missing source, and no other path ever closes those.
+      const missing = !live.has(cr.sourceBranch)
+        ? cr.sourceBranch
+        : !live.has(cr.targetBranch)
+          ? cr.targetBranch
+          : null;
+      if (!missing) continue;
       const now = new Date();
       // Guarded on `state = 'open'`, so a merge or withdraw racing this call
       // wins and this becomes a no-op.
@@ -1852,12 +2004,44 @@ export class WorkflowService implements IWorkflowService {
       this.prs.invalidateDetailCache(cr.number);
       this.events?.emit({ kind: 'change-request-rejected', number: cr.number });
       console.log(
-        `[cr] closed change request #${cr.number}: source branch "${cr.sourceBranch}" no longer exists`,
+        `[cr] closed change request #${cr.number}: branch "${missing}" no longer exists`,
       );
       closed++;
     }
     return closed;
   }
+
+  /**
+   * The sweep above, on demand. Boot runs it once (`create-core-server`),
+   * which clears requests stranded BEFORE the process started; a branch that
+   * goes missing mid-uptime would otherwise keep its requests broken until
+   * the next restart. Verbs that hit a failure which MIGHT mean a missing
+   * branch kick it here.
+   *
+   * Detached, because the kicking verb is already surfacing its own error
+   * and must not hold its response on a fetch. Coalesced, because the kick
+   * sites are user actions that cluster when something is stranded (retry,
+   * decline, delete) and one sweep answers all of them. The sweep proves
+   * absence itself and fails safe by closing nothing, so a spurious kick
+   * costs one fetch and never closes a live request.
+   */
+  private sweepKick: Promise<void> | null = null;
+  private kickDeletedBranchSweep(): void {
+    if (this.sweepKick) return;
+    this.sweepKick = this.closeChangeRequestsWithDeletedBranches()
+      .then((n) => {
+        if (n > 0) {
+          console.log(
+            `[cr] on-demand sweep closed ${n} stranded change request${n === 1 ? '' : 's'}`,
+          );
+        }
+      })
+      .catch((err) => console.warn('[cr] on-demand deleted-branch sweep failed:', err))
+      .finally(() => {
+        this.sweepKick = null;
+      });
+  }
+
 
   /**
    * Reject (close-without-merging) a change request. Per PLAN.md spec, the
@@ -1892,15 +2076,26 @@ export class WorkflowService implements IWorkflowService {
       // The path list comes from the PR detail — fetch fresh so the rule
       // applies against the current head (a stale list would let a user
       // reject a CR whose files they no longer all own).
-      const detail = await this.prs.getPrDetail(number, {
-        fresh: true,
-        workspaceId,
-        viewerEmail: user.email,
-        // Only `files[].path` is read below; a patch per file would be one
-        // git subprocess each, generated for nothing, on every reject by a
-        // non-author.
-        patches: false,
-      });
+      let detail;
+      try {
+        detail = await this.prs.getPrDetail(number, {
+          fresh: true,
+          workspaceId,
+          viewerEmail: user.email,
+          // Only `files[].path` is read below; a patch per file would be one
+          // git subprocess each, generated for nothing, on every reject by a
+          // non-author.
+          patches: false,
+        });
+      } catch (err) {
+        // The detail read resolves both branch tips (`resolvePrShas`), so a
+        // request one of whose branches is gone fails HERE, on the verb that
+        // exists to get rid of it. Kick the sweep (which proves the absence
+        // and closes the stranded rows) and surface the failure; see
+        // `kickDeletedBranchSweep`.
+        this.kickDeletedBranchSweep();
+        throw err;
+      }
       const paths = detail?.files.map((f) => f.path) ?? [];
       if (paths.length > 0) {
         const writeMap = await this.accessControl.canWriteBatchAtRef(
@@ -2086,17 +2281,12 @@ export class WorkflowService implements IWorkflowService {
       // until retirement finishes (and fails loudly on the missing branch,
       // retryable, instead of losing the branch mid-open).
       await this.branchLifecycle.run(`branch:${sourceBranch}`, async () => {
-        const stillOpen = await this.db
-          .select({ number: changeRequests.number })
-          .from(changeRequests)
-          .where(
-            and(
-              eq(changeRequests.sourceBranch, sourceBranch),
-              eq(changeRequests.state, 'open'),
-            ),
-          )
-          .limit(1);
-        if (stillOpen.length > 0) return;
+        // EITHER end (see `openChangeRequestOn`). The request being merged is
+        // already `merged` by now, so it never matches itself; anything left
+        // is a live request that still needs this branch — including one
+        // proposing INTO it, which the source-only question used to miss.
+        const stillOpen = await this.openChangeRequestOn(sourceBranch);
+        if (stillOpen !== null) return;
 
         const targetWs = await this.workspaceService.getOrCreateForBranch(baseBranch);
         // The remote-tracking ref must be current, or deleteBranch's

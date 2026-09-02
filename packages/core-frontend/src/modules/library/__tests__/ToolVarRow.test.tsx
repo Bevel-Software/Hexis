@@ -130,9 +130,9 @@ describe('ToolVarRow: admin scope', () => {
 });
 
 describe('ToolVarRow: user scope, typed value', () => {
-  it('shows Connected when the caller has their own value', () => {
+  it('shows Key saved when the caller has their own value', () => {
     renderRow(variable({ scope: 'user', userConfigured: true }));
-    expect(screen.getByText('Connected')).toBeInTheDocument();
+    expect(screen.getByText('Key saved')).toBeInTheDocument();
     expect(screen.getByText('Each person sets their own')).toBeInTheDocument();
   });
 
@@ -160,13 +160,13 @@ describe('ToolVarRow: oauth', () => {
       ...over,
     });
 
-  it('shows Connected once authorized', () => {
+  it('shows Signed in once authorized', () => {
     renderRow(signin({ authorized: true }));
     expect(screen.getByText('GitHub sign-in')).toBeInTheDocument();
-    expect(screen.getByText('Connected')).toBeInTheDocument();
+    expect(screen.getByText('Signed in')).toBeInTheDocument();
   });
 
-  it('offers Reconnect beside Connected, for everyone, and it re-enters the same sign-in flow', async () => {
+  it('offers Reconnect beside Signed in, for everyone, and it re-enters the same sign-in flow', async () => {
     // A provider can widen what it grants after the fact (HubSpot answers
     // REQUIRES_REAUTHORIZATION until the user consents again) or revoke a
     // grant — the caller needs a way back into consent that doesn't wait for
@@ -174,7 +174,7 @@ describe('ToolVarRow: oauth', () => {
     // row's terminal state at a glance.
     renderRow(signin({ authorized: true }));
     const reconnect = screen.getByRole('button', { name: 'Reconnect' });
-    expect(reconnect.compareDocumentPosition(screen.getByText('Connected')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(reconnect.compareDocumentPosition(screen.getByText('Signed in')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     fireEvent.click(reconnect);
     await waitFor(() =>
       expect(connectMock.startToolOAuth).toHaveBeenCalledWith('github', 'SIGNIN', { returnTo: RETURN_TO }),
@@ -231,7 +231,7 @@ describe('ToolVarRow: oauth', () => {
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
   });
 
-  it('offers a writer Replace client secret alongside Connected', () => {
+  it('offers a writer Replace client secret alongside Signed in', () => {
     renderRow(signin({ authorized: true }), { canWrite: true, setupKind: 'oauth-manual' });
     expect(screen.getByRole('button', { name: 'Replace client secret' })).toBeInTheDocument();
   });

@@ -45,6 +45,27 @@ export interface ToolSetup {
   reason?: string;
 }
 
+/**
+ * The verdict of the last credential PROBE — a different question from every
+ * `ToolVarStatus` field, which say only what is STORED.
+ *
+ *  - `ok`           — the provider was called and accepted the credential.
+ *  - `failed`       — the provider rejected it; `detail` is what it said.
+ *  - `unverifiable` — we don't know: either the tool offers no way to test it,
+ *                     or the attempt couldn't reach a verdict. `detail` says which.
+ *
+ * NOT stored anywhere. A verdict is returned to the page that asked for it and
+ * lives in that page's state until it is closed or reloaded — because a saved
+ * verdict is evidence with a date on it, and a credential can be revoked or
+ * expire between the check and the render. "Connected" therefore means "a call
+ * succeeded moments ago", which is the only claim a badge can honestly make.
+ */
+export interface ProbeVerdict {
+  status: 'ok' | 'failed' | 'unverifiable';
+  detail: string | null;
+  checkedAt: string;
+}
+
 export interface ToolSecrets {
   slug: string;
   name: string;
@@ -109,6 +130,21 @@ export async function setOAuthClientSecret(slug: string, varName: string, client
     },
   );
   if (!res.ok) await unwrap(res, "Couldn't save the client secret.");
+}
+
+/**
+ * Probe this tool's credential NOW and return the verdict.
+ *
+ * Called after saving a key so the user learns immediately whether it works,
+ * while they still have it to hand — the moment a wrong key is cheapest to fix.
+ * A rejected credential is a SUCCESSFUL check, so it resolves with
+ * `status: 'failed'` rather than throwing; only a transport or access failure
+ * rejects.
+ */
+export async function checkToolConnection(slug: string): Promise<ProbeVerdict> {
+  const res = await authFetch(`/api/secrets/tools/${encodeURIComponent(slug)}/check`, { method: 'POST' });
+  if (!res.ok) await unwrap(res, "Couldn't test this connection.");
+  return ((await res.json()) as { verdict: ProbeVerdict }).verdict;
 }
 
 export const setAdminVar = (slug: string, varName: string, value: string, label?: string | null) =>

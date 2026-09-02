@@ -271,6 +271,8 @@ export class GitService implements IGitService {
   // worst case for branch-switching UX).
   private readonly fetchLocks = new Map<string, Promise<void>>();
   private readonly lastImplicitFetchAt = new Map<string, number>();
+  /** Whether the last implicit fetch per workspace SUCCEEDED — see `fetchOriginIfStale`. */
+  private readonly lastImplicitFetchOk = new Map<string, boolean>();
   private static readonly IMPLICIT_FETCH_TTL_MS = 5_000;
   // Cap on concurrent `aheadBehindForBranch` calls inside `listBranches`. Each
   // call serializes up to 3 `git rev-list` spawns, so 8 workers ≈ ≤24
@@ -315,6 +317,11 @@ export class GitService implements IGitService {
    */
   noteWorkspaceFetched(workspaceId: string): void {
     this.lastImplicitFetchAt.set(workspaceId, Date.now());
+    // A fresh clone IS a successful fetch. Without this, a workspace
+    // recreated after some earlier failed fetch inherits the stale `false`
+    // under the same id, and a strict listBranches inside the TTL window
+    // refuses a list that is in fact provably fresh.
+    this.lastImplicitFetchOk.set(workspaceId, true);
   }
 
   /**
@@ -399,7 +406,7 @@ export class GitService implements IGitService {
 
   async listBranches(
     workspaceId: string,
-    opts: { freshFetch?: boolean } = {},
+    opts: { freshFetch?: boolean; strictFetch?: boolean } = {},
   ): Promise<BranchInfo[]> {
     const cwd = await this.repoDir(workspaceId);
     // Run the fetch BEFORE entering the mutex so a slow origin can't block
@@ -409,7 +416,18 @@ export class GitService implements IGitService {
     // bypasses the TTL — used for user-initiated refreshes (opening the branch
     // selector) so a draft another workspace just deleted is pruned right away
     // instead of lingering up to one TTL window.
-    await this.fetchOriginIfStale(cwd, workspaceId, opts.freshFetch);
+    const fresh = await this.fetchOriginIfStale(cwd, workspaceId, opts.freshFetch);
+    // `strictFetch` is for callers that USE the list to prove absence — the
+    // deleted-branch sweep closes change requests on it. The degrade-to-stale
+    // behaviour below is right for a UI listing (stale branches beat a 500),
+    // and exactly wrong for an absence proof: a clone that last fetched
+    // before a branch was created reports it missing. Such a caller gets a
+    // thrown error instead of a list it must not trust.
+    if (opts.strictFetch && !fresh) {
+      throw new Error(
+        'the fetch from origin failed, so the branch list cannot prove absence — refusing to serve a stale list to a strict caller',
+      );
+    }
     return this.mutex.run(workspaceId, async () => {
       // Union local heads with origin's remote-tracking refs: a fresh per-user
       // clone only has one local head (HEAD's default), so without this we'd hide
@@ -509,7 +527,10 @@ export class GitService implements IGitService {
    * onto a single in-flight fetch instead of each waiting their turn behind
    * the network round-trip. Failures (offline, bad auth, no remote) are
    * logged and swallowed so the branch list still serves stale local data
-   * instead of returning 500.
+   * instead of returning 500 — the RETURN VALUE says whether the refs are
+   * provably fresh (`true`: this call fetched, or shared a fetch, that
+   * succeeded; also `true` on a TTL skip, whose window a recent success
+   * opened). Callers that need proof (strict listing) read it.
    *
    * Safe to keep outside the mutex: fetch only writes remote-tracking refs
    * and the object store, neither of which checkout/status/commit touch.
@@ -518,9 +539,11 @@ export class GitService implements IGitService {
     cwd: string,
     workspaceId: string,
     force = false,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const last = this.lastImplicitFetchAt.get(workspaceId) ?? 0;
-    if (!force && Date.now() - last < GitService.IMPLICIT_FETCH_TTL_MS) return;
+    if (!force && Date.now() - last < GitService.IMPLICIT_FETCH_TTL_MS) {
+      return this.lastImplicitFetchOk.get(workspaceId) ?? true;
+    }
 
     const inFlight = this.fetchLocks.get(workspaceId);
     if (inFlight) {
@@ -529,7 +552,7 @@ export class GitService implements IGitService {
       // the same promise also means subsequent listBranches calls see the
       // newly fetched refs.
       await inFlight;
-      return;
+      return this.lastImplicitFetchOk.get(workspaceId) ?? false;
     }
 
     const runFetch = async (): Promise<void> => {
@@ -546,6 +569,7 @@ export class GitService implements IGitService {
           ...SAFE_IMPLICIT_FETCH_ARGS,
         ]);
         this.lastImplicitFetchAt.set(workspaceId, Date.now());
+        this.lastImplicitFetchOk.set(workspaceId, true);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(`[git] implicit fetch failed for workspace ${workspaceId}: ${msg}`);
@@ -553,12 +577,14 @@ export class GitService implements IGitService {
         // every subsequent listBranches retry the (still-failing) fetch and
         // pile up 10s timeouts. Stale local refs are better than spinning.
         this.lastImplicitFetchAt.set(workspaceId, Date.now());
+        this.lastImplicitFetchOk.set(workspaceId, false);
       }
     };
     const p = runFetch();
     this.fetchLocks.set(workspaceId, p);
     try {
       await p;
+      return this.lastImplicitFetchOk.get(workspaceId) ?? false;
     } finally {
       // Drop the lock once the fetch settles so the next caller past the TTL
       // can spawn a fresh one. Compare-and-delete in case a future race
@@ -1781,17 +1807,46 @@ export class GitService implements IGitService {
     const repoRelativePath = this.stripRepoPrefix(relativePath);
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
+      // Same per-file rule as the diff endpoints: `git log -- <dir>` lists
+      // every child's commits, and even metadata (subjects, authors, when)
+      // is history the per-file gate never authorized for the children. A
+      // HEAD check alone is not enough — a directory deleted before HEAD is
+      // absent NOW and still traversed by the log — so the proof comes from
+      // what the log itself TOUCHED: `--name-only` lists the paths behind
+      // each listed commit, and any name that is not exactly the requested
+      // path means the pathspec matched a tree somewhere in the range.
+      await this.assertNotTreeAtRef(cwd, 'HEAD', repoRelativePath, relativePath);
       const { stdout } = await this.git(cwd, [
         'log',
         `--max-count=${max}`,
-        '--pretty=format:%H%x00%an%x00%ae%x00%s%x00%aI',
+        '--name-only',
+        '--pretty=format:%x01%H%x00%an%x00%ae%x00%s%x00%aI',
         '--',
         repoRelativePath,
       ]);
+      for (const chunk of stdout.split('\u0001')) {
+        const lines = chunk.split('\n');
+        for (const nameLine of lines.slice(1)) {
+          // No trim: a tracked name CAN begin or end with whitespace, and
+          // trimming it here would reject that valid file as a directory.
+          // Only the genuinely empty separator lines are skipped.
+          const touched = nameLine.endsWith('\r') ? nameLine.slice(0, -1) : nameLine;
+          if (touched && touched !== repoRelativePath) {
+            throw new WorkflowValidationError(
+              `"${relativePath}" is a directory at that point in history — history is served per file`,
+            );
+          }
+        }
+      }
       return stdout
+        .split('\u0001')
+        .join('')
         .split('\n')
         .map((line) => line.trim())
         .filter(Boolean)
+        // `--name-only` interleaves the touched path under each commit line;
+        // only the field lines carry the NUL separators.
+        .filter((line) => line.includes('\x00'))
         .map((line): CommitAttribution => {
           const [sha, authorName, authorEmail, subject, committedAt] = line.split('\x00');
           return {
@@ -1817,6 +1872,11 @@ export class GitService implements IGitService {
     const repoRelativePath = this.stripRepoPrefix(relativePath);
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
+      // BOTH sides: at a commit that DELETES a directory the path is absent
+      // at `sha` but a tree at `sha^` — and the diff of that deletion is
+      // every child's content, exactly what the per-file gate never checked.
+      await this.assertNotTreeAtRef(cwd, sha, repoRelativePath, relativePath);
+      await this.assertNotTreeAtRef(cwd, `${sha}^`, repoRelativePath, relativePath);
       try {
         const { stdout } = await this.git(cwd, [
           'show',
@@ -1862,6 +1922,9 @@ export class GitService implements IGitService {
     }
     const repoRelativePath = this.stripRepoPrefix(relativePath);
     return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      await this.assertNotTreeAtRef(cwd, sha, repoRelativePath, relativePath);
+      await this.assertNotTreeAtRef(cwd, `${sha}^`, repoRelativePath, relativePath);
       const current = await this.readFileAtRef(workspaceId, sha, repoRelativePath);
       let baseline: string | null;
       try {
@@ -1898,6 +1961,8 @@ export class GitService implements IGitService {
       const cwd = await this.repoDir(workspaceId);
       const fromRef = await this.resolveBranchRef(cwd, fromBranch);
       const toRef = await this.resolveBranchRef(cwd, toBranch);
+      await this.assertNotTreeAtRef(cwd, fromRef, repoRelativePath, relativePath);
+      await this.assertNotTreeAtRef(cwd, toRef, repoRelativePath, relativePath);
       // When one side is the currently-checked-out branch, diff against the
       // working tree instead of the branch's HEAD commit. Otherwise saves
       // that haven't been committed yet (which is the normal state in the
@@ -2394,6 +2459,49 @@ export class GitService implements IGitService {
    * `showAtRef`) — the caller distinguishes "absent" from "present but empty".
    * Read-only: `git show <ref>:<path>` never mutates the working tree.
    */
+  /**
+   * Refuse a history pathspec that names a TREE at `ref`. The history
+   * surfaces are per-file, and their read gate upstream checked exactly one
+   * path — but `git show/diff -- <dir>` walks every child, and a directory
+   * whose folder chain grants read can hold children whose own frontmatter
+   * denies it. `git show <ref>:<dir>` even prints the tree listing. Absent
+   * at the ref is fine (absent is not a tree — a deleted file's history is
+   * still its own), and an unresolvable ref is left for the actual read to
+   * report in its own words.
+   */
+  private async assertNotTreeAtRef(
+    cwd: string,
+    ref: string,
+    repoRelativePath: string,
+    displayPath: string,
+  ): Promise<void> {
+    let kind: string;
+    try {
+      const { stdout } = await this.git(cwd, ['cat-file', '-t', `${ref}:${repoRelativePath}`]);
+      kind = stdout.trim();
+    } catch (err) {
+      // ONLY proven absence passes: the path missing at the ref, or the ref
+      // itself unresolvable (a root commit's `^`), which the actual read
+      // reports in its own words. Anything else — a locked repo, a corrupt
+      // object, git failing to run — must not be read as "not a tree": a
+      // guard that fails open on its own errors is not a guard.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (
+        /not a valid object name|invalid object name|does not exist in|unknown revision|bad revision|exists on disk, but not in/i.test(
+          msg,
+        )
+      ) {
+        return;
+      }
+      throw err;
+    }
+    if (kind === 'tree') {
+      throw new WorkflowValidationError(
+        `"${displayPath}" is a directory at that point in history — history is served per file`,
+      );
+    }
+  }
+
   async readFileAtRef(
     workspaceId: string,
     ref: string,

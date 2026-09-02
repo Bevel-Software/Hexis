@@ -114,6 +114,8 @@ export class WorkspaceService implements IWorkspaceService {
 
   /** Per-workspace-dir `git fetch origin` timestamp + in-flight tracker. */
   private readonly lastFetchAt = new Map<string, number>();
+  /** Whether the last fetch per repo SUCCEEDED — read by strict callers of `ensureRemotesFetched`. */
+  private readonly lastFetchOk = new Map<string, boolean>();
   private readonly inFlightFetches = new Map<string, Promise<void>>();
 
   /**
@@ -808,15 +810,26 @@ export class WorkspaceService implements IWorkspaceService {
    * cached for `FETCH_CACHE_TTL_MS`; concurrent callers share the same
    * in-flight fetch to avoid fetch storms when e.g. the CR list poll fans out.
    */
-  async ensureRemotesFetched(workspaceId: string): Promise<void> {
+  async ensureRemotesFetched(workspaceId: string, opts: { strict?: boolean } = {}): Promise<void> {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const repoDir = path.join(workspaceDir, this.kbDirName);
     const now = Date.now();
+    // The TTL is stamped only by a SUCCESSFUL fetch, so a fresh window is
+    // itself the proof a strict caller wants.
     const last = this.lastFetchAt.get(repoDir) ?? 0;
     if (now - last < FETCH_CACHE_TTL_MS) return;
 
     const inFlight = this.inFlightFetches.get(repoDir);
-    if (inFlight) return inFlight;
+    if (inFlight) {
+      await inFlight;
+      // `strict` callers use the refs to AUTHORIZE or to prove absence; the
+      // swallow-and-degrade below is right for the polling paths and wrong
+      // for them — a failed fetch must surface, never pass as freshness.
+      if (opts.strict && !this.lastFetchOk.get(repoDir)) {
+        throw new Error('git fetch origin failed — remote refs could not be refreshed');
+      }
+      return;
+    }
 
     // This driver runs outside the git layer's per-workspace mutex, so it may
     // only run the safe implicit-fetch shape — see `SAFE_IMPLICIT_FETCH_ARGS`
@@ -828,8 +841,10 @@ export class WorkspaceService implements IWorkspaceService {
     )
       .then(() => {
         this.lastFetchAt.set(repoDir, Date.now());
+        this.lastFetchOk.set(repoDir, true);
       })
       .catch((err) => {
+        this.lastFetchOk.set(repoDir, false);
         console.warn('[workspace] git fetch origin failed:', redactError(err));
       })
       .finally(() => {
@@ -838,7 +853,10 @@ export class WorkspaceService implements IWorkspaceService {
         }
       });
     this.inFlightFetches.set(repoDir, promise);
-    return promise;
+    await promise;
+    if (opts.strict && !this.lastFetchOk.get(repoDir)) {
+      throw new Error('git fetch origin failed — remote refs could not be refreshed');
+    }
   }
 
   private assertValidGitRef(ref: string): void {
