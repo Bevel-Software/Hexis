@@ -23,6 +23,7 @@ import {
 } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { hashEmail } from '../../../shared/hash-email.js';
+import { blindIndex } from '../../../shared/column-crypto.js';
 import type {
   IReviewWorkflowService,
   MergeGateInput,
@@ -271,6 +272,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .values({
         prNumber,
         authorEmail: user.email.trim().toLowerCase(),
+        authorEmailBidx: blindIndex(user.email),
         authorName: user.name,
         path: input.path ?? null,
         line: input.line ?? null,
@@ -493,7 +495,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     if (!canApprove) throw new ApprovalAuthError('not-eligible');
     const callerEmail = user.email.trim().toLowerCase();
 
-    // Unique index on (prNumber, path, approverEmail, headSha) makes this
+    // Unique index on (prNumber, path, approverEmailBidx, headSha) makes this
     // idempotent — `onConflictDoNothing` turns a double-click into a no-op.
     await this.db
       .insert(prFileApprovals)
@@ -501,6 +503,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
         prNumber,
         path,
         approverEmail: callerEmail,
+        approverEmailBidx: blindIndex(callerEmail),
         approverName: user.name,
         headSha,
       })
@@ -620,6 +623,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .values({
         prNumber,
         triggeredByEmail,
+        triggeredByEmailBidx: blindIndex(triggeredByEmail),
         triggeredByName: user.name,
         headShaAtMerge: headSha,
         mergeMethod: MERGE_METHOD,
@@ -799,15 +803,15 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     const callerEmail = user.email.trim().toLowerCase();
 
     // Only revoke the caller's OWN approval — never someone else's. Filter on
-    // (PR, path, approverEmail) without pinning the SHA so a user revoking
-    // after a force-push can drop their stale row in one click.
+    // (PR, path, approver blind index) without pinning the SHA so a user
+    // revoking after a force-push can drop their stale row in one click.
     await this.db
       .delete(prFileApprovals)
       .where(
         and(
           eq(prFileApprovals.prNumber, prNumber),
           eq(prFileApprovals.path, path),
-          eq(prFileApprovals.approverEmail, callerEmail),
+          eq(prFileApprovals.approverEmailBidx, blindIndex(callerEmail)),
         ),
       );
 

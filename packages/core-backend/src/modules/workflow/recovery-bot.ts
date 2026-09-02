@@ -20,6 +20,7 @@ import { eq } from 'drizzle-orm';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
+import { blindIndex } from '../../shared/column-crypto.js';
 
 export const RECOVERY_BOT_EMAIL = (
   process.env.RECOVERY_BOT_EMAIL ?? 'recovery-bot@bevel.local'
@@ -38,8 +39,12 @@ export const RECOVERY_BOT_NAME = 'Bevel Recovery Bot';
 export async function ensureRecoveryBotUser(db: Database): Promise<AuthUser> {
   const inserted = await db
     .insert(users)
-    .values({ email: RECOVERY_BOT_EMAIL, name: RECOVERY_BOT_NAME })
-    .onConflictDoNothing({ target: users.email })
+    .values({
+      email: RECOVERY_BOT_EMAIL,
+      emailBidx: blindIndex(RECOVERY_BOT_EMAIL),
+      name: RECOVERY_BOT_NAME,
+    })
+    .onConflictDoNothing({ target: users.emailBidx })
     .returning();
   if (inserted.length > 0) {
     const row = inserted[0];
@@ -54,7 +59,7 @@ export async function ensureRecoveryBotUser(db: Database): Promise<AuthUser> {
   const [row] = await db
     .select()
     .from(users)
-    .where(eq(users.email, RECOVERY_BOT_EMAIL))
+    .where(eq(users.emailBidx, blindIndex(RECOVERY_BOT_EMAIL)))
     .limit(1);
   if (!row) {
     // Vanishingly unlikely: the row exists for the conflict to fire but is

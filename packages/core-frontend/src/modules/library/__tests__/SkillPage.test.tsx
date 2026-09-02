@@ -367,8 +367,11 @@ describe('SkillPage', () => {
     expect(await screen.findByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
     expect(apiMock.getSkill).toHaveBeenCalledWith('newsletter');
 
-    // Needed integration derived from allowed-tools, with its connection state.
-    expect(screen.getByText('slack')).toBeInTheDocument();
+    // Needed integration derived from allowed-tools, with its connection
+    // state. AWAITED: the integrations section hangs off its own fetch, so on
+    // a slow runner it lands after the heading — the sync getByText here was
+    // the CI flake.
+    expect(await screen.findByText('slack')).toBeInTheDocument();
     expect(screen.getByText('Needs your sign-in')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Connect/ })).toBeInTheDocument();
 
