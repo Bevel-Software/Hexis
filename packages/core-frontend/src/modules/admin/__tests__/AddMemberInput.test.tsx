@@ -142,25 +142,40 @@ describe('AddMemberInput', () => {
   });
 
   it('drops the previous query\'s people the moment the text changes', async () => {
-    let resolveSecond: ((r: SuggestResponse) => void) | undefined;
-    vi.mocked(suggestPrincipals)
-      .mockResolvedValueOnce(people(ALICE))
-      .mockImplementationOnce(
-        () => new Promise<SuggestResponse>((resolve) => { resolveSecond = resolve; }),
-      );
+    let answerPat: ((r: SuggestResponse) => void) | undefined;
+    // Keyed by query rather than by call order: how many requests a burst of
+    // typing produces depends on where the debounce lands, and that is not what
+    // this test is about.
+    vi.mocked(suggestPrincipals).mockImplementation((_workspace, q) =>
+      q === 'al'
+        ? Promise.resolve(people(ALICE))
+        : new Promise<SuggestResponse>((resolve) => {
+            answerPat = resolve;
+          }),
+    );
     render(<Harness />);
     const input = screen.getByRole('textbox', { name: 'Member email' });
 
     await userEvent.type(input, 'al');
     expect(await screen.findByText('Alice Green')).toBeInTheDocument();
 
-    // A new query is in flight. Alice answered the OLD text, so leaving her row
-    // up would let a click add someone the current text never named.
-    await userEvent.type(input, 'pat');
-    await waitFor(() => expect(screen.queryByText('Alice Green')).not.toBeInTheDocument());
-    await waitFor(() => expect(resolveSecond).toBeDefined());
+    // 'al' is REPLACED by 'pat' in one edit, rather than typed onto the end of
+    // it. Two things ride on that. The query has to genuinely become 'pat' —
+    // appending would ask for 'alpat' and the test would not mean what it says.
+    // And the text must never dip below two characters on the way: the
+    // below-threshold path clears the list on its own, so a clear-then-type
+    // would pass even with the new-query clear removed, proving nothing.
+    await userEvent.click(input);
+    (input as HTMLInputElement).select();
+    await userEvent.paste('pat');
+    expect(input).toHaveValue('pat');
 
-    resolveSecond!(people(PAT));
+    // Alice answered the OLD text, so leaving her row up would let a click add
+    // someone the current text never named.
+    await waitFor(() => expect(screen.queryByText('Alice Green')).not.toBeInTheDocument());
+    await waitFor(() => expect(answerPat).toBeDefined());
+
+    answerPat!(people(PAT));
     expect(await screen.findByText('Pat Kim')).toBeInTheDocument();
   });
 
