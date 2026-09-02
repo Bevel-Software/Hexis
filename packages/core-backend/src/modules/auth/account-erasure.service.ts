@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { blindIndex } from '../../shared/column-crypto.js';
+import { blindIndex, isEncryptedBlob } from '../../shared/column-crypto.js';
 import type { Database } from '../database/connection.js';
 import {
   changeRequests,
@@ -111,6 +111,20 @@ export class AccountErasureService implements IAccountErasureService {
   async eraseUser(userId: string): Promise<boolean> {
     const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!user) return false;
+
+    // Fail CLOSED on an undecryptable email. The encrypted column's read
+    // fallback returns the raw ciphertext blob when the configured key cannot
+    // open it (a rotated/wrong SECRETS_ENC_KEY); hashing that blob would make
+    // every email-keyed audit anonymization below match zero rows while the
+    // user delete still committed — an erasure that silently left the PII
+    // behind. Refuse instead: nothing is deleted until the key is fixed.
+    if (isEncryptedBlob(user.email)) {
+      throw new Error(
+        `account-erasure: cannot decrypt the stored email for user id=${userId} with the ` +
+          'configured SECRETS_ENC_KEY — refusing to erase, because the email-keyed audit rows ' +
+          'could not be anonymized. Restore the correct key, then retry.',
+      );
+    }
 
     const target: ErasureTarget = {
       userId,

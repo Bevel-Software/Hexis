@@ -31,7 +31,9 @@ From 0.14, personal data in the database — emails, display names, and
 change-request/review text — is encrypted with a key derived from
 `SECRETS_ENC_KEY`, in addition to the secrets vault it already sealed. The
 first boot after the upgrade rewrites existing rows automatically; nothing
-to do.
+to do. Upgrade with a single app instance (the normal
+`docker compose pull app && up -d` flow already replaces the container) —
+don't run old and new versions against the same database side by side.
 
 What it changes for operations:
 

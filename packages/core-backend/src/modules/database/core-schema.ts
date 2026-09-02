@@ -168,6 +168,9 @@ export const changeRequests = pgTable('change_requests', {
   sourceBranch: text('source_branch').notNull(),
   targetBranch: text('target_branch').notNull(),
   // Encrypted: CR title/body exist only in this DB (the remote sees branches).
+  // The DB-level default '' bypasses toDriver, which is fine: the empty string
+  // is deliberately stored unencrypted (see encryptPii), so a defaulted row
+  // and an app-written empty body hold the identical representation.
   title: encryptedText('title').notNull(),
   body: encryptedText('body').notNull().default(''),
   authorEmail: encryptedText('author_email').notNull(), // lowercased at insert

@@ -43,12 +43,24 @@ function requireCrypto(): TokenCrypto {
 }
 
 /**
- * Whether `value` has the `iv:tag:ct` shape TokenCrypto produces (12-byte IV,
- * 16-byte tag, base64 parts). Used to tell ciphertext from legacy plaintext
- * during the backfill and in {@link decryptPii}'s fallback.
+ * Every PII ciphertext starts with this marker. An explicit prefix — rather
+ * than recognising ciphertext by its `iv:tag:ct` shape — means legacy
+ * plaintext can never be mistaken for ciphertext (and silently skipped by the
+ * backfill), and lets the backfill find unsealed rows with a plain SQL
+ * `NOT LIKE 'pii:v1:%'` instead of scanning every row in the app. Bump the
+ * version segment if the format ever changes.
+ */
+export const PII_CIPHERTEXT_PREFIX = 'pii:v1:';
+
+/**
+ * Whether `value` is a PII ciphertext blob: the version prefix followed by
+ * TokenCrypto's `iv:tag:ct` (12-byte IV, 16-byte tag, base64 parts). Used to
+ * tell ciphertext from legacy plaintext during the backfill and in
+ * {@link decryptPii}'s fallback.
  */
 export function isEncryptedBlob(value: string): boolean {
-  const parts = value.split(':');
+  if (!value.startsWith(PII_CIPHERTEXT_PREFIX)) return false;
+  const parts = value.slice(PII_CIPHERTEXT_PREFIX.length).split(':');
   if (parts.length !== 3) return false;
   const [iv, tag, ct] = parts;
   if (!iv || !tag || !ct) return false;
@@ -57,20 +69,30 @@ export function isEncryptedBlob(value: string): boolean {
   return Buffer.from(iv, 'base64').length === 12 && Buffer.from(tag, 'base64').length === 16;
 }
 
-/** Encrypt a PII value for storage (fresh random IV — NOT equality-comparable). */
+/**
+ * Encrypt a PII value for storage (fresh random IV — NOT equality-comparable).
+ *
+ * The empty string is stored as itself: it carries no personal data, GCM of an
+ * empty plaintext would produce an empty ciphertext segment the blob parser
+ * cannot represent, and columns with a DB-level `DEFAULT ''` (which bypasses
+ * this function entirely) then hold exactly the same representation as an
+ * app-written empty value.
+ */
 export function encryptPii(value: string): string {
-  return requireCrypto().encrypt(value);
+  if (value === '') return '';
+  return PII_CIPHERTEXT_PREFIX + requireCrypto().encrypt(value);
 }
 
 /**
- * Decrypt a stored PII value. A value that does not look like ciphertext — or
- * fails to decrypt — is returned as-is: rows written before the encryption
- * release stay readable until the boot-time backfill rewrites them.
+ * Decrypt a stored PII value. A value that does not carry the ciphertext
+ * prefix — or fails to decrypt (a different key) — is returned as-is: rows
+ * written before the encryption release stay readable until the boot-time
+ * backfill rewrites them.
  */
 export function decryptPii(value: string): string {
   if (!isEncryptedBlob(value)) return value;
   try {
-    return requireCrypto().decrypt(value);
+    return requireCrypto().decrypt(value.slice(PII_CIPHERTEXT_PREFIX.length));
   } catch {
     return value;
   }
