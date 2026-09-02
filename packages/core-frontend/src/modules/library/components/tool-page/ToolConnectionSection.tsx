@@ -226,21 +226,27 @@ export function ToolConnectionSection({
   }
 
   /**
-   * A credential was just saved: whatever the last probe concluded was about
-   * the key it replaced, so drop it and test the new one straight away — while
-   * the user still has it to hand, which is when a wrong key is cheapest to fix.
-   */
-  /**
    * A credential write LANDED (save or delete, from the banner's editor or a
-   * row). Whatever transport failure an earlier probe reported was about a
-   * connection that no longer exists in that form — clear it with the write,
-   * not merely with the next probe, because a delete starts no probe.
+   * row). Everything a pending probe could still say is about a credential
+   * that no longer exists in that form, so the write ORPHANS it outright —
+   * the sequence bump takes its voice (a delete starts no replacement probe,
+   * so nothing else would), the in-flight slot is released, and the old
+   * transport alert goes with them.
    */
   function changed() {
+    probeSeq.current++;
+    setInFlight(null);
     setProbeError(null);
     onChanged();
   }
 
+  /**
+   * A credential was just SAVED: whatever the last probe concluded was about
+   * the key it replaced, so drop it and test the new one straight away —
+   * while the user still has it to hand, which is when a wrong key is
+   * cheapest to fix. (The row calls `changed` too, which orphans the old
+   * probe; the fresh `runCheck` claims the sequence for the new key.)
+   */
   function onSaved() {
     setProbed(null);
     void runCheck();

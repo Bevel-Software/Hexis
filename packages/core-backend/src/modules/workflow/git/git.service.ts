@@ -1827,7 +1827,10 @@ export class GitService implements IGitService {
       for (const chunk of stdout.split('\u0001')) {
         const lines = chunk.split('\n');
         for (const nameLine of lines.slice(1)) {
-          const touched = nameLine.trim();
+          // No trim: a tracked name CAN begin or end with whitespace, and
+          // trimming it here would reject that valid file as a directory.
+          // Only the genuinely empty separator lines are skipped.
+          const touched = nameLine.endsWith('\r') ? nameLine.slice(0, -1) : nameLine;
           if (touched && touched !== repoRelativePath) {
             throw new WorkflowValidationError(
               `"${relativePath}" is a directory at that point in history — history is served per file`,
