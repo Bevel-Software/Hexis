@@ -174,10 +174,19 @@ export class McpServerEditService {
     const servers = mcp.mcpServers as Record<string, unknown>;
     if (!(name in servers)) throw new McpServerEditError('No such server.', 404);
 
-    if (write.transport !== 'streamable-http' && write.transport !== 'sse' && write.transport !== 'stdio') {
-      // Persisting an unknown transport would save an entry discovery then
-      // refuses — an unusable server with no error at the moment it was made.
-      throw new McpServerEditError(`Unknown transport "${String(write.transport)}".`, 422);
+    if (write.transport !== 'streamable-http' && write.transport !== 'stdio') {
+      // Persisting a transport discovery refuses would save an entry that
+      // vanishes from the catalog the moment it is written — an unusable
+      // server with no error at the moment it was made. `sse` is refused BY
+      // NAME with the fix spelled out, because the pinned MCP client has no
+      // sse transport; an EXISTING sse entry stays readable here, so it can
+      // be edited to `streamable-http` rather than being stranded.
+      throw new McpServerEditError(
+        write.transport === 'sse'
+          ? 'The MCP client has no `sse` transport — declare the server as `streamable-http` if it supports it.'
+          : `Unknown transport "${String(write.transport)}".`,
+        422,
+      );
     }
     // The EFFECTIVE value of every field, PATCH-over-stored (see
     // McpServerWrite): `undefined` keeps what the files already say, a

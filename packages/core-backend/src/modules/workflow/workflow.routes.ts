@@ -357,7 +357,11 @@ export function createWorkflowRoutes(
           try {
             verdicts.push(await accessControl.canReadAtRef(req.params.id, ref, user.email, repoRelative));
           } catch {
-            verdicts.push(null);
+            // An access-model FAILURE is not an unresolvable ref: mapped to
+            // null it would let the other candidate's grant serve a ref
+            // whose authorization errored. Fail closed outright.
+            res.status(403).json({ error: `You don't have permission to read "${pathParam}" on "${branch}".` });
+            return;
           }
         }
         const denied = verdicts.some((v) => v === false);

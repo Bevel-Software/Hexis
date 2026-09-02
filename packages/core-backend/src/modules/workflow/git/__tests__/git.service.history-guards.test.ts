@@ -50,6 +50,22 @@ describe('GitService history guards', () => {
     expect(diff).toContain('top');
   });
 
+  it('logForFile refuses a directory even when it was deleted before HEAD, and lists a file', async () => {
+    // A directory removed before HEAD is absent NOW — a HEAD-shape check
+    // passes — but `git log -- <dir>` still traverses its historical
+    // children. The proof comes from what the log touched.
+    await fs.rm(path.join(repo, 'docs'), { recursive: true });
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'remove docs']);
+    await expect(svc.logForFile(workspaceId, 'knowledge-base/docs')).rejects.toThrow(
+      /history is served per file/,
+    );
+    const log = await svc.logForFile(workspaceId, 'knowledge-base/top.md');
+    expect(log.length).toBe(1);
+    expect(log[0]!.subject).toBe('seed');
+    expect(log[0]!.sha).toMatch(/^[0-9a-f]{40}$/);
+  });
+
   it('fileContentsAtCommit refuses a directory and still serves a deleted file', async () => {
     await expect(svc.fileContentsAtCommit(workspaceId, 'knowledge-base/docs', sha)).rejects.toThrow(
       /history is served per file/,

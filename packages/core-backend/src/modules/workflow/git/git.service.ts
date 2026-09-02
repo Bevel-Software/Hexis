@@ -1809,19 +1809,41 @@ export class GitService implements IGitService {
       const cwd = await this.repoDir(workspaceId);
       // Same per-file rule as the diff endpoints: `git log -- <dir>` lists
       // every child's commits, and even metadata (subjects, authors, when)
-      // is history the per-file gate never authorized for the children.
+      // is history the per-file gate never authorized for the children. A
+      // HEAD check alone is not enough — a directory deleted before HEAD is
+      // absent NOW and still traversed by the log — so the proof comes from
+      // what the log itself TOUCHED: `--name-only` lists the paths behind
+      // each listed commit, and any name that is not exactly the requested
+      // path means the pathspec matched a tree somewhere in the range.
       await this.assertNotTreeAtRef(cwd, 'HEAD', repoRelativePath, relativePath);
       const { stdout } = await this.git(cwd, [
         'log',
         `--max-count=${max}`,
-        '--pretty=format:%H%x00%an%x00%ae%x00%s%x00%aI',
+        '--name-only',
+        '--pretty=format:%x01%H%x00%an%x00%ae%x00%s%x00%aI',
         '--',
         repoRelativePath,
       ]);
+      for (const chunk of stdout.split('\u0001')) {
+        const lines = chunk.split('\n');
+        for (const nameLine of lines.slice(1)) {
+          const touched = nameLine.trim();
+          if (touched && touched !== repoRelativePath) {
+            throw new WorkflowValidationError(
+              `"${relativePath}" is a directory at that point in history — history is served per file`,
+            );
+          }
+        }
+      }
       return stdout
+        .split('\u0001')
+        .join('')
         .split('\n')
         .map((line) => line.trim())
         .filter(Boolean)
+        // `--name-only` interleaves the touched path under each commit line;
+        // only the field lines carry the NUL separators.
+        .filter((line) => line.includes('\x00'))
         .map((line): CommitAttribution => {
           const [sha, authorName, authorEmail, subject, committedAt] = line.split('\x00');
           return {

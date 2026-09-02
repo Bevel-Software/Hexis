@@ -192,6 +192,10 @@ export function ToolConnectionSection({
     const mine = ++probeSeq.current;
     const rev = configRevision;
     setInFlight({ rev });
+    // A replacement probe makes the previous transport failure history the
+    // moment it starts — leaving the alert up while "Testing…" runs reads as
+    // the new attempt already having failed.
+    setProbeError(null);
     try {
       const value = await checkToolConnection(tool.slug);
       // Newest-probe guard only: everything published is REVISION-STAMPED
@@ -226,6 +230,17 @@ export function ToolConnectionSection({
    * the key it replaced, so drop it and test the new one straight away — while
    * the user still has it to hand, which is when a wrong key is cheapest to fix.
    */
+  /**
+   * A credential write LANDED (save or delete, from the banner's editor or a
+   * row). Whatever transport failure an earlier probe reported was about a
+   * connection that no longer exists in that form — clear it with the write,
+   * not merely with the next probe, because a delete starts no probe.
+   */
+  function changed() {
+    setProbeError(null);
+    onChanged();
+  }
+
   function onSaved() {
     setProbed(null);
     void runCheck();
@@ -262,12 +277,13 @@ export function ToolConnectionSection({
             Open Secrets
           </Link>
         </div>
+      </div>
+
       {shownProbeError && (
         <Banner tone="danger" role="alert" className="mb-2.5" data-testid="tool-probe-error">
           {shownProbeError}
         </Banner>
       )}
-      </div>
 
       {setupUnfinished && (
         <Banner tone="wait" role="status" className="mb-2.5">
@@ -364,7 +380,7 @@ export function ToolConnectionSection({
               setupKind={setupKind}
               returnTo={pathForTool(tool.slug)}
               editSignal={edit.name === variable.name ? edit.n : undefined}
-              onChanged={onChanged}
+              onChanged={changed}
               // Test the moment a key is entered — while the user still has it
               // to hand, which is when a typo is cheapest to fix. Waiting for
               // an agent to trip over it is how the wrong key got to look
