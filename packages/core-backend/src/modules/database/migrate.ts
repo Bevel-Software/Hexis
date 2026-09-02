@@ -111,9 +111,21 @@ type Executor = Pick<Database, 'execute'>;
  */
 const PII_BACKFILL_LOCK_KEY = 7_458_392_017;
 
-/** A column "needs sealing" when it holds non-empty text without the prefix. */
+/**
+ * SQL approximation of `isEncryptedBlob`: the version prefix followed by
+ * base64 segments with the exact widths GCM produces (12-byte IV → 16 chars,
+ * 16-byte tag → 22 chars + `==`). Deliberately a NEGATIVE filter: anything
+ * failing it — including plaintext that merely BEGINS with the prefix — is
+ * selected and re-examined app-side by `isEncryptedBlob`, so only values
+ * byte-for-byte indistinguishable from a well-formed blob are trusted as
+ * sealed. Sealed rows all match, keeping the steady-state scan an
+ * empty-result query.
+ */
+const SEALED_SHAPE_REGEX = `^${PII_CIPHERTEXT_PREFIX}[A-Za-z0-9+/]{16}:[A-Za-z0-9+/]{22}==:[A-Za-z0-9+/]+={0,2}$`;
+
+/** A column "needs sealing" when it holds non-empty text that isn't a blob. */
 function needsSealing(col: string) {
-  return sql`(${ident(col)} IS NOT NULL AND ${ident(col)} <> '' AND ${ident(col)} NOT LIKE ${`${PII_CIPHERTEXT_PREFIX}%`})`;
+  return sql`(${ident(col)} IS NOT NULL AND ${ident(col)} <> '' AND ${ident(col)} !~ ${SEALED_SHAPE_REGEX})`;
 }
 
 async function backfillTable(tx: Executor, t: PiiBackfillTable): Promise<number> {
@@ -143,11 +155,25 @@ async function backfillTable(tx: Executor, t: PiiBackfillTable): Promise<number>
     }
     if (t.bidx && row[t.bidx.column] == null) {
       // The source may already be ciphertext (a partial earlier run) — the
-      // blind index is always computed over the plaintext.
+      // blind index is always computed over the plaintext. If the source is
+      // ciphertext the configured key cannot open, refuse rather than derive
+      // a blind index from ciphertext (it would never match a real lookup).
       const source = row[t.bidx.source];
-      const plain = typeof source === 'string' ? decryptPii(source) : '';
+      const raw = typeof source === 'string' ? source : '';
+      const plain = decryptPii(raw);
+      if (isEncryptedBlob(plain)) {
+        throw new Error(
+          `PII encryption backfill: ${t.table}.${t.bidx.source} cannot be decrypted with the ` +
+            'configured SECRETS_ENC_KEY — refusing to derive a blind index from ciphertext. ' +
+            'Restore the key that sealed it, then restart.',
+        );
+      }
       sets.push(sql`${ident(t.bidx.column)} = ${blindIndex(plain)}`);
       where.push(sql`${ident(t.bidx.column)} IS NULL`);
+      // Pin the source too: if a concurrent writer replaces the email between
+      // scan and write, the CAS must not attach the OLD email's blind index
+      // to the NEW value.
+      where.push(sql`${ident(t.bidx.source)} IS NOT DISTINCT FROM ${source ?? null}`);
     }
     if (sets.length === 0) continue;
     const updated = await tx.execute(
