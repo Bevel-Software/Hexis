@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useState } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { AddMemberInput } from '../components/AddMemberInput';
+import { AddMemberInput, SUGGEST_DEBOUNCE_MS } from '../components/AddMemberInput';
 import { suggestPrincipals, type SuggestResponse } from '../../access/api';
 
 vi.mock('../../access/api', async (importOriginal) => {
@@ -10,8 +10,12 @@ vi.mock('../../access/api', async (importOriginal) => {
   return { ...actual, suggestPrincipals: vi.fn() };
 });
 
-/** The component's debounce, plus slack — how long "no request" has to hold. */
-const PAST_DEBOUNCE_MS = 350;
+/**
+ * How long "no request" has to hold: the component's own debounce plus slack,
+ * derived from the component so raising the debounce cannot leave this test
+ * asserting over a window the request has not been scheduled in yet.
+ */
+const PAST_DEBOUNCE_MS = SUGGEST_DEBOUNCE_MS + 150;
 
 const ALICE = { name: 'Alice Green', email: 'alice@example.com' };
 const PAT = { name: 'Pat Kim', email: 'pat@example.com' };
@@ -24,9 +28,11 @@ function people(...list: { name: string; email: string }[]): SuggestResponse {
 function Harness({
   onSubmit = () => {},
   exclude = [],
+  busy = false,
 }: {
   onSubmit?: (value: string) => void;
   exclude?: string[];
+  busy?: boolean;
 }) {
   const [value, setValue] = useState('');
   return (
@@ -36,6 +42,7 @@ function Harness({
       onSubmit={onSubmit}
       exclude={exclude}
       inputLabel="Member email"
+      busy={busy}
     />
   );
 }
@@ -102,6 +109,59 @@ describe('AddMemberInput', () => {
     expect(screen.queryByText(/suggest is down/)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Add' }));
     expect(onSubmit).toHaveBeenCalledWith('newcomer@example.com');
+  });
+
+  it('a keyboard alone can reach a suggestion and choose it', async () => {
+    const onSubmit = vi.fn();
+    render(<Harness onSubmit={onSubmit} />);
+
+    const input = screen.getByRole('textbox', { name: 'Member email' });
+    await userEvent.type(input, 'ali');
+    await screen.findByText('Alice Green');
+
+    // Tab moves focus from the input INTO the list — the list has to survive
+    // that, or the row it lands on is gone before Enter reaches it.
+    await userEvent.tab();
+    const row = screen.getByRole('button', { name: /Alice Green/ });
+    expect(row).toHaveFocus();
+    await userEvent.keyboard('{Enter}');
+    expect(onSubmit).toHaveBeenCalledWith('alice@example.com');
+  });
+
+  it('offers no suggestion rows while a mutation is in flight', async () => {
+    const onSubmit = vi.fn();
+    const { rerender } = render(<Harness onSubmit={onSubmit} />);
+
+    await userEvent.type(screen.getByRole('textbox', { name: 'Member email' }), 'ali');
+    expect(await screen.findByText('Alice Green')).toBeInTheDocument();
+
+    // The input and Add button already go inert while the add runs; a live row
+    // would be the one way left to queue a second mutation behind the first.
+    rerender(<Harness onSubmit={onSubmit} busy />);
+    await waitFor(() => expect(screen.queryByText('Alice Green')).not.toBeInTheDocument());
+  });
+
+  it('drops the previous query\'s people the moment the text changes', async () => {
+    let resolveSecond: ((r: SuggestResponse) => void) | undefined;
+    vi.mocked(suggestPrincipals)
+      .mockResolvedValueOnce(people(ALICE))
+      .mockImplementationOnce(
+        () => new Promise<SuggestResponse>((resolve) => { resolveSecond = resolve; }),
+      );
+    render(<Harness />);
+    const input = screen.getByRole('textbox', { name: 'Member email' });
+
+    await userEvent.type(input, 'al');
+    expect(await screen.findByText('Alice Green')).toBeInTheDocument();
+
+    // A new query is in flight. Alice answered the OLD text, so leaving her row
+    // up would let a click add someone the current text never named.
+    await userEvent.type(input, 'pat');
+    await waitFor(() => expect(screen.queryByText('Alice Green')).not.toBeInTheDocument());
+    await waitFor(() => expect(resolveSecond).toBeDefined());
+
+    resolveSecond!(people(PAT));
+    expect(await screen.findByText('Pat Kim')).toBeInTheDocument();
   });
 
   it('a stale response never overwrites the current query, and a backspace clears the list', async () => {
