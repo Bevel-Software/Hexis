@@ -237,6 +237,10 @@ export function ToolConnectionSection({
     probeSeq.current++;
     setInFlight(null);
     setProbeError(null);
+    // The VERDICT too: after a delete, “Connected” would otherwise keep
+    // describing a credential that no longer exists while the refetch is
+    // still in flight.
+    setProbed(null);
     onChanged();
   }
 
