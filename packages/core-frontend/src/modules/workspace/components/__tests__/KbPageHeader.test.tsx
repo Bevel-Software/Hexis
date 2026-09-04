@@ -126,29 +126,28 @@ describe('KbPageHeader', () => {
     expect(screen.getByText('Agent update waiting')).toBeInTheDocument();
   });
 
-  // Version history is a button of its own — the clock-arrow beside Edit,
-  // where Google Docs keeps it. It used to be the lone item behind a ⋯, and
-  // a menu with one entry is a hiding place, not an overflow.
-  it('opens Version history from the clock-arrow, with no overflow menu in the way', async () => {
+  it('offers the whole overflow behind ⋯', async () => {
     const user = userEvent.setup();
-    const { props } = renderHeader();
-    await user.click(screen.getByRole('button', { name: 'Version history' }));
-    expect(props.onOpenHistory).toHaveBeenCalled();
-    expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument();
+    renderHeader();
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    expect(screen.getByRole('menuitem', { name: /Version history/ })).toBeInTheDocument();
   });
 
-  // Git not being ready means there is no log to show, so the button goes
-  // rather than opening onto nothing.
-  it('drops the Version history button entirely when git is not ready', () => {
+  // Copying a reference to this page is one errand, and Share owns it. Two
+  // menus offering near-identical copies is how someone pastes the wrong one.
+  it('does not repeat Copy path in the overflow. Share owns copying a reference', async () => {
+    const user = userEvent.setup();
+    renderHeader();
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    expect(screen.queryByRole('menuitem', { name: /Copy path/i })).not.toBeInTheDocument();
+  });
+
+  // Version history is the whole menu now, so git not being ready leaves
+  // nothing behind ⋯ — and the trigger goes with it rather than opening onto
+  // an empty panel.
+  it('drops the ⋯ trigger entirely when git is not ready', () => {
     renderHeader({ historyAvailable: false });
-    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
-  });
-
-  // A prose document's pane bar owns Edit and carries Version history beside
-  // it; a second clock in the header would be two controls for one action.
-  it('leaves Version history to the pane bar when the pane carries it', () => {
-    renderHeader({ historyInPane: true });
-    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument();
   });
 
   // A copy that fails must say so — `navigator.clipboard` rejects outright on
@@ -195,14 +194,14 @@ describe('KbPageHeader', () => {
   it('closes an open menu on Escape and returns focus to its trigger', async () => {
     const user = userEvent.setup();
     renderHeader();
-    const trigger = screen.getByRole('button', { name: 'More sharing options' });
+    const trigger = screen.getByRole('button', { name: 'More actions' });
     await user.click(trigger);
-    expect(screen.getByRole('menu', { name: 'Sharing options' })).toBeInTheDocument();
+    expect(screen.getByRole('menu', { name: 'More actions' })).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.keyDown(document, { key: 'Escape' });
     });
-    expect(screen.queryByRole('menu', { name: 'Sharing options' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menu', { name: 'More actions' })).not.toBeInTheDocument();
     expect(document.activeElement).toBe(trigger);
   });
 });

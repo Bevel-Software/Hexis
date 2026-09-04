@@ -24,9 +24,7 @@ import { useDismissableMenu } from '../../../shared/components';
  * Weight follows stakes, not frequency (proto:3781-3783). Share is the ONE
  * bounded button because it is the one action here with a consequence for
  * other people. Copy and Edit are icons — frequent, private, instantly
- * reversible. Version history is the clock-arrow beside Edit, the placement
- * Google Docs taught everyone; a ⋯ holding one item was a hiding place, not
- * an overflow.
+ * reversible. Everything monthly is behind `⋯`.
  */
 
 /** Extensions we strip from the `<h1>`. Anything else stays verbatim. */
@@ -70,14 +68,6 @@ export interface KbPageHeaderProps {
    * they have no bar to carry them.
    */
   writeActionInPane?: boolean;
-  /**
-   * The pane bar carries Version history beside its Edit, so the header
-   * renders none. True for prose documents — the ones that get a pane card.
-   * Separate from `writeActionInPane`, which `viewOnly` also raises: a
-   * view-only full-bleed file has no bar to carry the button, and its log is
-   * still worth reading.
-   */
-  historyInPane?: boolean;
   /** Disables Edit and explains why via `title`. */
   lockedBy: string | null;
   historyAvailable: boolean;
@@ -104,7 +94,7 @@ export interface KbPageHeaderProps {
   /** The page as Markdown. Absent for a file that has no markdown to copy. */
   onCopyPage?: () => Promise<boolean>;
   /** The canonical URL, via `useCanonicalFileUrl`. The only copy-a-reference
-   *  action on this page — see the note in the Share menu. */
+   *  action on this page — see the note where the `⋯` menu is built. */
   onCopyLink(): Promise<boolean>;
 }
 
@@ -137,7 +127,6 @@ export function KbPageHeader({
   onSendProposal,
   onDiscardProposal,
   writeActionInPane = false,
-  historyInPane = false,
   lockedBy,
   historyAvailable,
   isDirty,
@@ -152,14 +141,22 @@ export function KbPageHeader({
   onCopyLink,
 }: KbPageHeaderProps) {
   const [shareOpen, setShareOpen] = useState(false);
+  const [dotsOpen, setDotsOpen] = useState(false);
   const [copied, setCopied] = useState<Record<string, CopyState>>({});
   const shareTriggerRef = useRef<HTMLButtonElement>(null);
+  const dotsTriggerRef = useRef<HTMLButtonElement>(null);
 
   const closeShare = useCallback(() => setShareOpen(false), []);
+  const closeDots = useCallback(() => setDotsOpen(false), []);
   const shareRef = useDismissableMenu<HTMLDivElement>({
     open: shareOpen,
     onClose: closeShare,
     returnFocusTo: shareTriggerRef,
+  });
+  const dotsRef = useDismissableMenu<HTMLDivElement>({
+    open: dotsOpen,
+    onClose: closeDots,
+    returnFocusTo: dotsTriggerRef,
   });
 
   const report = useCallback(async (key: string, run: () => Promise<boolean>) => {
@@ -355,22 +352,37 @@ export function KbPageHeader({
             </IconButton>
           ))}
 
-        {/* Version history, as the clock-arrow beside Edit. It was the lone
-            item behind a ⋯ here, and a menu with one entry is a hiding place,
-            not an overflow. Prose documents put Edit in the pane bar and carry
-            this beside it (`historyInPane`); full-bleed renderers have no bar,
-            so the header keeps both. Git not ready means there is no log to
-            show, and the button goes with it. */}
-        {historyAvailable && !historyInPane && (
-          <IconButton
-            aria-label="Version history"
-            title="Version history"
-            active={activeTab === 'history'}
-            aria-pressed={activeTab === 'history'}
-            onClick={onOpenHistory}
-          >
-            <History size={14} />
-          </IconButton>
+        {/* Version history is the whole menu now, so the trigger goes where it
+            goes: git not ready means there is nothing behind ⋯, and an overflow
+            that opens onto an empty panel is worse than no overflow at all. */}
+        {historyAvailable && (
+          <div className="relative">
+            <IconButton
+              ref={dotsTriggerRef}
+              aria-label="More actions"
+              aria-haspopup="menu"
+              aria-expanded={dotsOpen}
+              active={dotsOpen}
+              onClick={() => setDotsOpen((v) => !v)}
+            >
+              <span aria-hidden className="text-strong leading-none">⋯</span>
+            </IconButton>
+            {dotsOpen && (
+              <div ref={dotsRef} className="absolute right-0 top-[calc(100%+5px)] z-40">
+                <MenuPanel role="menu" aria-label="More actions" className="min-w-[212px]">
+                  <MenuItem role="menuitem" onClick={() => { closeDots(); onOpenHistory(); }}>
+                    <span className="flex items-center gap-2.5"><History size={14} />Version history</span>
+                  </MenuItem>
+                  {/* "Copy path" is NOT here. Copying a reference to this page is
+                      one errand, and Share already owns it ("Copy link to this
+                      page"); two menus offering near-identical copies is how a
+                      user ends up pasting the wrong one. The tree's right-click
+                      menu keeps its own Copy path, because there it reaches rows
+                      that are not open — a different job. */}
+                </MenuPanel>
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>
