@@ -16,6 +16,8 @@ import {
   Dialog,
   MenuItem,
   MenuPanel,
+  useDismissableMenu,
+  useModalLayer,
 } from '../../../shared/components';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useAuth } from '../../auth/state/auth.context';
@@ -296,8 +298,28 @@ const MENU_MIN_WIDTH = 200;
  * attached yet when this component's layout effect runs (React attaches refs
  * bottom-up, children first), so the first placement would silently no-op and
  * the panel would stay hidden.
+ *
+ * Dismissal is the caller's to opt into with `onDismiss`. A menu whose open
+ * state is a boolean the caller owns (the verb checklists) has to close on an
+ * outside click and on Escape, or it sits open until something inside it is
+ * picked — a trap for anyone driving the app from the keyboard, and a surprise
+ * for everyone else. That is `useDismissableMenu`'s job, plus one thing the
+ * hook's own docstring warns it does NOT do: co-exist with the `Dialog` this
+ * menu lives in, which also listens for Escape on `document` and would close
+ * itself on the same keypress. Registering the open menu as a modal layer
+ * makes it the topmost, so `Dialog` stands down until the menu is gone. The
+ * suggestion list leaves `onDismiss` unset: its openness is derived from what
+ * is typed, not from a flag a click could clear.
  */
+const noop = () => {};
+
 function AnchoredMenu({
+  /**
+   * Close the menu. Called on a mousedown outside the panel and its trigger,
+   * and on Escape (which also hands focus back to the trigger). Leave unset
+   * for a panel whose visibility is not an open flag.
+   */
+  onDismiss,
   /**
    * Panel width in px, or `'anchor'` to match the trigger (the combobox case).
    * Clamped up to {@link MENU_MIN_WIDTH} either way.
@@ -308,17 +330,29 @@ function AnchoredMenu({
   className = '',
   children,
 }: {
+  onDismiss?: () => void;
   width?: number | 'anchor';
   align?: 'left' | 'right';
   className?: string;
   children: ReactNode;
 }) {
-  const panelRef = useRef<HTMLDivElement>(null);
+  // The control that opened us: the anchor's button. Clicks on it are the
+  // trigger's own business (its handler toggles), and Escape returns focus to
+  // it. Resolved in the layout effect below, once the panel is in the DOM.
+  const triggerRef = useRef<HTMLElement | null>(null);
+  const dismissable = onDismiss !== undefined;
+  const panelRef = useDismissableMenu<HTMLDivElement>({
+    open: dismissable,
+    onClose: onDismiss ?? noop,
+    returnFocusTo: triggerRef,
+  });
+  useModalLayer(dismissable);
   const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
   useLayoutEffect(() => {
     const panel = panelRef.current;
     const anchorEl = panel?.parentElement ?? null;
+    triggerRef.current = anchorEl?.querySelector('button') ?? anchorEl;
     const place = () => {
       const el = panelRef.current;
       const anchor = el?.parentElement?.getBoundingClientRect();
@@ -371,7 +405,7 @@ function AnchoredMenu({
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', place, true);
     };
-  }, [width, align]);
+  }, [width, align, panelRef]);
 
   return (
     <div
@@ -1080,7 +1114,7 @@ export function ManageAccessDialog({
               {summarizeVerbs(p.verbs)}
             </Button>
             {openRowKey === p.key && (
-              <AnchoredMenu>
+              <AnchoredMenu onDismiss={() => setOpenRowKey(null)}>
                 {TIER_ROLES.map((role) => {
                   const k = ROLE_TO_KEY[role];
                   const checked = p.verbs[k];
@@ -1269,7 +1303,7 @@ export function ManageAccessDialog({
                   <span className="truncate">{summarizeVerbs(effectiveNewVerbs)}</span>
                 </Button>
                 {verbOpen && (
-                  <AnchoredMenu>
+                  <AnchoredMenu onDismiss={() => setVerbOpen(false)}>
                     {TIER_ROLES.map((role) => {
                       const k = ROLE_TO_KEY[role];
                       const checked = effectiveNewVerbs[k];
