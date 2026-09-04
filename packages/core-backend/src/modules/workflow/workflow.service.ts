@@ -2164,7 +2164,9 @@ export class WorkflowService implements IWorkflowService {
     // Roles & Members surface (itself admin-gated). The rest of the CR merges
     // normally. Best-effort by design is NOT acceptable here — a failure to
     // neutralise must abort the merge, never fall through.
-    const preserved = await this.preserveBaseRolesYaml(number, user, baseBranch);
+    const preserved = await this.preserveBaseRolesYaml(
+      number, user, baseBranch, workspaceId, headSha,
+    );
 
     // When preservation pushed a restore commit, the source-branch head advanced,
     // so the caller's `headSha`/`approvals` (resolved against the pre-preservation
@@ -2180,6 +2182,10 @@ export class WorkflowService implements IWorkflowService {
         fresh: true,
         workspaceId,
         viewerEmail: user.email,
+        // Only `headSha`/`approvals` are read off this re-resolve, so skip the
+        // per-file patch generation — otherwise a preservation commit makes
+        // every merge pay for the whole patch set a SECOND time.
+        patches: false,
       });
       if (!fresh) {
         throw new RolesYamlPreservationError(
@@ -2217,11 +2223,24 @@ export class WorkflowService implements IWorkflowService {
     // this a read right after a merge misses the just-merged change. Best-effort:
     // the merge already succeeded on origin, so a pull hiccup must not fail the
     // response (a later fetch/pull reconciles).
+    //
+    // Usually there is nothing to pull. `git.mergeChangeRequest` runs in THIS
+    // workspace — `getOrCreateForBranch(cr.targetBranch)` there and
+    // `getOrCreateForBranch(baseBranch)` here resolve to the same clone, since
+    // `preserveBaseRolesYaml` already cross-checked `summary.base === baseBranch`
+    // — and it leaves the target checked out at the merge commit it just pushed.
+    // So the tree is already current and `pull` would spend an HTTPS round-trip
+    // (~0.65s on the critical path of every merge) learning that. `matchesRemoteRef`
+    // settles it from local refs in ~12ms and answers false whenever it cannot
+    // prove currency, so the pull — and with it the stranded-workspace recovery
+    // ladder below — still runs in every case that actually needs it.
     let targetWorkspaceId: string | undefined;
     try {
       const targetWorkspace = await this.workspaceService.getOrCreateForBranch(baseBranch);
       targetWorkspaceId = targetWorkspace.id;
-      await this.git.pull(targetWorkspace.id);
+      if (!(await this.git.matchesRemoteRef(targetWorkspace.id, baseBranch))) {
+        await this.git.pull(targetWorkspace.id);
+      }
     } catch (err) {
       // Still best-effort for the merge response (the merge already landed
       // on origin) — but a rebase CONFLICT here means the target workspace
@@ -2319,10 +2338,14 @@ export class WorkflowService implements IWorkflowService {
     number: number,
     user: AuthUser,
     baseBranch: string,
+    workspaceId: string,
+    headSha: string,
   ): Promise<boolean> {
     const ROLES_YAML = 'roles.yaml';
     let headBranch: string;
     try {
+      if (!workspaceId) throw new Error('workspace id is required');
+      if (!headSha) throw new Error('head sha is required');
       const summary = await this.prs.getPr(number);
       if (!summary) throw new Error(`change request #${number} not found`);
       // Use the PR's own authoritative base rather than trusting the caller's
@@ -2337,21 +2360,51 @@ export class WorkflowService implements IWorkflowService {
       // Guard against a degenerate self-targeting CR (head === base) just in case.
       if (!headBranch || headBranch === summary.base) return false;
 
-      // Work in the SOURCE branch's own per-branch workspace (already checked out
-      // on that branch). Fetch so we read the CR's TRUE published roles.yaml from
-      // the origin refs below (the comparison never touches the working tree) and
-      // so a restoring commit fast-forwards on push. We deliberately DON'T
+      // ANSWER THE QUESTION IN THE CALLER'S WORKSPACE, NOT THE SOURCE BRANCH'S.
+      //
+      // The comparison only needs to read two origin refs, and any clone of this
+      // repo can serve them. The caller's workspace is already bootstrapped (the
+      // merge route / agent tool resolves it before calling), whereas
+      // `getOrCreateForBranch(headBranch)` CLONES when that branch has never been
+      // opened on this instance — checkout plus `--dissociate` — on the critical
+      // path of every merge, to answer "no" almost every time. The source branch's
+      // workspace is now touched only when a restore actually has to be written,
+      // below.
+      //
+      // NO FETCH HERE, and the head side is read at a COMMIT, not a branch ref.
+      //
+      // `headSha` is what the caller resolved through `resolvePrShas`, which
+      // fetched both refs into THIS workspace moments ago, and it is the same
+      // commit the merge gate authorised against (`headShaAtMerge`). Reading the
+      // head's roles.yaml at that exact commit is therefore both fresher than a
+      // re-fetch would make it and strictly more precise than `origin/<head>`:
+      // the ref could have moved since the gate ran, which would have us clear a
+      // commit the merge was never authorised for. Re-fetching here bought a
+      // second round-trip for the same two refs and did not close that gap.
+      //
+      // The base side stays on `origin/<base>`, refreshed by the same
+      // `resolvePrShas` fetch. A stale base cannot fail OPEN: it can only make
+      // base and head look DIFFERENT and trigger a restore that was not needed
+      // (fail-closed, and the merge still lands correctly), never make a real
+      // roles.yaml change look identical.
+      const baseRoles = await this.git.readFileAtRef(
+        workspaceId, `origin/${summary.base}`, ROLES_YAML,
+      );
+      const headRoles = await this.git.readFileAtRef(workspaceId, headSha, ROLES_YAML);
+
+      // Identical (incl. both-absent) → the CR doesn't change roles.yaml. Done,
+      // and the source workspace was never touched.
+      if (baseRoles === headRoles) return false;
+
+      // A restore IS needed, so from here we do need the source branch's own
+      // per-branch workspace (already checked out on that branch) — paying the
+      // bootstrap in the rare case rather than the common one. Fetch so a
+      // restoring commit fast-forwards on push. We deliberately DON'T
       // `resetToRemote` here: that workspace is shared per-branch and can carry
       // disk-first edits whose commits are still queued (see PendingCommitsService),
       // and a hard reset would silently discard them.
       const ws = await this.workspaceService.getOrCreateForBranch(headBranch);
-      await this.git.fetch(ws.id);
-
-      const baseRoles = await this.git.readFileAtRef(ws.id, `origin/${summary.base}`, ROLES_YAML);
-      const headRoles = await this.git.readFileAtRef(ws.id, `origin/${headBranch}`, ROLES_YAML);
-
-      // Identical (incl. both-absent) → the CR doesn't change roles.yaml. Done.
-      if (baseRoles === headRoles) return false;
+      await this.git.fetchBranchRefs(ws.id, [headBranch]);
 
       // The restore below writes roles.yaml directly to the shared per-branch
       // working tree. `LockingFilesystem` serializes every OTHER roles.yaml edit

@@ -1339,8 +1339,17 @@ export class GitService implements IGitService {
   /**
    * Merge a change request locally and publish it to the target branch — the
    * provider-agnostic replacement for `gh pr merge`. Runs in the *base* branch's
-   * workspace: reset to the published base tip, merge the source's published
-   * tip as a `--no-ff` commit authored by the human triggerer, and push.
+   * workspace: reset to the published base tip, merge `sourceSha` as a `--no-ff`
+   * commit authored by the human triggerer, and push.
+   *
+   * `sourceSha` — NOT `origin/<sourceBranch>` — is what gets merged, and the
+   * distinction is a security boundary rather than a detail. The review gate
+   * resolves a head SHA, approvals are pinned to it, and `prMergeLog` records it
+   * as `headShaAtMerge`; but this method fetches again, and merging the branch
+   * ref would land whatever arrived in between. That is not theoretical — a
+   * commit pushed after the gate ran was observed reaching the protected branch.
+   * The SHA is additionally required to still be an ancestor of the fetched
+   * branch tip, so a force-push cannot make this resurrect withdrawn content.
    *
    * Serialized per base workspace via the mutex, with a bounded retry: if the
    * push is rejected because the base advanced (a concurrent merge), we reset to
@@ -1352,12 +1361,19 @@ export class GitService implements IGitService {
   async mergeChangeRequest(
     baseWorkspaceId: string,
     sourceBranch: string,
+    sourceSha: string,
     targetBranch: string,
     commit: { subject: string; body: string },
     user: AuthUser,
   ): Promise<{ kind: 'merged'; sha: string } | { kind: 'conflicts'; paths: string[] }> {
     assertValidBranchName(sourceBranch);
     assertValidBranchName(targetBranch);
+    // Both `sourceBranch` and `sourceSha` are strings and adjacent in the
+    // parameter list; the shape check here is what makes a swapped call fail
+    // loudly instead of merging something surprising.
+    if (!/^[0-9a-f]{40,64}$/.test(sourceSha)) {
+      throw new WorkflowValidationError(`invalid source commit sha: ${sourceSha}`);
+    }
     assertValidAuthor(user);
     const MAX_ATTEMPTS = 3;
     return this.mutex.run(baseWorkspaceId, async () => {
@@ -1395,10 +1411,43 @@ export class GitService implements IGitService {
         await this.git(cwd, ['checkout', targetBranch]);
         await this.git(cwd, ['reset', '--hard', `origin/${targetBranch}`]);
 
-        // `--no-commit --no-ff` so we author the merge commit as the human and
-        // never fast-forward past the merge record.
+        // The pinned head must still be ON its branch. Merging `sourceSha` is
+        // what stops a commit pushed after the review gate from riding in — but
+        // on its own it would also happily merge a commit that has since been
+        // force-pushed AWAY, resurrecting content the author withdrew.
+        //
+        // Any non-zero exit refuses, and deliberately so. `--is-ancestor` exits
+        // 1 for "no" when both objects resolve, but a commit that was rewritten
+        // away is typically not in this clone's object store at all (the fetch
+        // above force-updates the remote-tracking ref; a base workspace may
+        // never have seen the old tip), which exits 128 instead. Both mean the
+        // same thing here — we cannot show this commit is published on that
+        // branch — and this is a fail-closed guard, so "cannot prove" must
+        // refuse. The git detail rides along so a genuine infra failure is still
+        // diagnosable rather than silently reported as a force-push.
         try {
-          await this.git(cwd, ['merge', '--no-commit', '--no-ff', `origin/${sourceBranch}`]);
+          await this.git(cwd, [
+            'merge-base', '--is-ancestor', sourceSha, `origin/${sourceBranch}`,
+          ]);
+        } catch (err) {
+          throw new Error(
+            `change request head ${sourceSha.slice(0, 8)} is no longer on "${sourceBranch}" ` +
+              '(force-pushed, rewritten, or unreachable); refusing to merge a commit ' +
+              `that is not published on its branch: ${redact(
+                err instanceof Error ? err.message : String(err),
+              )}`,
+          );
+        }
+
+        // `--no-commit --no-ff` so we author the merge commit as the human and
+        // never fast-forward past the merge record. Merging the pinned SHA, not
+        // `origin/<source>`: the branch ref can advance between the review gate
+        // resolving `headSha` and this fetch, and merging the ref would land
+        // commits nobody approved (verified: a commit pushed after the gate
+        // reached the protected branch). Pinning also makes the retry loop
+        // below deterministic — only the base moves between attempts.
+        try {
+          await this.git(cwd, ['merge', '--no-commit', '--no-ff', sourceSha]);
         } catch (err) {
           const paths = await this.conflictedPaths(cwd);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
@@ -1492,6 +1541,73 @@ export class GitService implements IGitService {
       // steering a concurrent refresh in the same clone (see `pull`).
       await this.git(cwd, ['fetch', '--no-write-fetch-head', 'origin']);
     });
+  }
+
+  /**
+   * Refresh `refs/remotes/origin/<branch>` for named branches only, and FAIL
+   * when the refresh doesn't land.
+   *
+   * The narrow counterpart to `fetch`. Explicit destination refspecs, so the
+   * refs the caller is about to read move regardless of any
+   * `remote.origin.fetch` drift (same reasoning as `mergeChangeRequest`), and
+   * nothing else moves. `--no-write-fetch-head` keeps it out of the clone's
+   * shared `FETCH_HEAD` (see `pull`).
+   *
+   * The distinction from `fetchPrRefs` is the error handling, and it is the
+   * whole point of this method existing. `fetchPrRefs` is best-effort: it backs
+   * the change-request DETAIL reads, where a stale ref costs a slightly-off
+   * diff. This one PROPAGATES. It exists for `preserveBaseRolesYaml`, which
+   * compares base-vs-head `roles.yaml` to decide whether a change request is
+   * smuggling a privilege escalation across a merge — answering that from a
+   * silently stale `origin/<head>` would fail OPEN. A caller that must fail
+   * closed needs the throw.
+   *
+   * Runs OUTSIDE the workspace mutex: a network round-trip must not hold a lock
+   * that local operations queue behind, and this only advances remote-tracking
+   * refs, which nothing reads mid-flight.
+   */
+  /**
+   * True when this workspace's HEAD already IS `origin/<branch>` — checked
+   * entirely from local refs, with no network.
+   *
+   * The point is to let a caller skip a refresh it does not need.
+   * `WorkflowService.mergeChangeRequest` pulls the target workspace after a
+   * merge so the working tree the file tools serve isn't behind origin — but
+   * the merge it just ran happened IN that same workspace (`git
+   * mergeChangeRequest` checks out the target, resets to it, commits and
+   * pushes), so the tree is current and the pull's fetch is a ~0.65s HTTPS
+   * round-trip to learn nothing.
+   *
+   * Answers FALSE on any failure — an unresolvable ref, a detached HEAD, a
+   * missing remote-tracking ref. "I could not prove it is current" must send
+   * the caller down the refresh path, never skip it: this gates a freshness
+   * guarantee, so the safe default is to do the work.
+   */
+  async matchesRemoteRef(workspaceId: string, branch: string): Promise<boolean> {
+    assertValidBranchName(branch);
+    try {
+      const cwd = await this.repoDir(workspaceId);
+      const [{ stdout: head }, { stdout: remote }] = await Promise.all([
+        this.git(cwd, ['rev-parse', 'HEAD']),
+        this.git(cwd, ['rev-parse', `refs/remotes/origin/${branch}`]),
+      ]);
+      const h = head.trim();
+      return h.length > 0 && h === remote.trim();
+    } catch {
+      return false;
+    }
+  }
+
+  async fetchBranchRefs(workspaceId: string, branches: string[]): Promise<void> {
+    if (branches.length === 0) return;
+    for (const branch of branches) assertValidBranchName(branch);
+    const cwd = await this.repoDir(workspaceId);
+    await this.git(cwd, [
+      'fetch',
+      '--no-write-fetch-head',
+      'origin',
+      ...branches.map((b) => `+refs/heads/${b}:refs/remotes/origin/${b}`),
+    ]);
   }
 
   /**
