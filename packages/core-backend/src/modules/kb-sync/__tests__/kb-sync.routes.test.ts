@@ -101,7 +101,7 @@ describe('POST /api/sync — credentials', () => {
       body,
     });
     expect(res.status).toBe(200);
-    expect(sync).toHaveBeenCalledWith({ branches: ['main'] });
+    expect(sync).toHaveBeenCalledWith(expect.objectContaining({ branches: ['main'] }));
   });
 });
 
@@ -110,7 +110,7 @@ describe('POST /api/sync — body and result', () => {
     const { base, sync } = await mount({});
     const res = await post(base, { headers: { authorization: `Bearer ${SECRET}` } });
     expect(res.status).toBe(200);
-    expect(sync).toHaveBeenCalledWith({ branches: 'all' });
+    expect(sync).toHaveBeenCalledWith(expect.objectContaining({ branches: 'all' }));
     expect(await res.json()).toEqual(SYNCED);
   });
 
@@ -120,7 +120,7 @@ describe('POST /api/sync — body and result', () => {
       headers: { authorization: `Bearer ${SECRET}`, 'content-type': 'application/json' },
       body: JSON.stringify({ branches: ['main', 'ali/x'] }),
     });
-    expect(sync).toHaveBeenCalledWith({ branches: ['main', 'ali/x'] });
+    expect(sync).toHaveBeenCalledWith(expect.objectContaining({ branches: ['main', 'ali/x'] }));
   });
 
   it('an Azure DevOps push payload names the pushed branch', async () => {
@@ -132,7 +132,7 @@ describe('POST /api/sync — body and result', () => {
         resource: { refUpdates: [{ name: 'refs/heads/ali/x' }] },
       }),
     });
-    expect(sync).toHaveBeenCalledWith({ branches: ['ali/x'] });
+    expect(sync).toHaveBeenCalledWith(expect.objectContaining({ branches: ['ali/x'] }));
   });
 
   it('400 for a branch name git would refuse, and for a body that is not JSON', async () => {
@@ -191,7 +191,7 @@ describe('POST /api/sync/<branch> — the branch in the URL', () => {
       const { base, sync } = await mount({});
       const res = await post(`${base}/${spelling}`, { headers: { authorization: `Bearer ${SECRET}` } });
       expect(res.status).toBe(200);
-      expect(sync).toHaveBeenCalledWith({ branches: [decodeURIComponent(spelling)] });
+      expect(sync).toHaveBeenCalledWith(expect.objectContaining({ branches: [decodeURIComponent(spelling)] }));
       server?.close();
     }
   });
@@ -202,7 +202,7 @@ describe('POST /api/sync/<branch> — the branch in the URL', () => {
       headers: { authorization: `Bearer ${SECRET}`, 'content-type': 'application/json' },
       body: JSON.stringify({ branches: ['other'] }),
     });
-    expect(sync).toHaveBeenCalledWith({ branches: ['main'] });
+    expect(sync).toHaveBeenCalledWith(expect.objectContaining({ branches: ['main'] }));
   });
 
   it('still checks the credential first', async () => {

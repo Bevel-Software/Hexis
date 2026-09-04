@@ -123,3 +123,45 @@ describe('KbSyncService', () => {
     expect(r.results.map((x) => x.branch)).toEqual(['main', 'ali/x', 'juan/y']);
   });
 });
+
+describe('KbSyncService.lastSync', () => {
+  it('is null before the first sync, then records when, who and what', async () => {
+    const workflow: SyncWorkflowPort = {
+      syncWorkspaceFromRemote: vi.fn(async (id: string) => updated(decodeURIComponent(id))),
+      closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+    };
+    let clock = 1_000;
+    const svc = new KbSyncService(workflow, workspaces(['main']), () => clock);
+    expect(svc.lastSync()).toBeNull();
+
+    await svc.sync({ branches: 'all', by: 'bearer' });
+    expect(svc.lastSync()).toEqual({
+      at: 1_000,
+      by: 'bearer',
+      status: 'synced',
+      results: [updated('main')],
+    });
+
+    clock = 2_000;
+    await svc.sync({ branches: ['main'], by: 'admin@example.com' });
+    expect(svc.lastSync()).toMatchObject({ at: 2_000, by: 'admin@example.com' });
+  });
+
+  it('a coalesced follow-up names everyone who asked for it', async () => {
+    const gate = deferred<void>();
+    const workflow: SyncWorkflowPort = {
+      syncWorkspaceFromRemote: vi.fn(async (id: string) => {
+        if (id === 'main') await gate.promise;
+        return updated(decodeURIComponent(id));
+      }),
+      closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+    };
+    const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x']));
+    const first = svc.sync({ branches: ['main'], by: 'bearer' });
+    const second = svc.sync({ branches: ['ali/x'], by: 'github-signature' });
+    const third = svc.sync({ branches: ['ali/x'], by: 'admin@example.com' });
+    gate.resolve();
+    await Promise.all([first, second, third]);
+    expect(svc.lastSync()?.by).toBe('github-signature, admin@example.com');
+  });
+});

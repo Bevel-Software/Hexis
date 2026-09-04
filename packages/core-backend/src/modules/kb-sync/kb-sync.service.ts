@@ -1,6 +1,7 @@
 import type { BranchSyncOutcome } from '@bevel-software/platform-shared';
 import type {
   IKbSyncService,
+  LastSync,
   SyncRequest,
   SyncResult,
   SyncWorkflowPort,
@@ -26,15 +27,22 @@ export class KbSyncService implements IKbSyncService {
   private inFlight: Promise<unknown> | null = null;
   private queued: {
     branches: Set<string> | 'all';
+    by: Set<string>;
     promise: Promise<SyncResult>;
     resolve: (r: SyncResult) => void;
     reject: (e: unknown) => void;
   } | null = null;
+  private last: LastSync | null = null;
 
   constructor(
     private readonly workflow: SyncWorkflowPort,
     private readonly workspaces: SyncWorkspacePort,
+    private readonly now: () => number = () => Date.now(),
   ) {}
+
+  lastSync(): LastSync | null {
+    return this.last;
+  }
 
   sync(request: SyncRequest): Promise<SyncResult> {
     if (!this.inFlight) return this.start(request);
@@ -48,13 +56,17 @@ export class KbSyncService implements IKbSyncService {
       });
       this.queued = {
         branches: request.branches === 'all' ? 'all' : new Set(request.branches),
+        by: new Set(request.by ? [request.by] : []),
         promise,
         resolve,
         reject,
       };
-    } else if (this.queued.branches !== 'all') {
-      if (request.branches === 'all') this.queued.branches = 'all';
-      else for (const b of request.branches) this.queued.branches.add(b);
+    } else {
+      if (this.queued.branches !== 'all') {
+        if (request.branches === 'all') this.queued.branches = 'all';
+        else for (const b of request.branches) this.queued.branches.add(b);
+      }
+      if (request.by) this.queued.by.add(request.by);
     }
     return this.queued.promise;
   }
@@ -74,6 +86,7 @@ export class KbSyncService implements IKbSyncService {
     this.queued = null;
     const request: SyncRequest = {
       branches: next.branches === 'all' ? 'all' : [...next.branches],
+      by: next.by.size > 0 ? [...next.by].join(', ') : undefined,
     };
     this.start(request).then(next.resolve, next.reject);
   }
@@ -109,10 +122,17 @@ export class KbSyncService implements IKbSyncService {
     const clean = results.every(
       (r) => r.outcome === 'updated' || r.outcome === 'up-to-date' || r.outcome === 'not-cloned',
     );
-    return {
+    const result: SyncResult = {
       status: clean ? 'synced' : 'partial',
       results,
       changeRequests: { closedDeletedBranch },
     };
+    this.last = {
+      at: this.now(),
+      by: request.by ?? 'unknown',
+      status: result.status,
+      results: [...results],
+    };
+    return result;
   }
 }

@@ -1,5 +1,6 @@
 export type {
   IKbSyncService,
+  LastSync,
   SyncRequest,
   SyncResult,
   SyncWorkflowPort,

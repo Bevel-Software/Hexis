@@ -106,7 +106,7 @@ export function createKbSyncRoutes(deps: KbSyncRouteDeps): express.Router {
     const asked =
       selection.branches === 'all' ? 'all cloned branches' : selection.branches.join(', ') || '(none)';
     try {
-      const result = await deps.kbSync.sync({ branches: selection.branches });
+      const result = await deps.kbSync.sync({ branches: selection.branches, by: who });
       const summary = result.results.map((r) => `${r.branch}=${r.outcome}`).join(' ');
       console.log(`[sync] by ${who} via ${selection.source} for ${asked}: ${result.status} ${summary}`);
       res.status(httpStatusFor(result)).json(result);

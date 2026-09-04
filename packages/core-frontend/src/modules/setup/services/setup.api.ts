@@ -15,6 +15,31 @@ export interface SettingStatus {
   restartToApply: boolean;
 }
 
+/** One branch's part in a remote sync, as `POST /api/sync` reports it. */
+export interface SyncBranchOutcome {
+  branch: string;
+  outcome: 'updated' | 'up-to-date' | 'not-cloned' | 'conflict' | 'error';
+  error?: string;
+  conflictedPaths?: string[];
+}
+
+/** What the most recent remote sync did — from the server's memory, so "none yet" after a restart. */
+export interface LastSync {
+  /** Epoch ms. */
+  at: number;
+  /** A credential kind (`bearer`, `github-signature`, …) or an admin's email. */
+  by: string;
+  status: 'synced' | 'partial';
+  results: SyncBranchOutcome[];
+}
+
+/** The remote-sync facts shown beside the sync secret. Admins only. */
+export interface SyncStatus {
+  /** `<backend>/api/sync` — a hook appends `/<branch>`. */
+  url: string;
+  last: LastSync | null;
+}
+
 export interface SetupStatus {
   /** Reachable knowledge base AND a process that can serve it. */
   complete: boolean;
@@ -26,6 +51,8 @@ export interface SetupStatus {
   isAdmin: boolean;
   /** Admins only — nobody else is told what is missing. */
   settings?: SettingStatus[];
+  /** Admins only. Absent on a build without the sync module. */
+  sync?: SyncStatus;
 }
 
 export interface SaveResult {
@@ -58,6 +85,37 @@ async function readError(res: Response): Promise<never> {
   const data = body as { error?: string; problems?: Record<string, string> };
   if (data.problems) throw new SettingsProblems(data.problems);
   throw new Error(data.error || `Request failed (${res.status})`);
+}
+
+/** What "Sync now" came back with. A 409 or 503 still carries per-branch results. */
+export interface SyncNowResult {
+  /** True for 200 — every branch current. */
+  ok: boolean;
+  status?: 'synced' | 'partial';
+  results: SyncBranchOutcome[];
+  /** Set when the server answered with an error body instead of results. */
+  error?: string;
+}
+
+/**
+ * Run a sync of every cloned branch with the admin's own session — the same
+ * thing a hook does, from the page where the hook is being wired up, so an
+ * admin can prove the deployment reaches the repository before trusting the
+ * hook to.
+ */
+export async function syncNow(): Promise<SyncNowResult> {
+  const res = await authFetch('/api/sync', { method: 'POST' });
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    throw new Error(`Sync failed (${res.status})`);
+  }
+  const data = body as { status?: 'synced' | 'partial'; results?: SyncBranchOutcome[]; error?: string };
+  if (!Array.isArray(data.results)) {
+    return { ok: false, results: [], error: data.error || `Sync failed (${res.status})` };
+  }
+  return { ok: res.status === 200, status: data.status, results: data.results };
 }
 
 export async function fetchSetupStatus(): Promise<SetupStatus> {

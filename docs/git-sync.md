@@ -22,6 +22,12 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 
 Without a secret the endpoint only accepts an administrator's own session.
 
+The setup screen shows the exact address to paste into a hook, with a copy
+button, beside the secret. Once the deployment is running, the Deployment
+page also shows what the last sync did and offers **Sync now**, which pulls
+every branch with your own session — handy for proving the connection
+before trusting the hook.
+
 ## 2. Call the endpoint
 
 Sync the branch whose change made the call:

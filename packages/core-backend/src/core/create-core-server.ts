@@ -182,6 +182,10 @@ export async function createCoreServer(
   const mcpResourceUrl = new URL('/api/mcp', core.config.publicBackendUrl);
   mcpResourceUrl.username = '';
   mcpResourceUrl.password = '';
+  /** The remote-sync address the setup status publishes for admins to paste into a hook. */
+  const syncUrl = new URL('/api/sync', core.config.publicBackendUrl);
+  syncUrl.username = '';
+  syncUrl.password = '';
 
   /**
    * The handful of facts the browser needs BEFORE it can render anything, and
@@ -493,7 +497,12 @@ export async function createCoreServer(
   app.use(
     '/api',
     core.authMiddleware,
-    createSetupRoutes(core.settings, core.adminAccess, core.kbStartupRunner),
+    createSetupRoutes(core.settings, core.adminAccess, core.kbStartupRunner, {
+      // Same address family as the MCP endpoint above, userinfo stripped for
+      // the same reason: this string is handed to admins to paste elsewhere.
+      url: syncUrl.toString(),
+      lastSync: () => core.kbSyncService.lastSync(),
+    }),
   );
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
     service: core.mcpServerEditService,

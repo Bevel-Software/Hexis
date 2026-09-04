@@ -11,6 +11,22 @@ import type { BranchSyncOutcome } from '@bevel-software/platform-shared';
 /** Which branches a caller asked to sync. `'all'` = every clone Hexis holds. */
 export interface SyncRequest {
   branches: string[] | 'all';
+  /** Who asked — a credential kind or an admin's email — for the last-sync record. */
+  by?: string;
+}
+
+/**
+ * What the most recent sync did, for the admin's Deployment page. Kept in
+ * memory only: it answers "is the hook wired up and working?", and a restart
+ * resetting it to "none yet" is the honest answer for a fresh process.
+ */
+export interface LastSync {
+  /** Epoch ms when the sync finished. */
+  at: number;
+  by: string;
+  status: SyncResult['status'];
+  /** One entry per branch, as the response carried them. */
+  results: BranchSyncOutcome[];
 }
 
 export interface SyncResult {
@@ -31,6 +47,8 @@ export interface IKbSyncService {
    * Never rejects for a per-branch failure — those are outcomes.
    */
   sync(request: SyncRequest): Promise<SyncResult>;
+  /** The most recent completed sync in this process, or null before the first. */
+  lastSync(): LastSync | null;
 }
 
 /** The slice of the workflow module a sync drives. */
