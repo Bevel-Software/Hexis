@@ -80,7 +80,7 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
 
     const git = {
       fetch: vi.fn().mockResolvedValue(undefined),
-      pull: vi.fn().mockResolvedValue({ headMoved: true }),
+      pull: vi.fn().mockResolvedValue({ treeChanged: true }),
       // Resolve roles.yaml at origin/<ref> from the per-test content.
       readFileAtRef: vi.fn(async (_ws: string, ref: string) =>
         ref === `origin/${BASE}` ? opts.baseRoles : ref === `origin/${HEAD}` ? opts.headRoles : null,

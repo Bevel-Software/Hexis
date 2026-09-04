@@ -77,7 +77,7 @@ describe('registerCatalogCacheInvalidation', () => {
      * as the `fs-tree-changed` its post-merge pull emits, exactly as a
      * working-tree write does — NOT as a `change-request-merged` special
      * case. That a pull of the default workspace actually emits this event
-     * (only after it resolves, and only when it moved HEAD) is the emitter's
+     * (only after it resolves, and only when it changed the tree's content) is the emitter's
      * own contract, pinned in workflow.service.releaseLock.test.ts under
      * "the tree-change announcement".
      */

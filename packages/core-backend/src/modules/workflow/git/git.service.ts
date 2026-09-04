@@ -1520,14 +1520,16 @@ export class GitService implements IGitService {
     return `refs/remotes/origin/${branch}`;
   }
 
-  async pull(workspaceId: string): Promise<{ headMoved: boolean }> {
+  async pull(workspaceId: string): Promise<{ treeChanged: boolean }> {
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
       const branch = await this.currentBranch(cwd);
-      // For `headMoved` (see IGitService.pull). Tolerant of an unborn HEAD
-      // (a clone of an empty upstream): "" before + a sha after correctly
-      // reads as moved, "" both sides as not.
-      const headBefore = await this.git(cwd, ['rev-parse', 'HEAD'])
+      // For `treeChanged` (see IGitService.pull): TREE ids, not commit ids —
+      // a pull that lands only content-identical commits (an empty commit)
+      // must not read as a content change. Tolerant of an unborn HEAD (a
+      // clone of an empty upstream): "" before + a tree after correctly
+      // reads as changed, "" both sides as not.
+      const treeBefore = await this.git(cwd, ['rev-parse', 'HEAD^{tree}'])
         .then(({ stdout }) => stdout.trim())
         .catch(() => '');
       try {
@@ -1590,10 +1592,10 @@ export class GitService implements IGitService {
         throw err;
       }
       this.accessControl?.invalidate(workspaceId);
-      const headAfter = await this.git(cwd, ['rev-parse', 'HEAD'])
+      const treeAfter = await this.git(cwd, ['rev-parse', 'HEAD^{tree}'])
         .then(({ stdout }) => stdout.trim())
         .catch(() => '');
-      return { headMoved: headAfter !== headBefore };
+      return { treeChanged: treeAfter !== treeBefore };
     });
   }
 

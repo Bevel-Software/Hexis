@@ -120,7 +120,7 @@ function makeGit(overrides: Partial<{
     }),
     pull: vi.fn().mockImplementation(async () => {
       if (pullBehavior === 'fail') throw new Error('git pull failed: merge conflict');
-      return { headMoved: true };
+      return { treeChanged: true };
     }),
   } as unknown as GitService;
 }
@@ -763,7 +763,7 @@ describe('WorkflowService.updateFromRemote — the tree-change announcement', ()
    */
   const DEFAULT_WS = 'target-company-state'; // == the test env's DEFAULT_BRANCH
 
-  function makePullingGit(result: { headMoved: boolean } | Error): {
+  function makePullingGit(result: { treeChanged: boolean } | Error): {
     git: GitService;
     pullSettled: () => boolean;
   } {
@@ -787,10 +787,10 @@ describe('WorkflowService.updateFromRemote — the tree-change announcement', ()
       .filter((e) => e.kind === 'fs-tree-changed');
   }
 
-  it('emits fs-tree-changed for the default workspace once the pull has moved HEAD', async () => {
+  it('emits fs-tree-changed for the default workspace once the pull has changed the tree', async () => {
     const events = new WorkflowEventBus();
     const emitSpy = vi.spyOn(events, 'emit');
-    const { git, pullSettled } = makePullingGit({ headMoved: true });
+    const { git, pullSettled } = makePullingGit({ treeChanged: true });
     let settledAtEmit: boolean | undefined;
     emitSpy.mockImplementation(() => {
       settledAtEmit = pullSettled();
@@ -807,10 +807,10 @@ describe('WorkflowService.updateFromRemote — the tree-change announcement', ()
     expect(settledAtEmit).toBe(true);
   });
 
-  it('stays silent when the pull found nothing new (headMoved: false)', async () => {
+  it('stays silent when the pull found nothing new (treeChanged: false)', async () => {
     const events = new WorkflowEventBus();
     const emitSpy = vi.spyOn(events, 'emit');
-    const { git } = makePullingGit({ headMoved: false });
+    const { git } = makePullingGit({ treeChanged: false });
     const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
 
     await svc.updateFromRemote(DEFAULT_WS, USER);
@@ -820,10 +820,10 @@ describe('WorkflowService.updateFromRemote — the tree-change announcement', ()
     expect(treeChangedEvents(emitSpy)).toEqual([]);
   });
 
-  it('stays silent for a non-default workspace even when HEAD moved', async () => {
+  it('stays silent for a non-default workspace even when the tree changed', async () => {
     const events = new WorkflowEventBus();
     const emitSpy = vi.spyOn(events, 'emit');
-    const { git } = makePullingGit({ headMoved: true });
+    const { git } = makePullingGit({ treeChanged: true });
     const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
 
     await svc.updateFromRemote(encodeURIComponent('alice/draft'), USER);

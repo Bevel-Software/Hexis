@@ -119,7 +119,7 @@ describe('post-merge refresh of the target branch workspace', () => {
     expect(merged.kind).toBe('merged');
 
     // 2. The post-merge refresh of the TARGET branch's own workspace succeeds.
-    await expect(git.pull(baseWsId)).resolves.toEqual({ headMoved: true });
+    await expect(git.pull(baseWsId)).resolves.toEqual({ treeChanged: true });
 
     // The workspace is at origin's head, and serves the merged file.
     const originHead = await gitOut(baseRepo, ['rev-parse', `origin/${BASE}`]);
@@ -203,7 +203,7 @@ describe('post-merge refresh of the target branch workspace', () => {
       // ~40% of rounds hit the fatal pre-fix (measured), so 20 rounds makes a
       // pre-fix regression a practical certainty while staying quick.
       for (let round = 0; round < 20; round += 1) {
-        await expect(git.pull(baseWsId)).resolves.toEqual({ headMoved: round === 0 });
+        await expect(git.pull(baseWsId)).resolves.toEqual({ treeChanged: round === 0 });
       }
     } finally {
       stop = true;
@@ -268,7 +268,7 @@ describe('post-merge refresh of the target branch workspace', () => {
     expect(upstreamLog.split('\n')).toContain(latestSource);
 
     // ...and the post-merge refresh of the base workspace serves that revision.
-    await expect(git.pull(baseWsId)).resolves.toEqual({ headMoved: true });
+    await expect(git.pull(baseWsId)).resolves.toEqual({ treeChanged: true });
     const revision = await fs.readFile(path.join(baseRepo, 'revision.md'), 'utf8');
     expect(revision.replace(/\r\n/g, '\n')).toBe('second revision\n');
   });

@@ -378,16 +378,17 @@ export class WorkflowService implements IWorkflowService {
    * that ONE mechanism — "the default branch's tree changed" — instead of a
    * separate special case per event.
    *
-   * Announced only after the pull RESOLVES, and only when it MOVED HEAD: a
-   * pull that threw left the tree as it was, and an "already up to date" pull
-   * left it as it was too — dropping every catalog and making every attached
-   * browser refetch its file tree for a change that did not happen buys a
-   * re-scan and nothing else. The pull itself reports the movement, since it
-   * is the only code that can observe it under the workspace mutex.
+   * Announced only after the pull RESOLVES, and only when it CHANGED the
+   * tree's content: a pull that threw left the tree as it was, and so did an
+   * "already up to date" pull or one that landed only content-identical
+   * commits — dropping every catalog and making every attached browser
+   * refetch its file tree for a change that did not happen buys a re-scan
+   * and nothing else. The pull itself reports the change, since it is the
+   * only code that can observe it under the workspace mutex.
    */
   private async pullWorkspace(workspaceId: string): Promise<void> {
-    const { headMoved } = await this.git.pull(workspaceId);
-    if (headMoved && branchForWorkspaceId(workspaceId) === DEFAULT_BRANCH) {
+    const { treeChanged } = await this.git.pull(workspaceId);
+    if (treeChanged && branchForWorkspaceId(workspaceId) === DEFAULT_BRANCH) {
       this.events?.emit({ kind: 'fs-tree-changed', workspaceId, branch: DEFAULT_BRANCH });
     }
   }
