@@ -36,7 +36,6 @@ import {
 import { MaintenanceOverlay } from '../modules/layout/components/MaintenanceOverlay';
 import { AdminProvider } from '../modules/admin/state/admin.context';
 import { RolesCorruptedBanner } from '../modules/admin/components/RolesCorruptedBanner';
-import { UpdateBanner } from '../modules/update-check/components/UpdateBanner';
 import { ConnectToolsPage } from '../modules/secrets-vault/components/ConnectToolsPage';
 import { SettingsLayout } from '../modules/settings/components/SettingsLayout';
 import { DeploymentPage } from '../modules/settings/components/DeploymentPage';
@@ -173,9 +172,6 @@ function AuthenticatedAppInner() {
 const CORE_BANNERS: BannerDef[] = [
   { id: 'demo', order: 20, node: <DemoBanner /> },
   { id: 'roles-corrupted', order: 30, node: <RolesCorruptedBanner /> },
-  // Admins-only "a newer release exists" line — quiet, dismissible per
-  // version, below the louder condition banners above.
-  { id: 'update-available', order: 35, node: <UpdateBanner /> },
 ];
 
 // Core panes; merged (by `order`) with registry-contributed panes (the

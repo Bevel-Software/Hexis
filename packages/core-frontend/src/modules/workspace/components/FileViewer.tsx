@@ -1,11 +1,11 @@
 import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Check, XCircle, Lock, AlertTriangle, ArrowLeft, FileText } from 'lucide-react';
+import { Check, XCircle, Lock, AlertTriangle, ArrowLeft, FileText, History } from 'lucide-react';
 import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
-import { Banner, Button, Surface } from '../../../shared/components';
+import { Banner, Button, IconButton, Surface } from '../../../shared/components';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
@@ -207,6 +207,35 @@ export function FileViewer() {
     toBranch: string;
   } | null>(null);
   const historyAvailable = git.availability === 'ready';
+  // Losing the log CLOSES the view, rather than parking `activeTab` on it.
+  // `availability` is re-derived from a polled status call, so one failed
+  // poll flips it off and the next good one flips it back. Left on
+  // 'history', the tab would keep the column full-bleed with no panel in it
+  // (a bare document, no pane card, no way back but the next poll), and then
+  // put the log back over the file the moment git recovered, minutes after
+  // the reader had gone back to reading. Same rule the skill page applies to
+  // its own open flag.
+  if (activeTab !== 'content' && !historyAvailable) setActiveTab('content');
+  /**
+   * Opening the log from the pane bar's clock unmounts the pane bar, and with
+   * it the clock a keyboard user just activated; closing it from the header's
+   * pressed clock hands the column back to prose, which hides the header's
+   * clock again (`historyInPane`). Either way focus would fall to `document`.
+   * So the two clocks hand focus to each other across the swap — the same
+   * rule the skill page applies — and only for a swap the USER made: the tab
+   * resetting because git stopped answering, or because a different file
+   * opened, must not move focus.
+   */
+  const paneClockRef = useRef<HTMLButtonElement>(null);
+  const headerClockRef = useRef<HTMLButtonElement>(null);
+  const focusAfterSwap = useRef<'header' | 'pane' | null>(null);
+  useEffect(() => {
+    const want = focusAfterSwap.current;
+    if (!want) return;
+    focusAfterSwap.current = null;
+    if (want === 'header' && activeTab === 'history') headerClockRef.current?.focus();
+    if (want === 'pane' && activeTab === 'content') paneClockRef.current?.focus();
+  }, [activeTab]);
   const hasUnsavedWork = isManualDirty || manualSaveState === 'saving';
 
   const hasPending = pendingFileContent !== null;
@@ -999,7 +1028,7 @@ export function FileViewer() {
   // rule). While a mode is OPEN it shows the way out instead. The header's
   // own cluster is suppressed for prose files (`writeActionInPane`).
   const lockedBy = fileLock.externalLock?.holderName ?? null;
-  const paneActions = isReviewingPending || viewOnly ? null : proposeMode ? (
+  const writeAction = isReviewingPending || viewOnly ? null : proposeMode ? (
     <>
       <Button variant="quiet" size="tiny" onClick={handleDiscardProposal} disabled={proposalBusy}>
         Discard
@@ -1054,6 +1083,33 @@ export function FileViewer() {
       {isEnteringEdit ? 'Loading…' : 'Edit'}
     </Button>
   );
+  // "Who changed this, when" — the clock-arrow beside Edit, where Google Docs
+  // keeps it. It sits in the bar for the same reason Edit does: history is a
+  // thing you do to THE FILE, and the bar is where the file's actions live.
+  // It used to be the lone item behind a ⋯ in the page header — two clicks
+  // and a menu for a question people ask often. Not gated on `viewOnly` or a
+  // pending review: reading the log changes nothing. Full-bleed renderers
+  // have no bar, so the header carries it for them (`historyInPane`).
+  const historyAction = historyAvailable ? (
+    <IconButton
+      ref={paneClockRef}
+      aria-label="Version history"
+      title="Version history"
+      onClick={() => {
+        focusAfterSwap.current = 'header';
+        setActiveTab('history');
+      }}
+    >
+      <History size={14} />
+    </IconButton>
+  ) : null;
+  const paneActions =
+    historyAction || writeAction ? (
+      <>
+        {historyAction}
+        {writeAction}
+      </>
+    ) : null;
 
   return (
     <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
@@ -1093,6 +1149,10 @@ export function FileViewer() {
         // `viewOnly` rides the same flag: it tells the header "the write
         // action is not yours to render" — and the pane bar renders none.
         writeActionInPane={shellVariant === 'prose' || viewOnly}
+        // Prose gets a pane card, and the card's bar carries Version history
+        // beside Edit. Not `viewOnly`: a view-only full-bleed file has no bar.
+        historyInPane={shellVariant === 'prose'}
+        historyButtonRef={headerClockRef}
         lockedBy={fileLock.externalLock?.holderName ?? null}
         historyAvailable={historyAvailable}
         isDirty={isManualDirty}
@@ -1101,7 +1161,13 @@ export function FileViewer() {
         activeTab={activeTab}
         onEdit={handleEnterEditMode}
         onDone={handleExitEditMode}
-        onOpenHistory={() => setActiveTab('history')}
+        // While the log is open the column is full-bleed, so the header
+        // carries the clock (pressed). A second click on a pressed clock is a
+        // request to put the document back, not to open the log again.
+        onOpenHistory={() => {
+          focusAfterSwap.current = activeTab === 'history' ? 'pane' : 'header';
+          setActiveTab((t) => (t === 'history' ? 'content' : 'history'));
+        }}
         onShare={handleShare}
         onCopyPage={canCopyPage ? handleCopyPage : undefined}
         onCopyLink={handleCopyLink}

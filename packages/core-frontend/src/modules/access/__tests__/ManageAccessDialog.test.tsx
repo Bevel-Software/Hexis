@@ -569,3 +569,123 @@ describe('ManageAccessDialog: grantee rows badge roles vs groups', () => {
     expect(screen.queryByText('Group')).not.toBeInTheDocument();
   });
 });
+
+/**
+ * CLOSING A VERB MENU WITHOUT PICKING ANYTHING.
+ *
+ * Both permission dropdowns (a grantee row's checklist and the add-row's verb
+ * selector) used to stay open until an item inside them was clicked or the
+ * trigger was clicked again: a click anywhere else in the dialog left the menu
+ * hanging, and Escape closed the whole dialog around it. Outside click and
+ * Escape now close the menu — and only the menu.
+ */
+describe('ManageAccessDialog: dismissing a verb menu', () => {
+  /** Alice, read + write directly here — her trigger reads "Can edit". */
+  const VIEW = {
+    canRead: true,
+    canWrite: true,
+    canDownload: false,
+    canOwner: false,
+    eligible: { roles: [], users: [A] },
+    readers: { restricted: true, roles: [], users: [A] },
+    owners: { roles: [], users: [] },
+    downloaders: { roles: [], users: [] },
+    sources: { 'u:alice@x.com': { read: [{ kind: 'direct' }], write: [{ kind: 'direct' }] } },
+  } as AccessResponse;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
+    api.fetchFileAccess.mockResolvedValue(VIEW);
+  });
+
+  /** The add-row's verb selector reads "Can edit" too; Alice's row trigger is the later one. */
+  async function aliceTrigger() {
+    const triggers = await screen.findAllByRole('button', { name: /^can edit$/i });
+    return triggers[triggers.length - 1];
+  }
+
+  it("a click outside a row's menu closes it and leaves the dialog open", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
+
+    await user.click(await aliceTrigger());
+    expect(screen.getByRole('button', { name: /remove access/i })).toBeInTheDocument();
+
+    // The dialog's own heading: inside the dialog, outside the menu.
+    await user.click(screen.getByRole('dialog'));
+
+    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(api.grantAccess).not.toHaveBeenCalled();
+    expect(api.revokeAccess).not.toHaveBeenCalled();
+  });
+
+  it("a click outside the add-row's verb selector closes it", async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const [addRowTrigger] = await screen.findAllByRole('button', { name: /^can edit$/i });
+    await user.click(addRowTrigger);
+    // The open selector adds a "Can download" item; Alice's closed row adds none.
+    expect(screen.getByRole('button', { name: /^can download$/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('dialog'));
+
+    expect(screen.queryByRole('button', { name: /^can download$/i })).not.toBeInTheDocument();
+  });
+
+  it('subscribes its document listeners once per open menu, not once per render', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    const [addRowTrigger] = await screen.findAllByRole('button', { name: /^can edit$/i });
+
+    const addSpy = vi.spyOn(document, 'addEventListener');
+    await user.click(addRowTrigger);
+    const mousedowns = () => addSpy.mock.calls.filter(([type]) => type === 'mousedown').length;
+    expect(mousedowns()).toBe(1);
+
+    // Toggling a verb re-renders the dialog with the menu still open. The
+    // dismiss hook lists `onClose` in its deps, so a fresh arrow per render
+    // would tear the listeners down and re-add them here.
+    await user.click(screen.getByRole('button', { name: /^owner$/i }));
+    expect(screen.getByRole('button', { name: /^can download$/i })).toBeInTheDocument();
+    expect(mousedowns()).toBe(1);
+    addSpy.mockRestore();
+  });
+
+  it('the trigger itself still toggles: one click opens, a second closes', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const trigger = await aliceTrigger();
+    await user.click(trigger);
+    expect(screen.getByRole('button', { name: /remove access/i })).toBeInTheDocument();
+    // The outside-click listener must NOT fire on the trigger, or this click
+    // would close-then-reopen and the menu would look stuck open.
+    await user.click(trigger);
+    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+  });
+
+  it('Escape closes the menu, not the dialog, and returns focus to the trigger', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
+
+    const trigger = await aliceTrigger();
+    await user.click(trigger);
+    expect(screen.getByRole('button', { name: /remove access/i })).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(document.activeElement).toBe(trigger);
+
+    // With the menu gone the dialog is the top layer again: Escape closes it.
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
