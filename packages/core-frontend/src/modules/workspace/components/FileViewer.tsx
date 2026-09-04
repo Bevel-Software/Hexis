@@ -207,6 +207,15 @@ export function FileViewer() {
     toBranch: string;
   } | null>(null);
   const historyAvailable = git.availability === 'ready';
+  // Losing the log CLOSES the view, rather than parking `activeTab` on it.
+  // `availability` is re-derived from a polled status call, so one failed
+  // poll flips it off and the next good one flips it back. Left on
+  // 'history', the tab would keep the column full-bleed with no panel in it
+  // (a bare document, no pane card, no way back but the next poll), and then
+  // put the log back over the file the moment git recovered, minutes after
+  // the reader had gone back to reading. Same rule the skill page applies to
+  // its own open flag.
+  if (activeTab !== 'content' && !historyAvailable) setActiveTab('content');
   const hasUnsavedWork = isManualDirty || manualSaveState === 'saving';
 
   const hasPending = pendingFileContent !== null;

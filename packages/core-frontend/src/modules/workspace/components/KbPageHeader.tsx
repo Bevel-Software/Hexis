@@ -366,6 +366,7 @@ export function KbPageHeader({
             aria-label="Version history"
             title="Version history"
             active={activeTab === 'history'}
+            aria-pressed={activeTab === 'history'}
             onClick={onOpenHistory}
           >
             <History size={14} />

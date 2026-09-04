@@ -1197,6 +1197,29 @@ describe('SkillPage: deciding on a change', () => {
       expect(await screen.findByTestId('md-view')).toBeInTheDocument();
     });
 
+    /**
+     * The file bar leaves with the file, and the clock with it; the history
+     * view draws the same clock pressed beside its Back link, so the control
+     * that opened the view is still on screen and is the other way back.
+     */
+    it('keeps a pressed clock on screen while the log is open, and it closes the log', async () => {
+      renderPage(false);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
+      await screen.findByText(/^Timeline:/);
+
+      const pressed = screen.getByRole('button', { name: 'Version history' });
+      expect(pressed).toHaveAttribute('aria-pressed', 'true');
+
+      fireEvent.click(pressed);
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+      expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Version history' })).not.toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+    });
+
     it('does not follow you to another file of the skill', async () => {
       renderPage(false);
 

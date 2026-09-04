@@ -558,7 +558,12 @@ export function SkillPage({
       {viewingHistory && historyPath !== null ? (
         <>
           {/* An explicit way back. Without it the only route to the file would
-              be reopening it, since history is not in the URL. */}
+              be reopening it, since history is not in the URL. The clock that
+              opened the log sits in the file bar, and the bar leaves with the
+              file, so the same clock is drawn here PRESSED: the control that
+              opened the view stays on screen showing that it is open, and a
+              second click on it is the other way back. Same shape as the
+              Knowledge header while its log is open. */}
           <div className="mb-3 mt-4 flex items-center gap-2">
             <Button
               variant="quiet"
@@ -569,6 +574,16 @@ export function SkillPage({
               Back to the file
             </Button>
             <span className="text-detail text-ink-faint">{`Version history: ${active}`}</span>
+            <IconButton
+              aria-label="Version history"
+              aria-pressed
+              title="Back to the file"
+              active
+              className="ml-auto"
+              onClick={() => setHistoryOpen(false)}
+            >
+              <History size={14} />
+            </IconButton>
           </div>
           {/* A DEFINITE height, and a flex column to hold it. The panel is
               built for the Knowledge viewer's full-height pane: its list and
