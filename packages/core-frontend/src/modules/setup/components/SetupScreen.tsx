@@ -58,6 +58,18 @@ const FIELDS: Record<
     placeholder: 'Plugins',
     advanced: true,
   },
+  pluginDialect: {
+    label: 'Plugin format',
+    help: '"native" reads plugin.json manifests (the default). "bundle" reads plugin.bundle.json files and an MCP registry, for a repository laid out that way.',
+    placeholder: 'native',
+    advanced: true,
+  },
+  mcpRegistryPath: {
+    label: 'MCP registry file',
+    help: 'Only for the bundle format: where the MCP server registry lives in the repository.',
+    placeholder: 'configs/mcp/registry.json',
+    advanced: true,
+  },
   defaultBranch: {
     label: 'Main branch',
     help: 'The version everyone sees. Filled in from your repository when you test the connection.',

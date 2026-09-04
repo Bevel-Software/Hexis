@@ -232,8 +232,17 @@ export class PluginLinksService {
       throw new PluginLinkError('Unknown plugin', 404, { kind: 'unknown-plugin' });
     }
     const membership = await this.links.membership();
-    if (!membership.byPlugin.has(trimmed)) {
+    const links = membership.byPlugin.get(trimmed);
+    if (!links) {
       throw new PluginLinkError('Unknown plugin', 404, { kind: 'unknown-plugin' });
+    }
+    if (!links.linksAreManaged) {
+      // A dialect plugin's links live in a file this platform does not write.
+      throw new PluginLinkError(
+        `${trimmed} is read from an external plugin format; edit its links in that repository.`,
+        409,
+        { kind: 'read-only-links' },
+      );
     }
     return trimmed;
   }

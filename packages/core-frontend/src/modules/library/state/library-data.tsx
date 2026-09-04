@@ -59,6 +59,8 @@ export interface LibraryItem {
   shared?: boolean;
   /** Every plugin holding a skill, inline or linked (skills only). */
   plugins?: PluginMembership[];
+  /** A skill's governance lifecycle (`metadata.lifecycle`), when declared. */
+  lifecycle?: string;
   /** Repo-root-relative path — the skill's folder, or the `.tool` file. */
   path: string;
   /**
@@ -134,6 +136,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       plugin: displayPluginOf(s.path),
       shared: isSharedPath(s.path),
       plugins: s.plugins ?? [],
+      lifecycle: s.lifecycle,
       path: s.path,
       version: s.version,
       status: skillStatus(

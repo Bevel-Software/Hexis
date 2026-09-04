@@ -50,6 +50,10 @@ import {
   PluginLinkIndex,
   PluginLinksService,
   MarketplaceCompilerService,
+  NativePluginSource,
+  BundlePluginSource,
+  DEFAULT_REGISTRY_PATH,
+  type PluginSource,
 } from '../modules/plugins/index.js';
 import { MarketplaceRepoService } from '../modules/marketplace/index.js';
 import {
@@ -348,14 +352,25 @@ export async function createCoreServices(
   // Tool manuals: user-authored `*.tool` files under `Plugins/` in the default
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
-  const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName);
+  // Where plugins come from: the native layout, or a customer dialect chosen
+  // on the setup screen (see modules/plugins/discovery). One switch, one arm
+  // per dialect — deleting a dialect is deleting its arm.
+  const pluginSource: PluginSource = (() => {
+    switch (settings.resolve('pluginDialect') || 'native') {
+      case 'bundle':
+        return new BundlePluginSource(settings.resolve('mcpRegistryPath') || DEFAULT_REGISTRY_PATH);
+      default:
+        return new NativePluginSource();
+    }
+  })();
+  const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName, Date.now, pluginSource);
   // Plugins: the folders under `Plugins/` that carry a
   // team's skills AND the tools they need. Enumerated for EVERY authenticated
   // caller — a plugin they cannot read still exists for them, as a locked one —
   // with the counts read off the two catalogs above rather than a second scan.
   // The link index resolves manifests against the released catalog, and the
   // plugin index counts through it (inline + linked), so it comes first.
-  const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kbDirName);
+  const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kbDirName, Date.now, pluginSource);
   const pluginIndexService = new PluginIndexService(
     workspaceService,
     accessControl,
@@ -364,6 +379,7 @@ export async function createCoreServices(
     kbDirName,
     Date.now,
     pluginLinkIndex,
+    pluginSource,
   );
   // Auth service — resolves identities for login, PR author attribution, and
   // access lookups. (Change requests now store the author email directly, so
@@ -500,6 +516,7 @@ export async function createCoreServices(
     pluginLinkIndex,
     kbDirName,
     { name: 'hexis', owner: 'Hexis', description: 'Skills and plugins from this knowledge base' },
+    pluginSource,
   );
   // Sibling of the workspaces root, like the spill store: one bare repo, one
   // git namespace per caller (see marketplace-repo.service.ts).

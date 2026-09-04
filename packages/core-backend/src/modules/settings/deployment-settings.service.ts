@@ -122,6 +122,31 @@ export const CORE_SETTINGS: SettingDef[] = [
   },
 
   /**
+   * Plugin DIALECT: which source format the plugins root is read in.
+   * `native` (the default) is the Agent Plugins layout this platform writes;
+   * `bundle` reads a customer's `plugin.bundle.json` files and MCP registry
+   * (see modules/plugins/discovery/bundle-dialect). Restart-to-apply: the
+   * source is handed to the scanners at construction.
+   */
+  {
+    key: 'pluginDialect',
+    envVar: 'KB_PLUGIN_DIALECT',
+    section: 'knowledge-base',
+    validate: (v) => (v === 'native' || v === 'bundle' ? null : 'Use "native" or "bundle".'),
+    restartToApply: true,
+  },
+  {
+    key: 'mcpRegistryPath',
+    envVar: 'KB_MCP_REGISTRY_PATH',
+    section: 'knowledge-base',
+    validate: (v) =>
+      v && !v.startsWith('/') && !v.includes('\\') && !v.split('/').includes('..')
+        ? null
+        : 'A repository-relative file path, e.g. configs/mcp/registry.json.',
+    restartToApply: true,
+  },
+
+  /**
    * The branch model. Both are restart-to-apply and could not be otherwise:
    * the backend hands `DEFAULT_BRANCH` to services at construction, and the
    * browser is served the pair once at boot — a live swap would leave half the

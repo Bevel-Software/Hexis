@@ -27,6 +27,14 @@ export interface SkillSummary {
   name: string;
   description: string;
   version?: string;
+  /** The governance owner from `metadata.owner`, when the skill declares one. */
+  owner?: string;
+  /**
+   * The governance lifecycle from `metadata.lifecycle`, lowercased — `active`
+   * (or absent), `deprecated` (still served, flagged), `retired` (served to the
+   * catalog for its owners, never compiled into a distribution).
+   */
+  lifecycle?: string;
   /** Repo-root-relative skill folder, e.g. `Plugins/Everyone/rfi`. */
   path: string;
   /**

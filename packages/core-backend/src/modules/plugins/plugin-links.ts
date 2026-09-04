@@ -1,14 +1,5 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
-import {
-  DEFAULT_BRANCH,
-  PLUGINS_DIR,
-  PLUGIN_MANIFEST_FILE,
-  isPersonalPluginFolder,
-  linkedSkillRoots,
-  pluginOfPath,
-  skillUnderRoot,
-} from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, isPersonalPluginFolder, pluginOfPath, skillUnderRoot } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -16,11 +7,16 @@ import type { ISkillService } from '../skills/skills.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
 import { PLUGIN_TOKEN_PREFIX } from '../access-model/access-grammar.js';
 import type { PluginMembership } from './plugins.contract.js';
+import type { PluginSource } from './discovery/plugin-source.js';
+import { NativePluginSource } from './discovery/native.source.js';
 
 const CACHE_TTL_MS = 60_000;
 
 /** One plugin's links, resolved against the released catalog. */
 export interface PluginLinks {
+  /** The plugin's name — its identity to people and URLs. */
+  name: string;
+  /** Repo-relative plugin folder. */
   folder: string;
   /** The roots the manifest declares, normalised. */
   roots: string[];
@@ -28,6 +24,8 @@ export interface PluginLinks {
   linkedSkills: string[];
   /** Roots that resolve to no released skill — a typo, or a skill not yet merged. */
   unresolvedRoots: string[];
+  /** Whether hexis writes these links and checks their grants — see `DiscoveredPlugin`. */
+  linksAreManaged: boolean;
 }
 
 export interface LinkMembership {
@@ -42,10 +40,12 @@ export interface LinkMembership {
  * round — which plugins each skill belongs to, whether by sitting inside the
  * plugin folder or by being linked from its manifest.
  *
- * Resolution runs against the RELEASED catalog (`skillService.listSkills()`,
- * unfiltered), never the file system: the catalog already applies the
- * leaf-folder rule, the `.bevelignore` layers and the global-name dedup, and a
- * second walk here would be a second opinion about what a skill is.
+ * Plugins come from the configured {@link PluginSource} (native manifests, or
+ * a customer dialect); resolution runs against the RELEASED catalog
+ * (`skillService.listSkills()`, unfiltered), never the file system: the
+ * catalog already applies the leaf-folder rule, the `.bevelignore` layers
+ * and the global-name dedup, and a second walk here would be a second
+ * opinion about what a skill is.
  *
  * `granted` is the consistency check the amber dot renders: a linked skill
  * whose own access rules DO grant the plugin's `plugin/<Name>/read`
@@ -65,6 +65,7 @@ export class PluginLinkIndex {
     private readonly accessControl: IAccessControl,
     private readonly kbDirName: string,
     now: () => number = Date.now,
+    private readonly source: PluginSource = new NativePluginSource(),
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
   }
@@ -119,17 +120,11 @@ export class PluginLinkIndex {
       }
     }
 
-    let folders: string[] = [];
-    try {
-      folders = (await fs.readdir(path.join(kbRoot, PLUGINS_DIR), { withFileTypes: true }))
-        .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !isPersonalPluginFolder(e.name))
-        .map((e) => e.name)
-        .sort();
-    } catch {
-      /* no Plugins/ root — nothing links anything */
-    }
-    for (const folder of folders) {
-      const roots = linkedSkillRoots(await readJson(path.join(kbRoot, PLUGINS_DIR, folder, PLUGIN_MANIFEST_FILE)));
+    const discovered = await this.source.discover(kbRoot);
+    for (const w of discovered.warnings) console.warn(`[plugins] ${w}`);
+    for (const plugin of discovered.plugins) {
+      if (plugin.personal) continue;
+      const roots = plugin.linkedRoots;
       const linkedSkills: string[] = [];
       const unresolvedRoots: string[] = [];
       for (const root of roots) {
@@ -137,14 +132,24 @@ export class PluginLinkIndex {
         if (hits.length === 0) unresolvedRoots.push(root);
         for (const hit of hits) if (!linkedSkills.includes(hit)) linkedSkills.push(hit);
       }
-      byPlugin.set(folder, { folder, roots, linkedSkills, unresolvedRoots });
+      byPlugin.set(plugin.name, {
+        name: plugin.name,
+        folder: plugin.folder,
+        roots,
+        linkedSkills,
+        unresolvedRoots,
+        linksAreManaged: plugin.linksAreManaged,
+      });
       if (linkedSkills.length === 0) continue;
-      const token = `${PLUGIN_TOKEN_PREFIX}${folder}/read`;
+      const token = `${PLUGIN_TOKEN_PREFIX}${plugin.name}/read`;
       for (const skillPath of linkedSkills) {
         // A skill that also sits INSIDE this plugin folder is inline, and its
         // inline membership already stands.
-        if (pluginOfPath(skillPath) === folder) continue;
-        add(skillPath, { name: folder, linked: true, granted: await this.isGranted(wsId, skillPath, token) });
+        if (pluginOfPath(skillPath) === plugin.name) continue;
+        // An unmanaged (dialect) link is a plain reference: nothing to grant,
+        // nothing to repair — the skill's own scope decides who reads it.
+        const granted = plugin.linksAreManaged ? await this.isGranted(wsId, skillPath, token) : true;
+        add(skillPath, { name: plugin.name, linked: true, granted });
       }
     }
     return { bySkill, byPlugin };
@@ -159,14 +164,6 @@ export class PluginLinkIndex {
     } catch {
       return false; // fail closed: an unreadable tree reports the link as needing repair
     }
-  }
-}
-
-async function readJson(p: string): Promise<unknown> {
-  try {
-    return JSON.parse(await fs.readFile(p, 'utf-8')) as unknown;
-  } catch {
-    return null;
   }
 }
 

@@ -47,6 +47,10 @@ export interface LibrarySkillSummary {
   path: string;
   /** Every plugin holding this skill. Absent from an older server. */
   plugins?: PluginMembership[];
+  /** The governance owner (`metadata.owner`), when declared. */
+  owner?: string;
+  /** The governance lifecycle (`metadata.lifecycle`), lowercased: `active`, `deprecated`, `retired`. */
+  lifecycle?: string;
 }
 
 /** The open write-access requests on a skill — `[]` to anyone but its editors. */

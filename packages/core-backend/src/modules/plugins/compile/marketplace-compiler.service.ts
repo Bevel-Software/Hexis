@@ -7,6 +7,8 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ISkillService } from '../../skills/skills.contract.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { PluginLinkIndex } from '../plugin-links.js';
+import type { PluginSource } from '../discovery/plugin-source.js';
+import { NativePluginSource } from '../discovery/native.source.js';
 import { compileMarketplace, type VirtualTree } from './compile-marketplace.js';
 
 const execFileAsync = promisify(execFile);
@@ -34,6 +36,7 @@ export class MarketplaceCompilerService {
     private readonly links: PluginLinkIndex,
     private readonly kbDirName: string,
     private readonly marketplace: { name: string; owner: string; description?: string },
+    private readonly source: PluginSource = new NativePluginSource(),
   ) {}
 
   /** The default-branch commit the next compile would read. */
@@ -52,10 +55,12 @@ export class MarketplaceCompilerService {
     const sourceCommit = await this.sourceCommit();
     const skills = await this.skillService.listSkills(undefined);
     const membership = await this.links.membership();
+    const { plugins } = await this.source.discover(kbRoot);
     const readable = await this.readPredicate(wsId, audience, skills.map((s) => `${s.path}/SKILL.md`));
     const tree = await compileMarketplace({
       kbRoot,
       skills,
+      plugins,
       membership,
       readable,
       options: { ...this.marketplace, sourceCommit },

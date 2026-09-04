@@ -1,11 +1,7 @@
 import path from 'node:path';
-import fs from 'node:fs/promises';
-import type { Dirent } from 'node:fs';
 import {
   DEFAULT_BRANCH,
-  PLUGINS_DIR,
   pluginOfPath,
-  isPersonalPluginFolder,
 } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
@@ -15,6 +11,8 @@ import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.j
 import { TtlCache } from '../../shared/ttl-cache.js';
 import type { PluginCatalogEntry, IPluginIndexService } from './plugins.contract.js';
 import type { PluginLinkIndex } from './plugin-links.js';
+import type { PluginSource } from './discovery/plugin-source.js';
+import { NativePluginSource } from './discovery/native.source.js';
 
 const CACHE_TTL_MS = 60_000;
 
@@ -59,6 +57,8 @@ export class PluginIndexService implements IPluginIndexService {
      * set (and older tests) keep the inline-only count.
      */
     private readonly links?: PluginLinkIndex,
+    /** Where plugins come from — native manifests unless a dialect is configured. */
+    private readonly source: PluginSource = new NativePluginSource(),
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
   }
@@ -106,7 +106,7 @@ export class PluginIndexService implements IPluginIndexService {
 
       const [skillCounts, toolCounts] = await Promise.all([
         this.countSkills(),
-        this.countTools(),
+        this.countTools(folders),
       ]);
 
       const entries: PluginCatalogEntry[] = [];
@@ -137,38 +137,22 @@ export class PluginIndexService implements IPluginIndexService {
     }
   }
 
-  /** name → repo-relative plugin folder (always a single-element list). */
+  /**
+   * name → repo-relative plugin folder (always a single-element list), from
+   * the configured source. Personal folders live under Plugins/ but are not
+   * plugins: one exists per person, private by construction, and listing them
+   * would put a locked row per employee in everyone's index. `exists` is the
+   * source's existence rule (see `DiscoveredPlugin`) — for native plugins,
+   * the `access.md` the class doc describes.
+   */
   private async scanFolders(kbRoot: string): Promise<Map<string, string[]>> {
     const byName = new Map<string, string[]>();
-    let children: Dirent[];
-    try {
-      children = await fs.readdir(path.join(kbRoot, PLUGINS_DIR), { withFileTypes: true });
-    } catch {
-      return byName; // a KB without a `Plugins/` root simply has no plugins
+    const discovered = await this.source.discover(kbRoot);
+    for (const w of discovered.warnings) console.warn(`[plugins] ${w}`);
+    for (const plugin of discovered.plugins) {
+      if (plugin.personal || !plugin.exists) continue;
+      byName.set(plugin.name, [plugin.folder]);
     }
-    const candidates = children.filter(
-      (child) =>
-        child.isDirectory() &&
-        !child.name.startsWith('.') &&
-        // Personal folders live under Plugins/ but are not plugins: one exists
-        // per person, private by construction, and listing them would put a
-        // locked row per employee in everyone's index.
-        !isPersonalPluginFolder(child.name),
-    );
-    // A plugin exists exactly when its folder carries an `access.md` (see the
-    // class doc) — stat that file, don't trust the directory.
-    const verdicts = await Promise.all(
-      candidates.map(async (child) => {
-        try {
-          return (await fs.stat(path.join(kbRoot, PLUGINS_DIR, child.name, 'access.md'))).isFile();
-        } catch {
-          return false;
-        }
-      }),
-    );
-    candidates.forEach((child, i) => {
-      if (verdicts[i]) byName.set(child.name, [`${PLUGINS_DIR}/${child.name}`]);
-    });
     return byName;
   }
 
@@ -186,8 +170,21 @@ export class PluginIndexService implements IPluginIndexService {
     return counts;
   }
 
-  private async countTools(): Promise<Map<string, number>> {
-    return bucketByPlugin(await this.toolManualService.listAllSummaries());
+  /**
+   * Tools belong to the plugin whose FOLDER holds them — matched by path
+   * prefix against the discovered folders, not by `pluginOfPath`'s
+   * second-segment rule, so a dialect plugin nested three folders deep still
+   * counts the servers its bundle expands.
+   */
+  private async countTools(folders: Map<string, string[]>): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    const byFolder = [...folders.entries()].map(([name, [folder]]) => ({ name, prefix: `${folder}/` }));
+    for (const tool of await this.toolManualService.listAllSummaries()) {
+      const owner = byFolder.find((f) => tool.path.startsWith(f.prefix));
+      if (!owner) continue;
+      counts.set(owner.name, (counts.get(owner.name) ?? 0) + 1);
+    }
+    return counts;
   }
 }
 

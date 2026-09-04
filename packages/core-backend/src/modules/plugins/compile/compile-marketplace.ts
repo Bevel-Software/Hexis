@@ -1,7 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
-  PLUGINS_DIR,
   PLUGIN_MANIFEST_FILE,
   PLUGIN_MCP_FILE,
   PLUGIN_MANIFEST_SCHEMA,
@@ -14,6 +13,7 @@ import { walkFiles } from '../../../shared/fs-walk.js';
 import { containsVariableReference } from '../../../shared/variable-refs.js';
 import type { SkillSummary } from '../../skills/skills.contract.js';
 import type { LinkMembership } from '../plugin-links.js';
+import type { DiscoveredPlugin } from '../discovery/plugin-source.js';
 
 /**
  * The compiler: SOURCE layout in, DISTRIBUTION layout out.
@@ -77,6 +77,8 @@ export interface CompileInput {
   kbRoot: string;
   /** The released catalog, UNFILTERED — `readable` does the filtering. */
   skills: SkillSummary[];
+  /** The plugins as the configured source discovered them (manifests and servers already parsed). */
+  plugins: DiscoveredPlugin[];
   /** Which plugins hold which skills, from the link index. */
   membership: LinkMembership;
   /** The caller's read verdict on a repo-relative path (`<skillFolder>/SKILL.md`). */
@@ -97,15 +99,18 @@ const BUNDLE_NAME = 'hexis-all';
 const NEVER_SHIPPED = new Set(['access.md', '.bevelignore']);
 
 export async function compileMarketplace(input: CompileInput): Promise<VirtualTree> {
-  const { kbRoot, skills, membership, readable, options } = input;
+  const { kbRoot, skills, plugins, membership, readable, options } = input;
   const files = new Map<string, Buffer>();
   const warnings: string[] = [];
   const put = (rel: string, content: string | Buffer) =>
     files.set(rel, typeof content === 'string' ? Buffer.from(content, 'utf-8') : content);
 
-  // One verdict per skill, resolved once: every plugin below reads from it.
+  // One verdict per skill, resolved once: every plugin below reads from it. A
+  // RETIRED skill (its governance lifecycle) stays in the catalog for its
+  // owners but never ships — retiring is how a skill leaves every agent.
   const readableSkills = new Map<string, SkillSummary>();
   for (const s of skills) {
+    if (s.lifecycle === 'retired') continue;
     if (await readable(`${s.path}/SKILL.md`)) readableSkills.set(s.path, s);
   }
 
@@ -121,32 +126,32 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
   const out: PluginOut[] = [];
 
   // 1. Real plugins: inline skills (in the folder) + linked skills (from the
-  //    manifest), each only if readable.
-  for (const [folder, links] of [...membership.byPlugin.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-    const manifest = await readJson(path.join(kbRoot, PLUGINS_DIR, folder, PLUGIN_MANIFEST_FILE));
-    if (manifest === undefined) {
-      warnings.push(`${PLUGINS_DIR}/${folder}/${PLUGIN_MANIFEST_FILE} is not valid JSON — plugin skipped`);
-      continue;
-    }
-    const inline = [...readableSkills.values()].filter((s) => pluginOfPath(s.path) === folder);
+  //    manifest), each only if readable. Personal folders are places, not
+  //    plugins; a plugin the index does not count as existing is not shipped.
+  const byName = new Map(plugins.map((p) => [p.name, p]));
+  for (const [name, links] of [...membership.byPlugin.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const plugin = byName.get(name);
+    if (!plugin || plugin.personal || !plugin.exists) continue;
+    const manifest = plugin.manifest;
+    const inline = [...readableSkills.values()].filter((s) => pluginOfPath(s.path) === name);
     const linked = links.linkedSkills
       .map((p) => readableSkills.get(p))
       .filter((s): s is SkillSummary => s !== undefined);
     const dedup = dedupeByName([...inline, ...linked], (s, other) =>
       warnings.push(
-        `${folder}: skill "${s.name}" at ${s.path} shares its name with ${other.path} — the second is left out`,
+        `${name}: skill "${s.name}" at ${s.path} shares its name with ${other.path} — the second is left out`,
       ),
     );
-    const mcp = await portableMcp(path.join(kbRoot, PLUGINS_DIR, folder, PLUGIN_MCP_FILE));
+    const mcp = portableMcp(plugin.mcpServers);
     if (dedup.length === 0 && mcp === null) continue; // nothing this caller may see
-    const slug = typeof manifest?.name === 'string' && manifest.name ? manifest.name : pluginManifestName(folder);
+    const slug = typeof manifest?.name === 'string' && manifest.name ? manifest.name : pluginManifestName(name);
     out.push({
       slug,
-      displayName: folder,
+      displayName: typeof manifest?.displayName === 'string' ? manifest.displayName : name,
       description: typeof manifest?.description === 'string' ? manifest.description : undefined,
       version: typeof manifest?.version === 'string' ? manifest.version : undefined,
       skills: dedup,
-      folder,
+      folder: plugin.folder,
     });
     if (mcp !== null) {
       const text = `${JSON.stringify({ $schema: PLUGIN_MCP_SCHEMA, mcpServers: mcp }, null, 2)}\n`;
@@ -308,15 +313,14 @@ function dedupeByName(
 }
 
 /**
- * The portable half of a plugin's mcp.json: transport, url, command, args,
- * env, cwd, and only those headers a client may send verbatim (no `${VAR}`
- * vault references). Null when the file is absent or holds no server.
+ * The portable half of a plugin's `mcpServers`: transport, url, command,
+ * args, env, cwd, and only those headers a client may send verbatim (no
+ * `${VAR}` vault references). Null when there is no server to ship.
  */
-async function portableMcp(abs: string): Promise<Record<string, Record<string, unknown>> | null> {
-  const parsed = await readJson(abs);
-  if (!parsed || typeof parsed.mcpServers !== 'object' || parsed.mcpServers === null) return null;
+function portableMcp(servers: Record<string, unknown> | null): Record<string, Record<string, unknown>> | null {
+  if (!servers) return null;
   const out: Record<string, Record<string, unknown>> = {};
-  for (const [name, raw] of Object.entries(parsed.mcpServers as Record<string, unknown>)) {
+  for (const [name, raw] of Object.entries(servers)) {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue;
     const server = raw as Record<string, unknown>;
     const entry: Record<string, unknown> = {};
@@ -334,22 +338,4 @@ async function portableMcp(abs: string): Promise<Record<string, Record<string, u
     out[name] = entry;
   }
   return Object.keys(out).length > 0 ? out : null;
-}
-
-/** Parsed JSON object; `null` when absent; `undefined` when present but unparsable. */
-async function readJson(abs: string): Promise<Record<string, unknown> | null | undefined> {
-  let text: string;
-  try {
-    text = await fs.readFile(abs, 'utf-8');
-  } catch {
-    return null;
-  }
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : undefined;
-  } catch {
-    return undefined;
-  }
 }
