@@ -487,7 +487,7 @@ describe('Toolbar', () => {
       renderToolbar({ isAdmin: true });
       await openMenu();
       expect(within(panel()).getByText('Admin only')).toBeInTheDocument();
-      expect(row(/Roles/)).toBeInTheDocument();
+      expect(row('App roles')).toBeInTheDocument();
       expect(row('Stub admin row')).toBeInTheDocument();
       // All-user rows are still present alongside the admin ones.
       expect(row('Stub extension')).toBeInTheDocument();
@@ -512,7 +512,7 @@ describe('Toolbar', () => {
     it('navigates to /roles-and-members from the admin row', async () => {
       renderToolbar({ isAdmin: true });
       await openMenu();
-      await userEvent.click(row('Roles & Members'));
+      await userEvent.click(row('App roles'));
       expect(screen.getByTestId('pathname')).toHaveTextContent('/roles-and-members');
       expect(panelGone()).toBeNull();
     });
