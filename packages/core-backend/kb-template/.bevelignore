@@ -23,3 +23,5 @@ CLAUDE.md
 roles.yaml
 
 Plugins/
+# The shared-skills root is rendered by the Skills & Tools app, like Plugins/.
+Skills/

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { isUngrouped } from '../utils/status';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../auth/state/auth.context';
 import { useLibrary, type LibraryItem } from '../state/library-data';
@@ -46,7 +47,7 @@ export function PersonalPluginPage() {
   const [removing, setRemoving] = useState<LibraryItem | null>(null);
 
   const name = personalPluginName(user?.name);
-  const items = useMemo(() => data.items.filter((i) => i.plugin === null), [data.items]);
+  const items = useMemo(() => data.items.filter(isUngrouped), [data.items]);
   /**
    * For the add dialog's name check. Every skill, not only the ungrouped ones:
    * a skill's id is its name and ids are global, so a new skill here collides

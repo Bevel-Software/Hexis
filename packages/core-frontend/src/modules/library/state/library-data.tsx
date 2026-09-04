@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode,  } from 'react';
 import { LibraryContext } from './library-context';
-import { pluginOfPath, isPersonalPluginFolder } from '@bevel-software/platform-shared';
+import { pluginOfPath, isPersonalPluginFolder, SKILLS_DIR } from '@bevel-software/platform-shared';
 
 /**
  * The plugin a card files under — with personal folders mapped to `null`, the
@@ -12,6 +12,11 @@ import { pluginOfPath, isPersonalPluginFolder } from '@bevel-software/platform-s
 function displayPluginOf(path: string): string | null {
   const plugin = pluginOfPath(path);
   return plugin !== null && isPersonalPluginFolder(plugin) ? null : plugin;
+}
+
+/** Under the shared `Skills/` root — owned by a scope, not by a person or a plugin folder. */
+function isSharedPath(path: string): boolean {
+  return path === SKILLS_DIR || path.startsWith(`${SKILLS_DIR}/`);
 }
 import { useLibraryData, type LibraryData } from '../hooks/useLibraryData';
 import { listPlugins, type PluginSummary } from '../services/plugins.api';
@@ -48,6 +53,8 @@ export interface LibraryItem {
   status: AttentionStatus;
   /** Folder plugin from the KB path, or null when the item is in none. */
   plugin: string | null;
+  /** Under the shared `Skills/` root — see `LibraryFilterable.shared`. */
+  shared?: boolean;
   /** Repo-root-relative path — the skill's folder, or the `.tool` file. */
   path: string;
   /**
@@ -121,6 +128,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       description: s.description,
       owned: data.ownedSkills.has(s.name),
       plugin: displayPluginOf(s.path),
+      shared: isSharedPath(s.path),
       path: s.path,
       version: s.version,
       status: skillStatus(
@@ -145,6 +153,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       description: s.description,
       owned: false,
       plugin: displayPluginOf(s.path),
+      shared: isSharedPath(s.path),
       path: s.path,
       version: s.version,
       status: { state: 'ok', text: 'In review' },

@@ -1,7 +1,12 @@
 import { eq, inArray } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { deploymentSettings } from '../database/core-schema.js';
-import { validateBranchModel } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_KB_LAYOUT,
+  validateBranchModel,
+  validateKbLayout,
+  validateKbRootName,
+} from '@bevel-software/platform-shared';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 
 /**
@@ -82,6 +87,37 @@ export const CORE_SETTINGS: SettingDef[] = [
         : 'Use a single folder name — no slashes.',
     // Copied into a dozen services when they are constructed. A running server
     // keeps the name it started with.
+    restartToApply: true,
+  },
+
+  /**
+   * The KB layout: the three root folders a deployment may rename so hexis can
+   * read a repository laid out by someone else (`skills/` and `plugins/` in
+   * lowercase, say). Restart-to-apply like the branch model — the names are
+   * applied once at boot through `configureKbLayout` and served to the browser
+   * once by `/api/config`. Each has a default, so an unset field means the
+   * default, not an unconfigured deployment. Checked as a trio in `save`: the
+   * three must differ, and one field alone cannot see the other two.
+   */
+  {
+    key: 'knowledgeBaseDir',
+    envVar: 'KB_KNOWLEDGE_BASE_DIR',
+    section: 'knowledge-base',
+    validate: validateKbRootName,
+    restartToApply: true,
+  },
+  {
+    key: 'skillsDir',
+    envVar: 'KB_SKILLS_DIR',
+    section: 'knowledge-base',
+    validate: validateKbRootName,
+    restartToApply: true,
+  },
+  {
+    key: 'pluginsDir',
+    envVar: 'KB_PLUGINS_DIR',
+    section: 'knowledge-base',
+    validate: validateKbRootName,
     restartToApply: true,
   },
 
@@ -266,6 +302,18 @@ export class DeploymentSettingsService {
     return (this.stored.get(key) ?? '').trim();
   }
 
+  /**
+   * The KB layout in effect: each root from the environment, else the stored
+   * row, else its default. The composition root applies this once at boot.
+   */
+  resolveKbLayout(): { knowledgeBaseDir: string; skillsDir: string; pluginsDir: string } {
+    return {
+      knowledgeBaseDir: this.resolve('knowledgeBaseDir') || DEFAULT_KB_LAYOUT.knowledgeBaseDir,
+      skillsDir: this.resolve('skillsDir') || DEFAULT_KB_LAYOUT.skillsDir,
+      pluginsDir: this.resolve('pluginsDir') || DEFAULT_KB_LAYOUT.pluginsDir,
+    };
+  }
+
   /** Where {@link resolve} got its answer — what the setup screen labels the field with. */
   sourceOf(key: string): SettingSource {
     const def = this.defs.get(key);
@@ -354,6 +402,26 @@ export class DeploymentSettingsService {
       // Reported against the protected list: it is the field with room to hold
       // the answer, and "add it to this list" is the usual fix.
       if (problem) problems.protectedBranches = problem;
+    }
+
+    // The layout trio is the other cross-field rule: three names that must
+    // differ. Judged on the layout this save WOULD produce, with the default
+    // standing in for anything neither written nor stored.
+    const layoutKeys = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'] as const;
+    if (toWrite.some((w) => (layoutKeys as readonly string[]).includes(w.key))) {
+      const effective = (key: (typeof layoutKeys)[number]) =>
+        toWrite.find((w) => w.key === key)?.value || this.resolve(key) || DEFAULT_KB_LAYOUT[key];
+      const problem = validateKbLayout({
+        knowledgeBaseDir: effective('knowledgeBaseDir'),
+        skillsDir: effective('skillsDir'),
+        pluginsDir: effective('pluginsDir'),
+      });
+      // Against the field being written — the first one in the batch — since
+      // any of the three could be the one that collides.
+      if (problem) {
+        const first = toWrite.find((w) => (layoutKeys as readonly string[]).includes(w.key))!;
+        problems[first.key] = problem;
+      }
     }
 
     if (Object.keys(problems).length > 0) throw new SettingsValidationError(problems);

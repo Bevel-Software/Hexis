@@ -1,4 +1,10 @@
-import { configureBranchModel, validateBranchModel } from '@bevel-software/platform-shared';
+import {
+  configureBranchModel,
+  configureKbLayout,
+  validateBranchModel,
+  validateKbLayout,
+  type KbLayout,
+} from '@bevel-software/platform-shared';
 // The pure module, NOT the `shared/mcp` barrel — the same reason `test-setup.ts`
 // avoids it. This runs BEFORE React renders, and the barrel would drag the
 // components and their icon imports into the boot path to set one string.
@@ -14,6 +20,11 @@ interface ServerConfig {
    * is what every connect surface did before this existed.
    */
   mcpUrl?: string;
+  /**
+   * Optional for the same version-skew reason: a server that predates the
+   * field leaves the defaults in place, which is what it was running with.
+   */
+  kbLayout?: KbLayout;
 }
 
 /**
@@ -52,6 +63,11 @@ export async function loadServerConfig(): Promise<void> {
    */
   const problem = validateBranchModel(config.branchModel);
   if (!problem) configureBranchModel(config.branchModel);
+
+  // The KB layout has defaults, so an absent or invalid one is not a boot
+  // failure either: the module keeps its defaults, which is exactly what an
+  // older server that omits the field is running with.
+  if (config.kbLayout && !validateKbLayout(config.kbLayout)) configureKbLayout(config.kbLayout);
 
   /**
    * Unconditional, and deliberately not guarded by the branch-model check

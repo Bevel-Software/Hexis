@@ -6,6 +6,8 @@ import {
   validateBranchModel,
   PROTECTED_BRANCHES,
   PLUGINS_DIR,
+  SKILLS_DIR,
+  configureKbLayout,
 } from '@bevel-software/platform-shared';
 import { CoreConfig } from '../core-config.js';
 import { getDb, type Database } from '../modules/database/connection.js';
@@ -242,6 +244,11 @@ export async function createCoreServices(
     protectedBranches: settings.resolve('protectedBranches'),
   };
   if (!validateBranchModel(branchModel)) configureBranchModel(branchModel);
+  // The KB layout — the three renameable roots — applied the same way and at
+  // the same moment, before any service captures a root name. Unlike the
+  // branch model it always resolves (every root has a default), so an invalid
+  // value is a real misconfiguration and stops the boot.
+  configureKbLayout(settings.resolveKbLayout());
   // A token supplied through the setup screen has to reach the credential
   // helper, which reads `$GITHUB_TOKEN` at call time.
   settings.syncGitTokenEnv();
@@ -495,12 +502,14 @@ export async function createCoreServices(
   // caches are independent, so the split preserves behavior.)
   fileChangeNotifier.onFilesChanged(({ branch, paths }) => {
     if (branch !== DEFAULT_BRANCH) return;
-    // Skills, tools and the plugin index all live under `Plugins/`, so one
-    // touch check drives all three caches. An access grant lands as a
-    // default-branch change to `Plugins/<plugin>/access.md`, so this is also
-    // what makes a newly-granted plugin unlock within one round-trip instead
-    // of one TTL.
-    const touched = paths.some((p) => p.startsWith(`${kbDirName}/${PLUGINS_DIR}/`));
+    // Skills, tools and the plugin index all live under `Plugins/` or
+    // `Skills/`, so one touch check drives all three caches. An access grant
+    // lands as a default-branch change to `Plugins/<plugin>/access.md`, so
+    // this is also what makes a newly-granted plugin unlock within one
+    // round-trip instead of one TTL.
+    const touched = paths.some(
+      (p) => p.startsWith(`${kbDirName}/${PLUGINS_DIR}/`) || p.startsWith(`${kbDirName}/${SKILLS_DIR}/`),
+    );
     if (touched) {
       toolManualService.invalidate();
       skillService.invalidate();

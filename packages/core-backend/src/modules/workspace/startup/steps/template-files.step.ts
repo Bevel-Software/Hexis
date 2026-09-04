@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { KNOWLEDGE_BASE_DIR, PLUGINS_DIR } from '@bevel-software/platform-shared';
+import { KNOWLEDGE_BASE_DIR, PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME } from '../../bevel-ignore.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
@@ -43,8 +43,8 @@ export const TEMPLATE_SOURCE_FALLBACKS: Readonly<Record<string, string>> = {
 };
 
 /**
- * The two roots CORE gives a knowledge base: the ontologies, and the plugins
- * that hold skills and tools.
+ * The three roots CORE gives a knowledge base: the ontologies, the shared
+ * skills, and the plugins that hold tools and link the skills.
  *
  * `Data/`, `Agents/` and `Pipelines/` are deliberately absent. They scaffold
  * the agentic execution layer, which is not part of this platform — a core
@@ -54,8 +54,13 @@ export const TEMPLATE_SOURCE_FALLBACKS: Readonly<Record<string, string>> = {
  * READMEs); the names stay reserved in `kb-layout.ts` either way, so a KB
  * that has them still renders them as roots rather than folding them into
  * Knowledge.
+ *
+ * A function: the three names are deployment-configurable live bindings, and
+ * a module-scope array would snapshot the defaults before configuration.
  */
-const CORE_REQUIRED_DIRS: readonly string[] = [KNOWLEDGE_BASE_DIR, PLUGINS_DIR];
+function coreRequiredDirs(): readonly string[] {
+  return [KNOWLEDGE_BASE_DIR, SKILLS_DIR, PLUGINS_DIR];
+}
 
 /**
  * A reserved root must be ONE path segment — `Data`, not `Data/x`, `../x` or
@@ -102,7 +107,7 @@ export function reservedRootDirs(extraRootDirs: readonly string[]): readonly str
       );
     }
   }
-  return [...CORE_REQUIRED_DIRS, ...extraRootDirs];
+  return [...coreRequiredDirs(), ...extraRootDirs];
 }
 
 /**

@@ -33,7 +33,7 @@ import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.j
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
-import { DEFAULT_BRANCH, PROTECTED_BRANCHES, type AuthUser } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PROTECTED_BRANCHES, currentKbLayout, type AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -199,6 +199,12 @@ export async function createCoreServer(
         defaultBranch: DEFAULT_BRANCH,
         protectedBranches: [...PROTECTED_BRANCHES],
       },
+      /**
+       * The three renameable KB roots, for the same reason as the branch
+       * model: the file tree, the library router and every path rule read
+       * them, and they used to be compile-time constants.
+       */
+      kbLayout: currentKbLayout(),
       /**
        * The same value the OAuth metadata publishes (see `mcpResourceUrl`).
        *

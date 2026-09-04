@@ -122,6 +122,7 @@ async function fullScaffold(): Promise<Record<string, string>> {
     '.gitignore': await template('gitignore.template'),
     'KnowledgeBase/.gitkeep': '',
     'Plugins/.gitkeep': '',
+    'Skills/.gitkeep': '',
   };
 }
 
@@ -144,6 +145,7 @@ describe('TemplateFilesStep', () => {
       // Reserved roots materialize as <dir>/.gitkeep.
       expect(await exists(dir, 'KnowledgeBase/.gitkeep')).toBe(true);
       expect(await exists(dir, 'Plugins/.gitkeep')).toBe(true);
+      expect(await exists(dir, 'Skills/.gitkeep')).toBe(true);
       const subject = (await git(dir, ['log', '--format=%s', '-1'])).trim();
       expect(subject).toMatch(/^Add missing KB scaffolding: /);
       expect(subject).toContain('.gitignore');
@@ -294,7 +296,7 @@ describe('buildSeedTree', () => {
     expect(await fs.readFile(path.join(dest, 'docs/guide.md'), 'utf8')).toBe('guide');
     expect(await fs.readFile(path.join(dest, 'access.md'), 'utf8')).toBe('policy');
     // The generated paths — what the runner force-adds past a template .gitignore.
-    expect(generated.sort()).toEqual(['KnowledgeBase/.gitkeep', 'Plugins/.gitkeep', 'roles.yaml']);
+    expect(generated.sort()).toEqual(['KnowledgeBase/.gitkeep', 'Plugins/.gitkeep', 'Skills/.gitkeep', 'roles.yaml']);
     expect(await exists(dest, 'roles.yaml')).toBe(true);
   });
 });

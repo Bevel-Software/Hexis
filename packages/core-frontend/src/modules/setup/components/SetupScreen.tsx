@@ -40,6 +40,24 @@ const FIELDS: Record<
     placeholder: 'knowledge-base',
     advanced: true,
   },
+  knowledgeBaseDir: {
+    label: 'Knowledge folder',
+    help: 'The top-level folder in the repository that holds the knowledge. Change it only to read a repository laid out by someone else.',
+    placeholder: 'KnowledgeBase',
+    advanced: true,
+  },
+  skillsDir: {
+    label: 'Skills folder',
+    help: 'The top-level folder that holds shared skills. The three folder names must differ.',
+    placeholder: 'Skills',
+    advanced: true,
+  },
+  pluginsDir: {
+    label: 'Plugins folder',
+    help: 'The top-level folder that holds plugins. The three folder names must differ.',
+    placeholder: 'Plugins',
+    advanced: true,
+  },
   defaultBranch: {
     label: 'Main branch',
     help: 'The version everyone sees. Filled in from your repository when you test the connection.',

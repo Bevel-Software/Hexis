@@ -241,6 +241,18 @@ export interface LibraryFilterable {
   owned: boolean;
   /** Folder plugin from the item's KB path, or null when it sits in none. */
   plugin: string | null;
+  /**
+   * Lives under the shared `Skills/` root rather than in a plugin folder.
+   * Such an item has no folder plugin, but it is not "yours alone" either —
+   * it is owned by a scope and shared into plugins by link — so the
+   * ungrouped view leaves it out and only the catalog-wide view lists it.
+   */
+  shared?: boolean;
+}
+
+/** "Yours alone": in no plugin folder AND not a shared skill. */
+export function isUngrouped(item: Pick<LibraryFilterable, 'plugin' | 'shared'>): boolean {
+  return item.plugin === null && !item.shared;
 }
 
 /** Sidebar selection narrows; the query matches name/description within it. */
@@ -262,7 +274,7 @@ export function filterLibraryItems<T extends LibraryFilterable>(
       case 'group':
         return item.plugin === filter.plugin;
       case 'ungrouped':
-        return item.plugin === null;
+        return isUngrouped(item);
     }
   });
 }

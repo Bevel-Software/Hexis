@@ -1,13 +1,14 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { parseDocument } from 'yaml';
-import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { extractFrontmatter, resolveDeclaredId, dedupeById } from '../../shared/frontmatter-id.js';
 import { walkFiles } from '../../shared/fs-walk.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
+import { BevelIgnoreStack } from '../workspace/bevel-ignore.js';
 import type {
   ISkillService,
   GetSkillResult,
@@ -103,9 +104,10 @@ export class SkillService implements ISkillService {
   }
 
   private async scanDisk(): Promise<ParsedSkill[]> {
-    // Ensure the default-branch clone exists, then scan its Plugins/ dir. Any
-    // failure (no workspace, no Plugins/ dir) degrades to an empty catalog — the
-    // manual/tools must never break because skills can't be read.
+    // Ensure the default-branch clone exists, then scan its Skills/ and
+    // Plugins/ roots. Any failure (no workspace, no such dir) degrades to an
+    // empty catalog — the manual/tools must never break because skills can't
+    // be read.
     let wsId: string;
     try {
       wsId = (await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH)).id;
@@ -115,19 +117,29 @@ export class SkillService implements ISkillService {
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
     // Skills may be grouped in category subfolders (each carrying its own
-    // access.md), so a SKILL.md can live at any depth under the root. Walk the
-    // tree and treat every folder that directly contains a SKILL.md as a skill;
-    // don't descend past it — its inner files are bundled assets, not nested
-    // skills. The skill name is the leaf folder name; its path is the full
-    // repo-relative folder (e.g. `Plugins/Development/coding-guidelines`).
+    // access.md), so a SKILL.md can live at any depth under either root. Walk
+    // the tree and treat every folder that directly contains a SKILL.md as a
+    // skill; don't descend past it — its inner files are bundled assets, not
+    // nested skills. The skill name is the leaf folder name; its path is the
+    // full repo-relative folder (e.g. `Skills/Engineering/deploy`).
+    //
+    // `.bevelignore` files INSIDE a root are honoured on the way down, the
+    // same layered rules the file tree applies: a repository that carries a
+    // build output beside its source (a `dist/` holding compiled copies of
+    // every skill) would otherwise list each skill twice and refuse the
+    // duplicate — the wrong one, half the time. The REPO-ROOT file is
+    // deliberately not consulted: it is where the template hides `Plugins/`
+    // from the Knowledge tree, and a rule that hides a root from the browser
+    // must not empty the catalog that root exists to feed.
     const out: ParsedSkill[] = [];
-    const walk = async (dir: string, relFolder: string): Promise<void> => {
+    const walk = async (dir: string, relFolder: string, ignore: BevelIgnoreStack): Promise<void> => {
       let entries: import('node:fs').Dirent[];
       try {
         entries = await fs.readdir(dir, { withFileTypes: true });
       } catch {
         return;
       }
+      ignore = await ignore.extendedWith(dir);
       if (entries.some((e) => e.isFile() && e.name === 'SKILL.md')) {
         let raw: string;
         try {
@@ -153,10 +165,16 @@ export class SkillService implements ISkillService {
       }
       for (const entry of entries) {
         if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
-        await walk(path.join(dir, entry.name), `${relFolder}/${entry.name}`);
+        const abs = path.join(dir, entry.name);
+        if (ignore.isIgnored(abs, true)) continue;
+        await walk(abs, `${relFolder}/${entry.name}`, ignore);
       }
     };
-    await walk(path.join(kbRoot, PLUGINS_DIR), PLUGINS_DIR);
+    // Each root starts its own ignore stack (the walk extends it with the
+    // root's own file first). Order is cosmetic: the sort below is by name
+    // then path, so a same-named pair resolves the same way regardless.
+    await walk(path.join(kbRoot, SKILLS_DIR), SKILLS_DIR, BevelIgnoreStack.empty());
+    await walk(path.join(kbRoot, PLUGINS_DIR), PLUGINS_DIR, BevelIgnoreStack.empty());
     // A skill's id (frontmatter `id`/`name`, else folder name) is how getSkill()
     // resolves it, so it must be unique. Sort by (name, path) for a deterministic
     // winner, then REFUSE later duplicates via the shared dedup — the same rule
