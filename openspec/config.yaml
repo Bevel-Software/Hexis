@@ -1,0 +1,19 @@
+schema: spec-driven
+
+context: |
+  Hexis: a git-backed knowledge base plus skill and tool catalogue that agents
+  reach over MCP. pnpm monorepo, TypeScript, Node 22. Packages: core-backend
+  (Express, Drizzle, Postgres), core-frontend (React, Vite), hexis-mcp (the
+  local MCP bridge), mcp-core (shared MCP plumbing), shared. The five packages
+  release together as one fixed version group (see .changeset/README.md).
+  Integration branch is dev; PRs target dev.
+  House style for prose: no em dashes; rewrite the clause instead.
+  Comments explain the action, then the why.
+
+rules:
+  proposal:
+    - Say why now and what changes; leave the how to design.md
+  specs:
+    - Plain-language scenarios that map to tests
+  tasks:
+    - Group by package; every task names the file it touches
