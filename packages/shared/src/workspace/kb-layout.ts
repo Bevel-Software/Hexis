@@ -206,6 +206,96 @@ export const HEXIS_EXTENSION_NS = 'software.bevel.hexis';
 export const HEXIS_TOOLS_DIR = `${HEXIS_EXTENSION_NS}/tools`;
 
 /**
+ * The manifest key under which a plugin LINKS shared skills:
+ *
+ *   plugin.json → extensions["software.bevel.hexis"].skills: [
+ *     "Skills/Engineering/deploy",   ← one skill folder
+ *     "Skills/Sales"                 ← a folder of skills: every skill beneath
+ *   ]
+ *
+ * Entries are repo-root-relative folder paths. A plugin's effective skill set
+ * is its inline `skills/` folder PLUS everything these roots resolve to. The
+ * spec reserves `extensions` for exactly this kind of client-specific data, so
+ * a conformant client that ignores it still gets a valid manifest; the
+ * compiled distribution copies the linked skills in for it.
+ *
+ * Linking is a reference, not a grant: a member of the plugin can read a
+ * linked skill only because the skill's own access rules name the plugin's
+ * principal (`plugin/<Name>/read`). The link service writes both together.
+ */
+export const HEXIS_LINKED_SKILLS_KEY = 'skills';
+
+/**
+ * Normalise a linked-skill root, or null when it cannot be one: a
+ * repo-root-relative POSIX folder path with no `..`, no leading slash, no
+ * backslashes and no empty segments. Trailing slashes are dropped.
+ */
+export function normalizeSkillRoot(raw: string): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.includes('\\') || trimmed.startsWith('/')) return null;
+  const segments = trimmed.split('/').filter((s) => s.length > 0);
+  if (segments.length === 0) return null;
+  if (segments.some((s) => s === '.' || s === '..')) return null;
+  return segments.join('/');
+}
+
+/**
+ * The linked-skill roots a parsed manifest declares — invalid entries are
+ * dropped, duplicates collapsed, order kept. A manifest with no extension
+ * block links nothing.
+ */
+export function linkedSkillRoots(manifest: unknown): string[] {
+  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return [];
+  const ext = (manifest as Record<string, unknown>).extensions;
+  if (typeof ext !== 'object' || ext === null) return [];
+  const ns = (ext as Record<string, unknown>)[HEXIS_EXTENSION_NS];
+  if (typeof ns !== 'object' || ns === null) return [];
+  const raw = (ns as Record<string, unknown>)[HEXIS_LINKED_SKILLS_KEY];
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const entry of raw) {
+    const root = normalizeSkillRoot(typeof entry === 'string' ? entry : '');
+    if (root !== null && !out.includes(root)) out.push(root);
+  }
+  return out;
+}
+
+/**
+ * The manifest with its linked-skill roots REPLACED by `roots`, every other
+ * byte of the object preserved (the MCP extension block beside it, the
+ * portable fields above it). An empty list removes the key rather than
+ * leaving `skills: []` behind.
+ */
+export function withLinkedSkillRoots(
+  manifest: Record<string, unknown>,
+  roots: readonly string[],
+): Record<string, unknown> {
+  const extensions =
+    typeof manifest.extensions === 'object' && manifest.extensions !== null && !Array.isArray(manifest.extensions)
+      ? { ...(manifest.extensions as Record<string, unknown>) }
+      : {};
+  const current = extensions[HEXIS_EXTENSION_NS];
+  const ns: Record<string, unknown> =
+    typeof current === 'object' && current !== null && !Array.isArray(current)
+      ? { ...(current as Record<string, unknown>) }
+      : {};
+  if (roots.length > 0) ns[HEXIS_LINKED_SKILLS_KEY] = [...roots];
+  else delete ns[HEXIS_LINKED_SKILLS_KEY];
+  if (Object.keys(ns).length > 0) extensions[HEXIS_EXTENSION_NS] = ns;
+  else delete extensions[HEXIS_EXTENSION_NS];
+  const out: Record<string, unknown> = { ...manifest };
+  if (Object.keys(extensions).length > 0) out.extensions = extensions;
+  else delete out.extensions;
+  return out;
+}
+
+/** Whether `skillPath` (a skill folder) falls under `root` (a skill folder or a folder of skills). */
+export function skillUnderRoot(skillPath: string, root: string): boolean {
+  return skillPath === root || skillPath.startsWith(`${root}/`);
+}
+
+/**
  * The manifest `name` for a plugin folder: lowercased, anything outside
  * `[a-z0-9.-]` folded to `-`, runs collapsed, ends trimmed to alphanumerics.
  *

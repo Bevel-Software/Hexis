@@ -14,6 +14,7 @@ import type { ISkillService } from '../skills/skills.contract.js';
 import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
 import type { PluginCatalogEntry, IPluginIndexService } from './plugins.contract.js';
+import type { PluginLinkIndex } from './plugin-links.js';
 
 const CACHE_TTL_MS = 60_000;
 
@@ -52,6 +53,12 @@ export class PluginIndexService implements IPluginIndexService {
     private readonly toolManualService: IToolManualService,
     private readonly kbDirName: string,
     now: () => number = Date.now,
+    /**
+     * The link index, when the deployment has one: a plugin's skill count is
+     * then inline PLUS linked. Optional so hosts composing their own service
+     * set (and older tests) keep the inline-only count.
+     */
+    private readonly links?: PluginLinkIndex,
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
   }
@@ -168,7 +175,15 @@ export class PluginIndexService implements IPluginIndexService {
   private async countSkills(): Promise<Map<string, number>> {
     // `undefined` is the documented GLOBAL, unfiltered mode — counts are a
     // property of the plugin, not of who is asking.
-    return bucketByPlugin(await this.skillService.listSkills(undefined));
+    if (!this.links) return bucketByPlugin(await this.skillService.listSkills(undefined));
+    // With links, a skill counts for EVERY plugin that holds it — inline in
+    // its folder, or linked from a manifest. Personal folders are already
+    // absent from the membership (they are places, not plugins).
+    const counts = new Map<string, number>();
+    for (const memberships of (await this.links.membership()).bySkill.values()) {
+      for (const m of memberships) counts.set(m.name, (counts.get(m.name) ?? 0) + 1);
+    }
+    return counts;
   }
 
   private async countTools(): Promise<Map<string, number>> {

@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
 import { useLibraryToast } from '../state/toast.context';
+import { isInPlugin, withLinkHealth } from '../utils/status';
 import {
   decodePluginSegment,
   pathForPluginsIndex,
@@ -120,8 +121,11 @@ export function PluginPage() {
     () => data.pluginSummaries.find((g) => g.name === plugin) ?? null,
     [data.pluginSummaries, plugin],
   );
+  // Inline AND linked: a shared skill linked from this plugin's manifest is
+  // one of its skills. A link whose grant went missing carries the amber
+  // "needs setup" foot note here — the one place the plugin's members look.
   const pluginItems = useMemo(
-    () => data.items.filter((i) => i.plugin === plugin),
+    () => data.items.filter((i) => isInPlugin(i, plugin)).map((i) => withLinkHealth(i, plugin)),
     [data.items, plugin],
   );
   /** For the add dialog's name check — global, because a skill's id is global. */
@@ -289,6 +293,16 @@ export function PluginPage() {
         </Banner>
       )}
 
+      {/* Ownership decides readability, the plugin is a view: a linked skill
+          the caller may not read is simply absent from their list, and the
+          plugin's own total says how many. */}
+      {summary && summary.skillCount > skillItems.length && (
+        <p className="mb-2 text-detail text-ink-faint">
+          {summary.skillCount - skillItems.length === 1
+            ? '1 skill in this plugin is not shared with you.'
+            : `${summary.skillCount - skillItems.length} skills in this plugin are not shared with you.`}
+        </p>
+      )}
       <PluginItemSections
         skillItems={shownSkills}
         toolItems={toolItems}
@@ -367,6 +381,11 @@ export function PluginPage() {
           // Every skill, not just this plugin's: a skill's id is its name and
           // ids are global, so the collision that matters is with any of them.
           existingSkills={allSkillNames}
+          linkable={data.items}
+          onLinked={() => {
+            data.reload();
+            data.reloadPlugins();
+          }}
           onClose={() => setAddOpen(false)}
         />
       )}

@@ -33,6 +33,10 @@ vi.mock('../services/library.api', () => ({
   getSkillFile: apiMock.getSkillFile,
   proposeChange: apiMock.proposeChange,
   listSkills: vi.fn(),
+  // The write-access request surface: nothing pending, nothing asked.
+  listSkillAccessRequests: vi.fn(async () => []),
+  reconcileSkillAccessRequest: vi.fn(async () => false),
+  requestSkillAccess: vi.fn(async () => ({ number: 1 })),
   // Real behaviour, not a stub: the page resolves the caller's own request by
   // this branch name, so a `vi.fn()` returning undefined would quietly disable
   // the very lookup these tests are checking.

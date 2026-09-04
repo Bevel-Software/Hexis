@@ -12,6 +12,7 @@
  */
 
 import { parse as parseFullYaml } from 'yaml';
+import { pluginManifestName } from '@bevel-software/platform-shared';
 import type { GroupsIndex } from './group-files.js';
 
 // ---------------------------------------------------------------------------
@@ -85,6 +86,45 @@ export const GROUP_REF_PREFIX = 'group:';
  * registered in the principal index under its `role/<canonical>` alias.
  */
 export const ROLE_TOKEN_PREFIX = 'role/';
+
+/**
+ * PLUGIN-principal token prefix in access.md entries: `plugin/<Name>/<verb>`
+ * names everyone who holds `<verb>` on the plugin folder `Plugins/<Name>` —
+ * `plugin/GTM/read` is the GTM plugin's members, `plugin/GTM/write` its
+ * managers. Membership is DERIVED at model-load time from the plugin's own
+ * `access.md` (see `plugin-principals.ts`), so a grant naming one follows the
+ * plugin's roster with no copying. This is how a shared skill under `Skills/`
+ * is made visible to a plugin: `read: plugin/GTM/read` on the skill folder.
+ *
+ * The name half is canonicalised with the plugin's MANIFEST slug, so
+ * `plugin/Sales Team/read` and `plugin/sales-team/read` are one principal —
+ * the same identity a conformant client keys the plugin on. Reserved in the
+ * group name-safety rules like `role/`.
+ */
+export const PLUGIN_TOKEN_PREFIX = 'plugin/';
+
+/** The verbs a plugin token may name — each is a distinct principal. */
+export const PLUGIN_TOKEN_VERBS = ['read', 'write', 'owner'] as const;
+export type PluginTokenVerb = (typeof PLUGIN_TOKEN_VERBS)[number];
+
+/** The canonical key of a plugin principal, from the plugin's manifest slug. */
+export function pluginPrincipalKey(slug: string, verb: PluginTokenVerb): string {
+  return `${PLUGIN_TOKEN_PREFIX}${slug}/${verb}`;
+}
+
+/** The parts of a canonical plugin key, or null when the token is not one. */
+export function parsePluginPrincipalKey(
+  canonical: string,
+): { slug: string; verb: PluginTokenVerb } | null {
+  if (!canonical.startsWith(PLUGIN_TOKEN_PREFIX)) return null;
+  const rest = canonical.slice(PLUGIN_TOKEN_PREFIX.length);
+  const cut = rest.lastIndexOf('/');
+  if (cut <= 0) return null;
+  const slug = rest.slice(0, cut);
+  const verb = rest.slice(cut + 1);
+  if (!(PLUGIN_TOKEN_VERBS as readonly string[]).includes(verb)) return null;
+  return { slug, verb: verb as PluginTokenVerb };
+}
 
 export const USER_REF_REGEX = /^(.+?)\s+<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$/;
 export const EMAIL_REGEX = /^[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+$/;
@@ -224,9 +264,22 @@ export function hasAccessFrontmatterExtension(p: string): boolean {
 export interface RolesIndex {
   byCanonical: Map<
     string,
-    { displayName: string; emails: Set<string>; groupRefs?: Set<string>; kind?: 'role' | 'group' }
+    {
+      displayName: string;
+      emails: Set<string>;
+      groupRefs?: Set<string>;
+      kind?: 'role' | 'group' | 'plugin';
+      /** For `kind: 'plugin'`: the plugin FOLDER name the principal derives from. */
+      pluginFolder?: string;
+    }
   >;
   byEmail: Map<string, Set<string>>;
+  /**
+   * Principal keys EVERY caller holds, known or not — a plugin whose own
+   * rules grant `everyone` yields a plugin principal no email list can
+   * enumerate. The resolver unions these into every caller's key set.
+   */
+  publicKeys?: Set<string>;
 }
 // ---------------------------------------------------------------------------
 // Tiny YAML subset parser — handles only block mappings + block sequences
@@ -482,6 +535,24 @@ export function parseAccessEntry(
     const suffix = canonicalRoleName(role.slice(ROLE_TOKEN_PREFIX.length));
     if (!suffix) return { ok: false, error: `entry '${body}' names no role after '${ROLE_TOKEN_PREFIX}'` };
     role = `${ROLE_TOKEN_PREFIX}${suffix}`;
+  } else if (role.startsWith(PLUGIN_TOKEN_PREFIX)) {
+    // `plugin/<Name>/<verb>`: the name is canonicalised to the plugin's
+    // manifest slug, the verb must be one of the three. Anything else is a
+    // parse error naming the valid shapes — a token that silently resolved to
+    // nothing would be a grant nobody gets and nobody is told about.
+    const rest = body.slice(body.toLowerCase().indexOf(PLUGIN_TOKEN_PREFIX) + PLUGIN_TOKEN_PREFIX.length).trim();
+    const cut = rest.lastIndexOf('/');
+    const name = cut > 0 ? rest.slice(0, cut).trim() : '';
+    const verb = cut > 0 ? rest.slice(cut + 1).trim().toLowerCase() : '';
+    if (!name || !(PLUGIN_TOKEN_VERBS as readonly string[]).includes(verb)) {
+      return {
+        ok: false,
+        error:
+          `entry '${body}' is not a plugin principal — write it as ` +
+          `${PLUGIN_TOKEN_PREFIX}<plugin>/read, ${PLUGIN_TOKEN_PREFIX}<plugin>/write or ${PLUGIN_TOKEN_PREFIX}<plugin>/owner`,
+      };
+    }
+    role = pluginPrincipalKey(pluginManifestName(name), verb as PluginTokenVerb);
   }
   return { ok: true, entry: { kind: 'role', role, displayRole: body, deny } };
 }

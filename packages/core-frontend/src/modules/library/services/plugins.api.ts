@@ -109,6 +109,60 @@ export async function ensurePersonalPlugin(): Promise<{ folder: string; created:
 }
 
 /**
+ * Thrown when linking is refused because the caller may edit the plugin but
+ * not the skill's access rules — the link would share nothing. The UI turns
+ * this into "request write access".
+ */
+export class NeedsSkillWriteError extends Error {
+  readonly root: string;
+  constructor(root: string) {
+    super("You can't change who may read this skill yet.");
+    this.name = 'NeedsSkillWriteError';
+    this.root = root;
+  }
+}
+
+async function linkCall(url: string, init: RequestInit): Promise<Record<string, unknown>> {
+  const res = await authFetch(url, init);
+  const body = (await res.json().catch(() => ({}))) as { error?: string; kind?: string; root?: string };
+  if (!res.ok) {
+    if (body.kind === 'needs-skill-write') throw new NeedsSkillWriteError(body.root ?? '');
+    throw new Error(body.error ?? "Couldn't update the plugin's links.");
+  }
+  return body;
+}
+
+/**
+ * Link a skill (or a folder of skills) into a plugin: the path goes into the
+ * plugin's manifest and the skill's rules grant the plugin's principals. Needs
+ * write on both sides — see `NeedsSkillWriteError`.
+ */
+export async function linkSkill(plugin: string, skillPath: string): Promise<{ root: string; skills: string[] }> {
+  return (await linkCall(`/api/plugins/${encodeURIComponent(plugin)}/links`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skillPath }),
+  })) as { root: string; skills: string[] };
+}
+
+/** Remove a link. `revoked` says whether the plugin's grant on the skill went with it. */
+export async function unlinkSkill(plugin: string, skillPath: string): Promise<{ root: string; revoked: boolean }> {
+  return (await linkCall(
+    `/api/plugins/${encodeURIComponent(plugin)}/links?skillPath=${encodeURIComponent(skillPath)}`,
+    { method: 'DELETE' },
+  )) as { root: string; revoked: boolean };
+}
+
+/** Re-grant the plugin's principals on a linked skill whose grant was hand-removed. */
+export async function repairSkillLink(plugin: string, skillPath: string): Promise<void> {
+  await linkCall(`/api/plugins/${encodeURIComponent(plugin)}/links/repair`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skillPath }),
+  });
+}
+
+/**
  * Thrown when a join request is refused because access already landed —
  * between the page load and the click. Not an error to show: the right
  * response is to reload the library and let the plugin appear unlocked.

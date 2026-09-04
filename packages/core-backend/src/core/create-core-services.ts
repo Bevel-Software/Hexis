@@ -42,7 +42,13 @@ import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
-import { PluginIndexService, PluginProvisionService, JoinRequestsService } from '../modules/plugins/index.js';
+import {
+  PluginIndexService,
+  PluginProvisionService,
+  JoinRequestsService,
+  PluginLinkIndex,
+  PluginLinksService,
+} from '../modules/plugins/index.js';
 import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
@@ -130,6 +136,10 @@ export interface CoreServices {
   pluginIndexService: PluginIndexService;
   pluginProvisionService: PluginProvisionService;
   joinRequestsService: JoinRequestsService;
+  /** Which plugins hold which skills (inline or linked) — see `PluginLinkIndex`. */
+  pluginLinkIndex: PluginLinkIndex;
+  /** Link / unlink / repair shared skills into plugins. */
+  pluginLinksService: PluginLinksService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
@@ -336,12 +346,17 @@ export async function createCoreServices(
   // team's skills AND the tools they need. Enumerated for EVERY authenticated
   // caller — a plugin they cannot read still exists for them, as a locked one —
   // with the counts read off the two catalogs above rather than a second scan.
+  // The link index resolves manifests against the released catalog, and the
+  // plugin index counts through it (inline + linked), so it comes first.
+  const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kbDirName);
   const pluginIndexService = new PluginIndexService(
     workspaceService,
     accessControl,
     skillService,
     toolManualService,
     kbDirName,
+    Date.now,
+    pluginLinkIndex,
   );
   // Auth service — resolves identities for login, PR author attribution, and
   // access lookups. (Change requests now store the author email directly, so
@@ -457,6 +472,18 @@ export async function createCoreServices(
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
   const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
+  // Links land as ordinary default-branch commits and change what the plugin
+  // index counts, so a link drops that cache too.
+  const pluginLinksService = new PluginLinksService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    skillService,
+    pluginLinkIndex,
+    kbDirName,
+    eventBus,
+    () => pluginIndexService.invalidate(),
+  );
   // Server-scoped MCP editing — the tool page's edit form. One server's truth
   // spans a plugin's mcp.json AND plugin.json extensions block, and this is
   // the ONE writer that rewrites both entries and commits them together (see
@@ -514,6 +541,7 @@ export async function createCoreServices(
       toolManualService.invalidate();
       skillService.invalidate();
       pluginIndexService.invalidate();
+      pluginLinkIndex.invalidate();
     }
 
   });
@@ -532,6 +560,7 @@ export async function createCoreServices(
     toolManualService.invalidate();
     skillService.invalidate();
     pluginIndexService.invalidate();
+    pluginLinkIndex.invalidate();
   });
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the
@@ -835,6 +864,8 @@ export async function createCoreServices(
     pluginIndexService,
     pluginProvisionService,
     joinRequestsService,
+    pluginLinkIndex,
+    pluginLinksService,
     authService,
     authMiddleware,
     accountErasureService,

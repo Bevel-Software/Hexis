@@ -7,6 +7,21 @@
  * bundled file's content (level 3).
  */
 
+/**
+ * One plugin a skill belongs to — by sitting INSIDE the plugin folder
+ * (`linked: false`) or by being LINKED from the plugin's manifest
+ * (`linked: true`). For a link, `granted` says whether the skill's own access
+ * rules name the plugin's `plugin/<Name>/read` principal, which is what makes
+ * the link work for the plugin's members; the link service writes that grant
+ * with the link, so `false` means a hand edit took it away.
+ */
+export interface PluginMembership {
+  /** The plugin folder name. */
+  name: string;
+  linked: boolean;
+  granted: boolean;
+}
+
 export interface SkillSummary {
   /** Canonical id = the skill's folder name (e.g. `rfi`). */
   name: string;
@@ -14,6 +29,12 @@ export interface SkillSummary {
   version?: string;
   /** Repo-root-relative skill folder, e.g. `Plugins/Everyone/rfi`. */
   path: string;
+  /**
+   * The plugins this skill belongs to, decorated onto the catalog by the
+   * browser route (the catalog itself is plugin-unaware). Absent on the agent
+   * surfaces, which load skills by name and never by plugin.
+   */
+  plugins?: PluginMembership[];
 }
 
 export interface Skill extends SkillSummary {

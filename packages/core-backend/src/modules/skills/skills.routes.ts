@@ -1,6 +1,11 @@
 import express from 'express';
 import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
-import type { IPendingSkillService, ISkillService } from './skills.contract.js';
+import type { IPendingSkillService, ISkillService, PluginMembership } from './skills.contract.js';
+
+/** The slice of the plugin link index this surface reads — see `PluginLinkIndex`. */
+export interface SkillMembershipSource {
+  membership(): Promise<{ bySkill: Map<string, PluginMembership[]> }>;
+}
 
 /**
  * Browser-facing (JWT) skill routes for the `/`-command menu, mounted behind
@@ -8,14 +13,21 @@ import type { IPendingSkillService, ISkillService } from './skills.contract.js';
  * so discovery, default-branch pinning, and per-user `canRead` filtering live
  * ONCE — the frontend never re-implements skill discovery or bypasses access.
  *
- *   GET /api/skills            → { skills: SkillSummary[] }   (filtered to this user)
+ *   GET /api/skills            → { skills: SkillSummary[] }   (filtered to this user,
+ *                                                              each with its `plugins`)
  *   GET /api/skills/pending    → { skills: PendingSkill[] }   (proposed, not released)
  *   GET /api/skills/:name      → GetSkillResult               (body + files)
  *   GET /api/skills/:name?file=… → GetSkillResult             (a bundled file's content)
+ *
+ * `plugins` is decorated HERE, not in the catalog: the catalog is what agents
+ * load by name and it stays plugin-unaware; the browser is the surface that
+ * groups skills by plugin. Optional dependency, so a host without the link
+ * index gets undecorated summaries rather than a 500.
  */
 export function createSkillsRoutes(
   skillService: ISkillService,
   pendingSkills?: IPendingSkillService,
+  links?: SkillMembershipSource,
 ): express.Router {
   const router = express.Router();
 
@@ -25,7 +37,18 @@ export function createSkillsRoutes(
       res.status(401).json({ error: 'Unauthenticated' });
       return;
     }
-    res.json({ skills: await skillService.listSkills(email) });
+    const skills = await skillService.listSkills(email);
+    if (!links) {
+      res.json({ skills });
+      return;
+    }
+    let bySkill: Map<string, PluginMembership[]>;
+    try {
+      bySkill = (await links.membership()).bySkill;
+    } catch {
+      bySkill = new Map(); // membership is a decoration; the shelf must not fall with it
+    }
+    res.json({ skills: skills.map((s) => ({ ...s, plugins: bySkill.get(s.path) ?? [] })) });
   });
 
   /**

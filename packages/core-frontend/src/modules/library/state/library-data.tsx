@@ -1,6 +1,7 @@
 import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode,  } from 'react';
 import { LibraryContext } from './library-context';
 import { pluginOfPath, isPersonalPluginFolder, SKILLS_DIR } from '@bevel-software/platform-shared';
+import type { PluginMembership } from '../services/library.api';
 
 /**
  * The plugin a card files under — with personal folders mapped to `null`, the
@@ -21,6 +22,7 @@ function isSharedPath(path: string): boolean {
 import { useLibraryData, type LibraryData } from '../hooks/useLibraryData';
 import { listPlugins, type PluginSummary } from '../services/plugins.api';
 import {
+  isInPlugin,
   neededToolsFor,
   skillStatus,
   toolStatus,
@@ -55,6 +57,8 @@ export interface LibraryItem {
   plugin: string | null;
   /** Under the shared `Skills/` root — see `LibraryFilterable.shared`. */
   shared?: boolean;
+  /** Every plugin holding a skill, inline or linked (skills only). */
+  plugins?: PluginMembership[];
   /** Repo-root-relative path — the skill's folder, or the `.tool` file. */
   path: string;
   /**
@@ -129,6 +133,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       owned: data.ownedSkills.has(s.name),
       plugin: displayPluginOf(s.path),
       shared: isSharedPath(s.path),
+      plugins: s.plugins ?? [],
       path: s.path,
       version: s.version,
       status: skillStatus(
@@ -248,6 +253,6 @@ export function workspaceHasNoPlugins(lib: LibraryContextValue): boolean {
  */
 export function attentionOf(items: LibraryItem[], plugin: string): number {
   return items.filter(
-    (i) => i.plugin === plugin && i.kind === 'integration' && i.status.state !== 'ok',
+    (i) => isInPlugin(i, plugin) && i.kind === 'integration' && i.status.state !== 'ok',
   ).length;
 }

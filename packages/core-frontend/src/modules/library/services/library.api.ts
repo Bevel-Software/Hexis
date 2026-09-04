@@ -6,7 +6,7 @@ import { deleteFile, getOrCreateWorkspace, writeFile } from '../../workspace/ser
 import { openChangeRequest } from '../../pr/services/pr-open.api';
 import { postPrComment } from '../../pr/services/pr-comments.api';
 import { branchSegment } from '../../change-requests/services/propose.api';
-import { ensurePersonalPlugin } from './plugins.api';
+import { ensurePersonalPlugin, type JoinRequest } from './plugins.api';
 
 /**
  * Library data access. Skills come from the browser skill routes
@@ -26,6 +26,18 @@ import { ensurePersonalPlugin } from './plugins.api';
  */
 export const defaultWorkspaceId = () => encodeURIComponent(DEFAULT_BRANCH);
 
+/**
+ * One plugin a skill belongs to — inside the plugin folder (`linked: false`)
+ * or linked from the plugin's manifest (`linked: true`). `granted` is the
+ * link's health: whether the skill's own access rules still name the plugin's
+ * `plugin/<Name>/read` principal. Mirrors the backend contract.
+ */
+export interface PluginMembership {
+  name: string;
+  linked: boolean;
+  granted: boolean;
+}
+
 export interface LibrarySkillSummary {
   /** Canonical id = the skill's folder name (e.g. `rfi`). */
   name: string;
@@ -33,6 +45,44 @@ export interface LibrarySkillSummary {
   version?: string;
   /** Repo-root-relative skill folder, e.g. `Plugins/Everyone/rfi`. */
   path: string;
+  /** Every plugin holding this skill. Absent from an older server. */
+  plugins?: PluginMembership[];
+}
+
+/** The open write-access requests on a skill — `[]` to anyone but its editors. */
+export async function listSkillAccessRequests(name: string): Promise<JoinRequest[]> {
+  const data = await handleApiResponse<{ requests: JoinRequest[] }>(
+    await authFetch(`/api/skills/${encodeURIComponent(name)}/access-requests`),
+  );
+  return data.requests;
+}
+
+/** Settle one request if every proposal has landed. Returns whether it closed. */
+export async function reconcileSkillAccessRequest(name: string, number: number): Promise<boolean> {
+  const data = await handleApiResponse<{ closed: boolean }>(
+    await authFetch(`/api/skills/${encodeURIComponent(name)}/access-requests/${number}/reconcile`, {
+      method: 'POST',
+    }),
+  );
+  return data.closed;
+}
+
+/**
+ * Ask the skill's editors for write on it — a change request that proposes
+ * the grant, exactly like asking to join a plugin. Idempotent: a second ask
+ * returns the open request.
+ */
+export async function requestSkillAccess(name: string): Promise<{ number: number }> {
+  const res = await authFetch(`/api/skills/${encodeURIComponent(name)}/access-request`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ verb: 'write' }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Couldn't request access.");
+  }
+  return (await res.json()) as { number: number };
 }
 
 export interface LibrarySkill extends LibrarySkillSummary {

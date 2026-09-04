@@ -13,6 +13,7 @@ import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { pluginsWorkspaceId } from './plugins.service.js';
 import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
+import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
 import type { JoinRequestsService } from './join-requests.service.js';
 import type {
   PluginCatalogEntry,
@@ -61,8 +62,62 @@ export function createPluginsRoutes(
   provision: PluginProvisionService,
   kbDirName: string,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
+  /** Optional: a host without the link machinery simply has no link routes. */
+  links?: PluginLinksService,
 ): express.Router {
   const router = express.Router();
+
+  /**
+   * Linking shared skills — see `PluginLinksService` for the two-sided write.
+   *
+   *   POST   /api/plugins/:name/links          { skillPath }  → { root, skills }
+   *   DELETE /api/plugins/:name/links?skillPath=              → { root, revoked }
+   *   POST   /api/plugins/:name/links/repair   { skillPath }  → { root }
+   *
+   * Refusals carry a `kind` the UI branches on — `needs-skill-write` (409) is
+   * the one that becomes "request write access".
+   */
+  if (links) {
+    const linkOp = async (
+      req: express.Request,
+      res: express.Response,
+      op: (user: AuthUser, plugin: string, skillPath: string) => Promise<unknown>,
+      skillPathOf: (req: express.Request) => unknown,
+    ) => {
+      const user = await resolveUser(req);
+      if (!user) {
+        res.status(401).json({ error: 'Unauthenticated' });
+        return;
+      }
+      const skillPath = skillPathOf(req);
+      if (typeof skillPath !== 'string' || !skillPath.trim()) {
+        res.status(400).json({ error: 'skillPath is required' });
+        return;
+      }
+      try {
+        res.json(await op(user, String(req.params.name), skillPath));
+      } catch (err) {
+        if (err instanceof PluginLinkError) {
+          res.status(err.status).json({ error: err.message, ...err.payload });
+          return;
+        }
+        if (err instanceof WorkflowDomainError) {
+          res.status(err.status).json({ error: err.message, ...(err.payload ?? {}) });
+          return;
+        }
+        console.error('[plugins] link operation failed:', err);
+        res.status(500).json({ error: 'Failed to update the plugin\'s links' });
+      }
+    };
+    const bodyPath = (req: express.Request) => ((req.body ?? {}) as { skillPath?: unknown }).skillPath;
+    router.post('/plugins/:name/links', (req, res) => linkOp(req, res, (u, p, s) => links.link(u, p, s), bodyPath));
+    router.post('/plugins/:name/links/repair', (req, res) =>
+      linkOp(req, res, (u, p, s) => links.repair(u, p, s), bodyPath),
+    );
+    router.delete('/plugins/:name/links', (req, res) =>
+      linkOp(req, res, (u, p, s) => links.unlink(u, p, s), (r) => r.query.skillPath),
+    );
+  }
 
   /** The folder-chain probe for MEMBERSHIP — the folder itself. */
   const memberProbe = (folder: string) => folder;

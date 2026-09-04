@@ -20,7 +20,7 @@ import {
 import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
-import { registerSkillsTools, createSkillsRoutes } from '../modules/skills/index.js';
+import { registerSkillsTools, createSkillsRoutes, createSkillAccessRequestRoutes } from '../modules/skills/index.js';
 import { createPluginsRoutes } from '../modules/plugins/index.js';
 import type { SessionOntologyGate } from '../modules/workspace/session-ontology.gate.js';
 import {
@@ -437,7 +437,23 @@ export async function createCoreServer(
   app.use(
     '/api',
     core.authMiddleware,
-    createSkillsRoutes(core.skillService, core.pendingSkillsService),
+    createSkillsRoutes(core.skillService, core.pendingSkillsService, core.pluginLinkIndex),
+  );
+  // Asking for write on a shared skill — the join-request machinery pointed
+  // at a skill folder. Same JWT gate, same fail-closed shape.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createSkillAccessRequestRoutes({
+      skillService: core.skillService,
+      accessControl: core.accessControl,
+      workflow: core.workflowService,
+      workspaceService: core.workspaceService,
+      joinRequests: core.joinRequestsService,
+      kbDirName: core.kbDirName,
+      resolveUser: async (req) =>
+        req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null,
+    }),
   );
   // Plugin enumeration + join requests. Browser-only (JWT), and fail-closed
   // like every other read surface: plugins the caller cannot access (member,
@@ -452,6 +468,7 @@ export async function createCoreServer(
     core.pluginProvisionService,
     core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
+    core.pluginLinksService,
   ));
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
