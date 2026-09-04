@@ -1,11 +1,11 @@
 import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Check, XCircle, Lock, AlertTriangle, ArrowLeft, FileText } from 'lucide-react';
+import { Check, XCircle, Lock, AlertTriangle, ArrowLeft, FileText, History } from 'lucide-react';
 import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
-import { Banner, Button, Surface } from '../../../shared/components';
+import { Banner, Button, IconButton, Surface } from '../../../shared/components';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
@@ -999,7 +999,7 @@ export function FileViewer() {
   // rule). While a mode is OPEN it shows the way out instead. The header's
   // own cluster is suppressed for prose files (`writeActionInPane`).
   const lockedBy = fileLock.externalLock?.holderName ?? null;
-  const paneActions = isReviewingPending || viewOnly ? null : proposeMode ? (
+  const writeAction = isReviewingPending || viewOnly ? null : proposeMode ? (
     <>
       <Button variant="quiet" size="tiny" onClick={handleDiscardProposal} disabled={proposalBusy}>
         Discard
@@ -1054,6 +1054,29 @@ export function FileViewer() {
       {isEnteringEdit ? 'Loading…' : 'Edit'}
     </Button>
   );
+  // "Who changed this, when" — the clock-arrow beside Edit, where Google Docs
+  // keeps it. It sits in the bar for the same reason Edit does: history is a
+  // thing you do to THE FILE, and the bar is where the file's actions live.
+  // It used to be the lone item behind a ⋯ in the page header — two clicks
+  // and a menu for a question people ask often. Not gated on `viewOnly` or a
+  // pending review: reading the log changes nothing. Full-bleed renderers
+  // have no bar, so the header carries it for them (`historyInPane`).
+  const historyAction = historyAvailable ? (
+    <IconButton
+      aria-label="Version history"
+      title="Version history"
+      onClick={() => setActiveTab('history')}
+    >
+      <History size={14} />
+    </IconButton>
+  ) : null;
+  const paneActions =
+    historyAction || writeAction ? (
+      <>
+        {historyAction}
+        {writeAction}
+      </>
+    ) : null;
 
   return (
     <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
@@ -1093,6 +1116,9 @@ export function FileViewer() {
         // `viewOnly` rides the same flag: it tells the header "the write
         // action is not yours to render" — and the pane bar renders none.
         writeActionInPane={shellVariant === 'prose' || viewOnly}
+        // Prose gets a pane card, and the card's bar carries Version history
+        // beside Edit. Not `viewOnly`: a view-only full-bleed file has no bar.
+        historyInPane={shellVariant === 'prose'}
         lockedBy={fileLock.externalLock?.holderName ?? null}
         historyAvailable={historyAvailable}
         isDirty={isManualDirty}
@@ -1101,7 +1127,10 @@ export function FileViewer() {
         activeTab={activeTab}
         onEdit={handleEnterEditMode}
         onDone={handleExitEditMode}
-        onOpenHistory={() => setActiveTab('history')}
+        // While the log is open the column is full-bleed, so the header
+        // carries the clock (pressed). A second click on a pressed clock is a
+        // request to put the document back, not to open the log again.
+        onOpenHistory={() => setActiveTab((t) => (t === 'history' ? 'content' : 'history'))}
         onShare={handleShare}
         onCopyPage={canCopyPage ? handleCopyPage : undefined}
         onCopyLink={handleCopyLink}

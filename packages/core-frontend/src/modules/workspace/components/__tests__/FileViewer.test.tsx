@@ -680,16 +680,31 @@ describe('FileViewer', () => {
     expect(screen.queryByRole('button', { name: 'Compare' })).not.toBeInTheDocument();
   });
 
-  it('opens Version history from ⋯ and offers a way back to the document', async () => {
+  it('opens Version history from the clock-arrow beside Edit and offers a way back to the document', async () => {
     const user = userEvent.setup();
     render(<ViewerHarness initialContent="historic" />);
 
-    await user.click(screen.getByRole('button', { name: 'More actions' }));
-    await user.click(screen.getByRole('menuitem', { name: /Version history/ }));
+    // ONE clock: the prose pane bar carries it beside Edit, and the header
+    // stands down (`historyInPane`) rather than offering a second.
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
 
     const back = await screen.findByRole('button', { name: /Back to the document/ });
     await user.click(back);
     // The document is back, and so is its Edit affordance.
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+  });
+
+  // With the log open the column goes full-bleed and the header carries the
+  // clock, pressed. Clicking it again is the other way back.
+  it('closes Version history from the pressed clock in the header', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="historic" />);
+
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
+    await screen.findByRole('button', { name: /Back to the document/ });
+
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
   });
 
