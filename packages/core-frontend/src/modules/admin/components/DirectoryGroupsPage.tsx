@@ -23,7 +23,7 @@ function errMessage(err: unknown, fallback: string): string {
 }
 
 /**
- * The Groups page (still routed at `/directory-groups` — the component and
+ * The Groups & Members page (still routed at `/directory-groups` — the component and
  * route name stayed to avoid churn). Groups are people-sets for access
  * management, with ONE source per deployment:
  *
@@ -124,7 +124,7 @@ export function DirectoryGroupsPage() {
 
   if (!isAdmin) {
     return (
-      <PageShell title="Groups">
+      <PageShell title="Groups & Members">
         <div className="text-sm text-ink-muted">Admins only.</div>
       </PageShell>
     );
@@ -143,7 +143,7 @@ export function DirectoryGroupsPage() {
 
   return (
     <>
-      <PageShell title="Groups">
+      <PageShell title="Groups & Members">
         <div className="space-y-4">
           {broken && (
             <div
