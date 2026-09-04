@@ -48,6 +48,7 @@ import {
   JoinRequestsService,
   PluginLinkIndex,
   PluginLinksService,
+  MarketplaceCompilerService,
 } from '../modules/plugins/index.js';
 import {
   DbSecretsVaultService,
@@ -140,6 +141,8 @@ export interface CoreServices {
   pluginLinkIndex: PluginLinkIndex;
   /** Link / unlink / repair shared skills into plugins. */
   pluginLinksService: PluginLinksService;
+  /** Source layout → distribution layout, for one audience. */
+  marketplaceCompiler: MarketplaceCompilerService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
@@ -483,6 +486,16 @@ export async function createCoreServices(
     kbDirName,
     eventBus,
     () => pluginIndexService.invalidate(),
+  );
+  // Source → distribution. The marketplace's identity is fixed for now; the
+  // per-user git endpoint and any mirror both compile through this.
+  const marketplaceCompiler = new MarketplaceCompilerService(
+    workspaceService,
+    accessControl,
+    skillService,
+    pluginLinkIndex,
+    kbDirName,
+    { name: 'hexis', owner: 'Hexis', description: 'Skills and plugins from this knowledge base' },
   );
   // Server-scoped MCP editing — the tool page's edit form. One server's truth
   // spans a plugin's mcp.json AND plugin.json extensions block, and this is
@@ -866,6 +879,7 @@ export async function createCoreServices(
     joinRequestsService,
     pluginLinkIndex,
     pluginLinksService,
+    marketplaceCompiler,
     authService,
     authMiddleware,
     accountErasureService,

@@ -1,0 +1,109 @@
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { ISkillService } from '../../skills/skills.contract.js';
+import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import type { PluginLinkIndex } from '../plugin-links.js';
+import { compileMarketplace, type VirtualTree } from './compile-marketplace.js';
+
+const execFileAsync = promisify(execFile);
+
+/** Whose view of the knowledge base to compile. */
+export type CompileAudience = { userEmail: string } | { everyone: true };
+
+/**
+ * The compiler wired to the live deployment: the default-branch checkout,
+ * the released catalog, the link index, and the access resolver as the read
+ * verdict. Every sink — the per-user git endpoint, a public mirror, a local
+ * export — asks this for a tree and writes it somewhere.
+ *
+ * Two audiences: a PERSON (their `canRead` per skill, exactly the catalog's
+ * filter) or EVERYONE (only what `read: everyone` reaches cleanly — the
+ * public subset a shared mirror may carry). Nothing in between: an audience
+ * that is "these three people" would need a union of verdicts nobody has
+ * asked for yet.
+ */
+export class MarketplaceCompilerService {
+  constructor(
+    private readonly workspaceService: WorkspaceService,
+    private readonly accessControl: IAccessControl,
+    private readonly skillService: ISkillService,
+    private readonly links: PluginLinkIndex,
+    private readonly kbDirName: string,
+    private readonly marketplace: { name: string; owner: string; description?: string },
+  ) {}
+
+  /** The default-branch commit the next compile would read. */
+  async sourceCommit(): Promise<string> {
+    const { kbRoot } = await this.checkout();
+    try {
+      const { stdout } = await execFileAsync('git', ['-C', kbRoot, 'rev-parse', 'HEAD']);
+      return stdout.trim();
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  async compileFor(audience: CompileAudience): Promise<VirtualTree & { sourceCommit: string }> {
+    const { wsId, kbRoot } = await this.checkout();
+    const sourceCommit = await this.sourceCommit();
+    const skills = await this.skillService.listSkills(undefined);
+    const membership = await this.links.membership();
+    const readable = await this.readPredicate(wsId, audience, skills.map((s) => `${s.path}/SKILL.md`));
+    const tree = await compileMarketplace({
+      kbRoot,
+      skills,
+      membership,
+      readable,
+      options: { ...this.marketplace, sourceCommit },
+    });
+    return { ...tree, sourceCommit };
+  }
+
+  // --- internal --------------------------------------------------------------
+
+  private async checkout(): Promise<{ wsId: string; kbRoot: string }> {
+    const wsId = (await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH)).id;
+    return { wsId, kbRoot: path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName) };
+  }
+
+  /**
+   * One batch verdict per compile, then a lookup. Fail closed both ways: a
+   * path the batch skipped is unreadable, and for the everyone audience a
+   * skill is public only when the resolver says `read: everyone` applies
+   * cleanly (`restricted: false`).
+   */
+  private async readPredicate(
+    wsId: string,
+    audience: CompileAudience,
+    docPaths: string[],
+  ): Promise<(repoPath: string) => Promise<boolean>> {
+    if ('userEmail' in audience) {
+      const verdicts = docPaths.length
+        ? await this.accessControl.canReadBatch(wsId, audience.userEmail, docPaths)
+        : new Map<string, boolean>();
+      return async (p) => verdicts.get(p) === true;
+    }
+    const cache = new Map<string, boolean>();
+    return async (p) => {
+      const hit = cache.get(p);
+      if (hit !== undefined) return hit;
+      let verdict = false;
+      try {
+        verdict = !(await this.accessControl.eligibleReaders(wsId, p)).restricted;
+      } catch {
+        verdict = false;
+      }
+      cache.set(p, verdict);
+      return verdict;
+    };
+  }
+}
+
+/** The default-branch workspace id compiles run against. */
+export function compileWorkspaceId(): string {
+  return workspaceIdForBranch(DEFAULT_BRANCH);
+}
