@@ -67,24 +67,21 @@ describe('registerCatalogCacheInvalidation', () => {
   });
 
   describe("the default branch's tree changed", () => {
-    it('drops the catalogs on a default-branch working-tree write', () => {
-      const { eventBus, drops } = setup();
-      eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws', branch: DEFAULT_BRANCH });
-      expect(drops()).toBe(1);
-    });
-
     /**
      * The bug this exists for: approving a proposed skill closed its change
      * request (so it left the pending shelf at once) while the released catalog
      * kept serving its pre-merge scan, and the card vanished from the library
      * until the TTL ran out.
      *
-     * The merge reaches here as the `fs-tree-changed` its post-merge pull
-     * emits, NOT as a `change-request-merged` special case — a pull is how a
-     * merge, a recovery and a remote sync all rewrite the default tree, so one
-     * signal covers the three.
+     * One test, because the subscriber sees ONE signal: the merge reaches here
+     * as the `fs-tree-changed` its post-merge pull emits, exactly as a
+     * working-tree write does — NOT as a `change-request-merged` special
+     * case. That a pull of the default workspace actually emits this event
+     * (only after it resolves, and only when it moved HEAD) is the emitter's
+     * own contract, pinned in workflow.service.releaseLock.test.ts under
+     * "the tree-change announcement".
      */
-    it('drops them when a pull rewrites the default tree (the merge path)', () => {
+    it('drops the catalogs when the default tree changes (write or post-merge pull alike)', () => {
       const { eventBus, drops } = setup();
       eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws', branch: DEFAULT_BRANCH });
       expect(drops()).toBe(1);
@@ -124,6 +121,7 @@ describe('registerCatalogCacheInvalidation', () => {
       const { eventBus, drops } = setup();
       eventBus.emit({
         kind: 'change-request-merge-failed',
+        forUserId: 'u1',
         number: 42,
         reason: 'conflicts',
         conflicts: true,
