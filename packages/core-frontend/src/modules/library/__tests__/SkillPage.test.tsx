@@ -1195,6 +1195,9 @@ describe('SkillPage: deciding on a change', () => {
       // And there is a way back, because history is not in the URL.
       fireEvent.click(screen.getByRole('button', { name: 'Back to the file' }));
       expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+      // The activated Back button unmounts with history. Hand keyboard focus
+      // to the replacement clock instead of letting it fall to the document.
+      expect(screen.getByRole('button', { name: 'Version history' })).toHaveFocus();
     });
 
     /**

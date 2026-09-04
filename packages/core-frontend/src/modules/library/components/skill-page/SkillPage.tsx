@@ -597,7 +597,7 @@ export function SkillPage({
               variant="quiet"
               size="sm"
               leadingIcon={<ArrowLeft size={13} />}
-              onClick={() => setHistoryOpen(false)}
+              onClick={closeHistory}
             >
               Back to the file
             </Button>
