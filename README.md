@@ -18,6 +18,8 @@ open-source core of the Bevel platform.
 
 ## Why Hexis?
 
+Used by companies such as [Unite](https://unite.eu) (formerly Mercateo), [osapiens](https://osapiens.com), [BEO](https://beo.energy), [Workpath](https://www.workpath.com) and others.
+
 ### For teams
 
 One place where engineers and non-technical people alike can browse and load
