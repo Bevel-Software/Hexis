@@ -25,6 +25,7 @@ import type {
   AcquireLockResult,
   AuthUser,
   Branch,
+  BranchSyncOutcome,
   BranchWorkspaceStatus,
   CancelChangeRequestResult,
   Change,
@@ -98,6 +99,22 @@ function isOpenPairViolation(err: unknown): boolean {
   if (constraint === OPEN_PAIR_CONSTRAINT) return true;
   const message = fieldOf(err, 'message') ?? fieldOf(cause, 'message');
   return typeof message === 'string' && message.includes(OPEN_PAIR_CONSTRAINT);
+}
+
+/**
+ * The one sentence a remote-sync conflict is reported with — in the sync
+ * response, on the branch's banner and in the log — so whoever sees any of
+ * the three reads the same thing: which branch, which files, that automatic
+ * recovery is under way, and what to do if it does not clear.
+ */
+export function syncConflictMessage(branch: string, conflictedPaths: string[]): string {
+  const files = conflictedPaths.length > 0 ? conflictedPaths.join(', ') : 'some files';
+  // Kept short: the banner's `reason` goes through `sanitizeError`, which
+  // clips at 200 characters, and the sentence must survive that whole.
+  return (
+    `${branch} is not in sync yet: ${files} changed both in Hexis and on the git host. ` +
+    `Recovery is queued; if this stays, open the files on ${branch} in Hexis, keep what you want, and save.`
+  );
 }
 
 /** Redact the shared GitHub token from any error string before surfacing it. */
@@ -454,6 +471,82 @@ export class WorkflowService implements IWorkflowService {
       }
       throw err;
     }
+  }
+
+  /**
+   * Cap on per-path `file-changed` events one sync announces for a branch.
+   * Past it the tree event alone carries the news — a bulk import that
+   * rewrote hundreds of files would otherwise fan hundreds of events out to
+   * every open browser to say what one refresh says.
+   */
+  private static readonly SYNC_FILE_EVENT_CAP = 200;
+
+  async syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome> {
+    const branch = branchForWorkspaceId(workspaceId);
+    const id = workspaceIdForBranch(branch);
+    let before: string;
+    try {
+      before = await this.git.headSha(workspaceId);
+    } catch (err) {
+      return { branch, outcome: 'error', error: sanitizeError(err) };
+    }
+    try {
+      await this.git.pull(workspaceId);
+    } catch (err) {
+      if (err instanceof PullRebaseConflictError) {
+        // Same path as `updateFromRemote`: the rebase was aborted inside
+        // `pull` (the clone is exactly what it was) and the divergence goes
+        // to the retry → recovery-agent → escalate ladder, attributed to the
+        // recovery bot since no person triggered this. It is still reported
+        // as a conflict because it is not resolved at request time — the
+        // caller's retry, or the ladder, settles it; the banner clears on the
+        // next clean pull or push.
+        await this.queuePullConflictRecovery(workspaceId, err);
+        const message = syncConflictMessage(branch, err.conflictedPaths);
+        console.warn(`[sync] ${message}`);
+        this.noteGitSyncFailed(workspaceId, branch, new Error(message), err.conflictedPaths);
+        return { branch, outcome: 'conflict', conflictedPaths: err.conflictedPaths, error: message };
+      }
+      const message = sanitizeError(err);
+      console.warn(`[sync] pull failed for branch "${branch}": ${message}`);
+      this.noteGitSyncFailed(workspaceId, branch, err);
+      return { branch, outcome: 'error', error: message };
+    }
+    // A clean pull is proof origin is reachable and this clone rebases onto
+    // it — the condition a `git-sync-failed` banner on this branch was
+    // waiting for, whether a sync or a push raised it.
+    this.noteGitSyncOk(workspaceId, branch);
+    const after = await this.git.headSha(workspaceId);
+    if (after === before) return { branch, outcome: 'up-to-date', to: after };
+
+    // Announce the new tree. The tree event alone already refreshes every
+    // open file explorer and, on the default branch, drops the skill / tool /
+    // plugin catalogues (`create-core-services.ts`); the CR list caches the
+    // touched paths it resolved against the old tree, so drop that too.
+    this.prs.invalidateListCache();
+    this.events?.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
+    // Per-file events so an open tab on a file the host rewrote refetches
+    // instead of showing stale bytes until its next tree refresh. Best-effort
+    // and capped: the sync itself succeeded whatever happens here.
+    try {
+      const paths = await this.git.changedPathsBetween(workspaceId, before, after);
+      if (paths.length <= WorkflowService.SYNC_FILE_EVENT_CAP) {
+        for (const p of paths) {
+          this.events?.emit({
+            kind: 'file-changed',
+            workspaceId: id,
+            branch,
+            path: `${this.kbDirName}/${p}`,
+            newSha: after,
+            byUserId: 'system',
+            byUserName: 'Git sync',
+          });
+        }
+      }
+    } catch (err) {
+      console.warn(`[sync] could not list changed paths for "${branch}":`, sanitizeError(err));
+    }
+    return { branch, outcome: 'updated', from: before, to: after };
   }
 
   /**
@@ -1033,7 +1126,13 @@ export class WorkflowService implements IWorkflowService {
    * machinery is unaffected — all this adds is that someone finds out, rather
    * than the deployment looking healthy while nothing reaches the remote.
    */
-  private noteGitSyncFailed(workspaceId: string, branch: string, err: unknown): void {
+  private noteGitSyncFailed(
+    workspaceId: string,
+    branch: string,
+    err: unknown,
+    /** Set only by a remote-sync conflict — the files a person must reconcile. */
+    conflictedPaths?: string[],
+  ): void {
     // Same canonicalization as `noteGitSyncOk` — the pair must agree on keys.
     const id = branchForWorkspaceId(workspaceId);
     this.gitSyncFailing.add(id);
@@ -1044,6 +1143,7 @@ export class WorkflowService implements IWorkflowService {
       // Git stderr can quote a credentialed URL; the banner is user-facing and
       // the string also lands in client logs, so sanitize before it leaves.
       reason: sanitizeError(err),
+      ...(conflictedPaths ? { conflictedPaths } : {}),
     });
   }
 

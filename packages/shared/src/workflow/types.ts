@@ -163,3 +163,25 @@ export interface OpenChangeRequestInput {
 export type MergeChangeRequestOutcome =
   | { kind: 'merged'; result: MergeChangeRequestResult }
   | { kind: 'conflicts-need-resolution'; conflictedPaths: string[] };
+
+/**
+ * What a remote sync did to one branch's clone. One entry per branch in the
+ * `POST /api/sync` response, so a pipeline can read exactly which branch
+ * moved, which was already current, and which needs a person.
+ *
+ *  - `updated`     — the clone moved from `from` to `to`.
+ *  - `up-to-date`  — origin had nothing new; `to` is the unchanged HEAD.
+ *  - `not-cloned`  — Hexis has no clone of this branch, so there is nothing
+ *                    to refresh (the first visit clones it fresh).
+ *  - `conflict`    — Hexis-side commits contradict what landed on the host.
+ *                    The clone is untouched; `error` is the message to show
+ *                    and `conflictedPaths` the files a person must reconcile.
+ *  - `error`       — the pull failed for another reason (origin unreachable,
+ *                    credential refused); `error` is the sanitised message.
+ */
+export type BranchSyncOutcome =
+  | { branch: string; outcome: 'updated'; from: string; to: string }
+  | { branch: string; outcome: 'up-to-date'; to: string }
+  | { branch: string; outcome: 'not-cloned' }
+  | { branch: string; outcome: 'conflict'; conflictedPaths: string[]; error: string }
+  | { branch: string; outcome: 'error'; error: string };

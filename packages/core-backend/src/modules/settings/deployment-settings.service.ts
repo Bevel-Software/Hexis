@@ -96,6 +96,21 @@ export const CORE_SETTINGS: SettingDef[] = [
    * protected list, and a per-field rule cannot see the other side.
    */
   {
+    /**
+     * The credential a git host's webhook or a pipeline presents to
+     * `POST /api/sync` (see `modules/kb-sync/`). Deployment-level on purpose:
+     * a person's connection key would stop the pipeline the day they leave.
+     * Optional — without it the endpoint only admits an admin's own session.
+     * Read per request, so it applies without a restart.
+     */
+    key: 'kbSyncSecret',
+    envVar: 'KB_SYNC_SECRET',
+    section: 'knowledge-base',
+    secret: true,
+    validate: (v) =>
+      v.trim().length >= 16 ? null : 'Use at least 16 characters — a random string is best.',
+  },
+  {
     key: 'defaultBranch',
     envVar: 'DEFAULT_BRANCH',
     section: 'knowledge-base',

@@ -1546,6 +1546,44 @@ export class GitService implements IGitService {
     return `refs/remotes/origin/${branch}`;
   }
 
+  async headSha(workspaceId: string): Promise<string> {
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const { stdout } = await this.git(cwd, ['rev-parse', 'HEAD']);
+      return stdout.trim();
+    });
+  }
+
+  async changedPathsBetween(workspaceId: string, fromSha: string, toSha: string): Promise<string[]> {
+    for (const sha of [fromSha, toSha]) {
+      if (!/^[0-9a-f]{4,64}$/i.test(sha)) throw new Error(`Invalid commit sha: ${sha}`);
+    }
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      // `-M` so a rename shows as one entry; `--name-only` then prints its
+      // destination, and the source is added below so a viewer holding the
+      // OLD path learns it is gone.
+      const { stdout } = await this.git(cwd, [
+        'diff', '--name-status', '-M', '--no-color', '-z', fromSha, toSha,
+      ]);
+      const fields = stdout.split('\0');
+      const paths = new Set<string>();
+      for (let i = 0; i < fields.length; ) {
+        const status = fields[i];
+        if (!status) break;
+        if (status.startsWith('R') || status.startsWith('C')) {
+          if (fields[i + 1]) paths.add(fields[i + 1]);
+          if (fields[i + 2]) paths.add(fields[i + 2]);
+          i += 3;
+        } else {
+          if (fields[i + 1]) paths.add(fields[i + 1]);
+          i += 2;
+        }
+      }
+      return [...paths];
+    });
+  }
+
   async pull(workspaceId: string): Promise<void> {
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);

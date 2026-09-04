@@ -30,6 +30,7 @@ pin in `.env` cannot be changed out from under you in the UI.
 | `LOGIN_PASSWORD` | no | `false` hides password login and rejects the endpoint |
 | `PORT` | no | Backend port (default 3001) |
 | `KB_DIR_NAME` | no | Directory name of the KB clone inside each workspace |
+| `KB_SYNC_SECRET` | setup screen | Bearer secret a git host's webhook or a pipeline presents to `POST /api/sync` so pushes made outside Hexis show up at once — see [git-sync.md](git-sync.md) |
 | `TENANT_ID` | no | Slug branding credential prefixes (default `bevel`) |
 | `KB_TEMPLATE_DIR` | no | Overrides the packaged KB seed template |
 | `ONTOLOGY_SESSION_BLOCK` | no | Ontology-session touch tracking toggle (default on) |

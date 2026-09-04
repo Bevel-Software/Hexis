@@ -19,6 +19,7 @@ import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-f
 import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
 import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
+import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 
 /** `a.com, b.com` → `['a.com','b.com']`, tolerating a leading `@` or `.`. */
 function parseDomainList(raw: string): string[] {
@@ -137,6 +138,8 @@ export interface CoreServices {
   reviewWorkflowService: ReviewWorkflowService;
   fileLockService: FileLockService;
   workflowService: WorkflowService;
+  /** Remote sync (`POST /api/sync`): a git host or pipeline makes the clones catch up. */
+  kbSyncService: KbSyncService;
   eventBus: WorkflowEventBus;
   fileChangeNotifier: FileChangeNotifier;
   pendingCommitsService: PendingCommitsService;
@@ -450,6 +453,10 @@ export async function createCoreServices(
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
   const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
+
+  // Remote sync. Drives the workflow module's per-branch pull-and-announce
+  // over every clone the workspace service knows about; owns no git of its own.
+  const kbSyncService = new KbSyncService(workflowService, workspaceService);
   // Server-scoped MCP editing — the tool page's edit form. One server's truth
   // spans a plugin's mcp.json AND plugin.json extensions block, and this is
   // the ONE writer that rewrites both entries and commits them together (see
@@ -835,6 +842,7 @@ export async function createCoreServices(
     reviewWorkflowService,
     fileLockService,
     workflowService,
+    kbSyncService,
     eventBus,
     fileChangeNotifier,
     pendingCommitsService,

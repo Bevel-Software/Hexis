@@ -40,6 +40,12 @@ const FIELDS: Record<
     placeholder: 'knowledge-base',
     advanced: true,
   },
+  kbSyncSecret: {
+    label: 'Sync secret',
+    help: 'Lets your git host tell this deployment when the repository changes, so pushes and merged pull requests show up right away. Add a webhook, action or pipeline step that calls POST /api/sync/<branch> with this value as a bearer token. Optional: without it, only an administrator can trigger a sync. Stored encrypted, and never shown again.',
+    placeholder: 'A long random string',
+    advanced: true,
+  },
   defaultBranch: {
     label: 'Main branch',
     help: 'The version everyone sees. Filled in from your repository when you test the connection.',

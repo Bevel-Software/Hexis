@@ -33,6 +33,7 @@ import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.j
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
+import { createKbSyncRoutes } from '../modules/kb-sync/kb-sync.routes.js';
 import { DEFAULT_BRANCH, PROTECTED_BRANCHES, type AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
@@ -141,7 +142,10 @@ export async function createCoreServer(
   // parse once the first has run, so without this the 10 MB global limit would
   // shadow the route's larger limit and 413 a large-but-valid upload before it
   // ever reaches the route).
-  const jsonExemptPaths = new Set(ext.jsonParserExemptPaths ?? []);
+  // `/api/sync` reads its body as raw bytes: one of its credentials is an
+  // HMAC over exactly what arrived, which a parsed-and-reserialised body
+  // cannot reproduce.
+  const jsonExemptPaths = new Set([...(ext.jsonParserExemptPaths ?? []), '/api/sync']);
   const globalJson = express.json({ limit: '10mb' });
   app.use((req, res, next) => {
     if (jsonExemptPaths.has(req.path)) return next();
@@ -276,6 +280,17 @@ export async function createCoreServer(
     core.mcpOAuthProvider,
     core.mcpResourceMetadataUrl,
   ));
+
+  // Remote sync — `POST /api/sync`, called by a git host's webhook or a
+  // pipeline with the deployment's sync secret (or by an admin's session).
+  // Same reason as MCP for mounting here: a non-JWT bearer must not meet a
+  // protected mount first.
+  app.use('/api', createKbSyncRoutes({
+    kbSync: core.kbSyncService,
+    syncSecret: () => core.settings.resolve('kbSyncSecret'),
+    authService: core.authService,
+    adminAccess: core.adminAccess,
+  }));
 
   // MCP OAuth 2.1 authorization server: /authorize, /token, /register,
   // /revoke + the /.well-known metadata documents (the SDK requires an

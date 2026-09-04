@@ -130,6 +130,14 @@ export interface IGitService {
   ): Promise<void>;
   fetch(workspaceId: string): Promise<void>;
   pull(workspaceId: string): Promise<void>;
+  /** The sha the clone's HEAD points at. */
+  headSha(workspaceId: string): Promise<string>;
+  /**
+   * Repo-relative paths whose content differs between two commits — what a
+   * pull that moved HEAD from `fromSha` to `toSha` changed on disk. Rename-
+   * aware: a renamed file reports both its old and new path.
+   */
+  changedPathsBetween(workspaceId: string, fromSha: string, toSha: string): Promise<string[]>;
   diffStat(workspaceId: string, base?: string): Promise<string[]>;
   /**
    * Paths in the working tree that the next commit would include — the set
