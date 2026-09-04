@@ -9,6 +9,7 @@ import {
 // avoids it. This runs BEFORE React renders, and the barrel would drag the
 // components and their icon imports into the boot path to set one string.
 import { configureMcpUrl } from '../shared/mcp/connect-snippets';
+import { configureMarketplaceGitUrl } from '../shared/marketplace-url';
 
 /** What `GET /api/config` serves. Unauthenticated — see the route's comment. */
 interface ServerConfig {
@@ -25,6 +26,8 @@ interface ServerConfig {
    * field leaves the defaults in place, which is what it was running with.
    */
   kbLayout?: KbLayout;
+  /** The per-user marketplace git remote; absent from an older server. */
+  marketplaceGitUrl?: string;
 }
 
 /**
@@ -77,6 +80,7 @@ export async function loadServerConfig(): Promise<void> {
    * origin rather than taking down the boot for a snippet.
    */
   configureMcpUrl(config.mcpUrl);
+  configureMarketplaceGitUrl(config.marketplaceGitUrl);
 }
 
 /**

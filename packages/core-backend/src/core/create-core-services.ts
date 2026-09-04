@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import {
@@ -50,6 +51,7 @@ import {
   PluginLinksService,
   MarketplaceCompilerService,
 } from '../modules/plugins/index.js';
+import { MarketplaceRepoService } from '../modules/marketplace/index.js';
 import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
@@ -143,6 +145,8 @@ export interface CoreServices {
   pluginLinksService: PluginLinksService;
   /** Source layout → distribution layout, for one audience. */
   marketplaceCompiler: MarketplaceCompilerService;
+  /** The bare repository the per-user marketplace git endpoint serves from. */
+  marketplaceRepo: MarketplaceRepoService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
@@ -496,6 +500,12 @@ export async function createCoreServices(
     pluginLinkIndex,
     kbDirName,
     { name: 'hexis', owner: 'Hexis', description: 'Skills and plugins from this knowledge base' },
+  );
+  // Sibling of the workspaces root, like the spill store: one bare repo, one
+  // git namespace per caller (see marketplace-repo.service.ts).
+  const marketplaceRepo = new MarketplaceRepoService(
+    path.resolve(config.workspacesRoot, '..', 'marketplace.git'),
+    marketplaceCompiler,
   );
   // Server-scoped MCP editing — the tool page's edit form. One server's truth
   // spans a plugin's mcp.json AND plugin.json extensions block, and this is
@@ -880,6 +890,7 @@ export async function createCoreServices(
     pluginLinkIndex,
     pluginLinksService,
     marketplaceCompiler,
+    marketplaceRepo,
     authService,
     authMiddleware,
     accountErasureService,

@@ -33,6 +33,7 @@ import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.j
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
+import { createMarketplaceGitRoutes } from '../modules/marketplace/index.js';
 import { DEFAULT_BRANCH, PROTECTED_BRANCHES, currentKbLayout, type AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
@@ -178,6 +179,9 @@ export async function createCoreServer(
   const mcpResourceUrl = new URL('/api/mcp', core.config.publicBackendUrl);
   mcpResourceUrl.username = '';
   mcpResourceUrl.password = '';
+  const marketplaceGitUrl = new URL(`/git/${core.marketplaceRepo.repoName}`, core.config.publicBackendUrl);
+  marketplaceGitUrl.username = '';
+  marketplaceGitUrl.password = '';
 
   /**
    * The handful of facts the browser needs BEFORE it can render anything, and
@@ -206,6 +210,12 @@ export async function createCoreServer(
        */
       kbLayout: currentKbLayout(),
       /**
+       * The per-user marketplace git remote (see modules/marketplace). Same
+       * derivation as `mcpUrl`: our address, userinfo stripped — the caller
+       * adds their own connection key.
+       */
+      marketplaceGitUrl: marketplaceGitUrl.toString(),
+      /**
        * The same value the OAuth metadata publishes (see `mcpResourceUrl`).
        *
        * The frontend used to build this from `window.location.origin`, which
@@ -222,6 +232,19 @@ export async function createCoreServer(
       mcpUrl: mcpResourceUrl.toString(),
     });
   });
+
+  // The per-user marketplace as a git remote. Outside `/api` and ahead of
+  // every JWT mount: it authenticates with a connection key in HTTP Basic
+  // (what `git clone https://key:<k>@…` sends), and git's own http-backend
+  // serves the protocol. See modules/marketplace.
+  app.use(
+    '/git',
+    createMarketplaceGitRoutes({
+      repo: core.marketplaceRepo,
+      keys: core.externalApiKeyService,
+      mountPath: '/git',
+    }),
+  );
 
   // Overlay boot-time side effects (startup reconciles, periodic sweeps).
   await ext.onBoot?.(core);
