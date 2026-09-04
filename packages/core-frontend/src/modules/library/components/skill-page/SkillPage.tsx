@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, History } from 'lucide-react';
 import {
@@ -278,6 +278,34 @@ export function SkillPage({
   // Cancel must not hand the log back open over the file.
   if (historyOpen && !historyAvailable) setHistoryOpen(false);
   const viewingHistory = historyAvailable && historyOpen;
+  /**
+   * The clock that opens the log sits in the file bar, and the bar unmounts
+   * with the file; the pressed clock that closes it sits in the history row,
+   * which unmounts with the log. Either way the control a keyboard user just
+   * activated is gone from the DOM, and focus would fall to `document` — the
+   * next Tab starts from the top of the page. So the two clocks hand focus to
+   * each other: opening lands on the pressed clock, closing lands on the bar's.
+   * Only for a swap the USER made (the flag is set by the click handlers);
+   * the log closing because git stopped answering must not move focus.
+   */
+  const paneClockRef = useRef<HTMLButtonElement>(null);
+  const pressedClockRef = useRef<HTMLButtonElement>(null);
+  const focusAfterSwap = useRef<'pressed' | 'pane' | null>(null);
+  useEffect(() => {
+    const want = focusAfterSwap.current;
+    if (!want) return;
+    focusAfterSwap.current = null;
+    if (want === 'pressed' && viewingHistory) pressedClockRef.current?.focus();
+    if (want === 'pane' && !viewingHistory) paneClockRef.current?.focus();
+  }, [viewingHistory]);
+  const openHistory = () => {
+    focusAfterSwap.current = 'pressed';
+    setHistoryOpen(true);
+  };
+  const closeHistory = () => {
+    focusAfterSwap.current = 'pane';
+    setHistoryOpen(false);
+  };
   /**
    * Change requests a merge attempt has REFUSED as unmergeable. Git is the only
    * thing that can answer "does this still apply?", and it answers when asked
@@ -575,12 +603,13 @@ export function SkillPage({
             </Button>
             <span className="text-detail text-ink-faint">{`Version history: ${active}`}</span>
             <IconButton
+              ref={pressedClockRef}
               aria-label="Version history"
               aria-pressed
               title="Back to the file"
               active
               className="ml-auto"
-              onClick={() => setHistoryOpen(false)}
+              onClick={closeHistory}
             >
               <History size={14} />
             </IconButton>
@@ -661,9 +690,10 @@ export function SkillPage({
                   answering, or no path to ask about. */}
               {historyAvailable && (
                 <IconButton
+                  ref={paneClockRef}
                   aria-label="Version history"
                   title="Version history"
-                  onClick={() => setHistoryOpen(true)}
+                  onClick={openHistory}
                 >
                   <History size={14} />
                 </IconButton>

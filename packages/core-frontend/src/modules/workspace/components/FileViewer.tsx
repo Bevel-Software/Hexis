@@ -216,6 +216,26 @@ export function FileViewer() {
   // the reader had gone back to reading. Same rule the skill page applies to
   // its own open flag.
   if (activeTab !== 'content' && !historyAvailable) setActiveTab('content');
+  /**
+   * Opening the log from the pane bar's clock unmounts the pane bar, and with
+   * it the clock a keyboard user just activated; closing it from the header's
+   * pressed clock hands the column back to prose, which hides the header's
+   * clock again (`historyInPane`). Either way focus would fall to `document`.
+   * So the two clocks hand focus to each other across the swap — the same
+   * rule the skill page applies — and only for a swap the USER made: the tab
+   * resetting because git stopped answering, or because a different file
+   * opened, must not move focus.
+   */
+  const paneClockRef = useRef<HTMLButtonElement>(null);
+  const headerClockRef = useRef<HTMLButtonElement>(null);
+  const focusAfterSwap = useRef<'header' | 'pane' | null>(null);
+  useEffect(() => {
+    const want = focusAfterSwap.current;
+    if (!want) return;
+    focusAfterSwap.current = null;
+    if (want === 'header' && activeTab === 'history') headerClockRef.current?.focus();
+    if (want === 'pane' && activeTab === 'content') paneClockRef.current?.focus();
+  }, [activeTab]);
   const hasUnsavedWork = isManualDirty || manualSaveState === 'saving';
 
   const hasPending = pendingFileContent !== null;
@@ -1072,9 +1092,13 @@ export function FileViewer() {
   // have no bar, so the header carries it for them (`historyInPane`).
   const historyAction = historyAvailable ? (
     <IconButton
+      ref={paneClockRef}
       aria-label="Version history"
       title="Version history"
-      onClick={() => setActiveTab('history')}
+      onClick={() => {
+        focusAfterSwap.current = 'header';
+        setActiveTab('history');
+      }}
     >
       <History size={14} />
     </IconButton>
@@ -1128,6 +1152,7 @@ export function FileViewer() {
         // Prose gets a pane card, and the card's bar carries Version history
         // beside Edit. Not `viewOnly`: a view-only full-bleed file has no bar.
         historyInPane={shellVariant === 'prose'}
+        historyButtonRef={headerClockRef}
         lockedBy={fileLock.externalLock?.holderName ?? null}
         historyAvailable={historyAvailable}
         isDirty={isManualDirty}
@@ -1139,7 +1164,10 @@ export function FileViewer() {
         // While the log is open the column is full-bleed, so the header
         // carries the clock (pressed). A second click on a pressed clock is a
         // request to put the document back, not to open the log again.
-        onOpenHistory={() => setActiveTab((t) => (t === 'history' ? 'content' : 'history'))}
+        onOpenHistory={() => {
+          focusAfterSwap.current = activeTab === 'history' ? 'pane' : 'header';
+          setActiveTab((t) => (t === 'history' ? 'content' : 'history'));
+        }}
         onShare={handleShare}
         onCopyPage={canCopyPage ? handleCopyPage : undefined}
         onCopyLink={handleCopyLink}

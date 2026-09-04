@@ -739,10 +739,19 @@ describe('FileViewer', () => {
 
     await user.click(screen.getByRole('button', { name: 'Version history' }));
     await screen.findByRole('button', { name: /Back to the document/ });
+    // The pane bar's clock unmounted with the bar; focus lands on the
+    // header's pressed clock rather than falling to `document`.
+    const pressed = screen.getByRole('button', { name: 'Version history' });
+    expect(pressed).toHaveAttribute('aria-pressed', 'true');
+    expect(document.activeElement).toBe(pressed);
 
-    await user.click(screen.getByRole('button', { name: 'Version history' }));
+    await user.click(pressed);
     expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    // And back: the header's clock hid again, so focus lands on the bar's.
+    const paneClock = screen.getByRole('button', { name: 'Version history' });
+    expect(paneClock).not.toHaveAttribute('aria-pressed', 'true');
+    expect(document.activeElement).toBe(paneClock);
   });
 
   it('shares the file itself from Share, and the parent folder from the chevron', async () => {

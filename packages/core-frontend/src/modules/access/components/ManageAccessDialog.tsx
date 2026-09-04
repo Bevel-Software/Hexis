@@ -311,8 +311,6 @@ const MENU_MIN_WIDTH = 200;
  * suggestion list leaves `onDismiss` unset: its openness is derived from what
  * is typed, not from a flag a click could clear.
  */
-const noop = () => {};
-
 function AnchoredMenu({
   /**
    * Close the menu. Called on a mousedown outside the panel and its trigger,
@@ -341,9 +339,20 @@ function AnchoredMenu({
   // it. Resolved in the layout effect below, once the panel is in the DOM.
   const triggerRef = useRef<HTMLElement | null>(null);
   const dismissable = onDismiss !== undefined;
+  // Callers pass a fresh `onDismiss` arrow each render, and the hook lists
+  // `onClose` in its effect deps: handed the arrow directly it would tear down
+  // and re-add its document listeners on every render of the open menu — each
+  // verb toggled in the checklist included. Mirror the arrow into a ref (the
+  // same shape `Dialog` uses for its `onClose`) and give the hook one stable
+  // callback, so it subscribes once for the life of the open menu.
+  const onDismissRef = useRef(onDismiss);
+  useEffect(() => {
+    onDismissRef.current = onDismiss;
+  }, [onDismiss]);
+  const close = useCallback(() => onDismissRef.current?.(), []);
   const panelRef = useDismissableMenu<HTMLDivElement>({
     open: dismissable,
-    onClose: onDismiss ?? noop,
+    onClose: close,
     returnFocusTo: triggerRef,
   });
   useModalLayer(dismissable);

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState, type Ref } from 'react';
 import {
   Check,
   ChevronDown,
@@ -78,6 +78,11 @@ export interface KbPageHeaderProps {
    * still worth reading.
    */
   historyInPane?: boolean;
+  /**
+   * The header's Version history clock, for the viewer to focus after a
+   * swap unmounts the control that was activated (see `FileViewer`).
+   */
+  historyButtonRef?: Ref<HTMLButtonElement>;
   /** Disables Edit and explains why via `title`. */
   lockedBy: string | null;
   historyAvailable: boolean;
@@ -138,6 +143,7 @@ export function KbPageHeader({
   onDiscardProposal,
   writeActionInPane = false,
   historyInPane = false,
+  historyButtonRef,
   lockedBy,
   historyAvailable,
   isDirty,
@@ -363,6 +369,7 @@ export function KbPageHeader({
             show, and the button goes with it. */}
         {historyAvailable && !historyInPane && (
           <IconButton
+            ref={historyButtonRef}
             aria-label="Version history"
             title="Version history"
             active={activeTab === 'history'}

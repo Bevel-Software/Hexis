@@ -636,6 +636,25 @@ describe('ManageAccessDialog: dismissing a verb menu', () => {
     expect(screen.queryByRole('button', { name: /^can download$/i })).not.toBeInTheDocument();
   });
 
+  it('subscribes its document listeners once per open menu, not once per render', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    const [addRowTrigger] = await screen.findAllByRole('button', { name: /^can edit$/i });
+
+    const addSpy = vi.spyOn(document, 'addEventListener');
+    await user.click(addRowTrigger);
+    const mousedowns = () => addSpy.mock.calls.filter(([type]) => type === 'mousedown').length;
+    expect(mousedowns()).toBe(1);
+
+    // Toggling a verb re-renders the dialog with the menu still open. The
+    // dismiss hook lists `onClose` in its deps, so a fresh arrow per render
+    // would tear the listeners down and re-add them here.
+    await user.click(screen.getByRole('button', { name: /^owner$/i }));
+    expect(screen.getByRole('button', { name: /^can download$/i })).toBeInTheDocument();
+    expect(mousedowns()).toBe(1);
+    addSpy.mockRestore();
+  });
+
   it('the trigger itself still toggles: one click opens, a second closes', async () => {
     const user = userEvent.setup();
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);

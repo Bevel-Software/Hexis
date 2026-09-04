@@ -1210,14 +1210,17 @@ describe('SkillPage: deciding on a change', () => {
 
       const pressed = screen.getByRole('button', { name: 'Version history' });
       expect(pressed).toHaveAttribute('aria-pressed', 'true');
+      // The bar's clock unmounted with the bar; a keyboard user's focus lands
+      // on the pressed clock, not on `document`.
+      expect(document.activeElement).toBe(pressed);
 
       fireEvent.click(pressed);
       expect(screen.queryByText(/^Timeline:/)).toBeNull();
       expect(await screen.findByTestId('md-view')).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Version history' })).not.toHaveAttribute(
-        'aria-pressed',
-        'true',
-      );
+      const paneClock = screen.getByRole('button', { name: 'Version history' });
+      expect(paneClock).not.toHaveAttribute('aria-pressed', 'true');
+      // And back again: the pressed clock unmounted with the log.
+      expect(document.activeElement).toBe(paneClock);
     });
 
     it('does not follow you to another file of the skill', async () => {
