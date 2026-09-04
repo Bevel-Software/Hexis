@@ -1520,10 +1520,16 @@ export class GitService implements IGitService {
     return `refs/remotes/origin/${branch}`;
   }
 
-  async pull(workspaceId: string): Promise<void> {
+  async pull(workspaceId: string): Promise<{ headMoved: boolean }> {
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
       const branch = await this.currentBranch(cwd);
+      // For `headMoved` (see IGitService.pull). Tolerant of an unborn HEAD
+      // (a clone of an empty upstream): "" before + a sha after correctly
+      // reads as moved, "" both sides as not.
+      const headBefore = await this.git(cwd, ['rev-parse', 'HEAD'])
+        .then(({ stdout }) => stdout.trim())
+        .catch(() => '');
       try {
         // Refresh WITHOUT `git pull`, and without touching `FETCH_HEAD` — see
         // `refreshRemoteBranchRef` for why both halves are load-bearing.
@@ -1584,6 +1590,10 @@ export class GitService implements IGitService {
         throw err;
       }
       this.accessControl?.invalidate(workspaceId);
+      const headAfter = await this.git(cwd, ['rev-parse', 'HEAD'])
+        .then(({ stdout }) => stdout.trim())
+        .catch(() => '');
+      return { headMoved: headAfter !== headBefore };
     });
   }
 

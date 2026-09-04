@@ -129,7 +129,16 @@ export interface IGitService {
     },
   ): Promise<void>;
   fetch(workspaceId: string): Promise<void>;
-  pull(workspaceId: string): Promise<void>;
+  /**
+   * `headMoved` is whether the pull changed what HEAD points at — i.e.
+   * whether the working tree is a different tree than before the call. Only
+   * the pull itself can answer that (it holds the workspace mutex across the
+   * rebase; any before/after probe a caller ran around it would race), and
+   * callers that announce "this tree changed" to the rest of the process need
+   * the distinction: an "already up to date" pull that broadcast anyway would
+   * drop every catalog cache and reload every attached browser for nothing.
+   */
+  pull(workspaceId: string): Promise<{ headMoved: boolean }>;
   diffStat(workspaceId: string, base?: string): Promise<string[]>;
   /**
    * Paths in the working tree that the next commit would include — the set

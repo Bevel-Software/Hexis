@@ -88,7 +88,7 @@ describe('GitService.pull', () => {
       'knowledge-base',
     );
 
-    await expect(svc.pull(workspaceId)).resolves.toBeUndefined();
+    await expect(svc.pull(workspaceId)).resolves.toEqual({ headMoved: true });
 
     // The pull landed origin's commit...
     const head = await gitOut(repo, ['log', '-1', '--pretty=%s']);
@@ -131,7 +131,7 @@ describe('GitService.pull', () => {
       'knowledge-base',
     );
 
-    await expect(svc.pull(workspaceId)).resolves.toBeUndefined();
+    await expect(svc.pull(workspaceId)).resolves.toEqual({ headMoved: true });
 
     // Origin's commit landed...
     expect(await gitOut(repo, ['log', '-1', '--pretty=%s'])).toBe('remote change');
@@ -177,7 +177,7 @@ describe('GitService.pull', () => {
       'knowledge-base',
     );
 
-    await expect(svc.pull(workspaceId)).resolves.toBeUndefined();
+    await expect(svc.pull(workspaceId)).resolves.toEqual({ headMoved: true });
 
     // Landed origin's commit — not the stray head the hostile file names.
     expect(await gitOut(repo, ['log', '-1', '--pretty=%s'])).toBe('remote change');
@@ -222,7 +222,7 @@ describe('GitService.pull', () => {
       'knowledge-base',
     );
 
-    await expect(svc.pull(workspaceId)).resolves.toBeUndefined();
+    await expect(svc.pull(workspaceId)).resolves.toEqual({ headMoved: true });
 
     // Both commits are present — the local commit was rebased onto origin's.
     const log = await gitOut(repo, ['log', '--pretty=%s']);
@@ -234,6 +234,24 @@ describe('GitService.pull', () => {
     // The dirty tracked edit survived — autostash reapplied it after the rebase.
     const dash = await fs.readFile(path.join(repo, 'dash.html'), 'utf8');
     expect(dash).toBe('v1\n');
+  });
+
+  // `headMoved` is what keeps an "already up to date" sync from broadcasting
+  // a tree change that did not happen (every catalog cache dropped, every
+  // attached browser refetching its file tree). The fixture pulls above all
+  // land a commit and assert `headMoved: true`; this is the other half.
+  it('reports headMoved: false when origin has nothing new', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    const headBefore = await gitOut(repo, ['rev-parse', 'HEAD']);
+
+    const svc = new GitService(
+      stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }),
+      stubWorkflowHooks(),
+      'knowledge-base',
+    );
+
+    await expect(svc.pull(workspaceId)).resolves.toEqual({ headMoved: false });
+    expect(await gitOut(repo, ['rev-parse', 'HEAD'])).toBe(headBefore);
   });
 
   // The production stuck-workspace state: a local commit and an origin commit
