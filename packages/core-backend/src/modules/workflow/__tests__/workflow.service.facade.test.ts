@@ -182,7 +182,7 @@ function makeGit(): GitService {
     commit: vi.fn(),
     push: vi.fn(),
     fetch: vi.fn(),
-    pull: vi.fn(),
+    pull: vi.fn().mockResolvedValue({ treeChanged: true }),
     diffStat: vi.fn(),
     pendingChanges: vi.fn(),
     resolveForkBase: vi.fn(),
@@ -559,7 +559,7 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
 
   function makeRevertGit(overrides: Record<string, unknown> = {}): GitService {
     return Object.assign(makeGit(), {
-      pull: vi.fn().mockResolvedValue(undefined),
+      pull: vi.fn().mockResolvedValue({ treeChanged: true }),
       changedPathsForPr: vi.fn().mockResolvedValue(['Docs/a.md', 'Docs/b.md']),
       mergeBaseForPr: vi.fn().mockResolvedValue('mb-sha'),
       restorePathFromRef: vi.fn().mockResolvedValue(undefined),
