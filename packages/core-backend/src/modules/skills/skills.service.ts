@@ -98,8 +98,12 @@ export class SkillService implements ISkillService {
   private async scan(): Promise<ParsedSkill[]> {
     const cached = this.cache.get();
     if (cached) return cached;
+    // Token first: a merge's `invalidate()` can land while `scanDisk` is still
+    // reading the pre-merge tree, and storing that read afterwards would undo
+    // the drop for a full TTL.
+    const token = this.cache.begin();
     const skills = await this.scanDisk();
-    this.cache.set(skills);
+    this.cache.set(skills, token);
     return skills;
   }
 

@@ -427,12 +427,15 @@ export class ToolManualService implements IToolManualService {
   private async scan(): Promise<ToolManualDescriptor[]> {
     const cached = this.cache.get();
     if (cached) return cached;
+    // See `TtlCache.begin`: taken before the read so an `invalidate()` that
+    // lands mid-scan discards this result instead of being overwritten by it.
+    const token = this.cache.begin();
     const manuals = await this.scanDisk();
     await this.decorateMcpOAuth(manuals);
     // AFTER the oauth decoration, so an injected `${MCP_OAUTH}` header ref is
     // already declared and isn't re-surfaced as a bare admin key.
     for (const m of manuals) this.surfaceReferencedVariables(m);
-    this.cache.set(manuals);
+    this.cache.set(manuals, token);
     return manuals;
   }
 

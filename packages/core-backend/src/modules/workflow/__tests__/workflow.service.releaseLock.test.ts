@@ -120,6 +120,7 @@ function makeGit(overrides: Partial<{
     }),
     pull: vi.fn().mockImplementation(async () => {
       if (pullBehavior === 'fail') throw new Error('git pull failed: merge conflict');
+      return { treeChanged: true };
     }),
   } as unknown as GitService;
 }
@@ -748,5 +749,96 @@ describe('WorkflowService.updateFromRemote — pull-conflict recovery dispatch',
     );
 
     await expect(svc.updateFromRemote('main', USER)).rejects.toBe(CONFLICT);
+  });
+});
+
+describe('WorkflowService.updateFromRemote — the tree-change announcement', () => {
+  /**
+   * The announcement under test is what keeps the DEFAULT branch's catalog
+   * caches (skills, tool manuals, plugin index) honest: a pull is the one way
+   * a tree changes without passing the write routes, so `pullWorkspace` owes
+   * the process an `fs-tree-changed` — and owes it ONLY when the pull moved
+   * HEAD, on the default branch, after the pull resolved. Asserted through
+   * `updateFromRemote`, the public verb that wraps `pullWorkspace`.
+   */
+  const DEFAULT_WS = 'target-company-state'; // == the test env's DEFAULT_BRANCH
+
+  function makePullingGit(result: { treeChanged: boolean } | Error): {
+    git: GitService;
+    pullSettled: () => boolean;
+  } {
+    let settled = false;
+    const git = {
+      pull: vi.fn().mockImplementation(async () => {
+        // A microtask gap, so an emit issued before the await would be
+        // observably premature rather than coincidentally ordered.
+        await Promise.resolve();
+        settled = true;
+        if (result instanceof Error) throw result;
+        return result;
+      }),
+    } as unknown as GitService;
+    return { git, pullSettled: () => settled };
+  }
+
+  function treeChangedEvents(emitSpy: MockInstance): unknown[] {
+    return emitSpy.mock.calls
+      .map((c) => c[0] as { kind: string })
+      .filter((e) => e.kind === 'fs-tree-changed');
+  }
+
+  it('emits fs-tree-changed for the default workspace once the pull has changed the tree', async () => {
+    const events = new WorkflowEventBus();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const { git, pullSettled } = makePullingGit({ treeChanged: true });
+    let settledAtEmit: boolean | undefined;
+    emitSpy.mockImplementation(() => {
+      settledAtEmit = pullSettled();
+    });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.updateFromRemote(DEFAULT_WS, USER);
+
+    expect(treeChangedEvents(emitSpy)).toEqual([
+      { kind: 'fs-tree-changed', workspaceId: DEFAULT_WS, branch: DEFAULT_WS },
+    ]);
+    // After the pull RESOLVED — an emit for a pull that later failed would
+    // make other clients refetch a tree that never changed.
+    expect(settledAtEmit).toBe(true);
+  });
+
+  it('stays silent when the pull found nothing new (treeChanged: false)', async () => {
+    const events = new WorkflowEventBus();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const { git } = makePullingGit({ treeChanged: false });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.updateFromRemote(DEFAULT_WS, USER);
+
+    // An "already up to date" sync must not drop the catalogs or make every
+    // attached browser refetch its file tree.
+    expect(treeChangedEvents(emitSpy)).toEqual([]);
+  });
+
+  it('stays silent for a non-default workspace even when the tree changed', async () => {
+    const events = new WorkflowEventBus();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const { git } = makePullingGit({ treeChanged: true });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await svc.updateFromRemote(encodeURIComponent('alice/draft'), USER);
+
+    expect(treeChangedEvents(emitSpy)).toEqual([]);
+  });
+
+  it('stays silent when the pull throws', async () => {
+    const events = new WorkflowEventBus();
+    const emitSpy = vi.spyOn(events, 'emit');
+    const { git } = makePullingGit(new Error('git fetch failed: could not resolve host'));
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+
+    await expect(svc.updateFromRemote(DEFAULT_WS, USER)).rejects.toThrow();
+
+    expect(treeChangedEvents(emitSpy)).toEqual([]);
   });
 });

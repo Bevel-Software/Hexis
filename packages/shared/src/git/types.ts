@@ -129,7 +129,18 @@ export interface IGitService {
     },
   ): Promise<void>;
   fetch(workspaceId: string): Promise<void>;
-  pull(workspaceId: string): Promise<void>;
+  /**
+   * `treeChanged` is whether the pull left the working tree holding different
+   * CONTENT than before the call — tree ids compared, not commit ids, so a
+   * pull that only moves HEAD across content-identical commits (an empty
+   * commit, a rebase that replays to the same result) reports false. Only the
+   * pull itself can answer that (it holds the workspace mutex across the
+   * rebase; any before/after probe a caller ran around it would race), and
+   * callers that announce "this tree changed" to the rest of the process need
+   * the distinction: an "already up to date" pull that broadcast anyway would
+   * drop every catalog cache and reload every attached browser for nothing.
+   */
+  pull(workspaceId: string): Promise<{ treeChanged: boolean }>;
   diffStat(workspaceId: string, base?: string): Promise<string[]>;
   /**
    * Paths in the working tree that the next commit would include — the set

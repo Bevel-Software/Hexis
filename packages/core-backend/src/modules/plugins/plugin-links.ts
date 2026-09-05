@@ -77,12 +77,16 @@ export class PluginLinkIndex {
   async membership(): Promise<LinkMembership> {
     const cached = this.cache.get();
     if (cached) return cached;
+    // Token first, like the other catalogs: an `invalidate()` landing while
+    // the build reads the pre-change tree must not be undone by storing that
+    // read afterwards.
+    const token = this.cache.begin();
     const built = await this.build();
     // A degraded read (no workspace yet) is served but not stored — the same
     // reasoning as the plugin index: caching a failure hides every link for
     // a full TTL after its cause is gone.
     if (built === null) return { bySkill: new Map(), byPlugin: new Map() };
-    this.cache.set(built);
+    this.cache.set(built, token);
     return built;
   }
 
