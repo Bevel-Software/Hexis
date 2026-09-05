@@ -151,6 +151,9 @@ function unusableConfigReason(config: Record<string, unknown>): string | null {
   const type = typeof config.type === 'string' ? config.type.toLowerCase() : undefined;
   const url = typeof config.url === 'string' ? config.url.trim() : '';
   const command = typeof config.command === 'string' ? config.command.trim() : '';
+  // A `url` key that is present but blank would still be preferred by the
+  // converter over a command; refuse it rather than emit an http entry to nowhere.
+  if (typeof config.url === 'string' && !url) return 'has an empty url';
   if (type === 'http' || type === 'streamable-http' || type === 'sse') {
     return url ? null : `has transport "${type}" but no url`;
   }

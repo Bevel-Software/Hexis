@@ -56,7 +56,9 @@ export class MarketplaceCompilerService {
     const { stdout } = await execFileAsync('git', ['-C', kbRoot, 'rev-parse', 'HEAD']);
     const sha = stdout.trim();
     // SHA-1 or SHA-256 object format: any hex object id is a commit.
-    if (!/^[0-9a-f]{40,64}$/.test(sha)) throw new Error(`could not read the default branch's commit (${sha || 'empty'})`);
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) {
+      throw new Error(`could not read the default branch's commit (${sha || 'empty'})`);
+    }
     return sha;
   }
 

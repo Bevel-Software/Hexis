@@ -148,13 +148,17 @@ export function createMarketplaceGitRoutes(deps: {
     // then stream the body straight through.
     let headerBuf = Buffer.alloc(0);
     let headersDone = false;
+    // Backpressure: a slow client must not make Node buffer a whole pack. One
+    // path for every body write, the remainder of the header chunk included.
+    const writeBody = (bytes: Buffer) => {
+      if (!res.write(bytes)) {
+        child.stdout.pause();
+        res.once('drain', () => child.stdout.resume());
+      }
+    };
     child.stdout.on('data', (chunk: Buffer) => {
       if (headersDone) {
-        // Backpressure: a slow client must not make Node buffer a whole pack.
-        if (!res.write(chunk)) {
-          child.stdout.pause();
-          res.once('drain', () => child.stdout.resume());
-        }
+        writeBody(chunk);
         return;
       }
       headerBuf = Buffer.concat([headerBuf, chunk]);
@@ -174,7 +178,7 @@ export function createMarketplaceGitRoutes(deps: {
       res.status(status);
       headersDone = true;
       const body = headerBuf.subarray(cut + sepLen);
-      if (body.length > 0) res.write(body);
+      if (body.length > 0) writeBody(body);
     });
     child.stdout.on('end', () => {
       if (!headersDone) {

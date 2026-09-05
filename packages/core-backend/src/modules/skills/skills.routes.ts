@@ -59,7 +59,8 @@ export function createSkillsRoutes(
       return;
     }
     let bySkill: Map<string, PluginMembership[]>;
-    let discoverable: (plugin: string) => boolean = () => true;
+    // Fail closed: memberships without a gate to judge them by name nothing.
+    let discoverable: (plugin: string) => boolean = () => false;
     try {
       const membership = await links.membership();
       bySkill = membership.bySkill;

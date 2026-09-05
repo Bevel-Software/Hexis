@@ -107,15 +107,26 @@ export class MarketplaceRepoService {
     await this.ensureRepo();
     const namespace = MarketplaceRepoService.namespaceFor(user.id);
     return this.locks.run(`ns:${namespace}`, async () => {
-      const current = await this.compiler.sourceCommit();
       const last = await this.readSidecar(namespace);
       const head = await this.headOf(namespace);
+      let current = await this.compiler.sourceCommit();
       if (last === current && head !== null) return { namespace, compiled: false, sourceCommit: current };
 
       // The commit just read is the one the tree is stamped with: a second
       // read that failed would otherwise record a placeholder as the compiled
-      // source and make every later fetch recompile.
-      const tree = await this.compiler.compileFor({ userEmail: user.email }, current);
+      // source and make every later fetch recompile. And the checkout can
+      // move WHILE we compile from it (a merge landing mid-read), so the
+      // commit is re-read afterwards: a tree stamped with a commit it was
+      // not compiled from would freeze that caller on a stale tree until the
+      // next change. Bounded — a checkout that moves on every attempt is
+      // served the latest attempt rather than never.
+      let tree = await this.compiler.compileFor({ userEmail: user.email }, current);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const after = await this.compiler.sourceCommit();
+        if (after === current) break;
+        current = after;
+        tree = await this.compiler.compileFor({ userEmail: user.email }, current);
+      }
       const sha = await this.commitTree(namespace, tree, head);
       await this.writeSidecar(namespace, tree.sourceCommit);
       return { namespace, compiled: sha !== head, sourceCommit: tree.sourceCommit };
