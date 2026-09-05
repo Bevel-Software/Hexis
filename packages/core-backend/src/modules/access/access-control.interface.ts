@@ -67,7 +67,7 @@ export type GrantPrincipal =
  * returns it, and payload consumers fall back to `roles` (all treated as
  * roles) when absent.
  */
-export type ResolvedPrincipal = { name: string; kind: 'role' | 'group' };
+export type ResolvedPrincipal = { name: string; kind: 'role' | 'group' | 'plugin' };
 
 /**
  * Per-verb sources of a principal's access on a target. Only verbs the principal
@@ -323,9 +323,17 @@ export interface IAccessControl {
    * (named). The login-only `users` table is unioned in by the caller — this
    * method covers the KB-canonical people the users table misses.
    */
-  kbPrincipals(
-    workspaceId: string,
-  ): Promise<{ roles: string[]; groups: string[]; people: { name: string; email: string }[] }>;
+  kbPrincipals(workspaceId: string): Promise<{
+    roles: string[];
+    groups: string[];
+    /**
+     * Plugins whose `plugin/<Name>/<verb>` principals exist (personal folders
+     * excluded): the display name and the repo-relative folder, so a caller
+     * can apply the discoverability verdict (`canRead` on `<folder>/access.md`).
+     */
+    plugins: { name: string; folder: string }[];
+    people: { name: string; email: string }[];
+  }>;
 
   /**
    * Reverse-lookup an email by its SHA-256 hash (per `hashEmail` semantics)

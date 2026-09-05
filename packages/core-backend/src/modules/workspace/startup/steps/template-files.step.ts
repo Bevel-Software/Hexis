@@ -1,6 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { KNOWLEDGE_BASE_DIR, PLUGINS_DIR } from '@bevel-software/platform-shared';
+import {
+  KNOWLEDGE_BASE_DIR,
+  PLUGINS_DIR,
+  SKILLS_DIR,
+  renderKbLayoutPlaceholders,
+} from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME } from '../../bevel-ignore.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
@@ -43,8 +48,8 @@ export const TEMPLATE_SOURCE_FALLBACKS: Readonly<Record<string, string>> = {
 };
 
 /**
- * The two roots CORE gives a knowledge base: the ontologies, and the plugins
- * that hold skills and tools.
+ * The three roots CORE gives a knowledge base: the ontologies, the shared
+ * skills, and the plugins that hold tools and link the skills.
  *
  * `Data/`, `Agents/` and `Pipelines/` are deliberately absent. They scaffold
  * the agentic execution layer, which is not part of this platform — a core
@@ -54,8 +59,13 @@ export const TEMPLATE_SOURCE_FALLBACKS: Readonly<Record<string, string>> = {
  * READMEs); the names stay reserved in `kb-layout.ts` either way, so a KB
  * that has them still renders them as roots rather than folding them into
  * Knowledge.
+ *
+ * A function: the three names are deployment-configurable live bindings, and
+ * a module-scope array would snapshot the defaults before configuration.
  */
-const CORE_REQUIRED_DIRS: readonly string[] = [KNOWLEDGE_BASE_DIR, PLUGINS_DIR];
+function coreRequiredDirs(): readonly string[] {
+  return [KNOWLEDGE_BASE_DIR, SKILLS_DIR, PLUGINS_DIR];
+}
 
 /**
  * A reserved root must be ONE path segment — `Data`, not `Data/x`, `../x` or
@@ -102,7 +112,7 @@ export function reservedRootDirs(extraRootDirs: readonly string[]): readonly str
       );
     }
   }
-  return [...CORE_REQUIRED_DIRS, ...extraRootDirs];
+  return [...coreRequiredDirs(), ...extraRootDirs];
 }
 
 /**
@@ -200,14 +210,14 @@ export class TemplateFilesStep implements OnServerStart {
             'Remove or rename it — the platform requires this name to be a readable file.',
         );
       }
-      let content: Uint8Array | string = await readTemplate(templateDir, rel);
+      let content = await readTemplate(templateDir, rel);
       // The on-disk merge below only runs against an EXISTING ignore file; a
       // freshly-declared one was merely assumed to carry the AGENTS.md rule —
       // true of the packaged template, not necessarily of a distribution's
       // custom one. Make it true here, so the managed conventions doc is
       // hidden from the file tree from the first boot either way.
       if (rel === IGNORE_FILENAME) {
-        content = withIgnorePattern(new TextDecoder().decode(content), 'AGENTS.md');
+        content = withIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), `${SKILLS_DIR}/`);
       }
       branch.write(rel, content);
       added.push(rel);
@@ -224,7 +234,14 @@ export class TemplateFilesStep implements OnServerStart {
     // LINE PRESENCE, not effective outcome: a later `!AGENTS.md` negation is
     // the operator explicitly choosing to SHOW the file, and hiding it is a
     // default this step provides, not a mandate it re-imposes every boot.
-    added.push(...(await mergeIgnorePattern(repoDir, branch, 'AGENTS.md')));
+    //
+    // The shared-skills root rides the same merge: it is the Library's, like
+    // `Plugins/`, and a KB whose ignore file predates it would show `Skills/`
+    // in the Knowledge tree and the agent view. Spelled with the CONFIGURED
+    // root name, since a deployment may have renamed it. ONE read-modify-
+    // write for both patterns: two merges would each read the on-disk file
+    // and the second declared write would drop the first's line.
+    added.push(...(await mergeIgnorePatterns(repoDir, branch, ['AGENTS.md', `${SKILLS_DIR}/`])));
 
     // AGENTS.md is MANAGED, not merely seeded: the platform owns its content,
     // and a stale copy is replaced with the packaged template's every startup
@@ -293,27 +310,35 @@ export class TemplateFilesStep implements OnServerStart {
   }
 }
 
-/** The template's content for `relPath`, bytes as shipped. */
-async function readTemplate(templateDir: string, relPath: string): Promise<Uint8Array> {
-  return fs.readFile(await templateSource(templateDir, relPath));
+/**
+ * The template's content for `relPath`, RENDERED: the managed files name the
+ * three root folders, and a deployment may have renamed those, so the
+ * placeholders the template carries (`{{pluginsDir}}` …) are filled with the
+ * names in effect. Every required file is text; a template without
+ * placeholders passes through unchanged.
+ */
+async function readTemplate(templateDir: string, relPath: string): Promise<string> {
+  return renderKbLayoutPlaceholders(await fs.readFile(await templateSource(templateDir, relPath), 'utf8'));
 }
 
 /**
- * Whether the repo's copy of `relPath` differs from the template's, modulo
- * line endings — a CRLF checkout of identical content must read as "same",
- * or the managed-file refresh would commit churn on every boot forever.
+ * Whether the repo's copy of `relPath` differs from the RENDERED template's,
+ * modulo line endings — a CRLF checkout of identical content must read as
+ * "same", or the managed-file refresh would commit churn on every boot
+ * forever. Rendered, so a renamed root is compared against the guide that
+ * names it, not against the placeholders.
  */
 async function templateDiffers(templateDir: string, repoDir: string, relPath: string): Promise<boolean> {
   const norm = (text: string) => text.replace(/\r\n?/g, '\n');
   const [current, template] = await Promise.all([
     fs.readFile(path.join(repoDir, relPath), 'utf8'),
-    templateSource(templateDir, relPath).then((from) => fs.readFile(from, 'utf8')),
+    readTemplate(templateDir, relPath),
   ]);
   return norm(current) !== norm(template);
 }
 
 /**
- * Ensure `.bevelignore` carries `pattern`, declaring the appended content when
+ * Ensure `.bevelignore` carries every `pattern`, declaring the appended content when
  * absent. Returns the paths changed, for the note.
  *
  * APPENDS — never rewrites. The file is the operator's, and every rule
@@ -326,17 +351,17 @@ async function templateDiffers(templateDir: string, repoDir: string, relPath: st
  * is not a rule for the root `AGENTS.md`, and treating it as one would leave
  * the mismatch this exists to close.
  */
-async function mergeIgnorePattern(repoDir: string, branch: KbBranch, pattern: string): Promise<string[]> {
+async function mergeIgnorePatterns(repoDir: string, branch: KbBranch, patterns: string[]): Promise<string[]> {
   let current: string;
   try {
     current = await fs.readFile(path.join(repoDir, IGNORE_FILENAME), 'utf8');
   } catch {
     // No ignore file — the copy declared from the template arrives with the
-    // pattern in it (guaranteed at declaration time, see the required-files
+    // patterns in it (guaranteed at declaration time, see the required-files
     // loop above).
     return [];
   }
-  const merged = withIgnorePattern(current, pattern);
+  const merged = patterns.reduce((text, pattern) => withIgnorePattern(text, pattern), current);
   if (merged === current) return [];
   branch.write(IGNORE_FILENAME, merged);
   return [IGNORE_FILENAME];
@@ -345,7 +370,7 @@ async function mergeIgnorePattern(repoDir: string, branch: KbBranch, pattern: st
 /**
  * `text` with `pattern` guaranteed present as a LINE — appended under a
  * comment naming its origin when absent, returned unchanged when present.
- * Line-wise match, same rationale as {@link mergeIgnorePattern}.
+ * Line-wise match, same rationale as {@link mergeIgnorePatterns}.
  *
  * An explicit `!pattern` line also returns the text unchanged: that is the
  * operator choosing to SHOW the file, and ordered matching means a positive

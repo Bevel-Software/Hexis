@@ -244,7 +244,8 @@ function countsText(skills: number, tools: number): string {
 }
 
 function countKind(items: LibraryItem[], plugin: string | null, kind: LibraryItem['kind']): number {
-  return items.filter((i) => i.plugin === plugin && i.kind === kind).length;
+  // The `null` bucket is "yours alone": shared skills have no folder plugin but are not yours.
+  return items.filter((i) => i.plugin === plugin && i.kind === kind && (plugin !== null || !i.shared)).length;
 }
 
 /** Section label with an optional count cap beside it, not inside it — the

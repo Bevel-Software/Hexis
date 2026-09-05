@@ -12,7 +12,7 @@ import {
   pathForPluginsIndex,
   pathForLibraryFilter,
 } from '../routes/library-paths';
-import { pluginCounts, type LibraryFilter } from '../utils/status';
+import { isUngrouped, pluginCounts, pluginsOfItem, type LibraryFilter } from '../utils/status';
 import { primaryFolderOf } from '../utils/plugin-summary';
 import { LINK_COPIED_TOAST, LINK_COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 import { useLibraryToast } from '../state/toast.context';
@@ -127,7 +127,10 @@ export function LibraryLayout() {
    * which is what keeps the row and the page it opens in agreement.
    */
   const lockedPlugins = useMemo(() => {
-    const visible = new Set(items.map((i) => i.plugin).filter((g): g is string => g !== null));
+    // Membership by folder AND by link: a shared skill linked into a plugin
+    // the caller cannot open still sits in the gallery under that plugin, so
+    // the plugin is visible, not locked — or it would be listed twice.
+    const visible = new Set(items.flatMap((i) => pluginsOfItem(i)));
     return pluginSummaries
       // A manager (canWrite via admin-rescue) is not locked out — their plugin
       // belongs with the ones they run, not below the gap.
@@ -146,7 +149,7 @@ export function LibraryLayout() {
     () => items.filter((i) => i.owned && i.status.state !== 'ok').length,
     [items],
   );
-  const ungroupedCount = useMemo(() => items.filter((i) => i.plugin === null).length, [items]);
+  const ungroupedCount = useMemo(() => items.filter(isUngrouped).length, [items]);
   const attentionCount = useMemo(
     () => items.filter((i) => i.kind === 'integration' && i.status.state !== 'ok').length,
     [items],

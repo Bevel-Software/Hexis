@@ -1,4 +1,4 @@
-import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
 import type { FileChangeNotifier } from '../modules/kb-fs/file-change-notifier.js';
 import type { WorkflowEventBus } from '../modules/workflow/event-bus.js';
 
@@ -43,12 +43,20 @@ export function registerCatalogCacheInvalidation(deps: {
   // behavior.)
   const offFiles = fileChangeNotifier.onFilesChanged(({ branch, paths }) => {
     if (branch !== DEFAULT_BRANCH) return;
-    // Skills, tools and the plugin index all live under `Plugins/`, so one
-    // touch check drives all three caches. An access grant lands as a
-    // default-branch change to `Plugins/<plugin>/access.md`, so this is also
-    // what makes a newly-granted plugin unlock within one round-trip instead
-    // of one TTL.
-    if (paths.some((p) => p.startsWith(`${kbDirName}/${PLUGINS_DIR}/`))) invalidateAll();
+    // Skills, tools, the plugin index and the link index all read `Plugins/`
+    // or `Skills/`, so one touch check drives every cache. An access grant
+    // lands as a default-branch change to `Plugins/<plugin>/access.md` or a
+    // skill folder's `access.md`, so this is also what makes a newly-granted
+    // plugin or link unlock within one round-trip instead of one TTL. Both
+    // names are live bindings (a deployment may rename the roots), hence read
+    // per event rather than captured.
+    if (
+      paths.some(
+        (p) => p.startsWith(`${kbDirName}/${PLUGINS_DIR}/`) || p.startsWith(`${kbDirName}/${SKILLS_DIR}/`),
+      )
+    ) {
+      invalidateAll();
+    }
   });
 
   // Subscriber B — the DEFAULT branch's tree changed under the catalogs.

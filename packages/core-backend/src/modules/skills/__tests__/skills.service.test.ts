@@ -67,6 +67,62 @@ describe('SkillService', () => {
   });
   afterEach(() => rm(root, { recursive: true, force: true }));
 
+  test('lists shared skills under the Skills root alongside plugin skills', async () => {
+    const shared = join(root, wsId, KB_DIR, 'Skills', 'Engineering', 'deploy');
+    await mkdir(shared, { recursive: true });
+    await writeFile(join(shared, 'SKILL.md'), '---\ndescription: Ship it.\n---\n\n# Deploy\n');
+    // A skill directly under the root, no scope folder — also a skill.
+    const bare = join(root, wsId, KB_DIR, 'Skills', 'triage');
+    await mkdir(bare, { recursive: true });
+    await writeFile(join(bare, 'SKILL.md'), '---\ndescription: Triage.\n---\n');
+
+    const list = await svc().listSkills();
+    expect(list.find((s) => s.name === 'deploy')?.path).toBe('Skills/Engineering/deploy');
+    expect(list.find((s) => s.name === 'triage')?.path).toBe('Skills/triage');
+    // The plugin tree is still scanned: the union is the catalog.
+    expect(list.find((s) => s.name === 'rfi')?.path).toBe('Plugins/rfi');
+
+    const res = await svc().getSkill('u@x.io', 'deploy');
+    expect(res.ok && res.kind === 'skill' && res.skill.body).toContain('# Deploy');
+  });
+
+  test('honours a .bevelignore inside a root, so a build output never shadows the source', async () => {
+    // A repository that commits a compiled copy of every skill beside the
+    // source: without the ignore, `dist/…/rfi` would collide with `Plugins/rfi`.
+    const dist = join(root, wsId, KB_DIR, 'Skills', 'dist', 'rfi');
+    await mkdir(dist, { recursive: true });
+    await writeFile(join(dist, 'SKILL.md'), '---\ndescription: compiled copy\n---\n');
+    await writeFile(join(root, wsId, KB_DIR, 'Skills', '.bevelignore'), 'dist/\n');
+
+    const list = await svc().listSkills();
+    expect(list.filter((s) => s.name === 'rfi').map((s) => s.path)).toEqual(['Plugins/rfi']);
+    expect(list.some((s) => s.path.includes('/dist/'))).toBe(false);
+  });
+
+  test('ignores the repo-root .bevelignore: hiding a root from the file tree must not empty the catalog', async () => {
+    // The seeded template hides `Plugins/` (and `Skills/`) from the Knowledge
+    // tree with exactly this file. The catalog is what those roots exist for.
+    await writeFile(join(root, wsId, KB_DIR, '.bevelignore'), 'Plugins/\nSkills/\n');
+    const shared = join(root, wsId, KB_DIR, 'Skills', 'deploy');
+    await mkdir(shared, { recursive: true });
+    await writeFile(join(shared, 'SKILL.md'), '---\ndescription: Ship it.\n---\n');
+
+    const list = await svc().listSkills();
+    expect(list.map((s) => s.name).sort()).toEqual(['coding-guidelines', 'deploy', 'rfi']);
+  });
+
+  test('a nested .bevelignore applies beneath the folder that carries it', async () => {
+    const scope = join(root, wsId, KB_DIR, 'Skills', 'Sales');
+    await mkdir(join(scope, 'drafts', 'pitch'), { recursive: true });
+    await mkdir(join(scope, 'pitch'), { recursive: true });
+    await writeFile(join(scope, 'drafts', 'pitch', 'SKILL.md'), '---\ndescription: draft\n---\n');
+    await writeFile(join(scope, 'pitch', 'SKILL.md'), '---\ndescription: released\n---\n');
+    await writeFile(join(scope, '.bevelignore'), 'drafts/\n');
+
+    const list = await svc().listSkills();
+    expect(list.filter((s) => s.name === 'pitch').map((s) => s.path)).toEqual(['Skills/Sales/pitch']);
+  });
+
   test('lists skills with a block-scalar description parsed correctly', async () => {
     const skills = await svc().listSkills();
     expect(skills).toHaveLength(2);

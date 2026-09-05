@@ -40,14 +40,35 @@ export interface JoinRequestsState {
   reload(): void;
 }
 
-export function useJoinRequests(plugin: string, folder: string | null): JoinRequestsState {
+/**
+ * Where the requests come from. The default is a plugin's join requests; a
+ * skill page passes the skill's write-access endpoints instead — same
+ * proposals, same accept-by-grant, a different folder.
+ */
+export interface JoinRequestsApi {
+  list(name: string): Promise<JoinRequest[]>;
+  reconcile(name: string, number: number): Promise<boolean>;
+}
+
+// Lazy wrappers, not the functions themselves: the plugin API is resolved at
+// call time, so a surface that never lists requests never needs those exports.
+const PLUGIN_JOIN_API: JoinRequestsApi = {
+  list: (name) => listJoinRequests(name),
+  reconcile: (name, number) => reconcileJoinRequest(name, number),
+};
+
+export function useJoinRequests(
+  plugin: string,
+  folder: string | null,
+  api: JoinRequestsApi = PLUGIN_JOIN_API,
+): JoinRequestsState {
   const [requests, setRequests] = useState<JoinRequest[]>([]);
   const [revision, setRevision] = useState(0);
   const toast = useLibraryToast();
 
   useEffect(() => {
     let cancelled = false;
-    listJoinRequests(plugin)
+    api.list(plugin)
       .then((rows) => {
         if (!cancelled) setRequests(rows);
       })
@@ -58,7 +79,7 @@ export function useJoinRequests(plugin: string, folder: string | null): JoinRequ
     return () => {
       cancelled = true;
     };
-  }, [plugin, revision]);
+  }, [plugin, revision, api]);
 
   const reload = useCallback(() => setRevision((r) => r + 1), []);
 
@@ -92,10 +113,10 @@ export function useJoinRequests(plugin: string, folder: string | null): JoinRequ
         ),
       );
       toast(`${proposal.label} now has ${proposal.verb} access.`);
-      await reconcileJoinRequest(plugin, request.number).catch(() => false);
+      await api.reconcile(plugin, request.number).catch(() => false);
       setRevision((r) => r + 1);
     },
-    [folder, plugin, toast],
+    [folder, plugin, toast, api],
   );
 
   const decline = useCallback(

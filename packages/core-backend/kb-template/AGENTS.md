@@ -6,7 +6,7 @@ maintaining it.
 > **This file is managed by the platform.** Every server restart replaces it
 > with the current template, so edits made here are overwritten. Deployment- or
 > team-specific conventions belong in files of your own — anywhere under
-> `KnowledgeBase/`, linked from wherever they are needed.
+> `{{knowledgeBaseDir}}/`, linked from wherever they are needed.
 
 **There is no required format for knowledge.** Write markdown the way the
 subject wants to be written: prose, tables, checklists, diagrams, whatever
@@ -20,34 +20,60 @@ change them.
 
 ```text
 knowledge-base/
-├── KnowledgeBase/        ← the knowledge itself; organise it however suits you
-├── Plugins/              ← one folder per plugin: its skills AND its tools
+├── {{knowledgeBaseDir}}/        ← the knowledge itself; organise it however suits you
+├── {{skillsDir}}/               ← shared skills, organised by who owns them
+├── {{pluginsDir}}/              ← one folder per plugin: its tools, and links to skills
 ├── roles.yaml            ← identity → role mapping (Admin-only edits)
 └── access.md             ← repo-root access-control rules
 ```
 
+(The three root names above are this deployment's own — a deployment may
+rename them in its setup screen, and this guide is rendered with the names in
+effect each time it is written.)
+
 Tool paths are workspace-relative, and the workspace root holds this
 repository as the `knowledge-base/` folder: a file in it is
-`knowledge-base/KnowledgeBase/Foo.md`, never `KnowledgeBase/Foo.md`. A path
+`knowledge-base/{{knowledgeBaseDir}}/Foo.md`, never `{{knowledgeBaseDir}}/Foo.md`. A path
 without that prefix is refused, because it would land beside the repository
 where git never sees it.
 
-Only those two folders are structural, and only `Plugins/` has a layout the
+Only those three folders are structural. `{{skillsDir}}/` holds shared skills at any
+depth — the folder that holds a `SKILL.md` is the skill, and everything above
+it is ownership (`{{skillsDir}}/<scope>/…/<skill>/SKILL.md`, with an `access.md` in
+any scope folder that needs its own rules). `{{pluginsDir}}/` has a layout the
 platform reads:
 
 ```text
-Plugins/<Plugin>/plugin.json                  the manifest (Agent Plugins)
-Plugins/<Plugin>/skills/<skill>/SKILL.md      a skill
-Plugins/<Plugin>/mcp.json                     MCP servers (authoritative)
-Plugins/<Plugin>/software.bevel.hexis/tools/  `.tool` manuals
-Plugins/<Plugin>/access.md                    who can read/write the plugin
-Plugins/personal-<user-id>/…                  one per person: private
+{{pluginsDir}}/<Plugin>/plugin.json                  the manifest (Agent Plugins) — what makes the folder a plugin
+{{pluginsDir}}/<Plugin>/skills/<skill>/SKILL.md      a skill that lives inside the plugin
+{{pluginsDir}}/<Plugin>/mcp.json                     MCP servers (authoritative)
+{{pluginsDir}}/<Plugin>/software.bevel.hexis/tools/  `.tool` manuals
+{{pluginsDir}}/<Plugin>/access.md                    who can read/write the plugin
+{{pluginsDir}}/personal-<user-id>/…                  one per person: private
 ```
 
-Skills and tools live TOGETHER in a plugin because they share one access
-boundary: a tool a plugin cannot read is a skill that plugin cannot run.
+**A plugin LINKS shared skills rather than containing them.** Its manifest
+lists skill paths under `extensions["software.bevel.hexis"].skills` — each
+entry is one skill folder or a folder of skills under `{{skillsDir}}/`:
 
-**Symlinks are not supported anywhere under `Plugins/`.** Access control
+```json
+{ "extensions": { "software.bevel.hexis": { "skills": ["{{skillsDir}}/Engineering/deploy", "{{skillsDir}}/Sales"] } } }
+```
+
+One skill, stored once, can be listed by many plugins. A plugin's effective
+skills are the ones inside its folder plus everything its links resolve to.
+Do not edit that list by hand: linking is done from the plugin's page in the
+app, because it is two edits at once — the manifest entry AND a grant on the
+skill (see *Access control* below). A manifest entry without the grant lists
+a skill the plugin's members cannot read; the app shows such a link as
+needing setup and offers Repair.
+
+**Ownership decides who may read a skill, never the plugin.** A shared
+skill's readability comes from the `access.md` rules on its own folder and
+the scopes above it. A plugin that links a skill someone cannot read simply
+does not show it to them.
+
+**Symlinks are not supported anywhere under `{{pluginsDir}}/`.** Access control
 resolves rules by path, and a symlink is a second path to the same content —
 the two can disagree about who may read what. The platform never creates
 them and ignores any it finds (they can only arrive via a direct git push).
@@ -89,20 +115,22 @@ answer to that — and `mcp.json` carries only where a server is, never a
 under `extensions["software.bevel.hexis"].mcpServers[<name>]`, which is ours
 to interpret and which other clients ignore by design.
 
-**Plugin folders are made through the app, not by writing files.** A plugin
-exists exactly when its folder carries an `access.md` — a bare directory
-under `Plugins/` is not a plugin and is never listed. A new
-direct child of `Plugins/` needs an `access.md` naming who runs it, and the
-write gate refuses a plain write into an unused name there — so do not try to
-create a plugin by writing a skill into `Plugins/<new-name>/…`; it will be
-denied. Send the user to the app's **New plugin** button (or its
+**Plugin folders are made through the app, not by writing files.** A folder
+is a plugin exactly when it carries a `plugin.json` (the platform writes one
+into every legacy plugin folder at startup), and it is LISTED only when it
+also carries an `access.md` — a bare directory under `{{pluginsDir}}/` is neither.
+Plugins may sit at any depth under `{{pluginsDir}}/`; a folder that holds plugins
+deeper down is a grouping folder, not a plugin. A new plugin needs an
+`access.md` naming who runs it, and the write gate refuses a plain write
+into an unused name there — so do not try to create a plugin by writing a
+skill into `{{pluginsDir}}/<new-name>/…`; it will be denied. Send the user to the app's **New plugin** button (or its
 `POST /api/plugins` endpoint), then write into the folder it made. Names
 starting with `personal-` are reserved: one such folder exists per person,
 created automatically with their first personal skill, readable only by its
 owner and never listed as a plugin — a signed-in user's own skills belong
 there, and move into a plugin by moving the skill's folder.
 
-Everything under `KnowledgeBase/` is yours to arrange. Subfolders, naming,
+Everything under `{{knowledgeBaseDir}}/` is yours to arrange. Subfolders, naming,
 whether a topic is one file or twenty — all of it is a judgement call about
 what the next reader needs, not a rule the platform enforces.
 
@@ -118,7 +146,16 @@ Write access to any path is governed by `roles.yaml` (who has which role) and
 
 - **Roles** in `roles.yaml` map a role name to a list of emails. Role names are
   case- and whitespace-insensitive (`Admin` = `admin` = `ADMIN`; `Product Team`
-  = `product team`). The reserved name `deny` cannot be used.
+  = `product team`). The reserved name `deny` cannot be used, and neither can
+  names starting with `role/` or `plugin/` — those spellings are tokens in
+  access entries (below).
+- **Plugins are grantable principals.** `plugin/<Name>/read`,
+  `plugin/<Name>/write` and `plugin/<Name>/owner` in any access file mean
+  everyone who currently holds that verb on the plugin `<Name>`, derived live
+  from the plugin's own `access.md`. This is how a shared skill is made
+  visible to a plugin's members: `read: plugin/GTM/read` on the skill's folder.
+  Adding or removing someone on the plugin changes what they can read
+  everywhere the token is granted, with no copying.
 - **Access rules** live in `access.md` files, which carry **two blocks with two
   scopes**: the body declares the rules for the folder the file sits in, and the
   frontmatter declares who may read and write that `access.md` itself. Each
@@ -155,24 +192,41 @@ File-level write access decides how a change lands on the default branch:
   review flow — and prefer a change request when in doubt, when the change is
   large, or when it touches content the user does not own.
 
-## Skills (`Plugins/<Plugin>/skills/<skill>/SKILL.md`)
+## Skills (`{{skillsDir}}/<scope>/…/<skill>/SKILL.md`, or `{{pluginsDir}}/<Plugin>/skills/<skill>/SKILL.md`)
 
-A skill is a folder holding a `SKILL.md` and whatever files it needs. The
-frontmatter names it and declares which tools it may use:
+A skill is a folder holding a `SKILL.md` and whatever files it needs. Shared
+skills live under `{{skillsDir}}/`, organised by ownership; a skill that belongs to
+exactly one plugin may live inside that plugin's `skills/` folder instead.
+Skill names are unique across the whole catalog, whichever home they have.
+The frontmatter names it, declares which tools it may use, and may carry a
+governance record:
 
 ```yaml
 ---
 name: weekly-newsletter
 description: Drafts the Friday newsletter for review.
 allowed-tools: [slack_post_message]
+metadata:
+  version: "1.4.0"
+  owner: "GTM"
+  lifecycle: active
 ---
 ```
 
 The body is the instructions, in plain markdown. `allowed-tools` entries are
-tool names from the `.tool` manuals in the same plugin — a skill can only reach
-tools its plugin can read.
+tool names from the `.tool` manuals and MCP servers of the plugins that hold
+the skill. `metadata.version` is semver; `metadata.lifecycle` is `active`,
+`deprecated` (still served, flagged in the library) or `retired` (kept for
+its owners, never distributed to agents).
 
-## Tool Manuals (`Plugins/<Plugin>/software.bevel.hexis/tools/*.tool`)
+**How skills reach agents.** Through the MCP server (`list_skills`,
+`get_skill`), or as native plugins: every user can clone a git remote from
+the app's external-agent page that holds a plugin marketplace compiled from
+exactly the skills they may read — one plugin per plugin here, a
+`skills-and-knowledge` plugin for the rest plus this knowledge base's MCP
+server, and a `hexis-all` bundle that installs everything.
+
+## Tool Manuals (`{{pluginsDir}}/<Plugin>/software.bevel.hexis/tools/*.tool`)
 
 Each plugin folder holds `*.tool` files — reusable **tool manuals** that let agents call external APIs. They are **not part of the knowledge graph** (never modelled as nodes) and are access-controlled like any other file via `access.md`. Any user who can *read* a `.tool` can use its tools; anyone who can *write* it sets its shared (admin) secrets (see below). Put each manual in the plugin's `software.bevel.hexis/tools/` directory, beside
 the skills that use it. The same integration may exist in several plugins as
@@ -371,7 +425,7 @@ merely correct.
 
 ## Finding things
 
-- `grep` for keywords across `KnowledgeBase/`.
+- `grep` for keywords across `{{knowledgeBaseDir}}/`.
 - Follow markdown links: when you read `[Some Page](relative/path/Some Page.md)`,
   that path is relative to the file you are reading.
 - `list_files` to see the shape of a folder before assuming where something

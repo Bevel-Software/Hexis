@@ -4,15 +4,7 @@ import { IGNORE_FILENAME } from './bevel-ignore.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
-import {
-  AGENTS_DIR,
-  DATA_DIR,
-  DEFAULT_BRANCH,
-  KNOWLEDGE_BASE_DIR,
-  KNOWLEDGE_DIR,
-  PIPELINES_DIR,
-  PLUGINS_DIR,
-} from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, KNOWLEDGE_DIR, reservedRootDirNames } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkspaceService } from './workspace.service.js';
@@ -476,14 +468,7 @@ export function createWorkspaceRoutes(
       // same treatment so legacy clones don't collapse. Only the folders
       // themselves are forced visible — their contents stay gated by the
       // verdict above.
-      const structuralRoots = new Set([
-        KNOWLEDGE_BASE_DIR,
-        DATA_DIR,
-        AGENTS_DIR,
-        PIPELINES_DIR,
-        PLUGINS_DIR,
-        KNOWLEDGE_DIR,
-      ]);
+      const structuralRoots = new Set([...reservedRootDirNames(), KNOWLEDGE_DIR]);
       for (const wp of wsRelPaths) {
         const rel = toKbRelative(wp, kbDirName);
         if (rel !== null && structuralRoots.has(rel)) verdict.set(wp, true);

@@ -75,17 +75,16 @@ async function makeHarness(opts: HarnessOpts = {}) {
   const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-plugins-routes-'));
   tmpDirs.push(workspaceDir);
   const kbRoot = path.join(workspaceDir, KB);
-  // Both carry the access.md that makes a folder a plugin at all.
-  await fs.mkdir(path.join(kbRoot, 'Plugins', 'GTM'), { recursive: true });
-  await fs.writeFile(
-    path.join(kbRoot, 'Plugins', 'GTM', 'access.md'),
-    '---\nread:\n  - everyone\n---\nread: []\n',
-  );
-  await fs.mkdir(path.join(kbRoot, 'Plugins', 'Finance'), { recursive: true });
-  await fs.writeFile(
-    path.join(kbRoot, 'Plugins', 'Finance', 'access.md'),
-    '---\nread:\n  - everyone\n---\nread: []\n',
-  );
+  // Both carry the manifest that makes a folder a plugin to discovery, and
+  // the access.md that makes it exist to the index.
+  for (const name of ['GTM', 'Finance']) {
+    await fs.mkdir(path.join(kbRoot, 'Plugins', name), { recursive: true });
+    await fs.writeFile(path.join(kbRoot, 'Plugins', name, 'plugin.json'), `{"name":"${name.toLowerCase()}"}`);
+    await fs.writeFile(
+      path.join(kbRoot, 'Plugins', name, 'access.md'),
+      '---\nread:\n  - everyone\n---\nread: []\n',
+    );
+  }
 
   const workspaceService = {
     getOrCreateForBranch: async (branch: string) => ({ id: workspaceIdForBranch(branch) }),
